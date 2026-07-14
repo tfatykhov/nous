@@ -110,6 +110,7 @@ class FactExtractor:
         self._bus = bus
         self._llm = llm_client
         self._dedup_via_search = dedup_via_search
+        self._enumerative_extractor = None  # lazily initialized singleton (codex r6)
         if bus is not None:
             bus.on("episode_summarized", self.handle)
 
@@ -249,10 +250,12 @@ class FactExtractor:
             from nous.handlers.enumerative_extractor import EnumerativeExtractor, is_enumerable
             if is_enumerable(transcript, self._settings.enumerative_density_threshold):
                 try:
-                    ex = EnumerativeExtractor(
-                        heart=self._heart, settings=self._settings,
-                        llm_client=self._llm, embedder=getattr(self._heart, "_embeddings", None),
-                    )
+                    if getattr(self, "_enumerative_extractor", None) is None:
+                        self._enumerative_extractor = EnumerativeExtractor(
+                            heart=self._heart, settings=self._settings,
+                            llm_client=self._llm, embedder=getattr(self._heart, "_embeddings", None),
+                        )
+                    ex = self._enumerative_extractor
                     stored_ids = await ex.process_transcript(transcript, _parse_episode_uuid(episode_id))
                     logger.info("R1: stored %d enumerative facts for episode %s", len(stored_ids), episode_id)
                     if stored_ids:

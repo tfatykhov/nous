@@ -466,6 +466,66 @@ async def test_enumerative_leg_zero_stored_falls_through_to_legacy(monkeypatch):
     )
 
 
+@pytest.mark.asyncio
+async def test_enumerative_budget_persists_across_episodes(monkeypatch):
+    """Codex r6: EnumerativeExtractor is a singleton on FactExtractor — hourly cap is
+    per-hour, not per-episode.  With budget=1, the second extract_and_store call
+    hits the shared spent counter and falls through to the legacy candidate path."""
+    from nous.handlers import fact_extractor as fe_mod
+
+    settings = _make_settings(
+        flag_on=True,
+        enumerative_density_threshold=0.0,  # force-enumerable
+        enumerative_extraction_max_per_hour=1,  # budget: 1 LLM call total
+    )
+    heart = _stub_heart_for_extractor()
+
+    mock_llm = AsyncMock(return_value=_CHUNK_FACTS)
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.call_background_llm_structured",
+        mock_llm,
+    )
+
+    # Use real __init__ so _enumerative_extractor is initialized to None.
+    fx = fe_mod.FactExtractor(
+        heart=heart,
+        settings=settings,
+        bus=None,
+        llm_client=object(),  # non-None satisfies the enumerative branch guard
+        dedup_via_search=False,
+    )
+    assert fx._enumerative_extractor is None  # initialized by __init__
+
+    # First call: budget ok → LLM called once → enumerative facts stored.
+    result1 = await fx.extract_and_store(
+        summary=_VALID_SUMMARY,
+        episode_id=str(uuid4()),
+        transcript=_DENSE_TRANSCRIPT,
+    )
+    singleton_ref = fx._enumerative_extractor
+    assert singleton_ref is not None, "singleton must be created after first call"
+    assert len(result1) >= 1, "first call must store facts via enumerative leg"
+
+    # Second call: same singleton, budget spent → LLM NOT called → falls through to legacy.
+    result2 = await fx.extract_and_store(
+        summary=_VALID_SUMMARY,
+        episode_id=str(uuid4()),
+        transcript=_DENSE_TRANSCRIPT,
+    )
+    # Singleton must be the SAME object — not re-constructed.
+    assert fx._enumerative_extractor is singleton_ref, (
+        "extract_and_store must reuse the same EnumerativeExtractor instance"
+    )
+    # LLM called exactly once across both calls (second hit the shared spent budget).
+    assert mock_llm.call_count == 1, (
+        f"expected 1 LLM call (budget=1), got {mock_llm.call_count}"
+    )
+    # Second call fell through to legacy candidate path (stored the _VALID_SUMMARY fact).
+    assert len(result2) == 1, (
+        "second extract_and_store must fall through to legacy path and store the candidate fact"
+    )
+
+
 @pytest.mark.postgres_only
 async def test_enumerative_min_chars_floor_applies_to_enumerative_source_only(heart, session):
     """_learn rejects a 20-char fact from source='fact_extractor' (floor 30)
