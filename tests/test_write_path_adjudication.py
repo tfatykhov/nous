@@ -2276,3 +2276,184 @@ async def test_backfill_keep_both_seen_set_terminates(heart, monkeypatch):
     )
     assert result["resolutions_written"] == 0
     assert result["keep_both"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Codex round-4 P1: stale-pair guard in resolve_key_conflict_pair
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_resolve_key_conflict_pair_skips_stale_pair(heart):
+    """R4-P1 unit test: resolve_key_conflict_pair must return False immediately
+    (without calling the classifier) when either row is already inactive or
+    already has a superseded_by set.
+
+    Scenario: seed B (older), A (middle), C (newest) with the same key.
+    Deactivate B via apply_supersession (B.superseded_by=A, B.active=False).
+    Then call resolve_key_conflict_pair(B.id, C.id, ...) — B is id1 (f_old).
+    The stale guard must catch B.active=False and return False before the
+    classifier is ever invoked."""
+    # Seed: B oldest, A middle, C newest (so B is f_old in the B/C pair)
+    f_b = await heart.learn(
+        FactInput(
+            content="The storage tier has four replicas across two availability zones.",
+            subject_key="storage_tier",
+            attribute_key="replica_count",
+        )
+    )
+    f_a = await heart.learn(
+        FactInput(
+            content="The storage tier has six replicas across three availability zones.",
+            subject_key="storage_tier",
+            attribute_key="replica_count",
+        )
+    )
+    f_c = await heart.learn(
+        FactInput(
+            content="The storage tier has eight replicas across four availability zones.",
+            subject_key="storage_tier",
+            attribute_key="replica_count",
+        )
+    )
+
+    # Deactivate B: A wins over B (simulates a prior sweep resolution)
+    async with heart.db.session() as s:
+        await heart.facts.apply_supersession(f_a.id, f_b.id, s)
+        await s.commit()
+
+    # Confirm B is now inactive
+    async with heart.db.session() as s:
+        b_row = await s.get(Fact, f_b.id)
+        assert b_row is not None and b_row.active is False and b_row.superseded_by == f_a.id
+
+    # Sentinel: classifier must NOT be called for a stale pair
+    classifier_sentinel = AsyncMock(
+        side_effect=AssertionError("classifier must not fire for stale pair")
+    )
+    heart.facts._classify_fact_pair = classifier_sentinel
+
+    # B is f_old (id1), C is f_new (id2); B is inactive — must short-circuit
+    result = await heart.facts.resolve_key_conflict_pair(
+        f_b.id, f_c.id, f_b.content, f_c.content
+    )
+
+    assert result is False, "stale pair (inactive winner candidate) must return False"
+    classifier_sentinel.assert_not_called()
+
+    # C must remain active and unsuperseded
+    async with heart.db.session() as s:
+        c_row = await s.get(Fact, f_c.id)
+        assert c_row is not None
+        assert c_row.active is not False, (
+            f"C must remain active; got active={c_row.active}"
+        )
+        assert c_row.superseded_by is None, (
+            f"C must not be superseded; got superseded_by={c_row.superseded_by}"
+        )
+
+
+@pytest.mark.postgres_only
+async def test_phase_sweep_no_inactive_winner(heart, caplog):
+    """R4-P1 integration test: after a full sweep-page over three same-key facts,
+    the stale-pair guard must ensure no superseded_by value ever points to an
+    inactive fact, and get_current must resolve all facts to a single active tip
+    without emitting any cycle-repair WARNINGs.
+
+    Ordering: A (oldest) < B (middle) < C (newest).
+    Classifier: UPDATE / current=new (newer fact wins every pair).
+    Expected flow with fix:
+      (A,B) → B wins, A inactive;
+      (A,C) → A inactive → stale guard skips;
+      (B,C) → B active (won prior pair), C wins, B inactive.
+    End state: A→B→C chain; C is the sole active tip."""
+    import logging
+    from nous.handlers.sleep_handler import SleepHandler
+
+    # Isolate from other tests: unique agent_id so find_key_conflict_pairs
+    # and get_current only see facts seeded by this test.
+    unique_agent = f"r4p1-sweep-{uuid4().hex[:8]}"
+    heart.facts.agent_id = unique_agent
+
+    # Seed three same-key facts (A oldest, C newest by insertion order)
+    f_a = await heart.learn(
+        FactInput(
+            content="The message queue backlog is one hundred thousand messages long.",
+            subject_key="message_queue",
+            attribute_key="backlog_size",
+        )
+    )
+    f_b = await heart.learn(
+        FactInput(
+            content="The message queue backlog is fifty thousand messages currently.",
+            subject_key="message_queue",
+            attribute_key="backlog_size",
+        )
+    )
+    f_c = await heart.learn(
+        FactInput(
+            content="The message queue backlog is ten thousand messages currently.",
+            subject_key="message_queue",
+            attribute_key="backlog_size",
+        )
+    )
+
+    settings = heart.facts._settings.model_copy(
+        update={
+            "supersession_key_resolution_enabled": True,
+            "supersession_sweep_max_pairs": 25,
+            "supersession_classifier_max_per_hour": 500,
+        }
+    )
+    heart.facts._settings = settings
+    # Classifier always says newer (id2) wins
+    heart.facts._classify_fact_pair = AsyncMock(
+        return_value={"relation": "UPDATE", "current_fact": "new", "confidence": 0.95}
+    )
+
+    llm_mock = MagicMock()
+    handler = SleepHandler(
+        brain=AsyncMock(),
+        heart=heart,
+        settings=settings,
+        bus=MagicMock(),
+        llm_client=llm_mock,
+    )
+    handler._llm = llm_mock
+    handler._interrupted = False
+
+    sleep_stats: dict = {}
+    with caplog.at_level(logging.WARNING, logger="nous.heart.facts"):
+        await handler._phase_sweep_key_conflicts(sleep_stats)
+
+    # Invariant 1: every superseded_by chain must transitively resolve to an
+    # active tip (the P1 bug produces a dead-end inactive winner with no further
+    # superseded_by, which would cause get_current to raise or need cycle repair).
+    async with heart.db.session() as s:
+        for label, fid in [("A", f_a.id), ("B", f_b.id), ("C", f_c.id)]:
+            row = await s.get(Fact, fid)
+            assert row is not None
+            if row.superseded_by is not None:
+                # Follow the chain: the target must itself be active OR must
+                # have its own superseded_by pointing onward to an active tip.
+                tip = await heart.facts.get_current(row.superseded_by)
+                assert tip.id is not None, (
+                    f"fact {label} superseded_by chain leads to no active tip"
+                )
+
+    # Invariant 2: no cycle-repair WARNING emitted during the sweep
+    cycle_msgs = [m for m in caplog.messages if "cycle" in m.lower()]
+    assert not cycle_msgs, f"Unexpected cycle-repair messages: {cycle_msgs}"
+
+    # Invariant 3: all three facts' get_current must converge to a single
+    # active tip, and that tip must be C (the newest fact).
+    tips = set()
+    for fid in [f_a.id, f_b.id, f_c.id]:
+        tip = await heart.facts.get_current(fid)
+        tips.add(tip.id)
+    assert len(tips) == 1, (
+        f"Expected all facts to converge to one active tip; got {tips}"
+    )
+    assert f_c.id in tips, (
+        f"Expected C ({f_c.id}) to be the active tip; got tips={tips}"
+    )

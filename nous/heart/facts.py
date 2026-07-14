@@ -1595,17 +1595,37 @@ class FactManager:
         """
         if not self._key_budget_ok():
             return False
-        cls = await self._classify_fact_pair(c1, c2)
-        if not cls:
-            return False
-        relation = cls.get("relation", "")
-        conf = float(cls.get("confidence", 0.0))
-        if relation not in ("UPDATE", "CONTRADICTION") or conf < 0.8:
-            return False
         async with self.db.session() as session:
             f_old = await self._get_fact_orm(id1, session)
             f_new = await self._get_fact_orm(id2, session)
             if f_old is None or f_new is None:
+                return False
+            # Stale-pair guard (codex r4 P1): skip pairs where either row is
+            # no longer active or already has a superseded_by set.  A sweep
+            # page can contain A/B, A/C, B/C; resolving A/B deactivates B, so
+            # the pre-fetched B/C pair must be skipped or C could be
+            # superseded to an inactive winner.  active IS NULL is treated as
+            # active (server_default=True, ORM may return None before flush).
+            old_active = f_old.active if f_old.active is not None else True
+            new_active = f_new.active if f_new.active is not None else True
+            if (
+                not old_active
+                or not new_active
+                or f_old.superseded_by is not None
+                or f_new.superseded_by is not None
+            ):
+                logger.debug(
+                    "resolve_key_conflict_pair: pair no longer current — skipping (%s, %s)",
+                    id1,
+                    id2,
+                )
+                return False
+            cls = await self._classify_fact_pair(c1, c2)
+            if not cls:
+                return False
+            relation = cls.get("relation", "")
+            conf = float(cls.get("confidence", 0.0))
+            if relation not in ("UPDATE", "CONTRADICTION") or conf < 0.8:
                 return False
             if relation == "CONTRADICTION":
                 current = cls.get("current_fact", "")
