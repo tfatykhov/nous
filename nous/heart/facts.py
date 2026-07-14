@@ -1502,22 +1502,23 @@ class FactManager:
         resolution deactivates losers so re-runs converge.
 
         Args:
-            after: Optional paging cursor ``(learned_at, id)`` of the last
-                   f1 row processed.  When set, only pairs whose f1 row is
-                   strictly after this position are returned, allowing the
-                   sleep sweep to page past KEEP_BOTH pairs without
-                   re-examining them every cycle.  Pass ``None`` to start
-                   from the oldest pair.
+            after: Optional paging cursor ``(ts1, id1, ts2, id2)`` — the
+                   full 4-tuple of the last pair processed.  The 4-tuple
+                   order (f1.learned_at, f1.id, f2.learned_at, f2.id) makes
+                   every pair uniquely addressable, so a single f1 with
+                   multiple same-key f2 partners no longer causes starvation
+                   when all first-page pairs are KEEP_BOTH.  Pass ``None``
+                   to start from the oldest pair.
 
         Returns:
             List of dicts with keys ``id1``, ``id2``, ``c1``, ``c2``,
-            ``ts1`` (f1.learned_at, for advancing the cursor).
+            ``ts1`` (f1.learned_at), ``ts2`` (f2.learned_at).
         """
         if after is not None:
             sql = text("""
                 SELECT f1.id AS id1, f2.id AS id2,
                        f1.content AS c1, f2.content AS c2,
-                       f1.learned_at AS ts1
+                       f1.learned_at AS ts1, f2.learned_at AS ts2
                 FROM heart.facts f1
                 JOIN heart.facts f2
                   ON f2.agent_id = f1.agent_id
@@ -1529,21 +1530,25 @@ class FactManager:
                   AND f1.subject_key IS NOT NULL AND f1.attribute_key IS NOT NULL
                   AND (f1.event_date IS NULL OR f2.event_date IS NULL
                        OR f1.event_date = f2.event_date)
-                  AND (f1.learned_at, f1.id) > (:after_ts, :after_id)
-                ORDER BY f1.learned_at ASC, f1.id ASC
+                  AND (f1.learned_at, f1.id, f2.learned_at, f2.id)
+                      > (:after_ts1, :after_id1, :after_ts2, :after_id2)
+                ORDER BY f1.learned_at ASC, f1.id ASC,
+                         f2.learned_at ASC, f2.id ASC
                 LIMIT :limit
             """)
             params: dict = {
                 "agent_id": self.agent_id,
                 "limit": limit,
-                "after_ts": after[0],
-                "after_id": after[1],
+                "after_ts1": after[0],
+                "after_id1": after[1],
+                "after_ts2": after[2],
+                "after_id2": after[3],
             }
         else:
             sql = text("""
                 SELECT f1.id AS id1, f2.id AS id2,
                        f1.content AS c1, f2.content AS c2,
-                       f1.learned_at AS ts1
+                       f1.learned_at AS ts1, f2.learned_at AS ts2
                 FROM heart.facts f1
                 JOIN heart.facts f2
                   ON f2.agent_id = f1.agent_id
@@ -1555,7 +1560,8 @@ class FactManager:
                   AND f1.subject_key IS NOT NULL AND f1.attribute_key IS NOT NULL
                   AND (f1.event_date IS NULL OR f2.event_date IS NULL
                        OR f1.event_date = f2.event_date)
-                ORDER BY f1.learned_at ASC, f1.id ASC
+                ORDER BY f1.learned_at ASC, f1.id ASC,
+                         f2.learned_at ASC, f2.id ASC
                 LIMIT :limit
             """)
             params = {"agent_id": self.agent_id, "limit": limit}
@@ -2397,11 +2403,56 @@ class FactManager:
         result = await session.execute(sql, {"start_id": fact_id, "agent_id": self.agent_id})
         row = result.first()
         if row is None:
-            # Path-exhausted without a NULL tip = genuine supersession cycle.
-            # Fall back to the chain member with the latest learned_at, break
-            # the cycle persistently (null its superseded_by + reactivate), and
-            # log the anomaly. Never leave the cycle in place.
-            cycle_rows = await session.execute(text("""
+            # Path-exhausted without a NULL tip — two distinct cases:
+            # (1) True cycle: deepest-visited row's superseded_by points back
+            #     into the already-visited path.  Fix: pick latest-learned
+            #     member, null its superseded_by + reactivate (existing repair).
+            # (2) Depth-exhausted: chain is longer than the depth=100 backstop
+            #     but acyclic — the deepest row's superseded_by points onward to
+            #     an unvisited node.  Fix: return deepest visited row WITHOUT any
+            #     mutation (corrupt-repair risk outweighs missing the tip).
+            # Evaluate (superseded_by IS NOT NULL AND superseded_by = ANY(path))
+            # in SQL to avoid pulling the uuid array into Python.
+            diag_rows = await session.execute(text("""
+                WITH RECURSIVE chain AS (
+                    SELECT id, superseded_by, learned_at, 1 AS depth,
+                           ARRAY[id]::uuid[] AS path
+                    FROM heart.facts WHERE id = :start_id AND agent_id = :agent_id
+                    UNION ALL
+                    SELECT f.id, f.superseded_by, f.learned_at, c.depth + 1,
+                           c.path || f.id
+                    FROM heart.facts f JOIN chain c ON f.id = c.superseded_by
+                    WHERE NOT (f.id = ANY(c.path))
+                      AND c.depth < 100
+                )
+                SELECT id, learned_at, superseded_by,
+                       (superseded_by IS NOT NULL
+                        AND superseded_by = ANY(path)) AS is_cycle
+                FROM chain ORDER BY depth DESC LIMIT 1
+            """), {"start_id": fact_id, "agent_id": self.agent_id})
+            deepest = diag_rows.first()
+            if deepest is None:
+                raise ValueError(f"Fact {fact_id} not found")
+
+            if not deepest.is_cycle:
+                # Chain exceeds the depth=100 backstop but contains no cycle —
+                # returning the deepest visited row is the safest degradation.
+                logger.warning(
+                    "Supersession chain from fact %s exceeds depth backstop; "
+                    "returning deepest visited row %s without repair",
+                    fact_id,
+                    deepest.id,
+                )
+                deepest_orm = await self._get_fact_orm(deepest.id, session)
+                if deepest_orm is None:
+                    raise ValueError(
+                        f"Deepest chain fact {deepest.id} not found for {fact_id}"
+                    )
+                return self._to_detail(deepest_orm)
+
+            # True cycle — existing repair: pick latest-learned chain member,
+            # null its superseded_by, reactivate.
+            winner_rows = await session.execute(text("""
                 WITH RECURSIVE chain AS (
                     SELECT id, superseded_by, learned_at, 1 AS depth,
                            ARRAY[id]::uuid[] AS path
@@ -2415,7 +2466,7 @@ class FactManager:
                 )
                 SELECT id FROM chain ORDER BY learned_at DESC NULLS LAST LIMIT 1
             """), {"start_id": fact_id, "agent_id": self.agent_id})
-            tip = cycle_rows.first()
+            tip = winner_rows.first()
             if tip is None:
                 raise ValueError(f"Fact {fact_id} not found")
             winner = await self._get_fact_orm(tip.id, session)

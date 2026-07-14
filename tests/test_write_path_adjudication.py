@@ -1278,6 +1278,68 @@ async def test_get_current_long_chain_not_rewritten(heart, session):
         )
 
 
+@pytest.mark.postgres_only
+async def test_get_current_deep_chain_no_repair(heart, session, caplog):
+    """FIX 1: A chain longer than the depth=100 backstop must NOT be repaired.
+
+    A 120-link acyclic chain (facts[0]→facts[1]→…→facts[119]) exceeds
+    the depth<100 CTE backstop, so the main CTE finds no NULL-tip row.
+    The fallback must distinguish depth-exhaustion (superseded_by NOT in
+    path) from a true cycle, log a WARNING, and return the deepest visited
+    row (facts[99]) without mutating any row.
+    """
+    import logging
+
+    n = 120
+    facts = []
+    for i in range(n):
+        f = await heart.learn(
+            FactInput(
+                content=(
+                    f"Deep chain link {i + 1} of {n}: the migration "
+                    f"revision counter is now at step {i + 1}."
+                )
+            ),
+            session=session,
+        )
+        facts.append(f)
+
+    # Wire the chain: facts[0] → facts[1] → … → facts[119]
+    rows = [await session.get(Fact, f.id) for f in facts]
+    for i, row in enumerate(rows[:-1]):
+        row.superseded_by = facts[i + 1].id
+        row.active = False
+    rows[-1].superseded_by = None
+    rows[-1].active = True
+    await session.flush()
+
+    with caplog.at_level(logging.WARNING, logger="nous.heart.facts"):
+        result = await heart.facts._get_current(facts[0].id, session)
+
+    # Deepest visited row is facts[99] (depth=100 is the last the backstop admits)
+    assert result.id == facts[99].id, (
+        f"Expected deepest visited row facts[99]={facts[99].id}, got {result.id}"
+    )
+
+    # No intermediate row must have been mutated
+    for i, row in enumerate(rows[:-1]):
+        await session.refresh(row)
+        assert row.superseded_by == facts[i + 1].id, (
+            f"Row {i} had superseded_by mutated unexpectedly"
+        )
+        assert row.active is False, (
+            f"Row {i} was reactivated unexpectedly"
+        )
+
+    # A WARNING must have been emitted (not a cycle repair message)
+    assert any("exceeds depth backstop" in m for m in caplog.messages), (
+        f"Expected 'exceeds depth backstop' WARNING; got messages: {caplog.messages}"
+    )
+    assert not any("CYCLE" in m for m in caplog.messages), (
+        "Must not log a cycle repair message for a depth-exhausted chain"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Task 9: sleep-phase key-conflict sweep (find_key_conflict_pairs,
 #         resolve_key_conflict_pair, _phase_sweep_key_conflicts)
@@ -1477,44 +1539,62 @@ async def test_phase_sweep_key_conflicts_cap_leaves_remainder(heart):
 
 @pytest.mark.asyncio
 async def test_key_conflict_sweep_cursor_pages_past_keep_both():
-    """(e) Paging cursor: a KEEP_BOTH pair at cycle 1 does not starve a later
-    UPDATE pair — cycle 2 must process the second pair, not re-examine pair 1.
+    """(e) Paging cursor: one f1 with three same-key f2 partners — KEEP_BOTH
+    on pairs 1 and 2 must NOT starve pair 3; the 4-tuple cursor
+    (ts1, id1, ts2, id2) addresses each pair uniquely so the same f1 is
+    never skipped prematurely.
 
     Uses AsyncMock so the test runs without a real DB and proves cursor
-    state transitions via classify-call inspection.
+    state transitions and per-cycle classifier dispatch via call inspection.
     """
     from datetime import datetime, timezone
     from uuid import uuid4
     from nous.handlers.sleep_handler import SleepHandler
 
-    uuid_old = uuid4()
-    uuid_new_old = uuid4()
-    uuid_later = uuid4()
-    uuid_new_later = uuid4()
-    ts_old = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    ts_later = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    # One shared f1 with three f2 partners in ascending ts2 order
+    uuid_f1 = uuid4()
+    uuid_f2a = uuid4()
+    uuid_f2b = uuid4()
+    uuid_f2c = uuid4()
+    ts_f1 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    ts_f2a = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    ts_f2b = datetime(2026, 1, 3, tzinfo=timezone.utc)
+    ts_f2c = datetime(2026, 1, 4, tzinfo=timezone.utc)
 
     pair1 = {
-        "id1": uuid_old, "id2": uuid_new_old,
-        "c1": "server count is two rack units total",
-        "c2": "server count is four rack units total",
-        "ts1": ts_old,
+        "id1": uuid_f1, "id2": uuid_f2a,
+        "c1": "replica count is two nodes",
+        "c2": "replica count is four nodes",
+        "ts1": ts_f1, "ts2": ts_f2a,
     }
     pair2 = {
-        "id1": uuid_later, "id2": uuid_new_later,
-        "c1": "deployment region is us-east-one primary zone",
-        "c2": "deployment region is now eu-west-two primary zone",
-        "ts1": ts_later,
+        "id1": uuid_f1, "id2": uuid_f2b,
+        "c1": "replica count is two nodes",
+        "c2": "replica count is six nodes",
+        "ts1": ts_f1, "ts2": ts_f2b,
+    }
+    pair3 = {
+        "id1": uuid_f1, "id2": uuid_f2c,
+        "c1": "replica count is two nodes",
+        "c2": "replica count is eight nodes",
+        "ts1": ts_f1, "ts2": ts_f2c,
     }
 
-    # find_key_conflict_pairs mock: returns pair1 without cursor, pair2 with cursor
+    cursor_after_1 = (ts_f1, uuid_f1, ts_f2a, uuid_f2a)
+    cursor_after_2 = (ts_f1, uuid_f1, ts_f2b, uuid_f2b)
+    cursor_after_3 = (ts_f1, uuid_f1, ts_f2c, uuid_f2c)
+
+    # find_key_conflict_pairs: branch on 4-tuple after= value
     find_mock = AsyncMock()
     find_mock.side_effect = lambda limit, after=None: (
-        [pair1] if after is None else [pair2] if after == (ts_old, uuid_old) else []
+        [pair1] if after is None
+        else [pair2] if after == cursor_after_1
+        else [pair3] if after == cursor_after_2
+        else []
     )
 
-    # resolve_key_conflict_pair mock: pair1 → False (KEEP_BOTH); pair2 → True (resolved)
-    resolve_mock = AsyncMock(side_effect=lambda id1, id2, c1, c2: id1 == uuid_later)
+    # resolve_key_conflict_pair: KEEP_BOTH for pair1/pair2, UPDATE for pair3
+    resolve_mock = AsyncMock(side_effect=lambda id1, id2, c1, c2: id2 == uuid_f2c)
 
     heart_mock = AsyncMock()
     heart_mock.facts.find_key_conflict_pairs = find_mock
@@ -1540,28 +1620,41 @@ async def test_key_conflict_sweep_cursor_pages_past_keep_both():
     await handler._phase_sweep_key_conflicts(stats1)
     assert stats1["key_conflicts_found"] == 1
     assert stats1["key_supersessions_written"] == 0
-    # Cursor must have advanced to pair1's position
-    assert handler._key_sweep_cursor == (ts_old, uuid_old), (
-        f"Expected cursor (ts_old, uuid_old) after cycle 1, got {handler._key_sweep_cursor}"
+    assert handler._key_sweep_cursor == cursor_after_1, (
+        f"Expected 4-tuple cursor {cursor_after_1} after cycle 1, "
+        f"got {handler._key_sweep_cursor}"
     )
-    # resolve was called with pair1's ids
-    resolve_mock.assert_awaited_once_with(uuid_old, uuid_new_old, pair1["c1"], pair1["c2"])
+    resolve_mock.assert_awaited_once_with(uuid_f1, uuid_f2a, pair1["c1"], pair1["c2"])
 
-    # Cycle 2: cursor is set; must fetch pair2 (not pair1 again)
+    # Cycle 2: cursor=cursor_after_1; fetches pair2 (KEEP_BOTH), not pair1
     resolve_mock.reset_mock()
     stats2: dict = {}
     await handler._phase_sweep_key_conflicts(stats2)
     assert stats2["key_conflicts_found"] == 1
-    assert stats2["key_supersessions_written"] == 1
-    # resolve must have been called with pair2's ids, not pair1's
-    resolve_mock.assert_awaited_once_with(uuid_later, uuid_new_later, pair2["c1"], pair2["c2"])
+    assert stats2["key_supersessions_written"] == 0
+    assert handler._key_sweep_cursor == cursor_after_2, (
+        f"Expected 4-tuple cursor {cursor_after_2} after cycle 2, "
+        f"got {handler._key_sweep_cursor}"
+    )
+    resolve_mock.assert_awaited_once_with(uuid_f1, uuid_f2b, pair2["c1"], pair2["c2"])
 
-    # Cycle 3: pair2 returned 1 == limit=1, so cursor advances to pair2's pos.
-    # Cycle 3 with that cursor returns [] → cursor resets to None.
+    # Cycle 3: cursor=cursor_after_2; fetches pair3 (UPDATE → resolved)
     resolve_mock.reset_mock()
     stats3: dict = {}
     await handler._phase_sweep_key_conflicts(stats3)
-    assert stats3["key_conflicts_found"] == 0
+    assert stats3["key_conflicts_found"] == 1
+    assert stats3["key_supersessions_written"] == 1
+    assert handler._key_sweep_cursor == cursor_after_3, (
+        f"Expected 4-tuple cursor {cursor_after_3} after cycle 3, "
+        f"got {handler._key_sweep_cursor}"
+    )
+    resolve_mock.assert_awaited_once_with(uuid_f1, uuid_f2c, pair3["c1"], pair3["c2"])
+
+    # Cycle 4: cursor=cursor_after_3 → fetch returns [] → cursor resets to None
+    resolve_mock.reset_mock()
+    stats4: dict = {}
+    await handler._phase_sweep_key_conflicts(stats4)
+    assert stats4["key_conflicts_found"] == 0
     assert handler._key_sweep_cursor is None, (
         "Cursor must reset to None when fetch returns 0 rows (table exhausted)"
     )
