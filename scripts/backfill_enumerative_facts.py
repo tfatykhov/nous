@@ -80,7 +80,15 @@ async def select_backfill_episodes(session, agent_id: str, since, limit: int):
             SELECT id, transcript
             FROM heart.episodes
             WHERE agent_id = :agent_id
-              AND active = true
+              -- #557 liveness lesson: episodes.active is a LIFECYCLE flag —
+              -- _end() sets active=False on every properly CLOSED episode,
+              -- which are exactly the transcripts this backfill remediates.
+              -- Include open (active) and closed (ended_at set) episodes;
+              -- exclude never-ended deactivated orphans and abandoned
+              -- episodes (F060.2 sets ended_at on those too — mirror the
+              -- recall predicate at nous/heart/episodes.py:531).
+              AND (active = true OR ended_at IS NOT NULL)
+              AND outcome IS DISTINCT FROM 'abandoned'
               AND transcript IS NOT NULL
               AND length(transcript) > 0
               {since_clause}

@@ -2234,6 +2234,64 @@ async def test_select_backfill_episodes_filters_empty_transcripts(session):
 
 
 @pytest.mark.postgres_only
+async def test_select_backfill_episodes_includes_closed_episodes(session):
+    """#557 liveness lesson: episodes.active is a LIFECYCLE flag — _end() sets
+    active=False on every properly closed episode (episodes.py:235). Closed
+    episodes are exactly the ones with complete transcripts the backfill
+    exists to remediate; filtering `active = true` selected only OPEN episodes
+    and silently skipped the whole corpus. Closed (ended) episodes must be
+    included; never-ended deactivated orphans stay excluded."""
+    from scripts.backfill_enumerative_facts import select_backfill_episodes
+    from nous.storage.models import Episode
+
+    agent_id = f"test-enum-closed-{uuid4().hex[:8]}"
+    now = datetime.now(timezone.utc)
+
+    ep_closed = Episode(
+        agent_id=agent_id,
+        summary="Properly closed episode",
+        transcript="Fact one.\nFact two.\nFact three.",
+        started_at=now,
+        ended_at=now,
+        active=False,  # lifecycle close, NOT soft-delete
+    )
+    ep_open = Episode(
+        agent_id=agent_id,
+        summary="Still-open episode",
+        transcript="Live fact 1.\nLive fact 2.\nLive fact 3.",
+        started_at=now,
+        active=True,
+    )
+    ep_orphan = Episode(
+        agent_id=agent_id,
+        summary="Never-ended deactivated orphan",
+        transcript="Orphan fact 1.\nOrphan fact 2.\nOrphan fact 3.",
+        started_at=now,
+        ended_at=None,
+        active=False,  # deactivated without ever closing — excluded
+    )
+    ep_abandoned = Episode(
+        agent_id=agent_id,
+        summary="Abandoned episode",
+        transcript="Stale fact 1.\nStale fact 2.\nStale fact 3.",
+        started_at=now,
+        ended_at=now,  # F060.2 stamps ended_at on abandonment too
+        active=False,
+        outcome="abandoned",  # excluded, mirroring the recall predicate
+    )
+    session.add_all([ep_closed, ep_open, ep_orphan, ep_abandoned])
+    await session.flush()
+
+    rows = await select_backfill_episodes(session, agent_id, None, 0)
+    ids = {r.id for r in rows}
+
+    assert ep_closed.id in ids, "closed episode (the normal case) must be included"
+    assert ep_open.id in ids, "open episode must still be included"
+    assert ep_orphan.id not in ids, "never-ended deactivated orphan must stay excluded"
+    assert ep_abandoned.id not in ids, "abandoned episode must stay excluded (F060.2)"
+
+
+@pytest.mark.postgres_only
 async def test_select_backfill_episodes_orders_oldest_first(session):
     """select_backfill_episodes: returns episodes ordered oldest-first (started_at ASC)."""
     from scripts.backfill_enumerative_facts import select_backfill_episodes
