@@ -233,6 +233,15 @@ class Settings(BaseSettings):
             "memory questions. Deterministic trigger (empty set), no score thresholds."
         ),
     )
+    override_prior_marking_enabled: bool = Field(
+        default=False,
+        description=(
+            "R2.4: render facts whose stored value contradicts common world "
+            "knowledge (overrides_prior=true) with an explicit trust marker in "
+            "pre-turn context. Evidence: 12/12 MAB flip-failures were parametric "
+            "fallbacks; the inoculation must sit AT the fact, not in a generic instruction."
+        ),
+    )
 
     # 064 R1: enumerative extraction (land-dark)
     extraction_enumerative_enabled: bool = Field(

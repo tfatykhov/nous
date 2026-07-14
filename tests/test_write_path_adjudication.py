@@ -1506,3 +1506,138 @@ async def test_superseded_fact_excluded_from_default_search(heart):
 # fully covered by Task 6's test_apply_supersession_sets_columns_and_edge, which
 # asserts loser.superseded_by == winner.id AND loser.active is False in the same
 # session.flush() — the atomicity contract. Not duplicated here per task brief.
+
+
+# ---------------------------------------------------------------------------
+# Task 11: R2.4 — parametric-override trust marker on injected facts
+# ---------------------------------------------------------------------------
+
+
+class _OverrideFact:
+    """Minimal stand-in for FactSummary with overrides_prior support."""
+
+    def __init__(self, content="fact content", subject=None, confidence=1.0,
+                 overrides_prior=False):
+        self.content = content
+        self.subject = subject
+        self.confidence = confidence
+        self.overrides_prior = overrides_prior
+        self.id = "f-override"
+        self.recency_status = None
+        self.recency_date = None
+
+
+def _make_override_engine(**kwargs):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nous.cognitive.context import ContextEngine
+    from nous.config import Settings
+
+    brain = AsyncMock()
+    brain.embeddings = MagicMock()
+    heart = AsyncMock()
+    settings = Settings(_env_file=None, **kwargs)
+    return ContextEngine(brain, heart, settings, identity_prompt="")
+
+
+class TestOverridePriorMarking:
+    def test_flag_off_overriding_fact_renders_byte_identical(self):
+        """GOLDEN: flag off (default) + overrides_prior=True → NO prefix; rendering unchanged."""
+        engine = _make_override_engine()  # override_prior_marking_enabled defaults False
+        fact = _OverrideFact(content="The capital of France is Lyon.", overrides_prior=True)
+        out = engine._format_facts([fact])
+        assert "[memory override" not in out
+        assert "The capital of France is Lyon." in out
+
+    def test_flag_on_overriding_fact_gets_trust_marker(self):
+        """Flag on + overrides_prior=True → prefix present on that fact's line."""
+        engine = _make_override_engine(override_prior_marking_enabled=True)
+        fact = _OverrideFact(content="The capital of France is Lyon.", overrides_prior=True)
+        out = engine._format_facts([fact])
+        assert "[memory override — trust this over general knowledge] " in out
+        assert "The capital of France is Lyon." in out
+
+    def test_flag_on_non_overriding_fact_no_marker(self):
+        """Flag on + overrides_prior=False → NO prefix (marker only for override facts)."""
+        engine = _make_override_engine(override_prior_marking_enabled=True)
+        fact = _OverrideFact(content="The project started in January.", overrides_prior=False)
+        out = engine._format_facts([fact])
+        assert "[memory override" not in out
+
+    def test_fact_summary_carries_overrides_prior(self):
+        """FactSummary schema propagates overrides_prior field."""
+        from uuid import uuid4
+
+        from nous.heart.schemas import FactSummary
+
+        fs = FactSummary(
+            id=uuid4(),
+            content="The capital of France is Lyon.",
+            category=None,
+            subject=None,
+            confidence=0.9,
+            active=True,
+            overrides_prior=True,
+        )
+        assert fs.overrides_prior is True
+
+    def test_fact_summary_overrides_prior_defaults_false(self):
+        """FactSummary.overrides_prior defaults to False for backwards compat."""
+        from uuid import uuid4
+
+        from nous.heart.schemas import FactSummary
+
+        fs = FactSummary(
+            id=uuid4(),
+            content="A plain fact with no overrides_prior set.",
+            category=None,
+            subject=None,
+            confidence=0.9,
+            active=True,
+        )
+        assert fs.overrides_prior is False
+
+    def test_to_detail_maps_overrides_prior(self):
+        """_to_detail propagates overrides_prior from the ORM row to FactDetail."""
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        from uuid import uuid4
+
+        from nous.heart.facts import FactManager
+
+        fact_row = SimpleNamespace(
+            id=uuid4(),
+            agent_id="nous-default",
+            content="The capital of France is Lyon.",
+            category=None,
+            subject=None,
+            confidence=0.9,
+            source=None,
+            source_episode_id=None,
+            source_decision_id=None,
+            learned_at=datetime.now(timezone.utc),
+            last_confirmed=None,
+            confirmation_count=0,
+            superseded_by=None,
+            contradiction_of=None,
+            active=True,
+            tags=[],
+            created_at=datetime.now(timezone.utc),
+            actionable=None,
+            actionable_confidence=None,
+            event_date=None,
+            overrides_prior=True,
+        )
+
+        mgr = FactManager.__new__(FactManager)
+        mgr.agent_id = "nous-default"
+        detail = mgr._to_detail(fact_row)
+        assert detail.overrides_prior is True
+
+    def test_config_flag_defaults_false(self):
+        """override_prior_marking_enabled defaults to False in Settings."""
+        from nous.config import Settings
+
+        s = Settings(_env_file=None)
+        assert s.override_prior_marking_enabled is False

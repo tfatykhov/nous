@@ -1788,6 +1788,7 @@ class FactManager:
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
                 event_date=f.event_date,  # F075
+                overrides_prior=bool(f.overrides_prior or False),  # R2.4
             )
             for f in facts
         ]
@@ -1916,6 +1917,7 @@ class FactManager:
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
                 event_date=f.event_date,
+                overrides_prior=bool(f.overrides_prior or False),  # R2.4
             )
             for fid in ids
             if (f := facts.get(fid)) is not None
@@ -2047,6 +2049,7 @@ class FactManager:
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
                 event_date=f.event_date,  # F075
+                overrides_prior=bool(f.overrides_prior or False),  # R2.4
             )
             for fid in ids
             if (f := facts.get(fid)) is not None
@@ -2144,6 +2147,7 @@ class FactManager:
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
                 event_date=f.event_date,  # F075
+                overrides_prior=bool(f.overrides_prior or False),  # R2.4
             )
             for fid in ids
             if (f := facts.get(fid)) is not None
@@ -2277,6 +2281,7 @@ class FactManager:
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
                 event_date=f.event_date,  # F075
+                overrides_prior=bool(f.overrides_prior or False),  # R2.4
             )
             for f in facts
         ]
@@ -2425,6 +2430,7 @@ class FactManager:
             actionable=fact.actionable,
             actionable_confidence=fact.actionable_confidence,
             event_date=fact.event_date,  # F075
+            overrides_prior=bool(fact.overrides_prior or False),  # R2.4
         )
 
     # ------------------------------------------------------------------

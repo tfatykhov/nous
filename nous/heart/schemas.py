@@ -191,6 +191,9 @@ class FactDetail(BaseModel):
     actionable_confidence: float | None = None
     # F075: Temporal event date (None for stable facts)
     event_date: date | None = None
+    # R2.4: True when the extractor classified this fact as contradicting common
+    # world knowledge (parametric override). Propagated to FactSummary for context rendering.
+    overrides_prior: bool = False
 
 
 class FactRejected(BaseModel):
@@ -223,6 +226,9 @@ class FactSummary(BaseModel):
     # F075: Propagated from ORM for the dedup-bypass rule + Layer 3 boost.
     # Distinct event_dates between candidate and existing => distinct events.
     event_date: date | None = None
+    # R2.4: True when the extractor classified this fact as contradicting common
+    # world knowledge (parametric override). Propagated from ORM for context rendering.
+    overrides_prior: bool = False
     # Gap-2: transient pre-turn recency-resolution tags set by
     # ContextEngine._resolve_recency (current/superseded + YYYY-MM). NOT persisted;
     # default None keeps every other consumer byte-identical.

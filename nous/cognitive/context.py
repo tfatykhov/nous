@@ -1473,9 +1473,15 @@ class ContextEngine:
                 ltag = f' (supersedes earlier belief: "{olds[0][:120]}")'
 
             if subject:
-                lines.append(f"- [{subject}] {content}{rtag}{ltag} [confidence: {conf:.2f}]")
+                line = f"- [{subject}] {content}{rtag}{ltag} [confidence: {conf:.2f}]"
             else:
-                lines.append(f"- {content}{rtag}{ltag} [confidence: {conf:.2f}]")
+                line = f"- {content}{rtag}{ltag} [confidence: {conf:.2f}]"
+            if (
+                getattr(self._settings, "override_prior_marking_enabled", False) is True
+                and getattr(f, "overrides_prior", False)
+            ):
+                line = "[memory override — trust this over general knowledge] " + line
+            lines.append(line)
         return "\n".join(lines)
 
     def _format_procedures(self, procedures: list) -> str:
