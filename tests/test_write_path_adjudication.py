@@ -78,3 +78,37 @@ async def test_adjudication_fields_persist_round_trip(heart, session):
     assert row2.attribute_key is None
     assert row2.source_ordinal is None
     assert row2.overrides_prior is None
+
+
+# R1.1: Enumerative extractor (density heuristic + key normalizer)
+from nous.handlers.enumerative_extractor import normalize_key, density_score, is_enumerable
+
+
+def test_normalize_key_canonicalizes():
+    assert normalize_key("Tim's Laptop") == "tims laptop"
+    assert normalize_key("  RED   Car!! ") == "red car"
+    assert normalize_key("") is None
+    assert normalize_key("   ") is None
+    assert len(normalize_key("x" * 500)) <= 200
+
+
+def test_density_score_high_for_enumerable():
+    doc = "\n".join(f"Statement {i}: item {i} belongs to person {i}." for i in range(40))
+    assert density_score(doc) > 0.8
+
+
+def test_density_score_low_for_narrative():
+    doc = (
+        "User: hey, how was your weekend?\n"
+        "Assistant: It went well! I spent most of it reading about distributed "
+        "systems and thinking about how consensus algorithms deal with partial "
+        "failure, which reminded me of a conversation we had a while back about "
+        "why exactly-once delivery is impossible in asynchronous networks.\n"
+    ) * 10
+    assert density_score(doc) < 0.5
+
+
+def test_is_enumerable_respects_threshold():
+    doc = "\n".join(f"{i}. fact number {i} is stored here." for i in range(30))
+    assert is_enumerable(doc, threshold=0.6) is True
+    assert is_enumerable(doc, threshold=1.01) is False
