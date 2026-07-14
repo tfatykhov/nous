@@ -80,7 +80,12 @@ async def select_backfill_episodes(session, agent_id: str, since, limit: int):
             SELECT id, transcript
             FROM heart.episodes
             WHERE agent_id = :agent_id
-              AND active = true
+              -- #557 liveness lesson: episodes.active is a LIFECYCLE flag —
+              -- _end() sets active=False on every properly CLOSED episode,
+              -- which are exactly the transcripts this backfill remediates.
+              -- Include open (active) and closed (ended_at set) episodes;
+              -- exclude only never-ended deactivated orphans.
+              AND (active = true OR ended_at IS NOT NULL)
               AND transcript IS NOT NULL
               AND length(transcript) > 0
               {since_clause}
