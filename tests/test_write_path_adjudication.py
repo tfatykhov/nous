@@ -418,6 +418,41 @@ async def test_enumerative_leg_exception_falls_through_to_legacy(monkeypatch):
     assert len(result) == 1, "extract_and_store must return the legacy UUID"
 
 
+@pytest.mark.asyncio
+async def test_enumerative_leg_zero_stored_falls_through_to_legacy(monkeypatch):
+    """Codex r3 FIX 3: process_transcript returns [] (no exception) — e.g. API
+    failure swallowed inside call_background_llm_structured.  extract_and_store
+    must fall through to the legacy candidate-facts path so episode facts are
+    never silently dropped.  Mirrors the exception-fallthrough test structure."""
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.EnumerativeExtractor.process_transcript",
+        AsyncMock(return_value=[]),  # zero stored, no exception
+    )
+
+    from nous.handlers import fact_extractor as fe_mod
+
+    heart = _stub_heart_for_extractor()
+    ext = fe_mod.FactExtractor.__new__(fe_mod.FactExtractor)
+    ext._heart = heart
+    ext._settings = _make_settings(flag_on=True, enumerative_density_threshold=0.0)  # force-enumerable
+    ext._dedup_via_search = False
+    ext._llm = object()  # non-None so the enumerative branch is entered
+
+    result = await ext.extract_and_store(
+        summary=_VALID_SUMMARY,
+        episode_id=str(uuid4()),
+        transcript=_DENSE_TRANSCRIPT,
+    )
+
+    # Legacy candidate path must have stored the one fact from _VALID_SUMMARY.
+    assert len(heart._captured) == 1, (
+        "legacy candidate path must run when enumerative leg stores 0 facts"
+    )
+    assert len(result) == 1, (
+        "extract_and_store must return the legacy UUID, not an empty list"
+    )
+
+
 @pytest.mark.postgres_only
 async def test_enumerative_min_chars_floor_applies_to_enumerative_source_only(heart, session):
     """_learn rejects a 20-char fact from source='fact_extractor' (floor 30)

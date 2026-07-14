@@ -255,7 +255,17 @@ class FactExtractor:
                     )
                     stored_ids = await ex.process_transcript(transcript, _parse_episode_uuid(episode_id))
                     logger.info("R1: stored %d enumerative facts for episode %s", len(stored_ids), episode_id)
-                    return stored_ids
+                    if stored_ids:
+                        return stored_ids
+                    logger.warning(
+                        "R1: enumerative leg stored 0 facts for episode %s — falling back to legacy path",
+                        episode_id,
+                    )
+                    # fall through: zero enumerative facts stored (e.g. API failure
+                    # swallowed by call_background_llm_structured) — legacy path
+                    # ensures the episode's facts are never silently dropped.
+                    # Variant-safety: 0 stored means no summary/enumerative
+                    # variant pairs can form.
                 except Exception:
                     logger.exception(
                         "R1 enumerative extraction failed for episode %s — falling back to legacy path",
