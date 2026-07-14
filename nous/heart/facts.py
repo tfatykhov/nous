@@ -2411,13 +2411,14 @@ class FactManager:
         return await self._get_current(fact_id, session)
 
     async def _get_current(self, fact_id: UUID, session: AsyncSession) -> FactDetail:
-        # Path-based cycle detection: carry the visited-id array so the walk
-        # stops as soon as it would re-enter an already-visited node.  A
-        # legitimate chain of any length terminates naturally at the NULL-tip
-        # row; only a true cycle (A→B→A, or longer) ever yields no NULL-tip.
-        # depth < 100 is a backstop against degenerate runaway, not the
-        # primary cycle gate.
-        sql = text("""
+        # Iterative chain walk: run a depth<100 path-guarded CTE from current_id
+        # each iteration. A NULL-tip row → done (healthy chain). A depth-exhausted
+        # CTE with no NULL tip → restart from the deepest visited row. A Python-side
+        # visited set guards cross-restart cycles (A→…→B after 100 links → B already
+        # in visited → repair). Intra-CTE cycles (superseded_by IN path) go to the
+        # existing latest-learned cycle repair. Restarts are capped at 100 (≈10k-link
+        # chains before ValueError).
+        _tip_sql = text("""
             WITH RECURSIVE chain AS (
                 SELECT id, superseded_by, 1 AS depth, ARRAY[id]::uuid[] AS path
                 FROM heart.facts
@@ -2431,90 +2432,86 @@ class FactManager:
             )
             SELECT id FROM chain WHERE superseded_by IS NULL
         """)
+        _diag_sql = text("""
+            WITH RECURSIVE chain AS (
+                SELECT id, superseded_by, learned_at, 1 AS depth,
+                       ARRAY[id]::uuid[] AS path
+                FROM heart.facts WHERE id = :start_id AND agent_id = :agent_id
+                UNION ALL
+                SELECT f.id, f.superseded_by, f.learned_at, c.depth + 1,
+                       c.path || f.id
+                FROM heart.facts f JOIN chain c ON f.id = c.superseded_by
+                WHERE NOT (f.id = ANY(c.path))
+                  AND c.depth < 100
+            )
+            SELECT id, learned_at, superseded_by,
+                   (superseded_by IS NOT NULL
+                    AND superseded_by = ANY(path)) AS is_cycle
+            FROM chain ORDER BY depth DESC LIMIT 1
+        """)
+        _winner_sql = text("""
+            WITH RECURSIVE chain AS (
+                SELECT id, superseded_by, learned_at, 1 AS depth,
+                       ARRAY[id]::uuid[] AS path
+                FROM heart.facts WHERE id = :start_id AND agent_id = :agent_id
+                UNION ALL
+                SELECT f.id, f.superseded_by, f.learned_at, c.depth + 1,
+                       c.path || f.id
+                FROM heart.facts f JOIN chain c ON f.id = c.superseded_by
+                WHERE NOT (f.id = ANY(c.path))
+                  AND c.depth < 100
+            )
+            SELECT id FROM chain ORDER BY learned_at DESC NULLS LAST LIMIT 1
+        """)
 
-        result = await session.execute(sql, {"start_id": fact_id, "agent_id": self.agent_id})
-        row = result.first()
-        if row is None:
-            # Path-exhausted without a NULL tip — two distinct cases:
-            # (1) True cycle: deepest-visited row's superseded_by points back
-            #     into the already-visited path.  Fix: pick latest-learned
-            #     member, null its superseded_by + reactivate (existing repair).
-            # (2) Depth-exhausted: chain is longer than the depth=100 backstop
-            #     but acyclic — the deepest row's superseded_by points onward to
-            #     an unvisited node.  Fix: return deepest visited row WITHOUT any
-            #     mutation (corrupt-repair risk outweighs missing the tip).
-            # Evaluate (superseded_by IS NOT NULL AND superseded_by = ANY(path))
-            # in SQL to avoid pulling the uuid array into Python.
-            diag_rows = await session.execute(text("""
-                WITH RECURSIVE chain AS (
-                    SELECT id, superseded_by, learned_at, 1 AS depth,
-                           ARRAY[id]::uuid[] AS path
-                    FROM heart.facts WHERE id = :start_id AND agent_id = :agent_id
-                    UNION ALL
-                    SELECT f.id, f.superseded_by, f.learned_at, c.depth + 1,
-                           c.path || f.id
-                    FROM heart.facts f JOIN chain c ON f.id = c.superseded_by
-                    WHERE NOT (f.id = ANY(c.path))
-                      AND c.depth < 100
-                )
-                SELECT id, learned_at, superseded_by,
-                       (superseded_by IS NOT NULL
-                        AND superseded_by = ANY(path)) AS is_cycle
-                FROM chain ORDER BY depth DESC LIMIT 1
-            """), {"start_id": fact_id, "agent_id": self.agent_id})
+        visited: set[UUID] = set()
+        current_id = fact_id
+        max_restarts = 100
+
+        for _restart in range(max_restarts + 1):
+            params = {"start_id": current_id, "agent_id": self.agent_id}
+
+            result = await session.execute(_tip_sql, params)
+            row = result.first()
+            if row is not None:
+                # Healthy path: CTE found the NULL-tip row.
+                current_fact = await self._get_fact_orm(row.id, session)
+                if current_fact is None:
+                    raise ValueError(f"Current fact for {fact_id} not found")
+                return self._to_detail(current_fact)
+
+            # No NULL-tip — depth-exhausted or intra-CTE cycle.
+            diag_rows = await session.execute(_diag_sql, params)
             deepest = diag_rows.first()
             if deepest is None:
                 raise ValueError(f"Fact {fact_id} not found")
 
-            if not deepest.is_cycle:
-                # Chain exceeds the depth=100 backstop but contains no cycle —
-                # returning the deepest visited row is the safest degradation.
+            if deepest.is_cycle or deepest.id in visited:
+                # True intra-CTE cycle OR cross-restart cycle detected.
+                # Repair: pick latest-learned member, null superseded_by + reactivate.
+                winner_rows = await session.execute(_winner_sql, params)
+                tip = winner_rows.first()
+                if tip is None:
+                    raise ValueError(f"Fact {fact_id} not found")
+                winner = await self._get_fact_orm(tip.id, session)
+                if winner is None:
+                    raise ValueError(f"Cycle winner {tip.id} not found for fact {fact_id}")
                 logger.warning(
-                    "Supersession chain from fact %s exceeds depth backstop; "
-                    "returning deepest visited row %s without repair",
-                    fact_id,
-                    deepest.id,
+                    "Supersession CYCLE detected at fact %s — breaking: winner %s",
+                    fact_id, tip.id,
                 )
-                deepest_orm = await self._get_fact_orm(deepest.id, session)
-                if deepest_orm is None:
-                    raise ValueError(
-                        f"Deepest chain fact {deepest.id} not found for {fact_id}"
-                    )
-                return self._to_detail(deepest_orm)
+                winner.superseded_by = None
+                winner.active = True
+                await session.flush()
+                return self._to_detail(winner)
 
-            # True cycle — existing repair: pick latest-learned chain member,
-            # null its superseded_by, reactivate.
-            winner_rows = await session.execute(text("""
-                WITH RECURSIVE chain AS (
-                    SELECT id, superseded_by, learned_at, 1 AS depth,
-                           ARRAY[id]::uuid[] AS path
-                    FROM heart.facts WHERE id = :start_id AND agent_id = :agent_id
-                    UNION ALL
-                    SELECT f.id, f.superseded_by, f.learned_at, c.depth + 1,
-                           c.path || f.id
-                    FROM heart.facts f JOIN chain c ON f.id = c.superseded_by
-                    WHERE NOT (f.id = ANY(c.path))
-                      AND c.depth < 100
-                )
-                SELECT id FROM chain ORDER BY learned_at DESC NULLS LAST LIMIT 1
-            """), {"start_id": fact_id, "agent_id": self.agent_id})
-            tip = winner_rows.first()
-            if tip is None:
-                raise ValueError(f"Fact {fact_id} not found")
-            winner = await self._get_fact_orm(tip.id, session)
-            if winner is None:
-                raise ValueError(f"Cycle winner {tip.id} not found for fact {fact_id}")
-            logger.warning("Supersession CYCLE detected at fact %s — breaking: winner %s", fact_id, tip.id)
-            winner.superseded_by = None
-            winner.active = True
-            await session.flush()
-            return self._to_detail(winner)
+            # Depth-exhausted, acyclic so far — restart from deepest visited row.
+            visited.add(deepest.id)
+            current_id = deepest.id
 
-        current_fact = await self._get_fact_orm(row.id, session)
-        if current_fact is None:
-            raise ValueError(f"Current fact for {fact_id} not found")
-
-        return self._to_detail(current_fact)
+        raise ValueError(
+            f"supersession chain exceeds walk bound ({max_restarts} restarts)"
+        )
 
     # ------------------------------------------------------------------
     # deactivate()

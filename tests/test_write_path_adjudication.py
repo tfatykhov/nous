@@ -1355,17 +1355,14 @@ async def test_get_current_long_chain_not_rewritten(heart, session):
 
 
 @pytest.mark.postgres_only
-async def test_get_current_deep_chain_no_repair(heart, session, caplog):
-    """FIX 1: A chain longer than the depth=100 backstop must NOT be repaired.
+async def test_get_current_deep_chain_no_repair(heart, session):
+    """FIX 5 (codex r5): iterative walk returns true tip for chains >100 links.
 
-    A 120-link acyclic chain (facts[0]→facts[1]→…→facts[119]) exceeds
-    the depth<100 CTE backstop, so the main CTE finds no NULL-tip row.
-    The fallback must distinguish depth-exhaustion (superseded_by NOT in
-    path) from a true cycle, log a WARNING, and return the deepest visited
-    row (facts[99]) without mutating any row.
+    A 120-link acyclic chain (facts[0]→facts[1]→…→facts[119]) exceeds the
+    depth<100 CTE backstop. The iterative walk restarts from the deepest visited
+    row each iteration, converging at facts[119] (the true NULL-tip). No rows
+    must be mutated (acyclic chain → no cycle repair).
     """
-    import logging
-
     n = 120
     facts = []
     for i in range(n):
@@ -1389,15 +1386,14 @@ async def test_get_current_deep_chain_no_repair(heart, session, caplog):
     rows[-1].active = True
     await session.flush()
 
-    with caplog.at_level(logging.WARNING, logger="nous.heart.facts"):
-        result = await heart.facts._get_current(facts[0].id, session)
+    result = await heart.facts._get_current(facts[0].id, session)
 
-    # Deepest visited row is facts[99] (depth=100 is the last the backstop admits)
-    assert result.id == facts[99].id, (
-        f"Expected deepest visited row facts[99]={facts[99].id}, got {result.id}"
+    # Iterative walk must reach the true tip (facts[119])
+    assert result.id == facts[119].id, (
+        f"Expected true tip facts[119]={facts[119].id}, got {result.id}"
     )
 
-    # No intermediate row must have been mutated
+    # No intermediate row must have been mutated (acyclic chain → no repair)
     for i, row in enumerate(rows[:-1]):
         await session.refresh(row)
         assert row.superseded_by == facts[i + 1].id, (
@@ -1406,14 +1402,6 @@ async def test_get_current_deep_chain_no_repair(heart, session, caplog):
         assert row.active is False, (
             f"Row {i} was reactivated unexpectedly"
         )
-
-    # A WARNING must have been emitted (not a cycle repair message)
-    assert any("exceeds depth backstop" in m for m in caplog.messages), (
-        f"Expected 'exceeds depth backstop' WARNING; got messages: {caplog.messages}"
-    )
-    assert not any("CYCLE" in m for m in caplog.messages), (
-        "Must not log a cycle repair message for a depth-exhausted chain"
-    )
 
 
 # ---------------------------------------------------------------------------
