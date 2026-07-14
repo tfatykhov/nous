@@ -1459,3 +1459,50 @@ async def test_event_date_type_equality_round_trip(heart):
         assert row.event_date == expected, (
             f"DB value {row.event_date!r} != FactInput-validated {expected!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 10: R2.3 retrieval-contract regression tests (RC-7 / DC-1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_superseded_fact_excluded_from_default_search(heart):
+    """R2.3 contract: after apply_supersession, the loser never appears in
+    search_facts (active=true filter in hybrid_search) — 'default recall
+    returns 0 superseded facts' acceptance test (RC-7).
+
+    Uses auto-committed learn calls (no session=) so that search_facts,
+    which opens its own session, sees the committed state.
+    """
+    # Learn two distinct facts that share the query term "project deadline"
+    a = await heart.learn(
+        FactInput(content="The project deadline is March 1st twenty-six, confirmed by the team.")
+    )
+    b = await heart.learn(
+        FactInput(content="The project deadline is April 15th twenty-six, revised after review.")
+    )
+    assert a.id is not None, f"Fact A was rejected: {a}"
+    assert b.id is not None, f"Fact B was rejected: {b}"
+
+    # Apply supersession: B wins over A (April deadline supersedes March deadline)
+    async with heart.db.session() as s:
+        ok = await heart.facts.apply_supersession(b.id, a.id, s)
+        assert ok, "apply_supersession returned False — clobber guard fired unexpectedly"
+        await s.commit()
+
+    # Default search uses active_only=True — the loser (A) must be excluded
+    results = await heart.search_facts("project deadline", limit=10)
+    ids = {r.id for r in results}
+    assert a.id not in ids, (
+        f"Superseded fact A ({a.id}) still appears in search results: {[r.id for r in results]}"
+    )
+    assert b.id in ids, (
+        f"Winner fact B ({b.id}) missing from search results: {[r.id for r in results]}"
+    )
+
+
+# NOTE: test_apply_supersession_sets_active_false_atomically (DC-1) is already
+# fully covered by Task 6's test_apply_supersession_sets_columns_and_edge, which
+# asserts loser.superseded_by == winner.id AND loser.active is False in the same
+# session.flush() — the atomicity contract. Not duplicated here per task brief.
