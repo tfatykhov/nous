@@ -1779,3 +1779,115 @@ async def test_dry_run_performs_zero_writes(session):
     )
     # Sanity: the dense transcript IS enumerable so the path was exercised
     assert len(_enumerable) >= 1, "dense transcript should be classified enumerable"
+
+
+# ---------------------------------------------------------------------------
+# Task 13: R2.5/R2.6 — backfill_supersession.py (run_sweep)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_backfill_dry_run_no_writes_no_classifier(heart, monkeypatch):
+    """T13(a): dry-run counts candidate pairs without any classifier calls or writes.
+
+    Seeds a same-key pair, verifies _classify_fact_pair is never invoked, and
+    confirms no superseded_by rows appear in the DB for the test agent.
+    """
+    from scripts.backfill_supersession import run_sweep
+    from sqlalchemy import text as sa_text
+    from unittest.mock import AsyncMock
+
+    # Unique agent_id so find_key_conflict_pairs only sees our facts.
+    unique_agent = f"t13a-{uuid4().hex[:8]}"
+    heart.facts.agent_id = unique_agent
+
+    await heart.learn(
+        FactInput(
+            content="The production server CPU count is four cores running continuously.",
+            subject_key="prod_server",
+            attribute_key="cpu_count",
+        )
+    )
+    await heart.learn(
+        FactInput(
+            content="The production server CPU count is eight cores running continuously.",
+            subject_key="prod_server",
+            attribute_key="cpu_count",
+        )
+    )
+
+    sentinel = AsyncMock(side_effect=AssertionError("classifier must not be called in dry-run"))
+    monkeypatch.setattr(heart.facts, "_classify_fact_pair", sentinel)
+
+    settings = heart.facts._settings.model_copy(update={
+        "supersession_key_resolution_enabled": True,
+        "supersession_classifier_max_per_hour": 0,  # unlimited
+    })
+
+    result = await run_sweep(heart, settings, max_pairs=0, batch_size=25, dry_run=True)
+
+    sentinel.assert_not_called()
+    assert result["resolutions_written"] == 0
+    assert result["pairs_examined"] >= 1  # at least our seeded pair
+
+    # Confirm no supersessions in DB for this agent.
+    async with heart.db.session() as s:
+        count = (
+            await s.execute(
+                sa_text("SELECT COUNT(*) FROM heart.facts WHERE agent_id = :a AND superseded_by IS NOT NULL"),
+                {"a": unique_agent},
+            )
+        ).scalar()
+    assert count == 0, f"dry-run must write 0 supersessions; found {count}"
+
+
+@pytest.mark.postgres_only
+async def test_backfill_keep_both_seen_set_terminates(heart, monkeypatch):
+    """T13(b): KEEP-BOTH pair terminates the loop via seen-set; pairs_examined == 1.
+
+    Seeds exactly ONE same-key pair under an isolated agent_id, mocks the
+    classifier to return UNRELATED (→ resolve returns False), and asserts the
+    loop exits cleanly with pairs_examined==1 rather than looping infinitely.
+    """
+    from scripts.backfill_supersession import run_sweep
+    from unittest.mock import AsyncMock
+
+    # Unique agent_id for DB isolation.
+    unique_agent = f"t13b-{uuid4().hex[:8]}"
+    heart.facts.agent_id = unique_agent
+
+    await heart.learn(
+        FactInput(
+            content="The cache server memory size is four gigabytes total allocated.",
+            subject_key="cache_server",
+            attribute_key="memory_size",
+        )
+    )
+    await heart.learn(
+        FactInput(
+            content="The cache server memory size is eight gigabytes total allocated.",
+            subject_key="cache_server",
+            attribute_key="memory_size",
+        )
+    )
+
+    # Classifier returns UNRELATED → resolve_key_conflict_pair returns False.
+    monkeypatch.setattr(
+        heart.facts,
+        "_classify_fact_pair",
+        AsyncMock(return_value={"relation": "UNRELATED", "current_fact": "new", "confidence": 0.9}),
+    )
+
+    settings = heart.facts._settings.model_copy(update={
+        "supersession_key_resolution_enabled": True,
+        "supersession_classifier_max_per_hour": 0,  # unlimited — so budget is NOT the stop
+    })
+
+    result = await run_sweep(heart, settings, max_pairs=0, batch_size=25, dry_run=False)
+
+    # Loop must have terminated (test completion proves no infinite loop).
+    assert result["pairs_examined"] == 1, (
+        f"expected 1 pair examined (only our seeded pair); got {result['pairs_examined']}"
+    )
+    assert result["resolutions_written"] == 0
+    assert result["keep_both"] == 1
