@@ -1475,6 +1475,98 @@ async def test_phase_sweep_key_conflicts_cap_leaves_remainder(heart):
     assert len(remaining) >= 1
 
 
+@pytest.mark.asyncio
+async def test_key_conflict_sweep_cursor_pages_past_keep_both():
+    """(e) Paging cursor: a KEEP_BOTH pair at cycle 1 does not starve a later
+    UPDATE pair — cycle 2 must process the second pair, not re-examine pair 1.
+
+    Uses AsyncMock so the test runs without a real DB and proves cursor
+    state transitions via classify-call inspection.
+    """
+    from datetime import datetime, timezone
+    from uuid import uuid4
+    from nous.handlers.sleep_handler import SleepHandler
+
+    uuid_old = uuid4()
+    uuid_new_old = uuid4()
+    uuid_later = uuid4()
+    uuid_new_later = uuid4()
+    ts_old = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    ts_later = datetime(2026, 1, 2, tzinfo=timezone.utc)
+
+    pair1 = {
+        "id1": uuid_old, "id2": uuid_new_old,
+        "c1": "server count is two rack units total",
+        "c2": "server count is four rack units total",
+        "ts1": ts_old,
+    }
+    pair2 = {
+        "id1": uuid_later, "id2": uuid_new_later,
+        "c1": "deployment region is us-east-one primary zone",
+        "c2": "deployment region is now eu-west-two primary zone",
+        "ts1": ts_later,
+    }
+
+    # find_key_conflict_pairs mock: returns pair1 without cursor, pair2 with cursor
+    find_mock = AsyncMock()
+    find_mock.side_effect = lambda limit, after=None: (
+        [pair1] if after is None else [pair2] if after == (ts_old, uuid_old) else []
+    )
+
+    # resolve_key_conflict_pair mock: pair1 → False (KEEP_BOTH); pair2 → True (resolved)
+    resolve_mock = AsyncMock(side_effect=lambda id1, id2, c1, c2: id1 == uuid_later)
+
+    heart_mock = AsyncMock()
+    heart_mock.facts.find_key_conflict_pairs = find_mock
+    heart_mock.facts.resolve_key_conflict_pair = resolve_mock
+
+    settings = SimpleNamespace(
+        supersession_key_resolution_enabled=True,
+        supersession_sweep_max_pairs=1,
+        supersession_classifier_max_per_hour=500,
+    )
+    handler = SleepHandler(
+        brain=AsyncMock(),
+        heart=heart_mock,
+        settings=settings,
+        bus=MagicMock(),
+        llm_client=MagicMock(),
+    )
+    handler._llm = MagicMock()
+    handler._interrupted = False
+
+    # Cycle 1: processes pair1 (KEEP_BOTH → resolve returns False)
+    stats1: dict = {}
+    await handler._phase_sweep_key_conflicts(stats1)
+    assert stats1["key_conflicts_found"] == 1
+    assert stats1["key_supersessions_written"] == 0
+    # Cursor must have advanced to pair1's position
+    assert handler._key_sweep_cursor == (ts_old, uuid_old), (
+        f"Expected cursor (ts_old, uuid_old) after cycle 1, got {handler._key_sweep_cursor}"
+    )
+    # resolve was called with pair1's ids
+    resolve_mock.assert_awaited_once_with(uuid_old, uuid_new_old, pair1["c1"], pair1["c2"])
+
+    # Cycle 2: cursor is set; must fetch pair2 (not pair1 again)
+    resolve_mock.reset_mock()
+    stats2: dict = {}
+    await handler._phase_sweep_key_conflicts(stats2)
+    assert stats2["key_conflicts_found"] == 1
+    assert stats2["key_supersessions_written"] == 1
+    # resolve must have been called with pair2's ids, not pair1's
+    resolve_mock.assert_awaited_once_with(uuid_later, uuid_new_later, pair2["c1"], pair2["c2"])
+
+    # Cycle 3: pair2 returned 1 == limit=1, so cursor advances to pair2's pos.
+    # Cycle 3 with that cursor returns [] → cursor resets to None.
+    resolve_mock.reset_mock()
+    stats3: dict = {}
+    await handler._phase_sweep_key_conflicts(stats3)
+    assert stats3["key_conflicts_found"] == 0
+    assert handler._key_sweep_cursor is None, (
+        "Cursor must reset to None when fetch returns 0 rows (table exhausted)"
+    )
+
+
 @pytest.mark.postgres_only
 async def test_event_date_type_equality_round_trip(heart):
     """devil-2 #5 type-equality: event_date stored as datetime.date, not str.

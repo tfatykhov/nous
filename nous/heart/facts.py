@@ -1491,29 +1491,74 @@ class FactManager:
     # ------------------------------------------------------------------
 
     async def find_key_conflict_pairs(
-        self, limit: int = 25, session: AsyncSession | None = None
+        self,
+        limit: int = 25,
+        session: AsyncSession | None = None,
+        after: tuple | None = None,
     ) -> list[dict]:
         """064 R2 sleep sweep: active fact pairs sharing (subject_key,
         attribute_key) — the cross-episode conflicts write-time detection
         missed (it only sees pairs at insert). Oldest-first for determinism;
-        resolution deactivates losers so re-runs converge."""
-        sql = text("""
-            SELECT f1.id AS id1, f2.id AS id2, f1.content AS c1, f2.content AS c2
-            FROM heart.facts f1
-            JOIN heart.facts f2
-              ON f2.agent_id = f1.agent_id
-             AND f2.subject_key = f1.subject_key
-             AND f2.attribute_key = f1.attribute_key
-             AND f1.learned_at < f2.learned_at
-            WHERE f1.agent_id = :agent_id
-              AND f1.active = true AND f2.active = true
-              AND f1.subject_key IS NOT NULL AND f1.attribute_key IS NOT NULL
-              AND (f1.event_date IS NULL OR f2.event_date IS NULL
-                   OR f1.event_date = f2.event_date)      -- F075 precedence in SQL
-            ORDER BY f1.learned_at ASC
-            LIMIT :limit
-        """)
-        params = {"agent_id": self.agent_id, "limit": limit}
+        resolution deactivates losers so re-runs converge.
+
+        Args:
+            after: Optional paging cursor ``(learned_at, id)`` of the last
+                   f1 row processed.  When set, only pairs whose f1 row is
+                   strictly after this position are returned, allowing the
+                   sleep sweep to page past KEEP_BOTH pairs without
+                   re-examining them every cycle.  Pass ``None`` to start
+                   from the oldest pair.
+
+        Returns:
+            List of dicts with keys ``id1``, ``id2``, ``c1``, ``c2``,
+            ``ts1`` (f1.learned_at, for advancing the cursor).
+        """
+        if after is not None:
+            sql = text("""
+                SELECT f1.id AS id1, f2.id AS id2,
+                       f1.content AS c1, f2.content AS c2,
+                       f1.learned_at AS ts1
+                FROM heart.facts f1
+                JOIN heart.facts f2
+                  ON f2.agent_id = f1.agent_id
+                 AND f2.subject_key = f1.subject_key
+                 AND f2.attribute_key = f1.attribute_key
+                 AND f1.learned_at < f2.learned_at
+                WHERE f1.agent_id = :agent_id
+                  AND f1.active = true AND f2.active = true
+                  AND f1.subject_key IS NOT NULL AND f1.attribute_key IS NOT NULL
+                  AND (f1.event_date IS NULL OR f2.event_date IS NULL
+                       OR f1.event_date = f2.event_date)
+                  AND (f1.learned_at, f1.id) > (:after_ts, :after_id)
+                ORDER BY f1.learned_at ASC, f1.id ASC
+                LIMIT :limit
+            """)
+            params: dict = {
+                "agent_id": self.agent_id,
+                "limit": limit,
+                "after_ts": after[0],
+                "after_id": after[1],
+            }
+        else:
+            sql = text("""
+                SELECT f1.id AS id1, f2.id AS id2,
+                       f1.content AS c1, f2.content AS c2,
+                       f1.learned_at AS ts1
+                FROM heart.facts f1
+                JOIN heart.facts f2
+                  ON f2.agent_id = f1.agent_id
+                 AND f2.subject_key = f1.subject_key
+                 AND f2.attribute_key = f1.attribute_key
+                 AND f1.learned_at < f2.learned_at
+                WHERE f1.agent_id = :agent_id
+                  AND f1.active = true AND f2.active = true
+                  AND f1.subject_key IS NOT NULL AND f1.attribute_key IS NOT NULL
+                  AND (f1.event_date IS NULL OR f2.event_date IS NULL
+                       OR f1.event_date = f2.event_date)
+                ORDER BY f1.learned_at ASC, f1.id ASC
+                LIMIT :limit
+            """)
+            params = {"agent_id": self.agent_id, "limit": limit}
         if session is None:
             async with self.db.session() as session:
                 rows = await session.execute(sql, params)

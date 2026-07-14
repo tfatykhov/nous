@@ -363,6 +363,11 @@ class SleepHandler:
         self._last_sleep_at: datetime | None = None
         self._last_phases: list[str] = []
         self._currently_sleeping: bool = False
+        # 064 R2: paging cursor for the key-conflict sweep. Stores the
+        # (learned_at, id) of the last f1 row processed so KEEP_BOTH pairs
+        # don't starve later conflicts. Reset to None when the fetch returns
+        # fewer rows than the limit (table wrapped — restart next cycle).
+        self._key_sweep_cursor: tuple | None = None
 
         bus.on("sleep_started", self.handle)
         bus.on("message_received", self._on_wake)
@@ -1303,7 +1308,9 @@ class SleepHandler:
             return True
         try:
             max_pairs = self._settings.supersession_sweep_max_pairs
-            pairs = await self._heart.facts.find_key_conflict_pairs(limit=max_pairs)
+            pairs = await self._heart.facts.find_key_conflict_pairs(
+                limit=max_pairs, after=self._key_sweep_cursor
+            )
             sleep_stats["key_conflicts_found"] = len(pairs)
             sleep_stats["key_supersessions_written"] = 0
             for pair in pairs:
@@ -1313,6 +1320,15 @@ class SleepHandler:
                     pair["id1"], pair["id2"], pair["c1"], pair["c2"]
                 ):
                     sleep_stats["key_supersessions_written"] += 1
+            # Advance the cursor to the last f1 row processed so the next
+            # cycle pages past pairs that were KEEP_BOTH this cycle.
+            # Reset to None when we got fewer rows than requested, meaning
+            # we've wrapped the table and should restart from the oldest pair.
+            if pairs and len(pairs) >= max_pairs:
+                last = pairs[-1]
+                self._key_sweep_cursor = (last["ts1"], last["id1"])
+            else:
+                self._key_sweep_cursor = None
             return True
         except Exception:
             logger.warning("Key-conflict sweep failed", exc_info=True)
