@@ -1295,7 +1295,7 @@ ROLLBACK: all facts written by this script have source='enumerative_extractor'.
 #   settings = Settings()  # then force the R1 knobs on for this process:
 #   settings = settings.model_copy(update={
 #       "extraction_enumerative_enabled": True,
-#       "enumerative_density_threshold": args.density_threshold or settings.enumerative_density_threshold,
+#       "enumerative_density_threshold": args.density_threshold if args.density_threshold is not None else settings.enumerative_density_threshold,
 #   })
 #   watermark = datetime.now(UTC).isoformat()
 #   print(f"ROLLBACK KEY (created_at watermark): {watermark}")

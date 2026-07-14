@@ -122,7 +122,7 @@ async def _run_backfill(
     settings = settings.model_copy(update={
         "extraction_enumerative_enabled": True,
         "enumerative_density_threshold": (
-            density_threshold or settings.enumerative_density_threshold
+            density_threshold if density_threshold is not None else settings.enumerative_density_threshold
         ),
         "enumerative_extraction_max_per_hour": extraction_budget,  # 0 = unlimited
     })
