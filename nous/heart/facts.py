@@ -1209,12 +1209,31 @@ class FactManager:
         extraction on, a dated candidate colliding with an older undated
         paraphrase was silently de-dated (the F075 bypass requires BOTH sides
         non-null, and plain _confirm never copied the date).
+
+        codex r11 — dedup-confirm must not discard adjudication metadata;
+        fill-if-empty only (never overwrite existing non-NULL values).
         """
         if input.event_date is not None and dupe.event_date is None:
             dupe.event_date = input.event_date
             dupe.event_date_classified_at = (
                 input.event_date_classified_at or datetime.now(UTC)
             )
+        # Fill subject_key + attribute_key as a PAIR — only when both input
+        # keys are present and both row keys are NULL (avoids half-keyed rows).
+        if (
+            input.subject_key is not None
+            and input.attribute_key is not None
+            and dupe.subject_key is None
+            and dupe.attribute_key is None
+        ):
+            dupe.subject_key = input.subject_key
+            dupe.attribute_key = input.attribute_key
+        # Fill source_ordinal when the row has none and input provides one.
+        if input.source_ordinal is not None and dupe.source_ordinal is None:
+            dupe.source_ordinal = input.source_ordinal
+        # Upgrade overrides_prior: True is sticky — never downgrade.
+        if input.overrides_prior and not dupe.overrides_prior:
+            dupe.overrides_prior = True
         return await self._confirm(dupe.id, session)
 
     async def _find_duplicate(

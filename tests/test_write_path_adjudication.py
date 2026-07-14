@@ -3053,3 +3053,80 @@ async def test_resolve_key_conflicts_malformed_confidence_keep_both(heart, sessi
     assert old_row.active is not False, "old fact must remain active"
     assert new_row.superseded_by is None, "new fact must not be superseded on malformed confidence"
     assert new_row.active is not False, "new fact must remain active"
+
+
+# ---------------------------------------------------------------------------
+# codex r11 fixes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_confirm_duplicate_fills_adjudication_metadata(heart, session):
+    """codex r11 FIX 1: _confirm_duplicate must copy adjudication metadata onto
+    an unkeyed legacy row when the new input carries them (fill-if-empty only).
+    Uses identical content + precomputed_embedding so cosine=1.0 > threshold
+    → _classify_dupe_in_band returns None → confirm path fires.
+    """
+    # Unit vector: two identical vectors produce cosine=1.0.
+    vec = [1.0] + [0.0] * 1535
+
+    # First learn: unkeyed legacy row.
+    r1 = await heart.learn(
+        FactInput(
+            content="The application cache hit rate is above ninety percent.",
+            subject="application",
+        ),
+        session=session,
+        precomputed_embedding=vec,
+    )
+    await session.flush()
+    row = await session.get(Fact, r1.id)
+    assert row.subject_key is None
+    assert row.attribute_key is None
+    assert row.source_ordinal is None
+    assert not row.overrides_prior
+
+    # Second learn: same content + same vector → confirm path; input carries keys.
+    r2 = await heart.learn(
+        FactInput(
+            content="The application cache hit rate is above ninety percent.",
+            subject="application",
+            subject_key="application",
+            attribute_key="cache hit rate",
+            source_ordinal=3_000_000,
+            overrides_prior=True,
+        ),
+        session=session,
+        precomputed_embedding=vec,
+    )
+    # dedup confirm: returned id == original fact id
+    assert r2.id == r1.id, "confirm path must return the existing fact"
+
+    await session.flush()
+    row = await session.get(Fact, r1.id, populate_existing=True)
+    assert row.subject_key == "application", "subject_key must be filled from second input"
+    assert row.attribute_key == "cache hit rate", "attribute_key must be filled from second input"
+    assert row.source_ordinal == 3_000_000, "source_ordinal must be filled from second input"
+    assert row.overrides_prior is True, "overrides_prior must be upgraded to True"
+
+    # Third learn: different keys — must NOT overwrite now that row is keyed.
+    await heart.learn(
+        FactInput(
+            content="The application cache hit rate is above ninety percent.",
+            subject="application",
+            subject_key="different subject",
+            attribute_key="different attr",
+            source_ordinal=999,
+            overrides_prior=False,
+        ),
+        session=session,
+        precomputed_embedding=vec,
+    )
+    await session.flush()
+    row = await session.get(Fact, r1.id, populate_existing=True)
+    assert row.subject_key == "application", "subject_key must not be overwritten by third learn"
+    assert row.attribute_key == "cache hit rate", "attribute_key must not be overwritten by third learn"
+    assert row.source_ordinal == 3_000_000, "source_ordinal must not be overwritten by third learn"
+    assert row.overrides_prior is True, "overrides_prior must not be downgraded by third learn"
+
+
