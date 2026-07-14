@@ -112,10 +112,9 @@ async def run_sweep(
                 continue
 
             # Peek budget before calling to distinguish budget-stops from
-            # genuine KEEP-BOTH; _key_budget_ok() consumes a slot so we check
-            # _key_calls directly (non-consuming).
-            cap = settings.supersession_classifier_max_per_hour
-            if cap > 0 and heart.facts._key_calls >= cap:
+            # genuine KEEP-BOTH; use the non-consuming key_budget_exhausted()
+            # so hour-boundary rollover resets the counter correctly.
+            if heart.facts.key_budget_exhausted():
                 counters["budget_stops"] += 1
                 continue
 
@@ -252,7 +251,7 @@ async def _run_backfill(
                             hist = await _chain_depth_histogram(s, agent_id, watermark)
                         _print_chain_histogram(hist)
                     # Budget note.
-                    if not heart.facts._key_budget_ok():
+                    if heart.facts.key_budget_exhausted():
                         print(
                             "\nNOTE: classifier budget exhausted mid-run — "
                             "some keep_both returns may be budget-gated, not genuine KEEP-BOTH."

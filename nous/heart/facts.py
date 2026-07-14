@@ -204,6 +204,19 @@ class FactManager:
         self._key_calls += 1
         return True
 
+    def key_budget_exhausted(self) -> bool:
+        """Non-consuming peek at the hourly key-classifier budget. Rolls the
+        hour bucket forward (resetting the counter) exactly like _key_budget_ok,
+        but never consumes a slot."""
+        cap = getattr(self._settings, "supersession_classifier_max_per_hour", 500) if self._settings else 500
+        if not cap or cap <= 0:
+            return False
+        bucket = int(time.monotonic() // 3600)
+        if bucket != self._key_bucket:
+            self._key_bucket = bucket
+            self._key_calls = 0
+        return self._key_calls >= cap
+
     # ------------------------------------------------------------------
     # Event helper
     # ------------------------------------------------------------------
