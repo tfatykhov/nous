@@ -221,7 +221,7 @@ resolutions with both texts for sampled precision audit (R2.6).
 UPDATE heart.facts SET superseded_by=NULL, active=true
 WHERE agent_id=:a AND superseded_by IS NOT NULL AND updated_at >= :watermark;
 DELETE FROM brain.graph_edges
-WHERE relation='supersedes' AND created_at >= :watermark;
+WHERE agent_id=:a AND relation='supersedes' AND created_at >= :watermark;
 ```
 
 ---

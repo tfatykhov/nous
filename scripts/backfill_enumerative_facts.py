@@ -118,6 +118,17 @@ async def _run_backfill(
         )
         return 2
 
+    # Live mode also requires an embedding key — without it facts are stored with
+    # NULL embeddings and Leg-2 cosine dedup never runs, so re-runs duplicate the
+    # entire fact set (idempotency depends on embedding dedup).
+    if not dry_run and not settings.openai_api_key:
+        print(
+            "ERROR: live backfill requires OPENAI_API_KEY — "
+            "idempotency depends on embedding dedup.",
+            file=sys.stderr,
+        )
+        return 2
+
     # Force R1 knobs on for this process.
     settings = settings.model_copy(update={
         "extraction_enumerative_enabled": True,

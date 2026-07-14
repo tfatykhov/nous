@@ -2457,3 +2457,48 @@ async def test_phase_sweep_no_inactive_winner(heart, caplog):
     assert f_c.id in tips, (
         f"Expected C ({f_c.id}) to be the active tip; got tips={tips}"
     )
+
+
+# ---------------------------------------------------------------------------
+# FIX 3 (codex r5): backfill_enumerative_facts — fail fast without OPENAI_API_KEY
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_enumerative_backfill_live_fails_without_embedding_key(monkeypatch):
+    """FIX 3: live backfill exits with code 2 before printing a rollback key
+    when OPENAI_API_KEY is absent.
+
+    Idempotency depends on embedding dedup (Leg-2 cosine dedup); without an
+    embedder, NULL-embedding facts are stored and re-runs duplicate the full
+    set.  The guard fires BEFORE the watermark print so no false rollback key
+    is emitted.
+    """
+    from scripts.backfill_enumerative_facts import _run_backfill
+    from nous.config import Settings
+
+    # Patch Settings to return a config with an Anthropic key but no OpenAI key.
+    fake_settings = Settings().model_copy(update={
+        "anthropic_api_key": "sk-ant-fake",
+        "openai_api_key": None,
+    })
+    monkeypatch.setattr(
+        "scripts.backfill_enumerative_facts.Settings",
+        lambda: fake_settings,
+    )
+
+    import io
+    captured_stderr = io.StringIO()
+    monkeypatch.setattr("sys.stderr", captured_stderr)
+
+    exit_code = await _run_backfill(
+        agent_id="nous-default",
+        since=None,
+        max_episodes=0,
+        density_threshold=None,
+        extraction_budget=0,
+        dry_run=False,
+    )
+
+    assert exit_code == 2, f"Expected exit code 2, got {exit_code}"
+    err = captured_stderr.getvalue()
+    assert "OPENAI_API_KEY" in err, f"Expected OPENAI_API_KEY in stderr; got: {err!r}"

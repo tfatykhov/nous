@@ -22,7 +22,8 @@ ROLLBACK SQL
        AND updated_at >= :w;
     -- Remove supersedes edges created by this backfill:
     DELETE FROM brain.graph_edges
-     WHERE relation = 'supersedes'
+     WHERE agent_id = :a
+       AND relation = 'supersedes'
        AND created_at >= :w;
 """
 from __future__ import annotations
