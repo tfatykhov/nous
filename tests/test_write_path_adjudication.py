@@ -2785,8 +2785,10 @@ async def test_store_batch_per_fact_failure_isolation():
     # Must not raise — per-fact failures are isolated
     result = await ex._store_batch(inputs)
 
-    # Only the first committed fact appears in the result
-    assert result == [first_id], f"Expected [first_id]; got {result}"
+    # _store_batch now returns list[tuple[FactInput, UUID]] for stored facts.
+    # Only the first committed fact appears in the result.
+    stored_uids = [uid for _, uid in result]
+    assert stored_uids == [first_id], f"Expected [first_id] in stored uids; got {stored_uids}"
     # learn called twice: call 1 succeeds, call 2 raises → break (call 3 never reached)
     assert call_count[0] == 2, (
         f"Expected 2 learn calls (1 success + 1 raise, 3rd skipped); got {call_count[0]}"
@@ -3512,6 +3514,100 @@ async def test_backfill_budget_stops_pair_not_marked_seen(heart, monkeypatch):
     assert classify_call_count[0] == 1, (
         f"classifier must be called exactly once (pair-1 only); "
         f"got {classify_call_count[0]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Codex round-13 FIX 3: seen_contents updated only after successful storage
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_failed_store_does_not_block_retry_in_later_chunk(monkeypatch, settings_fixture):
+    """Codex r13 FIX 3: when Heart.learn raises mid-batch in chunk-0 for fact Y,
+    Y must NOT be added to seen_contents — chunk-1's copy of Y (overlap window)
+    must be stored successfully.
+
+    chunk-0 batch = [X, Y]  → Y's learn raises → _store_batch returns [(X, x_id)]
+    chunk-1 batch = [Y, Z]  → Y not in seen_contents → both stored → 3 total
+
+    Before the fix: seen_contents was updated with filtered inputs BEFORE
+    _store_batch, so Y's failure still marked it seen → chunk-1 skipped Y →
+    permanent coverage loss.
+    """
+    transcript = "A" * 700  # two chunks: size=600, overlap=80
+
+    settings = settings_fixture(
+        enumerative_density_threshold=0.0,
+        enumerative_max_facts_per_episode=1000,
+        episode_chunk_size=600,
+        episode_chunk_overlap=80,
+        episode_chunk_min_transcript_chars=0,
+    )
+
+    x_id = uuid4()
+    y_id = uuid4()
+    z_id = uuid4()
+    learn_results = [
+        SimpleNamespace(id=x_id),     # call 1: X in chunk-0 → ok
+        RuntimeError("Y fails"),       # call 2: Y in chunk-0 → raises
+        SimpleNamespace(id=y_id),     # call 3: Y in chunk-1 → ok (retry)
+        SimpleNamespace(id=z_id),     # call 4: Z in chunk-1 → ok
+    ]
+    learn_calls = [0]
+
+    async def _learn(fi, **kw):
+        idx = learn_calls[0]
+        learn_calls[0] += 1
+        r = learn_results[idx]
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    heart_mock = AsyncMock()
+    heart_mock.learn = AsyncMock(side_effect=_learn)
+
+    embedder = AsyncMock()
+    embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.0] * 1536] * len(texts))
+
+    shared_y_content = "Y fact: the worker thread count is sixteen for parallel processing."
+    chunk0_facts = {
+        "facts": [
+            {"content": "X fact: the queue depth limit is one thousand messages maximum.",
+             "subject_key": "queue", "attribute_key": "depth_limit"},
+            {"content": shared_y_content,
+             "subject_key": "worker", "attribute_key": "thread_count"},
+        ]
+    }
+    chunk1_facts = {
+        "facts": [
+            {"content": shared_y_content,  # overlap copy of Y
+             "subject_key": "worker", "attribute_key": "thread_count"},
+            {"content": "Z fact: the retry backoff delay is five seconds exponential.",
+             "subject_key": "retry", "attribute_key": "backoff_delay"},
+        ]
+    }
+
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.call_background_llm_structured",
+        AsyncMock(side_effect=[chunk0_facts, chunk1_facts]),
+    )
+
+    ex = EnumerativeExtractor(
+        heart=heart_mock, settings=settings, llm_client=object(), embedder=embedder
+    )
+    stored_ids = await ex.process_transcript(transcript, episode_id=uuid4())
+
+    # 3 facts: X (chunk-0), Y (chunk-1 retry), Z (chunk-1)
+    assert len(stored_ids) == 3, (
+        f"Expected 3 stored IDs (X + Y-retry + Z); got {len(stored_ids)} — "
+        "Y must be retried in chunk-1 because the chunk-0 failure kept it out of seen_contents"
+    )
+    assert x_id in stored_ids, "X must be stored from chunk-0"
+    assert y_id in stored_ids, "Y must be stored from chunk-1 retry (not skipped as seen)"
+    assert z_id in stored_ids, "Z must be stored from chunk-1"
+    assert learn_calls[0] == 4, (
+        f"Expected 4 learn calls (X ok, Y raise, Y retry ok, Z ok); got {learn_calls[0]}"
     )
 
 

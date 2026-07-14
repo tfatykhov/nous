@@ -188,16 +188,22 @@ class EnumerativeExtractor:
                         chunk_index,
                         skipped,
                     )
-                seen_contents.update(
-                    (" ".join(inp.content.lower().split()), inp.event_date) for inp in filtered
-                )
                 inputs = filtered
                 if cap:
                     remaining = cap - len(stored_ids)
                     if len(inputs) > remaining:
                         inputs = inputs[:remaining]
                         truncated = True
-                stored_ids.extend(await self._store_batch(inputs))
+                stored_pairs = await self._store_batch(inputs)
+                stored_ids.extend(uid for _, uid in stored_pairs)
+                # Mark seen ONLY for facts that were actually stored so that
+                # transient Heart.learn failures (r9 per-fact isolation) do not
+                # permanently block the same content from being retried in a
+                # later chunk.
+                seen_contents.update(
+                    (" ".join(fi.content.lower().split()), fi.event_date)
+                    for fi, _ in stored_pairs
+                )
             except Exception:
                 logger.exception(
                     "R1: chunk %d failed for episode %s — stopping enumerative extraction with %d facts stored",
@@ -299,6 +305,10 @@ class EnumerativeExtractor:
         return inputs
 
     async def _store_batch(self, inputs: list[FactInput]) -> list:
+        """Store a batch of facts. Returns list[tuple[FactInput, UUID]] for
+        facts that were actually committed (not rejected). Stops on the first
+        Heart.learn exception so the caller can exclude unstored inputs from
+        the seen-contents set and retry them in later chunks."""
         if not inputs:
             return []
         vectors = None
@@ -310,7 +320,7 @@ class EnumerativeExtractor:
                     "R1: embed_batch failed; falling back to per-fact embedding",
                     exc_info=True,
                 )
-        stored_ids: list = []
+        stored: list = []  # list[tuple[FactInput, UUID]]
         for idx, fi in enumerate(inputs):
             vec = vectors[idx] if vectors is not None and idx < len(vectors) else None
             try:
@@ -320,9 +330,9 @@ class EnumerativeExtractor:
                     "R1: fact %d/%d failed to store — stopping batch with %d stored",
                     idx,
                     len(inputs),
-                    len(stored_ids),
+                    len(stored),
                 )
                 break
             if not isinstance(result, FactRejected):
-                stored_ids.append(result.id)
-        return stored_ids
+                stored.append((fi, result.id))
+        return stored
