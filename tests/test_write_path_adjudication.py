@@ -3598,6 +3598,105 @@ async def test_backfill_budget_stops_pair_not_marked_seen(heart, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Codex r15 FIX 1: distinguish failed extraction from empty extraction
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_extract_chunk_failure_is_loud_and_continues(monkeypatch, settings_fixture, caplog):
+    """R15 FIX 1 (a): LLM helper returns None for chunk 0 (API failure), valid fact for chunk 1.
+    chunk-1 fact IS stored; a WARNING mentioning chunk 0 is logged; truncated=True fires."""
+    transcript = "A" * 700  # two chunks: size=600, overlap=80
+
+    settings = settings_fixture(
+        enumerative_density_threshold=0.0,
+        enumerative_max_facts_per_episode=1000,
+        episode_chunk_size=600,
+        episode_chunk_overlap=80,
+        episode_chunk_min_transcript_chars=0,
+    )
+
+    chunk1_fact = {
+        "facts": [
+            {
+                "content": "The primary cache cluster has sixteen nodes active in production.",
+                "subject_key": "cache cluster",
+                "attribute_key": "node_count",
+            }
+        ]
+    }
+    stored_id = uuid4()
+    heart_mock = AsyncMock()
+    heart_mock.learn = AsyncMock(return_value=SimpleNamespace(id=stored_id))
+
+    embedder = AsyncMock()
+    embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.0] * 1536] * len(texts))
+
+    # chunk 0: helper returns None (API failure); chunk 1: valid extraction
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.call_background_llm_structured",
+        AsyncMock(side_effect=[None, chunk1_fact]),
+    )
+
+    ex = EnumerativeExtractor(
+        heart=heart_mock, settings=settings, llm_client=object(), embedder=embedder
+    )
+    with caplog.at_level("WARNING"):
+        stored_ids = await ex.process_transcript(transcript, episode_id=uuid4())
+
+    # chunk-1 fact must be stored despite chunk-0 failure
+    assert stored_id in stored_ids, "chunk-1 fact must be stored when chunk-0 extraction fails"
+    # truncation WARNING must be logged mentioning chunk 0
+    assert any(
+        "extraction failed" in r.message and "chunk 0" in r.message
+        for r in caplog.records
+    ), "WARNING must be logged mentioning chunk 0 failure"
+    # overall truncation warning also fires (truncated=True)
+    assert any("TRUNCATED" in r.message for r in caplog.records), (
+        "end-of-run truncation WARNING must fire when truncated=True"
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_extraction_is_silent(monkeypatch, settings_fixture, caplog):
+    """R15 FIX 1 (b): well-formed {"facts": []} response → no chunk-failure WARNING,
+    truncated stays False (no end-of-run truncation log either)."""
+    transcript = "A" * 100  # one short chunk
+
+    settings = settings_fixture(
+        enumerative_density_threshold=0.0,
+        enumerative_max_facts_per_episode=1000,
+        episode_chunk_size=600,
+        episode_chunk_overlap=80,
+        episode_chunk_min_transcript_chars=0,
+    )
+
+    heart_mock = AsyncMock()
+    heart_mock.learn = AsyncMock(side_effect=AssertionError("heart.learn must not be called for empty extraction"))
+    embedder = AsyncMock()
+
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.call_background_llm_structured",
+        AsyncMock(return_value={"facts": []}),
+    )
+
+    ex = EnumerativeExtractor(
+        heart=heart_mock, settings=settings, llm_client=object(), embedder=embedder
+    )
+    with caplog.at_level("WARNING"):
+        stored_ids = await ex.process_transcript(transcript, episode_id=uuid4())
+
+    assert stored_ids == [], "no facts should be stored for empty extraction"
+    # No chunk-failure warning
+    assert not any(
+        "extraction failed" in r.message for r in caplog.records
+    ), "empty extraction must not log a failure WARNING"
+    # No truncation warning (truncated stays False)
+    assert not any("TRUNCATED" in r.message for r in caplog.records), (
+        "empty extraction must not trigger truncation WARNING"
+    )
+
+
 @pytest.mark.asyncio
 async def test_failed_store_does_not_block_retry_in_later_chunk(monkeypatch, settings_fixture, caplog):
     """Codex r14 update (was r13 FIX 3): when Heart.learn raises mid-batch in chunk-0,

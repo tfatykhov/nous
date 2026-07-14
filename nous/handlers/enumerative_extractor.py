@@ -172,7 +172,19 @@ class EnumerativeExtractor:
                 break
             try:
                 raw = await self._extract_chunk(chunk)
+                if raw is None:
+                    # API/helper failure — an LLM blip on one chunk should not
+                    # abandon later chunks (contrast: _store_batch failure breaks
+                    # because a failing DB backend is likely to keep failing).
+                    logger.warning(
+                        "R1: extraction failed for chunk %d of episode %s — coverage truncated",
+                        chunk_index,
+                        episode_id,
+                    )
+                    truncated = True
+                    continue
                 if not raw:
+                    # Well-formed {"facts": []} — genuinely empty chunk, no warning.
                     continue
                 inputs = self._to_fact_inputs(raw, chunk_index, episode_id)
                 # R10: drop overlap duplicates — keep first-occurrence ordinal.
@@ -250,7 +262,7 @@ class EnumerativeExtractor:
         self._ex_calls += 1
         return True
 
-    async def _extract_chunk(self, chunk: str) -> list[dict]:
+    async def _extract_chunk(self, chunk: str) -> list[dict] | None:
         result = await call_background_llm_structured(
             client=self._llm,
             model=self._settings.background_model,
@@ -264,8 +276,11 @@ class EnumerativeExtractor:
             output_schema=_EXTRACTION_SCHEMA,
             max_tokens=4000,
         )
-        if not result or not isinstance(result.get("facts"), list):
-            return []
+        if result is None or not isinstance(result.get("facts"), list):
+            # API/helper failure or malformed response — caller treats None as a loud
+            # failure (warning + truncated=True + continue), distinct from a
+            # well-formed {"facts": []} empty extraction which is silent.
+            return None
         return [f for f in result["facts"] if isinstance(f, dict)]
 
     def _to_fact_inputs(self, raw_facts: list[dict], chunk_index: int, episode_id) -> list[FactInput]:
