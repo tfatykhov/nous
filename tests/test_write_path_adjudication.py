@@ -3187,3 +3187,166 @@ async def test_resolve_key_conflicts_loss_skips_contradiction_scan(heart, sessio
     )
 
 
+# ---------------------------------------------------------------------------
+# Codex round-12: F075 event_date on the enumerative extraction path
+# ---------------------------------------------------------------------------
+
+
+def test_enumerative_event_date_flag_on_valid_date(settings_fixture):
+    """FIX (codex r12): flag ON + valid ISO date → event_date stored, classified_at non-None."""
+    from datetime import date as _date
+
+    settings = settings_fixture(temporal_extraction_enabled=True)
+    ex = EnumerativeExtractor.__new__(EnumerativeExtractor)
+    ex._settings = settings
+
+    raw = [
+        {
+            "content": "BTC price on March tenth was thirty thousand dollars.",
+            "subject_key": "btc",
+            "attribute_key": "price",
+            "event_date": "2026-03-10",
+        }
+    ]
+    inputs = ex._to_fact_inputs(raw, chunk_index=0, episode_id=uuid4())
+    assert len(inputs) == 1
+    fi = inputs[0]
+    assert fi.event_date == _date(2026, 3, 10), (
+        f"event_date must be date(2026,3,10); got {fi.event_date!r}"
+    )
+    assert fi.event_date_classified_at is not None, (
+        "event_date_classified_at must be set when flag is ON and date is valid"
+    )
+
+
+def test_enumerative_event_date_flag_on_malformed_date(settings_fixture):
+    """FIX (codex r12): flag ON + malformed date → event_date=None AND classified_at=None (backfill-eligible)."""
+    settings = settings_fixture(temporal_extraction_enabled=True)
+    ex = EnumerativeExtractor.__new__(EnumerativeExtractor)
+    ex._settings = settings
+
+    raw = [
+        {
+            "content": "Revenue in March was fifty million dollars total.",
+            "subject_key": "revenue",
+            "attribute_key": "amount",
+            "event_date": "March 10",  # malformed — validator will drop it
+        }
+    ]
+    inputs = ex._to_fact_inputs(raw, chunk_index=0, episode_id=uuid4())
+    assert len(inputs) == 1
+    fi = inputs[0]
+    assert fi.event_date is None, (
+        f"malformed date must be dropped by validator; event_date={fi.event_date!r}"
+    )
+    assert fi.event_date_classified_at is None, (
+        "classified_at must stay None when date is malformed so F075.1 backfill can retry"
+    )
+
+
+def test_enumerative_event_date_flag_off_ignored(settings_fixture):
+    """GOLDEN (codex r12): flag OFF → event_date in LLM output ignored; both fields None."""
+    settings = settings_fixture()  # temporal_extraction_enabled absent → defaults to False
+    ex = EnumerativeExtractor.__new__(EnumerativeExtractor)
+    ex._settings = settings
+
+    raw = [
+        {
+            "content": "ETH price on March tenth was two thousand dollars.",
+            "subject_key": "eth",
+            "attribute_key": "price",
+            "event_date": "2026-03-10",  # LLM emits a date, but flag is OFF
+        }
+    ]
+    inputs = ex._to_fact_inputs(raw, chunk_index=0, episode_id=uuid4())
+    assert len(inputs) == 1
+    fi = inputs[0]
+    assert fi.event_date is None, (
+        "flag OFF: event_date must be ignored regardless of LLM output"
+    )
+    assert fi.event_date_classified_at is None, (
+        "flag OFF: classified_at must be None (byte-identical current behavior)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_enumerative_seen_set_distinct_dates_preserved(monkeypatch, settings_fixture):
+    """FIX (codex r12): same content + two different event_dates → both stored (distinct events).
+    Same content + same date (overlap) → one stored (overlap dedup preserved).
+    """
+    from datetime import date as _date
+
+    transcript = "A" * 700  # produces 2 chunks with chunk_size=600, overlap=80
+
+    settings = settings_fixture(
+        temporal_extraction_enabled=True,
+        enumerative_density_threshold=0.0,  # force-enumerable
+        enumerative_max_facts_per_episode=1000,
+        episode_chunk_size=600,
+        episode_chunk_overlap=80,
+        episode_chunk_min_transcript_chars=0,
+    )
+
+    stored_args: list = []
+
+    async def _learn(fi, **kw):
+        stored_args.append(fi)
+        return SimpleNamespace(id=uuid4())
+
+    heart_mock = AsyncMock()
+    heart_mock.learn = AsyncMock(side_effect=_learn)
+    embedder = AsyncMock()
+    embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.0] * 1536] * len(texts))
+
+    shared_content = "ETH price was two thousand dollars on the specified date."
+
+    # chunk-0: one dated fact (2026-03-10)
+    # chunk-1: same content with 2026-03-11 (distinct date → preserved),
+    #          plus exact same (content + 2026-03-10) as chunk-0 (overlap dup → dropped)
+    chunk0_facts = {
+        "facts": [
+            {
+                "content": shared_content,
+                "subject_key": "eth",
+                "attribute_key": "price",
+                "event_date": "2026-03-10",
+            },
+        ]
+    }
+    chunk1_facts = {
+        "facts": [
+            {
+                "content": shared_content,
+                "subject_key": "eth",
+                "attribute_key": "price",
+                "event_date": "2026-03-11",  # different date → distinct event, NOT deduped
+            },
+            {
+                "content": shared_content,
+                "subject_key": "eth",
+                "attribute_key": "price",
+                "event_date": "2026-03-10",  # same as chunk-0 → overlap dup, DROPPED
+            },
+        ]
+    }
+
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.call_background_llm_structured",
+        AsyncMock(side_effect=[chunk0_facts, chunk1_facts]),
+    )
+
+    ex = EnumerativeExtractor(
+        heart=heart_mock, settings=settings, llm_client=object(), embedder=embedder
+    )
+    stored_ids = await ex.process_transcript(transcript, episode_id=uuid4())
+
+    # 2 facts: (content, 2026-03-10) + (content, 2026-03-11)
+    # The third (content, 2026-03-10) from chunk-1 is dropped as overlap duplicate.
+    assert len(stored_ids) == 2, (
+        f"Expected 2 stored IDs (distinct dates); got {len(stored_ids)}"
+    )
+    dates_stored = {fi.event_date for fi in stored_args}
+    assert _date(2026, 3, 10) in dates_stored, "2026-03-10 fact must be stored"
+    assert _date(2026, 3, 11) in dates_stored, "2026-03-11 fact must be stored"
+
+

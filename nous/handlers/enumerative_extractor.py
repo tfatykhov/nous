@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import UTC, datetime
 
 # Imported at module top so monkeypatch("...enumerative_extractor.call_background_llm_structured")
 # can find the attribute in this module's namespace.
@@ -89,6 +90,10 @@ _EXTRACTION_SCHEMA = {
                         "type": "boolean",
                         "description": "True ONLY if this statement contradicts widely-known world knowledge.",
                     },
+                    "event_date": {
+                        "type": ["string", "null"],
+                        "description": "ISO YYYY-MM-DD date the statement is anchored to, ONLY when the statement itself carries an explicit date; else null.",
+                    },
                 },
                 "required": ["content", "subject_key", "attribute_key"],
             },
@@ -100,6 +105,7 @@ _EXTRACTION_SCHEMA = {
 _EXTRACTION_PROMPT = """Extract EVERY atomic factual statement from this text chunk.
 One fact per source statement, in source order. Resolve pronouns within the
 chunk. Keep exact values (names, numbers, dates) verbatim.
+Report event_date in ISO YYYY-MM-DD format ONLY when the statement itself carries an explicit date; omit otherwise.
 
 <chunk>
 {chunk}
@@ -145,9 +151,12 @@ class EnumerativeExtractor:
 
         cap = getattr(self._settings, "enumerative_max_facts_per_episode", 1000)
         stored_ids: list = []
-        # R10: track normalized content across chunks to drop verbatim overlap
-        # duplicates before _store_batch; first-occurrence ordinal always wins.
-        seen_contents: set[str] = set()
+        # R10: track (normalized_content, event_date) across chunks to drop verbatim
+        # overlap duplicates before _store_batch; first-occurrence ordinal always wins.
+        # Two facts with the same content but DIFFERENT event_dates are distinct events
+        # and must both be stored — extending the key to include event_date preserves
+        # the F075 dated-pair guard while still deduplicating plain overlap copies.
+        seen_contents: set = set()  # key: (normalized_content, event_date)
         for chunk_index, chunk in enumerate(chunks):
             if cap and len(stored_ids) >= cap:
                 truncated = True
@@ -170,7 +179,7 @@ class EnumerativeExtractor:
                 filtered: list = []
                 for inp in inputs:
                     norm = " ".join(inp.content.lower().split())
-                    if norm not in seen_contents:
+                    if (norm, inp.event_date) not in seen_contents:
                         filtered.append(inp)
                 skipped = len(inputs) - len(filtered)
                 if skipped > 0:
@@ -180,7 +189,7 @@ class EnumerativeExtractor:
                         skipped,
                     )
                 seen_contents.update(
-                    " ".join(inp.content.lower().split()) for inp in filtered
+                    (" ".join(inp.content.lower().split()), inp.event_date) for inp in filtered
                 )
                 inputs = filtered
                 if cap:
@@ -245,6 +254,7 @@ class EnumerativeExtractor:
 
     def _to_fact_inputs(self, raw_facts: list[dict], chunk_index: int, episode_id) -> list[FactInput]:
         inputs = []
+        flag_on = getattr(self._settings, "temporal_extraction_enabled", False)
         for pos, f in enumerate(raw_facts):
             content = str(f.get("content") or "").strip()
             skey = normalize_key(f.get("subject_key"))
@@ -254,6 +264,21 @@ class EnumerativeExtractor:
             # devil-2 #2: POSITIONAL ONLY — never use explicit statement numbers
             # from the source as ordinals (mixed-form comparisons invert reading order).
             ordinal = chunk_index * 1_000_000 + pos
+            # F075: producer-path date extraction — mirror _store_candidate_facts semantics.
+            # Consume event_date ONLY when temporal_extraction_enabled is True.
+            # Normalize through the FactInput validator round-trip so the stored value is
+            # type-safe (date, not str) and the F075 write-time key-resolution guard works.
+            # Do NOT stamp classified_at when the LLM emitted a date the validator dropped
+            # as malformed (e.g. "March 10", "2024-3-10"). Leaving classified_at None keeps
+            # the row backfill-eligible so F075.1 can retry it.
+            raw_event_date = f.get("event_date") if flag_on else None
+            candidate_event_date = (
+                FactInput(content="_", event_date=raw_event_date).event_date
+                if raw_event_date is not None
+                else None
+            )
+            date_dropped = raw_event_date is not None and candidate_event_date is None
+            classified_at = datetime.now(UTC) if (flag_on and not date_dropped) else None
             inputs.append(
                 FactInput(
                     content=content,
@@ -267,6 +292,8 @@ class EnumerativeExtractor:
                     source_text=content,  # RC-1a: per-statement grounding, not the whole chunk
                     source_ordinal=ordinal,
                     overrides_prior=bool(f.get("overrides_prior", False)),
+                    event_date=candidate_event_date,
+                    event_date_classified_at=classified_at,
                 )
             )
         return inputs
