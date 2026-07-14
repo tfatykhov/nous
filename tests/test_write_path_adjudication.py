@@ -1231,3 +1231,231 @@ async def test_get_current_cycle_break_durable_without_session(heart):
         assert fresh_b is not None
         assert fresh_b.superseded_by is None
         assert fresh_b.active is True
+
+
+# ---------------------------------------------------------------------------
+# Task 9: sleep-phase key-conflict sweep (find_key_conflict_pairs,
+#         resolve_key_conflict_pair, _phase_sweep_key_conflicts)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_find_key_conflict_pairs_cross_episode(heart):
+    """(a) Two same-key active facts from *different* episodes are found by
+    find_key_conflict_pairs; facts WITHOUT keys are not returned."""
+    # Fact with keys — the pair that should surface
+    old_f = await heart.learn(
+        FactInput(
+            content="The database cluster has twelve active shards running in production.",
+            subject_key="database",
+            attribute_key="shard_count",
+        )
+    )
+    new_f = await heart.learn(
+        FactInput(
+            content="The database cluster now has twenty-four active shards running in production.",
+            subject_key="database",
+            attribute_key="shard_count",
+        )
+    )
+    # Fact WITHOUT keys — must NOT appear in results
+    await heart.learn(
+        FactInput(content="A completely unrelated observation about the weather today.")
+    )
+
+    pairs = await heart.facts.find_key_conflict_pairs(limit=25)
+
+    # Both ids must appear together (ordering may vary at sub-ms learned_at resolution)
+    pair_id_sets = [{str(p["id1"]), str(p["id2"])} for p in pairs]
+    assert {str(old_f.id), str(new_f.id)} in pair_id_sets, (
+        f"Expected {{{old_f.id}, {new_f.id}}} not found in {pair_id_sets}"
+    )
+    # Ensure no pair has a None id1 or id2 (i.e., keyless facts not included)
+    for p in pairs:
+        assert p["id1"] is not None
+        assert p["id2"] is not None
+        assert p["c1"] is not None
+        assert p["c2"] is not None
+
+
+@pytest.mark.postgres_only
+async def test_phase_sweep_key_conflicts_resolves_and_increments_counters(heart):
+    """(b) The phase resolves a same-key pair via classifier-confirm + policy
+    and increments both key_conflicts_found and key_supersessions_written."""
+    from nous.handlers.sleep_handler import SleepHandler
+    from nous.heart.schemas import FactInput
+
+    # Persist two same-key facts (committed, so a fresh session sees both)
+    old_f = await heart.learn(
+        FactInput(
+            content="The API gateway processes one thousand requests per second at peak load.",
+            subject_key="api_gateway",
+            attribute_key="peak_rps",
+        )
+    )
+    new_f = await heart.learn(
+        FactInput(
+            content="The API gateway now processes two thousand requests per second at peak load.",
+            subject_key="api_gateway",
+            attribute_key="peak_rps",
+        )
+    )
+
+    # Enable the flag and wire a mock classifier that confirms UPDATE (new wins)
+    settings = heart.facts._settings.model_copy(
+        update={
+            "supersession_key_resolution_enabled": True,
+            "supersession_sweep_max_pairs": 25,
+            "supersession_classifier_max_per_hour": 500,
+        }
+    )
+    heart.facts._settings = settings
+
+    heart.facts._classify_fact_pair = AsyncMock(
+        return_value={"relation": "UPDATE", "current_fact": "new", "confidence": 0.95}
+    )
+
+    # Build a minimal SleepHandler with a mock LLM so it doesn't skip
+    llm_mock = MagicMock()
+    handler = SleepHandler(
+        brain=AsyncMock(),
+        heart=heart,
+        settings=settings,
+        bus=MagicMock(),
+        llm_client=llm_mock,
+    )
+    handler._llm = llm_mock  # ensure it's set on the handler too
+    handler._interrupted = False
+
+    sleep_stats: dict = {}
+    result = await handler._phase_sweep_key_conflicts(sleep_stats)
+
+    assert result is True
+    assert sleep_stats.get("key_conflicts_found", 0) >= 1
+    assert sleep_stats.get("key_supersessions_written", 0) >= 1
+
+    # Exactly one fact must have been superseded (the loser); chain must be valid
+    async with heart.db.session() as s:
+        old_row = await s.get(Fact, old_f.id)
+        new_row = await s.get(Fact, new_f.id)
+        assert old_row is not None and new_row is not None
+        active_count = (1 if old_row.active else 0) + (1 if new_row.active else 0)
+        assert active_count == 1, (
+            f"Expected exactly 1 active fact, got old.active={old_row.active} new.active={new_row.active}"
+        )
+        loser = old_row if not old_row.active else new_row
+        winner = new_row if not old_row.active else old_row
+        assert loser.superseded_by == winner.id
+
+
+@pytest.mark.asyncio
+async def test_phase_sweep_key_conflicts_flag_off_returns_immediately():
+    """(c) Flag off ⇒ phase returns True immediately with zero queries (golden).
+    find_key_conflict_pairs must NOT be called at all."""
+    from nous.handlers.sleep_handler import SleepHandler
+
+    heart_mock = AsyncMock()
+    heart_mock.facts = AsyncMock()
+    heart_mock.facts.find_key_conflict_pairs = AsyncMock(
+        side_effect=AssertionError("must not be called when flag is off")
+    )
+
+    settings = SimpleNamespace(
+        supersession_key_resolution_enabled=False,
+        supersession_sweep_max_pairs=25,
+    )
+    handler = SleepHandler(
+        brain=AsyncMock(),
+        heart=heart_mock,
+        settings=settings,
+        bus=MagicMock(),
+        llm_client=MagicMock(),
+    )
+    handler._llm = MagicMock()
+    handler._interrupted = False
+
+    sleep_stats: dict = {}
+    result = await handler._phase_sweep_key_conflicts(sleep_stats)
+
+    assert result is True
+    heart_mock.facts.find_key_conflict_pairs.assert_not_called()
+
+
+@pytest.mark.postgres_only
+async def test_phase_sweep_key_conflicts_cap_leaves_remainder(heart):
+    """(d) Pairs beyond supersession_sweep_max_pairs are left for the next cycle.
+    Resolution deactivates processed losers so unprocessed pairs re-surface."""
+    from nous.handlers.sleep_handler import SleepHandler
+
+    # Create 3 distinct same-key pairs
+    pairs_data = [
+        ("network", "latency", "Network latency is ten milliseconds at baseline average.", "Network latency is now twenty milliseconds at baseline average."),
+        ("cache", "hit_rate", "Cache hit rate is eighty percent over the last hour sampled.", "Cache hit rate is now ninety percent over the last hour sampled."),
+        ("cpu", "usage", "CPU usage averages thirty percent during peak traffic hours daily.", "CPU usage averages sixty percent during peak traffic hours daily."),
+    ]
+    for subj, attr, old_c, new_c in pairs_data:
+        await heart.learn(FactInput(content=old_c, subject_key=subj, attribute_key=attr))
+        await heart.learn(FactInput(content=new_c, subject_key=subj, attribute_key=attr))
+
+    settings = heart.facts._settings.model_copy(
+        update={
+            "supersession_key_resolution_enabled": True,
+            "supersession_sweep_max_pairs": 2,  # cap at 2 — one pair left over
+            "supersession_classifier_max_per_hour": 500,
+        }
+    )
+    heart.facts._settings = settings
+    heart.facts._classify_fact_pair = AsyncMock(
+        return_value={"relation": "UPDATE", "current_fact": "new", "confidence": 0.95}
+    )
+
+    llm_mock = MagicMock()
+    handler = SleepHandler(
+        brain=AsyncMock(),
+        heart=heart,
+        settings=settings,
+        bus=MagicMock(),
+        llm_client=llm_mock,
+    )
+    handler._llm = llm_mock
+    handler._interrupted = False
+
+    sleep_stats: dict = {}
+    await handler._phase_sweep_key_conflicts(sleep_stats)
+
+    # Only the capped number of pairs (2) were processed
+    assert sleep_stats["key_conflicts_found"] == 2
+    # At least one pair remains unprocessed (re-surfaces next cycle)
+    remaining = await heart.facts.find_key_conflict_pairs(limit=25)
+    assert len(remaining) >= 1
+
+
+@pytest.mark.postgres_only
+async def test_event_date_type_equality_round_trip(heart):
+    """devil-2 #5 type-equality: event_date stored as datetime.date, not str.
+    Pins that the Python != in _resolve_key_conflicts and the SQL = in
+    find_key_conflict_pairs compare the same datetime.date type."""
+    import datetime
+
+    result = await heart.learn(
+        FactInput(
+            content="The quarterly report was published on the tenth of March two thousand twenty-six.",
+            subject_key="quarterly_report",
+            attribute_key="publication_date",
+            event_date="2026-03-10",
+        )
+    )
+
+    async with heart.db.session() as s:
+        row = await s.get(Fact, result.id)
+        assert row is not None
+        assert isinstance(row.event_date, datetime.date), (
+            f"expected datetime.date, got {type(row.event_date)}"
+        )
+        expected = FactInput(
+            content="_" * 40,
+            event_date="2026-03-10",
+        ).event_date
+        assert row.event_date == expected, (
+            f"DB value {row.event_date!r} != FactInput-validated {expected!r}"
+        )

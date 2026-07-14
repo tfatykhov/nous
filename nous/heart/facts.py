@@ -1490,6 +1490,87 @@ class FactManager:
     # 064 R2: key-conflict resolution
     # ------------------------------------------------------------------
 
+    async def find_key_conflict_pairs(
+        self, limit: int = 25, session: AsyncSession | None = None
+    ) -> list[dict]:
+        """064 R2 sleep sweep: active fact pairs sharing (subject_key,
+        attribute_key) — the cross-episode conflicts write-time detection
+        missed (it only sees pairs at insert). Oldest-first for determinism;
+        resolution deactivates losers so re-runs converge."""
+        sql = text("""
+            SELECT f1.id AS id1, f2.id AS id2, f1.content AS c1, f2.content AS c2
+            FROM heart.facts f1
+            JOIN heart.facts f2
+              ON f2.agent_id = f1.agent_id
+             AND f2.subject_key = f1.subject_key
+             AND f2.attribute_key = f1.attribute_key
+             AND f1.learned_at < f2.learned_at
+            WHERE f1.agent_id = :agent_id
+              AND f1.active = true AND f2.active = true
+              AND f1.subject_key IS NOT NULL AND f1.attribute_key IS NOT NULL
+              AND (f1.event_date IS NULL OR f2.event_date IS NULL
+                   OR f1.event_date = f2.event_date)      -- F075 precedence in SQL
+            ORDER BY f1.learned_at ASC
+            LIMIT :limit
+        """)
+        params = {"agent_id": self.agent_id, "limit": limit}
+        if session is None:
+            async with self.db.session() as session:
+                rows = await session.execute(sql, params)
+                return [dict(r._mapping) for r in rows.fetchall()]
+        rows = await session.execute(sql, params)
+        return [dict(r._mapping) for r in rows.fetchall()]
+
+    async def resolve_key_conflict_pair(
+        self, id1: UUID, id2: UUID, c1: str, c2: str
+    ) -> bool:
+        """064 R2 sweep/backfill seam: confirm a same-key pair via the F027
+        classifier and resolve per policy. fact1 (id1/c1) is the OLDER fact.
+        Owns its session + commit. Returns True iff a supersession was written.
+        Fail-open (classifier None / low conf / budget spent / guard) => False.
+
+        NOTE (devil-2 #5): the F075 distinct-event-date exclusion for the sweep
+        lives in find_key_conflict_pairs' SQL; the write-time twin lives in
+        _resolve_key_conflicts' Python. One rule, two encodings — any future
+        change (tolerance windows, date ranges) MUST update both. Both compare
+        `date` values (FactInput's validator coerces to datetime.date; the ORM
+        column is Date) — the implementer must add the type-equality test below.
+        """
+        if not self._key_budget_ok():
+            return False
+        cls = await self._classify_fact_pair(c1, c2)
+        if not cls:
+            return False
+        relation = cls.get("relation", "")
+        conf = float(cls.get("confidence", 0.0))
+        if relation not in ("UPDATE", "CONTRADICTION") or conf < 0.8:
+            return False
+        async with self.db.session() as session:
+            f_old = await self._get_fact_orm(id1, session)
+            f_new = await self._get_fact_orm(id2, session)
+            if f_old is None or f_new is None:
+                return False
+            if relation == "CONTRADICTION":
+                current = cls.get("current_fact", "")
+                if current == "new":
+                    winner, loser = f_new, f_old
+                elif current == "old":
+                    winner, loser = f_old, f_new
+                else:
+                    return False  # ambiguous contradiction => KEEP BOTH (devil-2 #1)
+            else:
+                winner, loser = self._pick_winner(f_new, f_old, cls)
+            ok = await self.apply_supersession(winner.id, loser.id, session)
+            if ok:
+                # R2.6 sampled precision audit hook: caller logs the texts.
+                logger.info(
+                    "R2 resolved: superseded %r ==> %r",
+                    loser.content[:200],
+                    winner.content[:200],
+                )
+            await session.commit()
+            return ok
+
     async def _resolve_key_conflicts(
         self, fact: Fact, input: FactInput, session: AsyncSession,
         exclude_ids: list[UUID],

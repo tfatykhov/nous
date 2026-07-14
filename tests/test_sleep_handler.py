@@ -220,6 +220,7 @@ class TestPhasesCompleted:
         handler._phase_compress = AsyncMock(return_value=True)
         handler._phase_reflect = AsyncMock(return_value=True)
         handler._phase_resolve_contradictions = AsyncMock(return_value=True)
+        handler._phase_sweep_key_conflicts = AsyncMock(return_value=True)  # R2.1 sleep hook
         handler._phase_graph_densification = AsyncMock(return_value=True)
         handler._phase_recover_abandoned_episodes = AsyncMock(return_value=True)
         handler._phase_generalize = AsyncMock(return_value=True)
@@ -233,13 +234,14 @@ class TestPhasesCompleted:
         assert "compress" in emitted.data["phases_completed"]
         assert "reflect" in emitted.data["phases_completed"]
         assert "resolve_contradictions" in emitted.data["phases_completed"]
+        assert "sweep_key_conflicts" in emitted.data["phases_completed"]
         assert "graph_densification" in emitted.data["phases_completed"]
         assert "recover_abandoned_episodes" in emitted.data["phases_completed"]
         assert "generalize" in emitted.data["phases_completed"]
         # F065 Phase 2: prune_hub_snapshots runs after prune_dead_edges
         # and is included when graph_hub_snapshot_retention_days > 0 (default).
         assert "prune_hub_snapshots" in emitted.data["phases_completed"]
-        assert len(emitted.data["phases_completed"]) == 9
+        assert len(emitted.data["phases_completed"]) == 10
 
     @pytest.mark.asyncio
     async def test_all_phases_succeed_all_in_phases_completed(self):
@@ -249,6 +251,7 @@ class TestPhasesCompleted:
         handler._phase_compress = AsyncMock(return_value=True)
         handler._phase_reflect = AsyncMock(return_value=True)
         handler._phase_resolve_contradictions = AsyncMock(return_value=True)
+        handler._phase_sweep_key_conflicts = AsyncMock(return_value=True)  # R2.1 sleep hook
         handler._phase_graph_densification = AsyncMock(return_value=True)
         handler._phase_recover_abandoned_episodes = AsyncMock(return_value=True)
         handler._phase_generalize = AsyncMock(return_value=True)
@@ -258,8 +261,8 @@ class TestPhasesCompleted:
         await handler._run_sleep(_make_event("sleep_started"))
 
         emitted = bus.emit.call_args[0][0]
-        # F065 Phase 2 adds prune_hub_snapshots → 10 phases.
-        assert len(emitted.data["phases_completed"]) == 10
+        # F065 Phase 2 adds prune_hub_snapshots + R2.1 adds sweep_key_conflicts → 11 phases.
+        assert len(emitted.data["phases_completed"]) == 11
 
 
 # ===========================================================================

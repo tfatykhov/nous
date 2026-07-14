@@ -285,6 +285,10 @@ class Settings(BaseSettings):
         default=500, ge=0,
         description="RC-5: hourly in-process cap on key-conflict classifier (Haiku) calls; 0 disables the cap.",
     )
+    supersession_sweep_max_pairs: int = Field(
+        default=25, ge=0,
+        description="R2.1 sleep sweep: max same-key conflict pairs processed per cycle (resumable by construction).",
+    )
 
     # F017: Budget scaling
     budget_scale_enabled: bool = True

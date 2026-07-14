@@ -519,6 +519,11 @@ class SleepHandler:
                     phases_completed.append("resolve_contradictions")
 
             if not self._interrupted:
+                success = await self._phase_sweep_key_conflicts(sleep_stats)
+                if success:
+                    phases_completed.append("sweep_key_conflicts")
+
+            if not self._interrupted:
                 success = await self._phase_stale_scan(sleep_stats)
                 if success:
                     phases_completed.append("stale_scan")
@@ -1287,6 +1292,30 @@ class SleepHandler:
 
         except Exception:
             logger.warning("Contradiction resolution phase failed", exc_info=True)
+            return False
+
+    async def _phase_sweep_key_conflicts(self, sleep_stats: dict) -> bool:
+        """064 R2: key-based cross-episode supersession sweep. Complements
+        (does NOT replace) the embedding-based _phase_resolve_contradictions."""
+        if getattr(self._settings, "supersession_key_resolution_enabled", False) is not True:
+            return True
+        if not self._llm:
+            return True
+        try:
+            max_pairs = self._settings.supersession_sweep_max_pairs
+            pairs = await self._heart.facts.find_key_conflict_pairs(limit=max_pairs)
+            sleep_stats["key_conflicts_found"] = len(pairs)
+            sleep_stats["key_supersessions_written"] = 0
+            for pair in pairs:
+                if self._interrupted:
+                    break
+                if await self._heart.facts.resolve_key_conflict_pair(
+                    pair["id1"], pair["id2"], pair["c1"], pair["c2"]
+                ):
+                    sleep_stats["key_supersessions_written"] += 1
+            return True
+        except Exception:
+            logger.warning("Key-conflict sweep failed", exc_info=True)
             return False
 
     async def _phase_stale_scan(self, sleep_stats: dict) -> bool:
