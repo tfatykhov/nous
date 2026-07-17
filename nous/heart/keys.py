@@ -93,7 +93,15 @@ def extract_entity_candidates(
         _add(span)
     if vocab:
         tokens = (normalize_key(text, max_len=1000) or "").split()
-        for n in range(4, 0, -1):  # longest grams first
+        # codex P2 round 2: the window used to be a fixed 4 tokens, but keys
+        # can run much longer (normalize_key allows up to 200 chars — e.g.
+        # "national museum of african american history" is 6 tokens) and
+        # this vocab leg is the ONLY extractor that can recover a lowercase
+        # mention (the capitalized-span regex above requires TitleCase).
+        # Derive the window from the vocab's own longest key instead of a
+        # fixed guess, capped at 8 to bound the O(tokens * max_n) scan.
+        max_n = min(8, max((len(k.split()) for k in vocab), default=1))
+        for n in range(max_n, 0, -1):  # longest grams first
             for i in range(len(tokens) - n + 1):
                 gram = " ".join(tokens[i : i + n])
                 if gram in vocab and gram not in seen:

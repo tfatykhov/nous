@@ -182,6 +182,12 @@ class FactManager:
         # R3.3 (F085) codex P2: entity-key vocabulary cache, invalidated at
         # both entity-row write sites (see entity_key_vocabulary below).
         self._entity_vocab_cache: tuple[frozenset[str], float] | None = None
+        # codex P2 round 2: set alongside the in-txn cache=None above at both
+        # write sites; cleared by learn()'s post-commit (or post-failure)
+        # re-invalidation. Closes the race where a concurrent recall rebuilds
+        # + re-caches the vocab from a not-yet-committed transaction's
+        # pre-write snapshot, which the in-txn invalidation alone can't see.
+        self._entity_vocab_dirty: bool = False
 
     def _band_budget_ok(self) -> bool:
         """Advisory in-process per-hour cap on the in-band classifier. Returns
@@ -487,18 +493,38 @@ class FactManager:
 
         if session is None:
             async with self.db.session() as session:
-                result = await self._learn(
-                    input,
-                    list(exclude_ids or []),
-                    check_contradictions,
-                    session,
-                    encoded_frame=encoded_frame,
-                    encoded_censors=encoded_censors,
-                    utility_override=utility_override,
-                    precomputed_embedding=precomputed_embedding,
-                )
-                await session.commit()
-                return result
+                try:
+                    result = await self._learn(
+                        input,
+                        list(exclude_ids or []),
+                        check_contradictions,
+                        session,
+                        encoded_frame=encoded_frame,
+                        encoded_censors=encoded_censors,
+                        utility_override=utility_override,
+                        precomputed_embedding=precomputed_embedding,
+                    )
+                    await session.commit()
+                    return result
+                finally:
+                    # codex P2 round 2: _learn's in-txn cache=None (at either
+                    # entity-write site) can be undone by a concurrent
+                    # recall that rebuilds + re-caches entity_key_vocabulary()
+                    # before THIS transaction commits — under READ COMMITTED
+                    # isolation that rebuild can't see the uncommitted row,
+                    # so it re-caches a stale vocab with no further trigger
+                    # to invalidate it for the rest of the TTL. Re-check the
+                    # dirty flag here, after commit succeeds (the common
+                    # case) or on exception (a poisoned cache is still worth
+                    # clearing — it's only a cache, so over-invalidating on
+                    # failure is harmless).
+                    if self._entity_vocab_dirty:
+                        self._entity_vocab_cache = None
+                        self._entity_vocab_dirty = False
+        # Injected-session callers own their own commit point, so there is no
+        # place here to re-check the dirty flag post-commit — the 300s TTL
+        # remains the sole staleness bound for this path. No current caller
+        # passes entity_keys through an injected session.
         return await self._learn(
             input,
             list(exclude_ids or []),
@@ -739,8 +765,13 @@ class FactManager:
             fact.entity_keys_extracted_at = datetime.now(UTC)
             # codex P2: new entity keys just entered the vocab — invalidate
             # so the next recall's keyed leg sees them without waiting out
-            # the TTL.
+            # the TTL. codex P2 round 2: this transaction is still open (not
+            # committed until learn() returns), so also mark dirty — a
+            # concurrent rebuild between here and commit would otherwise
+            # re-cache a stale pre-commit vocab with nothing left to
+            # invalidate it again.
             self._entity_vocab_cache = None
+            self._entity_vocab_dirty = True
 
         # Audit S3: apply the in-band dupe verdict now that the new fact
         # has an id. Returns a ContradictionWarning for CONTRADICTION.
@@ -1285,8 +1316,10 @@ class FactManager:
                         .on_conflict_do_nothing()
                     )
             dupe.entity_keys_extracted_at = datetime.now(UTC)
-            # codex P2: mirrors the _learn invalidation above.
+            # codex P2 (+ round 2 dirty-flag): mirrors the _learn invalidation
+            # above — same still-open-transaction race applies here.
             self._entity_vocab_cache = None
+            self._entity_vocab_dirty = True
         # Fill source_ordinal when the row has none and input provides one.
         if input.source_ordinal is not None and dupe.source_ordinal is None:
             dupe.source_ordinal = input.source_ordinal

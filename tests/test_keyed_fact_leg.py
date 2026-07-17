@@ -274,6 +274,51 @@ class TestKeyedFactLeg:
                         await cleanup.delete(dbfact)
                         await cleanup.commit()
 
+    async def test_vocab_cache_invalidation_survives_mid_transaction_race(self, heart, brain, settings):
+        # codex P2 round 2: _learn's in-txn invalidation (cache=None, right
+        # after the entity-key rows are added) runs INSIDE the still-open
+        # write transaction — learn() doesn't commit until _learn returns.
+        # A concurrent recall that rebuilds the vocab in that window runs on
+        # a separate connection and, under READ COMMITTED isolation, can't
+        # see the uncommitted row — it re-caches a STALE vocab that then
+        # looks "fresh" for the rest of the TTL, with nothing left to
+        # invalidate it again.
+        #
+        # Simulate this deterministically: `_emit_event` runs unconditionally
+        # near the end of `_learn`, after the entity-key block and before
+        # `_learn` returns to `learn()` (which then commits) — hooking it
+        # lets us force a vocab rebuild from inside the still-open
+        # transaction without any real concurrency/threading.
+        orig_emit_event = heart.facts._emit_event
+
+        async def racing_emit_event(session, event_type, data):
+            if event_type == "fact_learned":
+                await heart.facts.entity_key_vocabulary()
+            return await orig_emit_event(session, event_type, data)
+
+        heart.facts._emit_event = racing_emit_event
+
+        result = await heart.learn(FactInput(
+            content="A separate unrelated notice mentions nothing about the topic below.",
+            entity_keys=["glimmerforge assembly protocol"],
+            source="enumerative_extractor",
+        ))
+        try:
+            # Without the round-2 post-commit re-invalidation, this would
+            # return the vocab the racing rebuild poisoned mid-transaction
+            # (missing the new key) for the rest of the 300s TTL.
+            vocab = await heart.facts.entity_key_vocabulary()
+            assert "glimmerforge assembly protocol" in vocab
+        finally:
+            heart.facts._emit_event = orig_emit_event
+            fact_id = getattr(result, "id", None)
+            if fact_id is not None:
+                async with heart.db.session() as cleanup:
+                    dbfact = await cleanup.get(Fact, fact_id)
+                    if dbfact is not None:
+                        await cleanup.delete(dbfact)
+                        await cleanup.commit()
+
 
 # ---------------------------------------------------------------------------
 # Entity-candidate extraction (NER-lite) — vocab leg + carry-forward coverage
@@ -324,3 +369,25 @@ class TestEntityCandidateVocabLeg:
         assert "art of war" in got
         assert "general sun tzu" in got
         assert got.index("art of war") < got.index("general sun tzu")
+
+    def test_vocab_recovers_long_lowercase_key_beyond_old_4_token_cap(self):
+        # codex P2 round 2: the n-gram window used to be a fixed 4 tokens;
+        # this 6-token key would previously never match via the vocab leg
+        # (the only path that can recover a lowercase mention at all).
+        vocab = frozenset({"national museum of african american history"})
+        got = extract_entity_candidates(
+            "I visited the national museum of african american history yesterday.",
+            vocab=vocab,
+        )
+        assert "national museum of african american history" in got
+
+    def test_vocab_ngram_window_capped_at_8_tokens(self):
+        # The window is derived from the vocab's longest key but capped at 8
+        # to bound the scan — a 9-token key is documented as NOT matched
+        # rather than left as an implicit gap.
+        long_key = "one two three four five six seven eight nine"  # 9 tokens
+        vocab = frozenset({long_key})
+        got = extract_entity_candidates(
+            f"reference to {long_key} appears in the text", vocab=vocab
+        )
+        assert long_key not in got
