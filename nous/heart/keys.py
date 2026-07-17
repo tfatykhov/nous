@@ -58,7 +58,7 @@ _QUOTED = re.compile(r"\"([^\"]{2,80})\"|'([^']{2,80})'|[“]([^”]{2,80})[”]
 # intent.py:148 discipline); allows lowercase connectors inside the run.
 _CAP_SPAN = re.compile(
     r"(?<!^)(?<![.!?]\s)"
-    r"\b[A-Z][\w''-]*(?:\s+(?:of|the|de|la|van|von|[A-Z][\w''-]*))*"
+    r"\b[A-Z][\w'’-]*(?:\s+(?:of|the|de|la|van|von|[A-Z][\w'’-]*))*"
 )
 # NOTE (review P2-3): 'and' is deliberately NOT a connector — "The Marriage of
 # Figaro and The Barber of Seville" must yield TWO spans, not one merged key.

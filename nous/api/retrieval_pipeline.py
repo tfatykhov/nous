@@ -155,8 +155,9 @@ class PipelineStats:
     # was actually found — mirrors chunks_searched's "eligible AND attempted"
     # semantics).
     keyed_leg_used: bool = False
-    # Count of keyed PipelineResults actually merged into the final list
-    # (after id-dedup against every other leg).
+    # Count of keyed PipelineResults merged at assembly time (after id-dedup
+    # against every other leg, BEFORE the F071 exclude_ids filter — a keyed
+    # hit dropped by exclude_ids still counts here; stats-only drift).
     n_keyed: int = 0
     # Count of keyed candidates dropped because their id already existed in
     # the result set from another leg (corroboration, not a new find).

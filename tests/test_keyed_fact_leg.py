@@ -228,6 +228,13 @@ class TestEntityCandidateVocabLeg:
         got = extract_entity_candidates("Mozart composed The Marriage of Figaro in his final years.")
         assert "marriage of figaro" in got
 
+    def test_capitalized_span_with_curly_apostrophe(self):
+        # final-review issue 1: _CAP_SPAN must accept U+2019 inside TitleCase
+        # words so the span survives as one entity; normalize_key then strips
+        # the apostrophe exactly as the write side does.
+        got = extract_entity_candidates("Everyone discussed Don’t Look Now at dinner.")
+        assert "dont look now" in got
+
     def test_two_coordinated_titles_yield_two_spans(self):
         got = extract_entity_candidates(
             "Mozart composed The Marriage of Figaro and The Barber of Seville during his career."
