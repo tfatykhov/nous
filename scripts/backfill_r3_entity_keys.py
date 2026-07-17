@@ -13,6 +13,17 @@ DELETE FROM heart.fact_entity_keys WHERE agent_id = :a AND created_at >=
 :watermark; UPDATE heart.facts SET entity_keys_extracted_at = NULL WHERE
 agent_id = :a AND entity_keys_extracted_at >= :watermark.
 
+codex P2 round 12: quiescence (no concurrent Heart.learn calls) is
+recommended while a rollback runs. `created_at >= watermark` alone can't
+distinguish "a pre-existing fact whose entity rows this backfill touched"
+from "a fact some OTHER, concurrent process learned during the run" -- the
+latter's own entity rows would be wrongly swept up too. phase_rollback
+guards this: it counts facts whose learned_at is ALSO >= the watermark
+(i.e. the fact itself, not just its keys, is new) among the rows about to
+be deleted, and aborts (no writes) when that count is nonzero, unless
+`--include-live-writes` is passed. `--dry-run` always reports the count,
+never aborts.
+
 Resume: phase 3 processes only facts WHERE entity_keys_extracted_at IS NULL
 (statement-level watermark, R3.2 hardening item); safe to kill and re-run.
 """
@@ -312,6 +323,7 @@ async def phase_extract(
 
 async def phase_rollback(
     session, *, agent_id: str, watermark: datetime, dry_run: bool,
+    include_live_writes: bool = False,
 ) -> dict[str, int]:
     """codex P2 round 8: real rollback mode, replacing hand-run SQL.
 
@@ -328,9 +340,33 @@ async def phase_rollback(
     only genuinely new rows (seed/extract, or a rewrite of a row that
     itself postdates the watermark) are deleted.
 
+    codex P2 round 12: `created_at >= watermark` alone conflates two
+    different provenances for a to-be-deleted entity_keys row: (a) a
+    PRE-EXISTING fact whose rows this backfill wrote/rewrote (learned_at
+    predates the watermark -- exactly what rollback is supposed to undo),
+    vs (b) a fact some OTHER, concurrent Heart.learn call created DURING
+    the run (learned_at also >= watermark) -- its own entity rows have
+    nothing to do with this backfill and would be wrongly swept up too.
+    Before deleting, this counts DISTINCT facts in case (b) (JOINed on
+    fact_id, learned_at >= watermark AND owning an in-scope entity row) and
+    aborts -- no writes at all -- when that count is nonzero, unless
+    `include_live_writes=True` is passed. `dry_run` always reports the
+    count and never aborts (it never writes regardless).
+
     No commit here -- same contract as the other phase_* functions; the
     CLI commits.
     """
+    n_live_write_facts = (
+        await session.execute(
+            text(
+                "SELECT COUNT(DISTINCT fek.fact_id) FROM heart.fact_entity_keys fek "
+                "JOIN heart.facts f ON f.id = fek.fact_id "
+                "WHERE fek.agent_id = :a AND fek.created_at >= :w AND f.learned_at >= :w"
+            ),
+            {"a": agent_id, "w": watermark},
+        )
+    ).scalar_one()
+
     if dry_run:
         n_rows = (
             await session.execute(
@@ -350,7 +386,23 @@ async def phase_rollback(
                 {"a": agent_id, "w": watermark},
             )
         ).scalar_one()
-        return {"entity_rows_deleted": n_rows, "facts_watermark_reset": n_facts}
+        return {
+            "entity_rows_deleted": n_rows,
+            "facts_watermark_reset": n_facts,
+            "live_write_facts": n_live_write_facts,
+        }
+
+    if n_live_write_facts > 0 and not include_live_writes:
+        raise RuntimeError(
+            f"Rollback aborted: {n_live_write_facts} live-learned fact(s) "
+            "(learned_at >= watermark) own entity-key rows that would be "
+            "deleted by this rollback -- they were likely written by a "
+            "concurrent Heart.learn call during the backfill run, not by "
+            "the run being rolled back. Re-run with --include-live-writes "
+            "to proceed anyway, or leave them out and re-extract those "
+            "facts afterwards (--phase extract revisits any fact whose "
+            "entity_keys_extracted_at is NULL)."
+        )
 
     r1 = await session.execute(
         text(
@@ -366,7 +418,11 @@ async def phase_rollback(
         ),
         {"a": agent_id, "w": watermark},
     )
-    return {"entity_rows_deleted": r1.rowcount, "facts_watermark_reset": r2.rowcount}
+    return {
+        "entity_rows_deleted": r1.rowcount,
+        "facts_watermark_reset": r2.rowcount,
+        "live_write_facts": n_live_write_facts,
+    }
 
 
 def _merge(totals: dict[str, int], counts: dict[str, int]) -> None:
@@ -392,6 +448,7 @@ async def _run_backfill(
     max_llm_calls: int,
     dry_run: bool,
     rollback_watermark: datetime | None = None,
+    include_live_writes: bool = False,
 ) -> int:
     settings = Settings()
 
@@ -405,13 +462,15 @@ async def _run_backfill(
             async with db.session() as s:
                 c = await phase_rollback(
                     s, agent_id=agent_id, watermark=rollback_watermark, dry_run=dry_run,
+                    include_live_writes=include_live_writes,
                 )
                 if not dry_run:
                     await s.commit()
             label = "DRY RUN " if dry_run else ""
             print(
                 f"[rollback] {label}entity_rows_deleted={c['entity_rows_deleted']} "
-                f"facts_watermark_reset={c['facts_watermark_reset']}"
+                f"facts_watermark_reset={c['facts_watermark_reset']} "
+                f"live_write_facts={c['live_write_facts']}"
             )
             return 0
         except Exception:
@@ -529,7 +588,9 @@ def main() -> None:
         epilog=(
             "ROLLBACK: --phase rollback --watermark <iso-ts> (the value printed as\n"
             "'ROLLBACK KEY' by the run you want to undo). See script header + \n"
-            "phase_rollback's docstring for the raw SQL reference.\n"
+            "phase_rollback's docstring for the raw SQL reference. Aborts (no writes)\n"
+            "if any live-learned fact would lose entity-key rows -- pass\n"
+            "--include-live-writes to proceed anyway.\n"
             "RESUME: phase 3 is resumable via entity_keys_extracted_at IS NULL."
         ),
     )
@@ -543,6 +604,14 @@ def main() -> None:
         "--watermark", type=str, default=None,
         help="ISO-8601, timezone-aware timestamp (the 'ROLLBACK KEY' printed by "
              "a prior run). Required for --phase rollback; ignored otherwise.",
+    )
+    parser.add_argument(
+        "--include-live-writes", action="store_true",
+        help="codex round 12: --phase rollback normally ABORTS (no writes) when any "
+             "fact learned at/after the watermark owns an entity-key row that would "
+             "be deleted -- such a fact was likely learned by a concurrent process "
+             "during the run, not created by it. Pass this to proceed anyway. "
+             "Ignored outside --phase rollback.",
     )
     parser.add_argument("--batch-size", type=int, default=500, help="Rows fetched per DB page (default: 500).")
     parser.add_argument("--llm-batch", type=int, default=40, help="Facts per LLM extraction call (default: 40).")
@@ -577,6 +646,7 @@ def main() -> None:
         max_llm_calls=args.max_llm_calls,
         dry_run=args.dry_run,
         rollback_watermark=rollback_watermark,
+        include_live_writes=args.include_live_writes,
     )))
 
 

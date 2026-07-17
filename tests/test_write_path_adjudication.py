@@ -89,7 +89,8 @@ from nous.handlers.enumerative_extractor import normalize_key, density_score, is
 
 
 def test_normalize_key_canonicalizes():
-    assert normalize_key("Tim's Laptop") == "tims laptop"
+    # codex P2 round 12: possessive 's collapses to the base entity.
+    assert normalize_key("Tim's Laptop") == "tim laptop"
     assert normalize_key("  RED   Car!! ") == "red car"
     assert normalize_key("") is None
     assert normalize_key("   ") is None

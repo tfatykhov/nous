@@ -1768,17 +1768,33 @@ class FactManager:
         entity-key union insert in (b) stays unconditional and additive
         regardless (ON CONFLICT DO NOTHING makes it safe either way).
 
+        codex P2 round 12: round 11's guard only compared subject_key,
+        so a replacement with the SAME subject_key as these sources but a
+        DIFFERENT, caller-supplied attribute_key still got that
+        attribute_key silently clobbered by the pair-copy — a half-foreign
+        pair is exactly the "worse than unkeyed" outcome (a) already warns
+        about, just introduced by this guard instead of avoided by it. Both
+        slots are now compared, and EITHER one differing from what these
+        sources would produce blocks the WHOLE pair-copy (never copy just
+        one slot) — the same equality-vs-bare-not-null distinction from
+        round 11 is preserved for both slots, so round 10's rerun-stability
+        contract still holds (on a rerun both slots already equal what the
+        same sources would produce, so the copy is still treated as a
+        no-op re-application, not a foreign pair).
+
         No commit here — caller-owned session/transaction, same contract as
         apply_supersession above.
         """
         if not source_ids:
             return
 
-        replacement_subject_key = (
+        replacement_row = (
             await session.execute(
-                select(Fact.subject_key).where(Fact.id == replacement_id)
+                select(Fact.subject_key, Fact.attribute_key).where(Fact.id == replacement_id)
             )
-        ).scalar_one_or_none()
+        ).first()
+        replacement_subject_key = replacement_row.subject_key if replacement_row else None
+        replacement_attribute_key = replacement_row.attribute_key if replacement_row else None
 
         sources = (
             await session.execute(
@@ -1788,10 +1804,11 @@ class FactManager:
         ).all()
         complete = [s for s in sources if s.subject_key is not None and s.attribute_key is not None]
         newest = max(complete, key=lambda s: s.learned_at) if complete else None
-        skip_subject_copy = replacement_subject_key is not None and (
-            newest is None or replacement_subject_key != newest.subject_key
+        skip_slot_copy = newest is not None and (
+            (replacement_subject_key is not None and replacement_subject_key != newest.subject_key)
+            or (replacement_attribute_key is not None and replacement_attribute_key != newest.attribute_key)
         )
-        if newest is not None and not skip_subject_copy:
+        if newest is not None and not skip_slot_copy:
             await session.execute(
                 update(Fact)
                 .where(Fact.id == replacement_id)
@@ -1804,10 +1821,11 @@ class FactManager:
             inserted_any = False
 
             # Reserve a slot for the copied subject_key FIRST, before the
-            # capped union query below can crowd it out. Skipped when (a)
-            # skipped the copy (a foreign, caller-owned key is present).
+            # capped union query below can crowd it out. Skipped when the
+            # pair-copy above was skipped (a foreign, caller-owned slot is
+            # present in either subject_key or attribute_key).
             subject_key_value = (
-                newest.subject_key if newest is not None and not skip_subject_copy else None
+                newest.subject_key if newest is not None and not skip_slot_copy else None
             )
             if subject_key_value and is_keyable_entity(subject_key_value, min_chars=min_chars):
                 await session.execute(

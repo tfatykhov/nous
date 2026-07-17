@@ -17,10 +17,24 @@ _PUNCT = re.compile(r"[^\w\s-]")
 _DANGLING_HYPHEN = re.compile(r"(?<!\w)-|-(?!\w)")
 _WS = re.compile(r"\s+")
 _ARTICLES = ("a ", "an ", "the ")
+# codex P2 round 12: possessive suffixes must collapse to the base entity —
+# "Tim's" and "tim" must normalize identically, or a query mentioning "Tim's
+# trip" can never exact-match a stored key "tim". Two patterns since 's and
+# s' are structurally different: a singular/trailing 's is dropped entirely
+# ("tim's" -> "tim"), while a plural possessive only loses its apostrophe,
+# keeping the s that's already the plural marker ("students'" -> "students").
+_POSSESSIVE_SINGULAR = re.compile(r"(['’])s\b")
+_POSSESSIVE_PLURAL = re.compile(r"s(['’])(?=\s|$)")
 
 
 def _normalize_once(s: str, max_len: int) -> str:
     s = unicodedata.normalize("NFC", s).lower()
+    # Must run BEFORE the punctuation strip below — apostrophes are still
+    # present here. Order matters: singular 's is checked first so a name
+    # like "boss's" (ends in "s's") collapses via the singular rule, not the
+    # plural one.
+    s = _POSSESSIVE_SINGULAR.sub("", s)
+    s = _POSSESSIVE_PLURAL.sub("s", s)
     s = s.replace("_", " ")
     s = _PUNCT.sub("", s)
     s = _DANGLING_HYPHEN.sub(" ", s)
@@ -35,12 +49,12 @@ def _normalize_once(s: str, max_len: int) -> str:
 def normalize_key(raw: str | None, *, max_len: int = 200) -> str | None:
     """Canonicalize an entity/attribute key (R3.2).
 
-    lowercase; NFC; underscores -> spaces; strip punctuation except
-    intra-word hyphens; collapse whitespace; strip leading articles
-    (a/an/the); cap at max_len. Iterated to a fixpoint so
-    normalize_key(normalize_key(x)) == normalize_key(x) always holds
-    (single-pass article stripping and cap-induced dangling hyphens would
-    otherwise break idempotency).
+    lowercase; NFC; strip possessive suffixes ('s / s'); underscores ->
+    spaces; strip punctuation except intra-word hyphens; collapse
+    whitespace; strip leading articles (a/an/the); cap at max_len. Iterated
+    to a fixpoint so normalize_key(normalize_key(x)) == normalize_key(x)
+    always holds (single-pass article stripping and cap-induced dangling
+    hyphens would otherwise break idempotency).
     """
     if not raw:
         return None

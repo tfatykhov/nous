@@ -42,8 +42,19 @@ class TestNormalizeKeyV2:
         assert normalize_key(composed) == normalize_key(decomposed) == "café"
 
     def test_possessive_and_punctuation(self):
-        assert normalize_key("Tim's Laptop") == "tims laptop"
+        # codex P2 round 12: possessive 's collapses to the base entity
+        # ("tim's laptop" -> "tim laptop"), not "tims laptop" -- otherwise a
+        # query mentioning "Tim's ..." can never exact-match a stored "tim".
+        assert normalize_key("Tim's Laptop") == "tim laptop"
         assert normalize_key("  RED   Car!! ") == "red car"
+
+    def test_possessive_suffixes(self):
+        """codex P2 round 12: singular 's is dropped entirely; a plural
+        possessive (already ending in s) only loses its apostrophe."""
+        assert normalize_key("Tim's trip") == "tim trip"
+        assert normalize_key("students' union") == "students union"
+        assert normalize_key("boss's office") == "boss office"
+        assert normalize_key("James’s book") == "james book"  # curly apostrophe
 
     def test_empty_none(self):
         assert normalize_key(None) is None
@@ -62,6 +73,7 @@ class TestNormalizeKeyV2:
             unicodedata.normalize("NFD", "café"),
             "the " + "ab-" * 80,   # truncation lands mid-token -> dangling hyphen
             "A  b__c--d", "-", "the the the", "an an apple",
+            "students' union", "boss's office", "James’s book",  # codex round 12
         ]
         for raw in cases:
             once = normalize_key(raw)
@@ -895,6 +907,69 @@ class TestSupersedeInheritsConflictSlotKeys:
 
                 # Entity-row union from the source is still additive+capped
                 # even though the subject/attribute pair copy was skipped.
+                rows = (await check.execute(
+                    select(FactEntityKey).where(FactEntityKey.fact_id == detail.id)
+                )).scalars().all()
+                assert {r.entity_key for r in rows} == {"package manager", "poetry"}
+        finally:
+            async with heart.db.session() as cleanup:
+                ids = [source_id] + ([detail.id] if detail is not None else [])
+                for fid in ids:
+                    f = await cleanup.get(Fact, fid)
+                    if f is not None:
+                        await cleanup.delete(f)
+                await cleanup.commit()
+
+    async def test_matching_subject_but_different_attribute_key_not_overwritten(self, heart):
+        """codex P2 round 12: round 11's guard only compared subject_key —
+        a replacement with the SAME subject_key as the source but a
+        DIFFERENT, caller-supplied attribute_key still got that
+        attribute_key silently clobbered by the source's, since the pair
+        was copied whenever subject_key alone matched. Either slot
+        differing from what the source would produce must now block the
+        WHOLE pair-copy — never mix a caller-owned attribute_key with an
+        inherited subject_key (or vice versa). The entity-row union stays
+        additive regardless.
+        """
+        agent_id = heart.agent_id
+        source_id = uuid.uuid4()
+
+        async with heart.db.session() as s:
+            s.add(Fact(
+                id=source_id, agent_id=agent_id,
+                content="Nous prefers uv over pip for dependency management, take three.",
+                subject_key="package manager", attribute_key="preference",
+                learned_at=datetime.now(UTC),
+                active=True,
+            ))
+            await s.flush()
+            s.add(FactEntityKey(fact_id=source_id, entity_key="package manager", agent_id=agent_id))
+            s.add(FactEntityKey(fact_id=source_id, entity_key="poetry", agent_id=agent_id))
+            await s.commit()
+
+        detail = None
+        try:
+            detail = await heart.supersede_fact(
+                source_id,
+                FactInput(
+                    subject="dependency tooling",
+                    subject_key="package manager",  # matches the source
+                    attribute_key="explicit different attribute",  # does NOT
+                    content="A jointly-keyed replacement fact for the round-12 slot-guard test.",
+                    source="sleep_reflection",
+                    confidence=0.8,
+                    category="concept",
+                ),
+            )
+
+            async with heart.db.session() as check:
+                replacement = await check.get(Fact, detail.id)
+                # Neither slot is overwritten -- the mismatched attribute_key
+                # blocks the WHOLE pair-copy, not just its own slot.
+                assert replacement.subject_key == "package manager"
+                assert replacement.attribute_key == "explicit different attribute"
+
+                # Entity-row union from the source is still additive.
                 rows = (await check.execute(
                     select(FactEntityKey).where(FactEntityKey.fact_id == detail.id)
                 )).scalars().all()

@@ -520,3 +520,13 @@ class TestEntityCandidateVocabLeg:
             f"reference to {long_key} appears in the text", vocab=vocab
         )
         assert long_key not in got
+
+    def test_possessive_query_recovers_vocab_key(self):
+        """codex P2 round 12: normalize_key("Tim's") used to yield "tims",
+        so a query mentioning "Tim's ..." could never match a stored key
+        "tim" — every leg here (capitalized-span, vocab n-gram) routes
+        through normalize_key. Possessive-suffix stripping fixes both."""
+        vocab = frozenset({"tim", "belgium"})
+        got = extract_entity_candidates("when was Tim's trip to Belgium?", vocab=vocab)
+        assert "tim" in got
+        assert "belgium" in got

@@ -155,6 +155,16 @@ UPDATE heart.facts SET entity_keys_extracted_at = NULL
 WHERE agent_id = :agent_id AND entity_keys_extracted_at >= :watermark;
 ```
 
+**Rollback quiescence + live-write guard (codex round 12):** `created_at >= watermark` alone can't tell a
+pre-existing fact whose entity rows the backfill touched apart from a fact some OTHER, concurrent
+`Heart.learn` call created during the run — the latter's own entity rows would be wrongly swept up too.
+Running the rollback against a quiesced system (no live traffic) avoids the ambiguity entirely and is the
+recommended way to roll back. When that isn't possible, `phase_rollback` counts distinct facts whose
+`learned_at` is *also* `>= watermark` among the rows about to be deleted and **aborts with no writes** when
+that count is nonzero — pass `--include-live-writes` to proceed anyway (or leave them out and let a later
+`--phase extract` re-derive their keys, since `entity_keys_extracted_at IS NULL` is its resume predicate).
+`--dry-run` always reports the count and never aborts.
+
 **Resume:** only phase 3 (`extract`) needs a resume story — it processes strictly
 `entity_keys_extracted_at IS NULL` facts, so killing and re-running mid-extraction continues from the same
 predicate with zero duplicate LLM spend. Phases 1 and 2 are naturally re-runnable by construction.

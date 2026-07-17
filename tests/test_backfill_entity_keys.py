@@ -185,6 +185,12 @@ class TestBackfillPhases:
         AND entity_keys_extracted_at is reset only on facts stamped at/after
         it (otherwise extract's IS NULL predicate would never revisit them).
         Pre-watermark data must survive untouched; dry_run must write nothing.
+
+        codex P2 round 12: both facts here are modeled as PRE-EXISTING (only
+        their entity rows/stamps were touched by the run being rolled back),
+        so learned_at is explicitly backdated -- otherwise make_fact's
+        default learned_at (now()) would make f_post look like a round-12
+        live-write collision and trip the new abort guard.
         """
         from scripts.backfill_r3_entity_keys import phase_rollback
 
@@ -192,8 +198,8 @@ class TestBackfillPhases:
         watermark = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc)
         post_ts = dt.datetime(2025, 6, 1, tzinfo=dt.timezone.utc)
 
-        f_pre = await make_fact(entity_keys_extracted_at=pre_ts)
-        f_post = await make_fact(entity_keys_extracted_at=post_ts)
+        f_pre = await make_fact(learned_at=pre_ts, entity_keys_extracted_at=pre_ts)
+        f_post = await make_fact(learned_at=pre_ts, entity_keys_extracted_at=post_ts)
         session.add(FactEntityKey(
             fact_id=f_pre.id, entity_key="pre key", agent_id=f_pre.agent_id, created_at=pre_ts,
         ))
@@ -208,6 +214,7 @@ class TestBackfillPhases:
         )
         assert dry_counts["entity_rows_deleted"] == 1
         assert dry_counts["facts_watermark_reset"] == 1
+        assert dry_counts["live_write_facts"] == 0
         rows = (await session.execute(
             select(FactEntityKey).where(FactEntityKey.agent_id == f_pre.agent_id)
         )).scalars().all()
@@ -219,6 +226,7 @@ class TestBackfillPhases:
         )
         assert counts["entity_rows_deleted"] == 1
         assert counts["facts_watermark_reset"] == 1
+        assert counts["live_write_facts"] == 0
 
         rows = (await session.execute(
             select(FactEntityKey).where(FactEntityKey.agent_id == f_pre.agent_id)
@@ -229,6 +237,69 @@ class TestBackfillPhases:
         await session.refresh(f_post)
         assert f_pre.entity_keys_extracted_at == pre_ts, "pre-watermark stamp must survive"
         assert f_post.entity_keys_extracted_at is None, "post-watermark stamp must be reset"
+
+    async def test_phase_rollback_aborts_on_live_write_collision(self, session, make_fact):
+        """codex P2 round 12: `created_at >= watermark` alone can't tell a
+        pre-existing fact whose entity rows the backfill touched apart from
+        a fact some OTHER, concurrent Heart.learn call created during the
+        run -- the latter's own entity rows would be wrongly swept up too.
+        Seeds one of each: f_old (learned long before the watermark, entity
+        row written by the backfill at/after it -- the ordinary rollback
+        case) and f_live (learned_at itself at/after the watermark, i.e. a
+        concurrent live write). Without --include-live-writes, rollback
+        must ABORT with zero deletions; dry_run must still just report the
+        count; with the flag, both rows are deleted as before.
+        """
+        from scripts.backfill_r3_entity_keys import phase_rollback
+
+        pre_ts = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
+        watermark = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc)
+        post_ts = dt.datetime(2025, 6, 1, tzinfo=dt.timezone.utc)
+
+        f_old = await make_fact(learned_at=pre_ts)
+        f_live = await make_fact(learned_at=post_ts)
+        session.add(FactEntityKey(
+            fact_id=f_old.id, entity_key="backfilled key", agent_id=f_old.agent_id, created_at=post_ts,
+        ))
+        session.add(FactEntityKey(
+            fact_id=f_live.id, entity_key="live write key", agent_id=f_live.agent_id, created_at=post_ts,
+        ))
+        await session.flush()
+
+        # dry_run: reports the live-write count, writes nothing, never aborts.
+        dry_counts = await phase_rollback(
+            session, agent_id=f_old.agent_id, watermark=watermark, dry_run=True,
+        )
+        assert dry_counts["entity_rows_deleted"] == 2
+        assert dry_counts["live_write_facts"] == 1
+        rows = (await session.execute(
+            select(FactEntityKey).where(FactEntityKey.agent_id == f_old.agent_id)
+        )).scalars().all()
+        assert {r.entity_key for r in rows} == {"backfilled key", "live write key"}
+
+        # Without the override: abort, zero deletions.
+        with pytest.raises(RuntimeError, match="live-learned"):
+            await phase_rollback(
+                session, agent_id=f_old.agent_id, watermark=watermark, dry_run=False,
+            )
+        rows = (await session.execute(
+            select(FactEntityKey).where(FactEntityKey.agent_id == f_old.agent_id)
+        )).scalars().all()
+        assert {r.entity_key for r in rows} == {"backfilled key", "live write key"}, (
+            "abort must leave both rows untouched"
+        )
+
+        # With the override: proceeds, deletes both.
+        counts = await phase_rollback(
+            session, agent_id=f_old.agent_id, watermark=watermark, dry_run=False,
+            include_live_writes=True,
+        )
+        assert counts["entity_rows_deleted"] == 2
+        assert counts["live_write_facts"] == 1
+        rows = (await session.execute(
+            select(FactEntityKey).where(FactEntityKey.agent_id == f_old.agent_id)
+        )).scalars().all()
+        assert rows == []
 
 
 class TestStuckRoundGuard:
