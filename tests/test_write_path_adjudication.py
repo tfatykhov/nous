@@ -1264,6 +1264,61 @@ async def test_r2_row11_keyed_fact_skips_legacy_when_r2_on(heart, session, monke
     sentinel.assert_not_called()
 
 
+# codex P2 round 7: subject_key/attribute_key canonicalized at the FactInput
+# boundary ──────────────────────────────────────────────────────────────────
+
+@pytest.mark.postgres_only
+async def test_r7_raw_form_key_matches_canonical_form_for_r2(heart, session, monkeypatch):
+    """codex P2 round 7: R2's same-key lookup is exact-string equality
+    (facts.py: ``Fact.subject_key == input.subject_key``). A direct
+    Heart.learn caller storing subject_key/attribute_key in RAW form
+    ("api_gateway"/"The_Owner") must still exact-match another caller's
+    canonical form ("api gateway"/"owner") — without normalizing at the
+    FactInput boundary, this conflict was silently missed (the two rows
+    never looked like the same slot to R2 at all).
+    """
+    heart.facts._settings = heart.facts._settings.model_copy(
+        update={"supersession_key_resolution_enabled": True}
+    )
+    ep_id = await _insert_episode(session)
+    monkeypatch.setattr(heart.facts, "_classify_fact_pair", AsyncMock(return_value=_UPDATE_NEW))
+
+    old_r = await heart.learn(
+        FactInput(
+            content="The api gateway owner is listed as the platform team lead.",
+            subject_key="api_gateway",  # RAW form
+            attribute_key="The_Owner",  # RAW form
+            source_ordinal=1,
+            source_episode_id=ep_id,
+        ),
+        session=session,
+    )
+    new_r = await heart.learn(
+        FactInput(
+            content="The api gateway owner is listed as the infrastructure team lead.",
+            subject_key="api gateway",  # canonical form
+            attribute_key="owner",      # canonical form
+            source_ordinal=2,
+            source_episode_id=ep_id,
+        ),
+        session=session,
+    )
+    await session.flush()
+
+    old_row = await session.get(Fact, old_r.id)
+    new_row = await session.get(Fact, new_r.id)
+    # Both rows normalize to the same slot, so R2 finds the conflict and the
+    # mocked classifier verdict (UPDATE, current=new, higher ordinal wins)
+    # resolves it — old superseded by new.
+    assert old_row.subject_key == "api gateway"
+    assert old_row.attribute_key == "owner"
+    assert new_row.subject_key == "api gateway"
+    assert new_row.attribute_key == "owner"
+    assert old_row.superseded_by == new_r.id
+    assert old_row.active is False
+    assert new_row.active is True
+
+
 # AC-5: supersession-cycle guard in _get_current ─────────────────────────────
 
 @pytest.mark.postgres_only

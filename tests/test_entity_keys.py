@@ -67,6 +67,39 @@ class TestNormalizeKeyV2:
             assert normalize_key(once) == once, raw
 
 
+class TestFactInputKeyNormalization:
+    """codex P2 round 7: subject_key/attribute_key canonicalized at the
+    FactInput boundary (pydantic field validators), so every producer —
+    extractor, backfill, or a direct Heart.learn caller — ends up storing
+    the SAME normalized form. Without this, a direct caller's raw
+    "api_gateway" would never exact-match the extractor's normalized
+    "api gateway", silently missing R2 same-key supersession.
+    """
+    def test_subject_key_and_attribute_key_normalized_on_construction(self):
+        fi = FactInput(
+            content="The api gateway owner is the platform team.",
+            subject_key="api_gateway",
+            attribute_key="The_Owner",
+        )
+        assert fi.subject_key == "api gateway"
+        assert fi.attribute_key == "owner"
+
+    def test_none_keys_stay_none(self):
+        fi = FactInput(content="A fact with no conflict-slot keys at all.")
+        assert fi.subject_key is None
+        assert fi.attribute_key is None
+
+    def test_already_normalized_keys_are_unchanged(self):
+        # Fixpoint property: normalize_key(normalize_key(x)) == normalize_key(x).
+        fi = FactInput(
+            content="The extractor already normalized these keys upstream.",
+            subject_key="marriage of figaro",
+            attribute_key="author",
+        )
+        assert fi.subject_key == "marriage of figaro"
+        assert fi.attribute_key == "author"
+
+
 @pytest_asyncio.fixture
 async def make_fact(session):
     """Function-scoped factory for a bare heart.facts row.

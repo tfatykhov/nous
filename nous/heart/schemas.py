@@ -13,6 +13,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
+from nous.heart.keys import normalize_key
+
 logger = logging.getLogger(__name__)
 
 # F075: strict YYYY-MM-DD shape gate. Python 3.12's date.fromisoformat()
@@ -163,6 +165,25 @@ class FactInput(BaseModel):
                 logger.warning("F075: dropped invalid-calendar event_date %r", v[:32])
                 return None  # fail-soft: drop bad date, keep fact
         return None
+
+    # codex P2 round 7: canonicalize conflict-slot keys at the SINGLE write
+    # boundary (R3.2: one canonicalizer). Direct Heart.learn callers were
+    # storing subject_key/attribute_key RAW — under v2 normalization a
+    # direct "api_gateway" never exact-matches the extractor's/backfill's
+    # normalized "api gateway", so R2 same-key supersession silently missed
+    # it. Running normalize_key here also double-normalizes values the
+    # extractor already normalized upstream — harmless, since
+    # normalize_key(normalize_key(x)) == normalize_key(x) always holds
+    # (the fixpoint property normalize_key's own docstring guarantees).
+    @field_validator("subject_key", mode="before")
+    @classmethod
+    def _normalize_subject_key(cls, v):
+        return normalize_key(v)
+
+    @field_validator("attribute_key", mode="before")
+    @classmethod
+    def _normalize_attribute_key(cls, v):
+        return normalize_key(v, max_len=100)
 
 
 class ContradictionWarning(BaseModel):
