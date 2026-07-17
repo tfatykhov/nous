@@ -1,0 +1,372 @@
+"""R3.2 backfill: re-normalize keys in place; seed subject rows; value-side extract."""
+import datetime as dt
+import uuid
+from types import SimpleNamespace
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import func, select
+
+from nous.storage.models import Fact, FactEntityKey
+
+
+def bf_settings():
+    """Tiny settings stand-in for phase_extract (mirrors real Settings defaults)."""
+    return SimpleNamespace(
+        background_model="claude-haiku-4-5-20251001",
+        entity_keys_max_per_fact=8,
+        entity_key_min_chars=3,
+    )
+
+
+@pytest_asyncio.fixture
+async def make_fact(session):
+    """Function-scoped factory for a bare heart.facts row (copied from test_entity_keys.py)."""
+    async def _make_fact(**overrides):
+        defaults = {
+            "id": uuid.uuid4(),
+            "agent_id": "test-backfill-entity-keys-agent",
+            "content": "default fact content for backfill entity key tests",
+            "active": True,
+        }
+        defaults.update(overrides)
+        fact = Fact(**defaults)
+        session.add(fact)
+        await session.flush()
+        return fact
+
+    return _make_fact
+
+
+@pytest.mark.postgres_only
+class TestBackfillPhases:
+    async def test_normalize_phase_rewrites_old_format_keys(self, session, make_fact):
+        f = await make_fact(subject_key="thomas_kyd", attribute_key="the_author")
+        from scripts.backfill_r3_entity_keys import phase_normalize
+        counts = await phase_normalize(session, agent_id=f.agent_id, dry_run=False)
+        await session.flush()
+        await session.refresh(f)
+        assert f.subject_key == "thomas kyd"
+        assert f.attribute_key == "author"
+        assert counts["facts_updated"] == 1
+        # idempotent: second run is a no-op
+        counts2 = await phase_normalize(session, agent_id=f.agent_id, dry_run=False)
+        assert counts2["facts_updated"] == 0
+
+    async def test_normalize_phase_dry_run_writes_nothing(self, session, make_fact):
+        f = await make_fact(subject_key="thomas_kyd")
+        from scripts.backfill_r3_entity_keys import phase_normalize
+        counts = await phase_normalize(session, agent_id=f.agent_id, dry_run=True)
+        await session.refresh(f)
+        assert f.subject_key == "thomas_kyd"
+        assert counts["facts_updated"] == 1  # counted, not written
+
+    async def test_normalize_phase_pass2_resolves_collision_without_deleting_canonical(self, session, make_fact):
+        """db-P3-5 guard: two old-format entity_key rows for the same fact that
+        BOTH normalize to the same canonical form, one of which is ALREADY
+        canonical. After phase_normalize exactly one canonical row survives
+        (insert-before-delete + ON CONFLICT DO NOTHING must not delete the
+        already-canonical row after its insert conflicts), and
+        entity_rows_rewritten counts only the row that actually changed.
+
+        codex P2 round 8: also seeds an independent, NON-colliding raw key
+        ("author_name", no pre-existing canonical counterpart) with an
+        explicit OLD created_at, to assert the rewrite INSERT carries the
+        original row's created_at forward. Without this, the replacement
+        row's created_at defaults to NOW() (the column's server_default),
+        which would make a later `--phase rollback --watermark <ts>` run
+        incorrectly delete this pre-existing row's replacement (it would
+        look like a row created BY the run being rolled back).
+        """
+        old_ts = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
+        f = await make_fact()
+        session.add(FactEntityKey(fact_id=f.id, entity_key="thomas_kyd", agent_id=f.agent_id))
+        session.add(FactEntityKey(fact_id=f.id, entity_key="thomas kyd", agent_id=f.agent_id))
+        session.add(FactEntityKey(
+            fact_id=f.id, entity_key="author_name", agent_id=f.agent_id, created_at=old_ts,
+        ))
+        await session.flush()
+        from scripts.backfill_r3_entity_keys import phase_normalize
+        counts = await phase_normalize(session, agent_id=f.agent_id, dry_run=False)
+        await session.flush()
+        rows = (await session.execute(
+            select(FactEntityKey).where(FactEntityKey.fact_id == f.id))).scalars().all()
+        assert {r.entity_key for r in rows} == {"thomas kyd", "author name"}
+        assert len(rows) == 2
+        assert counts["entity_rows_rewritten"] == 2
+
+        author_row = next(r for r in rows if r.entity_key == "author name")
+        assert author_row.created_at == old_ts, (
+            "rewrite INSERT must carry forward the original row's created_at, "
+            "not default to NOW() via the column's server_default"
+        )
+
+    async def test_seed_phase_inserts_subject_rows_idempotently(self, session, make_fact):
+        f = await make_fact(subject_key="thomas kyd")
+        from scripts.backfill_r3_entity_keys import phase_seed
+        await phase_seed(session, agent_id=f.agent_id, dry_run=False)
+        await phase_seed(session, agent_id=f.agent_id, dry_run=False)  # ON CONFLICT DO NOTHING
+        n = (await session.execute(
+            select(func.count()).select_from(FactEntityKey).where(FactEntityKey.fact_id == f.id)
+        )).scalar_one()
+        assert n == 1
+
+    async def test_extract_phase_resumes_via_watermark(self, session, make_fact, monkeypatch):
+        f1 = await make_fact(subject_key="key one", content="The capital of Belgium is Brussels.")
+        f2 = await make_fact(subject_key="key two", content="The author of X is Thomas Kyd.")
+        from unittest.mock import AsyncMock
+        import scripts.backfill_r3_entity_keys as bf
+        monkeypatch.setattr(bf, "call_background_llm_structured", AsyncMock(return_value={
+            "items": [
+                {"index": 0, "entities": ["Belgium", "Brussels"]},
+                {"index": 1, "entities": ["Thomas Kyd", "X"]},
+            ]
+        }))
+        counts = await bf.phase_extract(session, agent_id=f1.agent_id, settings=bf_settings(),
+                                        llm_client=object(), llm_batch=40, max_llm_calls=0, dry_run=False)
+        await session.flush()
+        for f, expected in ((f1, {"key one", "belgium", "brussels"}), (f2, {"key two", "thomas kyd"})):
+            rows = {r.entity_key for r in (await session.execute(
+                select(FactEntityKey).where(FactEntityKey.fact_id == f.id))).scalars().all()}
+            assert expected <= rows
+            await session.refresh(f)
+            assert f.entity_keys_extracted_at is not None
+        # resume: second call finds no NULL-watermark facts, zero LLM calls
+        mock2 = AsyncMock()
+        monkeypatch.setattr(bf, "call_background_llm_structured", mock2)
+        await bf.phase_extract(session, agent_id=f1.agent_id, settings=bf_settings(),
+                               llm_client=object(), llm_batch=40, max_llm_calls=0, dry_run=False)
+        mock2.assert_not_awaited()
+
+    async def test_extract_phase_applies_stop_policy_to_subject_key(self, session, make_fact, monkeypatch):
+        """Amendment 3 (review devil-P2-1): no stop-policy exemption for subject
+        keys -- a scalar/short subject gets no entity row, but the fact is still
+        stamped extracted (it appeared in an LLM item)."""
+        f = await make_fact(subject_key="ab", content="The widget color is ab.")
+        from unittest.mock import AsyncMock
+        import scripts.backfill_r3_entity_keys as bf
+        monkeypatch.setattr(bf, "call_background_llm_structured", AsyncMock(return_value={
+            "items": [{"index": 0, "entities": []}]
+        }))
+        await bf.phase_extract(session, agent_id=f.agent_id, settings=bf_settings(),
+                               llm_client=object(), llm_batch=40, max_llm_calls=0, dry_run=False)
+        await session.flush()
+        rows = (await session.execute(
+            select(FactEntityKey).where(FactEntityKey.fact_id == f.id))).scalars().all()
+        assert rows == []
+        await session.refresh(f)
+        assert f.entity_keys_extracted_at is not None
+
+    async def test_extract_phase_reports_zero_stamped_when_all_indices_malformed(self, session, make_fact, monkeypatch):
+        """Stuck-round guard precondition: when every LLM item this round is
+        unusable (out-of-bounds index), phase_extract must report
+        facts_scanned>0 but facts_stamped==0 -- exactly the signal
+        _is_stuck_round uses to stop the CLI extract loop -- and the fact
+        stays unstamped (resumable), not silently marked done."""
+        f = await make_fact(subject_key="key one", content="The capital of Belgium is Brussels.")
+        from unittest.mock import AsyncMock
+        import scripts.backfill_r3_entity_keys as bf
+        monkeypatch.setattr(bf, "call_background_llm_structured", AsyncMock(return_value={
+            "items": [{"index": 7, "entities": ["Belgium"]}]  # out of bounds: only 1 row (index 0)
+        }))
+        counts = await bf.phase_extract(session, agent_id=f.agent_id, settings=bf_settings(),
+                                        llm_client=object(), llm_batch=40, max_llm_calls=1, dry_run=False)
+        assert counts["facts_scanned"] == 1
+        assert counts["facts_stamped"] == 0
+        assert counts["warnings"] == 1
+        from scripts.backfill_r3_entity_keys import _is_stuck_round
+        assert _is_stuck_round(counts) is True
+        await session.refresh(f)
+        assert f.entity_keys_extracted_at is None
+
+    async def test_phase_rollback_deletes_post_watermark_only(self, session, make_fact):
+        """codex P2 round 8: phase_rollback must undo ONLY what a run at/after
+        the watermark did -- entity rows created at/after it are deleted,
+        AND entity_keys_extracted_at is reset only on facts stamped at/after
+        it (otherwise extract's IS NULL predicate would never revisit them).
+        Pre-watermark data must survive untouched; dry_run must write nothing.
+
+        codex P2 round 12: both facts here are modeled as PRE-EXISTING (only
+        their entity rows/stamps were touched by the run being rolled back),
+        so learned_at is explicitly backdated -- otherwise make_fact's
+        default learned_at (now()) would make f_post look like a round-12
+        live-write collision and trip the new abort guard.
+        """
+        from scripts.backfill_r3_entity_keys import phase_rollback
+
+        pre_ts = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
+        watermark = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc)
+        post_ts = dt.datetime(2025, 6, 1, tzinfo=dt.timezone.utc)
+
+        f_pre = await make_fact(learned_at=pre_ts, entity_keys_extracted_at=pre_ts)
+        f_post = await make_fact(learned_at=pre_ts, entity_keys_extracted_at=post_ts)
+        session.add(FactEntityKey(
+            fact_id=f_pre.id, entity_key="pre key", agent_id=f_pre.agent_id, created_at=pre_ts,
+        ))
+        session.add(FactEntityKey(
+            fact_id=f_post.id, entity_key="post key", agent_id=f_post.agent_id, created_at=post_ts,
+        ))
+        await session.flush()
+
+        # dry_run: counts only, writes nothing.
+        dry_counts = await phase_rollback(
+            session, agent_id=f_pre.agent_id, watermark=watermark, dry_run=True,
+        )
+        assert dry_counts["entity_rows_deleted"] == 1
+        assert dry_counts["facts_watermark_reset"] == 1
+        assert dry_counts["live_write_facts"] == 0
+        rows = (await session.execute(
+            select(FactEntityKey).where(FactEntityKey.agent_id == f_pre.agent_id)
+        )).scalars().all()
+        assert {r.entity_key for r in rows} == {"pre key", "post key"}, "dry-run must write nothing"
+
+        # Live rollback: only the post-watermark row/stamp are touched.
+        counts = await phase_rollback(
+            session, agent_id=f_pre.agent_id, watermark=watermark, dry_run=False,
+        )
+        assert counts["entity_rows_deleted"] == 1
+        assert counts["facts_watermark_reset"] == 1
+        assert counts["live_write_facts"] == 0
+
+        rows = (await session.execute(
+            select(FactEntityKey).where(FactEntityKey.agent_id == f_pre.agent_id)
+        )).scalars().all()
+        assert {r.entity_key for r in rows} == {"pre key"}, "only the post-watermark row must be deleted"
+
+        await session.refresh(f_pre)
+        await session.refresh(f_post)
+        assert f_pre.entity_keys_extracted_at == pre_ts, "pre-watermark stamp must survive"
+        assert f_post.entity_keys_extracted_at is None, "post-watermark stamp must be reset"
+
+    async def test_phase_rollback_aborts_on_live_write_collision(self, session, make_fact):
+        """codex P2 round 12: `created_at >= watermark` alone can't tell a
+        pre-existing fact whose entity rows the backfill touched apart from
+        a fact some OTHER, concurrent Heart.learn call created during the
+        run -- the latter's own entity rows would be wrongly swept up too.
+        Seeds one of each: f_old (learned long before the watermark, entity
+        row written by the backfill at/after it -- the ordinary rollback
+        case) and f_live (learned_at itself at/after the watermark, i.e. a
+        concurrent live write). Without --include-live-writes, rollback
+        must ABORT with zero deletions; dry_run must still just report the
+        count; with the flag, both rows are deleted as before.
+        """
+        from scripts.backfill_r3_entity_keys import phase_rollback
+
+        pre_ts = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
+        watermark = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc)
+        post_ts = dt.datetime(2025, 6, 1, tzinfo=dt.timezone.utc)
+
+        f_old = await make_fact(learned_at=pre_ts)
+        f_live = await make_fact(learned_at=post_ts)
+        session.add(FactEntityKey(
+            fact_id=f_old.id, entity_key="backfilled key", agent_id=f_old.agent_id, created_at=post_ts,
+        ))
+        session.add(FactEntityKey(
+            fact_id=f_live.id, entity_key="live write key", agent_id=f_live.agent_id, created_at=post_ts,
+        ))
+        await session.flush()
+
+        # dry_run: reports the live-write count, writes nothing, never aborts.
+        dry_counts = await phase_rollback(
+            session, agent_id=f_old.agent_id, watermark=watermark, dry_run=True,
+        )
+        assert dry_counts["entity_rows_deleted"] == 2
+        assert dry_counts["live_write_facts"] == 1
+        rows = (await session.execute(
+            select(FactEntityKey).where(FactEntityKey.agent_id == f_old.agent_id)
+        )).scalars().all()
+        assert {r.entity_key for r in rows} == {"backfilled key", "live write key"}
+
+        # Without the override: abort, zero deletions.
+        with pytest.raises(RuntimeError, match="live-learned"):
+            await phase_rollback(
+                session, agent_id=f_old.agent_id, watermark=watermark, dry_run=False,
+            )
+        rows = (await session.execute(
+            select(FactEntityKey).where(FactEntityKey.agent_id == f_old.agent_id)
+        )).scalars().all()
+        assert {r.entity_key for r in rows} == {"backfilled key", "live write key"}, (
+            "abort must leave both rows untouched"
+        )
+
+        # With the override: proceeds, deletes both.
+        counts = await phase_rollback(
+            session, agent_id=f_old.agent_id, watermark=watermark, dry_run=False,
+            include_live_writes=True,
+        )
+        assert counts["entity_rows_deleted"] == 2
+        assert counts["live_write_facts"] == 1
+        rows = (await session.execute(
+            select(FactEntityKey).where(FactEntityKey.agent_id == f_old.agent_id)
+        )).scalars().all()
+        assert rows == []
+
+
+class TestStuckRoundGuard:
+    """Pure-function tests for the CLI extract loop's budget-burn guard --
+    no DB, no monkeypatching, runs on both backends."""
+
+    def test_zero_stamps_with_pending_facts_is_stuck(self):
+        from scripts.backfill_r3_entity_keys import _is_stuck_round
+        assert _is_stuck_round({"facts_scanned": 5, "facts_stamped": 0}) is True
+
+    def test_partial_progress_is_not_stuck(self):
+        from scripts.backfill_r3_entity_keys import _is_stuck_round
+        assert _is_stuck_round({"facts_scanned": 5, "facts_stamped": 3}) is False
+
+    def test_full_progress_is_not_stuck(self):
+        from scripts.backfill_r3_entity_keys import _is_stuck_round
+        assert _is_stuck_round({"facts_scanned": 5, "facts_stamped": 5}) is False
+
+    def test_empty_round_is_not_stuck(self):
+        # facts_scanned==0 means "no more facts pending" -- a different,
+        # already-handled branch (natural completion), not a stuck round.
+        from scripts.backfill_r3_entity_keys import _is_stuck_round
+        assert _is_stuck_round({"facts_scanned": 0, "facts_stamped": 0}) is False
+
+
+@pytest.mark.postgres_only
+class TestFetchDbNow:
+    """codex P2 round 14: the rollback watermark (and entity_keys_extracted_at
+    in phase_extract) must be sourced from the DATABASE's own clock, not the
+    app host's -- a client-host datetime.now() can drift from the database
+    server's clock, and since the watermark is compared against DB-generated
+    columns (fact_entity_keys.created_at, facts.learned_at), any skew where
+    the app host is ahead of the DB silently breaks phase_rollback's
+    `created_at >= :watermark` predicate for rows the very run it should
+    undo just inserted.
+    """
+
+    async def test_returns_tz_aware_datetime_consistent_with_select_now(self, session):
+        from scripts.backfill_r3_entity_keys import fetch_db_now
+
+        result = await fetch_db_now(session)
+        assert isinstance(result, dt.datetime)
+        assert result.tzinfo is not None, "must be tz-aware to compare against tz-aware watermark args"
+        # Sanity bound, not an equality assertion -- asserting equality
+        # with the test process's own datetime.now(UTC) would make this a
+        # tautological re-implementation of the fix, and cross-host/
+        # container clock skew is exactly what the fix defends against in
+        # production. A generous window just catches "totally wrong value"
+        # bugs (wrong type, wrong epoch, naive datetime, etc).
+        delta = abs((result - dt.datetime.now(dt.timezone.utc)).total_seconds())
+        assert delta < 30
+
+    async def test_ignores_client_clock(self, session, monkeypatch):
+        """The above test alone can't distinguish a DB-sourced result from a
+        client-clock fallback -- app host and test-DB share a clock in dev/CI,
+        so a plain datetime.now(UTC) would also look tz-aware and ~now. Prove
+        fetch_db_now truly queries the database: poison the module's
+        `datetime.now` with an obviously-wrong sentinel and confirm the
+        result is unaffected (a client-clock implementation would return the
+        poisoned year here)."""
+        import scripts.backfill_r3_entity_keys as bf
+
+        class _PoisonedDatetime(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return dt.datetime(1999, 1, 1, tzinfo=dt.timezone.utc)
+
+        monkeypatch.setattr(bf, "datetime", _PoisonedDatetime)
+        result = await bf.fetch_db_now(session)
+        assert result.year > 2000

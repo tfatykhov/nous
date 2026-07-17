@@ -33,6 +33,8 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from nous.heart.keys import extract_entity_candidates
+
 if TYPE_CHECKING:
     from nous.brain.brain import Brain
     from nous.brain.schemas import DecisionSummary, NeighborResult
@@ -59,7 +61,6 @@ _DENSITY_GATE_TTL_SECONDS = 300.0
 _density_gate_cache: "weakref.WeakKeyDictionary[object, tuple[float, float]]" = (
     weakref.WeakKeyDictionary()
 )
-
 
 # ---------------------------------------------------------------------------
 # Structured result types
@@ -132,6 +133,18 @@ class PipelineStats:
     # procedures excluded from the ranked pool). Observability only — not
     # formatted into recall_deep text, so it does not affect the snapshot.
     coherent_ranking_applied: bool = False
+    # R3.3 (F085): True iff the keyed fact leg was flag-enabled AND the query
+    # yielded at least one entity candidate (regardless of whether any row
+    # was actually found — mirrors chunks_searched's "eligible AND attempted"
+    # semantics).
+    keyed_leg_used: bool = False
+    # Count of keyed PipelineResults merged at assembly time (after id-dedup
+    # against every other leg, BEFORE the F071 exclude_ids filter — a keyed
+    # hit dropped by exclude_ids still counts here; stats-only drift).
+    n_keyed: int = 0
+    # Count of keyed candidates dropped because their id already existed in
+    # the result set from another leg (corroboration, not a new find).
+    n_keyed_dup: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +189,15 @@ class _PipelineAccumulator:
     # F067 Stage 1.5: chunk-recall results
     # Shape: (id, content, score, episode_id) — see _search_episode_chunks.
     chunk_results: list[tuple[UUID, str, float, UUID]] = field(default_factory=list)
+
+    # R3.3 Stage 1.6: keyed fact-leg rows (raw SQLAlchemy Row objects from
+    # FactManager.fetch_by_entity_keys — id, content, learned_at,
+    # source_ordinal, matched).
+    keyed_results: list = field(default_factory=list)
+    keyed_leg_used: bool = False
+    # Set during assembly in run_recall_pipeline (after existing_ids from
+    # every other leg is known) — not populated inside _run_stages.
+    n_keyed_dup: int = 0
 
     # Flags
     searched_decisions: bool = False
@@ -287,6 +309,25 @@ async def run_recall_pipeline(
         )
     results.extend(_graph_expanded_to_pipeline(acc.graph_expanded, settings))
 
+    # R3.3 (F085): keyed fact leg assembly. Additive-only placement — each
+    # keyed hit is inserted before the first existing result with a strictly
+    # lower score. Only keyed hits move; every existing result keeps its
+    # relative order — attribution-clean for the MAB flag-on/off A/B, and
+    # works identically on the rerank=False (multi_turn_eval) and
+    # rerank=True (retrieval_runner) paths. When rerank_by_score=True the
+    # later global sort yields the same final order. A tail-append would
+    # sit at position 11+ under the rerank=False default and be sliced off
+    # by [:top_k] — the leg would measure as a no-op on the acceptance
+    # harness. No-op (empty acc.keyed_results) when the flag is off.
+    existing_ids = {r.id for r in results}
+    keyed, acc.n_keyed_dup = _keyed_to_pipeline(acc.keyed_results, settings, existing_ids)
+    for kr in keyed:
+        pos = next(
+            (i for i, r in enumerate(results) if (r.score or 0.0) < kr.score),
+            len(results),
+        )
+        results.insert(pos, kr)
+
     # Attach contradiction links to matching results
     if acc.contradictions:
         _attach_contradictions(results, acc.contradictions)
@@ -354,6 +395,9 @@ async def run_recall_pipeline(
         contradiction_edges=list(acc.contradictions),
         excluded_in_context=excluded_in_context,  # F071
         coherent_ranking_applied=acc.coherent_ranking_applied,  # F080: reflects the filter actually running (search_all only)
+        keyed_leg_used=acc.keyed_leg_used,  # R3.3 (F085)
+        n_keyed=len(keyed),
+        n_keyed_dup=acc.n_keyed_dup,
     )
     return results, stats
 
@@ -458,6 +502,28 @@ async def _run_stages(
             acc.stage_errors["chunk_recall"] = (
                 acc.stage_errors.get("chunk_recall", 0) + 1
             )
+
+    # ------------------------------------------------------------------
+    # Stage 1.6 (R3.3, F085): keyed fact leg — land-dark, flag + entity-
+    # presence gated (NOT frame-gated: the eval harness has no frame concept).
+    # Gated on the same search_all/"fact" condition as Stage 1.5's chunk leg
+    # (codex P2): a memory_types=["episode"] request has no fact-shaped
+    # consumer for these hits, so skip the vocab lookup + DB query entirely.
+    # ------------------------------------------------------------------
+    if getattr(settings, "keyed_fact_leg_enabled", False) and (
+        search_all or "fact" in search_types
+    ):
+        try:
+            vocab = await heart.facts.entity_key_vocabulary()
+            candidates = extract_entity_candidates(query, vocab=vocab)
+            if candidates:
+                acc.keyed_leg_used = True
+                acc.keyed_results = await heart.facts.fetch_by_entity_keys(
+                    candidates, limit=getattr(settings, "keyed_fact_leg_k", 8)
+                )
+        except Exception as exc:
+            acc.stage_errors["keyed"] = acc.stage_errors.get("keyed", 0) + 1
+            logger.warning("keyed fact leg failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Stage 2: F022 Phase 2 cross-type graph expansion from Heart seeds
@@ -1138,6 +1204,57 @@ def _chunks_to_pipeline(
             source="heart", metadata=md,
         ))
     return out
+
+
+def _keyed_to_pipeline(
+    rows, settings: "Settings", existing_ids: set,
+) -> tuple[list[PipelineResult], int]:
+    """R3.3 (F085): convert keyed fact-leg rows into PipelineResults.
+
+    Additive-only: fresh PipelineResults, id-deduped against every other
+    leg, scores in a bounded band UNDER the RRF head (base - 0.005*rank,
+    clamped >= 0) so keyed hits can enter context without displacing
+    higher-scoring direct/chunk hits (the -5.0pp lesson).
+
+    codex P2: metadata also carries ``subject``/``event_date`` in the exact
+    convention ``_heart_results_to_pipeline`` uses (heart.py:1205-1219) —
+    ``subject`` forwarded raw (``str | None``), ``event_date`` as an
+    isoformat string with the key omitted entirely when absent — so
+    ``_resolve_recency_conflicts`` groups keyed-only dated facts the same as
+    facts surfaced via Stage 1.
+
+    codex P2 round 6: metadata also carries ``source_episode_id`` (string,
+    key omitted when absent) so the formatter's session-grouping can bucket
+    keyed hits under their real episode instead of "-- Other --".
+    ``_attach_fact_source_episodes`` runs BEFORE this leg's results are
+    merged into ``run_recall_pipeline``'s output list (stage-order fact, not
+    a bug to reorder around), so it can never attach this field to a keyed
+    hit — the data has to arrive already-populated from
+    ``fetch_by_entity_keys``'s own SELECT.
+    """
+    out: list[PipelineResult] = []
+    dups = 0
+    base = getattr(settings, "keyed_fact_leg_score", 0.55)
+    for rank, row in enumerate(rows):
+        if row.id in existing_ids:
+            dups += 1
+            continue
+        metadata = {
+            "retrieval_leg": "keyed",
+            "matched_keys": int(row.matched),
+            "subject": row.subject,
+        }
+        if row.event_date is not None:
+            metadata["event_date"] = row.event_date.isoformat()
+        if row.source_episode_id:
+            metadata["source_episode_id"] = row.source_episode_id
+        out.append(PipelineResult(
+            id=row.id, type="fact",
+            description=row.content, score=max(0.0, base - 0.005 * rank),
+            source="heart",
+            metadata=metadata,
+        ))
+    return out, dups
 
 
 async def _search_episode_chunks(

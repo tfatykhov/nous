@@ -1174,6 +1174,18 @@ class SleepHandler:
                                     )
                                 else:
                                     async with self._heart.db.session() as session:
+                                        # codex P2 round 9: the merged
+                                        # replacement fact was created from a
+                                        # bare FactInput (subject/content/
+                                        # source/confidence/category only) —
+                                        # copy subject_key/attribute_key +
+                                        # the union of entity_keys rows over
+                                        # from the sources it occupies the
+                                        # same conflict slot as, before
+                                        # those sources are deactivated below.
+                                        await self._heart.facts.inherit_conflict_slot_keys(
+                                            merged_detail.id, [fact1_id, fact2_id], session,
+                                        )
                                         for orig_id in (fact1_id, fact2_id):
                                             # Defensive: never set
                                             # superseded_by to own id.
@@ -1223,6 +1235,12 @@ class SleepHandler:
                                                 "supersedes", 1.0, session,
                                             )
                                         await session.commit()
+                                        # codex P2 round 13: inherit_conflict_slot_keys
+                                        # above wrote entity-key rows in this same
+                                        # commit — invalidate the cached vocab now
+                                        # (this session's commit is the only place
+                                        # that knows those writes just landed).
+                                        self._heart.facts.invalidate_entity_vocab()
                                     sleep_stats["contradictions_resolved"] += 1
                                     sleep_stats["facts_created"] += 1
                                     logger.info(
@@ -1621,6 +1639,14 @@ class SleepHandler:
 
                 # Deactivate originals
                 async with self._heart.db.session() as session:
+                    # codex P2 round 9: mirrors the F031 fix — copy
+                    # subject_key/attribute_key + the union of entity_keys
+                    # rows from the cluster members onto the merged
+                    # replacement before those members are deactivated
+                    # below (see inherit_conflict_slot_keys's docstring).
+                    await self._heart.facts.inherit_conflict_slot_keys(
+                        merged_detail.id, [f.id for f in facts], session,
+                    )
                     for fact in facts:
                         # Defensive (mirrors F031 fix on PR #412): never
                         # set superseded_by to own id. Heart.learn always
@@ -1651,6 +1677,11 @@ class SleepHandler:
                             merged_detail.id, fact.id, "supersedes", 1.0, session,
                         )
                     await session.commit()
+                    # codex P2 round 13: mirrors the F031 fix — inherit_conflict_slot_keys
+                    # above wrote entity-key rows in this same commit; invalidate the
+                    # cached vocab now (this session's commit is the only place that
+                    # knows those writes just landed).
+                    self._heart.facts.invalidate_entity_vocab()
 
                 merged_fact_id = str(merged_detail.id)
                 merge_outcome = "merged"

@@ -43,6 +43,11 @@ def _dupe(content: str = "old fact content here", **kw) -> SimpleNamespace:
         id=uuid4(), content=content, confidence=1.0,
         superseded_by=None, active=True, contradiction_of=None,
         event_date=kw.get("event_date"), event_date_classified_at=None,
+        # codex P2 round 9: _confirm_duplicate's stamp check now reads this
+        # unconditionally (no longer short-circuited behind `input.entity_keys`
+        # truthy) -- a real Fact ORM row always has this attribute (default
+        # None), so the test double needs it too.
+        entity_keys_extracted_at=kw.get("entity_keys_extracted_at"),
     )
 
 

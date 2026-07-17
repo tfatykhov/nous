@@ -13,6 +13,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
+from nous.heart.keys import normalize_key
+
 logger = logging.getLogger(__name__)
 
 # F075: strict YYYY-MM-DD shape gate. Python 3.12's date.fromisoformat()
@@ -117,6 +119,24 @@ class FactInput(BaseModel):
     # stripped — see normalize_key). Drive the R2 exact-key candidate lookup.
     subject_key: str | None = None
     attribute_key: str | None = None
+    entity_keys: list[str] = Field(
+        default_factory=list,
+        description="R3.1: normalized keys of ALL participating entities (subject + proper-noun object/value side).",
+    )
+    # codex P2 round 9 (flipped from round 6's default True): True only when
+    # an entity-aware producer ran entity extraction for this fact — controls
+    # the backfill watermark (entity_keys_extracted_at). Legacy/non-entity-
+    # aware producers (fact_extractor, learn_fact tool, REST endpoint) never
+    # set this, so they default to False and correctly stay unstamped —
+    # stamping them would falsely mark facts they never entity-extracted as
+    # "done," permanently hiding them from the backfill script. An
+    # entity-aware producer (the enumerative extractor) sets this True
+    # whenever its raw response included the "entities" key at all — even
+    # if every candidate then failed the stop-policy and entity_keys ended
+    # up empty; zero ACCEPTED keys is still a VALID completion, and gating
+    # the stamp on entity_keys being non-empty (round 6's mistake) would
+    # leave those facts re-sent to the LLM by every backfill run forever.
+    entity_extraction_complete: bool = False
     # 064 R1: positional reading-order ordinal — chunk_index * 1_000_000 +
     # in-chunk position; explicit statement numbers from the source are never
     # used (mixed-form comparisons invert reading order). Higher = later in the
@@ -151,6 +171,25 @@ class FactInput(BaseModel):
                 logger.warning("F075: dropped invalid-calendar event_date %r", v[:32])
                 return None  # fail-soft: drop bad date, keep fact
         return None
+
+    # codex P2 round 7: canonicalize conflict-slot keys at the SINGLE write
+    # boundary (R3.2: one canonicalizer). Direct Heart.learn callers were
+    # storing subject_key/attribute_key RAW — under v2 normalization a
+    # direct "api_gateway" never exact-matches the extractor's/backfill's
+    # normalized "api gateway", so R2 same-key supersession silently missed
+    # it. Running normalize_key here also double-normalizes values the
+    # extractor already normalized upstream — harmless, since
+    # normalize_key(normalize_key(x)) == normalize_key(x) always holds
+    # (the fixpoint property normalize_key's own docstring guarantees).
+    @field_validator("subject_key", mode="before")
+    @classmethod
+    def _normalize_subject_key(cls, v):
+        return normalize_key(v)
+
+    @field_validator("attribute_key", mode="before")
+    @classmethod
+    def _normalize_attribute_key(cls, v):
+        return normalize_key(v, max_len=100)
 
 
 class ContradictionWarning(BaseModel):

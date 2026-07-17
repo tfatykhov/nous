@@ -19,10 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.admission import AdmissionController, AdmissionResult
+from nous.heart.keys import is_keyable_entity, normalize_key
 from nous.heart.schemas import ContradictionWarning, FactDetail, FactInput, FactRejected, FactSummary
 from nous.heart.search import hybrid_search, hybrid_search_multi, set_local_ef_search
 from nous.storage.database import Database
-from nous.storage.models import Episode, Event, Fact, GraphEdge
+from nous.storage.models import Episode, Event, Fact, FactEntityKey, GraphEdge
 
 if TYPE_CHECKING:
     from nous.config import Settings
@@ -31,6 +32,12 @@ if TYPE_CHECKING:
     from nous.heart.date_window import DateWindow
 
 logger = logging.getLogger(__name__)
+
+# R3.3 (F085) codex P2: entity-key vocabulary cache TTL, in seconds. Lives on
+# the FactManager instance (see entity_key_vocabulary below) rather than a
+# module-level cache keyed by instance, so writes from THIS process invalidate
+# it immediately instead of waiting out the TTL.
+_ENTITY_VOCAB_TTL_SECONDS = 300.0
 
 # F027: classifier prompt. Exported so the F027 eval script
 # (scripts/eval/eval_f027_supersession.py) tests the same prompt prod uses.
@@ -172,6 +179,26 @@ class FactManager:
         # 064 R2: advisory per-hour cap on key-conflict classifier calls.
         self._key_bucket: int = -1
         self._key_calls: int = 0
+        # R3.3 (F085) codex P2: entity-key vocabulary cache, invalidated at
+        # both entity-row write sites (see entity_key_vocabulary below).
+        self._entity_vocab_cache: tuple[frozenset[str], float] | None = None
+        # codex P2 round 3: generation counter, bumped at both entity-row
+        # write sites AND by learn()'s post-commit (per-call) invalidation.
+        # entity_key_vocabulary() snapshots this before its DB round-trip and
+        # only STORES its result if nothing bumped it in the meantime —
+        # closes the "late store" race: a rebuild that STARTS before a write
+        # invalidates the cache but FINISHES after can otherwise clobber the
+        # cache with a stale result.
+        #
+        # codex P2 round 5: round 2 originally gated learn()'s post-commit
+        # re-invalidation on a SHARED `self._entity_vocab_dirty` boolean —
+        # that broke under two overlapping learn() calls with entity_keys,
+        # since whichever call's `finally` ran first would clear the flag on
+        # behalf of BOTH, silently skipping the second call's own post-commit
+        # invalidation. Removed entirely; see learn()'s finally block, which
+        # now checks its OWN call-local `input.entity_keys` instead of any
+        # instance-shared state.
+        self._entity_vocab_gen: int = 0
 
     def _band_budget_ok(self) -> bool:
         """Advisory in-process per-hour cap on the in-band classifier. Returns
@@ -477,18 +504,62 @@ class FactManager:
 
         if session is None:
             async with self.db.session() as session:
-                result = await self._learn(
-                    input,
-                    list(exclude_ids or []),
-                    check_contradictions,
-                    session,
-                    encoded_frame=encoded_frame,
-                    encoded_censors=encoded_censors,
-                    utility_override=utility_override,
-                    precomputed_embedding=precomputed_embedding,
-                )
-                await session.commit()
-                return result
+                try:
+                    result = await self._learn(
+                        input,
+                        list(exclude_ids or []),
+                        check_contradictions,
+                        session,
+                        encoded_frame=encoded_frame,
+                        encoded_censors=encoded_censors,
+                        utility_override=utility_override,
+                        precomputed_embedding=precomputed_embedding,
+                    )
+                    await session.commit()
+                    return result
+                finally:
+                    # codex P2 round 2: _learn's in-txn cache=None (at either
+                    # entity-write site) can be undone by a concurrent
+                    # recall that rebuilds + re-caches entity_key_vocabulary()
+                    # before THIS transaction commits — under READ COMMITTED
+                    # isolation that rebuild can't see the uncommitted row,
+                    # so it re-caches a stale vocab with no further trigger
+                    # to invalidate it for the rest of the TTL. Re-invalidate
+                    # here, after commit succeeds (the common case) or on
+                    # exception (a poisoned cache is still worth clearing —
+                    # it's only a cache, so over-invalidating on failure or
+                    # on a rejected fact is harmless).
+                    # codex P2 round 3: also bump the generation counter here
+                    # — a rebuild that captured `gen` in the narrow window
+                    # AFTER the write site's own bump but BEFORE this commit
+                    # (so it still read the pre-commit, stale data) needs
+                    # this SECOND bump to be detected as stale; the write
+                    # site's bump alone only protects readers that captured
+                    # `gen` before the write started.
+                    # codex P2 round 5: gate this on the CALL-LOCAL
+                    # `input.entity_keys` rather than a shared instance flag.
+                    # A shared `self._entity_vocab_dirty` broke under two
+                    # overlapping learn() calls with entity_keys: whichever
+                    # call's `finally` ran first would clear the flag the
+                    # OTHER call had set, so the second call's own commit
+                    # never triggered its own post-commit invalidation —
+                    # `input` is this call's own local variable, so there is
+                    # no cross-talk between concurrent calls.
+                    # codex P2 round 13: reuse invalidate_entity_vocab() (DRY)
+                    # — the same post-commit invalidation is now also needed
+                    # at inherit_conflict_slot_keys's caller-owned commit
+                    # points (supersede, sleep_handler merge sites).
+                    # codex P2 round 16: widened to also cover a subject-only
+                    # write (no entity_keys) — _learn's insert block now
+                    # seeds an entity row from input.subject_key alone, so
+                    # this gate must match its own `input.subject_key or
+                    # input.entity_keys` condition.
+                    if input.entity_keys or input.subject_key:
+                        self.invalidate_entity_vocab()
+        # Injected-session callers own their own commit point, so there is no
+        # place here to re-invalidate post-commit — the 300s TTL remains the
+        # sole staleness bound for this path. No current caller passes
+        # entity_keys through an injected session.
         return await self._learn(
             input,
             list(exclude_ids or []),
@@ -714,6 +785,74 @@ class FactManager:
         )
         session.add(fact)
         await session.flush()
+
+        # R3.1 (F085): index entity-key rows in the same transaction as the fact.
+        # codex P2 round 16: the candidate list unions the subject key FIRST
+        # with entity_keys — mirrors the extractor's own subject-first union
+        # and the backfill's phase_seed. Without this, a direct
+        # FactInput(subject_key=..., attribute_key=...) with no entity_keys
+        # wrote ZERO entity rows: visible to R2 same-key supersession (which
+        # reads facts.subject_key directly) but invisible to the keyed
+        # retrieval leg until an operator ran phase_seed. The block now
+        # fires when EITHER subject_key or entity_keys is present.
+        if input.subject_key or input.entity_keys:
+            seen_keys: set[str] = set()
+            max_keys = self._settings.entity_keys_max_per_fact if self._settings else 8
+            min_chars = self._settings.entity_key_min_chars if self._settings else 3
+            for raw_key in (input.subject_key, *input.entity_keys):
+                if raw_key is None:
+                    continue
+                nk = normalize_key(raw_key)  # defensive re-normalize; idempotent (R3.2)
+                # codex P2 round 4: enforce the same stop-policy the
+                # extractor applies (enumerative_extractor.py:327) — a
+                # caller passing FactInput.entity_keys directly to
+                # Heart.learn bypasses the extractor entirely, so without
+                # this gate junk keys ("red", "1876", "ab") would persist.
+                # A scalar-only subject_key ("red") is filtered here too —
+                # zero rows, no crash (round 16).
+                if (
+                    nk
+                    and nk not in seen_keys
+                    and is_keyable_entity(nk, min_chars=min_chars)
+                ):
+                    seen_keys.add(nk)
+                    session.add(FactEntityKey(fact_id=fact.id, entity_key=nk, agent_id=self.agent_id))
+                if len(seen_keys) >= max_keys:
+                    break
+            # codex P2: new entity keys just entered the vocab — invalidate
+            # so the next recall's keyed leg sees them without waiting out
+            # the TTL. codex P2 round 2: this transaction is still open (not
+            # committed until learn() returns) — learn()'s finally performs
+            # the actual post-commit re-invalidation (round 5: gated on this
+            # call's own `input.entity_keys`, not a shared flag; round 16:
+            # widened to `input.entity_keys or input.subject_key`). codex P2
+            # round 3: bump the generation counter too, so a rebuild already
+            # in flight when we reach this line (captured `gen` before this
+            # point) is detected as stale by entity_key_vocabulary()'s
+            # post-query check, even if it finishes reading pre-commit data.
+            self._entity_vocab_cache = None
+            self._entity_vocab_gen += 1
+
+        # codex P2 round 9: stamping is a TRUE TRI-STATE signal, independent
+        # of whether entity_keys was non-empty or any candidate survived the
+        # stop-policy above. entity_extraction_complete alone answers "did an
+        # entity-aware producer finish extracting this fact's participating
+        # entities" — it is an explicit producer opt-in (default False as of
+        # round 9), so legacy/non-entity-aware producers (fact_extractor,
+        # learn_fact tool, REST endpoint) never set it and correctly stay
+        # unstamped/backfill-eligible. Zero ACCEPTED keys (e.g. a
+        # scalar-only subject with no object-side entities) is still a
+        # VALID completion for an entity-aware producer — gating the stamp
+        # on `input.entity_keys` non-empty (the round 6 behavior) would
+        # leave those facts permanently re-sent to the LLM by every
+        # backfill run, since they can never legitimately produce a
+        # non-empty entity_keys list. codex P2 round 16: this stays
+        # completely independent of the subject-key seeding above too — a
+        # subject-only write (no entity_keys, entity_extraction_complete
+        # not set) leaves this NULL, so value-side extraction still
+        # revisits the fact later via the backfill's IS NULL predicate.
+        if input.entity_extraction_complete:
+            fact.entity_keys_extracted_at = datetime.now(UTC)
 
         # Audit S3: apply the in-band dupe verdict now that the new fact
         # has an id. Returns a ContradictionWarning for CONTRADICTION.
@@ -1231,6 +1370,69 @@ class FactManager:
         ):
             dupe.subject_key = input.subject_key
             dupe.attribute_key = input.attribute_key
+        # R3.1 (F085): backfill entity-key rows onto a dupe that hasn't been
+        # entity-extracted yet. MUST be conflict-tolerant (review db-P2-2):
+        # phase_seed writes subject-key rows WITHOUT stamping
+        # entity_keys_extracted_at, so a live dedup-confirm on a
+        # seeded-but-not-yet-extracted fact would PK-collide on a plain
+        # session.add and abort the whole learn txn. Postgres-only construct
+        # (pg_insert.on_conflict_do_nothing) — guarded the same way the W-8
+        # advisory lock above gates on dialect.name, so the SQLite unit path
+        # never reaches it.
+        # codex P2 round 16: gate widened to fire on subject_key alone too
+        # (mirrors _learn's identical widening) — a direct dedup-confirming
+        # FactInput carrying only subject_key previously backfilled nothing.
+        if (
+            (input.subject_key or input.entity_keys)
+            and dupe.entity_keys_extracted_at is None
+            and session.bind is not None
+            and session.bind.dialect.name == "postgresql"
+        ):
+            seen_dupe_keys: set[str] = set()
+            max_keys = self._settings.entity_keys_max_per_fact if self._settings else 8
+            min_chars = self._settings.entity_key_min_chars if self._settings else 3
+            # codex P2 round 6: iterate the FULL list and filter BEFORE
+            # capping — mirrors _learn's loop exactly. The previous
+            # `input.entity_keys[:max_keys]` sliced the raw list before
+            # normalize/stop-policy/dedup, so junk candidates ("1876", "red")
+            # occupying early slots could crowd out valid keys past the cap
+            # position even though those junk keys never insert a row.
+            # codex P2 round 16: subject key unioned FIRST, mirrors _learn.
+            for raw_key in (input.subject_key, *input.entity_keys):
+                if raw_key is None:
+                    continue
+                nk = normalize_key(raw_key)
+                # codex P2 round 4: mirrors the _learn stop-policy gate above
+                # — same bypass-the-extractor risk applies to the dedup-confirm
+                # path.
+                if (
+                    nk
+                    and nk not in seen_dupe_keys
+                    and is_keyable_entity(nk, min_chars=min_chars)
+                ):
+                    seen_dupe_keys.add(nk)
+                    await session.execute(
+                        pg_insert(FactEntityKey)
+                        .values(fact_id=dupe.id, entity_key=nk, agent_id=self.agent_id)
+                        .on_conflict_do_nothing()
+                    )
+                if len(seen_dupe_keys) >= max_keys:
+                    break
+            # codex P2 (+ round 3 gen-counter, round 5 per-call finally):
+            # mirrors the _learn invalidation above — same still-open-
+            # transaction race applies here.
+            self._entity_vocab_cache = None
+            self._entity_vocab_gen += 1
+
+        # codex P2 round 9: stamping is independent of whether entity_keys
+        # was non-empty (mirrors _learn's restructure — see its comment for
+        # the full tri-state rationale) and independent of the postgres-only
+        # dialect guard above (that guard is for the pg_insert entity-row
+        # backfill construct; a plain attribute assignment works on any
+        # dialect). Still fill-if-empty: never overwrite an already-stamped
+        # dupe's watermark.
+        if dupe.entity_keys_extracted_at is None and input.entity_extraction_complete:
+            dupe.entity_keys_extracted_at = datetime.now(UTC)
         # Fill source_ordinal when the row has none and input provides one.
         if input.source_ordinal is not None and dupe.source_ordinal is None:
             dupe.source_ordinal = input.source_ordinal
@@ -1447,7 +1649,15 @@ class FactManager:
             async with self.db.session() as session:
                 result = await self._supersede(old_fact_id, new_fact, session)
                 await session.commit()
+                # codex P2 round 13: _supersede's inherit_conflict_slot_keys
+                # call can write new entity-key rows within THIS commit —
+                # invalidate post-commit so entity_key_vocabulary() doesn't
+                # serve a stale vocab for the rest of the TTL (mirrors
+                # learn()'s own finally-block invalidation).
+                self.invalidate_entity_vocab()
                 return result
+        # Injected-session callers own their own commit point (same contract
+        # as learn()) — no place here to re-invalidate post-commit.
         return await self._supersede(old_fact_id, new_fact, session)
 
     async def _supersede(
@@ -1466,6 +1676,15 @@ class FactManager:
         new_detail = await self._learn(bypass_input, [old_fact_id], False, session)
         if isinstance(new_detail, FactRejected):
             raise RuntimeError("Supersede bypass failed — admission should not reject bypassed sources")
+
+        # codex P2 round 11: callers like sleep_handler._handle_updates_prefix
+        # supersede with a bare FactInput (no subject_key/entity_keys) — the
+        # replacement would otherwise permanently lose exact-key recall for
+        # the conflict slot the deactivated old_fact occupied. Reuses the
+        # same helper the F031/F027 merge sites use; it no-ops the
+        # subject_key/attribute_key copy when new_fact already carries its
+        # own subject_key (a keyed caller wins over inheritance).
+        await self.inherit_conflict_slot_keys(new_detail.id, [old_fact_id], session)
 
         # Update old fact
         old_fact.superseded_by = new_detail.id
@@ -1526,6 +1745,240 @@ class FactManager:
         loser.active = False
         await self._create_graph_edge(winner_id, loser_id, "fact", "fact", "supersedes", 1.0, session)
         return True
+
+    def invalidate_entity_vocab(self) -> None:
+        """codex P2 round 13: clear the cached entity-key vocabulary and bump
+        its generation counter. Call this AFTER committing entity-key writes
+        made outside learn()'s own session — e.g. inherit_conflict_slot_keys
+        at a caller-owned commit point (supersede, sleep_handler's F031/F027
+        merge sites) — since learn()'s own finally block only invalidates
+        for writes made inside ITS OWN commit. Without a post-commit call
+        here, a concurrent recall that rebuilds entity_key_vocabulary()
+        before the caller's commit lands can re-cache a stale vocab with
+        nothing left to invalidate it for the rest of the TTL (same race
+        class as rounds 2/3/5, fixed there for learn() specifically)."""
+        self._entity_vocab_cache = None
+        self._entity_vocab_gen += 1
+
+    async def inherit_conflict_slot_keys(
+        self, replacement_id: UUID, source_ids: list[UUID], session: AsyncSession,
+    ) -> None:
+        """codex P2 round 9: merged/replacement facts (F031 contradiction-
+        resolution MERGE, F027 cluster-consolidation MERGE in sleep_handler.py)
+        are created via a bare FactInput carrying only
+        subject/content/source/confidence/category — subject_key,
+        attribute_key, and entity_keys never carry over from the facts being
+        merged, so the replacement silently drops out of R2 same-key
+        supersession AND the keyed retrieval leg despite occupying the exact
+        same conflict slot the sources did. Call this AFTER the replacement
+        fact row exists (its id is known), passing the ids of the facts
+        being merged away.
+
+        (a) subject_key/attribute_key are copied from the NEWEST source that
+        has BOTH set (as a pair — a half-keyed row is worse than an unkeyed
+        one; "newest" matches R2's general most-recent-wins resolution
+        spirit when sources disagree).
+        (b) entity_keys rows are the DISTINCT UNION of every source's
+        fact_entity_keys, inserted for the replacement (ON CONFLICT DO
+        NOTHING), capped at entity_keys_max_per_fact — nothing else about
+        the source rows is preserved. Postgres-only (on_conflict_do_nothing
+        is a Postgres construct), mirroring _confirm_duplicate's dialect
+        guard. codex P2 round 10: the copied subject_key is inserted FIRST
+        (when present and it passes the entity stop-policy), before the
+        capped union query — an unordered ``distinct().limit(max_keys)``
+        can return any subset when sources have more than max_keys distinct
+        rows, and without reserving a slot for it the subject key set in
+        (a) could silently be absent from the replacement's own
+        fact_entity_keys rows. The union fill then excludes the subject key
+        (already handled) and orders by entity_key for a stable, rerun-safe
+        outcome.
+        (c) entity_keys_extracted_at is deliberately left untouched (stays
+        NULL on the fresh replacement row — the merge FactInput never sets
+        entity_keys/entity_extraction_complete, so _learn's stamp never
+        fires): the merged CONTENT is new text — an LLM-authored synthesis,
+        not any one source's original wording — so the backfill's
+        value-side extraction should re-derive entities for it rather than
+        inheriting a stale completion signal from facts whose exact content
+        no longer exists anywhere.
+
+        codex P2 round 11: this is now also called from the generic
+        supersede path (_supersede), whose caller — unlike the two merge
+        sites, which always pass a bare subject/content-only FactInput —
+        can pass a FactInput that already carries its own subject_key (a
+        keyed replacement should win over an inherited one). So the
+        subject_key/attribute_key copy in (a), and the subject-key
+        reservation in (b), are skipped when the replacement already has a
+        subject_key that DIFFERS from what these same sources would copy —
+        that's a caller-owned key, not one this helper produced. When the
+        existing key instead MATCHES what these sources would produce, the
+        copy is treated as a no-op re-application rather than a foreign
+        key: this keeps a second, idempotent invocation on an
+        already-processed replacement (e.g. a retried merge/backfill call)
+        stable, per round 10's rerun-stability contract — round 10's
+        distinct().limit(max_keys) cap still needs the subject key
+        reserved on every call, not just the first, or a rerun can admit
+        one extra union row once the column is no longer NULL. The
+        entity-key union insert in (b) stays unconditional and additive
+        regardless (ON CONFLICT DO NOTHING makes it safe either way).
+
+        codex P2 round 12: round 11's guard only compared subject_key,
+        so a replacement with the SAME subject_key as these sources but a
+        DIFFERENT, caller-supplied attribute_key still got that
+        attribute_key silently clobbered by the pair-copy — a half-foreign
+        pair is exactly the "worse than unkeyed" outcome (a) already warns
+        about, just introduced by this guard instead of avoided by it. Both
+        slots are now compared, and EITHER one differing from what these
+        sources would produce blocks the WHOLE pair-copy (never copy just
+        one slot) — the same equality-vs-bare-not-null distinction from
+        round 11 is preserved for both slots, so round 10's rerun-stability
+        contract still holds (on a rerun both slots already equal what the
+        same sources would produce, so the copy is still treated as a
+        no-op re-application, not a foreign pair).
+
+        codex P2 round 13: two independent fixes. (1) The entity-key cap
+        now counts the replacement's EXISTING rows before spending the
+        remaining budget — a fresh max_keys allowance every call, ignoring
+        rows the replacement already owns (a keyed FactInput's own
+        entity_keys through supersede, or a merge-learn call that confirmed
+        an existing fact), could push the total past 2x the configured cap.
+        The subject-key reservation is best-effort within this remaining
+        budget: it still claims a slot FIRST (displacing potential union
+        "filler" keys, not the other way around), but if the replacement
+        already has no budget left when this call starts, the subject key
+        is simply not inserted this call — nothing is evicted to make room
+        for it. (2) This helper's own in-txn cache invalidation (below)
+        only protects a reader whose round-trip races the STILL-OPEN
+        transaction; it does nothing once the caller's own commit lands,
+        because that commit happens in code this helper doesn't control.
+        Every caller must now also call the new `invalidate_entity_vocab()`
+        AFTER its own commit — done at all three call seams (supersede,
+        sleep_handler's F031/F027 merge sites) — mirroring the post-commit
+        invalidation `learn()` already does for its own writes (rounds
+        2/3/5).
+
+        codex P2 round 15: round 13's cap fix counted only HOW MANY rows
+        the replacement already owned, not WHICH ones — a candidate
+        (subject key or union key) already present on the replacement
+        still spent a slot of the remaining budget even though its insert
+        was an ON CONFLICT DO NOTHING no-op (no row actually added). Under
+        a tight cap this could silently crowd out a genuinely new source
+        key. Now the replacement's existing keys are loaded as a SET, and
+        every candidate is checked for membership in it BEFORE either the
+        subject-key reservation or the union query spends any budget —
+        an already-present candidate costs nothing, so the remaining slots
+        go only to insertions that actually happen.
+
+        No commit here — caller-owned session/transaction, same contract as
+        apply_supersession above.
+        """
+        if not source_ids:
+            return
+
+        replacement_row = (
+            await session.execute(
+                select(Fact.subject_key, Fact.attribute_key).where(Fact.id == replacement_id)
+            )
+        ).first()
+        replacement_subject_key = replacement_row.subject_key if replacement_row else None
+        replacement_attribute_key = replacement_row.attribute_key if replacement_row else None
+
+        sources = (
+            await session.execute(
+                select(Fact.subject_key, Fact.attribute_key, Fact.learned_at)
+                .where(Fact.id.in_(source_ids))
+            )
+        ).all()
+        complete = [s for s in sources if s.subject_key is not None and s.attribute_key is not None]
+        newest = max(complete, key=lambda s: s.learned_at) if complete else None
+        skip_slot_copy = newest is not None and (
+            (replacement_subject_key is not None and replacement_subject_key != newest.subject_key)
+            or (replacement_attribute_key is not None and replacement_attribute_key != newest.attribute_key)
+        )
+        if newest is not None and not skip_slot_copy:
+            await session.execute(
+                update(Fact)
+                .where(Fact.id == replacement_id)
+                .values(subject_key=newest.subject_key, attribute_key=newest.attribute_key)
+            )
+
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            max_keys = self._settings.entity_keys_max_per_fact if self._settings else 8
+            min_chars = self._settings.entity_key_min_chars if self._settings else 3
+            inserted_any = False
+
+            # codex P2 round 13: the replacement may already own entity-key
+            # rows (a keyed FactInput through supersede, or a merge-learn
+            # call that confirmed an existing fact) — a fresh max_keys
+            # budget on every call, on top of rows already there, could
+            # push the total to 2x the configured cap. codex P2 round 15:
+            # fetch the actual SET of existing keys (not just a count) —
+            # round 13's count-only version still spent budget on a
+            # candidate that was ALREADY in that set (an ON CONFLICT DO
+            # NOTHING no-op adds no row), which could crowd out a
+            # genuinely new source key under a tight cap. Every candidate
+            # below is checked against this set before an insert is even
+            # attempted — deterministic, no rowcount inspection needed.
+            existing_keys = set(
+                (await session.execute(
+                    select(FactEntityKey.entity_key).where(FactEntityKey.fact_id == replacement_id)
+                )).scalars().all()
+            )
+            remaining = max(0, max_keys - len(existing_keys))
+
+            # Reserve a slot for the copied subject_key FIRST, before the
+            # capped union query below can crowd it out. Skipped when the
+            # pair-copy above was skipped (a foreign, caller-owned slot is
+            # present in either subject_key or attribute_key), when no
+            # budget remains, or when the subject key is ALREADY among the
+            # replacement's existing rows (nothing to insert, no budget
+            # spent) — subject-key reservation is best-effort within the
+            # cap: a replacement already at/over the cap does not evict an
+            # existing row to make room.
+            subject_key_value = (
+                newest.subject_key if newest is not None and not skip_slot_copy else None
+            )
+            if (
+                subject_key_value
+                and is_keyable_entity(subject_key_value, min_chars=min_chars)
+                and subject_key_value not in existing_keys
+                and remaining > 0
+            ):
+                await session.execute(
+                    pg_insert(FactEntityKey)
+                    .values(fact_id=replacement_id, entity_key=subject_key_value, agent_id=self.agent_id)
+                    .on_conflict_do_nothing()
+                )
+                inserted_any = True
+                remaining -= 1
+
+            if remaining > 0:
+                union_stmt = select(FactEntityKey.entity_key).where(
+                    FactEntityKey.fact_id.in_(source_ids)
+                )
+                # codex P2 round 15: exclude keys already on the replacement
+                # (existing rows, plus the subject key handled above) from
+                # the candidates BEFORE the LIMIT — so remaining counts only
+                # genuinely new rows, never a candidate that would no-op.
+                excluded = existing_keys | ({subject_key_value} if subject_key_value else set())
+                if excluded:
+                    union_stmt = union_stmt.where(FactEntityKey.entity_key.notin_(excluded))
+                union_keys = (
+                    await session.execute(
+                        union_stmt.distinct()
+                        .order_by(FactEntityKey.entity_key)
+                        .limit(remaining)
+                    )
+                ).scalars().all()
+                for key in union_keys:
+                    await session.execute(
+                        pg_insert(FactEntityKey)
+                        .values(fact_id=replacement_id, entity_key=key, agent_id=self.agent_id)
+                        .on_conflict_do_nothing()
+                    )
+                inserted_any = inserted_any or bool(union_keys)
+
+            if inserted_any:
+                self.invalidate_entity_vocab()
 
     # ------------------------------------------------------------------
     # 064 R2: key-conflict resolution
@@ -2742,3 +3195,118 @@ class FactManager:
             }
             for row in result.all()
         ]
+
+    async def entity_key_vocabulary(self, limit: int = 50_000) -> frozenset[str]:
+        """R3.3: distinct entity keys of ACTIVE facts for this agent (NER-lite
+        vocab matching). Active join per the fact_entity_keys read invariant.
+
+        codex P2: cached on this instance (TTL `_ENTITY_VOCAB_TTL_SECONDS`)
+        and invalidated at both entity-row write sites (`_learn`,
+        `_confirm_duplicate`) so a fact learned by THIS process is visible to
+        the vocab immediately, not after the TTL elapses. The TTL still
+        applies as a floor for entity keys written by a DIFFERENT process
+        (e.g. the backfill script), which cannot invalidate this instance's
+        cache.
+
+        codex P2 round 3: the DB round-trip below has an `await`, so a write
+        can land while this call is in flight. Snapshotting
+        `self._entity_vocab_gen` before the round-trip and only STORING the
+        result if it is unchanged afterward closes the "late store" race the
+        round-2 dirty flag couldn't: a rebuild that STARTS before a write
+        invalidates the cache but FINISHES after would otherwise clobber the
+        (correctly cleared) cache with a now-stale result — the dirty flag
+        only gates the write side's own re-invalidation, never a
+        concurrently in-flight read's store. Race-free without a lock:
+        asyncio is single-threaded/cooperative, so a writer can only
+        interleave at the `await` inside the round-trip; the comparison and
+        the store immediately after it are synchronous with no `await`
+        between them, so nothing can interleave there either.
+        """
+        cached = self._entity_vocab_cache
+        now = time.monotonic()
+        if cached is not None and now - cached[1] < _ENTITY_VOCAB_TTL_SECONDS:
+            return cached[0]
+        gen = self._entity_vocab_gen
+        async with self.db.session() as session:
+            rows = await session.execute(
+                text("SELECT DISTINCT ek.entity_key FROM heart.fact_entity_keys ek "
+                     "JOIN heart.facts f ON f.id = ek.fact_id "
+                     "WHERE ek.agent_id = :a AND f.active = true LIMIT :lim"),
+                {"a": self.agent_id, "lim": limit},
+            )
+            vocab = frozenset(r[0] for r in rows)
+        if gen == self._entity_vocab_gen:
+            self._entity_vocab_cache = (vocab, now)
+        return vocab
+
+    async def fetch_by_entity_keys(self, keys: list[str], limit: int = 8):
+        """R3.3: active facts matching any entity key, ranked by matched-key
+        count then recency/ordinal. MUST join facts on active=true (entity
+        rows survive supersession).
+
+        codex P2: also returns ``subject``/``event_date`` so
+        ``_keyed_to_pipeline`` can populate the same metadata keys the normal
+        fact-recall path does — otherwise keyed-only dated facts are invisible
+        to the recency resolver's same-subject grouping.
+
+        codex P2 round 6: also returns ``source_episode_id`` (cast to text,
+        matching ``_attach_fact_source_episodes``'s convention exactly).
+        That helper runs BEFORE the keyed leg's results are merged into
+        ``run_recall_pipeline``'s output list, so it can never attach this
+        field to a keyed hit — without it here, keyed facts silently fall
+        into the formatter's "-- Other --" session bucket under
+        session-grouped display.
+
+        codex P2 round 10: fires access tracking (recall_count,
+        last_recalled_at) for every returned row, in the SAME
+        session/transaction as the SELECT — retrieval == access, mirroring
+        ``search()``'s semantics. This is deliberately the OPPOSITE of
+        ``find_similar_facts``'s dedup probe, which opts OUT of tracking
+        (audit S9: a dedup probe never surfaces to a consumer, so tracking
+        it inflates the counters for nothing). A keyed hit DOES surface —
+        it's a real retrieval leg result — so without this, a fact found
+        ONLY via its entity keys never accumulates recall signal, and
+        ``_phase_stale_scan`` can deactivate a fact that is in active keyed
+        use. Skipped when the result set is empty; failures are swallowed
+        (mirrors ``track_access``) so a tracking hiccup never turns into a
+        lost retrieval result for the caller.
+        """
+        if not keys:
+            return []
+        async with self.db.session() as session:
+            rows = await session.execute(
+                text(
+                    "SELECT f.id, f.content, f.learned_at, f.source_ordinal, "
+                    "       f.subject, f.event_date, "
+                    "       f.source_episode_id::text AS source_episode_id, "
+                    "       COUNT(DISTINCT ek.entity_key) AS matched "
+                    "FROM heart.fact_entity_keys ek "
+                    "JOIN heart.facts f ON f.id = ek.fact_id "
+                    "WHERE ek.agent_id = :a AND ek.entity_key = ANY(:keys) "
+                    "  AND f.active = true AND f.agent_id = :a "
+                    "GROUP BY f.id, f.content, f.learned_at, f.source_ordinal, "
+                    "         f.subject, f.event_date, f.source_episode_id "
+                    "ORDER BY matched DESC, f.learned_at DESC, "
+                    "         f.source_ordinal DESC NULLS LAST "
+                    "LIMIT :lim"
+                ),
+                {"a": self.agent_id, "keys": keys, "lim": limit},
+            )
+            result_rows = list(rows)
+            if result_rows:
+                try:
+                    await session.execute(
+                        update(Fact)
+                        .where(Fact.id.in_([r.id for r in result_rows]))
+                        .values(
+                            recall_count=Fact.recall_count + 1,
+                            last_recalled_at=datetime.now(UTC),
+                        )
+                    )
+                    await session.commit()
+                except Exception:
+                    logger.debug(
+                        "R3.3: keyed-leg access tracking failed for %d facts",
+                        len(result_rows),
+                    )
+            return result_rows

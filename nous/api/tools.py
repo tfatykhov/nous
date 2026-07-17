@@ -299,6 +299,10 @@ def _format_pipeline_text(
     # that gate by checking whether any heart-eligible type was in search_types
     # (or 'all' was passed) AND the pipeline produced or attempted Heart results.
     def _via_tag(r) -> str:
+        # R3.3 (F085): mark a keyed-leg hit (exact entity-key match, not a
+        # score-ranked retrieval) so its distinct provenance stays visible.
+        if r.metadata.get("retrieval_leg") == "keyed":
+            return "[via keyed] "
         # Mark a Path-A graph-memory neighbour (now interleaved into the ranked Heart
         # Memory list by score) so its associative provenance stays visible to the agent.
         if r.metadata.get("stage_origin") == "heart_graph_memory" and getattr(r, "edge_relation", None):

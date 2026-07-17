@@ -598,11 +598,37 @@ class Fact(Base):
     source_ordinal: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
     overrides_prior: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
 
+    # 065 (R3.1/F085): watermark for the entity-key backfill/extraction pass.
+    entity_keys_extracted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+
     # Relationships
     source_episode: Mapped["Episode | None"] = relationship(foreign_keys=[source_episode_id])
     source_decision: Mapped["Decision | None"] = relationship(foreign_keys=[source_decision_id])
     superseding_fact: Mapped["Fact | None"] = relationship(foreign_keys=[superseded_by], remote_side="Fact.id")
     contradicting_fact: Mapped["Fact | None"] = relationship(foreign_keys=[contradiction_of], remote_side="Fact.id")
+
+
+class FactEntityKey(Base):
+    """R3.1 (F085): entity-key index rows for keyed facts.
+
+    No ORM relationship on purpose: facts are soft-deleted (Python-side
+    cascade would never fire) and DB-level ON DELETE CASCADE covers test
+    hard-deletes; skipping the relationship avoids async lazy-load traps.
+    """
+
+    __tablename__ = "fact_entity_keys"
+    __table_args__ = {"schema": "heart"}
+
+    fact_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("heart.facts.id", ondelete="CASCADE"), primary_key=True
+    )
+    entity_key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class Procedure(Base):
