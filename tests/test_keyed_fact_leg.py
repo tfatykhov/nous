@@ -7,6 +7,7 @@ every real caller, e.g. tools.py:951 ``results, stats = await
 run_recall_pipeline(...)``) — not an object with those attributes. Tests below
 unpack the tuple directly.
 """
+import asyncio
 import uuid
 from datetime import UTC, date, datetime, timedelta
 
@@ -371,6 +372,42 @@ class TestKeyedFactLeg:
         vocab2 = await heart.facts.entity_key_vocabulary()
         assert heart.facts._entity_vocab_cache is not None
         assert heart.facts._entity_vocab_cache[0] == vocab2
+
+    async def test_concurrent_learns_both_visible_in_vocab(self, heart, brain, settings):
+        # codex P2 round 5: a shared self._entity_vocab_dirty boolean broke
+        # under two overlapping learn() calls with entity_keys — whichever
+        # call's post-commit `finally` ran first would clear the flag the
+        # OTHER call had set, silently skipping that other call's own
+        # post-commit invalidation. Real writer/writer interleaving is hard
+        # to force deterministically, so this tests the user-visible
+        # contract instead: after two concurrent learns (asyncio.gather)
+        # with distinct entity_keys both complete, BOTH keys must be visible
+        # in entity_key_vocabulary() — regardless of internal interleaving
+        # order or which call's finally ran first.
+        fi_a = FactInput(
+            content="A council once discussed unrelated riverbank drainage systems entirely.",
+            entity_keys=["quixotic harbor apparatus"],
+            source="enumerative_extractor",
+        )
+        fi_b = FactInput(
+            content="A separate archive holds unrelated records about miscellaneous filing systems.",
+            entity_keys=["nebulous orchard registry"],
+            source="enumerative_extractor",
+        )
+        result_a, result_b = await asyncio.gather(heart.learn(fi_a), heart.learn(fi_b))
+        try:
+            vocab = await heart.facts.entity_key_vocabulary()
+            assert "quixotic harbor apparatus" in vocab
+            assert "nebulous orchard registry" in vocab
+        finally:
+            for result in (result_a, result_b):
+                fact_id = getattr(result, "id", None)
+                if fact_id is not None:
+                    async with heart.db.session() as cleanup:
+                        dbfact = await cleanup.get(Fact, fact_id)
+                        if dbfact is not None:
+                            await cleanup.delete(dbfact)
+                            await cleanup.commit()
 
 
 # ---------------------------------------------------------------------------

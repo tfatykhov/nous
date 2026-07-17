@@ -182,20 +182,22 @@ class FactManager:
         # R3.3 (F085) codex P2: entity-key vocabulary cache, invalidated at
         # both entity-row write sites (see entity_key_vocabulary below).
         self._entity_vocab_cache: tuple[frozenset[str], float] | None = None
-        # codex P2 round 2: set alongside the in-txn cache=None above at both
-        # write sites; cleared by learn()'s post-commit (or post-failure)
-        # re-invalidation. Closes the race where a concurrent recall rebuilds
-        # + re-caches the vocab from a not-yet-committed transaction's
-        # pre-write snapshot, which the in-txn invalidation alone can't see.
-        self._entity_vocab_dirty: bool = False
-        # codex P2 round 3: generation counter, bumped everywhere the dirty
-        # flag above is set/consumed. entity_key_vocabulary() snapshots this
-        # before its DB round-trip and only STORES its result if nothing
-        # bumped it in the meantime — closes the "late store" race the dirty
-        # flag alone can't: a rebuild that STARTS before a write invalidates
-        # the cache but FINISHES after can otherwise clobber the cache with
-        # a stale result, since the dirty flag only gated the write side's
-        # OWN re-invalidation, never a concurrently in-flight read's store.
+        # codex P2 round 3: generation counter, bumped at both entity-row
+        # write sites AND by learn()'s post-commit (per-call) invalidation.
+        # entity_key_vocabulary() snapshots this before its DB round-trip and
+        # only STORES its result if nothing bumped it in the meantime —
+        # closes the "late store" race: a rebuild that STARTS before a write
+        # invalidates the cache but FINISHES after can otherwise clobber the
+        # cache with a stale result.
+        #
+        # codex P2 round 5: round 2 originally gated learn()'s post-commit
+        # re-invalidation on a SHARED `self._entity_vocab_dirty` boolean —
+        # that broke under two overlapping learn() calls with entity_keys,
+        # since whichever call's `finally` ran first would clear the flag on
+        # behalf of BOTH, silently skipping the second call's own post-commit
+        # invalidation. Removed entirely; see learn()'s finally block, which
+        # now checks its OWN call-local `input.entity_keys` instead of any
+        # instance-shared state.
         self._entity_vocab_gen: int = 0
 
     def _band_budget_ok(self) -> bool:
@@ -522,11 +524,11 @@ class FactManager:
                     # before THIS transaction commits — under READ COMMITTED
                     # isolation that rebuild can't see the uncommitted row,
                     # so it re-caches a stale vocab with no further trigger
-                    # to invalidate it for the rest of the TTL. Re-check the
-                    # dirty flag here, after commit succeeds (the common
-                    # case) or on exception (a poisoned cache is still worth
-                    # clearing — it's only a cache, so over-invalidating on
-                    # failure is harmless).
+                    # to invalidate it for the rest of the TTL. Re-invalidate
+                    # here, after commit succeeds (the common case) or on
+                    # exception (a poisoned cache is still worth clearing —
+                    # it's only a cache, so over-invalidating on failure or
+                    # on a rejected fact is harmless).
                     # codex P2 round 3: also bump the generation counter here
                     # — a rebuild that captured `gen` in the narrow window
                     # AFTER the write site's own bump but BEFORE this commit
@@ -534,14 +536,22 @@ class FactManager:
                     # this SECOND bump to be detected as stale; the write
                     # site's bump alone only protects readers that captured
                     # `gen` before the write started.
-                    if self._entity_vocab_dirty:
+                    # codex P2 round 5: gate this on the CALL-LOCAL
+                    # `input.entity_keys` rather than a shared instance flag.
+                    # A shared `self._entity_vocab_dirty` broke under two
+                    # overlapping learn() calls with entity_keys: whichever
+                    # call's `finally` ran first would clear the flag the
+                    # OTHER call had set, so the second call's own commit
+                    # never triggered its own post-commit invalidation —
+                    # `input` is this call's own local variable, so there is
+                    # no cross-talk between concurrent calls.
+                    if input.entity_keys:
                         self._entity_vocab_cache = None
-                        self._entity_vocab_dirty = False
                         self._entity_vocab_gen += 1
         # Injected-session callers own their own commit point, so there is no
-        # place here to re-check the dirty flag post-commit — the 300s TTL
-        # remains the sole staleness bound for this path. No current caller
-        # passes entity_keys through an injected session.
+        # place here to re-invalidate post-commit — the 300s TTL remains the
+        # sole staleness bound for this path. No current caller passes
+        # entity_keys through an injected session.
         return await self._learn(
             input,
             list(exclude_ids or []),
@@ -797,16 +807,14 @@ class FactManager:
             # codex P2: new entity keys just entered the vocab — invalidate
             # so the next recall's keyed leg sees them without waiting out
             # the TTL. codex P2 round 2: this transaction is still open (not
-            # committed until learn() returns), so also mark dirty — a
-            # concurrent rebuild between here and commit would otherwise
-            # re-cache a stale pre-commit vocab with nothing left to
-            # invalidate it again. codex P2 round 3: bump the generation
-            # counter too, so a rebuild already in flight when we reach this
-            # line (captured `gen` before this point) is detected as stale
-            # by entity_key_vocabulary()'s post-query check, even if it
-            # finishes reading pre-commit data.
+            # committed until learn() returns) — learn()'s finally performs
+            # the actual post-commit re-invalidation (round 5: gated on this
+            # call's own `input.entity_keys`, not a shared flag). codex P2
+            # round 3: bump the generation counter too, so a rebuild already
+            # in flight when we reach this line (captured `gen` before this
+            # point) is detected as stale by entity_key_vocabulary()'s
+            # post-query check, even if it finishes reading pre-commit data.
             self._entity_vocab_cache = None
-            self._entity_vocab_dirty = True
             self._entity_vocab_gen += 1
 
         # Audit S3: apply the in-band dupe verdict now that the new fact
@@ -1363,11 +1371,10 @@ class FactManager:
             # candidate failed the stop-policy above (zero rows written) —
             # mirrors the _learn stamping rationale.
             dupe.entity_keys_extracted_at = datetime.now(UTC)
-            # codex P2 (+ round 2 dirty-flag, round 3 gen-counter): mirrors
-            # the _learn invalidation above — same still-open-transaction
-            # race applies here.
+            # codex P2 (+ round 3 gen-counter, round 5 per-call finally):
+            # mirrors the _learn invalidation above — same still-open-
+            # transaction race applies here.
             self._entity_vocab_cache = None
-            self._entity_vocab_dirty = True
             self._entity_vocab_gen += 1
         # Fill source_ordinal when the row has none and input provides one.
         if input.source_ordinal is not None and dupe.source_ordinal is None:
