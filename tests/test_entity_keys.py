@@ -1,6 +1,7 @@
 """R3 (F085): canonical key normalization + entity-candidate extraction."""
 import unicodedata
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -98,6 +99,31 @@ class TestFactInputKeyNormalization:
         )
         assert fi.subject_key == "marriage of figaro"
         assert fi.attribute_key == "author"
+
+
+class TestEntityExtractionCompleteDefault:
+    """codex P2 round 9: entity_extraction_complete's default flipped from
+    True to False. A bare FactInput — the shape a non-entity-aware legacy
+    producer (fact_extractor, the learn_fact tool, the REST endpoint) would
+    construct, with no entity awareness at all — must not implicitly claim
+    entity extraction completed. Only an entity-aware producer that
+    explicitly sets this True (the enumerative extractor, via
+    _to_fact_inputs) gets its facts stamped.
+    """
+    def test_defaults_false(self):
+        fi = FactInput(content="A legacy fact with no entity awareness at all.")
+        assert fi.entity_extraction_complete is False
+
+    def test_defaults_false_even_with_entity_keys_set(self):
+        # A direct caller can set entity_keys without being "entity-aware"
+        # in the full producer sense (e.g. hand-constructing a FactInput in
+        # a script or test) — the watermark stamp requires the EXPLICIT
+        # opt-in, not just a non-empty entity_keys list.
+        fi = FactInput(
+            content="A fact with entity_keys but no explicit opt-in.",
+            entity_keys=["some key"],
+        )
+        assert fi.entity_extraction_complete is False
 
 
 @pytest_asyncio.fixture
@@ -282,12 +308,18 @@ class TestExtractorEntityEmission:
 @pytest.mark.postgres_only
 class TestLearnWritesEntityRows:
     async def test_entity_rows_same_txn_and_stamp(self, heart, session):
+        # codex P2 round 9: entity_extraction_complete now defaults False
+        # (a direct FactInput() constructor is not, by itself, evidence an
+        # entity-aware producer ran) -- pass True explicitly since this test
+        # simulates the enumerative extractor's entity-aware write and
+        # asserts the watermark IS stamped.
         fi = FactInput(
             content="The author of The Marriage of Figaro is Thomas Kyd.",
             subject="marriage of figaro",
             subject_key="marriage of figaro",
             attribute_key="author",
             entity_keys=["marriage of figaro", "thomas kyd"],
+            entity_extraction_complete=True,
             source="enumerative_extractor",
         )
         result = await heart.learn(fi)
@@ -380,17 +412,64 @@ class TestLearnWritesEntityRows:
                         await cleanup.delete(dbfact)
                         await cleanup.commit()
 
+    async def test_entities_present_subject_fails_stop_policy_zero_rows_still_stamped(
+        self, heart, session, settings,
+    ):
+        """codex P2 round 9: entity-aware extraction where EVERY candidate,
+        including the subject, fails the stop-policy ends with
+        entity_keys=[] entirely (not just a subset filtered). Under round
+        6's stamp-only-if-entity_keys-non-empty rule this fact would NEVER
+        be stamped, so every backfill run would re-send it to the LLM
+        forever even though extraction genuinely completed with zero
+        accepted keys. entity_extraction_complete=True (from the "entities"
+        key being present) must still stamp the watermark.
+        """
+        from nous.handlers.enumerative_extractor import EnumerativeExtractor
+
+        ex = EnumerativeExtractor(heart=heart, settings=settings, llm_client=None, embedder=None)
+        raw = [{
+            "content": "The car in the driveway is red and freshly parked.",
+            "subject_key": "red",  # scalar -> fails is_keyable_entity
+            "attribute_key": "color",
+            "entities": [],  # entity-aware, reported zero object-side entities
+        }]
+        (fi,) = ex._to_fact_inputs(raw, chunk_index=0, episode_id=None)
+        assert fi.entity_keys == []
+        assert fi.entity_extraction_complete is True
+
+        result = await heart.learn(fi)
+        try:
+            rows = (await session.execute(
+                select(FactEntityKey).where(FactEntityKey.fact_id == result.id)
+            )).scalars().all()
+            assert rows == []
+            fact = await session.get(Fact, result.id)
+            assert fact.entity_keys_extracted_at is not None
+        finally:
+            fact_id = getattr(result, "id", None)
+            if fact_id is not None:
+                async with heart.db.session() as cleanup:
+                    dbfact = await cleanup.get(Fact, fact_id)
+                    if dbfact is not None:
+                        await cleanup.delete(dbfact)
+                        await cleanup.commit()
+
     async def test_junk_entity_keys_filtered_at_learn(self, heart, session):
         """codex P2 round 4: FactInput.entity_keys can be passed directly to
         Heart.learn, bypassing the extractor's is_keyable_entity stop-policy
         entirely (enumerative_extractor.py:327). _learn's insert loop must
         enforce the same gate itself, or a caller can persist junk keys
         ("red", "1876", 2-char values).
+
+        codex P2 round 9: entity_extraction_complete=True passed explicitly
+        (default flipped to False) since this test asserts the watermark IS
+        stamped despite 3 of the 4 candidates being filtered out.
         """
         fi = FactInput(
             content="The author of The Marriage of Figaro is Thomas Kyd.",
             subject="marriage of figaro",
             entity_keys=["red", "1876", "ab", "thomas kyd"],
+            entity_extraction_complete=True,
             source="enumerative_extractor",
         )
         result = await heart.learn(fi)
@@ -434,6 +513,10 @@ class TestLearnWritesEntityRows:
 
         codex P2 round 4: also carries a junk candidate ("1876") to confirm
         the stop-policy gate applies on this path too, mirroring _learn's.
+
+        codex P2 round 9: entity_extraction_complete=True passed explicitly
+        (default flipped to False) since this test asserts the watermark IS
+        stamped on the dupe.
         """
         vec = [1.0] + [0.0] * 1535  # unit vector: identical vec -> cosine 1.0 dupe match
         content = "The observability platform reports a service uptime of ninety nine point nine percent."
@@ -465,6 +548,7 @@ class TestLearnWritesEntityRows:
                     subject_key="observability platform",
                     attribute_key="uptime",
                     entity_keys=["observability platform", "service uptime", "1876"],
+                    entity_extraction_complete=True,
                     source="enumerative_extractor",
                 ),
                 precomputed_embedding=vec,
@@ -540,3 +624,92 @@ class TestLearnWritesEntityRows:
                 if dbfact is not None:
                     await cleanup.delete(dbfact)
                     await cleanup.commit()
+
+
+@pytest.mark.postgres_only
+class TestInheritConflictSlotKeys:
+    async def test_replacement_inherits_subject_key_and_entity_union(self, heart):
+        """codex P2 round 9: sleep_handler's F031/F027 merge sites create a
+        replacement fact from a bare FactInput (subject/content/source/
+        confidence/category only) — subject_key, attribute_key, and
+        entity_keys rows never carried over from the merged sources. This
+        drives FactManager.inherit_conflict_slot_keys the way both merge
+        sites do: AFTER the replacement row exists, pass it the source ids
+        being merged away.
+
+        Asserts: subject_key/attribute_key copied from the NEWEST source
+        that has both set; entity_keys rows are the DISTINCT UNION of every
+        source's rows; entity_keys_extracted_at stays NULL on the
+        replacement (merged content is new text — the backfill should
+        re-derive it); the source facts' own rows/active state are
+        untouched (this helper never deactivates anything itself — that's
+        the caller's job, same as apply_supersession).
+        """
+        agent_id = heart.agent_id
+        older_id = uuid.uuid4()
+        newer_id = uuid.uuid4()
+        replacement_id = uuid.uuid4()
+
+        async with heart.db.session() as s:
+            s.add(Fact(
+                id=older_id, agent_id=agent_id,
+                content="An older source fact about a shared topic.",
+                subject_key="topic", attribute_key="older attr",
+                learned_at=datetime.now(UTC) - timedelta(hours=2),
+                active=True,
+            ))
+            s.add(Fact(
+                id=newer_id, agent_id=agent_id,
+                content="A newer source fact about the same shared topic.",
+                subject_key="topic", attribute_key="newer attr",
+                learned_at=datetime.now(UTC) - timedelta(hours=1),
+                active=True,
+            ))
+            s.add(Fact(
+                id=replacement_id, agent_id=agent_id,
+                content="The LLM-merged replacement content.",
+                active=True,
+            ))
+            await s.flush()
+            s.add(FactEntityKey(fact_id=older_id, entity_key="shared key", agent_id=agent_id))
+            s.add(FactEntityKey(fact_id=older_id, entity_key="older only key", agent_id=agent_id))
+            s.add(FactEntityKey(fact_id=newer_id, entity_key="shared key", agent_id=agent_id))
+            s.add(FactEntityKey(fact_id=newer_id, entity_key="newer only key", agent_id=agent_id))
+            await s.commit()
+
+        try:
+            async with heart.db.session() as s:
+                await heart.facts.inherit_conflict_slot_keys(
+                    replacement_id, [older_id, newer_id], s,
+                )
+                await s.commit()
+
+            async with heart.db.session() as check:
+                replacement = await check.get(Fact, replacement_id)
+                # newest complete source (newer_id) wins the subject/attribute pair.
+                assert replacement.subject_key == "topic"
+                assert replacement.attribute_key == "newer attr"
+                assert replacement.entity_keys_extracted_at is None
+
+                rows = (await check.execute(
+                    select(FactEntityKey).where(FactEntityKey.fact_id == replacement_id)
+                )).scalars().all()
+                assert {r.entity_key for r in rows} == {
+                    "shared key", "older only key", "newer only key",
+                }
+
+                # Sources are untouched: still active, own rows intact.
+                older = await check.get(Fact, older_id)
+                newer = await check.get(Fact, newer_id)
+                assert older.active is True and newer.active is True
+                older_rows = (await check.execute(
+                    select(FactEntityKey).where(FactEntityKey.fact_id == older_id)
+                )).scalars().all()
+                assert {r.entity_key for r in older_rows} == {"shared key", "older only key"}
+        finally:
+            async with heart.db.session() as cleanup:
+                for fid in (older_id, newer_id, replacement_id):
+                    f = await cleanup.get(Fact, fid)
+                    if f is not None:
+                        await cleanup.delete(f)
+                await cleanup.commit()

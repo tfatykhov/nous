@@ -123,14 +123,20 @@ class FactInput(BaseModel):
         default_factory=list,
         description="R3.1: normalized keys of ALL participating entities (subject + proper-noun object/value side).",
     )
-    # codex P2 round 6: True (default) means the producer either isn't
-    # entity-aware at all, or IS and reported its full participating-entity
-    # set (even if empty). Only a producer whose raw response omitted the
-    # entities field entirely (not present-but-empty) sets this False —
-    # FactManager then inserts whatever entity_keys rows it has but leaves
-    # entity_keys_extracted_at NULL, so a future backfill pass still
-    # revisits this fact for value-side extraction.
-    entity_extraction_complete: bool = True
+    # codex P2 round 9 (flipped from round 6's default True): True only when
+    # an entity-aware producer ran entity extraction for this fact — controls
+    # the backfill watermark (entity_keys_extracted_at). Legacy/non-entity-
+    # aware producers (fact_extractor, learn_fact tool, REST endpoint) never
+    # set this, so they default to False and correctly stay unstamped —
+    # stamping them would falsely mark facts they never entity-extracted as
+    # "done," permanently hiding them from the backfill script. An
+    # entity-aware producer (the enumerative extractor) sets this True
+    # whenever its raw response included the "entities" key at all — even
+    # if every candidate then failed the stop-policy and entity_keys ended
+    # up empty; zero ACCEPTED keys is still a VALID completion, and gating
+    # the stamp on entity_keys being non-empty (round 6's mistake) would
+    # leave those facts re-sent to the LLM by every backfill run forever.
+    entity_extraction_complete: bool = False
     # 064 R1: positional reading-order ordinal — chunk_index * 1_000_000 +
     # in-chunk position; explicit statement numbers from the source are never
     # used (mixed-form comparisons invert reading order). Higher = later in the

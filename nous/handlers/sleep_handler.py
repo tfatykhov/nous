@@ -1174,6 +1174,18 @@ class SleepHandler:
                                     )
                                 else:
                                     async with self._heart.db.session() as session:
+                                        # codex P2 round 9: the merged
+                                        # replacement fact was created from a
+                                        # bare FactInput (subject/content/
+                                        # source/confidence/category only) —
+                                        # copy subject_key/attribute_key +
+                                        # the union of entity_keys rows over
+                                        # from the sources it occupies the
+                                        # same conflict slot as, before
+                                        # those sources are deactivated below.
+                                        await self._heart.facts.inherit_conflict_slot_keys(
+                                            merged_detail.id, [fact1_id, fact2_id], session,
+                                        )
                                         for orig_id in (fact1_id, fact2_id):
                                             # Defensive: never set
                                             # superseded_by to own id.
@@ -1621,6 +1633,14 @@ class SleepHandler:
 
                 # Deactivate originals
                 async with self._heart.db.session() as session:
+                    # codex P2 round 9: mirrors the F031 fix — copy
+                    # subject_key/attribute_key + the union of entity_keys
+                    # rows from the cluster members onto the merged
+                    # replacement before those members are deactivated
+                    # below (see inherit_conflict_slot_keys's docstring).
+                    await self._heart.facts.inherit_conflict_slot_keys(
+                        merged_detail.id, [f.id for f in facts], session,
+                    )
                     for fact in facts:
                         # Defensive (mirrors F031 fix on PR #412): never
                         # set superseded_by to own id. Heart.learn always

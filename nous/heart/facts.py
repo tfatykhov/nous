@@ -799,19 +799,6 @@ class FactManager:
                     session.add(FactEntityKey(fact_id=fact.id, entity_key=nk, agent_id=self.agent_id))
                 if len(seen_keys) >= max_keys:
                     break
-            # Stamped whenever entity_keys were provided, even if every
-            # candidate failed the stop-policy above (zero rows written) —
-            # the fact WAS processed for entity extraction; there is nothing
-            # left to retry, so a backfill pass must not re-visit it.
-            # codex P2 round 6: EXCEPT when entity_extraction_complete is
-            # False — the producer's raw response omitted the "entities"
-            # field entirely (distinct from an explicit empty list), so the
-            # object/value side was never actually extracted for this fact.
-            # Stamping anyway would be a false completion signal that
-            # permanently hides the fact from the backfill's IS NULL
-            # predicate. The subject-key row (if any) still inserted above.
-            if input.entity_extraction_complete:
-                fact.entity_keys_extracted_at = datetime.now(UTC)
             # codex P2: new entity keys just entered the vocab — invalidate
             # so the next recall's keyed leg sees them without waiting out
             # the TTL. codex P2 round 2: this transaction is still open (not
@@ -824,6 +811,23 @@ class FactManager:
             # post-query check, even if it finishes reading pre-commit data.
             self._entity_vocab_cache = None
             self._entity_vocab_gen += 1
+
+        # codex P2 round 9: stamping is a TRUE TRI-STATE signal, independent
+        # of whether entity_keys was non-empty or any candidate survived the
+        # stop-policy above. entity_extraction_complete alone answers "did an
+        # entity-aware producer finish extracting this fact's participating
+        # entities" — it is an explicit producer opt-in (default False as of
+        # round 9), so legacy/non-entity-aware producers (fact_extractor,
+        # learn_fact tool, REST endpoint) never set it and correctly stay
+        # unstamped/backfill-eligible. Zero ACCEPTED keys (e.g. a
+        # scalar-only subject with no object-side entities) is still a
+        # VALID completion for an entity-aware producer — gating the stamp
+        # on `input.entity_keys` non-empty (the round 6 behavior) would
+        # leave those facts permanently re-sent to the LLM by every
+        # backfill run, since they can never legitimately produce a
+        # non-empty entity_keys list.
+        if input.entity_extraction_complete:
+            fact.entity_keys_extracted_at = datetime.now(UTC)
 
         # Audit S3: apply the in-band dupe verdict now that the new fact
         # has an id. Returns a ContradictionWarning for CONTRADICTION.
@@ -1383,18 +1387,21 @@ class FactManager:
                     )
                 if len(seen_dupe_keys) >= max_keys:
                     break
-            # Stamped whenever entity_keys were provided, even if every
-            # candidate failed the stop-policy above (zero rows written) —
-            # mirrors the _learn stamping rationale. codex P2 round 6:
-            # EXCEPT when entity_extraction_complete is False — mirrors the
-            # _learn condition above (same false-completion-signal risk).
-            if input.entity_extraction_complete:
-                dupe.entity_keys_extracted_at = datetime.now(UTC)
             # codex P2 (+ round 3 gen-counter, round 5 per-call finally):
             # mirrors the _learn invalidation above — same still-open-
             # transaction race applies here.
             self._entity_vocab_cache = None
             self._entity_vocab_gen += 1
+
+        # codex P2 round 9: stamping is independent of whether entity_keys
+        # was non-empty (mirrors _learn's restructure — see its comment for
+        # the full tri-state rationale) and independent of the postgres-only
+        # dialect guard above (that guard is for the pg_insert entity-row
+        # backfill construct; a plain attribute assignment works on any
+        # dialect). Still fill-if-empty: never overwrite an already-stamped
+        # dupe's watermark.
+        if dupe.entity_keys_extracted_at is None and input.entity_extraction_complete:
+            dupe.entity_keys_extracted_at = datetime.now(UTC)
         # Fill source_ordinal when the row has none and input provides one.
         if input.source_ordinal is not None and dupe.source_ordinal is None:
             dupe.source_ordinal = input.source_ordinal
@@ -1690,6 +1697,80 @@ class FactManager:
         loser.active = False
         await self._create_graph_edge(winner_id, loser_id, "fact", "fact", "supersedes", 1.0, session)
         return True
+
+    async def inherit_conflict_slot_keys(
+        self, replacement_id: UUID, source_ids: list[UUID], session: AsyncSession,
+    ) -> None:
+        """codex P2 round 9: merged/replacement facts (F031 contradiction-
+        resolution MERGE, F027 cluster-consolidation MERGE in sleep_handler.py)
+        are created via a bare FactInput carrying only
+        subject/content/source/confidence/category — subject_key,
+        attribute_key, and entity_keys never carry over from the facts being
+        merged, so the replacement silently drops out of R2 same-key
+        supersession AND the keyed retrieval leg despite occupying the exact
+        same conflict slot the sources did. Call this AFTER the replacement
+        fact row exists (its id is known), passing the ids of the facts
+        being merged away.
+
+        (a) subject_key/attribute_key are copied from the NEWEST source that
+        has BOTH set (as a pair — a half-keyed row is worse than an unkeyed
+        one; "newest" matches R2's general most-recent-wins resolution
+        spirit when sources disagree).
+        (b) entity_keys rows are the DISTINCT UNION of every source's
+        fact_entity_keys, inserted for the replacement (ON CONFLICT DO
+        NOTHING), capped at entity_keys_max_per_fact — nothing else about
+        the source rows is preserved. Postgres-only (on_conflict_do_nothing
+        is a Postgres construct), mirroring _confirm_duplicate's dialect
+        guard.
+        (c) entity_keys_extracted_at is deliberately left untouched (stays
+        NULL on the fresh replacement row — the merge FactInput never sets
+        entity_keys/entity_extraction_complete, so _learn's stamp never
+        fires): the merged CONTENT is new text — an LLM-authored synthesis,
+        not any one source's original wording — so the backfill's
+        value-side extraction should re-derive entities for it rather than
+        inheriting a stale completion signal from facts whose exact content
+        no longer exists anywhere.
+
+        No commit here — caller-owned session/transaction, same contract as
+        apply_supersession above.
+        """
+        if not source_ids:
+            return
+
+        sources = (
+            await session.execute(
+                select(Fact.subject_key, Fact.attribute_key, Fact.learned_at)
+                .where(Fact.id.in_(source_ids))
+            )
+        ).all()
+        complete = [s for s in sources if s.subject_key is not None and s.attribute_key is not None]
+        if complete:
+            newest = max(complete, key=lambda s: s.learned_at)
+            await session.execute(
+                update(Fact)
+                .where(Fact.id == replacement_id)
+                .values(subject_key=newest.subject_key, attribute_key=newest.attribute_key)
+            )
+
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            max_keys = self._settings.entity_keys_max_per_fact if self._settings else 8
+            union_keys = (
+                await session.execute(
+                    select(FactEntityKey.entity_key)
+                    .where(FactEntityKey.fact_id.in_(source_ids))
+                    .distinct()
+                    .limit(max_keys)
+                )
+            ).scalars().all()
+            for key in union_keys:
+                await session.execute(
+                    pg_insert(FactEntityKey)
+                    .values(fact_id=replacement_id, entity_key=key, agent_id=self.agent_id)
+                    .on_conflict_do_nothing()
+                )
+            if union_keys:
+                self._entity_vocab_cache = None
+                self._entity_vocab_gen += 1
 
     # ------------------------------------------------------------------
     # 064 R2: key-conflict resolution

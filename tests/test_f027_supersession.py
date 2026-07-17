@@ -578,6 +578,9 @@ class TestPhaseClusterConsolidation:
         heart.learn = AsyncMock(return_value=merged_detail)
         # 2026-06-13 audit: cluster consolidation now writes the supersedes edge.
         heart.link_facts = AsyncMock()
+        # codex P2 round 9: merged fact now inherits subject_key/attribute_key
+        # + entity_keys from the cluster members before they're deactivated.
+        heart.facts.inherit_conflict_slot_keys = AsyncMock()
 
         # db.session returns different sessions on each call
         call_count = 0
