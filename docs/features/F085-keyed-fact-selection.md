@@ -206,22 +206,22 @@ up — but exact-key matching is degraded for the gap window).
 Per the implementation plan's Global Constraints, acceptance for R3/F085 is evaluated by the MAB team using
 their own scripts, **outside this repository** — this repo's deliverable is the mechanism (migration,
 canonicalizer, write-path emission, backfill, and the land-dark retrieval leg) plus unit/integration tests,
-not the eval run itself. **The R3 requirements doc (`nous-r3-keyed-selection-requirements.md`) that defines
-the acceptance gates in full is external to this repository and was not available verbatim during
-implementation or when writing this doc.** The four gates below are reconstructed from the plan's Global
-Constraints and Self-Review Notes (not a verbatim quote):
+not the eval run itself. The four gates below are quoted verbatim from the MAB requirements doc
+(`nous-r3-keyed-selection-requirements.md`, 2026-07-17, "Acceptance gates (in order; 1–2 are free)"):
 
-1. **Selection/retrievability gate** — the −5.0pp selection-failure cohort identified in the R3 measurement
-   (facts that exist per F084 but score too low on cosine/FTS to surface, keyed-similarity 0.20–0.23) must
-   become retrievable via exact entity-key match once R3.1/R3.2/R3.3 are enabled on a backfilled corpus.
-2. **Non-displacement gate** — the keyed leg's additive, score-banded, sorted-position merge (R3.3) must not
-   regress the ranking of facts already surfaced by the direct/chunk legs; this is the "displacement check"
-   the plan's Self-Review Notes call out as the empirical arbiter for deviation #3 above.
-3. **Paired QA replay** — a positive accuracy/MRR delta vs. baseline on the affected question class,
-   generator-robust and at adequate sample size, mirroring F084's stage-2 gate discipline.
-4. **Backfill/coverage completeness** — entity-key backfill coverage across the corpus (the three-phase
-   runbook above) reaching a level sufficient for gates 1–3 to be measurable, mirroring F084's chain-coverage
-   check.
+1. **Ceiling simulation (zero LLM, zero nous-runtime):** re-run `scripts/probe_keyed_lookup_sim.py`
+   (adapted to the entity-key index) on the re-keyed `nous_mab_wp` clone. **Gate: single-hop gold
+   retrieval ≥ 0.80** (vs 0.41 today) with median candidate set ≤ ~10 facts. If the gate fails, iterate
+   keying — build no retrieval code.
+2. **Displacement check (free):** injected-candidate composition on a probe sample must show chunk-channel
+   content NOT reduced when the keyed leg contributes (the bounded allotment requirement working).
+3. **Decisive replay (≈7M tokens, only after 1–2 pass):** CR n=320 on the re-keyed clone, flag on vs
+   published 0.725. Prediction to beat: the 0.713–0.725 noise band; the existence+selection thesis predicts
+   single-hop → ~0.95.
+4. **Regression replays** (AR eventqa slice, detective) — the keyed leg must not perturb non-CR retrieval.
+
+(The referenced probe script and `nous_mab_wp` clone live with the MAB evaluation program, not in this
+repository.)
 
 ## Non-goals
 
