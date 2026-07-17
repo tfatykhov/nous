@@ -777,3 +777,133 @@ class TestInheritConflictSlotKeys:
                     if f is not None:
                         await cleanup.delete(f)
                 await cleanup.commit()
+
+
+@pytest.mark.postgres_only
+class TestSupersedeInheritsConflictSlotKeys:
+    """codex P2 round 11: sleep_handler._handle_updates_prefix calls
+    Heart.supersede_fact with a bare FactInput (subject/content/source/
+    confidence/category only, mirrored here) — the same key-loss class
+    fixed at the F031/F027 merge sites in round 9, but at the generic
+    supersede path (FactManager._supersede). Without wiring
+    inherit_conflict_slot_keys into _supersede, the replacement would be
+    stored keyless while the keyed source gets deactivated, permanently
+    dropping the conflict slot out of exact-key recall.
+    """
+
+    async def test_bare_replacement_inherits_subject_key_and_entities(self, heart):
+        agent_id = heart.agent_id
+        source_id = uuid.uuid4()
+
+        async with heart.db.session() as s:
+            s.add(Fact(
+                id=source_id, agent_id=agent_id,
+                content="Nous prefers uv over pip for dependency management.",
+                subject_key="package manager", attribute_key="preference",
+                learned_at=datetime.now(UTC),
+                active=True,
+            ))
+            await s.flush()
+            s.add(FactEntityKey(fact_id=source_id, entity_key="package manager", agent_id=agent_id))
+            s.add(FactEntityKey(fact_id=source_id, entity_key="poetry", agent_id=agent_id))
+            await s.commit()
+
+        detail = None
+        try:
+            # Same bare-FactInput shape sleep_handler._handle_updates_prefix
+            # passes to supersede_fact — no subject_key/entity_keys at all.
+            detail = await heart.supersede_fact(
+                source_id,
+                FactInput(
+                    subject="package manager",
+                    content="Nous now strongly prefers uv over both pip and poetry.",
+                    source="sleep_reflection",
+                    confidence=0.8,
+                    category="concept",
+                ),
+            )
+
+            async with heart.db.session() as check:
+                replacement = await check.get(Fact, detail.id)
+                assert replacement.subject_key == "package manager"
+                assert replacement.attribute_key == "preference"
+                assert replacement.entity_keys_extracted_at is None
+
+                rows = (await check.execute(
+                    select(FactEntityKey).where(FactEntityKey.fact_id == detail.id)
+                )).scalars().all()
+                assert {r.entity_key for r in rows} == {"package manager", "poetry"}
+
+                source = await check.get(Fact, source_id)
+                assert source.active is False
+                assert source.superseded_by == detail.id
+                source_rows = (await check.execute(
+                    select(FactEntityKey).where(FactEntityKey.fact_id == source_id)
+                )).scalars().all()
+                assert {r.entity_key for r in source_rows} == {"package manager", "poetry"}
+        finally:
+            async with heart.db.session() as cleanup:
+                ids = [source_id] + ([detail.id] if detail is not None else [])
+                for fid in ids:
+                    f = await cleanup.get(Fact, fid)
+                    if f is not None:
+                        await cleanup.delete(f)
+                await cleanup.commit()
+
+    async def test_already_keyed_replacement_is_not_overwritten(self, heart):
+        """A supersede caller CAN pass a FactInput with its own subject_key
+        (unlike the merge sites, which never do) — that keyed replacement
+        must win over the inherited source key, not be clobbered by it.
+        The entity-row union stays additive regardless.
+        """
+        agent_id = heart.agent_id
+        source_id = uuid.uuid4()
+
+        async with heart.db.session() as s:
+            s.add(Fact(
+                id=source_id, agent_id=agent_id,
+                content="Nous prefers uv over pip for dependency management, take two.",
+                subject_key="package manager", attribute_key="preference",
+                learned_at=datetime.now(UTC),
+                active=True,
+            ))
+            await s.flush()
+            s.add(FactEntityKey(fact_id=source_id, entity_key="package manager", agent_id=agent_id))
+            s.add(FactEntityKey(fact_id=source_id, entity_key="poetry", agent_id=agent_id))
+            await s.commit()
+
+        detail = None
+        try:
+            detail = await heart.supersede_fact(
+                source_id,
+                FactInput(
+                    subject="dependency tooling",
+                    subject_key="its own distinct key",
+                    content="A keyed replacement fact for the already-keyed supersede test.",
+                    source="sleep_reflection",
+                    confidence=0.8,
+                    category="concept",
+                ),
+            )
+
+            async with heart.db.session() as check:
+                replacement = await check.get(Fact, detail.id)
+                # The caller's own key wins -- not overwritten by the
+                # source's "package manager"/"preference" pair.
+                assert replacement.subject_key == "its own distinct key"
+                assert replacement.attribute_key is None
+
+                # Entity-row union from the source is still additive+capped
+                # even though the subject/attribute pair copy was skipped.
+                rows = (await check.execute(
+                    select(FactEntityKey).where(FactEntityKey.fact_id == detail.id)
+                )).scalars().all()
+                assert {r.entity_key for r in rows} == {"package manager", "poetry"}
+        finally:
+            async with heart.db.session() as cleanup:
+                ids = [source_id] + ([detail.id] if detail is not None else [])
+                for fid in ids:
+                    f = await cleanup.get(Fact, fid)
+                    if f is not None:
+                        await cleanup.delete(f)
+                await cleanup.commit()

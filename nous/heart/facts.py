@@ -1638,6 +1638,15 @@ class FactManager:
         if isinstance(new_detail, FactRejected):
             raise RuntimeError("Supersede bypass failed — admission should not reject bypassed sources")
 
+        # codex P2 round 11: callers like sleep_handler._handle_updates_prefix
+        # supersede with a bare FactInput (no subject_key/entity_keys) — the
+        # replacement would otherwise permanently lose exact-key recall for
+        # the conflict slot the deactivated old_fact occupied. Reuses the
+        # same helper the F031/F027 merge sites use; it no-ops the
+        # subject_key/attribute_key copy when new_fact already carries its
+        # own subject_key (a keyed caller wins over inheritance).
+        await self.inherit_conflict_slot_keys(new_detail.id, [old_fact_id], session)
+
         # Update old fact
         old_fact.superseded_by = new_detail.id
         old_fact.active = False
@@ -1739,11 +1748,37 @@ class FactManager:
         inheriting a stale completion signal from facts whose exact content
         no longer exists anywhere.
 
+        codex P2 round 11: this is now also called from the generic
+        supersede path (_supersede), whose caller — unlike the two merge
+        sites, which always pass a bare subject/content-only FactInput —
+        can pass a FactInput that already carries its own subject_key (a
+        keyed replacement should win over an inherited one). So the
+        subject_key/attribute_key copy in (a), and the subject-key
+        reservation in (b), are skipped when the replacement already has a
+        subject_key that DIFFERS from what these same sources would copy —
+        that's a caller-owned key, not one this helper produced. When the
+        existing key instead MATCHES what these sources would produce, the
+        copy is treated as a no-op re-application rather than a foreign
+        key: this keeps a second, idempotent invocation on an
+        already-processed replacement (e.g. a retried merge/backfill call)
+        stable, per round 10's rerun-stability contract — round 10's
+        distinct().limit(max_keys) cap still needs the subject key
+        reserved on every call, not just the first, or a rerun can admit
+        one extra union row once the column is no longer NULL. The
+        entity-key union insert in (b) stays unconditional and additive
+        regardless (ON CONFLICT DO NOTHING makes it safe either way).
+
         No commit here — caller-owned session/transaction, same contract as
         apply_supersession above.
         """
         if not source_ids:
             return
+
+        replacement_subject_key = (
+            await session.execute(
+                select(Fact.subject_key).where(Fact.id == replacement_id)
+            )
+        ).scalar_one_or_none()
 
         sources = (
             await session.execute(
@@ -1752,8 +1787,11 @@ class FactManager:
             )
         ).all()
         complete = [s for s in sources if s.subject_key is not None and s.attribute_key is not None]
-        if complete:
-            newest = max(complete, key=lambda s: s.learned_at)
+        newest = max(complete, key=lambda s: s.learned_at) if complete else None
+        skip_subject_copy = replacement_subject_key is not None and (
+            newest is None or replacement_subject_key != newest.subject_key
+        )
+        if newest is not None and not skip_subject_copy:
             await session.execute(
                 update(Fact)
                 .where(Fact.id == replacement_id)
@@ -1766,8 +1804,11 @@ class FactManager:
             inserted_any = False
 
             # Reserve a slot for the copied subject_key FIRST, before the
-            # capped union query below can crowd it out.
-            subject_key_value = newest.subject_key if complete else None
+            # capped union query below can crowd it out. Skipped when (a)
+            # skipped the copy (a foreign, caller-owned key is present).
+            subject_key_value = (
+                newest.subject_key if newest is not None and not skip_subject_copy else None
+            )
             if subject_key_value and is_keyable_entity(subject_key_value, min_chars=min_chars):
                 await session.execute(
                     pg_insert(FactEntityKey)
