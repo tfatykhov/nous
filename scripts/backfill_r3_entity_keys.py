@@ -2,10 +2,16 @@
 """R3.2/R3.1 backfill (F085): (1) re-normalize existing F084 keys in place,
 (2) seed subject-key entity rows, (3) LLM value-side entity extraction.
 
-Rollback: entity rows this run -> DELETE FROM heart.fact_entity_keys
-WHERE agent_id = :a AND created_at >= :watermark. Phase 1 key rewrites are
-value-idempotent (normalize is a fixpoint) and cannot be auto-rolled back -
-the watermark timestamp is printed for audit.
+Rollback: `--phase rollback --watermark <iso-ts>` (the "ROLLBACK KEY" printed
+at the start of the run you want to undo) -- deletes entity rows created
+at/after the watermark AND resets entity_keys_extracted_at on facts stamped
+at/after it, so a re-run's IS NULL predicate revisits them (see
+phase_rollback). Safe against Phase 1 rewrites: a normalized replacement row
+carries the OLD row's created_at, so re-normalizing a pre-existing row never
+makes it look like a new one to a later rollback. Raw SQL for reference:
+DELETE FROM heart.fact_entity_keys WHERE agent_id = :a AND created_at >=
+:watermark; UPDATE heart.facts SET entity_keys_extracted_at = NULL WHERE
+agent_id = :a AND entity_keys_extracted_at >= :watermark.
 
 Resume: phase 3 processes only facts WHERE entity_keys_extracted_at IS NULL
 (statement-level watermark, R3.2 hardening item); safe to kill and re-run.
@@ -22,7 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from nous.config import Settings
@@ -123,8 +129,16 @@ async def phase_normalize(session, *, agent_id: str, dry_run: bool, batch_size: 
         # db-P3-5: INSERT the new (canonical) row first, ON CONFLICT DO NOTHING,
         # THEN delete the old row -- an unconditional insert+delete would instead
         # risk deleting an already-canonical row after its insert conflicts.
+        # codex P2 round 8: carry the OLD row's created_at into the replacement
+        # -- without this the column's server_default gives the replacement a
+        # FRESH created_at (>= this run's watermark), so a later rollback
+        # (DELETE ... WHERE created_at >= watermark) would delete normalized
+        # replacements of rows that PRE-DATE this backfill entirely, losing
+        # data the rollback is supposed to leave untouched.
         await session.execute(
-            pg_insert(FactEntityKey).values(fact_id=ek.fact_id, entity_key=new_key, agent_id=agent_id).on_conflict_do_nothing()
+            pg_insert(FactEntityKey)
+            .values(fact_id=ek.fact_id, entity_key=new_key, agent_id=agent_id, created_at=ek.created_at)
+            .on_conflict_do_nothing()
         )
         await session.delete(ek)
     if not dry_run:
@@ -296,6 +310,65 @@ async def phase_extract(
     return counts
 
 
+async def phase_rollback(
+    session, *, agent_id: str, watermark: datetime, dry_run: bool,
+) -> dict[str, int]:
+    """codex P2 round 8: real rollback mode, replacing hand-run SQL.
+
+    Undoes a backfill run identified by its printed "ROLLBACK KEY"
+    (created_at watermark): deletes entity rows created at/after the
+    watermark, AND resets entity_keys_extracted_at on facts stamped
+    at/after it -- without the second part, extract's IS NULL predicate
+    would never revisit those facts even after their entity rows are gone.
+
+    Safe against phase_normalize's Pass 2 rewrites: a normalized replacement
+    row now carries the OLD row's created_at (see phase_normalize), so a
+    row that was merely re-normalized by a PRIOR run (before this
+    watermark) does not match `created_at >= watermark` and survives —
+    only genuinely new rows (seed/extract, or a rewrite of a row that
+    itself postdates the watermark) are deleted.
+
+    No commit here -- same contract as the other phase_* functions; the
+    CLI commits.
+    """
+    if dry_run:
+        n_rows = (
+            await session.execute(
+                text(
+                    "SELECT COUNT(*) FROM heart.fact_entity_keys "
+                    "WHERE agent_id = :a AND created_at >= :w"
+                ),
+                {"a": agent_id, "w": watermark},
+            )
+        ).scalar_one()
+        n_facts = (
+            await session.execute(
+                text(
+                    "SELECT COUNT(*) FROM heart.facts "
+                    "WHERE agent_id = :a AND entity_keys_extracted_at >= :w"
+                ),
+                {"a": agent_id, "w": watermark},
+            )
+        ).scalar_one()
+        return {"entity_rows_deleted": n_rows, "facts_watermark_reset": n_facts}
+
+    r1 = await session.execute(
+        text(
+            "DELETE FROM heart.fact_entity_keys "
+            "WHERE agent_id = :a AND created_at >= :w"
+        ),
+        {"a": agent_id, "w": watermark},
+    )
+    r2 = await session.execute(
+        text(
+            "UPDATE heart.facts SET entity_keys_extracted_at = NULL "
+            "WHERE agent_id = :a AND entity_keys_extracted_at >= :w"
+        ),
+        {"a": agent_id, "w": watermark},
+    )
+    return {"entity_rows_deleted": r1.rowcount, "facts_watermark_reset": r2.rowcount}
+
+
 def _merge(totals: dict[str, int], counts: dict[str, int]) -> None:
     for k, v in counts.items():
         totals[k] = totals.get(k, 0) + v
@@ -318,8 +391,34 @@ async def _run_backfill(
     llm_batch: int,
     max_llm_calls: int,
     dry_run: bool,
+    rollback_watermark: datetime | None = None,
 ) -> int:
     settings = Settings()
+
+    # codex P2 round 8: rollback is a distinct flow -- it consumes a
+    # PAST run's printed watermark (rollback_watermark) rather than
+    # generating a fresh one, and runs none of the forward phases below.
+    if phase == "rollback":
+        db = Database(settings)
+        await db.connect()
+        try:
+            async with db.session() as s:
+                c = await phase_rollback(
+                    s, agent_id=agent_id, watermark=rollback_watermark, dry_run=dry_run,
+                )
+                if not dry_run:
+                    await s.commit()
+            label = "DRY RUN " if dry_run else ""
+            print(
+                f"[rollback] {label}entity_rows_deleted={c['entity_rows_deleted']} "
+                f"facts_watermark_reset={c['facts_watermark_reset']}"
+            )
+            return 0
+        except Exception:
+            logger.exception("Rollback failed")
+            return 2
+        finally:
+            await db.disconnect()
 
     needs_llm = phase in ("extract", "all")
     if needs_llm and not dry_run and not (
@@ -428,16 +527,22 @@ def main() -> None:
         description="R3.2/F085: re-normalize entity keys in place + seed subject-key rows + LLM value-side extraction.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "ROLLBACK: see script header for the entity-row DELETE. Phase-1 key\n"
-            "rewrites are value-idempotent and audited via the printed watermark.\n"
+            "ROLLBACK: --phase rollback --watermark <iso-ts> (the value printed as\n"
+            "'ROLLBACK KEY' by the run you want to undo). See script header + \n"
+            "phase_rollback's docstring for the raw SQL reference.\n"
             "RESUME: phase 3 is resumable via entity_keys_extracted_at IS NULL."
         ),
     )
     parser.add_argument("--agent-id", required=True, help="Agent identifier (e.g. nous-default).")
     parser.add_argument("--dry-run", action="store_true", help="Count only; no writes, no LLM calls.")
     parser.add_argument(
-        "--phase", choices=["normalize", "seed", "extract", "all"], default="all",
-        help="Which phase(s) to run (default: all, in order).",
+        "--phase", choices=["normalize", "seed", "extract", "all", "rollback"], default="all",
+        help="Which phase(s) to run (default: all, in order). 'rollback' requires --watermark.",
+    )
+    parser.add_argument(
+        "--watermark", type=str, default=None,
+        help="ISO-8601, timezone-aware timestamp (the 'ROLLBACK KEY' printed by "
+             "a prior run). Required for --phase rollback; ignored otherwise.",
     )
     parser.add_argument("--batch-size", type=int, default=500, help="Rows fetched per DB page (default: 500).")
     parser.add_argument("--llm-batch", type=int, default=40, help="Facts per LLM extraction call (default: 40).")
@@ -447,6 +552,17 @@ def main() -> None:
     )
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args()
+
+    rollback_watermark = None
+    if args.phase == "rollback":
+        if not args.watermark:
+            parser.error("--phase rollback requires --watermark <iso-ts>")
+        try:
+            rollback_watermark = datetime.fromisoformat(args.watermark)
+        except ValueError:
+            parser.error(f"--watermark is not a valid ISO-8601 timestamp: {args.watermark!r}")
+        if rollback_watermark.tzinfo is None:
+            parser.error("--watermark must be timezone-aware (e.g. include '+00:00' or 'Z')")
 
     logging.basicConfig(
         level=getattr(logging, args.log_level),
@@ -460,6 +576,7 @@ def main() -> None:
         llm_batch=args.llm_batch,
         max_llm_calls=args.max_llm_calls,
         dry_run=args.dry_run,
+        rollback_watermark=rollback_watermark,
     )))
 
 

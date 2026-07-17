@@ -1,4 +1,5 @@
 """R3.2 backfill: re-normalize keys in place; seed subject rows; value-side extract."""
+import datetime as dt
 import uuid
 from types import SimpleNamespace
 
@@ -66,19 +67,39 @@ class TestBackfillPhases:
         canonical. After phase_normalize exactly one canonical row survives
         (insert-before-delete + ON CONFLICT DO NOTHING must not delete the
         already-canonical row after its insert conflicts), and
-        entity_rows_rewritten counts only the row that actually changed."""
+        entity_rows_rewritten counts only the row that actually changed.
+
+        codex P2 round 8: also seeds an independent, NON-colliding raw key
+        ("author_name", no pre-existing canonical counterpart) with an
+        explicit OLD created_at, to assert the rewrite INSERT carries the
+        original row's created_at forward. Without this, the replacement
+        row's created_at defaults to NOW() (the column's server_default),
+        which would make a later `--phase rollback --watermark <ts>` run
+        incorrectly delete this pre-existing row's replacement (it would
+        look like a row created BY the run being rolled back).
+        """
+        old_ts = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
         f = await make_fact()
         session.add(FactEntityKey(fact_id=f.id, entity_key="thomas_kyd", agent_id=f.agent_id))
         session.add(FactEntityKey(fact_id=f.id, entity_key="thomas kyd", agent_id=f.agent_id))
+        session.add(FactEntityKey(
+            fact_id=f.id, entity_key="author_name", agent_id=f.agent_id, created_at=old_ts,
+        ))
         await session.flush()
         from scripts.backfill_r3_entity_keys import phase_normalize
         counts = await phase_normalize(session, agent_id=f.agent_id, dry_run=False)
         await session.flush()
         rows = (await session.execute(
             select(FactEntityKey).where(FactEntityKey.fact_id == f.id))).scalars().all()
-        assert {r.entity_key for r in rows} == {"thomas kyd"}
-        assert len(rows) == 1
-        assert counts["entity_rows_rewritten"] == 1
+        assert {r.entity_key for r in rows} == {"thomas kyd", "author name"}
+        assert len(rows) == 2
+        assert counts["entity_rows_rewritten"] == 2
+
+        author_row = next(r for r in rows if r.entity_key == "author name")
+        assert author_row.created_at == old_ts, (
+            "rewrite INSERT must carry forward the original row's created_at, "
+            "not default to NOW() via the column's server_default"
+        )
 
     async def test_seed_phase_inserts_subject_rows_idempotently(self, session, make_fact):
         f = await make_fact(subject_key="thomas kyd")
@@ -157,6 +178,57 @@ class TestBackfillPhases:
         assert _is_stuck_round(counts) is True
         await session.refresh(f)
         assert f.entity_keys_extracted_at is None
+
+    async def test_phase_rollback_deletes_post_watermark_only(self, session, make_fact):
+        """codex P2 round 8: phase_rollback must undo ONLY what a run at/after
+        the watermark did -- entity rows created at/after it are deleted,
+        AND entity_keys_extracted_at is reset only on facts stamped at/after
+        it (otherwise extract's IS NULL predicate would never revisit them).
+        Pre-watermark data must survive untouched; dry_run must write nothing.
+        """
+        from scripts.backfill_r3_entity_keys import phase_rollback
+
+        pre_ts = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
+        watermark = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc)
+        post_ts = dt.datetime(2025, 6, 1, tzinfo=dt.timezone.utc)
+
+        f_pre = await make_fact(entity_keys_extracted_at=pre_ts)
+        f_post = await make_fact(entity_keys_extracted_at=post_ts)
+        session.add(FactEntityKey(
+            fact_id=f_pre.id, entity_key="pre key", agent_id=f_pre.agent_id, created_at=pre_ts,
+        ))
+        session.add(FactEntityKey(
+            fact_id=f_post.id, entity_key="post key", agent_id=f_post.agent_id, created_at=post_ts,
+        ))
+        await session.flush()
+
+        # dry_run: counts only, writes nothing.
+        dry_counts = await phase_rollback(
+            session, agent_id=f_pre.agent_id, watermark=watermark, dry_run=True,
+        )
+        assert dry_counts["entity_rows_deleted"] == 1
+        assert dry_counts["facts_watermark_reset"] == 1
+        rows = (await session.execute(
+            select(FactEntityKey).where(FactEntityKey.agent_id == f_pre.agent_id)
+        )).scalars().all()
+        assert {r.entity_key for r in rows} == {"pre key", "post key"}, "dry-run must write nothing"
+
+        # Live rollback: only the post-watermark row/stamp are touched.
+        counts = await phase_rollback(
+            session, agent_id=f_pre.agent_id, watermark=watermark, dry_run=False,
+        )
+        assert counts["entity_rows_deleted"] == 1
+        assert counts["facts_watermark_reset"] == 1
+
+        rows = (await session.execute(
+            select(FactEntityKey).where(FactEntityKey.agent_id == f_pre.agent_id)
+        )).scalars().all()
+        assert {r.entity_key for r in rows} == {"pre key"}, "only the post-watermark row must be deleted"
+
+        await session.refresh(f_pre)
+        await session.refresh(f_post)
+        assert f_pre.entity_keys_extracted_at == pre_ts, "pre-watermark stamp must survive"
+        assert f_post.entity_keys_extracted_at is None, "post-watermark stamp must be reset"
 
 
 class TestStuckRoundGuard:

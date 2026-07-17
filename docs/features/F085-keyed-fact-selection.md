@@ -141,13 +141,18 @@ independently re-runnable and safe to invoke alone via `--phase`):
    re-asking about the same persistently-omitted facts. Every fact the LLM returns an item for — even an
    empty one — gets `entity_keys_extracted_at` stamped; that stamp IS the resume marker.
 
-**Watermark / rollback:** the CLI prints a `created_at` rollback watermark before any write. Phase-1
-(`normalize`) key rewrites are value-idempotent and not meaningfully "rollback-able" (the fixpoint is the
-fixpoint) — the watermark there is for audit only. Phase 2/3 entity rows can be rolled back with:
+**Watermark / rollback:** the CLI prints a `created_at` rollback watermark ("ROLLBACK KEY") before any write.
+Phase-1 (`normalize`) key rewrites are value-idempotent (the fixpoint is the fixpoint) and preserve the
+original row's `created_at` on rewrite, so they're transparent to rollback rather than exempt from it. Undo
+a run with `--phase rollback --watermark <iso-ts>` (`phase_rollback`): it deletes entity rows created at/after
+the watermark and resets `entity_keys_extracted_at` on facts stamped at/after it, so extract's `IS NULL`
+resume predicate revisits them on the next run. `--dry-run` reports counts only. Raw SQL, for reference:
 
 ```sql
 DELETE FROM heart.fact_entity_keys
 WHERE agent_id = :agent_id AND created_at >= :watermark;
+UPDATE heart.facts SET entity_keys_extracted_at = NULL
+WHERE agent_id = :agent_id AND entity_keys_extracted_at >= :watermark;
 ```
 
 **Resume:** only phase 3 (`extract`) needs a resume story — it processes strictly
