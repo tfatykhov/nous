@@ -1,7 +1,13 @@
 """R3 (F085): canonical key normalization + entity-candidate extraction."""
 import unicodedata
+import uuid
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import select
 
 from nous.heart.keys import extract_entity_candidates, normalize_key
+from nous.storage.models import Fact, FactEntityKey
 
 
 class TestNormalizeKeyV2:
@@ -58,3 +64,48 @@ class TestNormalizeKeyV2:
         for raw in cases:
             once = normalize_key(raw)
             assert normalize_key(once) == once, raw
+
+
+@pytest_asyncio.fixture
+async def make_fact(session):
+    """Function-scoped factory for a bare heart.facts row.
+
+    No `make_fact` fixture exists anywhere in the suite (other test files
+    insert facts via heart.learn() instead) — this local factory just needs
+    a row to hang FactEntityKey rows off of, so it skips the Heart pipeline.
+    """
+    async def _make_fact(**overrides):
+        defaults = {
+            "id": uuid.uuid4(),
+            "agent_id": "test-entity-keys-agent",
+            "content": "default fact content for entity key schema tests",
+            "active": True,
+        }
+        defaults.update(overrides)
+        fact = Fact(**defaults)
+        session.add(fact)
+        await session.flush()
+        return fact
+
+    return _make_fact
+
+
+@pytest.mark.postgres_only
+class TestFactEntityKeysSchema:
+    async def test_insert_and_cascade_delete(self, session, make_fact):
+        # make_fact: use the existing fixture pattern from test_write_path_adjudication.py
+        # (insert a Fact row directly); if no fixture exists, create the Fact inline.
+        fact = await make_fact(content="The author of X is Thomas Kyd.")
+        session.add(FactEntityKey(fact_id=fact.id, entity_key="thomas kyd", agent_id=fact.agent_id))
+        session.add(FactEntityKey(fact_id=fact.id, entity_key="x", agent_id=fact.agent_id))
+        await session.flush()
+        rows = (await session.execute(
+            select(FactEntityKey).where(FactEntityKey.fact_id == fact.id)
+        )).scalars().all()
+        assert {r.entity_key for r in rows} == {"thomas kyd", "x"}
+        await session.delete(fact)   # hard delete only in tests: FK must CASCADE
+        await session.flush()
+        rows = (await session.execute(
+            select(FactEntityKey).where(FactEntityKey.fact_id == fact.id)
+        )).scalars().all()
+        assert rows == []
