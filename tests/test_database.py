@@ -68,6 +68,7 @@ async def test_all_tables_exist(db):
         ("heart", "episode_decisions"),
         ("heart", "episode_chunks"),  # F067
         ("heart", "facts"),
+        ("heart", "fact_entity_keys"),  # F085
         ("heart", "procedures"),
         ("heart", "episode_procedures"),
         ("heart", "censors"),

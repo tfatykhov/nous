@@ -33,6 +33,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# R3.3 (F085) codex P2: entity-key vocabulary cache TTL, in seconds. Lives on
+# the FactManager instance (see entity_key_vocabulary below) rather than a
+# module-level cache keyed by instance, so writes from THIS process invalidate
+# it immediately instead of waiting out the TTL.
+_ENTITY_VOCAB_TTL_SECONDS = 300.0
+
 # F027: classifier prompt. Exported so the F027 eval script
 # (scripts/eval/eval_f027_supersession.py) tests the same prompt prod uses.
 # Apply this decision tree IN ORDER, returning the first match. UPDATE is
@@ -173,6 +179,9 @@ class FactManager:
         # 064 R2: advisory per-hour cap on key-conflict classifier calls.
         self._key_bucket: int = -1
         self._key_calls: int = 0
+        # R3.3 (F085) codex P2: entity-key vocabulary cache, invalidated at
+        # both entity-row write sites (see entity_key_vocabulary below).
+        self._entity_vocab_cache: tuple[frozenset[str], float] | None = None
 
     def _band_budget_ok(self) -> bool:
         """Advisory in-process per-hour cap on the in-band classifier. Returns
@@ -728,6 +737,10 @@ class FactManager:
                 if len(seen_keys) >= max_keys:
                     break
             fact.entity_keys_extracted_at = datetime.now(UTC)
+            # codex P2: new entity keys just entered the vocab — invalidate
+            # so the next recall's keyed leg sees them without waiting out
+            # the TTL.
+            self._entity_vocab_cache = None
 
         # Audit S3: apply the in-band dupe verdict now that the new fact
         # has an id. Returns a ContradictionWarning for CONTRADICTION.
@@ -1272,6 +1285,8 @@ class FactManager:
                         .on_conflict_do_nothing()
                     )
             dupe.entity_keys_extracted_at = datetime.now(UTC)
+            # codex P2: mirrors the _learn invalidation above.
+            self._entity_vocab_cache = None
         # Fill source_ordinal when the row has none and input provides one.
         if input.source_ordinal is not None and dupe.source_ordinal is None:
             dupe.source_ordinal = input.source_ordinal
@@ -2786,7 +2801,20 @@ class FactManager:
 
     async def entity_key_vocabulary(self, limit: int = 50_000) -> frozenset[str]:
         """R3.3: distinct entity keys of ACTIVE facts for this agent (NER-lite
-        vocab matching). Active join per the fact_entity_keys read invariant."""
+        vocab matching). Active join per the fact_entity_keys read invariant.
+
+        codex P2: cached on this instance (TTL `_ENTITY_VOCAB_TTL_SECONDS`)
+        and invalidated at both entity-row write sites (`_learn`,
+        `_confirm_duplicate`) so a fact learned by THIS process is visible to
+        the vocab immediately, not after the TTL elapses. The TTL still
+        applies as a floor for entity keys written by a DIFFERENT process
+        (e.g. the backfill script), which cannot invalidate this instance's
+        cache.
+        """
+        cached = self._entity_vocab_cache
+        now = time.monotonic()
+        if cached is not None and now - cached[1] < _ENTITY_VOCAB_TTL_SECONDS:
+            return cached[0]
         async with self.db.session() as session:
             rows = await session.execute(
                 text("SELECT DISTINCT ek.entity_key FROM heart.fact_entity_keys ek "
@@ -2794,24 +2822,34 @@ class FactManager:
                      "WHERE ek.agent_id = :a AND f.active = true LIMIT :lim"),
                 {"a": self.agent_id, "lim": limit},
             )
-            return frozenset(r[0] for r in rows)
+            vocab = frozenset(r[0] for r in rows)
+        self._entity_vocab_cache = (vocab, now)
+        return vocab
 
     async def fetch_by_entity_keys(self, keys: list[str], limit: int = 8):
         """R3.3: active facts matching any entity key, ranked by matched-key
         count then recency/ordinal. MUST join facts on active=true (entity
-        rows survive supersession)."""
+        rows survive supersession).
+
+        codex P2: also returns ``subject``/``event_date`` so
+        ``_keyed_to_pipeline`` can populate the same metadata keys the normal
+        fact-recall path does — otherwise keyed-only dated facts are invisible
+        to the recency resolver's same-subject grouping.
+        """
         if not keys:
             return []
         async with self.db.session() as session:
             rows = await session.execute(
                 text(
                     "SELECT f.id, f.content, f.learned_at, f.source_ordinal, "
+                    "       f.subject, f.event_date, "
                     "       COUNT(DISTINCT ek.entity_key) AS matched "
                     "FROM heart.fact_entity_keys ek "
                     "JOIN heart.facts f ON f.id = ek.fact_id "
                     "WHERE ek.agent_id = :a AND ek.entity_key = ANY(:keys) "
                     "  AND f.active = true AND f.agent_id = :a "
-                    "GROUP BY f.id, f.content, f.learned_at, f.source_ordinal "
+                    "GROUP BY f.id, f.content, f.learned_at, f.source_ordinal, "
+                    "         f.subject, f.event_date "
                     "ORDER BY matched DESC, f.learned_at DESC, "
                     "         f.source_ordinal DESC NULLS LAST "
                     "LIMIT :lim"

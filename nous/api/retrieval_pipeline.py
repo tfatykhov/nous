@@ -62,23 +62,6 @@ _density_gate_cache: "weakref.WeakKeyDictionary[object, tuple[float, float]]" = 
     weakref.WeakKeyDictionary()
 )
 
-# R3.3 (F085): entity-key vocabulary TTL cache per Heart instance. Mirrors the
-# density-gate pattern above — the vocab only moves when facts are learned,
-# so paying the DISTINCT query on every recall is pure overhead.
-_KEY_VOCAB_TTL_SECONDS = 300.0
-_key_vocab_cache: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
-
-
-async def _get_entity_key_vocab(heart) -> frozenset[str]:
-    cached = _key_vocab_cache.get(heart)
-    now = time.monotonic()
-    if cached is not None and now - cached[1] < _KEY_VOCAB_TTL_SECONDS:
-        return cached[0]
-    vocab = await heart.facts.entity_key_vocabulary()
-    _key_vocab_cache[heart] = (vocab, now)
-    return vocab
-
-
 # ---------------------------------------------------------------------------
 # Structured result types
 # ---------------------------------------------------------------------------
@@ -523,10 +506,15 @@ async def _run_stages(
     # ------------------------------------------------------------------
     # Stage 1.6 (R3.3, F085): keyed fact leg — land-dark, flag + entity-
     # presence gated (NOT frame-gated: the eval harness has no frame concept).
+    # Gated on the same search_all/"fact" condition as Stage 1.5's chunk leg
+    # (codex P2): a memory_types=["episode"] request has no fact-shaped
+    # consumer for these hits, so skip the vocab lookup + DB query entirely.
     # ------------------------------------------------------------------
-    if getattr(settings, "keyed_fact_leg_enabled", False):
+    if getattr(settings, "keyed_fact_leg_enabled", False) and (
+        search_all or "fact" in search_types
+    ):
         try:
-            vocab = await _get_entity_key_vocab(heart)
+            vocab = await heart.facts.entity_key_vocabulary()
             candidates = extract_entity_candidates(query, vocab=vocab)
             if candidates:
                 acc.keyed_leg_used = True
@@ -1227,6 +1215,13 @@ def _keyed_to_pipeline(
     leg, scores in a bounded band UNDER the RRF head (base - 0.005*rank,
     clamped >= 0) so keyed hits can enter context without displacing
     higher-scoring direct/chunk hits (the -5.0pp lesson).
+
+    codex P2: metadata also carries ``subject``/``event_date`` in the exact
+    convention ``_heart_results_to_pipeline`` uses (heart.py:1205-1219) —
+    ``subject`` forwarded raw (``str | None``), ``event_date`` as an
+    isoformat string with the key omitted entirely when absent — so
+    ``_resolve_recency_conflicts`` groups keyed-only dated facts the same as
+    facts surfaced via Stage 1.
     """
     out: list[PipelineResult] = []
     dups = 0
@@ -1235,11 +1230,18 @@ def _keyed_to_pipeline(
         if row.id in existing_ids:
             dups += 1
             continue
+        metadata = {
+            "retrieval_leg": "keyed",
+            "matched_keys": int(row.matched),
+            "subject": row.subject,
+        }
+        if row.event_date is not None:
+            metadata["event_date"] = row.event_date.isoformat()
         out.append(PipelineResult(
             id=row.id, type="fact",
             description=row.content, score=max(0.0, base - 0.005 * rank),
             source="heart",
-            metadata={"retrieval_leg": "keyed", "matched_keys": int(row.matched)},
+            metadata=metadata,
         ))
     return out, dups
 

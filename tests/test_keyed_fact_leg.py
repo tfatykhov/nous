@@ -8,7 +8,7 @@ run_recall_pipeline(...)``) — not an object with those attributes. Tests below
 unpack the tuple directly.
 """
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -16,6 +16,7 @@ import pytest_asyncio
 from nous.api.retrieval_pipeline import run_recall_pipeline
 from nous.brain.brain import Brain
 from nous.heart.keys import extract_entity_candidates
+from nous.heart.schemas import FactInput
 from nous.storage.models import Fact, FactEntityKey
 
 # ---------------------------------------------------------------------------
@@ -59,6 +60,10 @@ async def seed_keyed_corpus(heart):
             agent_id=agent_id,
             content="A quiet archive contains records unrelated to opera or playwrights, filed under miscellany.",
             active=True,
+            # codex P2: subject + event_date so the keyed leg's metadata
+            # (fetch_by_entity_keys / _keyed_to_pipeline) can be asserted.
+            subject="marriage of figaro",
+            event_date=date(2026, 3, 15),
         ))
         s.add(Fact(
             id=superseded_id,
@@ -150,6 +155,11 @@ class TestKeyedFactLeg:
         assert keyed and keyed[0].id == seed_keyed_corpus["gold_id"]
         assert keyed[0].type == "fact" and keyed[0].source == "heart"
         assert stats.keyed_leg_used and stats.n_keyed >= 1
+        # codex P2: subject + event_date must reach metadata in the same
+        # convention _heart_results_to_pipeline uses, so the recency
+        # resolver can group keyed-only dated facts by subject.
+        assert keyed[0].metadata.get("subject") == "marriage of figaro"
+        assert keyed[0].metadata.get("event_date") == "2026-03-15"
 
     async def test_superseded_fact_not_returned(self, heart, brain, settings, seed_keyed_corpus):
         # seed an inactive fact sharing the entity key
@@ -203,6 +213,66 @@ class TestKeyedFactLeg:
                 if f is not None:
                     await cleanup.delete(f)
                 await cleanup.commit()
+
+    async def test_memory_types_gates_keyed_leg(self, heart, brain, settings, seed_keyed_corpus):
+        # codex P2: the keyed leg must only run when the requested scope
+        # includes facts (search_all or "fact" in memory_types), mirroring
+        # Stage 1.5's chunk-leg gate.
+        s = settings.model_copy(update={"keyed_fact_leg_enabled": True})
+        query = 'Who is the author of "The Marriage of Figaro"?'
+
+        results, stats = await run_recall_pipeline(
+            query, heart, brain, s, memory_types=["episode"]
+        )
+        assert not stats.keyed_leg_used
+        assert not any(r.metadata.get("retrieval_leg") == "keyed" for r in results)
+
+        results, stats = await run_recall_pipeline(
+            query, heart, brain, s, memory_types=["fact"]
+        )
+        keyed = [r for r in results if r.metadata.get("retrieval_leg") == "keyed"]
+        assert stats.keyed_leg_used
+        assert keyed and keyed[0].id == seed_keyed_corpus["gold_id"]
+
+    async def test_vocab_cache_invalidated_after_learn(self, heart, brain, settings):
+        # codex P2: the entity-key vocabulary now caches on the FactManager
+        # instance (TTL 300s) and must be invalidated the moment a new fact
+        # is learned, or a fact learned mid-TTL stays invisible to the keyed
+        # leg for up to 300s in this same process.
+        s = settings.model_copy(update={"keyed_fact_leg_enabled": True})
+
+        # Warm the cache BEFORE the new key exists.
+        await heart.facts.entity_key_vocabulary()
+
+        # heart.learn() runs against the real shared dev DB (postgres_only
+        # tests share it), so Stage 1's vector leg may independently surface
+        # this fact by pure noise-level cosine among a large corpus — that's
+        # orthogonal to what's under test here. The invariant we assert is
+        # that the KEYED LEG itself saw the fresh key: without invalidation,
+        # `extract_entity_candidates` would find no candidates (vocab still
+        # missing the new key), `keyed_leg_used` would stay False, and
+        # `fetch_by_entity_keys` would never even run.
+        result = await heart.learn(FactInput(
+            content="An old town council once discussed unrelated matters about riverbank drainage systems.",
+            entity_keys=["wobblecrank industrial device"],
+            source="enumerative_extractor",
+        ))
+        try:
+            results, stats = await run_recall_pipeline(
+                "Please explain the wobblecrank industrial device thoroughly.",
+                heart, brain, s,
+            )
+            assert stats.keyed_leg_used
+            assert stats.n_keyed >= 1 or stats.n_keyed_dup >= 1
+            assert any(r.id == result.id for r in results)
+        finally:
+            fact_id = getattr(result, "id", None)
+            if fact_id is not None:
+                async with heart.db.session() as cleanup:
+                    dbfact = await cleanup.get(Fact, fact_id)
+                    if dbfact is not None:
+                        await cleanup.delete(dbfact)
+                        await cleanup.commit()
 
 
 # ---------------------------------------------------------------------------
