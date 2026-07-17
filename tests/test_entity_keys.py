@@ -4,9 +4,10 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from nous.heart.keys import extract_entity_candidates, normalize_key
+from nous.heart.keys import extract_entity_candidates, is_keyable_entity, normalize_key
+from nous.heart.schemas import FactInput, FactRejected
 from nous.storage.models import Fact, FactEntityKey
 
 
@@ -109,3 +110,101 @@ class TestFactEntityKeysSchema:
             select(FactEntityKey).where(FactEntityKey.fact_id == fact.id)
         )).scalars().all()
         assert rows == []
+
+
+class TestStopPolicy:
+    def test_scalars_rejected(self):
+        assert not is_keyable_entity("1876", min_chars=3)      # numeric
+        assert not is_keyable_entity("12.5", min_chars=3)
+        assert not is_keyable_entity("ab", min_chars=3)        # too short
+        assert not is_keyable_entity("red", min_chars=3)       # scalar stoplist
+        assert not is_keyable_entity("true", min_chars=3)
+
+    def test_entities_accepted(self):
+        assert is_keyable_entity("thomas kyd", min_chars=3)
+        assert is_keyable_entity("belgium", min_chars=3)
+        assert is_keyable_entity("cross-encoder", min_chars=3)
+
+
+class TestExtractorEntityEmission:
+    def test_to_fact_inputs_builds_entity_keys(self):
+        from types import SimpleNamespace
+
+        from nous.handlers.enumerative_extractor import EnumerativeExtractor
+
+        settings = SimpleNamespace(
+            temporal_extraction_enabled=False,
+            entity_keys_max_per_fact=8,
+            entity_key_min_chars=3,
+        )
+        ex = EnumerativeExtractor(heart=None, settings=settings, llm_client=None, embedder=None)
+        raw = [{
+            "content": "The author of The Marriage of Figaro is Thomas Kyd.",
+            "subject_key": "The Marriage of Figaro",
+            "attribute_key": "author",
+            "entities": ["The Marriage of Figaro", "Thomas Kyd", "1876", "red"],
+        }]
+        (fi,) = ex._to_fact_inputs(raw, chunk_index=0, episode_id=None)
+        assert fi.subject_key == "marriage of figaro"
+        # subject key unioned; scalars dropped; all normalized
+        assert fi.entity_keys == ["marriage of figaro", "thomas kyd"]
+
+    def test_entity_keys_capped(self):
+        from types import SimpleNamespace
+
+        from nous.handlers.enumerative_extractor import EnumerativeExtractor
+
+        settings = SimpleNamespace(
+            temporal_extraction_enabled=False,
+            entity_keys_max_per_fact=3,
+            entity_key_min_chars=3,
+        )
+        ex = EnumerativeExtractor(heart=None, settings=settings, llm_client=None, embedder=None)
+        raw = [{
+            "content": "c.", "subject_key": "subj",
+            "attribute_key": "attr",
+            "entities": [f"entity number {i}" for i in range(10)],
+        }]
+        (fi,) = ex._to_fact_inputs(raw, chunk_index=0, episode_id=None)
+        assert len(fi.entity_keys) == 3
+        assert fi.entity_keys[0] == "subj"   # subject first (when it passes the stop-policy)
+
+
+@pytest.mark.postgres_only
+class TestLearnWritesEntityRows:
+    async def test_entity_rows_same_txn_and_stamp(self, heart, session):
+        fi = FactInput(
+            content="The author of The Marriage of Figaro is Thomas Kyd.",
+            subject="marriage of figaro",
+            subject_key="marriage of figaro",
+            attribute_key="author",
+            entity_keys=["marriage of figaro", "thomas kyd"],
+            source="enumerative_extractor",
+        )
+        result = await heart.learn(fi)
+        try:
+            rows = (await session.execute(
+                select(FactEntityKey).where(FactEntityKey.fact_id == result.id)
+            )).scalars().all()
+            assert {r.entity_key for r in rows} == {"marriage of figaro", "thomas kyd"}
+            fact = await session.get(Fact, result.id)
+            assert fact.entity_keys_extracted_at is not None
+        finally:
+            # heart.learn() commits on its OWN connection (bypasses the
+            # session fixture's rollback isolation), so the row survives
+            # the test unless hard-deleted here. Entity rows CASCADE.
+            async with heart.db.session() as cleanup:
+                dbfact = await cleanup.get(Fact, result.id)
+                if dbfact is not None:
+                    await cleanup.delete(dbfact)
+                    await cleanup.commit()
+
+    async def test_rejected_fact_writes_no_rows(self, heart, session):
+        fi = FactInput(content="x", subject="s", entity_keys=["thomas kyd"])  # below min-content floor
+        result = await heart.learn(fi)
+        assert isinstance(result, FactRejected)
+        n = (await session.execute(
+            select(func.count()).select_from(FactEntityKey)
+            .where(FactEntityKey.entity_key == "thomas kyd")
+        )).scalar_one()
+        assert n == 0

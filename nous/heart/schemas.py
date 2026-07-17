@@ -117,6 +117,10 @@ class FactInput(BaseModel):
     # stripped — see normalize_key). Drive the R2 exact-key candidate lookup.
     subject_key: str | None = None
     attribute_key: str | None = None
+    entity_keys: list[str] = Field(
+        default_factory=list,
+        description="R3.1: normalized keys of ALL participating entities (subject + proper-noun object/value side).",
+    )
     # 064 R1: positional reading-order ordinal — chunk_index * 1_000_000 +
     # in-chunk position; explicit statement numbers from the source are never
     # used (mixed-form comparisons invert reading order). Higher = later in the

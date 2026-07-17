@@ -100,3 +100,27 @@ def extract_entity_candidates(
                     seen.add(gram)
                     out.append(gram)
     return out[:max_candidates]
+
+
+_NUMERIC = re.compile(r"[\d\s.,:/-]+")
+# Code-side safety net; the extraction prompt is the primary proper-noun
+# filter (R3.1 stop-policy). Deliberately small.
+_SCALAR_STOP = frozenset({
+    "red", "green", "blue", "black", "white", "yellow", "orange", "purple",
+    "true", "false", "yes", "no", "none", "null", "unknown",
+    # article-strip + question-word collisions (review devil-P3-5): keys like
+    # "The Who"->"who" would otherwise create query-token junk buckets
+    "the", "who", "what", "when", "where", "why", "how", "this", "that",
+})
+
+
+def is_keyable_entity(key: str, *, min_chars: int) -> bool:
+    """R3.1 stop-policy: index proper-noun/entity values, never scalars.
+    key must already be normalized."""
+    if not key or len(key) < min_chars:
+        return False
+    if _NUMERIC.fullmatch(key):
+        return False
+    if key in _SCALAR_STOP:
+        return False
+    return True

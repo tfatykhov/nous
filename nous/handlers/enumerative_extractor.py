@@ -25,7 +25,7 @@ _LIST_MARKER = re.compile(r"^\s*(?:[-*•]|\d{1,5}[.):])\s+")
 # A short, self-contained declarative line: 10-180 chars ending in period/semicolon (not question/exclamation).
 _STATEMENT_LINE = re.compile(r"^.{10,180}[.;]\s*$")
 
-from nous.heart.keys import normalize_key  # noqa: F401 — re-exported; R3.2 single canonicalizer
+from nous.heart.keys import is_keyable_entity, normalize_key  # noqa: F401 — re-exported; R3.2 single canonicalizer
 
 
 def density_score(text: str) -> float:
@@ -70,6 +70,17 @@ _EXTRACTION_SCHEMA = {
                         "type": "string",
                         "description": "Canonical property/relation name (e.g. 'owner', 'color', 'location').",
                     },
+                    "entities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 8,
+                        "description": (
+                            "ALL named entities participating in this statement - the "
+                            "subject AND any object/value-side entity (people, works, "
+                            "places, organizations, products). NEVER scalar values: no "
+                            "numbers, dates, colors, or common nouns."
+                        ),
+                    },
                     "category": {
                         "type": "string",
                         "enum": ["preference", "person", "rule", "technical", "concept", "tool"],
@@ -95,6 +106,7 @@ _EXTRACTION_PROMPT = """Extract EVERY atomic factual statement from this text ch
 One fact per source statement, in source order. Resolve pronouns within the
 chunk. Keep exact values (names, numbers, dates) verbatim.
 Report event_date in ISO YYYY-MM-DD format ONLY when the statement itself carries an explicit date; omit otherwise.
+For each fact also list its participating named entities (subject and object side); never list scalar values.
 
 <chunk>
 {chunk}
@@ -299,12 +311,31 @@ class EnumerativeExtractor:
             )
             date_dropped = raw_event_date is not None and candidate_event_date is None
             classified_at = datetime.now(UTC) if (flag_on and not date_dropped) else None
+
+            # R3.1: entity-key emission. Subject key is unioned in and runs
+            # through the SAME stop-policy check as every other candidate —
+            # no exemption (review devil-P2-1): R2's conflict lookup reads
+            # facts.subject_key directly, not this entity table, so indexing
+            # a scalar subject buys nothing and creates junk buckets.
+            # Object/value-side entities come from the LLM's "entities" field.
+            max_keys = getattr(self._settings, "entity_keys_max_per_fact", 8)
+            min_chars = getattr(self._settings, "entity_key_min_chars", 3)
+            entity_keys: list[str] = []
+            raw_entities = f.get("entities") or []
+            for cand in [skey, *[str(e) for e in raw_entities if e]]:
+                nk = normalize_key(cand)
+                if nk and nk not in entity_keys and is_keyable_entity(nk, min_chars=min_chars):
+                    entity_keys.append(nk)
+                if len(entity_keys) >= max_keys:
+                    break
+
             inputs.append(
                 FactInput(
                     content=content,
                     subject=f.get("subject") or skey,
                     subject_key=skey,
                     attribute_key=akey,
+                    entity_keys=entity_keys,
                     category=f.get("category"),
                     confidence=min(max(float(f.get("confidence", 0.8)), 0.0), 1.0),
                     source="enumerative_extractor",

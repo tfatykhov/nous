@@ -300,6 +300,14 @@ class Settings(BaseSettings):
         default=25, ge=0,
         description="R2.1 sleep sweep: max same-key conflict pairs processed per cycle (resumable by construction).",
     )
+    entity_keys_max_per_fact: int = Field(
+        default=8, ge=1,
+        description="R3.1 (F085): max entity-key index rows per fact (subject key always included).",
+    )
+    entity_key_min_chars: int = Field(
+        default=3, ge=1,
+        description="R3.1 (F085): stop-policy floor - normalized entity keys shorter than this are not indexed (subject key exempt).",
+    )
 
     # F017: Budget scaling
     budget_scale_enabled: bool = True

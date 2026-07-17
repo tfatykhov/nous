@@ -19,10 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.admission import AdmissionController, AdmissionResult
+from nous.heart.keys import normalize_key
 from nous.heart.schemas import ContradictionWarning, FactDetail, FactInput, FactRejected, FactSummary
 from nous.heart.search import hybrid_search, hybrid_search_multi, set_local_ef_search
 from nous.storage.database import Database
-from nous.storage.models import Episode, Event, Fact, GraphEdge
+from nous.storage.models import Episode, Event, Fact, FactEntityKey, GraphEdge
 
 if TYPE_CHECKING:
     from nous.config import Settings
@@ -715,6 +716,19 @@ class FactManager:
         session.add(fact)
         await session.flush()
 
+        # R3.1 (F085): index entity-key rows in the same transaction as the fact.
+        if input.entity_keys:
+            seen_keys: set[str] = set()
+            max_keys = self._settings.entity_keys_max_per_fact if self._settings else 8
+            for raw_key in input.entity_keys:
+                nk = normalize_key(raw_key)  # defensive re-normalize; idempotent (R3.2)
+                if nk and nk not in seen_keys:
+                    seen_keys.add(nk)
+                    session.add(FactEntityKey(fact_id=fact.id, entity_key=nk, agent_id=self.agent_id))
+                if len(seen_keys) >= max_keys:
+                    break
+            fact.entity_keys_extracted_at = datetime.now(UTC)
+
         # Audit S3: apply the in-band dupe verdict now that the new fact
         # has an id. Returns a ContradictionWarning for CONTRADICTION.
         band_warning: ContradictionWarning | None = None
@@ -1231,6 +1245,33 @@ class FactManager:
         ):
             dupe.subject_key = input.subject_key
             dupe.attribute_key = input.attribute_key
+        # R3.1 (F085): backfill entity-key rows onto a dupe that hasn't been
+        # entity-extracted yet. MUST be conflict-tolerant (review db-P2-2):
+        # phase_seed writes subject-key rows WITHOUT stamping
+        # entity_keys_extracted_at, so a live dedup-confirm on a
+        # seeded-but-not-yet-extracted fact would PK-collide on a plain
+        # session.add and abort the whole learn txn. Postgres-only construct
+        # (pg_insert.on_conflict_do_nothing) — guarded the same way the W-8
+        # advisory lock above gates on dialect.name, so the SQLite unit path
+        # never reaches it.
+        if (
+            input.entity_keys
+            and dupe.entity_keys_extracted_at is None
+            and session.bind is not None
+            and session.bind.dialect.name == "postgresql"
+        ):
+            seen_dupe_keys: set[str] = set()
+            max_keys = self._settings.entity_keys_max_per_fact if self._settings else 8
+            for raw_key in input.entity_keys[:max_keys]:
+                nk = normalize_key(raw_key)
+                if nk and nk not in seen_dupe_keys:
+                    seen_dupe_keys.add(nk)
+                    await session.execute(
+                        pg_insert(FactEntityKey)
+                        .values(fact_id=dupe.id, entity_key=nk, agent_id=self.agent_id)
+                        .on_conflict_do_nothing()
+                    )
+            dupe.entity_keys_extracted_at = datetime.now(UTC)
         # Fill source_ordinal when the row has none and input provides one.
         if input.source_ordinal is not None and dupe.source_ordinal is None:
             dupe.source_ordinal = input.source_ordinal
