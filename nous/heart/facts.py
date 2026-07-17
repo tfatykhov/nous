@@ -1828,6 +1828,18 @@ class FactManager:
         invalidation `learn()` already does for its own writes (rounds
         2/3/5).
 
+        codex P2 round 15: round 13's cap fix counted only HOW MANY rows
+        the replacement already owned, not WHICH ones — a candidate
+        (subject key or union key) already present on the replacement
+        still spent a slot of the remaining budget even though its insert
+        was an ON CONFLICT DO NOTHING no-op (no row actually added). Under
+        a tight cap this could silently crowd out a genuinely new source
+        key. Now the replacement's existing keys are loaded as a SET, and
+        every candidate is checked for membership in it BEFORE either the
+        subject-key reservation or the union query spends any budget —
+        an already-present candidate costs nothing, so the remaining slots
+        go only to insertions that actually happen.
+
         No commit here — caller-owned session/transaction, same contract as
         apply_supersession above.
         """
@@ -1870,31 +1882,38 @@ class FactManager:
             # rows (a keyed FactInput through supersede, or a merge-learn
             # call that confirmed an existing fact) — a fresh max_keys
             # budget on every call, on top of rows already there, could
-            # push the total to 2x the configured cap. Count what already
-            # exists and spend only the REMAINING budget below.
-            existing_count = (
-                await session.execute(
-                    select(func.count()).select_from(FactEntityKey)
-                    .where(FactEntityKey.fact_id == replacement_id)
-                )
-            ).scalar_one()
-            remaining = max(0, max_keys - existing_count)
+            # push the total to 2x the configured cap. codex P2 round 15:
+            # fetch the actual SET of existing keys (not just a count) —
+            # round 13's count-only version still spent budget on a
+            # candidate that was ALREADY in that set (an ON CONFLICT DO
+            # NOTHING no-op adds no row), which could crowd out a
+            # genuinely new source key under a tight cap. Every candidate
+            # below is checked against this set before an insert is even
+            # attempted — deterministic, no rowcount inspection needed.
+            existing_keys = set(
+                (await session.execute(
+                    select(FactEntityKey.entity_key).where(FactEntityKey.fact_id == replacement_id)
+                )).scalars().all()
+            )
+            remaining = max(0, max_keys - len(existing_keys))
 
             # Reserve a slot for the copied subject_key FIRST, before the
             # capped union query below can crowd it out. Skipped when the
             # pair-copy above was skipped (a foreign, caller-owned slot is
-            # present in either subject_key or attribute_key), or when no
-            # budget remains — subject-key reservation is best-effort within
-            # the cap: a replacement already at/over the cap does not evict
-            # an existing row to make room (it may already be present among
-            # the existing rows, or may simply be left out this call).
+            # present in either subject_key or attribute_key), when no
+            # budget remains, or when the subject key is ALREADY among the
+            # replacement's existing rows (nothing to insert, no budget
+            # spent) — subject-key reservation is best-effort within the
+            # cap: a replacement already at/over the cap does not evict an
+            # existing row to make room.
             subject_key_value = (
                 newest.subject_key if newest is not None and not skip_slot_copy else None
             )
             if (
-                remaining > 0
-                and subject_key_value
+                subject_key_value
                 and is_keyable_entity(subject_key_value, min_chars=min_chars)
+                and subject_key_value not in existing_keys
+                and remaining > 0
             ):
                 await session.execute(
                     pg_insert(FactEntityKey)
@@ -1908,8 +1927,13 @@ class FactManager:
                 union_stmt = select(FactEntityKey.entity_key).where(
                     FactEntityKey.fact_id.in_(source_ids)
                 )
-                if subject_key_value:
-                    union_stmt = union_stmt.where(FactEntityKey.entity_key != subject_key_value)
+                # codex P2 round 15: exclude keys already on the replacement
+                # (existing rows, plus the subject key handled above) from
+                # the candidates BEFORE the LIMIT — so remaining counts only
+                # genuinely new rows, never a candidate that would no-op.
+                excluded = existing_keys | ({subject_key_value} if subject_key_value else set())
+                if excluded:
+                    union_stmt = union_stmt.where(FactEntityKey.entity_key.notin_(excluded))
                 union_keys = (
                     await session.execute(
                         union_stmt.distinct()

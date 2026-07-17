@@ -790,6 +790,74 @@ class TestInheritConflictSlotKeys:
                         await cleanup.delete(f)
                 await cleanup.commit()
 
+    async def test_budget_only_spent_on_real_inserts(self, heart):
+        """codex P2 round 15: round 13's cap fix counted only HOW MANY rows
+        the replacement already owned, not WHICH ones -- reserving a slot
+        for the subject key even when it's ALREADY among the replacement's
+        existing rows burned budget on an ON CONFLICT DO NOTHING no-op (no
+        row actually added), which could crowd out a genuinely new source
+        key under a tight cap.
+
+        entity_keys_max_per_fact=2; the replacement PRE-OWNS its subject
+        row ("topic") already, leaving exactly 1 slot remaining. The
+        source has "topic" (subject key) plus one distinct object key
+        ("poetry"). Without this fix, the subject-key reservation would
+        still spend the 1 remaining slot on "topic" (a no-op, since it's
+        already present), leaving 0 for the union fill -- "poetry" would
+        never be copied. With the fix, the already-present subject key
+        costs nothing, so "poetry" claims the 1 real remaining slot.
+        """
+        heart.facts._settings = heart.facts._settings.model_copy(
+            update={"entity_keys_max_per_fact": 2}
+        )
+        agent_id = heart.agent_id
+        source_id = uuid.uuid4()
+        replacement_id = uuid.uuid4()
+
+        async with heart.db.session() as s:
+            s.add(Fact(
+                id=source_id, agent_id=agent_id,
+                content="A source fact for the round-15 real-inserts-only budget test.",
+                subject_key="topic", attribute_key="attr",
+                learned_at=datetime.now(UTC),
+                active=True,
+            ))
+            s.add(Fact(
+                id=replacement_id, agent_id=agent_id,
+                content="The replacement content, pre-owning its subject row.",
+                active=True,
+            ))
+            await s.flush()
+            for key in ["topic", "poetry"]:
+                s.add(FactEntityKey(fact_id=source_id, entity_key=key, agent_id=agent_id))
+            # Replacement PRE-OWNS the subject key's row already (1 of the
+            # 2-slot cap), leaving exactly 1 slot remaining.
+            s.add(FactEntityKey(fact_id=replacement_id, entity_key="topic", agent_id=agent_id))
+            await s.commit()
+
+        try:
+            async with heart.db.session() as s:
+                await heart.facts.inherit_conflict_slot_keys(
+                    replacement_id, [source_id], s,
+                )
+                await s.commit()
+
+            async with heart.db.session() as check:
+                rows = (await check.execute(
+                    select(FactEntityKey).where(FactEntityKey.fact_id == replacement_id)
+                )).scalars().all()
+                keys = {r.entity_key for r in rows}
+                assert len(rows) == 2, "total rows must not exceed the configured cap"
+                assert "poetry" in keys, "the real remaining slot must go to a genuinely new key"
+                assert "topic" in keys
+        finally:
+            async with heart.db.session() as cleanup:
+                for fid in (source_id, replacement_id):
+                    f = await cleanup.get(Fact, fid)
+                    if f is not None:
+                        await cleanup.delete(f)
+                await cleanup.commit()
+
     async def test_cap_counts_existing_rows_on_replacement(self, heart):
         """codex P2 round 13: the entity-key cap used to start a FRESH
         max_keys budget every call, ignoring rows the replacement already

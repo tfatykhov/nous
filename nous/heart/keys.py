@@ -67,7 +67,17 @@ def normalize_key(raw: str | None, *, max_len: int = 200) -> str | None:
     return s or None
 
 
-_QUOTED = re.compile(r"\"([^\"]{2,80})\"|'([^']{2,80})'|[“]([^”]{2,80})[”]")
+_QUOTED = re.compile(
+    r"\"([^\"]{2,80})\"|(?<!\w)'([^']{2,80})'(?!\w)|[“]([^”]{2,80})[”]"
+)
+# codex P2 round 15: the single-quote alternative used to match straight
+# apostrophes bare -- a contraction ("what's") followed later by a
+# possessive ("Tim's") gave it two apostrophes to pair up, capturing the
+# junk span between them ("s Tim") as if it were a quoted mention. Guarding
+# it with non-word-context lookaround/lookahead means an apostrophe
+# directly attached to a word (contraction/possessive) can never serve as
+# an opening OR closing delimiter, while a genuine quoted span like
+# 'Belgium' (bounded by spaces/punctuation on both sides) still matches.
 # Runs of TitleCase words, skipping sentence-initial position (mirrors
 # intent.py:148 discipline); allows lowercase connectors inside the run.
 _CAP_SPAN = re.compile(

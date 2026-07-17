@@ -530,3 +530,42 @@ class TestEntityCandidateVocabLeg:
         got = extract_entity_candidates("when was Tim's trip to Belgium?", vocab=vocab)
         assert "tim" in got
         assert "belgium" in got
+
+    def test_possessive_and_contraction_do_not_produce_quoted_junk(self):
+        """codex P2 round 15: the single-quote _QUOTED alternative used to
+        match bare across ANY two apostrophes regardless of word-boundary
+        context — "what's Tim's kitchen" gave it a contraction's apostrophe
+        and a possessive's apostrophe to pair up, capturing the junk span
+        between them ("s tim") as if it were a genuine quoted mention.
+        Guarded with non-word-context delimiters, no such junk span is
+        produced; "Tim" and "Riverside Cafe" still arrive via CAP_SPAN
+        exactly as before (unaffected by the single-quote guard).
+        """
+        got = extract_entity_candidates("what's Tim's kitchen at the Riverside Cafe?")
+        assert "s tim" not in got
+        assert "riverside cafe" in got
+
+    def test_straight_single_quoted_span_still_extracted(self):
+        """The paired-delimiter guard must not break a genuine single-quoted
+        span bounded by non-word context (space/punctuation) on both
+        sides."""
+        got = extract_entity_candidates("He read 'Belgium' aloud")
+        assert "belgium" in got
+
+    def test_possessive_junk_no_longer_exhausts_max_candidates_budget(self):
+        """codex P2 round 15: quoted-first insertion order means junk quote
+        spans used to occupy the FRONT of the candidate list — since
+        max_candidates truncates the FINAL list rather than gating
+        collection, 3 possessive/contraction pairs could fill the entire
+        budget before the vocab leg (which runs LAST) ever got a chance to
+        add a real match. All three subjects here are lowercase so
+        CAP_SPAN can't independently recover them either — isolating the
+        effect to the quoted-junk fix.
+        """
+        vocab = frozenset({"marriage of figaro"})
+        text = (
+            "what's everyone's excuse, who's anybody's guess, and where's "
+            "nobody's answer regarding the marriage of figaro?"
+        )
+        got = extract_entity_candidates(text, vocab=vocab, max_candidates=3)
+        assert "marriage of figaro" in got
