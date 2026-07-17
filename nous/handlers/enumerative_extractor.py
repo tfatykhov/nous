@@ -78,7 +78,7 @@ _EXTRACTION_SCHEMA = {
                             "ALL named entities participating in this statement - the "
                             "subject AND any object/value-side entity (people, works, "
                             "places, organizations, products). NEVER scalar values: no "
-                            "numbers, dates, colors, or common nouns."
+                            "numbers, dates, colors, or common nouns. Empty array if none."
                         ),
                     },
                     "category": {
@@ -95,7 +95,14 @@ _EXTRACTION_SCHEMA = {
                         "description": "ISO YYYY-MM-DD date the statement is anchored to, ONLY when the statement itself carries an explicit date; else null.",
                     },
                 },
-                "required": ["content", "subject_key", "attribute_key"],
+                # codex P2 round 6: "entities" is REQUIRED (LLM must emit []
+                # when none apply) so a producer that omits the field
+                # entirely is a schema violation, not a silent gap — closes
+                # the source of the false-completion watermark bug at the
+                # prompt level. _to_fact_inputs still carries a belt+braces
+                # fallback (entity_extraction_complete) for any response
+                # that reaches Python having dropped the field anyway.
+                "required": ["content", "subject_key", "attribute_key", "entities"],
             },
         }
     },
@@ -106,7 +113,7 @@ _EXTRACTION_PROMPT = """Extract EVERY atomic factual statement from this text ch
 One fact per source statement, in source order. Resolve pronouns within the
 chunk. Keep exact values (names, numbers, dates) verbatim.
 Report event_date in ISO YYYY-MM-DD format ONLY when the statement itself carries an explicit date; omit otherwise.
-For each fact also list its participating named entities (subject and object side); never list scalar values.
+For each fact also list its participating named entities (subject and object side); never list scalar values; use an empty array if none apply.
 
 <chunk>
 {chunk}
@@ -328,6 +335,14 @@ class EnumerativeExtractor:
                     entity_keys.append(nk)
                 if len(entity_keys) >= max_keys:
                     break
+            # codex P2 round 6: belt+braces for the schema's new "entities"
+            # required field (above) — if a response somehow still reaches
+            # Python without the KEY at all (distinct from an explicit empty
+            # list), extraction is NOT complete for this fact's object/value
+            # side. FactManager must not stamp entity_keys_extracted_at in
+            # that case, or the backfill's IS NULL predicate would never
+            # revisit it.
+            entity_extraction_complete = "entities" in f
 
             inputs.append(
                 FactInput(
@@ -336,6 +351,7 @@ class EnumerativeExtractor:
                     subject_key=skey,
                     attribute_key=akey,
                     entity_keys=entity_keys,
+                    entity_extraction_complete=entity_extraction_complete,
                     category=f.get("category"),
                     confidence=min(max(float(f.get("confidence", 0.8)), 0.0), 1.0),
                     source="enumerative_extractor",

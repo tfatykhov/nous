@@ -121,6 +121,14 @@ class FactInput(BaseModel):
         default_factory=list,
         description="R3.1: normalized keys of ALL participating entities (subject + proper-noun object/value side).",
     )
+    # codex P2 round 6: True (default) means the producer either isn't
+    # entity-aware at all, or IS and reported its full participating-entity
+    # set (even if empty). Only a producer whose raw response omitted the
+    # entities field entirely (not present-but-empty) sets this False —
+    # FactManager then inserts whatever entity_keys rows it has but leaves
+    # entity_keys_extracted_at NULL, so a future backfill pass still
+    # revisits this fact for value-side extraction.
+    entity_extraction_complete: bool = True
     # 064 R1: positional reading-order ordinal — chunk_index * 1_000_000 +
     # in-chunk position; explicit statement numbers from the source are never
     # used (mixed-form comparisons invert reading order). Higher = later in the

@@ -803,7 +803,15 @@ class FactManager:
             # candidate failed the stop-policy above (zero rows written) —
             # the fact WAS processed for entity extraction; there is nothing
             # left to retry, so a backfill pass must not re-visit it.
-            fact.entity_keys_extracted_at = datetime.now(UTC)
+            # codex P2 round 6: EXCEPT when entity_extraction_complete is
+            # False — the producer's raw response omitted the "entities"
+            # field entirely (distinct from an explicit empty list), so the
+            # object/value side was never actually extracted for this fact.
+            # Stamping anyway would be a false completion signal that
+            # permanently hides the fact from the backfill's IS NULL
+            # predicate. The subject-key row (if any) still inserted above.
+            if input.entity_extraction_complete:
+                fact.entity_keys_extracted_at = datetime.now(UTC)
             # codex P2: new entity keys just entered the vocab — invalidate
             # so the next recall's keyed leg sees them without waiting out
             # the TTL. codex P2 round 2: this transaction is still open (not
@@ -1351,7 +1359,13 @@ class FactManager:
             seen_dupe_keys: set[str] = set()
             max_keys = self._settings.entity_keys_max_per_fact if self._settings else 8
             min_chars = self._settings.entity_key_min_chars if self._settings else 3
-            for raw_key in input.entity_keys[:max_keys]:
+            # codex P2 round 6: iterate the FULL list and filter BEFORE
+            # capping — mirrors _learn's loop exactly. The previous
+            # `input.entity_keys[:max_keys]` sliced the raw list before
+            # normalize/stop-policy/dedup, so junk candidates ("1876", "red")
+            # occupying early slots could crowd out valid keys past the cap
+            # position even though those junk keys never insert a row.
+            for raw_key in input.entity_keys:
                 nk = normalize_key(raw_key)
                 # codex P2 round 4: mirrors the _learn stop-policy gate above
                 # — same bypass-the-extractor risk applies to the dedup-confirm
@@ -1367,10 +1381,15 @@ class FactManager:
                         .values(fact_id=dupe.id, entity_key=nk, agent_id=self.agent_id)
                         .on_conflict_do_nothing()
                     )
+                if len(seen_dupe_keys) >= max_keys:
+                    break
             # Stamped whenever entity_keys were provided, even if every
             # candidate failed the stop-policy above (zero rows written) —
-            # mirrors the _learn stamping rationale.
-            dupe.entity_keys_extracted_at = datetime.now(UTC)
+            # mirrors the _learn stamping rationale. codex P2 round 6:
+            # EXCEPT when entity_extraction_complete is False — mirrors the
+            # _learn condition above (same false-completion-signal risk).
+            if input.entity_extraction_complete:
+                dupe.entity_keys_extracted_at = datetime.now(UTC)
             # codex P2 (+ round 3 gen-counter, round 5 per-call finally):
             # mirrors the _learn invalidation above — same still-open-
             # transaction race applies here.
@@ -2940,6 +2959,14 @@ class FactManager:
         ``_keyed_to_pipeline`` can populate the same metadata keys the normal
         fact-recall path does — otherwise keyed-only dated facts are invisible
         to the recency resolver's same-subject grouping.
+
+        codex P2 round 6: also returns ``source_episode_id`` (cast to text,
+        matching ``_attach_fact_source_episodes``'s convention exactly).
+        That helper runs BEFORE the keyed leg's results are merged into
+        ``run_recall_pipeline``'s output list, so it can never attach this
+        field to a keyed hit — without it here, keyed facts silently fall
+        into the formatter's "-- Other --" session bucket under
+        session-grouped display.
         """
         if not keys:
             return []
@@ -2948,13 +2975,14 @@ class FactManager:
                 text(
                     "SELECT f.id, f.content, f.learned_at, f.source_ordinal, "
                     "       f.subject, f.event_date, "
+                    "       f.source_episode_id::text AS source_episode_id, "
                     "       COUNT(DISTINCT ek.entity_key) AS matched "
                     "FROM heart.fact_entity_keys ek "
                     "JOIN heart.facts f ON f.id = ek.fact_id "
                     "WHERE ek.agent_id = :a AND ek.entity_key = ANY(:keys) "
                     "  AND f.active = true AND f.agent_id = :a "
                     "GROUP BY f.id, f.content, f.learned_at, f.source_ordinal, "
-                    "         f.subject, f.event_date "
+                    "         f.subject, f.event_date, f.source_episode_id "
                     "ORDER BY matched DESC, f.learned_at DESC, "
                     "         f.source_ordinal DESC NULLS LAST "
                     "LIMIT :lim"

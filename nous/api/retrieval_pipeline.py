@@ -1222,6 +1222,15 @@ def _keyed_to_pipeline(
     isoformat string with the key omitted entirely when absent — so
     ``_resolve_recency_conflicts`` groups keyed-only dated facts the same as
     facts surfaced via Stage 1.
+
+    codex P2 round 6: metadata also carries ``source_episode_id`` (string,
+    key omitted when absent) so the formatter's session-grouping can bucket
+    keyed hits under their real episode instead of "-- Other --".
+    ``_attach_fact_source_episodes`` runs BEFORE this leg's results are
+    merged into ``run_recall_pipeline``'s output list (stage-order fact, not
+    a bug to reorder around), so it can never attach this field to a keyed
+    hit — the data has to arrive already-populated from
+    ``fetch_by_entity_keys``'s own SELECT.
     """
     out: list[PipelineResult] = []
     dups = 0
@@ -1237,6 +1246,8 @@ def _keyed_to_pipeline(
         }
         if row.event_date is not None:
             metadata["event_date"] = row.event_date.isoformat()
+        if row.source_episode_id:
+            metadata["source_episode_id"] = row.source_episode_id
         out.append(PipelineResult(
             id=row.id, type="fact",
             description=row.content, score=max(0.0, base - 0.005 * rank),

@@ -193,6 +193,34 @@ class TestExtractorEntityEmission:
         }]
         (fi,) = ex._to_fact_inputs(raw, chunk_index=0, episode_id=None)
         assert fi.entity_keys == ["marriage of figaro"]
+        # codex P2 round 6: KEY absent (not present-but-empty) means entity
+        # extraction is NOT complete for this fact's object/value side.
+        assert fi.entity_extraction_complete is False
+
+    def test_entities_key_present_empty_marks_extraction_complete(self):
+        """codex P2 round 6 sibling case: an explicit "entities": [] means
+        the LLM reported its full (empty) participating-entity set — entity
+        extraction for this fact IS complete, unlike the absent-key case
+        above.
+        """
+        from types import SimpleNamespace
+
+        from nous.handlers.enumerative_extractor import EnumerativeExtractor
+
+        settings = SimpleNamespace(
+            temporal_extraction_enabled=False,
+            entity_keys_max_per_fact=8,
+            entity_key_min_chars=3,
+        )
+        ex = EnumerativeExtractor(heart=None, settings=settings, llm_client=None, embedder=None)
+        raw = [{
+            "content": "The observability platform reports high uptime consistently.",
+            "subject_key": "observability platform",
+            "attribute_key": "uptime",
+            "entities": [],
+        }]
+        (fi,) = ex._to_fact_inputs(raw, chunk_index=0, episode_id=None)
+        assert fi.entity_extraction_complete is True
 
     def test_entities_key_absent_scalar_subject_yields_empty(self):
         """Same backward-compat case, but the subject itself fails the
@@ -243,6 +271,74 @@ class TestLearnWritesEntityRows:
             # the test unless hard-deleted here. Entity rows CASCADE.
             # result may be a FactRejected (no .id) if learn() unexpectedly
             # rejects — guard so cleanup itself never masks the real failure.
+            fact_id = getattr(result, "id", None)
+            if fact_id is not None:
+                async with heart.db.session() as cleanup:
+                    dbfact = await cleanup.get(Fact, fact_id)
+                    if dbfact is not None:
+                        await cleanup.delete(dbfact)
+                        await cleanup.commit()
+
+    async def test_entities_key_absent_leaves_watermark_null_after_learn(self, heart, session, settings):
+        """codex P2 round 6 end-to-end: a raw LLM fact dict that omits the
+        "entities" field entirely produces entity_extraction_complete=False
+        (see TestExtractorEntityEmission above); heart.learn() must still
+        insert whatever entity rows it has (the subject key), but leave
+        entity_keys_extracted_at NULL so a future backfill pass revisits
+        this fact for value-side extraction.
+        """
+        from nous.handlers.enumerative_extractor import EnumerativeExtractor
+
+        ex = EnumerativeExtractor(heart=heart, settings=settings, llm_client=None, embedder=None)
+        raw = [{
+            "content": "The author of The Marriage of Figaro is Thomas Kyd.",
+            "subject_key": "The Marriage of Figaro",
+            "attribute_key": "author",
+            # no "entities" key at all
+        }]
+        (fi,) = ex._to_fact_inputs(raw, chunk_index=0, episode_id=None)
+        assert fi.entity_extraction_complete is False
+
+        result = await heart.learn(fi)
+        try:
+            rows = (await session.execute(
+                select(FactEntityKey).where(FactEntityKey.fact_id == result.id)
+            )).scalars().all()
+            assert {r.entity_key for r in rows} == {"marriage of figaro"}
+            fact = await session.get(Fact, result.id)
+            assert fact.entity_keys_extracted_at is None
+        finally:
+            fact_id = getattr(result, "id", None)
+            if fact_id is not None:
+                async with heart.db.session() as cleanup:
+                    dbfact = await cleanup.get(Fact, fact_id)
+                    if dbfact is not None:
+                        await cleanup.delete(dbfact)
+                        await cleanup.commit()
+
+    async def test_entities_key_present_empty_stamps_watermark_after_learn(self, heart, session, settings):
+        """Sibling case: raw dict WITH "entities": [] (LLM explicitly
+        reported no additional entities) produces
+        entity_extraction_complete=True — the watermark IS stamped since
+        this fact's entity extraction is genuinely done.
+        """
+        from nous.handlers.enumerative_extractor import EnumerativeExtractor
+
+        ex = EnumerativeExtractor(heart=heart, settings=settings, llm_client=None, embedder=None)
+        raw = [{
+            "content": "The observability platform reports high uptime consistently.",
+            "subject_key": "observability platform",
+            "attribute_key": "uptime",
+            "entities": [],
+        }]
+        (fi,) = ex._to_fact_inputs(raw, chunk_index=0, episode_id=None)
+        assert fi.entity_extraction_complete is True
+
+        result = await heart.learn(fi)
+        try:
+            fact = await session.get(Fact, result.id)
+            assert fact.entity_keys_extracted_at is not None
+        finally:
             fact_id = getattr(result, "id", None)
             if fact_id is not None:
                 async with heart.db.session() as cleanup:
@@ -353,6 +449,58 @@ class TestLearnWritesEntityRows:
                 # the on_conflict_do_nothing insert.
                 assert {r.entity_key for r in rows} == {"observability platform", "service uptime"}
                 assert len(rows) == 2, "pre-seeded key must not be duplicated, junk key must be absent"
+        finally:
+            async with heart.db.session() as cleanup:
+                dbfact = await cleanup.get(Fact, fact_id)
+                if dbfact is not None:
+                    await cleanup.delete(dbfact)
+                    await cleanup.commit()
+
+    async def test_confirm_duplicate_filters_before_capping(self, heart):
+        """codex P2 round 6: _confirm_duplicate's entity-key loop previously
+        sliced `input.entity_keys[:max_keys]` BEFORE normalize/stop-policy
+        filtering — junk candidates in early list positions ("1876", "red")
+        could crowd out valid keys past the cap position even though the
+        junk keys themselves never insert a row. The loop must filter the
+        FULL list first and cap only on ACCEPTED keys, mirroring _learn.
+        """
+        heart.facts._settings = heart.facts._settings.model_copy(
+            update={"entity_keys_max_per_fact": 2}
+        )
+        vec = [1.0] + [0.0] * 1535  # unit vector: identical vec -> cosine 1.0 dupe match
+        content = "The archival index records a single reference entry for this matter."
+        fact_id = uuid.uuid4()
+
+        async with heart.db.session() as seed:
+            seed.add(Fact(
+                id=fact_id,
+                agent_id=heart.agent_id,
+                content=content,
+                subject="x archive",
+                embedding=vec,
+            ))
+            await seed.commit()
+
+        try:
+            result = await heart.learn(
+                FactInput(
+                    content=content,
+                    subject="x archive",
+                    # 2 junk candidates FIRST, then 2 valid ones. With the
+                    # old pre-slice bug (entity_keys[:2]), only "1876" and
+                    # "red" would ever reach the loop — both junk, zero rows.
+                    entity_keys=["1876", "red", "thomas kyd", "x archive"],
+                    source="enumerative_extractor",
+                ),
+                precomputed_embedding=vec,
+            )
+            assert result.id == fact_id, "identical content+vector must hit the confirm-dupe path"
+
+            async with heart.db.session() as check:
+                rows = (await check.execute(
+                    select(FactEntityKey).where(FactEntityKey.fact_id == fact_id)
+                )).scalars().all()
+                assert {r.entity_key for r in rows} == {"thomas kyd", "x archive"}
         finally:
             async with heart.db.session() as cleanup:
                 dbfact = await cleanup.get(Fact, fact_id)

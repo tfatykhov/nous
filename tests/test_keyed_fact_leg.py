@@ -18,7 +18,7 @@ from nous.api.retrieval_pipeline import run_recall_pipeline
 from nous.brain.brain import Brain
 from nous.heart.keys import extract_entity_candidates
 from nous.heart.schemas import FactInput
-from nous.storage.models import Fact, FactEntityKey
+from nous.storage.models import Episode, Fact, FactEntityKey
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -55,7 +55,16 @@ async def seed_keyed_corpus(heart):
     agent_id = heart.agent_id
     gold_id = uuid.uuid4()
     superseded_id = uuid.uuid4()
+    episode_id = uuid.uuid4()
     async with heart.db.session() as s:
+        # codex P2 round 6: real Episode row so the gold fact's
+        # source_episode_id FK (heart.facts -> heart.episodes) is valid,
+        # letting the keyed leg's session-grouping metadata be asserted.
+        s.add(Episode(
+            id=episode_id,
+            agent_id=agent_id,
+            summary="An unrelated archival review session, filed for record-keeping.",
+        ))
         s.add(Fact(
             id=gold_id,
             agent_id=agent_id,
@@ -65,6 +74,7 @@ async def seed_keyed_corpus(heart):
             # (fetch_by_entity_keys / _keyed_to_pipeline) can be asserted.
             subject="marriage of figaro",
             event_date=date(2026, 3, 15),
+            source_episode_id=episode_id,
         ))
         s.add(Fact(
             id=superseded_id,
@@ -78,13 +88,16 @@ async def seed_keyed_corpus(heart):
         s.add(FactEntityKey(fact_id=superseded_id, entity_key="marriage of figaro", agent_id=agent_id))
         await s.commit()
 
-    yield {"gold_id": gold_id, "superseded_id": superseded_id}
+    yield {"gold_id": gold_id, "superseded_id": superseded_id, "episode_id": episode_id}
 
     async with heart.db.session() as cleanup:
         for fid in (gold_id, superseded_id):
             f = await cleanup.get(Fact, fid)
             if f is not None:
                 await cleanup.delete(f)
+        ep = await cleanup.get(Episode, episode_id)
+        if ep is not None:
+            await cleanup.delete(ep)
         await cleanup.commit()
 
 
@@ -161,6 +174,10 @@ class TestKeyedFactLeg:
         # resolver can group keyed-only dated facts by subject.
         assert keyed[0].metadata.get("subject") == "marriage of figaro"
         assert keyed[0].metadata.get("event_date") == "2026-03-15"
+        # codex P2 round 6: source_episode_id must reach metadata too, or
+        # the formatter's session-grouping buckets keyed hits into
+        # "-- Other --" instead of their real episode.
+        assert keyed[0].metadata.get("source_episode_id") == str(seed_keyed_corpus["episode_id"])
 
     async def test_superseded_fact_not_returned(self, heart, brain, settings, seed_keyed_corpus):
         # seed an inactive fact sharing the entity key
