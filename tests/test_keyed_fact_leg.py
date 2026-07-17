@@ -179,6 +179,28 @@ class TestKeyedFactLeg:
         # "-- Other --" instead of their real episode.
         assert keyed[0].metadata.get("source_episode_id") == str(seed_keyed_corpus["episode_id"])
 
+    async def test_keyed_recall_bumps_access_tracking(self, heart, seed_keyed_corpus):
+        """codex P2 round 10: facts surfaced ONLY via fetch_by_entity_keys
+        (never reached through FactManager.search) must still get
+        recall_count/last_recalled_at updates — otherwise a fact in active
+        keyed use looks unused to _phase_stale_scan and can be deactivated.
+        """
+        gold_id = seed_keyed_corpus["gold_id"]
+        async with heart.db.session() as before_session:
+            before = await before_session.get(Fact, gold_id)
+            before_count = before.recall_count or 0
+            before_recalled_at = before.last_recalled_at
+
+        results = await heart.facts.fetch_by_entity_keys(["marriage of figaro"])
+        assert any(r.id == gold_id for r in results)
+
+        async with heart.db.session() as after_session:
+            after = await after_session.get(Fact, gold_id)
+            assert after.recall_count == before_count + 1
+            assert after.last_recalled_at is not None
+            if before_recalled_at is not None:
+                assert after.last_recalled_at > before_recalled_at
+
     async def test_superseded_fact_not_returned(self, heart, brain, settings, seed_keyed_corpus):
         # seed an inactive fact sharing the entity key
         s = settings.model_copy(update={"keyed_fact_leg_enabled": True})

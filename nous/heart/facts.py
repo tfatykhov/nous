@@ -1721,7 +1721,15 @@ class FactManager:
         NOTHING), capped at entity_keys_max_per_fact — nothing else about
         the source rows is preserved. Postgres-only (on_conflict_do_nothing
         is a Postgres construct), mirroring _confirm_duplicate's dialect
-        guard.
+        guard. codex P2 round 10: the copied subject_key is inserted FIRST
+        (when present and it passes the entity stop-policy), before the
+        capped union query — an unordered ``distinct().limit(max_keys)``
+        can return any subset when sources have more than max_keys distinct
+        rows, and without reserving a slot for it the subject key set in
+        (a) could silently be absent from the replacement's own
+        fact_entity_keys rows. The union fill then excludes the subject key
+        (already handled) and orders by entity_key for a stable, rerun-safe
+        outcome.
         (c) entity_keys_extracted_at is deliberately left untouched (stays
         NULL on the fresh replacement row — the merge FactInput never sets
         entity_keys/entity_extraction_complete, so _learn's stamp never
@@ -1754,21 +1762,43 @@ class FactManager:
 
         if session.bind is not None and session.bind.dialect.name == "postgresql":
             max_keys = self._settings.entity_keys_max_per_fact if self._settings else 8
-            union_keys = (
-                await session.execute(
-                    select(FactEntityKey.entity_key)
-                    .where(FactEntityKey.fact_id.in_(source_ids))
-                    .distinct()
-                    .limit(max_keys)
-                )
-            ).scalars().all()
-            for key in union_keys:
+            min_chars = self._settings.entity_key_min_chars if self._settings else 3
+            inserted_any = False
+
+            # Reserve a slot for the copied subject_key FIRST, before the
+            # capped union query below can crowd it out.
+            subject_key_value = newest.subject_key if complete else None
+            if subject_key_value and is_keyable_entity(subject_key_value, min_chars=min_chars):
                 await session.execute(
                     pg_insert(FactEntityKey)
-                    .values(fact_id=replacement_id, entity_key=key, agent_id=self.agent_id)
+                    .values(fact_id=replacement_id, entity_key=subject_key_value, agent_id=self.agent_id)
                     .on_conflict_do_nothing()
                 )
-            if union_keys:
+                inserted_any = True
+                max_keys -= 1
+
+            if max_keys > 0:
+                union_stmt = select(FactEntityKey.entity_key).where(
+                    FactEntityKey.fact_id.in_(source_ids)
+                )
+                if subject_key_value:
+                    union_stmt = union_stmt.where(FactEntityKey.entity_key != subject_key_value)
+                union_keys = (
+                    await session.execute(
+                        union_stmt.distinct()
+                        .order_by(FactEntityKey.entity_key)
+                        .limit(max_keys)
+                    )
+                ).scalars().all()
+                for key in union_keys:
+                    await session.execute(
+                        pg_insert(FactEntityKey)
+                        .values(fact_id=replacement_id, entity_key=key, agent_id=self.agent_id)
+                        .on_conflict_do_nothing()
+                    )
+                inserted_any = inserted_any or bool(union_keys)
+
+            if inserted_any:
                 self._entity_vocab_cache = None
                 self._entity_vocab_gen += 1
 
@@ -3048,6 +3078,20 @@ class FactManager:
         field to a keyed hit — without it here, keyed facts silently fall
         into the formatter's "-- Other --" session bucket under
         session-grouped display.
+
+        codex P2 round 10: fires access tracking (recall_count,
+        last_recalled_at) for every returned row, in the SAME
+        session/transaction as the SELECT — retrieval == access, mirroring
+        ``search()``'s semantics. This is deliberately the OPPOSITE of
+        ``find_similar_facts``'s dedup probe, which opts OUT of tracking
+        (audit S9: a dedup probe never surfaces to a consumer, so tracking
+        it inflates the counters for nothing). A keyed hit DOES surface —
+        it's a real retrieval leg result — so without this, a fact found
+        ONLY via its entity keys never accumulates recall signal, and
+        ``_phase_stale_scan`` can deactivate a fact that is in active keyed
+        use. Skipped when the result set is empty; failures are swallowed
+        (mirrors ``track_access``) so a tracking hiccup never turns into a
+        lost retrieval result for the caller.
         """
         if not keys:
             return []
@@ -3070,4 +3114,21 @@ class FactManager:
                 ),
                 {"a": self.agent_id, "keys": keys, "lim": limit},
             )
-            return list(rows)
+            result_rows = list(rows)
+            if result_rows:
+                try:
+                    await session.execute(
+                        update(Fact)
+                        .where(Fact.id.in_([r.id for r in result_rows]))
+                        .values(
+                            recall_count=Fact.recall_count + 1,
+                            last_recalled_at=datetime.now(UTC),
+                        )
+                    )
+                    await session.commit()
+                except Exception:
+                    logger.debug(
+                        "R3.3: keyed-leg access tracking failed for %d facts",
+                        len(result_rows),
+                    )
+            return result_rows

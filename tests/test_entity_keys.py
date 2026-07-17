@@ -638,12 +638,16 @@ class TestInheritConflictSlotKeys:
         being merged away.
 
         Asserts: subject_key/attribute_key copied from the NEWEST source
-        that has both set; entity_keys rows are the DISTINCT UNION of every
-        source's rows; entity_keys_extracted_at stays NULL on the
-        replacement (merged content is new text — the backfill should
-        re-derive it); the source facts' own rows/active state are
-        untouched (this helper never deactivates anything itself — that's
-        the caller's job, same as apply_supersession).
+        that has both set; entity_keys rows are the copied subject_key PLUS
+        the DISTINCT UNION of every source's rows (codex P2 round 10: the
+        subject_key is always reserved its own row, even when it wasn't
+        itself among the sources' own fact_entity_keys — that's what makes
+        the replacement findable via the keyed leg on its own subject);
+        entity_keys_extracted_at stays NULL on the replacement (merged
+        content is new text — the backfill should re-derive it); the source
+        facts' own rows/active state are untouched (this helper never
+        deactivates anything itself — that's the caller's job, same as
+        apply_supersession).
         """
         agent_id = heart.agent_id
         older_id = uuid.uuid4()
@@ -695,7 +699,7 @@ class TestInheritConflictSlotKeys:
                     select(FactEntityKey).where(FactEntityKey.fact_id == replacement_id)
                 )).scalars().all()
                 assert {r.entity_key for r in rows} == {
-                    "shared key", "older only key", "newer only key",
+                    "topic", "shared key", "older only key", "newer only key",
                 }
 
                 # Sources are untouched: still active, own rows intact.
@@ -709,6 +713,66 @@ class TestInheritConflictSlotKeys:
         finally:
             async with heart.db.session() as cleanup:
                 for fid in (older_id, newer_id, replacement_id):
+                    f = await cleanup.get(Fact, fid)
+                    if f is not None:
+                        await cleanup.delete(f)
+                await cleanup.commit()
+
+    async def test_subject_key_survives_cap(self, heart):
+        """codex P2 round 10: an unordered ``distinct().limit(max_keys)``
+        can return any subset when a source has more than max_keys distinct
+        entity keys, silently dropping the subject key just copied onto the
+        replacement's own subject_key column. With entity_keys_max_per_fact
+        set below the source's actual key count (max_keys+2 here), the
+        replacement must still end up with exactly max_keys rows AND the
+        subject key must be among them. Rerun-stable: calling the helper
+        twice must not change the outcome (ON CONFLICT DO NOTHING).
+        """
+        heart.facts._settings = heart.facts._settings.model_copy(
+            update={"entity_keys_max_per_fact": 3}
+        )
+        agent_id = heart.agent_id
+        source_id = uuid.uuid4()
+        replacement_id = uuid.uuid4()
+
+        async with heart.db.session() as s:
+            s.add(Fact(
+                id=source_id, agent_id=agent_id,
+                content="A source fact with many distinct entity keys.",
+                subject_key="topic", attribute_key="attr",
+                learned_at=datetime.now(UTC),
+                active=True,
+            ))
+            s.add(Fact(
+                id=replacement_id, agent_id=agent_id,
+                content="The merged replacement content.",
+                active=True,
+            ))
+            await s.flush()
+            # "topic" (the subject key) is ALSO indexed as one of the
+            # source's own entity-key rows (matching the real write path);
+            # plus 4 more distinct keys -- 5 total, max_keys(3)+2.
+            for key in ["topic", "alpha key", "beta key", "gamma key", "delta key"]:
+                s.add(FactEntityKey(fact_id=source_id, entity_key=key, agent_id=agent_id))
+            await s.commit()
+
+        try:
+            for _ in range(2):  # rerun-stable
+                async with heart.db.session() as s:
+                    await heart.facts.inherit_conflict_slot_keys(
+                        replacement_id, [source_id], s,
+                    )
+                    await s.commit()
+
+                async with heart.db.session() as check:
+                    rows = (await check.execute(
+                        select(FactEntityKey).where(FactEntityKey.fact_id == replacement_id)
+                    )).scalars().all()
+                    assert len(rows) == 3
+                    assert "topic" in {r.entity_key for r in rows}
+        finally:
+            async with heart.db.session() as cleanup:
+                for fid in (source_id, replacement_id):
                     f = await cleanup.get(Fact, fid)
                     if f is not None:
                         await cleanup.delete(f)
