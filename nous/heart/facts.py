@@ -188,6 +188,15 @@ class FactManager:
         # + re-caches the vocab from a not-yet-committed transaction's
         # pre-write snapshot, which the in-txn invalidation alone can't see.
         self._entity_vocab_dirty: bool = False
+        # codex P2 round 3: generation counter, bumped everywhere the dirty
+        # flag above is set/consumed. entity_key_vocabulary() snapshots this
+        # before its DB round-trip and only STORES its result if nothing
+        # bumped it in the meantime — closes the "late store" race the dirty
+        # flag alone can't: a rebuild that STARTS before a write invalidates
+        # the cache but FINISHES after can otherwise clobber the cache with
+        # a stale result, since the dirty flag only gated the write side's
+        # OWN re-invalidation, never a concurrently in-flight read's store.
+        self._entity_vocab_gen: int = 0
 
     def _band_budget_ok(self) -> bool:
         """Advisory in-process per-hour cap on the in-band classifier. Returns
@@ -518,9 +527,17 @@ class FactManager:
                     # case) or on exception (a poisoned cache is still worth
                     # clearing — it's only a cache, so over-invalidating on
                     # failure is harmless).
+                    # codex P2 round 3: also bump the generation counter here
+                    # — a rebuild that captured `gen` in the narrow window
+                    # AFTER the write site's own bump but BEFORE this commit
+                    # (so it still read the pre-commit, stale data) needs
+                    # this SECOND bump to be detected as stale; the write
+                    # site's bump alone only protects readers that captured
+                    # `gen` before the write started.
                     if self._entity_vocab_dirty:
                         self._entity_vocab_cache = None
                         self._entity_vocab_dirty = False
+                        self._entity_vocab_gen += 1
         # Injected-session callers own their own commit point, so there is no
         # place here to re-check the dirty flag post-commit — the 300s TTL
         # remains the sole staleness bound for this path. No current caller
@@ -769,9 +786,14 @@ class FactManager:
             # committed until learn() returns), so also mark dirty — a
             # concurrent rebuild between here and commit would otherwise
             # re-cache a stale pre-commit vocab with nothing left to
-            # invalidate it again.
+            # invalidate it again. codex P2 round 3: bump the generation
+            # counter too, so a rebuild already in flight when we reach this
+            # line (captured `gen` before this point) is detected as stale
+            # by entity_key_vocabulary()'s post-query check, even if it
+            # finishes reading pre-commit data.
             self._entity_vocab_cache = None
             self._entity_vocab_dirty = True
+            self._entity_vocab_gen += 1
 
         # Audit S3: apply the in-band dupe verdict now that the new fact
         # has an id. Returns a ContradictionWarning for CONTRADICTION.
@@ -1316,10 +1338,12 @@ class FactManager:
                         .on_conflict_do_nothing()
                     )
             dupe.entity_keys_extracted_at = datetime.now(UTC)
-            # codex P2 (+ round 2 dirty-flag): mirrors the _learn invalidation
-            # above — same still-open-transaction race applies here.
+            # codex P2 (+ round 2 dirty-flag, round 3 gen-counter): mirrors
+            # the _learn invalidation above — same still-open-transaction
+            # race applies here.
             self._entity_vocab_cache = None
             self._entity_vocab_dirty = True
+            self._entity_vocab_gen += 1
         # Fill source_ordinal when the row has none and input provides one.
         if input.source_ordinal is not None and dupe.source_ordinal is None:
             dupe.source_ordinal = input.source_ordinal
@@ -2843,11 +2867,26 @@ class FactManager:
         applies as a floor for entity keys written by a DIFFERENT process
         (e.g. the backfill script), which cannot invalidate this instance's
         cache.
+
+        codex P2 round 3: the DB round-trip below has an `await`, so a write
+        can land while this call is in flight. Snapshotting
+        `self._entity_vocab_gen` before the round-trip and only STORING the
+        result if it is unchanged afterward closes the "late store" race the
+        round-2 dirty flag couldn't: a rebuild that STARTS before a write
+        invalidates the cache but FINISHES after would otherwise clobber the
+        (correctly cleared) cache with a now-stale result — the dirty flag
+        only gates the write side's own re-invalidation, never a
+        concurrently in-flight read's store. Race-free without a lock:
+        asyncio is single-threaded/cooperative, so a writer can only
+        interleave at the `await` inside the round-trip; the comparison and
+        the store immediately after it are synchronous with no `await`
+        between them, so nothing can interleave there either.
         """
         cached = self._entity_vocab_cache
         now = time.monotonic()
         if cached is not None and now - cached[1] < _ENTITY_VOCAB_TTL_SECONDS:
             return cached[0]
+        gen = self._entity_vocab_gen
         async with self.db.session() as session:
             rows = await session.execute(
                 text("SELECT DISTINCT ek.entity_key FROM heart.fact_entity_keys ek "
@@ -2856,7 +2895,8 @@ class FactManager:
                 {"a": self.agent_id, "lim": limit},
             )
             vocab = frozenset(r[0] for r in rows)
-        self._entity_vocab_cache = (vocab, now)
+        if gen == self._entity_vocab_gen:
+            self._entity_vocab_cache = (vocab, now)
         return vocab
 
     async def fetch_by_entity_keys(self, keys: list[str], limit: int = 8):

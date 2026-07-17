@@ -319,6 +319,59 @@ class TestKeyedFactLeg:
                         await cleanup.delete(dbfact)
                         await cleanup.commit()
 
+    async def test_late_rebuild_does_not_overwrite_cache_after_concurrent_write(self, heart, brain, settings):
+        # codex P2 round 3: round 2's dirty flag only gates the WRITE side's
+        # own post-commit re-invalidation — it does nothing to stop a
+        # concurrently in-flight READ from storing a stale result after the
+        # fact. A rebuild that STARTS (captures `gen`) before a write bumps
+        # the generation counter, but FINISHES (would otherwise store) after,
+        # must detect the mismatch and skip the store.
+        #
+        # Simulate the interleaving deterministically by wrapping db.session
+        # so that, immediately after the query executes (but still inside
+        # entity_key_vocabulary's `async with` block, before its gen
+        # comparison), we bump heart.facts._entity_vocab_gen exactly as a
+        # concurrent write's invalidation would.
+        orig_db_session = heart.facts.db.session
+
+        class _RacingSessionCM:
+            def __init__(self, real_cm):
+                self._real_cm = real_cm
+
+            async def __aenter__(self):
+                session = await self._real_cm.__aenter__()
+                orig_execute = session.execute
+
+                async def racing_execute(*args, **kwargs):
+                    result = await orig_execute(*args, **kwargs)
+                    heart.facts._entity_vocab_gen += 1
+                    return result
+
+                session.execute = racing_execute
+                return session
+
+            async def __aexit__(self, *exc_info):
+                return await self._real_cm.__aexit__(*exc_info)
+
+        def racing_session():
+            return _RacingSessionCM(orig_db_session())
+
+        heart.facts.db.session = racing_session
+        try:
+            vocab = await heart.facts.entity_key_vocabulary()
+        finally:
+            heart.facts.db.session = orig_db_session
+
+        # The in-flight query's own result is still returned to the caller...
+        assert isinstance(vocab, frozenset)
+        # ...but must NOT have been stored, since a "write" landed mid-flight.
+        assert heart.facts._entity_vocab_cache is None
+
+        # A subsequent (unpatched) call rebuilds fresh and caches normally.
+        vocab2 = await heart.facts.entity_key_vocabulary()
+        assert heart.facts._entity_vocab_cache is not None
+        assert heart.facts._entity_vocab_cache[0] == vocab2
+
 
 # ---------------------------------------------------------------------------
 # Entity-candidate extraction (NER-lite) — vocab leg + carry-forward coverage
