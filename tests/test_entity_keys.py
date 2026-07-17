@@ -251,6 +251,39 @@ class TestLearnWritesEntityRows:
                         await cleanup.delete(dbfact)
                         await cleanup.commit()
 
+    async def test_junk_entity_keys_filtered_at_learn(self, heart, session):
+        """codex P2 round 4: FactInput.entity_keys can be passed directly to
+        Heart.learn, bypassing the extractor's is_keyable_entity stop-policy
+        entirely (enumerative_extractor.py:327). _learn's insert loop must
+        enforce the same gate itself, or a caller can persist junk keys
+        ("red", "1876", 2-char values).
+        """
+        fi = FactInput(
+            content="The author of The Marriage of Figaro is Thomas Kyd.",
+            subject="marriage of figaro",
+            entity_keys=["red", "1876", "ab", "thomas kyd"],
+            source="enumerative_extractor",
+        )
+        result = await heart.learn(fi)
+        try:
+            rows = (await session.execute(
+                select(FactEntityKey).where(FactEntityKey.fact_id == result.id)
+            )).scalars().all()
+            assert {r.entity_key for r in rows} == {"thomas kyd"}
+            fact = await session.get(Fact, result.id)
+            # Stamped even though 3 of the 4 candidates were filtered out —
+            # the fact WAS processed for entity extraction; nothing left to
+            # retry.
+            assert fact.entity_keys_extracted_at is not None
+        finally:
+            fact_id = getattr(result, "id", None)
+            if fact_id is not None:
+                async with heart.db.session() as cleanup:
+                    dbfact = await cleanup.get(Fact, fact_id)
+                    if dbfact is not None:
+                        await cleanup.delete(dbfact)
+                        await cleanup.commit()
+
     async def test_rejected_fact_writes_no_rows(self, heart, session):
         fi = FactInput(content="x", subject="s", entity_keys=["thomas kyd"])  # below min-content floor
         result = await heart.learn(fi)
@@ -269,6 +302,9 @@ class TestLearnWritesEntityRows:
         entity_keys_extracted_at. on_conflict_do_nothing must absorb the
         collision rather than aborting the whole learn txn, and the new
         (non-colliding) key must still land alongside it.
+
+        codex P2 round 4: also carries a junk candidate ("1876") to confirm
+        the stop-policy gate applies on this path too, mirroring _learn's.
         """
         vec = [1.0] + [0.0] * 1535  # unit vector: identical vec -> cosine 1.0 dupe match
         content = "The observability platform reports a service uptime of ninety nine point nine percent."
@@ -299,7 +335,7 @@ class TestLearnWritesEntityRows:
                     subject="observability platform",
                     subject_key="observability platform",
                     attribute_key="uptime",
-                    entity_keys=["observability platform", "service uptime"],
+                    entity_keys=["observability platform", "service uptime", "1876"],
                     source="enumerative_extractor",
                 ),
                 precomputed_embedding=vec,
@@ -312,8 +348,11 @@ class TestLearnWritesEntityRows:
                 rows = (await check.execute(
                     select(FactEntityKey).where(FactEntityKey.fact_id == fact_id)
                 )).scalars().all()
+                # "1876" is a junk numeric candidate — the stop-policy gate
+                # (codex P2 round 4) must filter it before it ever reaches
+                # the on_conflict_do_nothing insert.
                 assert {r.entity_key for r in rows} == {"observability platform", "service uptime"}
-                assert len(rows) == 2, "pre-seeded key must not be duplicated"
+                assert len(rows) == 2, "pre-seeded key must not be duplicated, junk key must be absent"
         finally:
             async with heart.db.session() as cleanup:
                 dbfact = await cleanup.get(Fact, fact_id)

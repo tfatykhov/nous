@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.admission import AdmissionController, AdmissionResult
-from nous.heart.keys import normalize_key
+from nous.heart.keys import is_keyable_entity, normalize_key
 from nous.heart.schemas import ContradictionWarning, FactDetail, FactInput, FactRejected, FactSummary
 from nous.heart.search import hybrid_search, hybrid_search_multi, set_local_ef_search
 from nous.storage.database import Database
@@ -772,13 +772,27 @@ class FactManager:
         if input.entity_keys:
             seen_keys: set[str] = set()
             max_keys = self._settings.entity_keys_max_per_fact if self._settings else 8
+            min_chars = self._settings.entity_key_min_chars if self._settings else 3
             for raw_key in input.entity_keys:
                 nk = normalize_key(raw_key)  # defensive re-normalize; idempotent (R3.2)
-                if nk and nk not in seen_keys:
+                # codex P2 round 4: enforce the same stop-policy the
+                # extractor applies (enumerative_extractor.py:327) — a
+                # caller passing FactInput.entity_keys directly to
+                # Heart.learn bypasses the extractor entirely, so without
+                # this gate junk keys ("red", "1876", "ab") would persist.
+                if (
+                    nk
+                    and nk not in seen_keys
+                    and is_keyable_entity(nk, min_chars=min_chars)
+                ):
                     seen_keys.add(nk)
                     session.add(FactEntityKey(fact_id=fact.id, entity_key=nk, agent_id=self.agent_id))
                 if len(seen_keys) >= max_keys:
                     break
+            # Stamped whenever entity_keys were provided, even if every
+            # candidate failed the stop-policy above (zero rows written) —
+            # the fact WAS processed for entity extraction; there is nothing
+            # left to retry, so a backfill pass must not re-visit it.
             fact.entity_keys_extracted_at = datetime.now(UTC)
             # codex P2: new entity keys just entered the vocab — invalidate
             # so the next recall's keyed leg sees them without waiting out
@@ -1328,15 +1342,26 @@ class FactManager:
         ):
             seen_dupe_keys: set[str] = set()
             max_keys = self._settings.entity_keys_max_per_fact if self._settings else 8
+            min_chars = self._settings.entity_key_min_chars if self._settings else 3
             for raw_key in input.entity_keys[:max_keys]:
                 nk = normalize_key(raw_key)
-                if nk and nk not in seen_dupe_keys:
+                # codex P2 round 4: mirrors the _learn stop-policy gate above
+                # — same bypass-the-extractor risk applies to the dedup-confirm
+                # path.
+                if (
+                    nk
+                    and nk not in seen_dupe_keys
+                    and is_keyable_entity(nk, min_chars=min_chars)
+                ):
                     seen_dupe_keys.add(nk)
                     await session.execute(
                         pg_insert(FactEntityKey)
                         .values(fact_id=dupe.id, entity_key=nk, agent_id=self.agent_id)
                         .on_conflict_do_nothing()
                     )
+            # Stamped whenever entity_keys were provided, even if every
+            # candidate failed the stop-policy above (zero rows written) —
+            # mirrors the _learn stamping rationale.
             dupe.entity_keys_extracted_at = datetime.now(UTC)
             # codex P2 (+ round 2 dirty-flag, round 3 gen-counter): mirrors
             # the _learn invalidation above — same still-open-transaction
