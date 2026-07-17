@@ -24,6 +24,17 @@ be deleted, and aborts (no writes) when that count is nonzero, unless
 `--include-live-writes` is passed. `--dry-run` always reports the count,
 never aborts.
 
+codex P2 round 14: the printed watermark, and every other timestamp this
+script later compares against it (`entity_keys_extracted_at`, etc.), are
+ALWAYS sourced from the DATABASE's own clock (`fetch_db_now`, `SELECT
+now()`), never the app host's `datetime.now()`. The watermark is compared
+against DB-generated columns (`fact_entity_keys.created_at`,
+`facts.learned_at`); if the app host clock is even slightly AHEAD of the
+database server's, rows this run inserts get a DB-assigned `created_at`
+EARLIER than a client-sourced watermark, so a later
+`--phase rollback --watermark <that-value>`'s `created_at >= :watermark`
+predicate would silently miss rows from the very run it should undo.
+
 Resume: phase 3 processes only facts WHERE entity_keys_extracted_at IS NULL
 (statement-level watermark, R3.2 hardening item); safe to kill and re-run.
 """
@@ -51,6 +62,21 @@ from nous.storage.database import Database
 from nous.storage.models import Fact, FactEntityKey
 
 logger = logging.getLogger("r3-entity-keys-backfill")
+
+
+async def fetch_db_now(session) -> datetime:
+    """codex P2 round 14: fetch the current time from the DATABASE's own
+    clock (`SELECT now()`), never the app host's. Every timestamp this
+    script compares against the rollback watermark (`fact_entity_keys.
+    created_at`, `facts.learned_at`, `facts.entity_keys_extracted_at`) is a
+    DB-generated column -- sourcing the watermark itself (and any other
+    value compared against those columns) from `datetime.now()` on the
+    app host risks clock skew silently breaking the `created_at >=
+    watermark` rollback predicate. Returns a timezone-aware datetime
+    (Postgres `timestamptz` maps to one automatically).
+    """
+    return (await session.execute(text("SELECT now()"))).scalar_one()
+
 
 _VALUE_EXTRACTION_SCHEMA = {
     "type": "object",
@@ -276,7 +302,10 @@ async def phase_extract(
             logger.warning("phase_extract: LLM call returned no usable result -- stopping (resumable).")
             break
 
-        now = datetime.now(UTC)
+        # codex P2 round 14: entity_keys_extracted_at is compared against
+        # the rollback watermark by phase_rollback -- DB-sourced, not the
+        # app host's clock (see fetch_db_now's docstring).
+        now = await fetch_db_now(session)
         seen_indices: set[int] = set()
         for item in result["items"]:
             if not isinstance(item, dict):
@@ -490,12 +519,18 @@ async def _run_backfill(
         )
         return 2
 
-    watermark = datetime.now(UTC).isoformat()
-    print(f"ROLLBACK KEY (created_at watermark): {watermark}")
-
     db = Database(settings)
     await db.connect()
     try:
+        # codex P2 round 14: watermark sourced from the DATABASE's clock,
+        # not the app host's -- see fetch_db_now's docstring. Fetched here
+        # (immediately before the forward phases start) rather than at
+        # module scope, so it's as close as possible to the first write
+        # this run makes.
+        async with db.session() as s:
+            watermark = (await fetch_db_now(s)).isoformat()
+        print(f"ROLLBACK KEY (created_at watermark): {watermark}")
+
         totals: dict[str, int] = {}
 
         if phase in ("normalize", "all"):

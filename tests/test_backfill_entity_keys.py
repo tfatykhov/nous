@@ -323,3 +323,50 @@ class TestStuckRoundGuard:
         # already-handled branch (natural completion), not a stuck round.
         from scripts.backfill_r3_entity_keys import _is_stuck_round
         assert _is_stuck_round({"facts_scanned": 0, "facts_stamped": 0}) is False
+
+
+@pytest.mark.postgres_only
+class TestFetchDbNow:
+    """codex P2 round 14: the rollback watermark (and entity_keys_extracted_at
+    in phase_extract) must be sourced from the DATABASE's own clock, not the
+    app host's -- a client-host datetime.now() can drift from the database
+    server's clock, and since the watermark is compared against DB-generated
+    columns (fact_entity_keys.created_at, facts.learned_at), any skew where
+    the app host is ahead of the DB silently breaks phase_rollback's
+    `created_at >= :watermark` predicate for rows the very run it should
+    undo just inserted.
+    """
+
+    async def test_returns_tz_aware_datetime_consistent_with_select_now(self, session):
+        from scripts.backfill_r3_entity_keys import fetch_db_now
+
+        result = await fetch_db_now(session)
+        assert isinstance(result, dt.datetime)
+        assert result.tzinfo is not None, "must be tz-aware to compare against tz-aware watermark args"
+        # Sanity bound, not an equality assertion -- asserting equality
+        # with the test process's own datetime.now(UTC) would make this a
+        # tautological re-implementation of the fix, and cross-host/
+        # container clock skew is exactly what the fix defends against in
+        # production. A generous window just catches "totally wrong value"
+        # bugs (wrong type, wrong epoch, naive datetime, etc).
+        delta = abs((result - dt.datetime.now(dt.timezone.utc)).total_seconds())
+        assert delta < 30
+
+    async def test_ignores_client_clock(self, session, monkeypatch):
+        """The above test alone can't distinguish a DB-sourced result from a
+        client-clock fallback -- app host and test-DB share a clock in dev/CI,
+        so a plain datetime.now(UTC) would also look tz-aware and ~now. Prove
+        fetch_db_now truly queries the database: poison the module's
+        `datetime.now` with an obviously-wrong sentinel and confirm the
+        result is unaffected (a client-clock implementation would return the
+        poisoned year here)."""
+        import scripts.backfill_r3_entity_keys as bf
+
+        class _PoisonedDatetime(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return dt.datetime(1999, 1, 1, tzinfo=dt.timezone.utc)
+
+        monkeypatch.setattr(bf, "datetime", _PoisonedDatetime)
+        result = await bf.fetch_db_now(session)
+        assert result.year > 2000
