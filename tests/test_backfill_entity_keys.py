@@ -60,6 +60,26 @@ class TestBackfillPhases:
         assert f.subject_key == "thomas_kyd"
         assert counts["facts_updated"] == 1  # counted, not written
 
+    async def test_normalize_phase_pass2_resolves_collision_without_deleting_canonical(self, session, make_fact):
+        """db-P3-5 guard: two old-format entity_key rows for the same fact that
+        BOTH normalize to the same canonical form, one of which is ALREADY
+        canonical. After phase_normalize exactly one canonical row survives
+        (insert-before-delete + ON CONFLICT DO NOTHING must not delete the
+        already-canonical row after its insert conflicts), and
+        entity_rows_rewritten counts only the row that actually changed."""
+        f = await make_fact()
+        session.add(FactEntityKey(fact_id=f.id, entity_key="thomas_kyd", agent_id=f.agent_id))
+        session.add(FactEntityKey(fact_id=f.id, entity_key="thomas kyd", agent_id=f.agent_id))
+        await session.flush()
+        from scripts.backfill_r3_entity_keys import phase_normalize
+        counts = await phase_normalize(session, agent_id=f.agent_id, dry_run=False)
+        await session.flush()
+        rows = (await session.execute(
+            select(FactEntityKey).where(FactEntityKey.fact_id == f.id))).scalars().all()
+        assert {r.entity_key for r in rows} == {"thomas kyd"}
+        assert len(rows) == 1
+        assert counts["entity_rows_rewritten"] == 1
+
     async def test_seed_phase_inserts_subject_rows_idempotently(self, session, make_fact):
         f = await make_fact(subject_key="thomas kyd")
         from scripts.backfill_r3_entity_keys import phase_seed
@@ -115,3 +135,48 @@ class TestBackfillPhases:
         assert rows == []
         await session.refresh(f)
         assert f.entity_keys_extracted_at is not None
+
+    async def test_extract_phase_reports_zero_stamped_when_all_indices_malformed(self, session, make_fact, monkeypatch):
+        """Stuck-round guard precondition: when every LLM item this round is
+        unusable (out-of-bounds index), phase_extract must report
+        facts_scanned>0 but facts_stamped==0 -- exactly the signal
+        _is_stuck_round uses to stop the CLI extract loop -- and the fact
+        stays unstamped (resumable), not silently marked done."""
+        f = await make_fact(subject_key="key one", content="The capital of Belgium is Brussels.")
+        from unittest.mock import AsyncMock
+        import scripts.backfill_r3_entity_keys as bf
+        monkeypatch.setattr(bf, "call_background_llm_structured", AsyncMock(return_value={
+            "items": [{"index": 7, "entities": ["Belgium"]}]  # out of bounds: only 1 row (index 0)
+        }))
+        counts = await bf.phase_extract(session, agent_id=f.agent_id, settings=bf_settings(),
+                                        llm_client=object(), llm_batch=40, max_llm_calls=1, dry_run=False)
+        assert counts["facts_scanned"] == 1
+        assert counts["facts_stamped"] == 0
+        assert counts["warnings"] == 1
+        from scripts.backfill_r3_entity_keys import _is_stuck_round
+        assert _is_stuck_round(counts) is True
+        await session.refresh(f)
+        assert f.entity_keys_extracted_at is None
+
+
+class TestStuckRoundGuard:
+    """Pure-function tests for the CLI extract loop's budget-burn guard --
+    no DB, no monkeypatching, runs on both backends."""
+
+    def test_zero_stamps_with_pending_facts_is_stuck(self):
+        from scripts.backfill_r3_entity_keys import _is_stuck_round
+        assert _is_stuck_round({"facts_scanned": 5, "facts_stamped": 0}) is True
+
+    def test_partial_progress_is_not_stuck(self):
+        from scripts.backfill_r3_entity_keys import _is_stuck_round
+        assert _is_stuck_round({"facts_scanned": 5, "facts_stamped": 3}) is False
+
+    def test_full_progress_is_not_stuck(self):
+        from scripts.backfill_r3_entity_keys import _is_stuck_round
+        assert _is_stuck_round({"facts_scanned": 5, "facts_stamped": 5}) is False
+
+    def test_empty_round_is_not_stuck(self):
+        # facts_scanned==0 means "no more facts pending" -- a different,
+        # already-handled branch (natural completion), not a stuck round.
+        from scripts.backfill_r3_entity_keys import _is_stuck_round
+        assert _is_stuck_round({"facts_scanned": 0, "facts_stamped": 0}) is False

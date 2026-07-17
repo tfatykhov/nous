@@ -190,7 +190,10 @@ async def phase_extract(
     """LLM value-side entity extraction. Resume marker = entity_keys_extracted_at
     IS NULL; every fact the LLM returns an item for gets stamped (even an empty
     item), so kill+retry never re-asks the LLM about already-answered facts."""
-    counts = {"facts_scanned": 0, "llm_calls_made": 0, "entity_rows_inserted": 0, "warnings": 0}
+    counts = {
+        "facts_scanned": 0, "llm_calls_made": 0, "entity_rows_inserted": 0,
+        "warnings": 0, "facts_stamped": 0,
+    }
 
     base_predicate = (
         Fact.agent_id == agent_id,
@@ -281,6 +284,7 @@ async def phase_extract(
                 counts["entity_rows_inserted"] += 1
 
             await session.execute(update(Fact).where(Fact.id == row.id).values(entity_keys_extracted_at=now))
+            counts["facts_stamped"] += 1
 
         logger.info(
             "phase_extract: round scanned=%d llm_calls=%d inserted=%d warnings=%d",
@@ -295,6 +299,15 @@ async def phase_extract(
 def _merge(totals: dict[str, int], counts: dict[str, int]) -> None:
     for k, v in counts.items():
         totals[k] = totals.get(k, 0) + v
+
+
+def _is_stuck_round(counts: dict[str, int]) -> bool:
+    """True when a phase_extract round found pending facts but stamped none of
+    them (every LLM item this round was malformed/omitted/skipped, or the LLM
+    call itself failed). Without this check the CLI's extract loop would burn
+    the remaining --max-llm-calls budget one call per round re-asking about
+    the same persistently-omitted facts, never making progress."""
+    return counts["facts_scanned"] > 0 and counts.get("facts_stamped", 0) == 0
 
 
 async def _run_backfill(
@@ -382,6 +395,12 @@ async def _run_backfill(
                         )
                         if c["llm_calls_made"] == 0:
                             break  # no more facts pending
+                        if _is_stuck_round(c):
+                            print(
+                                f"{c['facts_scanned']} facts persistently omitted by the LLM "
+                                "-- stopping; re-run or inspect."
+                            )
+                            break
                         if remaining_budget > 0:
                             remaining_budget -= c["llm_calls_made"]
                             if remaining_budget <= 0:
