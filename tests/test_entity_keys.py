@@ -393,6 +393,121 @@ class TestLearnWritesEntityRows:
                         await cleanup.delete(dbfact)
                         await cleanup.commit()
 
+    async def test_subject_key_only_seeds_entity_row(self, heart, session):
+        """codex P2 round 16: a direct FactInput(subject_key=...,
+        attribute_key=...) with no entity_keys previously wrote ZERO entity
+        rows -- visible to R2 same-key supersession (reads facts.subject_key
+        directly) but invisible to the keyed retrieval leg until an
+        operator ran phase_seed. entity_keys_extracted_at stays NULL
+        (entity_extraction_complete not set here) so value-side extraction
+        still revisits the fact later. The vocab must be visible
+        IMMEDIATELY post-learn, not after the 300s TTL -- proves the
+        post-commit invalidation gate widened alongside the write-site one.
+        """
+        fi = FactInput(
+            content="The API gateway service is owned by the platform team going forward.",
+            subject="api gateway",
+            subject_key="api gateway",
+            attribute_key="owner",
+            source="direct_caller",
+        )
+        result = await heart.learn(fi)
+        try:
+            rows = (await session.execute(
+                select(FactEntityKey).where(FactEntityKey.fact_id == result.id)
+            )).scalars().all()
+            assert {r.entity_key for r in rows} == {"api gateway"}
+            fact = await session.get(Fact, result.id)
+            assert fact.entity_keys_extracted_at is None
+
+            vocab = await heart.facts.entity_key_vocabulary()
+            assert "api gateway" in vocab
+        finally:
+            fact_id = getattr(result, "id", None)
+            if fact_id is not None:
+                async with heart.db.session() as cleanup:
+                    dbfact = await cleanup.get(Fact, fact_id)
+                    if dbfact is not None:
+                        await cleanup.delete(dbfact)
+                        await cleanup.commit()
+
+    async def test_subject_key_only_vocab_visible_immediately_no_ttl_wait(self, heart):
+        """codex P2 round 16: learn()'s post-commit invalidation gate was
+        `if input.entity_keys:` only -- a subject-key-only FactInput (no
+        entity_keys) would never trigger the post-commit re-invalidation
+        even though _learn's write-site block now seeds an entity row for
+        it. A plain sequential warm/check test (like the one above) can't
+        catch this on its own: the write-site's in-txn bump already nulls
+        the cache unconditionally, so a check run strictly after the real
+        commit rebuilds correctly either way (same subtlety discovered in
+        round 13). Mirrors round 13's racing-_emit_event technique: hooks
+        _emit_event ("fact_learned", called after the entity-key block but
+        before learn()'s outer commit) to force a vocab rebuild from
+        inside the still-open transaction -- under READ COMMITTED that
+        rebuild can't see the uncommitted row, so it caches a STALE vocab,
+        exactly the window the post-commit invalidation must close.
+        """
+        orig_emit_event = heart.facts._emit_event
+
+        async def racing_emit_event(sess, event_type, data):
+            if event_type == "fact_learned":
+                await heart.facts.entity_key_vocabulary()
+            return await orig_emit_event(sess, event_type, data)
+
+        heart.facts._emit_event = racing_emit_event
+
+        fi = FactInput(
+            content="The billing reconciliation job is owned by the finance systems team.",
+            subject="billing reconciliation job",
+            subject_key="billing reconciliation job",
+            attribute_key="owner",
+            source="direct_caller",
+        )
+        result = None
+        try:
+            result = await heart.learn(fi)
+            # Without learn()'s widened post-commit invalidation, this
+            # would return the vocab the racing rebuild poisoned
+            # mid-transaction (missing the new key) for the rest of the
+            # 300s TTL.
+            vocab = await heart.facts.entity_key_vocabulary()
+            assert "billing reconciliation job" in vocab
+        finally:
+            heart.facts._emit_event = orig_emit_event
+            fact_id = getattr(result, "id", None)
+            if fact_id is not None:
+                async with heart.db.session() as cleanup:
+                    dbfact = await cleanup.get(Fact, fact_id)
+                    if dbfact is not None:
+                        await cleanup.delete(dbfact)
+                        await cleanup.commit()
+
+    async def test_scalar_subject_key_only_writes_zero_rows_no_crash(self, heart, session):
+        """codex P2 round 16: a scalar-only subject_key ("red") must still
+        be filtered by the stop-policy -- zero entity rows, no crash --
+        exactly like a scalar entity_keys candidate always was."""
+        fi = FactInput(
+            content="Per the updated spec, this batch's widget paint color is red.",
+            subject="widget color",
+            subject_key="red",
+            attribute_key="color",
+            source="direct_caller",
+        )
+        result = await heart.learn(fi)
+        try:
+            rows = (await session.execute(
+                select(FactEntityKey).where(FactEntityKey.fact_id == result.id)
+            )).scalars().all()
+            assert rows == []
+        finally:
+            fact_id = getattr(result, "id", None)
+            if fact_id is not None:
+                async with heart.db.session() as cleanup:
+                    dbfact = await cleanup.get(Fact, fact_id)
+                    if dbfact is not None:
+                        await cleanup.delete(dbfact)
+                        await cleanup.commit()
+
     async def test_entities_key_present_empty_stamps_watermark_after_learn(self, heart, session, settings):
         """Sibling case: raw dict WITH "entities": [] (LLM explicitly
         reported no additional entities) produces
@@ -578,6 +693,55 @@ class TestLearnWritesEntityRows:
                 # the on_conflict_do_nothing insert.
                 assert {r.entity_key for r in rows} == {"observability platform", "service uptime"}
                 assert len(rows) == 2, "pre-seeded key must not be duplicated, junk key must be absent"
+        finally:
+            async with heart.db.session() as cleanup:
+                dbfact = await cleanup.get(Fact, fact_id)
+                if dbfact is not None:
+                    await cleanup.delete(dbfact)
+                    await cleanup.commit()
+
+    async def test_confirm_duplicate_seeds_subject_key_when_input_has_subject_only(self, heart):
+        """codex P2 round 16: mirrors the _learn fix for the dedup-confirm
+        path -- a confirming FactInput carrying only subject_key/
+        attribute_key (no entity_keys) must still seed the subject key onto
+        the dupe, not silently skip backfilling because input.entity_keys
+        is empty. entity_keys_extracted_at stays NULL (no
+        entity_extraction_complete signal here either).
+        """
+        vec = [1.0] + [0.0] * 1535  # unit vector: identical vec -> cosine 1.0 dupe match
+        content = "The deployment pipeline for this service runs nightly at midnight UTC."
+        fact_id = uuid.uuid4()
+
+        async with heart.db.session() as seed:
+            seed.add(Fact(
+                id=fact_id,
+                agent_id=heart.agent_id,
+                content=content,
+                subject="deployment pipeline",
+                embedding=vec,
+            ))
+            await seed.commit()
+
+        try:
+            result = await heart.learn(
+                FactInput(
+                    content=content,
+                    subject="deployment pipeline",
+                    subject_key="deployment pipeline",
+                    attribute_key="schedule",
+                    source="direct_caller",
+                ),
+                precomputed_embedding=vec,
+            )
+            assert result.id == fact_id, "identical content+vector must hit the confirm-dupe path"
+
+            async with heart.db.session() as check:
+                rows = (await check.execute(
+                    select(FactEntityKey).where(FactEntityKey.fact_id == fact_id)
+                )).scalars().all()
+                assert {r.entity_key for r in rows} == {"deployment pipeline"}
+                dbfact = await check.get(Fact, fact_id)
+                assert dbfact.entity_keys_extracted_at is None
         finally:
             async with heart.db.session() as cleanup:
                 dbfact = await cleanup.get(Fact, fact_id)
@@ -1000,6 +1164,14 @@ class TestSupersedeInheritsConflictSlotKeys:
         (unlike the merge sites, which never do) — that keyed replacement
         must win over the inherited source key, not be clobbered by it.
         The entity-row union stays additive regardless.
+
+        codex P2 round 16: _learn's write-site block now also seeds an
+        entity row from a bare subject_key (this test's own FactInput has
+        one: "its own distinct key") — so the replacement's OWN subject key
+        is now indexed alongside the source's additively-unioned rows, not
+        absent as it was before round 16. This is round 16's deliberate new
+        behavior (a direct subject_key-only write must be keyed-leg
+        visible), not a regression of round 11's guard.
         """
         agent_id = heart.agent_id
         source_id = uuid.uuid4()
@@ -1039,11 +1211,17 @@ class TestSupersedeInheritsConflictSlotKeys:
                 assert replacement.attribute_key is None
 
                 # Entity-row union from the source is still additive+capped
-                # even though the subject/attribute pair copy was skipped.
+                # even though the subject/attribute pair copy was skipped;
+                # the replacement's OWN subject key is ALSO indexed now
+                # (round 16 — seeded by _learn's write-site block, not by
+                # inherit_conflict_slot_keys, which never copies a foreign
+                # caller-owned key).
                 rows = (await check.execute(
                     select(FactEntityKey).where(FactEntityKey.fact_id == detail.id)
                 )).scalars().all()
-                assert {r.entity_key for r in rows} == {"package manager", "poetry"}
+                assert {r.entity_key for r in rows} == {
+                    "its own distinct key", "package manager", "poetry",
+                }
         finally:
             async with heart.db.session() as cleanup:
                 ids = [source_id] + ([detail.id] if detail is not None else [])

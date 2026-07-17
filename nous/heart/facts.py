@@ -549,7 +549,12 @@ class FactManager:
                     # — the same post-commit invalidation is now also needed
                     # at inherit_conflict_slot_keys's caller-owned commit
                     # points (supersede, sleep_handler merge sites).
-                    if input.entity_keys:
+                    # codex P2 round 16: widened to also cover a subject-only
+                    # write (no entity_keys) — _learn's insert block now
+                    # seeds an entity row from input.subject_key alone, so
+                    # this gate must match its own `input.subject_key or
+                    # input.entity_keys` condition.
+                    if input.entity_keys or input.subject_key:
                         self.invalidate_entity_vocab()
         # Injected-session callers own their own commit point, so there is no
         # place here to re-invalidate post-commit — the 300s TTL remains the
@@ -782,17 +787,29 @@ class FactManager:
         await session.flush()
 
         # R3.1 (F085): index entity-key rows in the same transaction as the fact.
-        if input.entity_keys:
+        # codex P2 round 16: the candidate list unions the subject key FIRST
+        # with entity_keys — mirrors the extractor's own subject-first union
+        # and the backfill's phase_seed. Without this, a direct
+        # FactInput(subject_key=..., attribute_key=...) with no entity_keys
+        # wrote ZERO entity rows: visible to R2 same-key supersession (which
+        # reads facts.subject_key directly) but invisible to the keyed
+        # retrieval leg until an operator ran phase_seed. The block now
+        # fires when EITHER subject_key or entity_keys is present.
+        if input.subject_key or input.entity_keys:
             seen_keys: set[str] = set()
             max_keys = self._settings.entity_keys_max_per_fact if self._settings else 8
             min_chars = self._settings.entity_key_min_chars if self._settings else 3
-            for raw_key in input.entity_keys:
+            for raw_key in (input.subject_key, *input.entity_keys):
+                if raw_key is None:
+                    continue
                 nk = normalize_key(raw_key)  # defensive re-normalize; idempotent (R3.2)
                 # codex P2 round 4: enforce the same stop-policy the
                 # extractor applies (enumerative_extractor.py:327) — a
                 # caller passing FactInput.entity_keys directly to
                 # Heart.learn bypasses the extractor entirely, so without
                 # this gate junk keys ("red", "1876", "ab") would persist.
+                # A scalar-only subject_key ("red") is filtered here too —
+                # zero rows, no crash (round 16).
                 if (
                     nk
                     and nk not in seen_keys
@@ -807,7 +824,8 @@ class FactManager:
             # the TTL. codex P2 round 2: this transaction is still open (not
             # committed until learn() returns) — learn()'s finally performs
             # the actual post-commit re-invalidation (round 5: gated on this
-            # call's own `input.entity_keys`, not a shared flag). codex P2
+            # call's own `input.entity_keys`, not a shared flag; round 16:
+            # widened to `input.entity_keys or input.subject_key`). codex P2
             # round 3: bump the generation counter too, so a rebuild already
             # in flight when we reach this line (captured `gen` before this
             # point) is detected as stale by entity_key_vocabulary()'s
@@ -828,7 +846,11 @@ class FactManager:
         # on `input.entity_keys` non-empty (the round 6 behavior) would
         # leave those facts permanently re-sent to the LLM by every
         # backfill run, since they can never legitimately produce a
-        # non-empty entity_keys list.
+        # non-empty entity_keys list. codex P2 round 16: this stays
+        # completely independent of the subject-key seeding above too — a
+        # subject-only write (no entity_keys, entity_extraction_complete
+        # not set) leaves this NULL, so value-side extraction still
+        # revisits the fact later via the backfill's IS NULL predicate.
         if input.entity_extraction_complete:
             fact.entity_keys_extracted_at = datetime.now(UTC)
 
@@ -1357,8 +1379,11 @@ class FactManager:
         # (pg_insert.on_conflict_do_nothing) — guarded the same way the W-8
         # advisory lock above gates on dialect.name, so the SQLite unit path
         # never reaches it.
+        # codex P2 round 16: gate widened to fire on subject_key alone too
+        # (mirrors _learn's identical widening) — a direct dedup-confirming
+        # FactInput carrying only subject_key previously backfilled nothing.
         if (
-            input.entity_keys
+            (input.subject_key or input.entity_keys)
             and dupe.entity_keys_extracted_at is None
             and session.bind is not None
             and session.bind.dialect.name == "postgresql"
@@ -1372,7 +1397,10 @@ class FactManager:
             # normalize/stop-policy/dedup, so junk candidates ("1876", "red")
             # occupying early slots could crowd out valid keys past the cap
             # position even though those junk keys never insert a row.
-            for raw_key in input.entity_keys:
+            # codex P2 round 16: subject key unioned FIRST, mirrors _learn.
+            for raw_key in (input.subject_key, *input.entity_keys):
+                if raw_key is None:
+                    continue
                 nk = normalize_key(raw_key)
                 # codex P2 round 4: mirrors the _learn stop-policy gate above
                 # — same bypass-the-extractor risk applies to the dedup-confirm
