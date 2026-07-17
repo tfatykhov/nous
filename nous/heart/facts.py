@@ -2783,3 +2783,39 @@ class FactManager:
             }
             for row in result.all()
         ]
+
+    async def entity_key_vocabulary(self, limit: int = 50_000) -> frozenset[str]:
+        """R3.3: distinct entity keys of ACTIVE facts for this agent (NER-lite
+        vocab matching). Active join per the fact_entity_keys read invariant."""
+        async with self.db.session() as session:
+            rows = await session.execute(
+                text("SELECT DISTINCT ek.entity_key FROM heart.fact_entity_keys ek "
+                     "JOIN heart.facts f ON f.id = ek.fact_id "
+                     "WHERE ek.agent_id = :a AND f.active = true LIMIT :lim"),
+                {"a": self.agent_id, "lim": limit},
+            )
+            return frozenset(r[0] for r in rows)
+
+    async def fetch_by_entity_keys(self, keys: list[str], limit: int = 8):
+        """R3.3: active facts matching any entity key, ranked by matched-key
+        count then recency/ordinal. MUST join facts on active=true (entity
+        rows survive supersession)."""
+        if not keys:
+            return []
+        async with self.db.session() as session:
+            rows = await session.execute(
+                text(
+                    "SELECT f.id, f.content, f.learned_at, f.source_ordinal, "
+                    "       COUNT(DISTINCT ek.entity_key) AS matched "
+                    "FROM heart.fact_entity_keys ek "
+                    "JOIN heart.facts f ON f.id = ek.fact_id "
+                    "WHERE ek.agent_id = :a AND ek.entity_key = ANY(:keys) "
+                    "  AND f.active = true "
+                    "GROUP BY f.id, f.content, f.learned_at, f.source_ordinal "
+                    "ORDER BY matched DESC, f.learned_at DESC, "
+                    "         f.source_ordinal DESC NULLS LAST "
+                    "LIMIT :lim"
+                ),
+                {"a": self.agent_id, "keys": keys, "lim": limit},
+            )
+            return list(rows)

@@ -308,6 +308,18 @@ class Settings(BaseSettings):
         default=3, ge=1,
         description="R3.1 (F085): stop-policy floor - normalized entity keys shorter than this are not indexed (applies to subject keys too).",
     )
+    keyed_fact_leg_enabled: bool = Field(
+        default=False,
+        description="R3.3 (F085) master switch: exact entity-key retrieval leg in run_recall_pipeline. Land-dark.",
+    )
+    keyed_fact_leg_k: int = Field(
+        default=8, ge=1,
+        description="R3.3: bounded allotment - max keyed facts merged per query.",
+    )
+    keyed_fact_leg_score: float = Field(
+        default=0.55, ge=0.0, le=1.0,
+        description="R3.3: score band ceiling for keyed hits (RRF [0,1] scale, below the direct-hit head).",
+    )
 
     # F017: Budget scaling
     budget_scale_enabled: bool = True
