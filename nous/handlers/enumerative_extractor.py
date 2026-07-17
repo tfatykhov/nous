@@ -21,22 +21,11 @@ from nous.heart.schemas import FactInput, FactRejected
 
 logger = logging.getLogger(__name__)
 
-_PUNCT = re.compile(r"[^\w\s]")
-_WS = re.compile(r"\s+")
 _LIST_MARKER = re.compile(r"^\s*(?:[-*•]|\d{1,5}[.):])\s+")
 # A short, self-contained declarative line: 10-180 chars ending in period/semicolon (not question/exclamation).
 _STATEMENT_LINE = re.compile(r"^.{10,180}[.;]\s*$")
 
-
-def normalize_key(raw: str | None, *, max_len: int = 200) -> str | None:
-    """Canonicalize an entity/attribute identifier: lowercase, strip
-    punctuation (possessives collapse: "Tim's" -> "tims"), collapse
-    whitespace, cap at max_len chars. None/empty -> None."""
-    if not raw:
-        return None
-    s = _PUNCT.sub("", raw.lower())
-    s = _WS.sub(" ", s).strip()
-    return s[:max_len] or None
+from nous.heart.keys import normalize_key  # noqa: F401 — re-exported; R3.2 single canonicalizer
 
 
 def density_score(text: str) -> float:
