@@ -306,7 +306,7 @@ class Settings(BaseSettings):
     )
     entity_key_min_chars: int = Field(
         default=3, ge=1,
-        description="R3.1 (F085): stop-policy floor - normalized entity keys shorter than this are not indexed (subject key exempt).",
+        description="R3.1 (F085): stop-policy floor - normalized entity keys shorter than this are not indexed (applies to subject keys too).",
     )
 
     # F017: Budget scaling

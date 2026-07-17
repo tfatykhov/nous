@@ -71,8 +71,8 @@ class TestBackfillPhases:
         assert n == 1
 
     async def test_extract_phase_resumes_via_watermark(self, session, make_fact, monkeypatch):
-        f1 = await make_fact(subject_key="k1", content="The capital of Belgium is Brussels.")
-        f2 = await make_fact(subject_key="k2", content="The author of X is Thomas Kyd.")
+        f1 = await make_fact(subject_key="key one", content="The capital of Belgium is Brussels.")
+        f2 = await make_fact(subject_key="key two", content="The author of X is Thomas Kyd.")
         from unittest.mock import AsyncMock
         import scripts.backfill_r3_entity_keys as bf
         monkeypatch.setattr(bf, "call_background_llm_structured", AsyncMock(return_value={
@@ -84,7 +84,7 @@ class TestBackfillPhases:
         counts = await bf.phase_extract(session, agent_id=f1.agent_id, settings=bf_settings(),
                                         llm_client=object(), llm_batch=40, max_llm_calls=0, dry_run=False)
         await session.flush()
-        for f, expected in ((f1, {"k1", "belgium", "brussels"}), (f2, {"k2", "thomas kyd"})):
+        for f, expected in ((f1, {"key one", "belgium", "brussels"}), (f2, {"key two", "thomas kyd"})):
             rows = {r.entity_key for r in (await session.execute(
                 select(FactEntityKey).where(FactEntityKey.fact_id == f.id))).scalars().all()}
             assert expected <= rows
@@ -96,3 +96,22 @@ class TestBackfillPhases:
         await bf.phase_extract(session, agent_id=f1.agent_id, settings=bf_settings(),
                                llm_client=object(), llm_batch=40, max_llm_calls=0, dry_run=False)
         mock2.assert_not_awaited()
+
+    async def test_extract_phase_applies_stop_policy_to_subject_key(self, session, make_fact, monkeypatch):
+        """Amendment 3 (review devil-P2-1): no stop-policy exemption for subject
+        keys -- a scalar/short subject gets no entity row, but the fact is still
+        stamped extracted (it appeared in an LLM item)."""
+        f = await make_fact(subject_key="ab", content="The widget color is ab.")
+        from unittest.mock import AsyncMock
+        import scripts.backfill_r3_entity_keys as bf
+        monkeypatch.setattr(bf, "call_background_llm_structured", AsyncMock(return_value={
+            "items": [{"index": 0, "entities": []}]
+        }))
+        await bf.phase_extract(session, agent_id=f.agent_id, settings=bf_settings(),
+                               llm_client=object(), llm_batch=40, max_llm_calls=0, dry_run=False)
+        await session.flush()
+        rows = (await session.execute(
+            select(FactEntityKey).where(FactEntityKey.fact_id == f.id))).scalars().all()
+        assert rows == []
+        await session.refresh(f)
+        assert f.entity_keys_extracted_at is not None

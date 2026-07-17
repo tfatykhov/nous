@@ -261,20 +261,17 @@ async def phase_extract(
             seen_indices.add(idx)
             row = rows[idx]
 
-            # Subject key is unconditional here (config.py entity_key_min_chars
-            # docstring: "subject key exempt") -- only the LLM-returned
-            # value-side entities pass through the stop-policy. This differs
-            # from the write-time enumerative_extractor path, which applies
-            # is_keyable_entity to the subject too; phase_extract matches the
-            # documented field semantics instead.
+            # Amendment 3 (review devil-P2-1): NO stop-policy exemption for
+            # subject keys, here or anywhere else in the entity index -- R2
+            # reads facts.subject_key directly (never this table), so
+            # exempting subjects buys nothing and creates junk buckets.
+            # Subject and LLM-returned entities go through is_keyable_entity
+            # identically, matching the write-time enumerative_extractor path.
             keys: list[str] = []
-            subj_key = normalize_key(row.subject_key)
-            if subj_key:
-                keys.append(subj_key)
-            for e in (item.get("entities") or []):
+            for cand in (row.subject_key, *[str(e) for e in (item.get("entities") or []) if e]):
                 if len(keys) >= max_keys:
                     break
-                nk = normalize_key(str(e)) if e else None
+                nk = normalize_key(cand) if cand else None
                 if nk and nk not in keys and is_keyable_entity(nk, min_chars=min_chars):
                     keys.append(nk)
             for key in keys:
