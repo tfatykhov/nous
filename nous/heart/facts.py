@@ -545,9 +545,12 @@ class FactManager:
                     # never triggered its own post-commit invalidation —
                     # `input` is this call's own local variable, so there is
                     # no cross-talk between concurrent calls.
+                    # codex P2 round 13: reuse invalidate_entity_vocab() (DRY)
+                    # — the same post-commit invalidation is now also needed
+                    # at inherit_conflict_slot_keys's caller-owned commit
+                    # points (supersede, sleep_handler merge sites).
                     if input.entity_keys:
-                        self._entity_vocab_cache = None
-                        self._entity_vocab_gen += 1
+                        self.invalidate_entity_vocab()
         # Injected-session callers own their own commit point, so there is no
         # place here to re-invalidate post-commit — the 300s TTL remains the
         # sole staleness bound for this path. No current caller passes
@@ -1618,7 +1621,15 @@ class FactManager:
             async with self.db.session() as session:
                 result = await self._supersede(old_fact_id, new_fact, session)
                 await session.commit()
+                # codex P2 round 13: _supersede's inherit_conflict_slot_keys
+                # call can write new entity-key rows within THIS commit —
+                # invalidate post-commit so entity_key_vocabulary() doesn't
+                # serve a stale vocab for the rest of the TTL (mirrors
+                # learn()'s own finally-block invalidation).
+                self.invalidate_entity_vocab()
                 return result
+        # Injected-session callers own their own commit point (same contract
+        # as learn()) — no place here to re-invalidate post-commit.
         return await self._supersede(old_fact_id, new_fact, session)
 
     async def _supersede(
@@ -1707,6 +1718,20 @@ class FactManager:
         await self._create_graph_edge(winner_id, loser_id, "fact", "fact", "supersedes", 1.0, session)
         return True
 
+    def invalidate_entity_vocab(self) -> None:
+        """codex P2 round 13: clear the cached entity-key vocabulary and bump
+        its generation counter. Call this AFTER committing entity-key writes
+        made outside learn()'s own session — e.g. inherit_conflict_slot_keys
+        at a caller-owned commit point (supersede, sleep_handler's F031/F027
+        merge sites) — since learn()'s own finally block only invalidates
+        for writes made inside ITS OWN commit. Without a post-commit call
+        here, a concurrent recall that rebuilds entity_key_vocabulary()
+        before the caller's commit lands can re-cache a stale vocab with
+        nothing left to invalidate it for the rest of the TTL (same race
+        class as rounds 2/3/5, fixed there for learn() specifically)."""
+        self._entity_vocab_cache = None
+        self._entity_vocab_gen += 1
+
     async def inherit_conflict_slot_keys(
         self, replacement_id: UUID, source_ids: list[UUID], session: AsyncSession,
     ) -> None:
@@ -1782,6 +1807,27 @@ class FactManager:
         same sources would produce, so the copy is still treated as a
         no-op re-application, not a foreign pair).
 
+        codex P2 round 13: two independent fixes. (1) The entity-key cap
+        now counts the replacement's EXISTING rows before spending the
+        remaining budget — a fresh max_keys allowance every call, ignoring
+        rows the replacement already owns (a keyed FactInput's own
+        entity_keys through supersede, or a merge-learn call that confirmed
+        an existing fact), could push the total past 2x the configured cap.
+        The subject-key reservation is best-effort within this remaining
+        budget: it still claims a slot FIRST (displacing potential union
+        "filler" keys, not the other way around), but if the replacement
+        already has no budget left when this call starts, the subject key
+        is simply not inserted this call — nothing is evicted to make room
+        for it. (2) This helper's own in-txn cache invalidation (below)
+        only protects a reader whose round-trip races the STILL-OPEN
+        transaction; it does nothing once the caller's own commit lands,
+        because that commit happens in code this helper doesn't control.
+        Every caller must now also call the new `invalidate_entity_vocab()`
+        AFTER its own commit — done at all three call seams (supersede,
+        sleep_handler's F031/F027 merge sites) — mirroring the post-commit
+        invalidation `learn()` already does for its own writes (rounds
+        2/3/5).
+
         No commit here — caller-owned session/transaction, same contract as
         apply_supersession above.
         """
@@ -1820,23 +1866,45 @@ class FactManager:
             min_chars = self._settings.entity_key_min_chars if self._settings else 3
             inserted_any = False
 
+            # codex P2 round 13: the replacement may already own entity-key
+            # rows (a keyed FactInput through supersede, or a merge-learn
+            # call that confirmed an existing fact) — a fresh max_keys
+            # budget on every call, on top of rows already there, could
+            # push the total to 2x the configured cap. Count what already
+            # exists and spend only the REMAINING budget below.
+            existing_count = (
+                await session.execute(
+                    select(func.count()).select_from(FactEntityKey)
+                    .where(FactEntityKey.fact_id == replacement_id)
+                )
+            ).scalar_one()
+            remaining = max(0, max_keys - existing_count)
+
             # Reserve a slot for the copied subject_key FIRST, before the
             # capped union query below can crowd it out. Skipped when the
             # pair-copy above was skipped (a foreign, caller-owned slot is
-            # present in either subject_key or attribute_key).
+            # present in either subject_key or attribute_key), or when no
+            # budget remains — subject-key reservation is best-effort within
+            # the cap: a replacement already at/over the cap does not evict
+            # an existing row to make room (it may already be present among
+            # the existing rows, or may simply be left out this call).
             subject_key_value = (
                 newest.subject_key if newest is not None and not skip_slot_copy else None
             )
-            if subject_key_value and is_keyable_entity(subject_key_value, min_chars=min_chars):
+            if (
+                remaining > 0
+                and subject_key_value
+                and is_keyable_entity(subject_key_value, min_chars=min_chars)
+            ):
                 await session.execute(
                     pg_insert(FactEntityKey)
                     .values(fact_id=replacement_id, entity_key=subject_key_value, agent_id=self.agent_id)
                     .on_conflict_do_nothing()
                 )
                 inserted_any = True
-                max_keys -= 1
+                remaining -= 1
 
-            if max_keys > 0:
+            if remaining > 0:
                 union_stmt = select(FactEntityKey.entity_key).where(
                     FactEntityKey.fact_id.in_(source_ids)
                 )
@@ -1846,7 +1914,7 @@ class FactManager:
                     await session.execute(
                         union_stmt.distinct()
                         .order_by(FactEntityKey.entity_key)
-                        .limit(max_keys)
+                        .limit(remaining)
                     )
                 ).scalars().all()
                 for key in union_keys:
@@ -1858,8 +1926,7 @@ class FactManager:
                 inserted_any = inserted_any or bool(union_keys)
 
             if inserted_any:
-                self._entity_vocab_cache = None
-                self._entity_vocab_gen += 1
+                self.invalidate_entity_vocab()
 
     # ------------------------------------------------------------------
     # 064 R2: key-conflict resolution

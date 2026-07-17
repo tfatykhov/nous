@@ -1235,6 +1235,12 @@ class SleepHandler:
                                                 "supersedes", 1.0, session,
                                             )
                                         await session.commit()
+                                        # codex P2 round 13: inherit_conflict_slot_keys
+                                        # above wrote entity-key rows in this same
+                                        # commit — invalidate the cached vocab now
+                                        # (this session's commit is the only place
+                                        # that knows those writes just landed).
+                                        self._heart.facts.invalidate_entity_vocab()
                                     sleep_stats["contradictions_resolved"] += 1
                                     sleep_stats["facts_created"] += 1
                                     logger.info(
@@ -1671,6 +1677,11 @@ class SleepHandler:
                             merged_detail.id, fact.id, "supersedes", 1.0, session,
                         )
                     await session.commit()
+                    # codex P2 round 13: mirrors the F031 fix — inherit_conflict_slot_keys
+                    # above wrote entity-key rows in this same commit; invalidate the
+                    # cached vocab now (this session's commit is the only place that
+                    # knows those writes just landed).
+                    self._heart.facts.invalidate_entity_vocab()
 
                 merged_fact_id = str(merged_detail.id)
                 merge_outcome = "merged"

@@ -790,6 +790,71 @@ class TestInheritConflictSlotKeys:
                         await cleanup.delete(f)
                 await cleanup.commit()
 
+    async def test_cap_counts_existing_rows_on_replacement(self, heart):
+        """codex P2 round 13: the entity-key cap used to start a FRESH
+        max_keys budget every call, ignoring rows the replacement already
+        owns (a keyed FactInput's own entity_keys through supersede, or a
+        merge-learn call that confirmed an existing fact) -- total rows
+        could reach 2x the configured cap. With entity_keys_max_per_fact=3
+        and the replacement PRE-SEEDED with 2 (max_keys-1) existing rows,
+        the source's 3 distinct keys must fill only the ONE remaining slot
+        -- the subject key claims it first (displacing potential "filler"
+        union keys, not the other way around), landing the replacement at
+        EXACTLY max_keys (3) total rows with the subject key among them.
+        """
+        heart.facts._settings = heart.facts._settings.model_copy(
+            update={"entity_keys_max_per_fact": 3}
+        )
+        agent_id = heart.agent_id
+        source_id = uuid.uuid4()
+        replacement_id = uuid.uuid4()
+
+        async with heart.db.session() as s:
+            s.add(Fact(
+                id=source_id, agent_id=agent_id,
+                content="A source fact for the round-13 existing-rows cap test.",
+                subject_key="topic", attribute_key="attr",
+                learned_at=datetime.now(UTC),
+                active=True,
+            ))
+            s.add(Fact(
+                id=replacement_id, agent_id=agent_id,
+                content="The replacement content, pre-seeded with existing rows.",
+                active=True,
+            ))
+            await s.flush()
+            # Source has 3 distinct keys (subject key included, matching the
+            # real write path).
+            for key in ["topic", "alpha key", "beta key"]:
+                s.add(FactEntityKey(fact_id=source_id, entity_key=key, agent_id=agent_id))
+            # Replacement is PRE-SEEDED with max_keys-1 = 2 existing rows —
+            # simulating rows the replacement already owns before this call
+            # (e.g. from its own FactInput.entity_keys through supersede).
+            for key in ["existing filler one", "existing filler two"]:
+                s.add(FactEntityKey(fact_id=replacement_id, entity_key=key, agent_id=agent_id))
+            await s.commit()
+
+        try:
+            async with heart.db.session() as s:
+                await heart.facts.inherit_conflict_slot_keys(
+                    replacement_id, [source_id], s,
+                )
+                await s.commit()
+
+            async with heart.db.session() as check:
+                rows = (await check.execute(
+                    select(FactEntityKey).where(FactEntityKey.fact_id == replacement_id)
+                )).scalars().all()
+                assert len(rows) == 3, "total rows must not exceed the configured cap"
+                assert "topic" in {r.entity_key for r in rows}
+        finally:
+            async with heart.db.session() as cleanup:
+                for fid in (source_id, replacement_id):
+                    f = await cleanup.get(Fact, fid)
+                    if f is not None:
+                        await cleanup.delete(f)
+                await cleanup.commit()
+
 
 @pytest.mark.postgres_only
 class TestSupersedeInheritsConflictSlotKeys:
@@ -975,6 +1040,77 @@ class TestSupersedeInheritsConflictSlotKeys:
                 )).scalars().all()
                 assert {r.entity_key for r in rows} == {"package manager", "poetry"}
         finally:
+            async with heart.db.session() as cleanup:
+                ids = [source_id] + ([detail.id] if detail is not None else [])
+                for fid in ids:
+                    f = await cleanup.get(Fact, fid)
+                    if f is not None:
+                        await cleanup.delete(f)
+                await cleanup.commit()
+
+    async def test_inherited_key_visible_immediately_no_ttl_wait(self, heart):
+        """codex P2 round 13: inherit_conflict_slot_keys's own in-txn cache
+        invalidation only protects a reader racing the STILL-OPEN
+        transaction -- once supersede()'s OWN commit lands, nothing
+        re-invalidates the cache for that commit unless supersede() does it
+        itself. Mirrors test_vocab_cache_invalidation_survives_mid_transaction_race's
+        exact technique (test_keyed_fact_leg.py) but for the supersede path:
+        hooking _emit_event (called near the end of _supersede, after
+        inherit_conflict_slot_keys has written the new row but BEFORE
+        supersede()'s outer commit) forces a vocab rebuild from inside the
+        still-open transaction. Under READ COMMITTED that rebuild can't see
+        the uncommitted row, so it caches a STALE vocab -- exactly the
+        window supersede()'s post-commit invalidation must close. (A plain
+        sequential warm-before/check-after, with no forced race, would NOT
+        catch this: the in-txn bump already nulls the cache, so a check run
+        strictly after the real commit rebuilds correctly either way.)
+
+        The source's subject_key ("round13 vocab visibility key") is set
+        as a Fact COLUMN with NO pre-existing FactEntityKey row anywhere --
+        the row inherit_conflict_slot_keys reserves onto the replacement is
+        the ONLY place this key can ever appear in the vocab.
+        """
+        agent_id = heart.agent_id
+        source_id = uuid.uuid4()
+
+        async with heart.db.session() as s:
+            s.add(Fact(
+                id=source_id, agent_id=agent_id,
+                content="A source fact for the round-13 post-commit vocab visibility test.",
+                subject_key="round13 vocab visibility key", attribute_key="preference",
+                learned_at=datetime.now(UTC),
+                active=True,
+            ))
+            await s.commit()
+
+        orig_emit_event = heart.facts._emit_event
+
+        async def racing_emit_event(session, event_type, data):
+            if event_type == "fact_superseded":
+                await heart.facts.entity_key_vocabulary()
+            return await orig_emit_event(session, event_type, data)
+
+        heart.facts._emit_event = racing_emit_event
+
+        detail = None
+        try:
+            detail = await heart.supersede_fact(
+                source_id,
+                FactInput(
+                    subject="round13 vocab visibility key",
+                    content="A replacement fact for the round-13 post-commit vocab visibility test.",
+                    source="sleep_reflection",
+                    confidence=0.8,
+                    category="concept",
+                ),
+            )
+            # Without supersede()'s post-commit re-invalidation, this would
+            # return the vocab the racing rebuild poisoned mid-transaction
+            # (missing the inherited key) for the rest of the 300s TTL.
+            vocab = await heart.facts.entity_key_vocabulary()
+            assert "round13 vocab visibility key" in vocab
+        finally:
+            heart.facts._emit_event = orig_emit_event
             async with heart.db.session() as cleanup:
                 ids = [source_id] + ([detail.id] if detail is not None else [])
                 for fid in ids:
