@@ -169,6 +169,54 @@ class TestExtractorEntityEmission:
         assert len(fi.entity_keys) == 3
         assert fi.entity_keys[0] == "subj"   # subject first (when it passes the stop-policy)
 
+    def test_entities_key_absent_falls_back_to_subject_only(self):
+        """Backward-compat pin: a raw fact dict with no "entities" key at all
+        (pre-R3.1 extraction output, or any producer that omits it) must not
+        raise — `raw_entities = f.get("entities") or []` degrades to
+        subject-only entity_keys.
+        """
+        from types import SimpleNamespace
+
+        from nous.handlers.enumerative_extractor import EnumerativeExtractor
+
+        settings = SimpleNamespace(
+            temporal_extraction_enabled=False,
+            entity_keys_max_per_fact=8,
+            entity_key_min_chars=3,
+        )
+        ex = EnumerativeExtractor(heart=None, settings=settings, llm_client=None, embedder=None)
+        raw = [{
+            "content": "The Marriage of Figaro was composed by Mozart.",
+            "subject_key": "The Marriage of Figaro",
+            "attribute_key": "composer",
+            # no "entities" key
+        }]
+        (fi,) = ex._to_fact_inputs(raw, chunk_index=0, episode_id=None)
+        assert fi.entity_keys == ["marriage of figaro"]
+
+    def test_entities_key_absent_scalar_subject_yields_empty(self):
+        """Same backward-compat case, but the subject itself fails the
+        stop-policy (scalar) — entity_keys must come back empty, not raise.
+        """
+        from types import SimpleNamespace
+
+        from nous.handlers.enumerative_extractor import EnumerativeExtractor
+
+        settings = SimpleNamespace(
+            temporal_extraction_enabled=False,
+            entity_keys_max_per_fact=8,
+            entity_key_min_chars=3,
+        )
+        ex = EnumerativeExtractor(heart=None, settings=settings, llm_client=None, embedder=None)
+        raw = [{
+            "content": "The car is red.",
+            "subject_key": "red",
+            "attribute_key": "color",
+            # no "entities" key
+        }]
+        (fi,) = ex._to_fact_inputs(raw, chunk_index=0, episode_id=None)
+        assert fi.entity_keys == []
+
 
 @pytest.mark.postgres_only
 class TestLearnWritesEntityRows:
@@ -193,11 +241,15 @@ class TestLearnWritesEntityRows:
             # heart.learn() commits on its OWN connection (bypasses the
             # session fixture's rollback isolation), so the row survives
             # the test unless hard-deleted here. Entity rows CASCADE.
-            async with heart.db.session() as cleanup:
-                dbfact = await cleanup.get(Fact, result.id)
-                if dbfact is not None:
-                    await cleanup.delete(dbfact)
-                    await cleanup.commit()
+            # result may be a FactRejected (no .id) if learn() unexpectedly
+            # rejects — guard so cleanup itself never masks the real failure.
+            fact_id = getattr(result, "id", None)
+            if fact_id is not None:
+                async with heart.db.session() as cleanup:
+                    dbfact = await cleanup.get(Fact, fact_id)
+                    if dbfact is not None:
+                        await cleanup.delete(dbfact)
+                        await cleanup.commit()
 
     async def test_rejected_fact_writes_no_rows(self, heart, session):
         fi = FactInput(content="x", subject="s", entity_keys=["thomas kyd"])  # below min-content floor
@@ -208,3 +260,63 @@ class TestLearnWritesEntityRows:
             .where(FactEntityKey.entity_key == "thomas kyd")
         )).scalar_one()
         assert n == 0
+
+    async def test_confirm_duplicate_backfills_seeded_entity_key_on_conflict(self, heart):
+        """R3 review (Minor, riskiest new path): _confirm_duplicate's entity-key
+        backfill (facts.py ~1257-1274) must tolerate a PK collision when the
+        dupe row already carries a FactEntityKey seeded by phase_seed's
+        backfill — which writes subject-key rows WITHOUT stamping
+        entity_keys_extracted_at. on_conflict_do_nothing must absorb the
+        collision rather than aborting the whole learn txn, and the new
+        (non-colliding) key must still land alongside it.
+        """
+        vec = [1.0] + [0.0] * 1535  # unit vector: identical vec -> cosine 1.0 dupe match
+        content = "The observability platform reports a service uptime of ninety nine point nine percent."
+        fact_id = uuid.uuid4()
+
+        # Seed the dupe row + one phase_seed-style entity row in a SEPARATE,
+        # already-committed transaction (mirrors a sleep-cycle backfill that
+        # ran before the live learn() call below).
+        async with heart.db.session() as seed:
+            seed.add(Fact(
+                id=fact_id,
+                agent_id=heart.agent_id,
+                content=content,
+                subject="observability platform",
+                embedding=vec,
+            ))
+            await seed.flush()
+            # phase_seed's would-be subject key — watermark deliberately NOT stamped.
+            seed.add(FactEntityKey(
+                fact_id=fact_id, entity_key="observability platform", agent_id=heart.agent_id,
+            ))
+            await seed.commit()
+
+        try:
+            result = await heart.learn(
+                FactInput(
+                    content=content,
+                    subject="observability platform",
+                    subject_key="observability platform",
+                    attribute_key="uptime",
+                    entity_keys=["observability platform", "service uptime"],
+                    source="enumerative_extractor",
+                ),
+                precomputed_embedding=vec,
+            )
+            assert result.id == fact_id, "identical content+vector must hit the confirm-dupe path"
+
+            async with heart.db.session() as check:
+                dbfact = await check.get(Fact, fact_id)
+                assert dbfact.entity_keys_extracted_at is not None
+                rows = (await check.execute(
+                    select(FactEntityKey).where(FactEntityKey.fact_id == fact_id)
+                )).scalars().all()
+                assert {r.entity_key for r in rows} == {"observability platform", "service uptime"}
+                assert len(rows) == 2, "pre-seeded key must not be duplicated"
+        finally:
+            async with heart.db.session() as cleanup:
+                dbfact = await cleanup.get(Fact, fact_id)
+                if dbfact is not None:
+                    await cleanup.delete(dbfact)
+                    await cleanup.commit()
