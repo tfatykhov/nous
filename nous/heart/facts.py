@@ -2810,7 +2810,7 @@ class FactManager:
                     "FROM heart.fact_entity_keys ek "
                     "JOIN heart.facts f ON f.id = ek.fact_id "
                     "WHERE ek.agent_id = :a AND ek.entity_key = ANY(:keys) "
-                    "  AND f.active = true "
+                    "  AND f.active = true AND f.agent_id = :a "
                     "GROUP BY f.id, f.content, f.learned_at, f.source_ordinal "
                     "ORDER BY matched DESC, f.learned_at DESC, "
                     "         f.source_ordinal DESC NULLS LAST "
