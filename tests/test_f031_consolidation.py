@@ -815,6 +815,45 @@ def test_contradiction_prompt_debias_pins():
     assert "REMOVE" in p  # action vocabulary unchanged (scope guard: prompt-only)
 
 
+@pytest.mark.asyncio
+async def test_contradiction_prompt_includes_full_timestamps_for_same_day_pairs():
+    """Codex r5: the debiased Step 3 prompt instructs statement-order
+    preference (later-stated wins), which requires real ordering data. The
+    old `str(date)[:10]` formatting truncated to date-only, so two facts
+    recorded on the SAME DAY were indistinguishable to the resolver -- it
+    could only guess. The fix must format full timestamps (time component
+    included) so same-day pairs remain genuinely orderable in the prompt."""
+    from datetime import UTC, datetime
+
+    fact1_id, fact2_id = uuid4(), uuid4()
+    same_day_morning = datetime(2026, 3, 1, 9, 0, 0, tzinfo=UTC)
+    same_day_evening = datetime(2026, 3, 1, 17, 30, 0, tzinfo=UTC)
+
+    heart = AsyncMock()
+    heart.find_contradiction_candidates = AsyncMock(return_value=[{
+        "fact1_id": fact1_id, "fact2_id": fact2_id,
+        "content1": "Tim's timezone is EST", "content2": "Tim's timezone is PST",
+        "date1": same_day_morning, "date2": same_day_evening, "similarity": 0.88,
+    }])
+
+    llm_client = _mock_llm_client(json.dumps(
+        {"action": "KEEP_BOTH", "confidence": 0.5, "reason": "ambiguous"}))
+    handler, *_ = _make_sleep_handler(heart=heart, llm_client=llm_client)
+
+    sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+    await handler._phase_resolve_contradictions(sleep_stats)
+
+    sent_prompt = llm_client.call.call_args.args[0]["messages"][0]["content"][0]["text"]
+    morning_str = same_day_morning.isoformat(timespec="seconds")
+    evening_str = same_day_evening.isoformat(timespec="seconds")
+    assert morning_str != evening_str  # sanity: genuinely distinct strings
+    assert morning_str in sent_prompt
+    assert evening_str in sent_prompt
+    # The old date-only string ("2026-03-01") must NOT appear standalone --
+    # it should only ever show up as a PREFIX of the full timestamp above.
+    assert "2026-03-01" not in sent_prompt.replace(morning_str, "").replace(evening_str, "")
+
+
 # ===========================================================================
 # Task 3b: Sleep cycle integration
 # ===========================================================================

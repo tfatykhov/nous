@@ -1850,14 +1850,21 @@ class TestGate1SameSlotDedupRouting:
         assert new.active and not old.active and old.superseded_by == new.id
 
     async def test_routed_dupe_cluster_excludes_all_active_same_slot_facts(self, heart, session, monkeypatch):
-        """Codex r4: the cluster extension of r2. When MORE than one active
-        same-slot fact exists, admission's novelty exclusion must cover the
-        WHOLE conflict-slot cluster, not just the single routed dupe -- a
-        second, non-routed same-slot variant (one _find_duplicate's cosine
-        threshold never flagged, because its embedding differs) can still be
-        the nearest neighbor _find_max_similarity finds, collapsing novelty
-        to ~0 and getting the correction admission-rejected before R2 ever
-        adjudicates the cluster."""
+        """Codex r4/r5: the cluster extension of r2. When MORE than one
+        active same-slot fact exists, admission's novelty exclusion must
+        cover the WHOLE conflict-slot cluster, not just the single routed
+        dupe -- other non-routed same-slot variants (ones _find_duplicate's
+        cosine threshold never flagged, because their embeddings differ) can
+        still be the nearest neighbor _find_max_similarity finds, collapsing
+        novelty to ~0 and getting the correction admission-rejected before R2
+        ever adjudicates the cluster.
+
+        Codex r5: the exclusion must NOT be capped by
+        supersession_key_candidates_cap -- that cap bounds R2's ADJUDICATION
+        reach (which pairs get resolved), but admission runs BEFORE storage;
+        an older cluster member outside the cap would still zero novelty and
+        get the candidate rejected. Set the cap to 2 and seed cap+2 (4)
+        active same-slot facts to prove the admission exclusion is uncapped."""
         from nous.heart.admission import AdmissionConfig, AdmissionController
 
         monkeypatch.setattr(
@@ -1866,6 +1873,8 @@ class TestGate1SameSlotDedupRouting:
         monkeypatch.setattr(
             "nous.heart.facts.FactManager._classify_fact_pair",
             AsyncMock(return_value={"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}))
+        s = heart.facts._settings.model_copy(update={"supersession_key_candidates_cap": 2})
+        monkeypatch.setattr(heart.facts, "_settings", s)
 
         heart.facts._admission_controller = AdmissionController(
             config=AdmissionConfig(shadow_mode=False, utility_llm_enabled=False)
@@ -1881,34 +1890,32 @@ class TestGate1SameSlotDedupRouting:
         monkeypatch.setattr(heart.facts, "_find_max_similarity", _capturing_find_max_similarity)
 
         ep_id = await _insert_episode(session)
-        vec_a = _unit_vec(26)
-        vec_b = _unit_vec(27)
+        vec_first = _unit_vec(26)
+        cluster_names = ["Alice Prior", "Bob Middle", "Dana Second", "Erin Third"]
+        cluster_facts = []
+        for i, name in enumerate(cluster_names):
+            fact = await heart.learn(FactInput(
+                content=f"The project lead is {name}.",
+                subject_key="project", attribute_key="lead",
+                source_episode_id=ep_id, source_ordinal=i + 1,
+            ), session=session, precomputed_embedding=(vec_first if i == 0 else _unit_vec(27 + i)))
+            cluster_facts.append(fact)
 
-        a = await heart.learn(FactInput(
-            content="The project lead is Alice Prior.",
-            subject_key="project", attribute_key="lead",
-            source_episode_id=ep_id, source_ordinal=1,
-        ), session=session, precomputed_embedding=vec_a)
-        b = await heart.learn(FactInput(
-            content="The project lead is Bob Middle.",
-            subject_key="project", attribute_key="lead",
-            source_episode_id=ep_id, source_ordinal=2,
-        ), session=session, precomputed_embedding=vec_b)
-
-        # C shares A's embedding exactly -> _find_duplicate routes against A
-        # only. B is a separate active same-slot fact _find_duplicate never
-        # saw (different embedding), but it's still in the same conflict slot.
+        # C shares the FIRST cluster member's embedding exactly -> only that
+        # one is routed by _find_duplicate. cap=2 means R2 would only
+        # adjudicate 2 of the 4 cluster members, but admission must exclude
+        # ALL 4 -- it protects storage, not adjudication.
         await heart.learn(FactInput(
             content="The project lead is Carol Later.",
             subject_key="project", attribute_key="lead",
-            source_episode_id=ep_id, source_ordinal=3,
-        ), session=session, precomputed_embedding=vec_a)
+            source_episode_id=ep_id, source_ordinal=5,
+        ), session=session, precomputed_embedding=vec_first)
 
-        # The admission novelty call for C's learn must exclude the WHOLE
-        # cluster -- both A (the routed dupe) and B (not routed, but still
-        # same-slot and active) -- not just the routed dupe.
-        assert a.id in captured_excludes[-1]
-        assert b.id in captured_excludes[-1]
+        for fact in cluster_facts:
+            assert fact.id in captured_excludes[-1], (
+                f"cluster member {fact.id} missing from admission excludes "
+                f"(cap={s.supersession_key_candidates_cap} must not limit this)"
+            )
 
 
 # codex P2 round 7: subject_key/attribute_key canonicalized at the FactInput

@@ -999,6 +999,17 @@ class SleepHandler:
         if not self._llm:
             return True
         sleep_contradiction_fact_chars = self._settings.sleep_contradiction_fact_chars
+
+        def _fmt_ts(value) -> str:
+            """Codex r5: pass the FULL timestamp, not just the date, to the
+            resolver — the debiased Step 3 prompt instructs statement-order
+            preference (later-stated wins), which is indistinguishable for
+            same-day pairs once only the date survives (the old `[:10]`
+            truncation). Real candidate rows carry tz-aware datetime objects
+            (isoformat with seconds); test fixtures often pass bare date
+            strings with no time component — pass those through as-is."""
+            return value.isoformat(timespec="seconds") if hasattr(value, "isoformat") else str(value)
+
         try:
             candidates = await self._heart.find_contradiction_candidates(limit=10)
             if not candidates:
@@ -1013,8 +1024,8 @@ class SleepHandler:
                     break
 
                 prompt = _CONTRADICTION_RESOLUTION_PROMPT.format(
-                    date_a=str(pair["date1"])[:10],
-                    date_b=str(pair["date2"])[:10],
+                    date_a=_fmt_ts(pair["date1"]),
+                    date_b=_fmt_ts(pair["date2"]),
                     content_a=pair["content1"][:sleep_contradiction_fact_chars],
                     content_b=pair["content2"][:sleep_contradiction_fact_chars],
                 )

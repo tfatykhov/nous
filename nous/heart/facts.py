@@ -776,13 +776,18 @@ class FactManager:
             # _find_max_similarity's nearest-active-fact scan still finds)
             # can equally collapse novelty and get this candidate
             # admission-rejected before R2 ever sees the cluster. When
-            # routing fired, exclude every active same-slot fact, bounded by
-            # the same supersession_key_candidates_cap R2 uses below — a
-            # cluster member beyond that cap is unreachable to R2 anyway, so
-            # admission visibility mirrors R2's own reach. Served by
+            # routing fired, exclude every active same-slot fact. Served by
             # idx_facts_conflict_slot.
+            #
+            # Codex r5: UNCAPPED — do not bound this query by
+            # supersession_key_candidates_cap. That cap bounds R2's
+            # ADJUDICATION reach (which pairs get resolved after storage);
+            # this exclusion protects STORAGE itself (admission runs
+            # BEFORE the fact exists). A cluster member outside R2's cap can
+            # still be the nearest active neighbor and zero novelty, so
+            # correctness here must not depend on the cap — real conflict
+            # clusters are small in practice.
             if routed_dupe_id is not None:
-                cap = self._settings.supersession_key_candidates_cap if self._settings else 8
                 same_slot_rows = await session.execute(
                     select(Fact.id)
                     .where(
@@ -791,8 +796,6 @@ class FactManager:
                         Fact.subject_key == input.subject_key,
                         Fact.attribute_key == input.attribute_key,
                     )
-                    .order_by(Fact.learned_at.desc())
-                    .limit(cap)
                 )
                 same_slot_ids = [row[0] for row in same_slot_rows.all()]
                 admission_excludes = list({*exclude_ids, routed_dupe_id, *same_slot_ids})
