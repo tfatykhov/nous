@@ -796,6 +796,26 @@ class TestContradictionResolution:
 
 
 # ===========================================================================
+# Gate-1 same-class debias: F031 resolver must never remove facts by world
+# truth (F085 Gate-1 fixes plan, Task 4)
+# ===========================================================================
+
+def test_contradiction_prompt_debias_pins():
+    """Prompt pins: the Step 3 decision-tree branch and its example must
+    stop directing REMOVE by which claim the model believes is factually
+    correct, and must instead prefer statement order (later-stated wins)."""
+    from nous.handlers.sleep_handler import _CONTRADICTION_RESOLUTION_PROMPT
+
+    p = _CONTRADICTION_RESOLUTION_PROMPT
+    assert "Factual correctness" not in p
+    assert "was wrong" not in p
+    assert "was never correct" not in p
+    assert "Pi equals 4" not in p
+    assert "statement order" in p.lower()
+    assert "REMOVE" in p  # action vocabulary unchanged (scope guard: prompt-only)
+
+
+# ===========================================================================
 # Task 3b: Sleep cycle integration
 # ===========================================================================
 

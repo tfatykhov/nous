@@ -173,10 +173,7 @@ Step 2 — Compatibility test. Can A and B both be simultaneously true?
 - Both describe COMPLEMENTARY aspects (different facets of the same subject) → return KEEP_BOTH.
 - Both partial truths that combine into a richer single fact → return MERGE (provide merged_content).
 
-Step 3 — Factual correctness test. Was either fact OBJECTIVELY WRONG at the time of writing?
-- Fact A was wrong (factual error, not state change) → return REMOVE_A.
-- Fact B was wrong (factual error, not state change) → return REMOVE_B.
-- Note: REMOVE means the fact was never accurate. Do not use REMOVE for mutable-state changes — those are SUPERSEDE.
+Step 3 — Statement order: when the two facts genuinely conflict about the same property, prefer SUPERSEDE of the EARLIER-stated by the LATER-stated (use recorded timestamps if shown). NEVER decide by which claim matches your world knowledge — a stored correction must beat the model's prior. Use REMOVE only for degenerate content (empty, truncated, self-referential garbage), never to delete a claim you believe is false.
 
 Step 4 — Temporal-update test. Could time passing reconcile the two facts (a mutable property changed)?
 - Fact B reflects the CURRENT state, A is now stale → return SUPERSEDE_A.
@@ -184,7 +181,7 @@ Step 4 — Temporal-update test. Could time passing reconcile the two facts (a m
 - Mutable properties: schedule, status, value, count, version, location, configuration, role, ownership, price, quantity.
 
 Examples to disambiguate:
-- "Pi equals 3.14" vs "Pi equals 4" → REMOVE_B (math is fixed; 4 was never correct).
+- "Meeting room is Room 204" vs "Meeting room is Room 310" → SUPERSEDE_A (room reassigned; B is the later-stated, current booking).
 - "Tim's flight is at 3pm" vs "Tim's flight is at 5pm" → SUPERSEDE_A (schedule moved; A was correct earlier).
 - "API returns 200" vs "API returns 500" → SUPERSEDE_A (status changes; both true at different times).
 - "X uses Postgres" + "X uses Redis for cache" → KEEP_BOTH (different layers, both valid).
