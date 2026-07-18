@@ -238,6 +238,50 @@ not the eval run itself. The four gates below are quoted verbatim from the MAB r
 (The referenced probe script and `nous_mab_wp` clone live with the MAB evaluation program, not in this
 repository.)
 
+## Gate-1 fixes (2026-07-18)
+
+The MAB team's first Gate-1 (ceiling simulation, acceptance gate 1 above) run measured **0.48** against the
+**≥0.80** bar — a shortfall traced not to the keying/indexing mechanism itself but to two store-time
+corruption defects that destroyed or mis-adjudicated facts before R3.3's retrieval leg ever had a chance to
+look them up (`nous-f085-gate1-fix-spec-1.md`, external to this repo). Both fixes ship together in one PR
+(`feat/f085-gate1-fixes`) — neither is independently sufficient, since D2 without D1 would still let the
+classifier's world-truth belief pick the wrong winner once the pair reaches the resolver, and D1 without D2
+never sees the pairs D2 stops from being silently swallowed.
+
+- **D1 — CONTRADICTION truth-bias.** The F027 supersession classifier's `current_fact` verdict (which claim it
+  believes is factually correct) was deciding CONTRADICTION resolution at the three write/sweep sites
+  (`_resolve_key_conflicts`, the `resolve_key_conflict_pair` sleep sweep, and the legacy
+  `_supersede_by_subject` fall-through). A memory store must record what was *said*, not adjudicate what is
+  *true* — a benchmark's later, deliberately-wrong correction was losing to an earlier, world-true statement.
+  Measured impact: **21/160 gold facts destroyed** by the classifier overriding a later-stated (gold) value
+  with an earlier-stated (world-true) one. Fixed by `_pick_contradiction_winner` (same-episode `source_ordinal`
+  → `learned_at` → `None`/KEEP-BOTH+flag, never consulting the classifier's verdict) at all three sites, plus
+  an unconditional prompt/schema debias (the classifier's `current_fact` field is now documented as advisory
+  only for CONTRADICTION).
+- **D2 — dedup blind-confirm swallow.** `_learn`'s near-duplicate check confirmed any hit at cosine similarity
+  ≥ `fact_native_cosine_threshold` (0.95) before the same-slot conflict machinery ever saw it — a same-
+  `(subject_key, attribute_key)` pair with a *different* value (e.g. "author is Alice" → "author is Bob") was
+  swallowed as a duplicate-confirmation instead of being routed to conflict resolution. Measured impact:
+  **~39pp of MAB answer-statement facts existence-destroyed** by this swallow. Fixed by
+  `FactManager._same_slot_value_variant` (folded-content prefilter → band-budget gate → the F377
+  `is_distinct_fact` tiebreaker), gating a new branch in `_learn`'s dedup logic that routes same-slot
+  value-variants past confirm-as-duplicate and into insert, letting `_resolve_key_conflicts` (or the sleep
+  sweep, when R2 is off) adjudicate. Kill-switch: `NOUS_SAME_SLOT_CONFLICT_ROUTING_ENABLED` (default `true` —
+  see CLAUDE.md).
+- **Order-resolution contract** (documented, not further coded): same-episode ordinal is the robust
+  resolution path, since enumerative extraction always stamps `source_ordinal` within an episode.
+  Cross-episode conflicts fall back to `learned_at`, which equals true statement order only when ingestion
+  order matches wall-clock write order. KEEP-BOTH (no ordering signal — identical timestamps) is the fail-safe
+  and is expected to be rare in the live write path.
+- **Pre-existing, unchanged:** `_resolve_key_conflicts` still never surfaces a `ContradictionWarning` to the
+  `learn()` caller (deferred, not introduced by this fix). Backfill re-run idempotency still holds via the
+  folded-content confirm shortcut, except for paraphrase-drift below the cosine dedup threshold — a
+  pre-existing risk this change does not worsen.
+- **MAB repair sequence** (owned by the MAB team, outside this repo): re-run R1 (enumerative extraction
+  backfill) → R2 rollback + re-run (`--phase rollback --watermark <ts>` then `--phase all`, since D1/D2 change
+  how conflicts adjudicate) → acceptance gate 1 (ceiling simulation, expect ≥0.80) → gate 2 (displacement
+  check) → gate 3 (decisive CR n=320 replay).
+
 ## Non-goals
 
 - **Multi-hop entity reasoning.** No pronoun/co-reference resolution across facts — v1 is exact single-hop
