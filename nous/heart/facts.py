@@ -2372,25 +2372,38 @@ class FactManager:
         and is never overwritten, so it is the authoritative idempotence
         check — query it in EITHER direction. The column check stays as a
         cheap fast path for the common single-pair case; the edge query is
-        the correctness backstop for clusters."""
-        if b.contradiction_of == a.id:
-            return  # fast path: common single-pair case
-        existing = await session.execute(
-            select(GraphEdge.id)
-            .where(GraphEdge.agent_id == self.agent_id)
-            .where(GraphEdge.relation == "contradicts")
-            .where(
-                or_(
-                    and_(GraphEdge.source_id == b.id, GraphEdge.target_id == a.id),
-                    and_(GraphEdge.source_id == a.id, GraphEdge.target_id == b.id),
+        the correctness backstop for clusters.
+
+        Codex r3: the documented rollback (backfill_supersession.py header)
+        deletes `contradicts` edges but leaves `contradiction_of` as accepted
+        residue. A prior version of this guard returned early on either check
+        passing — which left the graph permanently missing the edge after a
+        rollback, since a re-run would hit the (still-set) column fast path
+        and exit before ever touching the edge table. The -0.2 decrement is
+        the only ONE-TIME effect and stays gated on `already_flagged`
+        (column OR edge — either proves a prior pass); the column
+        assignment and edge creation now run UNCONDITIONALLY every call —
+        both are idempotent (column: same-value reassignment; edge:
+        on_conflict_do_nothing) — so a rolled-back edge is recreated on the
+        next pass while confidence is never touched twice."""
+        already_flagged = b.contradiction_of == a.id
+        if not already_flagged:
+            existing = await session.execute(
+                select(GraphEdge.id)
+                .where(GraphEdge.agent_id == self.agent_id)
+                .where(GraphEdge.relation == "contradicts")
+                .where(
+                    or_(
+                        and_(GraphEdge.source_id == b.id, GraphEdge.target_id == a.id),
+                        and_(GraphEdge.source_id == a.id, GraphEdge.target_id == b.id),
+                    )
                 )
+                .limit(1)
             )
-            .limit(1)
-        )
-        if existing.first() is not None:
-            return  # pair already flagged in a prior pass (cluster case: column may point elsewhere)
+            already_flagged = existing.first() is not None
+        if not already_flagged:
+            a.confidence = max(0.0, (a.confidence or 1.0) - 0.2)
         b.contradiction_of = a.id
-        a.confidence = max(0.0, (a.confidence or 1.0) - 0.2)
         await self._create_graph_edge(b.id, a.id, "fact", "fact", "contradicts", 1.0, session)
 
     # ------------------------------------------------------------------

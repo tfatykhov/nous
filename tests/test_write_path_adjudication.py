@@ -1549,6 +1549,87 @@ class TestGate1ContradictionOrderResolution:
             edges = edge_r.scalars().all()
             assert len(edges) == 2  # C->A and C->B only; the third call created no new edge
 
+    async def test_flag_contradiction_pair_recreates_edge_post_rollback(self, heart, monkeypatch):
+        """Codex r3: the documented rollback (backfill_supersession.py header)
+        deletes contradicts edges but leaves contradiction_of as accepted
+        residue. A re-run's keep-both pass must recreate the missing edge —
+        not just hit the column fast path and return before the graph is
+        repaired — while still NOT re-decrementing confidence a second time."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy import delete as sa_delete
+        from sqlalchemy import update as sa_update
+
+        unique_agent = f"g1-{uuid4().hex[:8]}"
+        heart.facts.agent_id = unique_agent
+        heart.facts._settings = heart.facts._settings.model_copy(
+            update={"supersession_key_resolution_enabled": True}
+        )
+
+        f1 = await heart.learn(FactInput(
+            content="The office parking policy allows two spots per employee.",
+            subject_key="office", attribute_key="parking_policy",
+        ))
+        f2 = await heart.learn(FactInput(
+            content="The office parking policy allows three spots per employee.",
+            subject_key="office", attribute_key="parking_policy",
+        ))
+
+        fixed_ts = datetime.now(UTC)
+        async with heart.db.session() as s:
+            await s.execute(
+                sa_update(Fact).where(Fact.id.in_([f1.id, f2.id])).values(learned_at=fixed_ts)
+            )
+            await s.commit()
+
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.95}),
+        )
+
+        # First pass: flags the pair, decrements f1, writes the edge.
+        r1 = await heart.facts.resolve_key_conflict_pair(f1.id, f2.id, f1.content, f2.content)
+        assert r1 is False
+        f1_after_first = await _get_fact(heart, f1.id)
+        assert f1_after_first.confidence == pytest.approx(0.8)
+
+        # Simulate the documented rollback: delete the contradicts edge only.
+        # contradiction_of is accepted residue and is NOT reset (matches the
+        # backfill_supersession.py rollback contract).
+        async with heart.db.session() as s:
+            await s.execute(
+                sa_delete(GraphEdge)
+                .where(GraphEdge.agent_id == unique_agent)
+                .where(GraphEdge.relation == "contradicts")
+            )
+            await s.commit()
+
+        async with heart.db.session() as s:
+            edge_check = await s.execute(
+                select(GraphEdge)
+                .where(GraphEdge.agent_id == unique_agent)
+                .where(GraphEdge.relation == "contradicts")
+            )
+            assert edge_check.scalars().first() is None  # rollback confirmed: edge gone
+
+        # Second pass (post-rollback re-run): must recreate the edge without
+        # re-decrementing confidence.
+        r2 = await heart.facts.resolve_key_conflict_pair(f1.id, f2.id, f1.content, f2.content)
+        assert r2 is False
+
+        f1_after_second = await _get_fact(heart, f1.id)
+        assert f1_after_second.confidence == pytest.approx(0.8)  # NOT re-decremented to 0.6
+
+        async with heart.db.session() as s:
+            edge_r = await s.execute(
+                select(GraphEdge)
+                .where(GraphEdge.agent_id == unique_agent)
+                .where(GraphEdge.relation == "contradicts")
+            )
+            edges = edge_r.scalars().all()
+            assert len(edges) == 1  # edge recreated
+
     def test_prompt_and_schema_debias_pins(self):
         from nous.heart.facts import _SUPERSESSION_CLASSIFIER_PROMPT_TEMPLATE, _SUPERSESSION_CLASSIFIER_SCHEMA
 
