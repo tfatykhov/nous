@@ -173,10 +173,7 @@ Step 2 — Compatibility test. Can A and B both be simultaneously true?
 - Both describe COMPLEMENTARY aspects (different facets of the same subject) → return KEEP_BOTH.
 - Both partial truths that combine into a richer single fact → return MERGE (provide merged_content).
 
-Step 3 — Factual correctness test. Was either fact OBJECTIVELY WRONG at the time of writing?
-- Fact A was wrong (factual error, not state change) → return REMOVE_A.
-- Fact B was wrong (factual error, not state change) → return REMOVE_B.
-- Note: REMOVE means the fact was never accurate. Do not use REMOVE for mutable-state changes — those are SUPERSEDE.
+Step 3 — Statement order: when the two facts genuinely conflict about the same property, prefer SUPERSEDE of the EARLIER-stated by the LATER-stated (use recorded timestamps if shown). NEVER decide by which claim matches your world knowledge — a stored correction must beat the model's prior. Use REMOVE only for degenerate content (empty, truncated, self-referential garbage), never to delete a claim you believe is false.
 
 Step 4 — Temporal-update test. Could time passing reconcile the two facts (a mutable property changed)?
 - Fact B reflects the CURRENT state, A is now stale → return SUPERSEDE_A.
@@ -184,7 +181,7 @@ Step 4 — Temporal-update test. Could time passing reconcile the two facts (a m
 - Mutable properties: schedule, status, value, count, version, location, configuration, role, ownership, price, quantity.
 
 Examples to disambiguate:
-- "Pi equals 3.14" vs "Pi equals 4" → REMOVE_B (math is fixed; 4 was never correct).
+- "Meeting room is Room 204" vs "Meeting room is Room 310" → SUPERSEDE_A (room reassigned; B is the later-stated, current booking).
 - "Tim's flight is at 3pm" vs "Tim's flight is at 5pm" → SUPERSEDE_A (schedule moved; A was correct earlier).
 - "API returns 200" vs "API returns 500" → SUPERSEDE_A (status changes; both true at different times).
 - "X uses Postgres" + "X uses Redis for cache" → KEEP_BOTH (different layers, both valid).
@@ -1002,6 +999,17 @@ class SleepHandler:
         if not self._llm:
             return True
         sleep_contradiction_fact_chars = self._settings.sleep_contradiction_fact_chars
+
+        def _fmt_ts(value) -> str:
+            """Codex r5: pass the FULL timestamp, not just the date, to the
+            resolver — the debiased Step 3 prompt instructs statement-order
+            preference (later-stated wins), which is indistinguishable for
+            same-day pairs once only the date survives (the old `[:10]`
+            truncation). Real candidate rows carry tz-aware datetime objects
+            (isoformat with seconds); test fixtures often pass bare date
+            strings with no time component — pass those through as-is."""
+            return value.isoformat(timespec="seconds") if hasattr(value, "isoformat") else str(value)
+
         try:
             candidates = await self._heart.find_contradiction_candidates(limit=10)
             if not candidates:
@@ -1016,8 +1024,8 @@ class SleepHandler:
                     break
 
                 prompt = _CONTRADICTION_RESOLUTION_PROMPT.format(
-                    date_a=str(pair["date1"])[:10],
-                    date_b=str(pair["date2"])[:10],
+                    date_a=_fmt_ts(pair["date1"]),
+                    date_b=_fmt_ts(pair["date2"]),
                     content_a=pair["content1"][:sleep_contradiction_fact_chars],
                     content_b=pair["content2"][:sleep_contradiction_fact_chars],
                 )

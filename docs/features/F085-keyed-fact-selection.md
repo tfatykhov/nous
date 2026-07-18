@@ -238,6 +238,69 @@ not the eval run itself. The four gates below are quoted verbatim from the MAB r
 (The referenced probe script and `nous_mab_wp` clone live with the MAB evaluation program, not in this
 repository.)
 
+## Gate-1 fixes (2026-07-18)
+
+The MAB team's first Gate-1 (ceiling simulation, acceptance gate 1 above) run measured **0.48** against the
+**≥0.80** bar — a shortfall traced not to the keying/indexing mechanism itself but to two store-time
+corruption defects that destroyed or mis-adjudicated facts before R3.3's retrieval leg ever had a chance to
+look them up (`nous-f085-gate1-fix-spec-1.md`, external to this repo). Both fixes ship together in one PR
+(`feat/f085-gate1-fixes`) — neither is independently sufficient, since D2 without D1 would still let the
+classifier's world-truth belief pick the wrong winner once the pair reaches the resolver, and D1 without D2
+never sees the pairs D2 stops from being silently swallowed.
+
+- **D1 — CONTRADICTION truth-bias.** The F027 supersession classifier's `current_fact` verdict (which claim it
+  believes is factually correct) was deciding CONTRADICTION resolution at the three write/sweep sites
+  (`_resolve_key_conflicts`, the `resolve_key_conflict_pair` sleep sweep, and the legacy
+  `_supersede_by_subject` fall-through). A memory store must record what was *said*, not adjudicate what is
+  *true* — a benchmark's later, deliberately-wrong correction was losing to an earlier, world-true statement.
+  Measured impact: **21/160 gold facts destroyed** by the classifier overriding a later-stated (gold) value
+  with an earlier-stated (world-true) one. Fixed by `_pick_contradiction_winner` (same-episode `source_ordinal`
+  → `learned_at` → `None`/KEEP-BOTH+flag, never consulting the classifier's verdict) at the two write/sweep
+  sites (`_resolve_key_conflicts`, the `resolve_key_conflict_pair` sleep sweep). The third site, the legacy
+  `_supersede_by_subject` fall-through, has no ordinal/`learned_at` signal to order by (it only fires for
+  unkeyed facts or R2-off deployments) — it does not call `_pick_contradiction_winner` at all and instead
+  KEEP-BOTH+flags every CONTRADICTION unconditionally, replacing its prior silent supersede via a wrong-type
+  `supersedes` edge. All three sites also got an unconditional prompt/schema debias (the classifier's
+  `current_fact` field is now documented as advisory only for CONTRADICTION).
+- **D2 — dedup blind-confirm swallow.** `_learn`'s near-duplicate check confirmed any hit at cosine similarity
+  ≥ `fact_native_cosine_threshold` (0.95) before the same-slot conflict machinery ever saw it — a same-
+  `(subject_key, attribute_key)` pair with a *different* value (e.g. "author is Alice" → "author is Bob") was
+  swallowed as a duplicate-confirmation instead of being routed to conflict resolution. Measured impact:
+  **~39pp of MAB answer-statement facts existence-destroyed** by this swallow. Fixed by
+  `FactManager._same_slot_value_variant` (folded-content prefilter → band-budget gate → the F377
+  `is_distinct_fact` tiebreaker), gating a new branch in `_learn`'s dedup logic that routes same-slot
+  value-variants past confirm-as-duplicate and into insert. With R2 on, `_resolve_key_conflicts` adjudicates
+  the routed pair immediately. **With R2 off, the sleep sweep does NOT recover it** —
+  `_phase_sweep_key_conflicts` early-returns as a no-op when `supersession_key_resolution_enabled` is false —
+  so resolution falls to the legacy `_supersede_by_subject` path, and only when the caller also set
+  `input.subject`; otherwise the pair simply accumulates KEEP-BOTH, unflagged. This is fail-safe rather than
+  fully recovered: both facts exist and are retrievable, they are just unmerged. Default prod deployment runs
+  routing ON with R2 OFF (see CLAUDE.md) — this accumulation is the expected, documented steady state there;
+  the MAB acceptance harness runs with R2 ON. Kill-switch: `NOUS_SAME_SLOT_CONFLICT_ROUTING_ENABLED` (default
+  `true` — see CLAUDE.md).
+- **Order-resolution contract** (documented, not further coded): same-episode ordinal is the robust
+  resolution path, since enumerative extraction always stamps `source_ordinal` within an episode.
+  Cross-episode conflicts fall back to `learned_at`, which equals true statement order only when ingestion
+  order matches wall-clock write order. KEEP-BOTH (no ordering signal — identical timestamps) is the fail-safe
+  and is expected to be rare in the live write path. A KEEP-BOTH pair never sets `superseded_by`, so it stays
+  active and keeps re-surfacing to the sleep sweep on every later cycle; `_flag_contradiction_pair` is
+  idempotent against repeat re-runs of the same pair (final review C1) so this does not compound the
+  confidence decrement, but it also means the pair is never removed from future sweep pages — a durable,
+  by-design KEEP-BOTH, not a leak.
+- **Pre-existing, unchanged:** `_resolve_key_conflicts` still never surfaces a `ContradictionWarning` to the
+  `learn()` caller (deferred, not introduced by this fix). Backfill re-run idempotency still holds via the
+  folded-content confirm shortcut, except for paraphrase-drift below the cosine dedup threshold — a
+  pre-existing risk this change does not worsen.
+- **MAB repair sequence** (owned by the MAB team, outside this repo): re-run R1 (enumerative extraction
+  backfill) → R2 rollback + re-run — `scripts/backfill_supersession.py` has no `--phase` flag; rollback is the
+  manual `UPDATE`/`DELETE` SQL printed in its header, run against the printed `ROLLBACK KEY` watermark, then
+  re-invoke `python scripts/backfill_supersession.py --agent-id <a> --classifier-budget 0` (D1/D2 changed how
+  conflicts adjudicate, so a stale prior run must be undone first) → acceptance gate 1 (ceiling simulation,
+  expect ≥0.80) → gate 2 (displacement check) → gate 3 (decisive CR n=320 replay). Note: that rollback SQL only
+  deletes `supersedes`/`contradicts` edges and resets `superseded_by`/`active` within the watermark window — a
+  KEEP-BOTH pair's `contradiction_of` value and the (post-C1, at-most-one) `-0.2` confidence decrement are
+  accepted residue it does not undo.
+
 ## Non-goals
 
 - **Multi-hop entity reasoning.** No pronoun/co-reference resolution across facts — v1 is exact single-hop

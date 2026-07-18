@@ -162,6 +162,8 @@ async def sqlite_find_duplicate(
     exclude_ids: list[UUID],
     session: AsyncSession,
     candidate_event_date=None,
+    prefer_slot: tuple[str, str] | None = None,
+    probed_ids: list[UUID] | None = None,
 ):
     """Pure-Python duplicate finding using cosine similarity.
 
@@ -171,6 +173,26 @@ async def sqlite_find_duplicate(
     back to the highest cosine. Without this preference, a March-10
     candidate could match a March-12 fact, trigger the F075 bypass, and
     insert a duplicate of an already-stored March-10 fact.
+
+    Codex r7: mirrors production's same-slot preference too — when
+    ``prefer_slot`` is set and any above-threshold match shares that
+    ``(subject_key, attribute_key)`` slot, restrict to those before applying
+    the date/cosine ordering above; otherwise fall back to the full set.
+
+    Codex r9: mirrors production's precedence fix — a same-date match
+    outranks same-slot narrowing (that identity claim wins regardless of
+    slot); narrowing only decides among candidates when no row can claim
+    the same event.
+
+    Codex r10: mirrors production's ``probed_ids`` out-param — populated
+    with every above-threshold match's id (not just the one returned) so
+    ``_learn`` can fold them all into the admission novelty exclusion.
+
+    Codex r11: mirrors production's fix for an UNDATED candidate — same-slot
+    narrowing now only keeps date-compatible rows (undated, or an exact
+    match); if none qualify, widen to a date-compatible row anywhere in the
+    full above-threshold set before falling back to legacy (unfiltered)
+    slot narrowing.
     """
     from nous.storage.models import Fact
 
@@ -198,11 +220,36 @@ async def sqlite_find_duplicate(
                 matches.append((date_match, sim, fact))
     if not matches:
         return None
-    # date-match first (True > False), then highest cosine
-    matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
+    if probed_ids is not None:
+        probed_ids.extend(m[2].id for m in matches)
+
+    # Codex r9: a same-date match outranks same-slot narrowing entirely.
+    if candidate_event_date is not None:
+        date_matches = [m for m in matches if m[0]]
+        if date_matches:
+            date_matches.sort(key=lambda m: m[1], reverse=True)
+            return date_matches[0][2], date_matches[0][1]
+
+    candidates = matches
+    if prefer_slot is not None:
+        same_slot = [m for m in matches if (m[2].subject_key, m[2].attribute_key) == prefer_slot]
+        if same_slot:
+            # Codex r11 FIX 3: same-slot rows with an incompatible SPECIFIC
+            # date (m[0] False and event_date not None) must not mask a
+            # genuine date-compatible duplicate elsewhere in the full set.
+            date_compatible_same_slot = [m for m in same_slot if m[0] or m[2].event_date is None]
+            if date_compatible_same_slot:
+                candidates = date_compatible_same_slot
+            else:
+                full_compatible = [m for m in matches if m[0] or m[2].event_date is None]
+                candidates = full_compatible if full_compatible else same_slot
+
+    # date-match first (True > False, meaningful for the NULL==NULL
+    # undated-input case), then highest cosine
+    candidates.sort(key=lambda m: (m[0], m[1]), reverse=True)
     # Audit S3: production now returns (fact, similarity) so _learn can
     # band-route the hit — mirror that contract.
-    return matches[0][2], matches[0][1]
+    return candidates[0][2], candidates[0][1]
 
 
 async def sqlite_find_contradiction(

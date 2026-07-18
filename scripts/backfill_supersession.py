@@ -20,11 +20,17 @@ ROLLBACK SQL
      WHERE agent_id = :a
        AND superseded_by IS NOT NULL
        AND updated_at >= :w;
-    -- Remove supersedes edges created by this backfill:
+    -- Remove supersedes/contradicts edges created by this backfill (a CONTRADICTION
+    -- verdict with no ordering signal writes a 'contradicts' KEEP-BOTH edge instead
+    -- of a supersession — see _flag_contradiction_pair):
     DELETE FROM brain.graph_edges
      WHERE agent_id = :a
-       AND relation = 'supersedes'
+       AND relation IN ('supersedes', 'contradicts')
        AND created_at >= :w;
+    -- NOT covered by this rollback (accepted residue): a KEEP-BOTH pair's
+    -- `contradiction_of` value on the newer fact, and the (at most one, since
+    -- Gate-1 review C1's convergence guard) -0.2 confidence decrement applied
+    -- to the older fact — neither is undone by the statements above.
 """
 from __future__ import annotations
 

@@ -13,7 +13,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -75,12 +75,13 @@ _SUPERSESSION_CLASSIFIER_PROMPT_TEMPLATE = (
     "- 'API returns 200' vs 'API returns 500' → UPDATE (status changes)\n"
     "- 'Pi equals 3.14' vs 'Pi equals 4' → CONTRADICTION (math is fixed)\n"
     "- 'Tim works at Acme' vs 'Tim works at Globex' → UPDATE (employment changes)\n"
-    "- 'Capital of France is Paris' vs 'Capital of France is London' → "
-    "CONTRADICTION (historical/definitional)\n"
+    "- 'The config file is settings.yaml' vs 'The config file is config.toml' → "
+    "UPDATE (configuration changes)\n"
     "- 'Database uses Postgres' vs 'Cache uses Redis' → UNRELATED (different "
     "subsystems despite shared 'uses' verb)\n\n"
-    "For `current_fact`: 'new' for UPDATE/REFINEMENT; for CONTRADICTION pick the "
-    "factually correct one; 'new' by default for UNRELATED."
+    "For `current_fact`: 'new' for UPDATE/REFINEMENT; for CONTRADICTION it is "
+    "advisory only (the caller resolves by statement order, NOT by which claim "
+    "is true); 'new' by default for UNRELATED."
 )
 
 
@@ -96,7 +97,10 @@ _SUPERSESSION_CLASSIFIER_SCHEMA: dict[str, Any] = {
         "current_fact": {
             "type": "string",
             "enum": ["new", "old"],
-            "description": "Which fact represents the current/correct state of affairs",
+            "description": (
+                "Which statement was made later / supersedes the other (advisory "
+                "for CONTRADICTION — callers resolve by statement order)"
+            ),
         },
         "confidence": {
             "type": "number",
@@ -409,6 +413,27 @@ class FactManager:
             return None
         return result["verdict"] == "DISTINCT"
 
+    async def _same_slot_value_variant(self, input: FactInput, dupe: Fact) -> bool:
+        """True when the same-slot pair differs in VALUE (route to conflict
+        resolution); False when it is the same statement (confirm as dup).
+        Fail-open TO STORE (True): dropping an update is silent data loss
+        (audit S1). A stored near-dup is only recoverable by the sleep sweep
+        when supersession_key_resolution_enabled (R2) is on — the sweep
+        early-returns as a no-op when R2 is off. With R2 off (and no
+        input.subject to engage the legacy _supersede_by_subject path), the
+        pair simply accumulates KEEP-BOTH, unflagged — fail-safe (existence
+        preserved, unmerged) rather than recovered."""
+        folded_in = " ".join(input.content.lower().split())
+        folded_dupe = " ".join((dupe.content or "").lower().split())
+        if folded_in == folded_dupe:
+            return False                      # identical statement -> dedup
+        if not self._band_budget_ok():
+            return True                       # budget spent -> STORE (never swallow)
+        verdict = await self.is_distinct_fact(dupe.content, input.content)
+        if verdict is None:
+            return True                       # LLM down -> STORE (never swallow)
+        return verdict                        # DISTINCT -> route; DUPLICATE -> dedup
+
     # ------------------------------------------------------------------
     # F027: Retrieval soft suppression
     # ------------------------------------------------------------------
@@ -673,10 +698,37 @@ class FactManager:
         band_action: str | None = None
         band_dupe: Fact | None = None
         band_sim: float = 0.0
+        routed_dupe_id: UUID | None = None  # Gate-1 D2: same-slot value-variant routed past dedup
+        # Codex r10: every above-threshold row _find_duplicate examines,
+        # regardless of which one it ultimately selects — used below to
+        # widen the admission novelty exclusion when D2 routing fires (a
+        # row r7's slot narrowing skipped is exactly as close to the
+        # candidate as the routed dupe, so it is equally non-novel context).
+        probed_ids: list[UUID] = []
         if embedding is not None:
+            # Codex r7: tell the selector which slot the D2 guard cares about
+            # so a cross-slot near-duplicate (closer in embedding space, but
+            # from an unrelated conflict slot) cannot mask a same-slot
+            # value-variant sitting just below it — the guard can only route
+            # what _find_duplicate surfaces. Only set when the guard could
+            # actually fire below (mirrors its own gating minus the dupe-side
+            # key check, which isn't known until a candidate is selected);
+            # every other learn() call passes prefer_slot=None and is
+            # unaffected.
+            prefer_slot = (
+                (input.subject_key, input.attribute_key)
+                if (
+                    check_contradictions
+                    and getattr(self._settings, "same_slot_conflict_routing_enabled", True)
+                    and input.subject_key and input.attribute_key
+                )
+                else None
+            )
             found = await self._find_duplicate(
                 embedding, exclude_ids, session,
                 candidate_event_date=input.event_date,
+                prefer_slot=prefer_slot,
+                probed_ids=probed_ids,
             )
             if found is not None:
                 dupe, dupe_similarity = found
@@ -691,6 +743,41 @@ class FactManager:
                     and input.event_date != dupe.event_date
                 ):
                     pass  # do NOT return; treat as new event
+                elif (
+                    # Codex r6: routing exists to FEED a resolver
+                    # (_resolve_key_conflicts / legacy _supersede_by_subject /
+                    # _find_contradiction) — every one of those is itself gated
+                    # on check_contradictions. When the caller disables conflict
+                    # work (e.g. a bulk-import/sentinel path), routing would
+                    # insert an unadjudicated near-dupe that NO resolver will
+                    # ever see, accumulating silently. First term so False
+                    # short-circuits before the settings getattr or the
+                    # is_distinct_fact budget/LLM call below.
+                    check_contradictions
+                    and getattr(self._settings, "same_slot_conflict_routing_enabled", True)
+                    and input.subject_key and input.attribute_key
+                    and dupe.subject_key and dupe.attribute_key
+                    and input.subject_key == dupe.subject_key
+                    and input.attribute_key == dupe.attribute_key
+                    and await self._same_slot_value_variant(input, dupe)
+                ):
+                    # Gate-1 D2: a same-conflict-slot pair with a DIFFERENT value is
+                    # an update/contradiction, not a duplicate — it must reach the
+                    # F027/F084 resolver. The blind-confirm at similarity >= 0.95
+                    # (CONTRADICTION_SIMILARITY_MAX) was silently swallowing exactly
+                    # these (39pp of MAB answer statements). Fall through to INSERT;
+                    # with R2 (supersession_key_resolution_enabled) on, adjudication
+                    # happens in _resolve_key_conflicts below. With R2 OFF, the sleep
+                    # sweep (_phase_sweep_key_conflicts) does NOT recover this pair —
+                    # it early-returns when the flag is off — so resolution falls to
+                    # the legacy _supersede_by_subject path, and only when the caller
+                    # also set input.subject (later wins); if neither applies, the
+                    # pair simply accumulates KEEP-BOTH, unflagged. Fail-safe: this
+                    # still beats the pre-fix silent swallow — both facts exist and
+                    # are retrievable, they are just unmerged. The dupe is shielded
+                    # ONLY from _find_contradiction re-processing (safe_excludes
+                    # below) — it MUST remain visible to _resolve_key_conflicts.
+                    routed_dupe_id = dupe.id
                 else:
                     band_action = await self._classify_dupe_in_band(
                         dupe, dupe_similarity, input, check_contradictions
@@ -708,7 +795,57 @@ class FactManager:
         # F023: Admission gate — score candidate before storage
         admission_result: AdmissionResult | None = None
         if self._admission_controller is not None:
-            max_sim = await self._find_max_similarity(embedding, exclude_ids, session) if embedding else None
+            # Codex r2: the routed dupe (Gate-1 D2) must NOT feed this
+            # candidate's novelty term — it is definitionally near-identical
+            # (that's why it hit the >= fact_native_cosine_threshold dedup
+            # check), so leaving it visible to _find_max_similarity would
+            # collapse novelty to ~0 and let admission REJECT the very pair
+            # R2 must adjudicate, reintroducing a drop path. Admission-only
+            # exclusion list — exclude_ids itself (which feeds
+            # _resolve_key_conflicts below) is untouched; R2 visibility is
+            # unchanged (Amendment 1).
+            #
+            # Codex r4: the routed dupe alone is insufficient when the
+            # conflict slot holds MORE than one active variant — a second,
+            # non-routed same-slot fact (one _find_duplicate's cosine
+            # threshold didn't flag, because its embedding differs, but
+            # _find_max_similarity's nearest-active-fact scan still finds)
+            # can equally collapse novelty and get this candidate
+            # admission-rejected before R2 ever sees the cluster. When
+            # routing fired, exclude every active same-slot fact. Served by
+            # idx_facts_conflict_slot.
+            #
+            # Codex r5: UNCAPPED — do not bound this query by
+            # supersession_key_candidates_cap. That cap bounds R2's
+            # ADJUDICATION reach (which pairs get resolved after storage);
+            # this exclusion protects STORAGE itself (admission runs
+            # BEFORE the fact exists). A cluster member outside R2's cap can
+            # still be the nearest active neighbor and zero novelty, so
+            # correctness here must not depend on the cap — real conflict
+            # clusters are small in practice.
+            #
+            # Codex r10: also union in probed_ids — every above-threshold
+            # row _find_duplicate examined, including ones r7's slot
+            # narrowing SKIPPED (e.g. a closer cross-slot row from a
+            # different conflict slot than the routed pair, which the
+            # same-slot query above can't see). Everything the dedup probe
+            # saw above threshold is definitionally non-novel context for a
+            # routed correction — none of it may zero the novelty term.
+            if routed_dupe_id is not None:
+                same_slot_rows = await session.execute(
+                    select(Fact.id)
+                    .where(
+                        Fact.agent_id == self.agent_id,
+                        Fact.active == True,  # noqa: E712
+                        Fact.subject_key == input.subject_key,
+                        Fact.attribute_key == input.attribute_key,
+                    )
+                )
+                same_slot_ids = [row[0] for row in same_slot_rows.all()]
+                admission_excludes = list({*exclude_ids, routed_dupe_id, *same_slot_ids, *probed_ids})
+            else:
+                admission_excludes = exclude_ids
+            max_sim = await self._find_max_similarity(embedding, admission_excludes, session) if embedding else None
             source_text = await self._get_source_text(input, session)
 
             admission_result = await self._admission_controller.score(
@@ -874,26 +1011,38 @@ class FactManager:
         # or a key missing the legacy subject path is the only write-time
         # supersession guard — skipping it leaves stale unkeyed same-subject
         # rows active (codex r5).
+        # Codex r11 FIX 1: pairs flagged KEEP-BOTH by either resolver below
+        # (legacy subject path or R2 keyed path) are collected here so the
+        # post-insert _find_contradiction scan (safe_excludes, below) does
+        # not re-discover and re-decrement the same already-flagged pair.
+        keep_both_ids: list[UUID] = []
+        new_fact_lost = False  # codex r11: set True when either resolver deactivates the new fact
         if check_contradictions and input.subject and embedding is not None and not (
             getattr(self._settings, "supersession_key_resolution_enabled", False) is True
             and input.subject_key
             and input.attribute_key
         ):
-            await self._supersede_by_subject(
+            # Codex r11 FIX 2: the legacy path can also deactivate the new
+            # fact via statement-order resolution (existing fact wins) —
+            # mirror _resolve_key_conflicts' bool contract so _learn gates
+            # the post-insert scan + domain threshold on this path too.
+            new_fact_lost = await self._supersede_by_subject(
                 fact.id, input.subject, embedding, session,
                 new_content=input.content,
                 new_event_date=input.event_date,
                 exclude_ids=exclude_ids,
+                keep_both_ids=keep_both_ids,
             )
 
-        new_fact_lost = False  # codex r11: set True when keyed resolution deactivates the new fact
         if (
             check_contradictions
             and getattr(self._settings, "supersession_key_resolution_enabled", False) is True
             and input.subject_key
             and input.attribute_key
         ):
-            new_fact_lost = await self._resolve_key_conflicts(fact, input, session, exclude_ids)
+            new_fact_lost = await self._resolve_key_conflicts(
+                fact, input, session, exclude_ids, keep_both_ids=keep_both_ids,
+            )
 
         await self._emit_event(
             session,
@@ -914,7 +1063,15 @@ class FactManager:
             # codex r11: skipped when new fact lost keyed resolution (inactive fact
             # must not trigger contradiction edges or domain compaction).
             if embedding is not None:
-                safe_excludes = list(exclude_ids) + [fact.id]
+                # Codex r11 FIX 1: keep_both_ids excludes pairs either
+                # resolver above already flagged KEEP-BOTH this learn — left
+                # visible, this scan would re-match the same active pair and
+                # re-run its own (non-idempotent) CONTRADICTION handling.
+                safe_excludes = (
+                    list(exclude_ids) + [fact.id]
+                    + ([routed_dupe_id] if routed_dupe_id else [])
+                    + keep_both_ids
+                )
                 contradiction = await self._find_contradiction(
                     embedding, fact.content, safe_excludes, session,
                     new_fact_id=fact.id,
@@ -1116,7 +1273,8 @@ class FactManager:
         new_content: str = "",
         new_event_date: date | None = None,
         exclude_ids: list[UUID] | None = None,
-    ) -> None:
+        keep_both_ids: list[UUID] | None = None,
+    ) -> bool:
         """Supersede older facts with same subject AND similar content (006.2).
 
         Only supersedes when both conditions are met:
@@ -1134,6 +1292,19 @@ class FactManager:
 
         This prevents "Nous version 0.2" from nuking "Nous uses PostgreSQL"
         while correctly superseding "Nous version 0.1".
+
+        Codex r11 FIX 2: returns True when ``new_fact_id`` loses (statement-
+        order resolution or a classifier UPDATE verdict favors the existing
+        fact) and is now inactive — same contract as
+        ``_resolve_key_conflicts`` — so ``_learn`` can gate the post-insert
+        contradiction scan + domain threshold on this path too. The loop
+        stops (returns immediately) once the new fact loses; an inactive
+        fact must not go on to supersede further candidates.
+
+        Codex r11 FIX 1: when ``keep_both_ids`` is provided, the id of any
+        fact flagged KEEP-BOTH via ``_flag_contradiction_pair`` during this
+        call is appended to it, so the caller can exclude it from a
+        subsequent contradiction scan in the same learn.
         """
         result = await session.execute(
             select(Fact).where(
@@ -1185,7 +1356,43 @@ class FactManager:
                                 new_fact = await self._get_fact_orm(new_fact_id, session)
                                 if new_fact:
                                     new_fact.active = False
-                                continue
+                                # Codex r11 FIX 2: new fact is now inactive —
+                                # stop scanning remaining candidates (an
+                                # inactive fact must not go on to supersede
+                                # others) and signal the loss to _learn.
+                                return True
+                            if relation == "CONTRADICTION":
+                                # Gate-1 D1 (codex r10): the legacy path DOES
+                                # have ordering data whenever it's actually
+                                # present on the two rows (same-episode
+                                # source_ordinal, or differing learned_at) —
+                                # _pick_contradiction_winner resolves by
+                                # statement order exactly like the keyed
+                                # paths do. This is the ONLY write-time
+                                # resolver when R2 is off (the prod default),
+                                # so it must not discard ordering data it
+                                # has. KEEP-BOTH+flag only when neither fact
+                                # carries an ordering signal (the true
+                                # unordered case — _pick_contradiction_winner
+                                # returns None). The old fall-through silently
+                                # superseded with a wrong-type 'supersedes'
+                                # edge; this uses the same uniform primitive
+                                # (apply_supersession) the keyed paths use.
+                                new_fact = await self._get_fact_orm(new_fact_id, session)
+                                if new_fact is not None:
+                                    winner = self._pick_contradiction_winner(old, new_fact)
+                                    if winner is None:
+                                        await self._flag_contradiction_pair(old, new_fact, session)
+                                        if keep_both_ids is not None:
+                                            keep_both_ids.append(old.id)
+                                    else:
+                                        loser = old if winner is new_fact else new_fact
+                                        await self.apply_supersession(winner.id, loser.id, session)
+                                        if loser is new_fact:
+                                            # Codex r11 FIX 2: new fact lost —
+                                            # stop scanning, signal the loss.
+                                            return True
+                                continue  # keep scanning remaining candidates
                             # UPDATE + current=="new" or unknown → fall through to supersede
 
                     old.active = False
@@ -1203,6 +1410,7 @@ class FactManager:
                         "Superseded fact %s (subject=%s, sim=%.2f) by %s",
                         old.id, subject, similarity, new_fact_id,
                     )
+        return False
 
     @staticmethod
     def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -1447,6 +1655,8 @@ class FactManager:
         exclude_ids: list[UUID],
         session: AsyncSession,
         candidate_event_date: date | None = None,
+        prefer_slot: tuple[str, str] | None = None,
+        probed_ids: list[UUID] | None = None,
     ) -> tuple[Fact, float] | None:
         """Find a near-duplicate fact by cosine similarity > threshold.
 
@@ -1474,7 +1684,42 @@ class FactManager:
         That horizon is the price of HNSW-servability; 20 comfortably covers
         any realistic above-threshold cluster (the old SQL date-first ordering
         saw ALL above-threshold rows but could never use the index).
-        """
+
+        Codex r7: this method picks ONE candidate from the above-threshold
+        set — the Gate-1 D2 same-slot guard in ``_learn`` can only route what
+        THIS selector surfaces, so a cross-slot near-duplicate (closer in
+        embedding space, but from an unrelated conflict slot) could mask a
+        genuine same-slot value-variant sitting just below it, letting the
+        legacy blind-confirm swallow the correction before R2 ever saw it.
+        ``_learn`` passes ``prefer_slot`` ONLY when the D2 guard could
+        actually fire (check_contradictions + routing flag + input
+        both-keyed); every other caller passes ``None`` and is
+        byte-identical to before. When set, above-threshold candidates
+        matching ``(subject_key, attribute_key) == prefer_slot`` are
+        preferred; the EXISTING F075 date-preference logic then runs within
+        that narrower subset unchanged. When no same-slot candidate exists,
+        selection falls back to today's behavior exactly.
+
+        Codex r9: F075's date-match preference OUTRANKS r7's same-slot
+        narrowing. A same-date above-threshold candidate means "this exact
+        event is already stored," regardless of which conflict slot it sits
+        in (e.g. a pre-migration duplicate that is unkeyed or mis-keyed) —
+        that identity claim outranks slot identity. Applying slot narrowing
+        first could pick a same-slot-but-DIFFERENT-date row, trip the F075
+        distinct-event bypass in ``_learn``, and INSERT a duplicate of the
+        very row that should have been confirmed. Slot narrowing therefore
+        only decides among candidates when no row can claim the same event.
+
+        Codex r10: ``probed_ids``, when passed, is populated (via
+        ``.extend()``) with the ids of EVERY row in the above-threshold set
+        — not just the one ``chosen`` — so ``_learn`` can fold them all into
+        the admission novelty exclusion when D2 routing fires. r7's slot
+        narrowing can leave a closer, above-threshold, cross-slot row
+        un-selected but still active; that row is exactly as close to the
+        candidate as the routed dupe (both cleared the dedup threshold), so
+        it is equally non-novel context for admission's purposes even though
+        it lost the slot-preference tiebreak. Every other caller passes
+        ``None`` and is unaffected."""
         embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
 
         # Build exclude clause (P1-2)
@@ -1502,7 +1747,7 @@ class FactManager:
         # partial indexes.
         await set_local_ef_search(session, 100)
         sql = text(f"""
-            SELECT id, event_date,
+            SELECT id, event_date, subject_key, attribute_key,
                    1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
             FROM heart.facts
             WHERE agent_id = :agent_id
@@ -1517,13 +1762,58 @@ class FactManager:
         above = [r for r in result.all() if float(r.similarity) > threshold]
         if not above:
             return None
+        if probed_ids is not None:
+            probed_ids.extend(r.id for r in above)
 
-        # F075 date preference in Python (rows are distance-ordered, so the
-        # first date-match is the nearest one; None == None is a match).
-        chosen = next(
-            (r for r in above if r.event_date == candidate_event_date),
-            above[0],
-        )
+        # Codex r9: check for a same-date match across the FULL above-threshold
+        # set BEFORE any slot narrowing — a date match wins outright and skips
+        # narrowing entirely (see docstring precedence).
+        date_match = next((r for r in above if r.event_date == candidate_event_date), None)
+        if candidate_event_date is not None and date_match is not None:
+            chosen = date_match
+        else:
+            # Codex r7: restrict to same-slot candidates first when requested
+            # and any exist among the above-threshold set; otherwise fall
+            # back to the full set exactly as before prefer_slot existed.
+            candidates = above
+            if prefer_slot is not None:
+                same_slot = [r for r in above if (r.subject_key, r.attribute_key) == prefer_slot]
+                if same_slot:
+                    # Codex r11 FIX 3: r9's date-match preference above only
+                    # fires when candidate_event_date is not None, so an
+                    # UNDATED candidate never benefited from it — a same-slot
+                    # row that stakes out a SPECIFIC date the candidate
+                    # cannot confirm (row dated, candidate undated) could
+                    # still be preferred here and mask a genuine NULL==NULL
+                    # duplicate sitting elsewhere (unkeyed/legacy/different
+                    # slot) in the full above-threshold set. A same-slot row
+                    # with NO date is always a safe narrowing target (unknown
+                    # — benefit of the doubt); one whose date actually
+                    # matches the candidate's is trivially safe too. Only
+                    # when NEITHER holds for any same-slot row do we widen to
+                    # the full set looking for a date-compatible row before
+                    # falling back to legacy (unfiltered) slot narrowing.
+                    date_compatible_same_slot = [
+                        r for r in same_slot
+                        if r.event_date is None or r.event_date == candidate_event_date
+                    ]
+                    if date_compatible_same_slot:
+                        candidates = date_compatible_same_slot
+                    else:
+                        full_compatible = next(
+                            (r for r in above if r.event_date is None or r.event_date == candidate_event_date),
+                            None,
+                        )
+                        candidates = [full_compatible] if full_compatible is not None else same_slot
+
+            # F075 date preference in Python (rows are distance-ordered, so
+            # the first date-match is the nearest one; None == None is a
+            # match — meaningful here for an undated input against a
+            # narrowed same-slot subset).
+            chosen = next(
+                (r for r in candidates if r.event_date == candidate_event_date),
+                candidates[0],
+            )
 
         # Fetch the ORM object
         fact_result = await session.execute(select(Fact).where(Fact.id == chosen.id))
@@ -2134,13 +2424,17 @@ class FactManager:
             if relation not in ("UPDATE", "CONTRADICTION") or conf < 0.8:
                 return False
             if relation == "CONTRADICTION":
-                current = cls.get("current_fact", "")
-                if current == "new":
-                    winner, loser = f_new, f_old
-                elif current == "old":
-                    winner, loser = f_old, f_new
-                else:
-                    return False  # ambiguous contradiction => KEEP BOTH (devil-2 #1)
+                # Gate-1 D1: statement order resolves CONTRADICTION, never the
+                # classifier's current_fact verdict — see _pick_contradiction_winner.
+                winner = self._pick_contradiction_winner(f_old, f_new)
+                if winner is None:
+                    await self._flag_contradiction_pair(f_old, f_new, session)
+                    # store-P1: this method owns its session; Database.session()
+                    # does NOT auto-commit, so an uncommitted KEEP-BOTH flag
+                    # would be silently rolled back on close.
+                    await session.commit()
+                    return False  # KEEP-BOTH + flag
+                loser = f_old if winner is f_new else f_new
             else:
                 winner, loser = self._pick_winner(f_new, f_old, cls)
             ok = await self.apply_supersession(winner.id, loser.id, session)
@@ -2157,6 +2451,7 @@ class FactManager:
     async def _resolve_key_conflicts(
         self, fact: Fact, input: FactInput, session: AsyncSession,
         exclude_ids: list[UUID],
+        keep_both_ids: list[UUID] | None = None,
     ) -> bool:
         """064 R2.1/R2.2: same-(subject_key, attribute_key) conflict resolution.
 
@@ -2170,6 +2465,11 @@ class FactManager:
 
         Returns True when the newly-inserted fact (``fact``) lost and is now
         inactive; False otherwise (codex r11).
+
+        Codex r11 FIX 1: when ``keep_both_ids`` is provided, the id of any
+        fact flagged KEEP-BOTH via ``_flag_contradiction_pair`` is appended
+        to it, so ``_learn`` can exclude it from a subsequent contradiction
+        scan in the same learn.
         """
         cap = self._settings.supersession_key_candidates_cap if self._settings else 8
         rows = await session.execute(
@@ -2208,17 +2508,17 @@ class FactManager:
             if relation not in ("UPDATE", "CONTRADICTION") or conf < 0.8:
                 continue  # not a confirmed same-slot conflict
             if relation == "CONTRADICTION":
-                # devil-2 #1: a CONTRADICTION is about an inherently FIXED
-                # property — reading order says nothing about truth. Only the
-                # classifier's explicit current_fact verdict may resolve it;
-                # ambiguous => KEEP BOTH. Ordinal/recency never apply here.
-                current = cls.get("current_fact", "")
-                if current == "new":
-                    winner, loser = fact, old
-                elif current == "old":
-                    winner, loser = old, fact
-                else:
-                    continue
+                # Gate-1 D1: statement order resolves CONTRADICTION, never the
+                # classifier's current_fact verdict (a memory store records
+                # what was said; a user's correction must beat the model's
+                # prior). See _pick_contradiction_winner.
+                winner = self._pick_contradiction_winner(old, fact)
+                if winner is None:
+                    await self._flag_contradiction_pair(old, fact, session)
+                    if keep_both_ids is not None:
+                        keep_both_ids.append(old.id)
+                    continue  # KEEP-BOTH + flag
+                loser = old if winner is fact else fact
             else:  # UPDATE — mutable state; ordinal (reading order) is the authority signal
                 winner, loser = self._pick_winner(fact, old, cls)
             await self.apply_supersession(winner.id, loser.id, session)
@@ -2230,7 +2530,8 @@ class FactManager:
         """R2.2 policy for UPDATE conflicts. Returns (winner, loser).
         Precedence: same-episode positional ordinal (reading order) →
         classifier current_fact → recency (later learned_at). CONTRADICTION
-        never reaches this method (resolved by current_fact only)."""
+        is resolved by _pick_contradiction_winner — statement order only,
+        never this method or the classifier's current_fact verdict."""
         policy = getattr(self._settings, "supersession_policy", "ordinal") if self._settings else "ordinal"
         if (
             policy == "ordinal"
@@ -2254,6 +2555,149 @@ class FactManager:
         if new_ts is not None and old_ts is not None and old_ts > new_ts:
             return (old_fact, new_fact)
         return (new_fact, old_fact)
+
+    def _pick_contradiction_winner(self, old_fact: Fact, new_fact: Fact) -> Fact | None:
+        """Gate-1 D1: CONTRADICTION resolves by TESTIMONY ORDER, never by which
+        claim the model believes is true (a memory store records what was said;
+        a user's correction must beat the model's prior). Same-episode ordinal
+        -> later learned_at -> None (KEEP-BOTH + flag, the fail-open default).
+
+        Codex r15: EQUAL same-episode ordinals (e.g. a re-extraction or
+        backfill run that assigns duplicate positional ordinals) carry no
+        order signal — the prior `>=` crowned `new_fact` on a tie, making
+        resolution a coin-flip on call/UUID order rather than genuine
+        testimony order, exactly the corruption class this fix removes.
+        Equality now falls through to the learned_at tiebreak instead of
+        being treated as new_fact reading later."""
+        if (
+            old_fact.source_ordinal is not None
+            and new_fact.source_ordinal is not None
+            and old_fact.source_episode_id is not None
+            and old_fact.source_episode_id == new_fact.source_episode_id
+        ):
+            if new_fact.source_ordinal > old_fact.source_ordinal:
+                return new_fact
+            if old_fact.source_ordinal > new_fact.source_ordinal:
+                return old_fact
+            # Equal ordinals: no order signal from position — fall through.
+        if old_fact.learned_at != new_fact.learned_at:
+            return new_fact if new_fact.learned_at > old_fact.learned_at else old_fact
+        return None
+
+    async def _flag_contradiction_pair(self, a: Fact, b: Fact, session: AsyncSession) -> None:
+        """KEEP-BOTH marking — mirrors _find_contradiction's flag primitives
+        (contradiction_of assignment + contradicts edge + the same -0.2
+        confidence decrement on the OLDER fact), so all keep-both sites
+        behave uniformly (review store-P2 + devil-P3-2: match existing,
+        don't innovate). See r13 below: the column assignment is scoped to
+        first-flag only, not unconditional.
+
+        Final review C1: a KEEP-BOTH pair never sets superseded_by, so it stays
+        active and keeps re-surfacing to this same code path on every later
+        sleep sweep / backfill re-run (find_key_conflict_pairs has no
+        already-flagged exclusion and the sweep cursor wraps). Without a
+        convergence guard, each re-run re-decrements `a.confidence` by another
+        -0.2, compounding toward 0. Idempotent: a repeat call for an
+        already-flagged pair is a no-op.
+
+        Codex r1: the column-only guard above forgets pairs in a 3+ fact
+        cluster — `contradiction_of` is a single-valued column, so flagging
+        (B, C) after (A, C) overwrites C's column from A.id to B.id; a later
+        re-scan of (A, C) then sees a column mismatch and would re-decrement
+        A.confidence. A `contradicts` edge is written for EVERY flagged pair
+        and is never overwritten, so it is the authoritative idempotence
+        check — query it in EITHER direction. The column check stays as a
+        cheap fast path for the common single-pair case; the edge query is
+        the correctness backstop for clusters.
+
+        Codex r3: the documented rollback (backfill_supersession.py header)
+        deletes `contradicts` edges but leaves `contradiction_of` as accepted
+        residue. A prior version of this guard returned early on either check
+        passing — which left the graph permanently missing the edge after a
+        rollback, since a re-run would hit the (still-set) column fast path
+        and exit before ever touching the edge table. The -0.2 decrement is
+        the only ONE-TIME effect and stays gated on `already_flagged`
+        (column OR edge — either proves a prior pass); edge creation runs
+        UNCONDITIONALLY every call — idempotent via on_conflict_do_nothing —
+        so a rolled-back edge is recreated on the next pass while confidence
+        is never touched twice. (The column assignment was ALSO
+        unconditional at this point in the file's history; r13 below moved
+        it inside the `not already_flagged` guard — see that note for why.)
+
+        Codex r12: a sweep revisit can present the SAME pair with (a, b)
+        roles REVERSED from the original flagging call (equal-learned_at
+        pairs are UUID-ordered by find_key_conflict_pairs, which can flip
+        which fact lands in id1/id2 across runs). The bidirectional edge
+        query correctly recognized this pair as already-flagged for the
+        decrement guard — but it was previously only ever run as a
+        column-fast-path FALLBACK, so the edge write below stayed
+        unconditional and, called with roles reversed, wrote a SECOND
+        contradicts edge in the opposite direction. Edge existence is now
+        always computed once and used to gate the edge write directly; the
+        confidence-decrement guard is unchanged (column match OR edge
+        exists, either direction).
+
+        Codex r13: the column write had the SAME reverse-revisit bug as r12's
+        edge write, and for a different reason — a reversed-roles revisit
+        also sets `b.contradiction_of = a.id` unconditionally, which (with
+        a/b swapped) points the OTHER fact back at the first, leaving both
+        facts pointing at each other on what should be an idempotent no-op.
+        Unlike the edge, the column never needs repair-on-revisit: rollback
+        (backfill_supersession.py) deletes `contradicts` edges but leaves
+        `contradiction_of` as accepted residue, so it is never cleared and
+        never needs recreating. Writing it ONLY on first flag (inside
+        `not already_flagged`) makes a reverse revisit a true no-op while
+        still preserving r1's cluster semantics: a genuinely NEW pair (no
+        column match, no edge) still decrements and the column still
+        reflects last-writer-wins across a cluster.
+
+        Codex r14: the composite of r3 + r13 — post-rollback (edge deleted,
+        column residue intact) PLUS a sweep revisit in reversed order. The
+        one-way `column_match = b.contradiction_of == a.id` only checks
+        THIS call's `b` side; the residue from the original flag sits on
+        the OTHER side (`a.contradiction_of == b.id` in this call's roles).
+        With the edge gone (rollback) and the column check missing the
+        reversed residue, `already_flagged` fell through False —
+        re-decrementing confidence a second time and writing a fresh
+        column + edge in the reverse direction. `column_match` is now
+        checked in BOTH directions. Edge repair must still recreate the
+        edge in its ORIGINAL recorded orientation (not necessarily this
+        call's (b, a)) — whichever fact's column points at the other is
+        the historical source; only a genuinely new, never-flagged pair
+        (neither column set) defaults to this call's (b, a)."""
+        column_match = b.contradiction_of == a.id or a.contradiction_of == b.id
+        existing = await session.execute(
+            select(GraphEdge.id)
+            .where(GraphEdge.agent_id == self.agent_id)
+            .where(GraphEdge.relation == "contradicts")
+            .where(
+                or_(
+                    and_(GraphEdge.source_id == b.id, GraphEdge.target_id == a.id),
+                    and_(GraphEdge.source_id == a.id, GraphEdge.target_id == b.id),
+                )
+            )
+            .limit(1)
+        )
+        edge_exists = existing.first() is not None
+        already_flagged = column_match or edge_exists
+        if not already_flagged:
+            # Codex r8: `a.confidence or 1.0` treats a legitimate 0.0 as
+            # missing and RAISES it to 0.8 on flagging. `is None` is the
+            # correct missing-value check; a fact that is already at 0.0
+            # confidence must stay there.
+            base = 1.0 if a.confidence is None else a.confidence
+            a.confidence = max(0.0, base - 0.2)
+            b.contradiction_of = a.id
+        if not edge_exists:
+            # Codex r14: repair follows the RECORDED direction — whichever
+            # fact's column points at the other is the original source,
+            # regardless of which role it plays in THIS call. A brand-new
+            # pair (neither column set yet) has no recorded direction, so it
+            # defaults to this call's (b, a), matching first-flag orientation.
+            if a.contradiction_of == b.id:
+                await self._create_graph_edge(a.id, b.id, "fact", "fact", "contradicts", 1.0, session)
+            else:
+                await self._create_graph_edge(b.id, a.id, "fact", "fact", "contradicts", 1.0, session)
 
     # ------------------------------------------------------------------
     # contradict()
@@ -3160,7 +3604,13 @@ class FactManager:
         sql = text(f"""
             SELECT f1.id AS fact1_id, f2.id AS fact2_id,
                    f1.content AS content1, f2.content AS content2,
-                   f1.created_at AS date1, f2.created_at AS date2,
+                   -- Codex r8: learned_at, not created_at -- the statement-order
+                   -- resolver prompt (and all Gate-1 order semantics) key on
+                   -- learned_at. A backfilled/imported fact's created_at is
+                   -- insertion time, which can differ from when the statement
+                   -- was actually made, letting the resolver supersede the
+                   -- real later correction based on the wrong clock.
+                   f1.learned_at AS date1, f2.learned_at AS date2,
                    f1.subject AS subject, f1.category AS category,
                    1 - (f1.embedding <=> f2.embedding) AS similarity
             FROM heart.facts f1

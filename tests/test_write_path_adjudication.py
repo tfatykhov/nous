@@ -799,6 +799,39 @@ async def _insert_episode(session, agent_id="nous-default") -> uuid4:
     return ep.id
 
 
+def _unit_vec(i: int) -> list[float]:
+    """1536-dim one-hot vector — orthogonal to _unit_vec(j) for i != j, so
+    distinct indices never collide with the native-cosine dedup path."""
+    v = [0.0] * 1536
+    v[i] = 1.0
+    return v
+
+
+def _embedding_at_similarity(target_sim: float) -> list[float]:
+    """1536-dim vector with cosine similarity == target_sim vs _unit_vec(0)."""
+    import math
+
+    perp = math.sqrt(max(0.0, 1.0 - target_sim ** 2))
+    v = [0.0] * 1536
+    v[0] = target_sim
+    v[1] = perp
+    return v
+
+
+async def _get_fact(heart, fact_id, session=None):
+    """Fetch a Fact row by id. With no `session`, opens a FRESH
+    heart.db.session() — a different connection than any ambient test
+    session, so this is load-bearing for tests verifying a caller-owned
+    commit (e.g. resolve_key_conflict_pair) actually persisted: an
+    in-memory ORM attribute check on the original session would pass even
+    if the commit were missing. Pass an explicit `session` to read within
+    an ambient (uncommitted) transaction the caller still holds open."""
+    if session is not None:
+        return await session.get(Fact, fact_id, populate_existing=True)
+    async with heart.db.session() as s:
+        return await s.get(Fact, fact_id)
+
+
 _UPDATE_NEW = {"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}
 _UPDATE_OLD = {"relation": "UPDATE", "current_fact": "old", "confidence": 0.9}
 _CONTRADICTION_OLD = {"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.9}
@@ -1133,9 +1166,9 @@ async def test_r2_row8_policy_recency_no_ordinals(heart, session, monkeypatch):
 # Row 9 ─────────────────────────────────────────────────────────────────────
 
 @pytest.mark.postgres_only
-async def test_r2_row9_contradiction_current_fact_beats_ordinal(heart, session, monkeypatch):
-    """Row 9: CONTRADICTION + current_fact=old, new has HIGHER ordinal → NEW superseded by old.
-    Devil-2 #1: CONTRADICTION verdict is resolved ONLY by current_fact; ordinal is irrelevant."""
+async def test_r2_row9_contradiction_later_stated_wins_despite_classifier(heart, session, monkeypatch):
+    """Row 9 (Gate-1 D1): CONTRADICTION + current_fact=old, new has HIGHER ordinal
+    → NEW wins (later statement order), classifier's current_fact is ignored."""
     heart.facts._settings = heart.facts._settings.model_copy(
         update={"supersession_key_resolution_enabled": True}
     )
@@ -1157,24 +1190,24 @@ async def test_r2_row9_contradiction_current_fact_beats_ordinal(heart, session, 
             content="The capital city of France has always been London throughout recorded history.",
             subject_key="france",
             attribute_key="capital_city",
-            source_ordinal=2,  # higher ordinal — but CONTRADICTION ignores it
+            source_ordinal=2,  # higher ordinal — later statement wins despite current_fact=old
             source_episode_id=ep_id,
         ),
         session=session,
     )
     await session.flush()
-    new_row = await session.get(Fact, new_r.id)
-    assert new_row.superseded_by == old_r.id
-    assert new_row.active is False
     old_row = await session.get(Fact, old_r.id)
-    assert old_row.superseded_by is None
-    assert old_row.active is True
+    assert old_row.superseded_by == new_r.id
+    assert old_row.active is False
+    new_row = await session.get(Fact, new_r.id)
+    assert new_row.superseded_by is None
+    assert new_row.active is True
 
-    # Assert supersedes graph edge: old_r (winner) → new_r (loser)
+    # Assert supersedes graph edge: new_r (winner) → old_r (loser)
     edge_r = await session.execute(
         select(GraphEdge)
-        .where(GraphEdge.source_id == old_r.id)
-        .where(GraphEdge.target_id == new_r.id)
+        .where(GraphEdge.source_id == new_r.id)
+        .where(GraphEdge.target_id == old_r.id)
         .where(GraphEdge.relation == "supersedes")
     )
     edge = edge_r.scalars().first()
@@ -1185,7 +1218,12 @@ async def test_r2_row9_contradiction_current_fact_beats_ordinal(heart, session, 
 
 @pytest.mark.postgres_only
 async def test_r2_row10_contradiction_ambiguous_keep_both(heart, session, monkeypatch):
-    """Row 10: CONTRADICTION conf 0.9 but current_fact missing/ambiguous → NO supersession."""
+    """Row 10: CONTRADICTION conf 0.9, no ordinals/shared episode → NO supersession.
+    Gate-1 D1: with no ordering signal (both facts share the conftest session's
+    single transaction, so learned_at is transaction-constant and identical),
+    _pick_contradiction_winner returns None → KEEP-BOTH, now also flagged via
+    _flag_contradiction_pair (contradiction_of + contradicts edge) like the
+    other keep-both sites."""
     heart.facts._settings = heart.facts._settings.model_copy(
         update={"supersession_key_resolution_enabled": True}
     )
@@ -1214,6 +1252,19 @@ async def test_r2_row10_contradiction_ambiguous_keep_both(heart, session, monkey
     assert new_row.superseded_by is None
     assert old_row.active is True
     assert new_row.active is True
+    # Gate-1 D1: unordered CONTRADICTION now flags on KEEP-BOTH (mirrors path A/C).
+    assert old_row.learned_at == new_row.learned_at, (
+        "sanity: same-transaction learned_at must be identical for the "
+        "unordered branch to be the one under test"
+    )
+    assert new_row.contradiction_of == old_r.id
+    edge_r = await session.execute(
+        select(GraphEdge)
+        .where(GraphEdge.source_id == new_r.id)
+        .where(GraphEdge.target_id == old_r.id)
+        .where(GraphEdge.relation == "contradicts")
+    )
+    assert edge_r.scalars().first() is not None
 
 
 # Row 11 ─────────────────────────────────────────────────────────────────────
@@ -1263,6 +1314,1309 @@ async def test_r2_row11_keyed_fact_skips_legacy_when_r2_on(heart, session, monke
         session=session,
     )
     sentinel.assert_not_called()
+
+
+# Gate-1 D1 ───────────────────────────────────────────────────────────────────
+# CONTRADICTION resolves by statement order, never by which claim the
+# classifier believes is true (F085 Gate-1 fixes plan, Task 1).
+
+
+@pytest.mark.postgres_only
+class TestGate1ContradictionOrderResolution:
+    async def test_figaro_shape_later_stated_wins_despite_world_knowledge(self, heart, session, monkeypatch):
+        """Gate-1 regression: the later-stated 'wrong' value must WIN.
+        Statement 1: author is Pierre Beaumarchais (world-true, ordinal 100).
+        Statement 2 (later): author is Thomas Kyd (benchmark gold, ordinal 200).
+        Classifier says CONTRADICTION and (biased) current_fact='old' — the
+        resolver must IGNORE current_fact and supersede the EARLIER fact."""
+        monkeypatch.setattr(
+            "nous.heart.facts.FactManager._classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.95}),
+        )
+        s = heart.facts._settings.model_copy(update={"supersession_key_resolution_enabled": True})
+        monkeypatch.setattr(heart.facts, "_settings", s)
+        ep_id = await _insert_episode(session)
+        r1 = await heart.learn(FactInput(
+            content="The author of The Marriage of Figaro is Pierre Beaumarchais.",
+            subject="marriage of figaro", subject_key="marriage of figaro",
+            attribute_key="author", source_episode_id=ep_id, source_ordinal=100,
+        ), session=session, precomputed_embedding=_unit_vec(0))
+        r2 = await heart.learn(FactInput(
+            content="The author of The Marriage of Figaro is Thomas Kyd.",
+            subject="marriage of figaro", subject_key="marriage of figaro",
+            attribute_key="author", source_episode_id=ep_id, source_ordinal=200,
+        ), session=session, precomputed_embedding=_unit_vec(1))  # orthogonal vec: dedup miss -> R2 path
+        await session.flush()
+        old = await _get_fact(heart, r1.id, session)
+        new = await _get_fact(heart, r2.id, session)
+        assert new.active and new.superseded_by is None      # later-stated WINS
+        assert (not old.active) and old.superseded_by == new.id
+
+    async def test_unordered_contradiction_keeps_both_and_flags(self, heart, monkeypatch):
+        """No ordinals, no shared episode — force the unordered case via a
+        direct ORM update pinning both facts to an IDENTICAL learned_at, then
+        drive resolve_key_conflict_pair (the sweep seam) directly with the
+        CONTRADICTION mock. _pick_contradiction_winner has no ordering signal
+        left -> KEEP-BOTH, flagged via _flag_contradiction_pair (contradiction_of
+        + contradicts edge). The sweep branch commits its own session, so this
+        re-reads through a FRESH session to prove the commit actually landed."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy import update as sa_update
+
+        unique_agent = f"g1-{uuid4().hex[:8]}"
+        heart.facts.agent_id = unique_agent
+        heart.facts._settings = heart.facts._settings.model_copy(
+            update={"supersession_key_resolution_enabled": True}
+        )
+
+        f1 = await heart.learn(FactInput(
+            content="The store's return policy allows returns within thirty days.",
+            subject_key="store", attribute_key="return_policy",
+        ))
+        f2 = await heart.learn(FactInput(
+            content="The store's return policy allows returns within ninety days.",
+            subject_key="store", attribute_key="return_policy",
+        ))
+
+        fixed_ts = datetime.now(UTC)
+        async with heart.db.session() as s:
+            await s.execute(
+                sa_update(Fact).where(Fact.id.in_([f1.id, f2.id])).values(learned_at=fixed_ts)
+            )
+            await s.commit()
+
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.95}),
+        )
+
+        result = await heart.facts.resolve_key_conflict_pair(f1.id, f2.id, f1.content, f2.content)
+        assert result is False  # KEEP-BOTH: no supersession written
+
+        old = await _get_fact(heart, f1.id)
+        new = await _get_fact(heart, f2.id)
+        assert old.active is True and new.active is True
+        assert old.superseded_by is None and new.superseded_by is None
+        assert new.contradiction_of == old.id
+
+        async with heart.db.session() as s:
+            edge_r = await s.execute(
+                select(GraphEdge)
+                .where(GraphEdge.source_id == f2.id)
+                .where(GraphEdge.target_id == f1.id)
+                .where(GraphEdge.relation == "contradicts")
+            )
+            assert edge_r.scalars().first() is not None
+
+    async def test_flag_contradiction_pair_converges_on_repeat_sweep(self, heart, monkeypatch):
+        """Final review C1: a KEEP-BOTH pair never sets superseded_by, so it
+        stays active and keeps re-surfacing to resolve_key_conflict_pair on
+        every later sleep sweep / backfill re-run. Calling it TWICE on the
+        same unordered pair must decrement confidence exactly ONCE (not
+        compound toward 0) and must not create a second contradicts edge."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy import update as sa_update
+
+        unique_agent = f"g1-{uuid4().hex[:8]}"
+        heart.facts.agent_id = unique_agent
+        heart.facts._settings = heart.facts._settings.model_copy(
+            update={"supersession_key_resolution_enabled": True}
+        )
+
+        f1 = await heart.learn(FactInput(
+            content="The warehouse shift schedule starts at six in the morning.",
+            subject_key="warehouse", attribute_key="shift_schedule",
+        ))
+        f2 = await heart.learn(FactInput(
+            content="The warehouse shift schedule starts at seven in the morning.",
+            subject_key="warehouse", attribute_key="shift_schedule",
+        ))
+
+        fixed_ts = datetime.now(UTC)
+        async with heart.db.session() as s:
+            await s.execute(
+                sa_update(Fact).where(Fact.id.in_([f1.id, f2.id])).values(learned_at=fixed_ts)
+            )
+            await s.commit()
+
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.95}),
+        )
+
+        result1 = await heart.facts.resolve_key_conflict_pair(f1.id, f2.id, f1.content, f2.content)
+        assert result1 is False  # KEEP-BOTH: no supersession written
+
+        old_after_first = await _get_fact(heart, f1.id)
+        assert old_after_first.confidence == pytest.approx(0.8)  # 1.0 - 0.2, decremented once
+
+        # Repeat sweep re-processes the same still-active, unresolved pair.
+        result2 = await heart.facts.resolve_key_conflict_pair(f1.id, f2.id, f1.content, f2.content)
+        assert result2 is False  # still KEEP-BOTH
+
+        old = await _get_fact(heart, f1.id)
+        new = await _get_fact(heart, f2.id)
+        assert old.active is True and new.active is True
+        assert old.confidence == pytest.approx(0.8)  # unchanged — converged, not re-decremented
+        assert new.contradiction_of == old.id
+
+        async with heart.db.session() as s:
+            edge_r = await s.execute(
+                select(GraphEdge)
+                .where(GraphEdge.source_id == f2.id)
+                .where(GraphEdge.target_id == f1.id)
+                .where(GraphEdge.relation == "contradicts")
+            )
+            edges = edge_r.scalars().all()
+            assert len(edges) == 1  # single edge, not duplicated on repeat
+
+    async def test_flag_contradiction_pair_converges_on_cluster(self, heart, monkeypatch):
+        """Codex r1: the column-only guard (b.contradiction_of == a.id) forgets
+        pairs in a 3+ fact cluster. Seed A, B, C same-slot, all unordered (equal
+        learned_at). Flag (A, C) then (B, C) — the second call OVERWRITES
+        C.contradiction_of from A.id to B.id, so a naive column-only check on a
+        THIRD call re-processing (A, C) would no longer see the earlier flag
+        and would re-decrement A.confidence. The edge-based idempotence check
+        must catch this via the existing contradicts edge (either direction)."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy import update as sa_update
+
+        unique_agent = f"g1-{uuid4().hex[:8]}"
+        heart.facts.agent_id = unique_agent
+        heart.facts._settings = heart.facts._settings.model_copy(
+            update={"supersession_key_resolution_enabled": True}
+        )
+
+        a = await heart.learn(FactInput(
+            content="The team standup meeting time is nine in the morning.",
+            subject_key="team", attribute_key="standup_time",
+        ))
+        b = await heart.learn(FactInput(
+            content="The team standup meeting time is ten in the morning.",
+            subject_key="team", attribute_key="standup_time",
+        ))
+        c = await heart.learn(FactInput(
+            content="The team standup meeting time is eleven in the morning.",
+            subject_key="team", attribute_key="standup_time",
+        ))
+
+        fixed_ts = datetime.now(UTC)
+        async with heart.db.session() as s:
+            await s.execute(
+                sa_update(Fact).where(Fact.id.in_([a.id, b.id, c.id])).values(learned_at=fixed_ts)
+            )
+            await s.commit()
+
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.95}),
+        )
+
+        # (A, C): flags C.contradiction_of -> A, decrements A, writes edge C->A.
+        r1 = await heart.facts.resolve_key_conflict_pair(a.id, c.id, a.content, c.content)
+        assert r1 is False
+
+        # (B, C): C.contradiction_of currently points at A (not B), so the
+        # column fast path misses and this proceeds — OVERWRITING
+        # C.contradiction_of -> B, decrementing B, writing edge C->B.
+        r2 = await heart.facts.resolve_key_conflict_pair(b.id, c.id, b.content, c.content)
+        assert r2 is False
+
+        # (A, C) AGAIN: the column now points at B, not A — the column-only
+        # fast path can't catch this repeat. The edge-based check must.
+        r3 = await heart.facts.resolve_key_conflict_pair(a.id, c.id, a.content, c.content)
+        assert r3 is False
+
+        fa = await _get_fact(heart, a.id)
+        fb = await _get_fact(heart, b.id)
+        fc = await _get_fact(heart, c.id)
+        assert fa.confidence == pytest.approx(0.8)  # decremented exactly once, not compounded
+        assert fb.confidence == pytest.approx(0.8)  # decremented exactly once
+        assert fc.confidence == pytest.approx(1.0)  # C is never the "a" (older) side — untouched
+
+        async with heart.db.session() as s:
+            edge_r = await s.execute(
+                select(GraphEdge)
+                .where(GraphEdge.agent_id == unique_agent)
+                .where(GraphEdge.relation == "contradicts")
+            )
+            edges = edge_r.scalars().all()
+            assert len(edges) == 2  # C->A and C->B only; the third call created no new edge
+
+    async def test_flag_contradiction_pair_recreates_edge_post_rollback(self, heart, monkeypatch):
+        """Codex r3: the documented rollback (backfill_supersession.py header)
+        deletes contradicts edges but leaves contradiction_of as accepted
+        residue. A re-run's keep-both pass must recreate the missing edge —
+        not just hit the column fast path and return before the graph is
+        repaired — while still NOT re-decrementing confidence a second time."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy import delete as sa_delete
+        from sqlalchemy import update as sa_update
+
+        unique_agent = f"g1-{uuid4().hex[:8]}"
+        heart.facts.agent_id = unique_agent
+        heart.facts._settings = heart.facts._settings.model_copy(
+            update={"supersession_key_resolution_enabled": True}
+        )
+
+        f1 = await heart.learn(FactInput(
+            content="The office parking policy allows two spots per employee.",
+            subject_key="office", attribute_key="parking_policy",
+        ))
+        f2 = await heart.learn(FactInput(
+            content="The office parking policy allows three spots per employee.",
+            subject_key="office", attribute_key="parking_policy",
+        ))
+
+        fixed_ts = datetime.now(UTC)
+        async with heart.db.session() as s:
+            await s.execute(
+                sa_update(Fact).where(Fact.id.in_([f1.id, f2.id])).values(learned_at=fixed_ts)
+            )
+            await s.commit()
+
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.95}),
+        )
+
+        # First pass: flags the pair, decrements f1, writes the edge.
+        r1 = await heart.facts.resolve_key_conflict_pair(f1.id, f2.id, f1.content, f2.content)
+        assert r1 is False
+        f1_after_first = await _get_fact(heart, f1.id)
+        assert f1_after_first.confidence == pytest.approx(0.8)
+
+        # Simulate the documented rollback: delete the contradicts edge only.
+        # contradiction_of is accepted residue and is NOT reset (matches the
+        # backfill_supersession.py rollback contract).
+        async with heart.db.session() as s:
+            await s.execute(
+                sa_delete(GraphEdge)
+                .where(GraphEdge.agent_id == unique_agent)
+                .where(GraphEdge.relation == "contradicts")
+            )
+            await s.commit()
+
+        async with heart.db.session() as s:
+            edge_check = await s.execute(
+                select(GraphEdge)
+                .where(GraphEdge.agent_id == unique_agent)
+                .where(GraphEdge.relation == "contradicts")
+            )
+            assert edge_check.scalars().first() is None  # rollback confirmed: edge gone
+
+        # Second pass (post-rollback re-run): must recreate the edge without
+        # re-decrementing confidence.
+        r2 = await heart.facts.resolve_key_conflict_pair(f1.id, f2.id, f1.content, f2.content)
+        assert r2 is False
+
+        f1_after_second = await _get_fact(heart, f1.id)
+        assert f1_after_second.confidence == pytest.approx(0.8)  # NOT re-decremented to 0.6
+
+        async with heart.db.session() as s:
+            edge_r = await s.execute(
+                select(GraphEdge)
+                .where(GraphEdge.agent_id == unique_agent)
+                .where(GraphEdge.relation == "contradicts")
+            )
+            edges = edge_r.scalars().all()
+            assert len(edges) == 1  # edge recreated
+
+    async def test_flag_contradiction_pair_reversed_roles_no_duplicate_edge(self, heart, monkeypatch):
+        """Codex r12: a sweep revisit can present the SAME pair with a/b
+        roles REVERSED from the original flagging call (find_key_conflict_pairs
+        orders equal-learned_at pairs by UUID, which can flip which fact is
+        id1/id2 across runs). The bidirectional edge query already catches
+        this for the confidence-decrement guard (no second decrement) -- but
+        the old code only computed that query as a fallback INSIDE the
+        column-fast-path branch, then unconditionally wrote the edge in
+        whatever (b, a) direction THIS call uses. A reversed-roles revisit
+        therefore fell through to an unconditional write in the OPPOSITE
+        direction from the original edge, creating a second, duplicate
+        contradicts edge for one pair.
+
+        Codex r13: the column write had the same bug — a reversed-roles
+        revisit unconditionally set THIS call's b.contradiction_of = a.id,
+        which (with a/b swapped) pointed f1 back at f2 in addition to f2's
+        original pointer at f1, leaving both facts pointing at each other on
+        what should be an idempotent no-op."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy import and_, or_
+        from sqlalchemy import update as sa_update
+
+        unique_agent = f"g1-{uuid4().hex[:8]}"
+        heart.facts.agent_id = unique_agent
+        heart.facts._settings = heart.facts._settings.model_copy(
+            update={"supersession_key_resolution_enabled": True}
+        )
+
+        f1 = await heart.learn(FactInput(
+            content="The lobby reception desk closes at five in the evening.",
+            subject_key="lobby", attribute_key="reception_hours",
+        ))
+        f2 = await heart.learn(FactInput(
+            content="The lobby reception desk closes at six in the evening.",
+            subject_key="lobby", attribute_key="reception_hours",
+        ))
+
+        fixed_ts = datetime.now(UTC)
+        async with heart.db.session() as s:
+            await s.execute(
+                sa_update(Fact).where(Fact.id.in_([f1.id, f2.id])).values(learned_at=fixed_ts)
+            )
+            await s.commit()
+
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.95}),
+        )
+
+        # First pass: flags (f1, f2), decrements f1, writes edge f2->f1.
+        r1 = await heart.facts.resolve_key_conflict_pair(f1.id, f2.id, f1.content, f2.content)
+        assert r1 is False
+
+        # Sweep revisit with roles REVERSED (f2 now "older"/id1, f1 "newer"/id2)
+        # -- simulates find_key_conflict_pairs' UUID-ordering flipping which
+        # fact lands in which slot across runs for an equal-learned_at pair.
+        r2 = await heart.facts.resolve_key_conflict_pair(f2.id, f1.id, f2.content, f1.content)
+        assert r2 is False
+
+        f1_after = await _get_fact(heart, f1.id)
+        f2_after = await _get_fact(heart, f2.id)
+        assert f1_after.confidence == pytest.approx(0.8)  # decremented exactly once
+        assert f2_after.confidence == pytest.approx(1.0)  # never the "a" (older) role -- untouched
+
+        # Codex r13: the reversed revisit must be a true no-op on the column
+        # too -- only f2 (the original "b") points at f1; f1 must NOT also
+        # point back at f2 just because a later call flagged the pair with
+        # roles reversed.
+        assert f2_after.contradiction_of == f1.id
+        assert f1_after.contradiction_of is None
+
+        async with heart.db.session() as s:
+            edge_r = await s.execute(
+                select(GraphEdge)
+                .where(GraphEdge.agent_id == unique_agent)
+                .where(GraphEdge.relation == "contradicts")
+                .where(
+                    or_(
+                        and_(GraphEdge.source_id == f2.id, GraphEdge.target_id == f1.id),
+                        and_(GraphEdge.source_id == f1.id, GraphEdge.target_id == f2.id),
+                    )
+                )
+            )
+            edges = edge_r.scalars().all()
+            assert len(edges) == 1, (
+                "exactly one contradicts edge must exist between the pair regardless "
+                "of which direction a reversed-roles revisit flags it from"
+            )
+
+    async def test_flag_contradiction_pair_rollback_plus_reversed_revisit(self, heart, monkeypatch):
+        """Codex r14: the composite of r3 (post-rollback edge repair) + r13
+        (reversed-roles no-op) -- the edge is deleted (rollback) AND the
+        sweep revisit presents the pair in REVERSED order. The one-way
+        column_match (b.contradiction_of == a.id) only checks THIS call's
+        `b` side; the residue from the ORIGINAL flag sits on the other side
+        (a.contradiction_of == b.id in this call's roles). With the edge
+        gone and the column check missing the reversed residue,
+        already_flagged fell through False pre-fix -- re-decrementing the
+        (wrong) fact's confidence and writing a fresh column + edge in the
+        REVERSE direction from the original. Edge repair must recreate the
+        edge in its ORIGINAL recorded orientation, not this call's (b, a)."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy import and_, or_
+        from sqlalchemy import delete as sa_delete
+        from sqlalchemy import update as sa_update
+
+        unique_agent = f"g1-{uuid4().hex[:8]}"
+        heart.facts.agent_id = unique_agent
+        heart.facts._settings = heart.facts._settings.model_copy(
+            update={"supersession_key_resolution_enabled": True}
+        )
+
+        old = await heart.learn(FactInput(
+            content="The archive retention policy keeps records for five years.",
+            subject_key="archive", attribute_key="retention_policy",
+        ))
+        new = await heart.learn(FactInput(
+            content="The archive retention policy keeps records for seven years.",
+            subject_key="archive", attribute_key="retention_policy",
+        ))
+
+        fixed_ts = datetime.now(UTC)
+        async with heart.db.session() as s:
+            await s.execute(
+                sa_update(Fact).where(Fact.id.in_([old.id, new.id])).values(learned_at=fixed_ts)
+            )
+            await s.commit()
+
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.95}),
+        )
+
+        # First pass: flags (old, new) -- new points at old, edge new->old,
+        # old decremented to 0.8.
+        r1 = await heart.facts.resolve_key_conflict_pair(old.id, new.id, old.content, new.content)
+        assert r1 is False
+        old_after_first = await _get_fact(heart, old.id)
+        assert old_after_first.confidence == pytest.approx(0.8)
+
+        # Simulate the documented rollback: delete the contradicts edge only
+        # (contradiction_of residue is intentionally left, per r3).
+        async with heart.db.session() as s:
+            await s.execute(
+                sa_delete(GraphEdge)
+                .where(GraphEdge.agent_id == unique_agent)
+                .where(GraphEdge.relation == "contradicts")
+            )
+            await s.commit()
+
+        # Sweep revisit, roles REVERSED (new now id1/"older" role, old now
+        # id2/"newer" role) -- simulates find_key_conflict_pairs presenting
+        # this equal-learned_at pair in the opposite order post-rollback.
+        r2 = await heart.facts.resolve_key_conflict_pair(new.id, old.id, new.content, old.content)
+        assert r2 is False
+
+        old_after = await _get_fact(heart, old.id)
+        new_after = await _get_fact(heart, new.id)
+        assert old_after.confidence == pytest.approx(0.8)  # no second decrement
+        assert new_after.confidence == pytest.approx(1.0)  # never decremented -- not the "a" (older) role
+        assert old_after.contradiction_of is None  # no reverse column write
+        assert new_after.contradiction_of == old.id  # original pointer preserved
+
+        async with heart.db.session() as s:
+            edge_r = await s.execute(
+                select(GraphEdge)
+                .where(GraphEdge.agent_id == unique_agent)
+                .where(GraphEdge.relation == "contradicts")
+                .where(
+                    or_(
+                        and_(GraphEdge.source_id == new.id, GraphEdge.target_id == old.id),
+                        and_(GraphEdge.source_id == old.id, GraphEdge.target_id == new.id),
+                    )
+                )
+            )
+            edges = edge_r.scalars().all()
+            assert len(edges) == 1, "exactly one contradicts edge after repair"
+            assert edges[0].source_id == new.id and edges[0].target_id == old.id, (
+                "repaired edge must follow the ORIGINAL recorded direction (new->old), "
+                "not this call's (b, a) orientation"
+            )
+
+    async def test_flag_contradiction_pair_preserves_explicit_zero_confidence(self, heart, monkeypatch):
+        """Codex r8: `a.confidence or 1.0` treats a legitimate 0.0 as missing
+        and RAISES it to 0.8 on flagging -- `is None` is the correct
+        missing-value check. An older fact already at 0.0 confidence must
+        stay at 0.0 after a keep-both flag, not jump up to 0.8."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy import update as sa_update
+
+        unique_agent = f"g1-{uuid4().hex[:8]}"
+        heart.facts.agent_id = unique_agent
+        heart.facts._settings = heart.facts._settings.model_copy(
+            update={"supersession_key_resolution_enabled": True}
+        )
+
+        f1 = await heart.learn(FactInput(
+            content="The warehouse loading dock closes at six in the evening.",
+            subject_key="warehouse", attribute_key="dock_hours",
+        ))
+        f2 = await heart.learn(FactInput(
+            content="The warehouse loading dock closes at seven in the evening.",
+            subject_key="warehouse", attribute_key="dock_hours",
+        ))
+
+        fixed_ts = datetime.now(UTC)
+        async with heart.db.session() as s:
+            await s.execute(
+                sa_update(Fact).where(Fact.id.in_([f1.id, f2.id])).values(learned_at=fixed_ts)
+            )
+            # f1 already carries a legitimate 0.0 confidence (e.g. from a
+            # prior contradiction decrement floor) BEFORE this flag pass.
+            await s.execute(
+                sa_update(Fact).where(Fact.id == f1.id).values(confidence=0.0)
+            )
+            await s.commit()
+
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.95}),
+        )
+
+        result = await heart.facts.resolve_key_conflict_pair(f1.id, f2.id, f1.content, f2.content)
+        assert result is False  # KEEP-BOTH
+
+        f1_after = await _get_fact(heart, f1.id)
+        assert f1_after.confidence == pytest.approx(0.0)  # NOT raised to 0.8
+
+    def test_prompt_and_schema_debias_pins(self):
+        from nous.heart.facts import _SUPERSESSION_CLASSIFIER_PROMPT_TEMPLATE, _SUPERSESSION_CLASSIFIER_SCHEMA
+
+        p = _SUPERSESSION_CLASSIFIER_PROMPT_TEMPLATE
+        assert "factually correct" not in p
+        assert "Capital of France" not in p
+        assert "settings.yaml" in p and "config.toml" in p  # replacement example
+        assert "correct" not in _SUPERSESSION_CLASSIFIER_SCHEMA["properties"]["current_fact"]["description"]
+
+    async def test_legacy_subject_path_contradiction_resolves_by_order(self, heart, session, monkeypatch):
+        """Codex r10: the legacy _supersede_by_subject path (R2 flag OFF,
+        the prod default) is the ONLY write-time resolver for unkeyed
+        facts — it must not throw away ordering data it actually has. When
+        the two facts carry DIFFERING learned_at, CONTRADICTION now
+        resolves by statement order (later wins), via the SAME uniform
+        apply_supersession primitive the keyed paths use — not always
+        KEEP-BOTH+flag regardless of available ordering data. The
+        classifier's current_fact="old" verdict is advisory only and must
+        be ignored (same contract as the keyed paths)."""
+        from datetime import UTC, datetime, timedelta
+
+        from sqlalchemy import update as sa_update
+
+        monkeypatch.setattr(heart.facts, "_llm", MagicMock())  # truthy sentinel; classify is mocked below
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.9}),
+        )
+        anchor = _unit_vec(0)
+        candidate = _embedding_at_similarity(0.88)  # inside the 0.80-0.95 F027 band
+
+        old_r = await heart.learn(FactInput(
+            content="The office thermostat is set to seventy two degrees fahrenheit.",
+            subject="office thermostat",
+        ), session=session, precomputed_embedding=anchor)
+
+        # Backdate old_r BEFORE learning new_r, within the same ambient
+        # transaction, so _supersede_by_subject (which fires live during
+        # new_r's learn() call, below) sees genuinely differing learned_at —
+        # same-session learns otherwise share a transaction-constant "now()".
+        await session.execute(
+            sa_update(Fact).where(Fact.id == old_r.id).values(
+                learned_at=datetime.now(UTC) - timedelta(hours=1)
+            )
+        )
+        await session.flush()
+
+        new_r = await heart.learn(FactInput(
+            content="The office thermostat is set to sixty eight degrees fahrenheit.",
+            subject="office thermostat",
+        ), session=session, precomputed_embedding=candidate)
+
+        await session.flush()
+        old = await _get_fact(heart, old_r.id, session)
+        new = await _get_fact(heart, new_r.id, session)
+        assert new.active and new.superseded_by is None  # later-stated WINS
+        assert not old.active and old.superseded_by == new_r.id
+
+        edge_r = await session.execute(
+            select(GraphEdge)
+            .where(GraphEdge.source_id == new_r.id)
+            .where(GraphEdge.target_id == old_r.id)
+        )
+        relations = {e.relation for e in edge_r.scalars().all()}
+        assert "supersedes" in relations
+
+    async def test_legacy_subject_path_contradiction_keeps_both_when_unordered(self, heart, session, monkeypatch):
+        """Codex r10 sibling: when neither fact carries an ordering signal
+        (same-session learns share a transaction-constant learned_at, no
+        ordinals), _pick_contradiction_winner returns None and the legacy
+        path falls back to KEEP-BOTH + flag — not a silent supersede with a
+        wrong-type 'supersedes' edge (the pre-Gate-1 fall-through)."""
+        monkeypatch.setattr(heart.facts, "_llm", MagicMock())  # truthy sentinel; classify is mocked below
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.9}),
+        )
+        anchor = _unit_vec(0)
+        candidate = _embedding_at_similarity(0.88)  # inside the 0.80-0.95 F027 band
+
+        old_r = await heart.learn(FactInput(
+            content="The office thermostat is set to seventy two degrees fahrenheit.",
+            subject="office thermostat",
+        ), session=session, precomputed_embedding=anchor)
+        new_r = await heart.learn(FactInput(
+            content="The office thermostat is set to sixty eight degrees fahrenheit.",
+            subject="office thermostat",
+        ), session=session, precomputed_embedding=candidate)
+
+        await session.flush()
+        old = await _get_fact(heart, old_r.id, session)
+        new = await _get_fact(heart, new_r.id, session)
+        assert old.active and new.active
+        assert new.contradiction_of == old.id
+
+        edge_r = await session.execute(
+            select(GraphEdge)
+            .where(GraphEdge.source_id == new_r.id)
+            .where(GraphEdge.target_id == old_r.id)
+        )
+        relations = {e.relation for e in edge_r.scalars().all()}
+        assert "supersedes" not in relations
+        assert "contradicts" in relations
+
+    async def test_pick_contradiction_winner_equal_ordinals_keeps_both(self, heart, session, monkeypatch):
+        """Codex r15: EQUAL same-episode ordinals (e.g. a re-extraction or
+        backfill run assigning duplicate positional ordinals) carry no order
+        signal. The prior `>=` comparison crowned new_fact on a tie, making
+        resolution a coin-flip on call/UUID order -- exactly the corruption
+        class Gate-1 D1 removes. Equal ordinals + equal learned_at (the
+        natural same-session-transaction value) must fall through all the
+        way to None (KEEP-BOTH + flag), not silently supersede."""
+        monkeypatch.setattr(heart.facts, "_llm", MagicMock())  # truthy sentinel; classify is mocked below
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.9}),
+        )
+        ep_id = await _insert_episode(session)
+        anchor = _unit_vec(0)
+        candidate = _embedding_at_similarity(0.88)  # inside the 0.80-0.95 F027 band
+
+        old_r = await heart.learn(FactInput(
+            content="The office thermostat is set to seventy two degrees fahrenheit.",
+            subject="office thermostat",
+            source_episode_id=ep_id, source_ordinal=5,
+        ), session=session, precomputed_embedding=anchor)
+        new_r = await heart.learn(FactInput(
+            content="The office thermostat is set to sixty eight degrees fahrenheit.",
+            subject="office thermostat",
+            source_episode_id=ep_id, source_ordinal=5,  # SAME ordinal as old -- no order signal
+        ), session=session, precomputed_embedding=candidate)
+
+        await session.flush()
+        old = await _get_fact(heart, old_r.id, session)
+        new = await _get_fact(heart, new_r.id, session)
+        assert old.active and new.active  # KEEP-BOTH -- equal ordinal is NOT an order signal
+        assert new.contradiction_of == old.id
+
+        edge_r = await session.execute(
+            select(GraphEdge)
+            .where(GraphEdge.source_id == new_r.id)
+            .where(GraphEdge.target_id == old_r.id)
+        )
+        relations = {e.relation for e in edge_r.scalars().all()}
+        assert "supersedes" not in relations
+        assert "contradicts" in relations
+
+    async def test_pick_contradiction_winner_equal_ordinals_falls_through_to_learned_at(self, heart, session, monkeypatch):
+        """Codex r15 sibling: equal same-episode ordinals fall through to the
+        learned_at tiebreak (not straight to None) when learned_at actually
+        differs -- the later-stated fact still wins by genuine testimony
+        order, just via the next signal in the precedence chain rather than
+        position."""
+        from datetime import UTC, datetime, timedelta
+
+        from sqlalchemy import update as sa_update
+
+        monkeypatch.setattr(heart.facts, "_llm", MagicMock())  # truthy sentinel; classify is mocked below
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.9}),
+        )
+        ep_id = await _insert_episode(session)
+        anchor = _unit_vec(0)
+        candidate = _embedding_at_similarity(0.88)  # inside the 0.80-0.95 F027 band
+
+        old_r = await heart.learn(FactInput(
+            content="The office thermostat is set to seventy two degrees fahrenheit.",
+            subject="office thermostat",
+            source_episode_id=ep_id, source_ordinal=5,
+        ), session=session, precomputed_embedding=anchor)
+
+        # Backdate old_r so learned_at genuinely differs once the ordinal
+        # tie falls through (same-session learns otherwise share a
+        # transaction-constant "now()").
+        await session.execute(
+            sa_update(Fact).where(Fact.id == old_r.id).values(
+                learned_at=datetime.now(UTC) - timedelta(hours=1)
+            )
+        )
+        await session.flush()
+
+        new_r = await heart.learn(FactInput(
+            content="The office thermostat is set to sixty eight degrees fahrenheit.",
+            subject="office thermostat",
+            source_episode_id=ep_id, source_ordinal=5,  # SAME ordinal as old -- falls through
+        ), session=session, precomputed_embedding=candidate)
+
+        await session.flush()
+        old = await _get_fact(heart, old_r.id, session)
+        new = await _get_fact(heart, new_r.id, session)
+        assert new.active and new.superseded_by is None  # later-learned WINS
+        assert not old.active and old.superseded_by == new_r.id
+
+        edge_r = await session.execute(
+            select(GraphEdge)
+            .where(GraphEdge.source_id == new_r.id)
+            .where(GraphEdge.target_id == old_r.id)
+        )
+        relations = {e.relation for e in edge_r.scalars().all()}
+        assert "supersedes" in relations
+
+    async def test_keep_both_pair_excluded_from_post_insert_contradiction_scan(self, heart, session, monkeypatch):
+        """Codex r11 FIX 1: a pair the legacy subject path just flagged
+        KEEP-BOTH must not be visible to the post-insert _find_contradiction
+        scan that runs immediately afterward in the same learn() call. Pre-
+        fix, old.id was absent from safe_excludes, so _find_contradiction
+        re-discovered the SAME pair (same 0.85-0.95 band) and re-ran its own
+        inline CONTRADICTION handling — decrementing old.confidence a SECOND
+        time (1.0 -> 0.8 -> 0.6) even though the pair was already flagged
+        once by _supersede_by_subject."""
+        monkeypatch.setattr(heart.facts, "_llm", MagicMock())  # truthy sentinel; classify is mocked below
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.9}),
+        )
+        anchor = _unit_vec(0)
+        candidate = _embedding_at_similarity(0.88)  # inside the 0.80-0.95 F027 band
+
+        old_r = await heart.learn(FactInput(
+            content="The office thermostat is set to seventy two degrees fahrenheit.",
+            subject="office thermostat",
+        ), session=session, precomputed_embedding=anchor)
+        new_r = await heart.learn(FactInput(
+            content="The office thermostat is set to sixty eight degrees fahrenheit.",
+            subject="office thermostat",
+        ), session=session, precomputed_embedding=candidate)
+
+        await session.flush()
+        old = await _get_fact(heart, old_r.id, session)
+        new = await _get_fact(heart, new_r.id, session)
+        assert old.active and new.active  # unordered -> KEEP-BOTH
+        assert new.contradiction_of == old.id
+        assert old.confidence == pytest.approx(0.8), (
+            "old fact must be decremented exactly ONCE by the legacy KEEP-BOTH "
+            "flag — a second decrement means the post-insert scan re-matched "
+            "the same already-flagged pair"
+        )
+
+        edge_r = await session.execute(
+            select(GraphEdge)
+            .where(GraphEdge.source_id == new_r.id)
+            .where(GraphEdge.target_id == old_r.id)
+            .where(GraphEdge.relation == "contradicts")
+        )
+        assert len(edge_r.scalars().all()) == 1
+
+    async def test_legacy_path_loss_skips_contradiction_scan(self, heart, session, monkeypatch):
+        """Codex r11 FIX 2: mirrors test_resolve_key_conflicts_loss_skips_
+        contradiction_scan for the LEGACY _supersede_by_subject path (R2
+        off, the prod default). When the NEW fact loses statement-order
+        resolution (lower source_ordinal, same episode as the existing
+        fact), _find_contradiction must not fire against the now-inactive
+        loser."""
+        monkeypatch.setattr(heart.facts, "_llm", MagicMock())  # truthy sentinel; classify is mocked below
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.9}),
+        )
+        ep_id = await _insert_episode(session)
+        anchor = _unit_vec(0)
+        candidate = _embedding_at_similarity(0.88)  # inside the 0.80-0.95 F027 band
+
+        old_r = await heart.learn(FactInput(
+            content="The office thermostat is set to seventy two degrees fahrenheit.",
+            subject="office thermostat",
+            source_episode_id=ep_id, source_ordinal=200,
+        ), session=session, precomputed_embedding=anchor)
+
+        # current_fact is ignored for CONTRADICTION -- old wins via the
+        # LOWER ordinal on the new fact below, not this verdict.
+        find_contradiction_sentinel = AsyncMock(return_value=None)
+        monkeypatch.setattr(heart.facts, "_find_contradiction", find_contradiction_sentinel)
+
+        new_r = await heart.learn(FactInput(
+            content="The office thermostat is set to sixty eight degrees fahrenheit.",
+            subject="office thermostat",
+            source_episode_id=ep_id, source_ordinal=100,  # LOWER than old's 200 -> new fact loses
+        ), session=session, precomputed_embedding=candidate)
+
+        find_contradiction_sentinel.assert_not_called()
+
+        await session.flush()
+        new_row = await session.get(Fact, new_r.id)
+        assert new_row.active is False or new_row.superseded_by is not None, (
+            "new fact must be inactive after losing legacy order resolution"
+        )
+
+
+# Gate-1 D2 ───────────────────────────────────────────────────────────────────
+# Same-slot value variants must route to conflict resolution, never
+# dedup-confirm (F085 Gate-1 fixes plan, Task 3).
+
+
+@pytest.mark.postgres_only
+class TestGate1SameSlotDedupRouting:
+    async def test_same_slot_value_variant_not_swallowed(self, heart, session, monkeypatch):
+        """'author of X is A' then '...is B' with near-identical embeddings
+        (similarity >= 0.95, the blind-confirm region): the update MUST be
+        stored and adjudicated (later wins), never confirmed as a duplicate."""
+        monkeypatch.setattr(  # distinct values -> DISTINCT
+            "nous.heart.facts.FactManager.is_distinct_fact",
+            AsyncMock(return_value=True),
+        )
+        monkeypatch.setattr(  # conflict classifier: UPDATE
+            "nous.heart.facts.FactManager._classify_fact_pair",
+            AsyncMock(return_value={"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}),
+        )
+        s = heart.facts._settings.model_copy(update={"supersession_key_resolution_enabled": True})
+        monkeypatch.setattr(heart.facts, "_settings", s)
+        ep_id = await _insert_episode(session)
+        vec = _unit_vec(20)  # SAME embedding both times -> similarity 1.0
+        r1 = await heart.learn(FactInput(
+            content="The author of Work X is Alice Prior.",
+            subject_key="work x", attribute_key="author",
+            source_episode_id=ep_id, source_ordinal=1,
+        ), session=session, precomputed_embedding=vec)
+        r2 = await heart.learn(FactInput(
+            content="The author of Work X is Bob Later.",
+            subject_key="work x", attribute_key="author",
+            source_episode_id=ep_id, source_ordinal=2,
+        ), session=session, precomputed_embedding=vec)
+        assert r2.id != r1.id                       # NOT dedup-confirmed
+        old = await _get_fact(heart, r1.id, session)
+        new = await _get_fact(heart, r2.id, session)
+        assert new.active and not old.active and old.superseded_by == new.id
+
+    async def test_same_slot_same_value_still_dedups(self, heart, session):
+        """Identical folded content on a same-slot pair confirms as a
+        duplicate via the fold-compare prefilter alone — no LLM call."""
+        vec = _unit_vec(21)
+        r1 = await heart.learn(FactInput(
+            content="The server region is set to us-east-1.",
+            subject_key="server", attribute_key="region",
+        ), session=session, precomputed_embedding=vec)
+        r2 = await heart.learn(FactInput(
+            content="The server region is set to us-east-1.",
+            subject_key="server", attribute_key="region",
+        ), session=session, precomputed_embedding=vec)
+        assert r2.id == r1.id
+
+    async def test_unkeyed_pair_keeps_todays_dedup(self, heart, session):
+        """Neither side carries subject_key/attribute_key — the guard's
+        keyed gate is unsatisfied and today's confirm-on-match behavior
+        is unchanged."""
+        vec = _unit_vec(22)
+        r1 = await heart.learn(FactInput(
+            content="The office plant needs watering twice a week.",
+        ), session=session, precomputed_embedding=vec)
+        r2 = await heart.learn(FactInput(
+            content="The office plant needs watering three times a week.",
+        ), session=session, precomputed_embedding=vec)
+        assert r2.id == r1.id
+
+    async def test_guard_fails_open_to_store_on_classifier_outage(self, heart, session, monkeypatch):
+        """is_distinct_fact -> None (LLM down): a differing-content
+        same-slot pair MUST STORE (keep-both), never confirm as a dup."""
+        monkeypatch.setattr(
+            "nous.heart.facts.FactManager.is_distinct_fact",
+            AsyncMock(return_value=None),
+        )
+        vec = _unit_vec(23)
+        r1 = await heart.learn(FactInput(
+            content="The meeting room capacity is twelve people.",
+            subject_key="meeting room", attribute_key="capacity",
+        ), session=session, precomputed_embedding=vec)
+        r2 = await heart.learn(FactInput(
+            content="The meeting room capacity is twenty people.",
+            subject_key="meeting room", attribute_key="capacity",
+        ), session=session, precomputed_embedding=vec)
+        assert r2.id != r1.id
+        old = await _get_fact(heart, r1.id, session)
+        new = await _get_fact(heart, r2.id, session)
+        assert old.active and new.active
+
+    async def test_kill_switch_restores_legacy_swallow(self, heart, session, monkeypatch):
+        """Kill switch OFF restores the legacy blind-confirm at
+        similarity >= 0.95 even for a same-slot value-variant pair."""
+        s = heart.facts._settings.model_copy(update={"same_slot_conflict_routing_enabled": False})
+        monkeypatch.setattr(heart.facts, "_settings", s)
+        vec = _unit_vec(24)
+        r1 = await heart.learn(FactInput(
+            content="The API rate limit is set to one hundred requests per minute.",
+            subject_key="api", attribute_key="rate_limit",
+        ), session=session, precomputed_embedding=vec)
+        r2 = await heart.learn(FactInput(
+            content="The API rate limit is set to five hundred requests per minute.",
+            subject_key="api", attribute_key="rate_limit",
+        ), session=session, precomputed_embedding=vec)
+        assert r2.id == r1.id
+
+    async def test_routed_dupe_excluded_from_admission_novelty_only(self, heart, session, monkeypatch):
+        """Codex r2: a same-slot value-variant routed past dedup (Gate-1 D2)
+        is definitionally near-identical to the dupe it was routed against
+        (that's why it hit the >= fact_native_cosine_threshold dedup check).
+        Leaving it visible to _find_max_similarity's novelty computation
+        would collapse the candidate's novelty term to ~0 and let admission
+        REJECT the very pair R2 must adjudicate -- reintroducing a drop path
+        this fix was meant to close. Verify the seam directly (cheaper and
+        more reliable than tuning real admission scores to straddle the
+        composite threshold, per review guidance): capture the exclude_ids
+        _find_max_similarity actually receives and confirm it includes the
+        routed dupe's id, while R2 still successfully adjudicates the pair
+        (proving exclude_ids feeding _resolve_key_conflicts is untouched --
+        Amendment 1 preserved)."""
+        from nous.heart.admission import AdmissionConfig, AdmissionController
+        from nous.heart.schemas import FactRejected
+
+        monkeypatch.setattr(
+            "nous.heart.facts.FactManager.is_distinct_fact",
+            AsyncMock(return_value=True))
+        monkeypatch.setattr(
+            "nous.heart.facts.FactManager._classify_fact_pair",
+            AsyncMock(return_value={"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}))
+        s = heart.facts._settings.model_copy(update={"supersession_key_resolution_enabled": True})
+        monkeypatch.setattr(heart.facts, "_settings", s)
+
+        # Real (heuristic-only, no LLM) admission controller so the novelty
+        # call actually fires -- mirrors heart_with_admission's conftest recipe.
+        heart.facts._admission_controller = AdmissionController(
+            config=AdmissionConfig(shadow_mode=False, utility_llm_enabled=False)
+        )
+
+        captured_excludes: list[list] = []
+        original_find_max = heart.facts._find_max_similarity
+
+        async def _capturing_find_max_similarity(embedding, exclude_ids, session):
+            captured_excludes.append(list(exclude_ids))
+            return await original_find_max(embedding, exclude_ids, session)
+
+        monkeypatch.setattr(heart.facts, "_find_max_similarity", _capturing_find_max_similarity)
+
+        ep_id = await _insert_episode(session)
+        vec = _unit_vec(25)
+        r1 = await heart.learn(FactInput(
+            content="The author of Work Y is Carla First.",
+            subject_key="work y", attribute_key="author",
+            source_episode_id=ep_id, source_ordinal=1,
+        ), session=session, precomputed_embedding=vec)
+        r2 = await heart.learn(FactInput(
+            content="The author of Work Y is Derek Later.",
+            subject_key="work y", attribute_key="author",
+            source_episode_id=ep_id, source_ordinal=2,
+        ), session=session, precomputed_embedding=vec)
+
+        # The admission novelty call for the SECOND learn (the one that hit
+        # dedup and got routed past it) must have received the routed
+        # dupe's id in its excludes -- otherwise max_sim ~= 1.0 and novelty
+        # collapses to ~0.
+        assert len(captured_excludes) == 2
+        assert r1.id in captured_excludes[-1]
+
+        # The candidate was NOT admission-rejected, and R2 still adjudicates
+        # the pair (later ordinal wins) -- proves exclude_ids feeding
+        # _resolve_key_conflicts was not also polluted by this change.
+        assert not isinstance(r2, FactRejected)
+        old = await _get_fact(heart, r1.id, session)
+        new = await _get_fact(heart, r2.id, session)
+        assert new.active and not old.active and old.superseded_by == new.id
+
+    async def test_routed_dupe_cluster_excludes_all_active_same_slot_facts(self, heart, session, monkeypatch):
+        """Codex r4/r5: the cluster extension of r2. When MORE than one
+        active same-slot fact exists, admission's novelty exclusion must
+        cover the WHOLE conflict-slot cluster, not just the single routed
+        dupe -- other non-routed same-slot variants (ones _find_duplicate's
+        cosine threshold never flagged, because their embeddings differ) can
+        still be the nearest neighbor _find_max_similarity finds, collapsing
+        novelty to ~0 and getting the correction admission-rejected before R2
+        ever adjudicates the cluster.
+
+        Codex r5: the exclusion must NOT be capped by
+        supersession_key_candidates_cap -- that cap bounds R2's ADJUDICATION
+        reach (which pairs get resolved), but admission runs BEFORE storage;
+        an older cluster member outside the cap would still zero novelty and
+        get the candidate rejected. Set the cap to 2 and seed cap+2 (4)
+        active same-slot facts to prove the admission exclusion is uncapped."""
+        from nous.heart.admission import AdmissionConfig, AdmissionController
+
+        monkeypatch.setattr(
+            "nous.heart.facts.FactManager.is_distinct_fact",
+            AsyncMock(return_value=True))
+        monkeypatch.setattr(
+            "nous.heart.facts.FactManager._classify_fact_pair",
+            AsyncMock(return_value={"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}))
+        s = heart.facts._settings.model_copy(update={"supersession_key_candidates_cap": 2})
+        monkeypatch.setattr(heart.facts, "_settings", s)
+
+        heart.facts._admission_controller = AdmissionController(
+            config=AdmissionConfig(shadow_mode=False, utility_llm_enabled=False)
+        )
+
+        captured_excludes: list[list] = []
+        original_find_max = heart.facts._find_max_similarity
+
+        async def _capturing_find_max_similarity(embedding, exclude_ids, session):
+            captured_excludes.append(list(exclude_ids))
+            return await original_find_max(embedding, exclude_ids, session)
+
+        monkeypatch.setattr(heart.facts, "_find_max_similarity", _capturing_find_max_similarity)
+
+        ep_id = await _insert_episode(session)
+        vec_first = _unit_vec(26)
+        cluster_names = ["Alice Prior", "Bob Middle", "Dana Second", "Erin Third"]
+        cluster_facts = []
+        for i, name in enumerate(cluster_names):
+            fact = await heart.learn(FactInput(
+                content=f"The project lead is {name}.",
+                subject_key="project", attribute_key="lead",
+                source_episode_id=ep_id, source_ordinal=i + 1,
+            ), session=session, precomputed_embedding=(vec_first if i == 0 else _unit_vec(27 + i)))
+            cluster_facts.append(fact)
+
+        # C shares the FIRST cluster member's embedding exactly -> only that
+        # one is routed by _find_duplicate. cap=2 means R2 would only
+        # adjudicate 2 of the 4 cluster members, but admission must exclude
+        # ALL 4 -- it protects storage, not adjudication.
+        await heart.learn(FactInput(
+            content="The project lead is Carol Later.",
+            subject_key="project", attribute_key="lead",
+            source_episode_id=ep_id, source_ordinal=5,
+        ), session=session, precomputed_embedding=vec_first)
+
+        for fact in cluster_facts:
+            assert fact.id in captured_excludes[-1], (
+                f"cluster member {fact.id} missing from admission excludes "
+                f"(cap={s.supersession_key_candidates_cap} must not limit this)"
+            )
+
+    async def test_same_slot_routing_honors_check_contradictions_false(self, heart, session, monkeypatch):
+        """Codex r6: when check_contradictions=False (bulk-import/sentinel
+        callers), _resolve_key_conflicts, the legacy _supersede_by_subject
+        path, AND _find_contradiction are ALL gated on that same flag. If the
+        D2 guard still routed a same-slot value-variant past confirm in this
+        mode, the routed pair would be inserted with NO resolver ever
+        adjudicating it -- unadjudicated near-dupes accumulating silently.
+        The guard must instead take the legacy confirm path exactly as
+        pre-D2-fix, and must not spend the is_distinct_fact budget/LLM call
+        doing so."""
+        is_distinct_mock = AsyncMock(return_value=True)
+        monkeypatch.setattr(
+            "nous.heart.facts.FactManager.is_distinct_fact",
+            is_distinct_mock)
+
+        vec = _unit_vec(28)
+        r1 = await heart.facts.learn(FactInput(
+            content="The office thermostat is set to seventy degrees.",
+            subject_key="office", attribute_key="thermostat",
+        ), session=session, precomputed_embedding=vec, check_contradictions=False)
+        r2 = await heart.facts.learn(FactInput(
+            content="The office thermostat is set to sixty five degrees.",
+            subject_key="office", attribute_key="thermostat",
+        ), session=session, precomputed_embedding=vec, check_contradictions=False)
+
+        assert r2.id == r1.id  # legacy confirm, not routed past dedup
+        is_distinct_mock.assert_not_awaited()
+
+    async def test_find_duplicate_prefers_same_slot_over_closer_cross_slot(self, heart, session, monkeypatch):
+        """Codex r7: _find_duplicate returns exactly ONE candidate, and the
+        D2 guard can only route what that selector surfaces. Seed A in slot
+        (book one, author) at cosine 0.97 to the incoming candidate C, and B
+        in a DIFFERENT slot (book two, author) at cosine 0.99 to C (closer,
+        but unrelated). A and B sit on OPPOSITE sides of C along the same
+        orthogonal axis, so their MUTUAL similarity (~0.926) stays below the
+        0.95 dedup threshold -- seeding them independently must not blind-
+        merge them into each other (that would confound the test before C is
+        even introduced). Without a same-slot preference, _find_duplicate
+        returns the closer B and the guard can't fire (subject_key
+        mismatch), so C -- a genuine value-variant of A -- would blind-
+        confirm into the unrelated B. Post-fix, A is preferred and C is
+        routed + adjudicated against it.
+
+        Codex r10 (admission seam variant): B is a row _find_duplicate
+        itself examined and judged above the dedup threshold -- exactly as
+        close to C as the routed dupe A -- but r7's slot narrowing skips it.
+        Round-4's same-slot admission query can't see B either (different
+        slot). B must still land in the admission novelty exclusion via
+        probed_ids, or it could zero C's novelty term and get it
+        admission-rejected before R2 ever adjudicates it."""
+        import math
+
+        from nous.heart.admission import AdmissionConfig, AdmissionController
+
+        heart.facts._admission_controller = AdmissionController(
+            config=AdmissionConfig(shadow_mode=False, utility_llm_enabled=False)
+        )
+        captured_excludes: list[list] = []
+        original_find_max = heart.facts._find_max_similarity
+
+        async def _capturing_find_max_similarity(embedding, exclude_ids, session):
+            captured_excludes.append(list(exclude_ids))
+            return await original_find_max(embedding, exclude_ids, session)
+
+        monkeypatch.setattr(heart.facts, "_find_max_similarity", _capturing_find_max_similarity)
+
+        ep_id = await _insert_episode(session)
+        vec_c = _unit_vec(0)
+        vec_a = [0.0] * 1536
+        vec_a[0] = 0.97
+        vec_a[1] = math.sqrt(1.0 - 0.97 ** 2)
+        vec_b = [0.0] * 1536
+        vec_b[0] = 0.99
+        vec_b[1] = -math.sqrt(1.0 - 0.99 ** 2)  # opposite sign -> low sim(A, B)
+
+        # source_text=<own content> keeps the ROUGE-L confidence dimension
+        # near 1.0 now that a real AdmissionController is wired (the round-7
+        # version of this test predates admission scoring and had no
+        # controller attached) -- without it, _get_source_text falls back to
+        # _insert_episode's generic, content-unrelated summary and ROUGE-L
+        # collapses confidence to 0.0, dropping the composite below the
+        # 0.55 threshold and rejecting the fact outright.
+        a_content = "The author of Book One is Alice Prior."
+        b_content = "The author of Book Two is Bob Middle."
+        c_content = "The author of Book One is Carol Later."
+        a = await heart.learn(FactInput(
+            content=a_content, source_text=a_content,
+            subject_key="book one", attribute_key="author",
+            source_episode_id=ep_id, source_ordinal=1,
+        ), session=session, precomputed_embedding=vec_a)
+        b = await heart.learn(FactInput(
+            content=b_content, source_text=b_content,
+            subject_key="book two", attribute_key="author",  # DIFFERENT slot
+            source_episode_id=ep_id, source_ordinal=2,
+        ), session=session, precomputed_embedding=vec_b)
+        assert a.id != b.id  # sanity: seeding did not blind-merge A and B
+
+        # Sanity / unchanged-legacy-path assertion: with no prefer_slot
+        # (flag off / not set), _find_duplicate still returns the CLOSER
+        # cross-slot fact (B, sim 0.99) over the same-slot fact (A, sim 0.97).
+        legacy = await heart.facts._find_duplicate(vec_c, [], session)
+        assert legacy is not None
+        assert legacy[0].id == b.id
+
+        monkeypatch.setattr(
+            "nous.heart.facts.FactManager.is_distinct_fact",
+            AsyncMock(return_value=True))
+        monkeypatch.setattr(
+            "nous.heart.facts.FactManager._classify_fact_pair",
+            AsyncMock(return_value={"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}))
+        s = heart.facts._settings.model_copy(update={"supersession_key_resolution_enabled": True})
+        monkeypatch.setattr(heart.facts, "_settings", s)
+
+        c = await heart.learn(FactInput(
+            content=c_content, source_text=c_content,
+            subject_key="book one", attribute_key="author",  # SAME slot as A
+            source_episode_id=ep_id, source_ordinal=3,
+        ), session=session, precomputed_embedding=vec_c)
+
+        # Codex r10: check the admission-exclusion MECHANISM first,
+        # independent of C's eventual admit/reject outcome -- pre-fix, B (an
+        # above-threshold row slot narrowing skipped) is missing from the
+        # excludes, which can (and here does) get C admission-REJECTED
+        # outright; asserting on c.id first would mask this exact-mechanism
+        # check behind an AttributeError on FactRejected.
+        assert b.id in captured_excludes[-1]
+
+        # Post-fix: C is routed + adjudicated against A (same slot, later
+        # ordinal wins) -- NOT blind-confirmed into B.
+        assert c.id != a.id and c.id != b.id
+        old = await _get_fact(heart, a.id, session)
+        new = await _get_fact(heart, c.id, session)
+        assert new.active and not old.active and old.superseded_by == new.id
+        # B is untouched -- it was never in C's conflict slot.
+        unrelated = await _get_fact(heart, b.id, session)
+        assert unrelated.active
+
+    async def test_date_match_outranks_same_slot_narrowing_in_duplicate_selection(self, heart, session):
+        """Codex r9: F075's date-match preference must outrank r7's
+        same-slot narrowing. Migration shape: a legacy, UNKEYED fact L
+        already represents the March-10 event; same-slot fact S represents
+        a DIFFERENT (March-12) event and is CLOSER in cosine distance; an
+        incoming keyed candidate C is a March-10 duplicate whose embedding
+        clears the dedup threshold against both. Slot narrowing must NOT
+        pick S -- that would trip the F075 distinct-event bypass and INSERT
+        a second row for the same March-10 event instead of confirming
+        against L, which already claims that event regardless of slot."""
+        import math
+        from datetime import date
+
+        vec_c = _unit_vec(0)
+        vec_l = [0.0] * 1536
+        vec_l[0] = 0.97
+        vec_l[1] = math.sqrt(1.0 - 0.97 ** 2)
+        vec_s = [0.0] * 1536
+        vec_s[0] = 0.99
+        vec_s[1] = -math.sqrt(1.0 - 0.99 ** 2)  # opposite sign -> low mutual sim(L, S)
+
+        l = await heart.learn(FactInput(
+            content="The office received a security audit on March tenth.",
+            event_date=date(2026, 3, 10),
+        ), session=session, precomputed_embedding=vec_l)
+        s = await heart.learn(FactInput(
+            content="The office received a security audit on March twelfth.",
+            subject_key="office", attribute_key="security_audit",
+            event_date=date(2026, 3, 12),
+        ), session=session, precomputed_embedding=vec_s)
+        assert l.id != s.id  # sanity: seeding did not blind-merge L and S
+
+        c = await heart.learn(FactInput(
+            content="The office received a security audit on March tenth.",
+            subject_key="office", attribute_key="security_audit",
+            event_date=date(2026, 3, 10),
+        ), session=session, precomputed_embedding=vec_c)
+
+        # Post-fix: the date match on L wins outright -- C confirms into L,
+        # no new row for the same March-10 event.
+        assert c.id == l.id
+
+    async def test_null_date_match_outranks_same_slot_narrowing_when_candidate_undated(self, heart, session):
+        """Codex r11 FIX 3: r9's date-match preference only fired when
+        candidate_event_date is not None, so an UNDATED candidate with a
+        genuinely undated (NULL==NULL) duplicate elsewhere in the above-
+        threshold set could still be masked by a DATED same-slot variant.
+        Migration shape: a legacy, unkeyed fact L is the true (undated)
+        duplicate; same-slot fact S claims a specific (unrelated) date and
+        is CLOSER in cosine distance. Slot narrowing must not pick S over
+        L just because the candidate itself carries no date to disqualify
+        S outright — S's own specific date, with no counterpart on the
+        undated candidate, is not a confirmable match."""
+        import math
+        from datetime import date
+
+        vec_c = _unit_vec(0)
+        vec_l = [0.0] * 1536
+        vec_l[0] = 0.97
+        vec_l[1] = math.sqrt(1.0 - 0.97 ** 2)
+        vec_s = [0.0] * 1536
+        vec_s[0] = 0.99
+        vec_s[1] = -math.sqrt(1.0 - 0.99 ** 2)  # opposite sign -> low mutual sim(L, S)
+
+        l = await heart.learn(FactInput(
+            content="The office thermostat schedule was reset to factory defaults.",
+        ), session=session, precomputed_embedding=vec_l)  # legacy, unkeyed, undated
+        s = await heart.learn(FactInput(
+            content="The office thermostat schedule changed for the holiday season.",
+            subject_key="office", attribute_key="thermostat_schedule",
+            event_date=date(2026, 3, 12),
+        ), session=session, precomputed_embedding=vec_s)  # same slot as C, but DATED
+        assert l.id != s.id  # sanity: seeding did not blind-merge L and S
+
+        c = await heart.learn(FactInput(
+            content="The office thermostat schedule was reset to factory defaults.",
+            subject_key="office", attribute_key="thermostat_schedule",
+        ), session=session, precomputed_embedding=vec_c)  # undated candidate, same slot as S
+
+        # Post-fix: L (the true undated duplicate) wins outright over S (a
+        # date-incompatible same-slot variant) -- C confirms into L.
+        assert c.id == l.id
 
 
 # codex P2 round 7: subject_key/attribute_key canonicalized at the FactInput
@@ -3395,6 +4749,11 @@ async def test_resolve_key_conflicts_loss_skips_contradiction_scan(heart, sessio
     """codex r11 FIX 2: when the new fact loses keyed resolution (old wins),
     _find_contradiction must NOT be invoked — an inactive loser must not generate
     contradiction edges or trigger domain compaction.
+
+    Gate-1 D1: CONTRADICTION now resolves by statement order, not current_fact
+    (which the classifier mock below still sets, but the resolver ignores) —
+    so the fixture makes the new fact lose via ORDER instead: same episode,
+    LOWER source_ordinal than the old fact.
     """
     heart.facts._settings = heart.facts._settings.model_copy(
         update={"supersession_key_resolution_enabled": True}
@@ -3404,6 +4763,8 @@ async def test_resolve_key_conflicts_loss_skips_contradiction_scan(heart, sessio
     vec_old = [1.0] + [0.0] * 1535
     vec_new = [0.0, 1.0] + [0.0] * 1534
 
+    ep_id = await _insert_episode(session)
+
     # Learn old fact via FactManager directly to pass check_contradictions=False,
     # so the sentinel is not disturbed by the first learn's contradiction scan.
     await heart.facts.learn(
@@ -3411,13 +4772,16 @@ async def test_resolve_key_conflicts_loss_skips_contradiction_scan(heart, sessio
             content="The server cluster handles 1000 requests per second at peak.",
             subject_key="server cluster",
             attribute_key="throughput",
+            source_episode_id=ep_id,
+            source_ordinal=200,
         ),
         session=session,
         precomputed_embedding=vec_old,
         check_contradictions=False,
     )
 
-    # Wire: old wins (CONTRADICTION, current_fact=old, conf=0.9).
+    # current_fact is now ignored for CONTRADICTION — old wins via the LOWER
+    # ordinal on the new fact below, not this verdict.
     monkeypatch.setattr(
         heart.facts,
         "_classify_fact_pair",
@@ -3432,6 +4796,8 @@ async def test_resolve_key_conflicts_loss_skips_contradiction_scan(heart, sessio
             content="The server cluster handles 500 requests per second at peak.",
             subject_key="server cluster",
             attribute_key="throughput",
+            source_episode_id=ep_id,
+            source_ordinal=100,  # LOWER than old's 200 → new fact loses via order
         ),
         session=session,
         precomputed_embedding=vec_new,

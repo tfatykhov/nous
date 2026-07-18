@@ -300,6 +300,10 @@ class Settings(BaseSettings):
         default=25, ge=0,
         description="R2.1 sleep sweep: max same-key conflict pairs processed per cycle (resumable by construction).",
     )
+    same_slot_conflict_routing_enabled: bool = Field(
+        default=True,
+        description="Gate-1 D2 kill-switch: same-(subject_key, attribute_key) pairs with differing values route to conflict resolution instead of dedup-drop. Default ON (correctness fix).",
+    )
     entity_keys_max_per_fact: int = Field(
         default=8, ge=1,
         description="R3.1 (F085): max entity-key index rows per fact (subject key always included).",
