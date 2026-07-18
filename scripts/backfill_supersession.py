@@ -149,12 +149,20 @@ async def run_sweep(
     return counters
 
 
-async def _chain_depth_histogram(session, agent_id: str, watermark: str) -> Counter:
+async def _chain_depth_histogram(
+    session, agent_id: str, watermark: str | datetime
+) -> Counter:
     """Return a Counter of chain depths for winners touched this run.
 
     Uses the DB trigger-updated updated_at to identify losers written in this
     run, then walks each winner's downstream chain recursively.
     """
+    # The run watermark is kept as an ISO STRING for printing (the rollback
+    # key), but asyncpg refuses str for a timestamptz bind — normalize to a
+    # datetime here so the report can never crash after resolutions have
+    # already been committed (field bug: rc=2 with only the printout lost).
+    if isinstance(watermark, str):
+        watermark = datetime.fromisoformat(watermark)
     # Find distinct winners from this run.
     winner_sql = text("""
         SELECT DISTINCT superseded_by AS winner_id
