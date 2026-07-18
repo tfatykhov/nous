@@ -1699,6 +1699,75 @@ class TestGate1SameSlotDedupRouting:
         ), session=session, precomputed_embedding=vec)
         assert r2.id == r1.id
 
+    async def test_routed_dupe_excluded_from_admission_novelty_only(self, heart, session, monkeypatch):
+        """Codex r2: a same-slot value-variant routed past dedup (Gate-1 D2)
+        is definitionally near-identical to the dupe it was routed against
+        (that's why it hit the >= fact_native_cosine_threshold dedup check).
+        Leaving it visible to _find_max_similarity's novelty computation
+        would collapse the candidate's novelty term to ~0 and let admission
+        REJECT the very pair R2 must adjudicate -- reintroducing a drop path
+        this fix was meant to close. Verify the seam directly (cheaper and
+        more reliable than tuning real admission scores to straddle the
+        composite threshold, per review guidance): capture the exclude_ids
+        _find_max_similarity actually receives and confirm it includes the
+        routed dupe's id, while R2 still successfully adjudicates the pair
+        (proving exclude_ids feeding _resolve_key_conflicts is untouched --
+        Amendment 1 preserved)."""
+        from nous.heart.admission import AdmissionConfig, AdmissionController
+        from nous.heart.schemas import FactRejected
+
+        monkeypatch.setattr(
+            "nous.heart.facts.FactManager.is_distinct_fact",
+            AsyncMock(return_value=True))
+        monkeypatch.setattr(
+            "nous.heart.facts.FactManager._classify_fact_pair",
+            AsyncMock(return_value={"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}))
+        s = heart.facts._settings.model_copy(update={"supersession_key_resolution_enabled": True})
+        monkeypatch.setattr(heart.facts, "_settings", s)
+
+        # Real (heuristic-only, no LLM) admission controller so the novelty
+        # call actually fires -- mirrors heart_with_admission's conftest recipe.
+        heart.facts._admission_controller = AdmissionController(
+            config=AdmissionConfig(shadow_mode=False, utility_llm_enabled=False)
+        )
+
+        captured_excludes: list[list] = []
+        original_find_max = heart.facts._find_max_similarity
+
+        async def _capturing_find_max_similarity(embedding, exclude_ids, session):
+            captured_excludes.append(list(exclude_ids))
+            return await original_find_max(embedding, exclude_ids, session)
+
+        monkeypatch.setattr(heart.facts, "_find_max_similarity", _capturing_find_max_similarity)
+
+        ep_id = await _insert_episode(session)
+        vec = _unit_vec(25)
+        r1 = await heart.learn(FactInput(
+            content="The author of Work Y is Carla First.",
+            subject_key="work y", attribute_key="author",
+            source_episode_id=ep_id, source_ordinal=1,
+        ), session=session, precomputed_embedding=vec)
+        r2 = await heart.learn(FactInput(
+            content="The author of Work Y is Derek Later.",
+            subject_key="work y", attribute_key="author",
+            source_episode_id=ep_id, source_ordinal=2,
+        ), session=session, precomputed_embedding=vec)
+
+        # The admission novelty call for the SECOND learn (the one that hit
+        # dedup and got routed past it) must have received the routed
+        # dupe's id in its excludes -- otherwise max_sim ~= 1.0 and novelty
+        # collapses to ~0.
+        assert len(captured_excludes) == 2
+        assert r1.id in captured_excludes[-1]
+
+        # The candidate was NOT admission-rejected, and R2 still adjudicates
+        # the pair (later ordinal wins) -- proves exclude_ids feeding
+        # _resolve_key_conflicts was not also polluted by this change.
+        assert not isinstance(r2, FactRejected)
+        old = await _get_fact(heart, r1.id, session)
+        new = await _get_fact(heart, r2.id, session)
+        assert new.active and not old.active and old.superseded_by == new.id
+
 
 # codex P2 round 7: subject_key/attribute_key canonicalized at the FactInput
 # boundary ──────────────────────────────────────────────────────────────────

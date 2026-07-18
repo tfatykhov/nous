@@ -759,7 +759,19 @@ class FactManager:
         # F023: Admission gate — score candidate before storage
         admission_result: AdmissionResult | None = None
         if self._admission_controller is not None:
-            max_sim = await self._find_max_similarity(embedding, exclude_ids, session) if embedding else None
+            # Codex r2: the routed dupe (Gate-1 D2) must NOT feed this
+            # candidate's novelty term — it is definitionally near-identical
+            # (that's why it hit the >= fact_native_cosine_threshold dedup
+            # check), so leaving it visible to _find_max_similarity would
+            # collapse novelty to ~0 and let admission REJECT the very pair
+            # R2 must adjudicate, reintroducing a drop path. Admission-only
+            # exclusion list — exclude_ids itself (which feeds
+            # _resolve_key_conflicts below) is untouched; R2 visibility is
+            # unchanged (Amendment 1).
+            admission_excludes = (
+                exclude_ids if routed_dupe_id is None else [*exclude_ids, routed_dupe_id]
+            )
+            max_sim = await self._find_max_similarity(embedding, admission_excludes, session) if embedding else None
             source_text = await self._get_source_text(input, session)
 
             admission_result = await self._admission_controller.score(
