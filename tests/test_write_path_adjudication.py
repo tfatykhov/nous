@@ -807,6 +807,17 @@ def _unit_vec(i: int) -> list[float]:
     return v
 
 
+def _embedding_at_similarity(target_sim: float) -> list[float]:
+    """1536-dim vector with cosine similarity == target_sim vs _unit_vec(0)."""
+    import math
+
+    perp = math.sqrt(max(0.0, 1.0 - target_sim ** 2))
+    v = [0.0] * 1536
+    v[0] = target_sim
+    v[1] = perp
+    return v
+
+
 async def _get_fact(heart, fact_id, session=None):
     """Fetch a Fact row by id. With no `session`, opens a FRESH
     heart.db.session() — a different connection than any ambient test
@@ -1407,6 +1418,44 @@ class TestGate1ContradictionOrderResolution:
         assert "Capital of France" not in p
         assert "settings.yaml" in p and "config.toml" in p  # replacement example
         assert "correct" not in _SUPERSESSION_CLASSIFIER_SCHEMA["properties"]["current_fact"]["description"]
+
+    async def test_legacy_subject_path_contradiction_keeps_both(self, heart, session, monkeypatch):
+        """Gate-1 D1 legacy path: R2 flag OFF (default) -> _supersede_by_subject.
+        A CONTRADICTION verdict must KEEP BOTH + flag (mirrors the keyed path),
+        not silently supersede with a wrong-type 'supersedes' edge — the old
+        fall-through behavior at the :1191-area unconditional supersede."""
+        monkeypatch.setattr(heart.facts, "_llm", MagicMock())  # truthy sentinel; classify is mocked below
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.9}),
+        )
+        anchor = _unit_vec(0)
+        candidate = _embedding_at_similarity(0.88)  # inside the 0.80-0.95 F027 band
+
+        old_r = await heart.learn(FactInput(
+            content="The office thermostat is set to seventy two degrees fahrenheit.",
+            subject="office thermostat",
+        ), session=session, precomputed_embedding=anchor)
+        new_r = await heart.learn(FactInput(
+            content="The office thermostat is set to sixty eight degrees fahrenheit.",
+            subject="office thermostat",
+        ), session=session, precomputed_embedding=candidate)
+
+        await session.flush()
+        old = await _get_fact(heart, old_r.id, session)
+        new = await _get_fact(heart, new_r.id, session)
+        assert old.active and new.active
+        assert new.contradiction_of == old.id
+
+        edge_r = await session.execute(
+            select(GraphEdge)
+            .where(GraphEdge.source_id == new_r.id)
+            .where(GraphEdge.target_id == old_r.id)
+        )
+        relations = {e.relation for e in edge_r.scalars().all()}
+        assert "supersedes" not in relations
+        assert "contradicts" in relations
 
 
 # codex P2 round 7: subject_key/attribute_key canonicalized at the FactInput

@@ -1190,6 +1190,18 @@ class FactManager:
                                 if new_fact:
                                     new_fact.active = False
                                 continue
+                            if relation == "CONTRADICTION":
+                                # Gate-1 D1: this legacy path has no ordinal/
+                                # learned_at signal to order by (it only fires
+                                # for unkeyed facts or R2-off deployments) —
+                                # always KEEP BOTH + flag, same as
+                                # _pick_contradiction_winner's unordered
+                                # fallback. The old fall-through silently
+                                # superseded with a wrong-type 'supersedes' edge.
+                                new_fact = await self._get_fact_orm(new_fact_id, session)
+                                if new_fact is not None:
+                                    await self._flag_contradiction_pair(old, new_fact, session)
+                                continue  # keep-both; keep scanning remaining candidates
                             # UPDATE + current=="new" or unknown → fall through to supersede
 
                     old.active = False
