@@ -2608,22 +2608,35 @@ class FactManager:
         assignment and edge creation now run UNCONDITIONALLY every call —
         both are idempotent (column: same-value reassignment; edge:
         on_conflict_do_nothing) — so a rolled-back edge is recreated on the
-        next pass while confidence is never touched twice."""
-        already_flagged = b.contradiction_of == a.id
-        if not already_flagged:
-            existing = await session.execute(
-                select(GraphEdge.id)
-                .where(GraphEdge.agent_id == self.agent_id)
-                .where(GraphEdge.relation == "contradicts")
-                .where(
-                    or_(
-                        and_(GraphEdge.source_id == b.id, GraphEdge.target_id == a.id),
-                        and_(GraphEdge.source_id == a.id, GraphEdge.target_id == b.id),
-                    )
+        next pass while confidence is never touched twice.
+
+        Codex r12: a sweep revisit can present the SAME pair with (a, b)
+        roles REVERSED from the original flagging call (equal-learned_at
+        pairs are UUID-ordered by find_key_conflict_pairs, which can flip
+        which fact lands in id1/id2 across runs). The bidirectional edge
+        query correctly recognized this pair as already-flagged for the
+        decrement guard — but it was previously only ever run as a
+        column-fast-path FALLBACK, so the edge write below stayed
+        unconditional and, called with roles reversed, wrote a SECOND
+        contradicts edge in the opposite direction. Edge existence is now
+        always computed once and used to gate the edge write directly; the
+        confidence-decrement guard is unchanged (column match OR edge
+        exists, either direction)."""
+        column_match = b.contradiction_of == a.id
+        existing = await session.execute(
+            select(GraphEdge.id)
+            .where(GraphEdge.agent_id == self.agent_id)
+            .where(GraphEdge.relation == "contradicts")
+            .where(
+                or_(
+                    and_(GraphEdge.source_id == b.id, GraphEdge.target_id == a.id),
+                    and_(GraphEdge.source_id == a.id, GraphEdge.target_id == b.id),
                 )
-                .limit(1)
             )
-            already_flagged = existing.first() is not None
+            .limit(1)
+        )
+        edge_exists = existing.first() is not None
+        already_flagged = column_match or edge_exists
         if not already_flagged:
             # Codex r8: `a.confidence or 1.0` treats a legitimate 0.0 as
             # missing and RAISES it to 0.8 on flagging. `is None` is the
@@ -2632,7 +2645,8 @@ class FactManager:
             base = 1.0 if a.confidence is None else a.confidence
             a.confidence = max(0.0, base - 0.2)
         b.contradiction_of = a.id
-        await self._create_graph_edge(b.id, a.id, "fact", "fact", "contradicts", 1.0, session)
+        if not edge_exists:
+            await self._create_graph_edge(b.id, a.id, "fact", "fact", "contradicts", 1.0, session)
 
     # ------------------------------------------------------------------
     # contradict()

@@ -1630,6 +1630,84 @@ class TestGate1ContradictionOrderResolution:
             edges = edge_r.scalars().all()
             assert len(edges) == 1  # edge recreated
 
+    async def test_flag_contradiction_pair_reversed_roles_no_duplicate_edge(self, heart, monkeypatch):
+        """Codex r12: a sweep revisit can present the SAME pair with a/b
+        roles REVERSED from the original flagging call (find_key_conflict_pairs
+        orders equal-learned_at pairs by UUID, which can flip which fact is
+        id1/id2 across runs). The bidirectional edge query already catches
+        this for the confidence-decrement guard (no second decrement) -- but
+        the old code only computed that query as a fallback INSIDE the
+        column-fast-path branch, then unconditionally wrote the edge in
+        whatever (b, a) direction THIS call uses. A reversed-roles revisit
+        therefore fell through to an unconditional write in the OPPOSITE
+        direction from the original edge, creating a second, duplicate
+        contradicts edge for one pair."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy import and_, or_
+        from sqlalchemy import update as sa_update
+
+        unique_agent = f"g1-{uuid4().hex[:8]}"
+        heart.facts.agent_id = unique_agent
+        heart.facts._settings = heart.facts._settings.model_copy(
+            update={"supersession_key_resolution_enabled": True}
+        )
+
+        f1 = await heart.learn(FactInput(
+            content="The lobby reception desk closes at five in the evening.",
+            subject_key="lobby", attribute_key="reception_hours",
+        ))
+        f2 = await heart.learn(FactInput(
+            content="The lobby reception desk closes at six in the evening.",
+            subject_key="lobby", attribute_key="reception_hours",
+        ))
+
+        fixed_ts = datetime.now(UTC)
+        async with heart.db.session() as s:
+            await s.execute(
+                sa_update(Fact).where(Fact.id.in_([f1.id, f2.id])).values(learned_at=fixed_ts)
+            )
+            await s.commit()
+
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.95}),
+        )
+
+        # First pass: flags (f1, f2), decrements f1, writes edge f2->f1.
+        r1 = await heart.facts.resolve_key_conflict_pair(f1.id, f2.id, f1.content, f2.content)
+        assert r1 is False
+
+        # Sweep revisit with roles REVERSED (f2 now "older"/id1, f1 "newer"/id2)
+        # -- simulates find_key_conflict_pairs' UUID-ordering flipping which
+        # fact lands in which slot across runs for an equal-learned_at pair.
+        r2 = await heart.facts.resolve_key_conflict_pair(f2.id, f1.id, f2.content, f1.content)
+        assert r2 is False
+
+        f1_after = await _get_fact(heart, f1.id)
+        f2_after = await _get_fact(heart, f2.id)
+        assert f1_after.confidence == pytest.approx(0.8)  # decremented exactly once
+        assert f2_after.confidence == pytest.approx(1.0)  # never the "a" (older) role -- untouched
+
+        async with heart.db.session() as s:
+            edge_r = await s.execute(
+                select(GraphEdge)
+                .where(GraphEdge.agent_id == unique_agent)
+                .where(GraphEdge.relation == "contradicts")
+                .where(
+                    or_(
+                        and_(GraphEdge.source_id == f2.id, GraphEdge.target_id == f1.id),
+                        and_(GraphEdge.source_id == f1.id, GraphEdge.target_id == f2.id),
+                    )
+                )
+            )
+            edges = edge_r.scalars().all()
+            assert len(edges) == 1, (
+                "exactly one contradicts edge must exist between the pair regardless "
+                "of which direction a reversed-roles revisit flags it from"
+            )
+
     async def test_flag_contradiction_pair_preserves_explicit_zero_confidence(self, heart, monkeypatch):
         """Codex r8: `a.confidence or 1.0` treats a legitimate 0.0 as missing
         and RAISES it to 0.8 on flagging -- `is None` is the correct
