@@ -768,9 +768,36 @@ class FactManager:
             # exclusion list — exclude_ids itself (which feeds
             # _resolve_key_conflicts below) is untouched; R2 visibility is
             # unchanged (Amendment 1).
-            admission_excludes = (
-                exclude_ids if routed_dupe_id is None else [*exclude_ids, routed_dupe_id]
-            )
+            #
+            # Codex r4: the routed dupe alone is insufficient when the
+            # conflict slot holds MORE than one active variant — a second,
+            # non-routed same-slot fact (one _find_duplicate's cosine
+            # threshold didn't flag, because its embedding differs, but
+            # _find_max_similarity's nearest-active-fact scan still finds)
+            # can equally collapse novelty and get this candidate
+            # admission-rejected before R2 ever sees the cluster. When
+            # routing fired, exclude every active same-slot fact, bounded by
+            # the same supersession_key_candidates_cap R2 uses below — a
+            # cluster member beyond that cap is unreachable to R2 anyway, so
+            # admission visibility mirrors R2's own reach. Served by
+            # idx_facts_conflict_slot.
+            if routed_dupe_id is not None:
+                cap = self._settings.supersession_key_candidates_cap if self._settings else 8
+                same_slot_rows = await session.execute(
+                    select(Fact.id)
+                    .where(
+                        Fact.agent_id == self.agent_id,
+                        Fact.active == True,  # noqa: E712
+                        Fact.subject_key == input.subject_key,
+                        Fact.attribute_key == input.attribute_key,
+                    )
+                    .order_by(Fact.learned_at.desc())
+                    .limit(cap)
+                )
+                same_slot_ids = [row[0] for row in same_slot_rows.all()]
+                admission_excludes = list({*exclude_ids, routed_dupe_id, *same_slot_ids})
+            else:
+                admission_excludes = exclude_ids
             max_sim = await self._find_max_similarity(embedding, admission_excludes, session) if embedding else None
             source_text = await self._get_source_text(input, session)
 

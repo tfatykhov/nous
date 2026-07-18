@@ -1849,6 +1849,67 @@ class TestGate1SameSlotDedupRouting:
         new = await _get_fact(heart, r2.id, session)
         assert new.active and not old.active and old.superseded_by == new.id
 
+    async def test_routed_dupe_cluster_excludes_all_active_same_slot_facts(self, heart, session, monkeypatch):
+        """Codex r4: the cluster extension of r2. When MORE than one active
+        same-slot fact exists, admission's novelty exclusion must cover the
+        WHOLE conflict-slot cluster, not just the single routed dupe -- a
+        second, non-routed same-slot variant (one _find_duplicate's cosine
+        threshold never flagged, because its embedding differs) can still be
+        the nearest neighbor _find_max_similarity finds, collapsing novelty
+        to ~0 and getting the correction admission-rejected before R2 ever
+        adjudicates the cluster."""
+        from nous.heart.admission import AdmissionConfig, AdmissionController
+
+        monkeypatch.setattr(
+            "nous.heart.facts.FactManager.is_distinct_fact",
+            AsyncMock(return_value=True))
+        monkeypatch.setattr(
+            "nous.heart.facts.FactManager._classify_fact_pair",
+            AsyncMock(return_value={"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}))
+
+        heart.facts._admission_controller = AdmissionController(
+            config=AdmissionConfig(shadow_mode=False, utility_llm_enabled=False)
+        )
+
+        captured_excludes: list[list] = []
+        original_find_max = heart.facts._find_max_similarity
+
+        async def _capturing_find_max_similarity(embedding, exclude_ids, session):
+            captured_excludes.append(list(exclude_ids))
+            return await original_find_max(embedding, exclude_ids, session)
+
+        monkeypatch.setattr(heart.facts, "_find_max_similarity", _capturing_find_max_similarity)
+
+        ep_id = await _insert_episode(session)
+        vec_a = _unit_vec(26)
+        vec_b = _unit_vec(27)
+
+        a = await heart.learn(FactInput(
+            content="The project lead is Alice Prior.",
+            subject_key="project", attribute_key="lead",
+            source_episode_id=ep_id, source_ordinal=1,
+        ), session=session, precomputed_embedding=vec_a)
+        b = await heart.learn(FactInput(
+            content="The project lead is Bob Middle.",
+            subject_key="project", attribute_key="lead",
+            source_episode_id=ep_id, source_ordinal=2,
+        ), session=session, precomputed_embedding=vec_b)
+
+        # C shares A's embedding exactly -> _find_duplicate routes against A
+        # only. B is a separate active same-slot fact _find_duplicate never
+        # saw (different embedding), but it's still in the same conflict slot.
+        await heart.learn(FactInput(
+            content="The project lead is Carol Later.",
+            subject_key="project", attribute_key="lead",
+            source_episode_id=ep_id, source_ordinal=3,
+        ), session=session, precomputed_embedding=vec_a)
+
+        # The admission novelty call for C's learn must exclude the WHOLE
+        # cluster -- both A (the routed dupe) and B (not routed, but still
+        # same-slot and active) -- not just the routed dupe.
+        assert a.id in captured_excludes[-1]
+        assert b.id in captured_excludes[-1]
+
 
 # codex P2 round 7: subject_key/attribute_key canonicalized at the FactInput
 # boundary ──────────────────────────────────────────────────────────────────
