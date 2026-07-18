@@ -2637,8 +2637,23 @@ class FactManager:
         `not already_flagged`) makes a reverse revisit a true no-op while
         still preserving r1's cluster semantics: a genuinely NEW pair (no
         column match, no edge) still decrements and the column still
-        reflects last-writer-wins across a cluster."""
-        column_match = b.contradiction_of == a.id
+        reflects last-writer-wins across a cluster.
+
+        Codex r14: the composite of r3 + r13 — post-rollback (edge deleted,
+        column residue intact) PLUS a sweep revisit in reversed order. The
+        one-way `column_match = b.contradiction_of == a.id` only checks
+        THIS call's `b` side; the residue from the original flag sits on
+        the OTHER side (`a.contradiction_of == b.id` in this call's roles).
+        With the edge gone (rollback) and the column check missing the
+        reversed residue, `already_flagged` fell through False —
+        re-decrementing confidence a second time and writing a fresh
+        column + edge in the reverse direction. `column_match` is now
+        checked in BOTH directions. Edge repair must still recreate the
+        edge in its ORIGINAL recorded orientation (not necessarily this
+        call's (b, a)) — whichever fact's column points at the other is
+        the historical source; only a genuinely new, never-flagged pair
+        (neither column set) defaults to this call's (b, a)."""
+        column_match = b.contradiction_of == a.id or a.contradiction_of == b.id
         existing = await session.execute(
             select(GraphEdge.id)
             .where(GraphEdge.agent_id == self.agent_id)
@@ -2662,7 +2677,15 @@ class FactManager:
             a.confidence = max(0.0, base - 0.2)
             b.contradiction_of = a.id
         if not edge_exists:
-            await self._create_graph_edge(b.id, a.id, "fact", "fact", "contradicts", 1.0, session)
+            # Codex r14: repair follows the RECORDED direction — whichever
+            # fact's column points at the other is the original source,
+            # regardless of which role it plays in THIS call. A brand-new
+            # pair (neither column set yet) has no recorded direction, so it
+            # defaults to this call's (b, a), matching first-flag orientation.
+            if a.contradiction_of == b.id:
+                await self._create_graph_edge(a.id, b.id, "fact", "fact", "contradicts", 1.0, session)
+            else:
+                await self._create_graph_edge(b.id, a.id, "fact", "fact", "contradicts", 1.0, session)
 
     # ------------------------------------------------------------------
     # contradict()

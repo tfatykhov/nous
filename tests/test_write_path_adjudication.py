@@ -1721,6 +1721,101 @@ class TestGate1ContradictionOrderResolution:
                 "of which direction a reversed-roles revisit flags it from"
             )
 
+    async def test_flag_contradiction_pair_rollback_plus_reversed_revisit(self, heart, monkeypatch):
+        """Codex r14: the composite of r3 (post-rollback edge repair) + r13
+        (reversed-roles no-op) -- the edge is deleted (rollback) AND the
+        sweep revisit presents the pair in REVERSED order. The one-way
+        column_match (b.contradiction_of == a.id) only checks THIS call's
+        `b` side; the residue from the ORIGINAL flag sits on the other side
+        (a.contradiction_of == b.id in this call's roles). With the edge
+        gone and the column check missing the reversed residue,
+        already_flagged fell through False pre-fix -- re-decrementing the
+        (wrong) fact's confidence and writing a fresh column + edge in the
+        REVERSE direction from the original. Edge repair must recreate the
+        edge in its ORIGINAL recorded orientation, not this call's (b, a)."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy import and_, or_
+        from sqlalchemy import delete as sa_delete
+        from sqlalchemy import update as sa_update
+
+        unique_agent = f"g1-{uuid4().hex[:8]}"
+        heart.facts.agent_id = unique_agent
+        heart.facts._settings = heart.facts._settings.model_copy(
+            update={"supersession_key_resolution_enabled": True}
+        )
+
+        old = await heart.learn(FactInput(
+            content="The archive retention policy keeps records for five years.",
+            subject_key="archive", attribute_key="retention_policy",
+        ))
+        new = await heart.learn(FactInput(
+            content="The archive retention policy keeps records for seven years.",
+            subject_key="archive", attribute_key="retention_policy",
+        ))
+
+        fixed_ts = datetime.now(UTC)
+        async with heart.db.session() as s:
+            await s.execute(
+                sa_update(Fact).where(Fact.id.in_([old.id, new.id])).values(learned_at=fixed_ts)
+            )
+            await s.commit()
+
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.95}),
+        )
+
+        # First pass: flags (old, new) -- new points at old, edge new->old,
+        # old decremented to 0.8.
+        r1 = await heart.facts.resolve_key_conflict_pair(old.id, new.id, old.content, new.content)
+        assert r1 is False
+        old_after_first = await _get_fact(heart, old.id)
+        assert old_after_first.confidence == pytest.approx(0.8)
+
+        # Simulate the documented rollback: delete the contradicts edge only
+        # (contradiction_of residue is intentionally left, per r3).
+        async with heart.db.session() as s:
+            await s.execute(
+                sa_delete(GraphEdge)
+                .where(GraphEdge.agent_id == unique_agent)
+                .where(GraphEdge.relation == "contradicts")
+            )
+            await s.commit()
+
+        # Sweep revisit, roles REVERSED (new now id1/"older" role, old now
+        # id2/"newer" role) -- simulates find_key_conflict_pairs presenting
+        # this equal-learned_at pair in the opposite order post-rollback.
+        r2 = await heart.facts.resolve_key_conflict_pair(new.id, old.id, new.content, old.content)
+        assert r2 is False
+
+        old_after = await _get_fact(heart, old.id)
+        new_after = await _get_fact(heart, new.id)
+        assert old_after.confidence == pytest.approx(0.8)  # no second decrement
+        assert new_after.confidence == pytest.approx(1.0)  # never decremented -- not the "a" (older) role
+        assert old_after.contradiction_of is None  # no reverse column write
+        assert new_after.contradiction_of == old.id  # original pointer preserved
+
+        async with heart.db.session() as s:
+            edge_r = await s.execute(
+                select(GraphEdge)
+                .where(GraphEdge.agent_id == unique_agent)
+                .where(GraphEdge.relation == "contradicts")
+                .where(
+                    or_(
+                        and_(GraphEdge.source_id == new.id, GraphEdge.target_id == old.id),
+                        and_(GraphEdge.source_id == old.id, GraphEdge.target_id == new.id),
+                    )
+                )
+            )
+            edges = edge_r.scalars().all()
+            assert len(edges) == 1, "exactly one contradicts edge after repair"
+            assert edges[0].source_id == new.id and edges[0].target_id == old.id, (
+                "repaired edge must follow the ORIGINAL recorded direction (new->old), "
+                "not this call's (b, a) orientation"
+            )
+
     async def test_flag_contradiction_pair_preserves_explicit_zero_confidence(self, heart, monkeypatch):
         """Codex r8: `a.confidence or 1.0` treats a legitimate 0.0 as missing
         and RAISES it to 0.8 on flagging -- `is None` is the correct
