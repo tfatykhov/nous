@@ -75,12 +75,13 @@ _SUPERSESSION_CLASSIFIER_PROMPT_TEMPLATE = (
     "- 'API returns 200' vs 'API returns 500' → UPDATE (status changes)\n"
     "- 'Pi equals 3.14' vs 'Pi equals 4' → CONTRADICTION (math is fixed)\n"
     "- 'Tim works at Acme' vs 'Tim works at Globex' → UPDATE (employment changes)\n"
-    "- 'Capital of France is Paris' vs 'Capital of France is London' → "
-    "CONTRADICTION (historical/definitional)\n"
+    "- 'The config file is settings.yaml' vs 'The config file is config.toml' → "
+    "UPDATE (configuration changes)\n"
     "- 'Database uses Postgres' vs 'Cache uses Redis' → UNRELATED (different "
     "subsystems despite shared 'uses' verb)\n\n"
-    "For `current_fact`: 'new' for UPDATE/REFINEMENT; for CONTRADICTION pick the "
-    "factually correct one; 'new' by default for UNRELATED."
+    "For `current_fact`: 'new' for UPDATE/REFINEMENT; for CONTRADICTION it is "
+    "advisory only (the caller resolves by statement order, NOT by which claim "
+    "is true); 'new' by default for UNRELATED."
 )
 
 
@@ -96,7 +97,10 @@ _SUPERSESSION_CLASSIFIER_SCHEMA: dict[str, Any] = {
         "current_fact": {
             "type": "string",
             "enum": ["new", "old"],
-            "description": "Which fact represents the current/correct state of affairs",
+            "description": (
+                "Which statement was made later / supersedes the other (advisory "
+                "for CONTRADICTION — callers resolve by statement order)"
+            ),
         },
         "confidence": {
             "type": "number",
@@ -2134,13 +2138,17 @@ class FactManager:
             if relation not in ("UPDATE", "CONTRADICTION") or conf < 0.8:
                 return False
             if relation == "CONTRADICTION":
-                current = cls.get("current_fact", "")
-                if current == "new":
-                    winner, loser = f_new, f_old
-                elif current == "old":
-                    winner, loser = f_old, f_new
-                else:
-                    return False  # ambiguous contradiction => KEEP BOTH (devil-2 #1)
+                # Gate-1 D1: statement order resolves CONTRADICTION, never the
+                # classifier's current_fact verdict — see _pick_contradiction_winner.
+                winner = self._pick_contradiction_winner(f_old, f_new)
+                if winner is None:
+                    await self._flag_contradiction_pair(f_old, f_new, session)
+                    # store-P1: this method owns its session; Database.session()
+                    # does NOT auto-commit, so an uncommitted KEEP-BOTH flag
+                    # would be silently rolled back on close.
+                    await session.commit()
+                    return False  # KEEP-BOTH + flag
+                loser = f_old if winner is f_new else f_new
             else:
                 winner, loser = self._pick_winner(f_new, f_old, cls)
             ok = await self.apply_supersession(winner.id, loser.id, session)
@@ -2208,17 +2216,15 @@ class FactManager:
             if relation not in ("UPDATE", "CONTRADICTION") or conf < 0.8:
                 continue  # not a confirmed same-slot conflict
             if relation == "CONTRADICTION":
-                # devil-2 #1: a CONTRADICTION is about an inherently FIXED
-                # property — reading order says nothing about truth. Only the
-                # classifier's explicit current_fact verdict may resolve it;
-                # ambiguous => KEEP BOTH. Ordinal/recency never apply here.
-                current = cls.get("current_fact", "")
-                if current == "new":
-                    winner, loser = fact, old
-                elif current == "old":
-                    winner, loser = old, fact
-                else:
-                    continue
+                # Gate-1 D1: statement order resolves CONTRADICTION, never the
+                # classifier's current_fact verdict (a memory store records
+                # what was said; a user's correction must beat the model's
+                # prior). See _pick_contradiction_winner.
+                winner = self._pick_contradiction_winner(old, fact)
+                if winner is None:
+                    await self._flag_contradiction_pair(old, fact, session)
+                    continue  # KEEP-BOTH + flag
+                loser = old if winner is fact else fact
             else:  # UPDATE — mutable state; ordinal (reading order) is the authority signal
                 winner, loser = self._pick_winner(fact, old, cls)
             await self.apply_supersession(winner.id, loser.id, session)
@@ -2230,7 +2236,8 @@ class FactManager:
         """R2.2 policy for UPDATE conflicts. Returns (winner, loser).
         Precedence: same-episode positional ordinal (reading order) →
         classifier current_fact → recency (later learned_at). CONTRADICTION
-        never reaches this method (resolved by current_fact only)."""
+        is resolved by _pick_contradiction_winner — statement order only,
+        never this method or the classifier's current_fact verdict."""
         policy = getattr(self._settings, "supersession_policy", "ordinal") if self._settings else "ordinal"
         if (
             policy == "ordinal"
@@ -2254,6 +2261,32 @@ class FactManager:
         if new_ts is not None and old_ts is not None and old_ts > new_ts:
             return (old_fact, new_fact)
         return (new_fact, old_fact)
+
+    def _pick_contradiction_winner(self, old_fact: Fact, new_fact: Fact) -> Fact | None:
+        """Gate-1 D1: CONTRADICTION resolves by TESTIMONY ORDER, never by which
+        claim the model believes is true (a memory store records what was said;
+        a user's correction must beat the model's prior). Same-episode ordinal
+        -> later learned_at -> None (KEEP-BOTH + flag, the fail-open default)."""
+        if (
+            old_fact.source_ordinal is not None
+            and new_fact.source_ordinal is not None
+            and old_fact.source_episode_id is not None
+            and old_fact.source_episode_id == new_fact.source_episode_id
+        ):
+            return new_fact if new_fact.source_ordinal >= old_fact.source_ordinal else old_fact
+        if old_fact.learned_at != new_fact.learned_at:
+            return new_fact if new_fact.learned_at > old_fact.learned_at else old_fact
+        return None
+
+    async def _flag_contradiction_pair(self, a: Fact, b: Fact, session: AsyncSession) -> None:
+        """KEEP-BOTH marking — mirrors _find_contradiction's flag primitives
+        exactly (unconditional contradiction_of assignment + contradicts edge +
+        the same -0.2 confidence decrement on the OLDER fact), so all keep-both
+        sites behave uniformly (review store-P2 + devil-P3-2: match existing,
+        don't innovate)."""
+        b.contradiction_of = a.id
+        a.confidence = max(0.0, (a.confidence or 1.0) - 0.2)
+        await self._create_graph_edge(b.id, a.id, "fact", "fact", "contradicts", 1.0, session)
 
     # ------------------------------------------------------------------
     # contradict()

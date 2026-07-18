@@ -799,6 +799,28 @@ async def _insert_episode(session, agent_id="nous-default") -> uuid4:
     return ep.id
 
 
+def _unit_vec(i: int) -> list[float]:
+    """1536-dim one-hot vector — orthogonal to _unit_vec(j) for i != j, so
+    distinct indices never collide with the native-cosine dedup path."""
+    v = [0.0] * 1536
+    v[i] = 1.0
+    return v
+
+
+async def _get_fact(heart, fact_id, session=None):
+    """Fetch a Fact row by id. With no `session`, opens a FRESH
+    heart.db.session() — a different connection than any ambient test
+    session, so this is load-bearing for tests verifying a caller-owned
+    commit (e.g. resolve_key_conflict_pair) actually persisted: an
+    in-memory ORM attribute check on the original session would pass even
+    if the commit were missing. Pass an explicit `session` to read within
+    an ambient (uncommitted) transaction the caller still holds open."""
+    if session is not None:
+        return await session.get(Fact, fact_id, populate_existing=True)
+    async with heart.db.session() as s:
+        return await s.get(Fact, fact_id)
+
+
 _UPDATE_NEW = {"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}
 _UPDATE_OLD = {"relation": "UPDATE", "current_fact": "old", "confidence": 0.9}
 _CONTRADICTION_OLD = {"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.9}
@@ -1133,9 +1155,9 @@ async def test_r2_row8_policy_recency_no_ordinals(heart, session, monkeypatch):
 # Row 9 ─────────────────────────────────────────────────────────────────────
 
 @pytest.mark.postgres_only
-async def test_r2_row9_contradiction_current_fact_beats_ordinal(heart, session, monkeypatch):
-    """Row 9: CONTRADICTION + current_fact=old, new has HIGHER ordinal → NEW superseded by old.
-    Devil-2 #1: CONTRADICTION verdict is resolved ONLY by current_fact; ordinal is irrelevant."""
+async def test_r2_row9_contradiction_later_stated_wins_despite_classifier(heart, session, monkeypatch):
+    """Row 9 (Gate-1 D1): CONTRADICTION + current_fact=old, new has HIGHER ordinal
+    → NEW wins (later statement order), classifier's current_fact is ignored."""
     heart.facts._settings = heart.facts._settings.model_copy(
         update={"supersession_key_resolution_enabled": True}
     )
@@ -1157,24 +1179,24 @@ async def test_r2_row9_contradiction_current_fact_beats_ordinal(heart, session, 
             content="The capital city of France has always been London throughout recorded history.",
             subject_key="france",
             attribute_key="capital_city",
-            source_ordinal=2,  # higher ordinal — but CONTRADICTION ignores it
+            source_ordinal=2,  # higher ordinal — later statement wins despite current_fact=old
             source_episode_id=ep_id,
         ),
         session=session,
     )
     await session.flush()
-    new_row = await session.get(Fact, new_r.id)
-    assert new_row.superseded_by == old_r.id
-    assert new_row.active is False
     old_row = await session.get(Fact, old_r.id)
-    assert old_row.superseded_by is None
-    assert old_row.active is True
+    assert old_row.superseded_by == new_r.id
+    assert old_row.active is False
+    new_row = await session.get(Fact, new_r.id)
+    assert new_row.superseded_by is None
+    assert new_row.active is True
 
-    # Assert supersedes graph edge: old_r (winner) → new_r (loser)
+    # Assert supersedes graph edge: new_r (winner) → old_r (loser)
     edge_r = await session.execute(
         select(GraphEdge)
-        .where(GraphEdge.source_id == old_r.id)
-        .where(GraphEdge.target_id == new_r.id)
+        .where(GraphEdge.source_id == new_r.id)
+        .where(GraphEdge.target_id == old_r.id)
         .where(GraphEdge.relation == "supersedes")
     )
     edge = edge_r.scalars().first()
@@ -1185,7 +1207,12 @@ async def test_r2_row9_contradiction_current_fact_beats_ordinal(heart, session, 
 
 @pytest.mark.postgres_only
 async def test_r2_row10_contradiction_ambiguous_keep_both(heart, session, monkeypatch):
-    """Row 10: CONTRADICTION conf 0.9 but current_fact missing/ambiguous → NO supersession."""
+    """Row 10: CONTRADICTION conf 0.9, no ordinals/shared episode → NO supersession.
+    Gate-1 D1: with no ordering signal (both facts share the conftest session's
+    single transaction, so learned_at is transaction-constant and identical),
+    _pick_contradiction_winner returns None → KEEP-BOTH, now also flagged via
+    _flag_contradiction_pair (contradiction_of + contradicts edge) like the
+    other keep-both sites."""
     heart.facts._settings = heart.facts._settings.model_copy(
         update={"supersession_key_resolution_enabled": True}
     )
@@ -1214,6 +1241,19 @@ async def test_r2_row10_contradiction_ambiguous_keep_both(heart, session, monkey
     assert new_row.superseded_by is None
     assert old_row.active is True
     assert new_row.active is True
+    # Gate-1 D1: unordered CONTRADICTION now flags on KEEP-BOTH (mirrors path A/C).
+    assert old_row.learned_at == new_row.learned_at, (
+        "sanity: same-transaction learned_at must be identical for the "
+        "unordered branch to be the one under test"
+    )
+    assert new_row.contradiction_of == old_r.id
+    edge_r = await session.execute(
+        select(GraphEdge)
+        .where(GraphEdge.source_id == new_r.id)
+        .where(GraphEdge.target_id == old_r.id)
+        .where(GraphEdge.relation == "contradicts")
+    )
+    assert edge_r.scalars().first() is not None
 
 
 # Row 11 ─────────────────────────────────────────────────────────────────────
@@ -1263,6 +1303,110 @@ async def test_r2_row11_keyed_fact_skips_legacy_when_r2_on(heart, session, monke
         session=session,
     )
     sentinel.assert_not_called()
+
+
+# Gate-1 D1 ───────────────────────────────────────────────────────────────────
+# CONTRADICTION resolves by statement order, never by which claim the
+# classifier believes is true (F085 Gate-1 fixes plan, Task 1).
+
+
+@pytest.mark.postgres_only
+class TestGate1ContradictionOrderResolution:
+    async def test_figaro_shape_later_stated_wins_despite_world_knowledge(self, heart, session, monkeypatch):
+        """Gate-1 regression: the later-stated 'wrong' value must WIN.
+        Statement 1: author is Pierre Beaumarchais (world-true, ordinal 100).
+        Statement 2 (later): author is Thomas Kyd (benchmark gold, ordinal 200).
+        Classifier says CONTRADICTION and (biased) current_fact='old' — the
+        resolver must IGNORE current_fact and supersede the EARLIER fact."""
+        monkeypatch.setattr(
+            "nous.heart.facts.FactManager._classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.95}),
+        )
+        s = heart.facts._settings.model_copy(update={"supersession_key_resolution_enabled": True})
+        monkeypatch.setattr(heart.facts, "_settings", s)
+        ep_id = await _insert_episode(session)
+        r1 = await heart.learn(FactInput(
+            content="The author of The Marriage of Figaro is Pierre Beaumarchais.",
+            subject="marriage of figaro", subject_key="marriage of figaro",
+            attribute_key="author", source_episode_id=ep_id, source_ordinal=100,
+        ), session=session, precomputed_embedding=_unit_vec(0))
+        r2 = await heart.learn(FactInput(
+            content="The author of The Marriage of Figaro is Thomas Kyd.",
+            subject="marriage of figaro", subject_key="marriage of figaro",
+            attribute_key="author", source_episode_id=ep_id, source_ordinal=200,
+        ), session=session, precomputed_embedding=_unit_vec(1))  # orthogonal vec: dedup miss -> R2 path
+        await session.flush()
+        old = await _get_fact(heart, r1.id, session)
+        new = await _get_fact(heart, r2.id, session)
+        assert new.active and new.superseded_by is None      # later-stated WINS
+        assert (not old.active) and old.superseded_by == new.id
+
+    async def test_unordered_contradiction_keeps_both_and_flags(self, heart, monkeypatch):
+        """No ordinals, no shared episode — force the unordered case via a
+        direct ORM update pinning both facts to an IDENTICAL learned_at, then
+        drive resolve_key_conflict_pair (the sweep seam) directly with the
+        CONTRADICTION mock. _pick_contradiction_winner has no ordering signal
+        left -> KEEP-BOTH, flagged via _flag_contradiction_pair (contradiction_of
+        + contradicts edge). The sweep branch commits its own session, so this
+        re-reads through a FRESH session to prove the commit actually landed."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy import update as sa_update
+
+        unique_agent = f"g1-{uuid4().hex[:8]}"
+        heart.facts.agent_id = unique_agent
+        heart.facts._settings = heart.facts._settings.model_copy(
+            update={"supersession_key_resolution_enabled": True}
+        )
+
+        f1 = await heart.learn(FactInput(
+            content="The store's return policy allows returns within thirty days.",
+            subject_key="store", attribute_key="return_policy",
+        ))
+        f2 = await heart.learn(FactInput(
+            content="The store's return policy allows returns within ninety days.",
+            subject_key="store", attribute_key="return_policy",
+        ))
+
+        fixed_ts = datetime.now(UTC)
+        async with heart.db.session() as s:
+            await s.execute(
+                sa_update(Fact).where(Fact.id.in_([f1.id, f2.id])).values(learned_at=fixed_ts)
+            )
+            await s.commit()
+
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.95}),
+        )
+
+        result = await heart.facts.resolve_key_conflict_pair(f1.id, f2.id, f1.content, f2.content)
+        assert result is False  # KEEP-BOTH: no supersession written
+
+        old = await _get_fact(heart, f1.id)
+        new = await _get_fact(heart, f2.id)
+        assert old.active is True and new.active is True
+        assert old.superseded_by is None and new.superseded_by is None
+        assert new.contradiction_of == old.id
+
+        async with heart.db.session() as s:
+            edge_r = await s.execute(
+                select(GraphEdge)
+                .where(GraphEdge.source_id == f2.id)
+                .where(GraphEdge.target_id == f1.id)
+                .where(GraphEdge.relation == "contradicts")
+            )
+            assert edge_r.scalars().first() is not None
+
+    def test_prompt_and_schema_debias_pins(self):
+        from nous.heart.facts import _SUPERSESSION_CLASSIFIER_PROMPT_TEMPLATE, _SUPERSESSION_CLASSIFIER_SCHEMA
+
+        p = _SUPERSESSION_CLASSIFIER_PROMPT_TEMPLATE
+        assert "factually correct" not in p
+        assert "Capital of France" not in p
+        assert "settings.yaml" in p and "config.toml" in p  # replacement example
+        assert "correct" not in _SUPERSESSION_CLASSIFIER_SCHEMA["properties"]["current_fact"]["description"]
 
 
 # codex P2 round 7: subject_key/attribute_key canonicalized at the FactInput
@@ -3395,6 +3539,11 @@ async def test_resolve_key_conflicts_loss_skips_contradiction_scan(heart, sessio
     """codex r11 FIX 2: when the new fact loses keyed resolution (old wins),
     _find_contradiction must NOT be invoked — an inactive loser must not generate
     contradiction edges or trigger domain compaction.
+
+    Gate-1 D1: CONTRADICTION now resolves by statement order, not current_fact
+    (which the classifier mock below still sets, but the resolver ignores) —
+    so the fixture makes the new fact lose via ORDER instead: same episode,
+    LOWER source_ordinal than the old fact.
     """
     heart.facts._settings = heart.facts._settings.model_copy(
         update={"supersession_key_resolution_enabled": True}
@@ -3404,6 +3553,8 @@ async def test_resolve_key_conflicts_loss_skips_contradiction_scan(heart, sessio
     vec_old = [1.0] + [0.0] * 1535
     vec_new = [0.0, 1.0] + [0.0] * 1534
 
+    ep_id = await _insert_episode(session)
+
     # Learn old fact via FactManager directly to pass check_contradictions=False,
     # so the sentinel is not disturbed by the first learn's contradiction scan.
     await heart.facts.learn(
@@ -3411,13 +3562,16 @@ async def test_resolve_key_conflicts_loss_skips_contradiction_scan(heart, sessio
             content="The server cluster handles 1000 requests per second at peak.",
             subject_key="server cluster",
             attribute_key="throughput",
+            source_episode_id=ep_id,
+            source_ordinal=200,
         ),
         session=session,
         precomputed_embedding=vec_old,
         check_contradictions=False,
     )
 
-    # Wire: old wins (CONTRADICTION, current_fact=old, conf=0.9).
+    # current_fact is now ignored for CONTRADICTION — old wins via the LOWER
+    # ordinal on the new fact below, not this verdict.
     monkeypatch.setattr(
         heart.facts,
         "_classify_fact_pair",
@@ -3432,6 +3586,8 @@ async def test_resolve_key_conflicts_loss_skips_contradiction_scan(heart, sessio
             content="The server cluster handles 500 requests per second at peak.",
             subject_key="server cluster",
             attribute_key="throughput",
+            source_episode_id=ep_id,
+            source_ordinal=100,  # LOWER than old's 200 → new fact loses via order
         ),
         session=session,
         precomputed_embedding=vec_new,
