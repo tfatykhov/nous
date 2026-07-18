@@ -1917,6 +1917,34 @@ class TestGate1SameSlotDedupRouting:
                 f"(cap={s.supersession_key_candidates_cap} must not limit this)"
             )
 
+    async def test_same_slot_routing_honors_check_contradictions_false(self, heart, session, monkeypatch):
+        """Codex r6: when check_contradictions=False (bulk-import/sentinel
+        callers), _resolve_key_conflicts, the legacy _supersede_by_subject
+        path, AND _find_contradiction are ALL gated on that same flag. If the
+        D2 guard still routed a same-slot value-variant past confirm in this
+        mode, the routed pair would be inserted with NO resolver ever
+        adjudicating it -- unadjudicated near-dupes accumulating silently.
+        The guard must instead take the legacy confirm path exactly as
+        pre-D2-fix, and must not spend the is_distinct_fact budget/LLM call
+        doing so."""
+        is_distinct_mock = AsyncMock(return_value=True)
+        monkeypatch.setattr(
+            "nous.heart.facts.FactManager.is_distinct_fact",
+            is_distinct_mock)
+
+        vec = _unit_vec(28)
+        r1 = await heart.facts.learn(FactInput(
+            content="The office thermostat is set to seventy degrees.",
+            subject_key="office", attribute_key="thermostat",
+        ), session=session, precomputed_embedding=vec, check_contradictions=False)
+        r2 = await heart.facts.learn(FactInput(
+            content="The office thermostat is set to sixty five degrees.",
+            subject_key="office", attribute_key="thermostat",
+        ), session=session, precomputed_embedding=vec, check_contradictions=False)
+
+        assert r2.id == r1.id  # legacy confirm, not routed past dedup
+        is_distinct_mock.assert_not_awaited()
+
 
 # codex P2 round 7: subject_key/attribute_key canonicalized at the FactInput
 # boundary ──────────────────────────────────────────────────────────────────

@@ -718,7 +718,17 @@ class FactManager:
                 ):
                     pass  # do NOT return; treat as new event
                 elif (
-                    getattr(self._settings, "same_slot_conflict_routing_enabled", True)
+                    # Codex r6: routing exists to FEED a resolver
+                    # (_resolve_key_conflicts / legacy _supersede_by_subject /
+                    # _find_contradiction) — every one of those is itself gated
+                    # on check_contradictions. When the caller disables conflict
+                    # work (e.g. a bulk-import/sentinel path), routing would
+                    # insert an unadjudicated near-dupe that NO resolver will
+                    # ever see, accumulating silently. First term so False
+                    # short-circuits before the settings getattr or the
+                    # is_distinct_fact budget/LLM call below.
+                    check_contradictions
+                    and getattr(self._settings, "same_slot_conflict_routing_enabled", True)
                     and input.subject_key and input.attribute_key
                     and dupe.subject_key and dupe.attribute_key
                     and input.subject_key == dupe.subject_key
