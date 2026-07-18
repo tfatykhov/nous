@@ -3903,6 +3903,29 @@ async def test_backfill_keep_both_seen_set_terminates(heart, monkeypatch):
     assert result["keep_both"] == 1
 
 
+@pytest.mark.postgres_only
+async def test_chain_depth_histogram_accepts_iso_string_watermark(heart):
+    """Field bug (sh_6k run): the run watermark is an ISO STRING (kept that way
+    for the printed rollback key) but was bound directly into the histogram's
+    timestamptz query — asyncpg raises TypeError, rc=2 AFTER all resolutions
+    were committed (only the report printout was lost). The helper must accept
+    both str and datetime watermarks."""
+    from collections import Counter
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from scripts.backfill_supersession import _chain_depth_histogram
+
+    unique_agent = f"hist-{uuid4().hex[:8]}"
+    wm_dt = datetime.now(UTC)
+    async with heart.db.session() as s:
+        # str watermark (the exact shape _run_backfill passes) must not raise.
+        hist_str = await _chain_depth_histogram(s, unique_agent, wm_dt.isoformat())
+        # datetime watermark keeps working.
+        hist_dt = await _chain_depth_histogram(s, unique_agent, wm_dt)
+    assert hist_str == hist_dt == Counter()
+
+
 # ---------------------------------------------------------------------------
 # Codex round-4 P1: stale-pair guard in resolve_key_conflict_pair
 # ---------------------------------------------------------------------------
