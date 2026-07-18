@@ -413,6 +413,22 @@ class FactManager:
             return None
         return result["verdict"] == "DISTINCT"
 
+    async def _same_slot_value_variant(self, input: FactInput, dupe: Fact) -> bool:
+        """True when the same-slot pair differs in VALUE (route to conflict
+        resolution); False when it is the same statement (confirm as dup).
+        Fail-open TO STORE (True): dropping an update is silent data loss
+        (audit S1); a stored near-dup is recoverable by the sweep."""
+        folded_in = " ".join(input.content.lower().split())
+        folded_dupe = " ".join((dupe.content or "").lower().split())
+        if folded_in == folded_dupe:
+            return False                      # identical statement -> dedup
+        if not self._band_budget_ok():
+            return True                       # budget spent -> STORE (never swallow)
+        verdict = await self.is_distinct_fact(dupe.content, input.content)
+        if verdict is None:
+            return True                       # LLM down -> STORE (never swallow)
+        return verdict                        # DISTINCT -> route; DUPLICATE -> dedup
+
     # ------------------------------------------------------------------
     # F027: Retrieval soft suppression
     # ------------------------------------------------------------------
@@ -677,6 +693,7 @@ class FactManager:
         band_action: str | None = None
         band_dupe: Fact | None = None
         band_sim: float = 0.0
+        routed_dupe_id: UUID | None = None  # Gate-1 D2: same-slot value-variant routed past dedup
         if embedding is not None:
             found = await self._find_duplicate(
                 embedding, exclude_ids, session,
@@ -695,6 +712,24 @@ class FactManager:
                     and input.event_date != dupe.event_date
                 ):
                     pass  # do NOT return; treat as new event
+                elif (
+                    getattr(self._settings, "same_slot_conflict_routing_enabled", True)
+                    and input.subject_key and input.attribute_key
+                    and dupe.subject_key and dupe.attribute_key
+                    and input.subject_key == dupe.subject_key
+                    and input.attribute_key == dupe.attribute_key
+                    and await self._same_slot_value_variant(input, dupe)
+                ):
+                    # Gate-1 D2: a same-conflict-slot pair with a DIFFERENT value is
+                    # an update/contradiction, not a duplicate — it must reach the
+                    # F027/F084 resolver. The blind-confirm at similarity >= 0.95
+                    # (CONTRADICTION_SIMILARITY_MAX) was silently swallowing exactly
+                    # these (39pp of MAB answer statements). Fall through to INSERT;
+                    # adjudication happens in _resolve_key_conflicts (R2 flag on) or
+                    # the sleep sweep (flag off). The dupe is shielded ONLY from
+                    # _find_contradiction re-processing (safe_excludes below) — it
+                    # MUST remain visible to _resolve_key_conflicts.
+                    routed_dupe_id = dupe.id
                 else:
                     band_action = await self._classify_dupe_in_band(
                         dupe, dupe_similarity, input, check_contradictions
@@ -918,7 +953,7 @@ class FactManager:
             # codex r11: skipped when new fact lost keyed resolution (inactive fact
             # must not trigger contradiction edges or domain compaction).
             if embedding is not None:
-                safe_excludes = list(exclude_ids) + [fact.id]
+                safe_excludes = list(exclude_ids) + [fact.id] + ([routed_dupe_id] if routed_dupe_id else [])
                 contradiction = await self._find_contradiction(
                     embedding, fact.content, safe_excludes, session,
                     new_fact_id=fact.id,

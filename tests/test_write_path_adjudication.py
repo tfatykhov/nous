@@ -1458,6 +1458,109 @@ class TestGate1ContradictionOrderResolution:
         assert "contradicts" in relations
 
 
+# Gate-1 D2 ───────────────────────────────────────────────────────────────────
+# Same-slot value variants must route to conflict resolution, never
+# dedup-confirm (F085 Gate-1 fixes plan, Task 3).
+
+
+@pytest.mark.postgres_only
+class TestGate1SameSlotDedupRouting:
+    async def test_same_slot_value_variant_not_swallowed(self, heart, session, monkeypatch):
+        """'author of X is A' then '...is B' with near-identical embeddings
+        (similarity >= 0.95, the blind-confirm region): the update MUST be
+        stored and adjudicated (later wins), never confirmed as a duplicate."""
+        monkeypatch.setattr(  # distinct values -> DISTINCT
+            "nous.heart.facts.FactManager.is_distinct_fact",
+            AsyncMock(return_value=True),
+        )
+        monkeypatch.setattr(  # conflict classifier: UPDATE
+            "nous.heart.facts.FactManager._classify_fact_pair",
+            AsyncMock(return_value={"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}),
+        )
+        s = heart.facts._settings.model_copy(update={"supersession_key_resolution_enabled": True})
+        monkeypatch.setattr(heart.facts, "_settings", s)
+        ep_id = await _insert_episode(session)
+        vec = _unit_vec(20)  # SAME embedding both times -> similarity 1.0
+        r1 = await heart.learn(FactInput(
+            content="The author of Work X is Alice Prior.",
+            subject_key="work x", attribute_key="author",
+            source_episode_id=ep_id, source_ordinal=1,
+        ), session=session, precomputed_embedding=vec)
+        r2 = await heart.learn(FactInput(
+            content="The author of Work X is Bob Later.",
+            subject_key="work x", attribute_key="author",
+            source_episode_id=ep_id, source_ordinal=2,
+        ), session=session, precomputed_embedding=vec)
+        assert r2.id != r1.id                       # NOT dedup-confirmed
+        old = await _get_fact(heart, r1.id, session)
+        new = await _get_fact(heart, r2.id, session)
+        assert new.active and not old.active and old.superseded_by == new.id
+
+    async def test_same_slot_same_value_still_dedups(self, heart, session):
+        """Identical folded content on a same-slot pair confirms as a
+        duplicate via the fold-compare prefilter alone — no LLM call."""
+        vec = _unit_vec(21)
+        r1 = await heart.learn(FactInput(
+            content="The server region is set to us-east-1.",
+            subject_key="server", attribute_key="region",
+        ), session=session, precomputed_embedding=vec)
+        r2 = await heart.learn(FactInput(
+            content="The server region is set to us-east-1.",
+            subject_key="server", attribute_key="region",
+        ), session=session, precomputed_embedding=vec)
+        assert r2.id == r1.id
+
+    async def test_unkeyed_pair_keeps_todays_dedup(self, heart, session):
+        """Neither side carries subject_key/attribute_key — the guard's
+        keyed gate is unsatisfied and today's confirm-on-match behavior
+        is unchanged."""
+        vec = _unit_vec(22)
+        r1 = await heart.learn(FactInput(
+            content="The office plant needs watering twice a week.",
+        ), session=session, precomputed_embedding=vec)
+        r2 = await heart.learn(FactInput(
+            content="The office plant needs watering three times a week.",
+        ), session=session, precomputed_embedding=vec)
+        assert r2.id == r1.id
+
+    async def test_guard_fails_open_to_store_on_classifier_outage(self, heart, session, monkeypatch):
+        """is_distinct_fact -> None (LLM down): a differing-content
+        same-slot pair MUST STORE (keep-both), never confirm as a dup."""
+        monkeypatch.setattr(
+            "nous.heart.facts.FactManager.is_distinct_fact",
+            AsyncMock(return_value=None),
+        )
+        vec = _unit_vec(23)
+        r1 = await heart.learn(FactInput(
+            content="The meeting room capacity is twelve people.",
+            subject_key="meeting room", attribute_key="capacity",
+        ), session=session, precomputed_embedding=vec)
+        r2 = await heart.learn(FactInput(
+            content="The meeting room capacity is twenty people.",
+            subject_key="meeting room", attribute_key="capacity",
+        ), session=session, precomputed_embedding=vec)
+        assert r2.id != r1.id
+        old = await _get_fact(heart, r1.id, session)
+        new = await _get_fact(heart, r2.id, session)
+        assert old.active and new.active
+
+    async def test_kill_switch_restores_legacy_swallow(self, heart, session, monkeypatch):
+        """Kill switch OFF restores the legacy blind-confirm at
+        similarity >= 0.95 even for a same-slot value-variant pair."""
+        s = heart.facts._settings.model_copy(update={"same_slot_conflict_routing_enabled": False})
+        monkeypatch.setattr(heart.facts, "_settings", s)
+        vec = _unit_vec(24)
+        r1 = await heart.learn(FactInput(
+            content="The API rate limit is set to one hundred requests per minute.",
+            subject_key="api", attribute_key="rate_limit",
+        ), session=session, precomputed_embedding=vec)
+        r2 = await heart.learn(FactInput(
+            content="The API rate limit is set to five hundred requests per minute.",
+            subject_key="api", attribute_key="rate_limit",
+        ), session=session, precomputed_embedding=vec)
+        assert r2.id == r1.id
+
+
 # codex P2 round 7: subject_key/attribute_key canonicalized at the FactInput
 # boundary ──────────────────────────────────────────────────────────────────
 
