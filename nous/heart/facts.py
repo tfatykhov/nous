@@ -700,9 +700,28 @@ class FactManager:
         band_sim: float = 0.0
         routed_dupe_id: UUID | None = None  # Gate-1 D2: same-slot value-variant routed past dedup
         if embedding is not None:
+            # Codex r7: tell the selector which slot the D2 guard cares about
+            # so a cross-slot near-duplicate (closer in embedding space, but
+            # from an unrelated conflict slot) cannot mask a same-slot
+            # value-variant sitting just below it — the guard can only route
+            # what _find_duplicate surfaces. Only set when the guard could
+            # actually fire below (mirrors its own gating minus the dupe-side
+            # key check, which isn't known until a candidate is selected);
+            # every other learn() call passes prefer_slot=None and is
+            # unaffected.
+            prefer_slot = (
+                (input.subject_key, input.attribute_key)
+                if (
+                    check_contradictions
+                    and getattr(self._settings, "same_slot_conflict_routing_enabled", True)
+                    and input.subject_key and input.attribute_key
+                )
+                else None
+            )
             found = await self._find_duplicate(
                 embedding, exclude_ids, session,
                 candidate_event_date=input.event_date,
+                prefer_slot=prefer_slot,
             )
             if found is not None:
                 dupe, dupe_similarity = found
@@ -1562,6 +1581,7 @@ class FactManager:
         exclude_ids: list[UUID],
         session: AsyncSession,
         candidate_event_date: date | None = None,
+        prefer_slot: tuple[str, str] | None = None,
     ) -> tuple[Fact, float] | None:
         """Find a near-duplicate fact by cosine similarity > threshold.
 
@@ -1589,6 +1609,21 @@ class FactManager:
         That horizon is the price of HNSW-servability; 20 comfortably covers
         any realistic above-threshold cluster (the old SQL date-first ordering
         saw ALL above-threshold rows but could never use the index).
+
+        Codex r7: this method picks ONE candidate from the above-threshold
+        set — the Gate-1 D2 same-slot guard in ``_learn`` can only route what
+        THIS selector surfaces, so a cross-slot near-duplicate (closer in
+        embedding space, but from an unrelated conflict slot) could mask a
+        genuine same-slot value-variant sitting just below it, letting the
+        legacy blind-confirm swallow the correction before R2 ever saw it.
+        ``_learn`` passes ``prefer_slot`` ONLY when the D2 guard could
+        actually fire (check_contradictions + routing flag + input
+        both-keyed); every other caller passes ``None`` and is
+        byte-identical to before. When set, above-threshold candidates
+        matching ``(subject_key, attribute_key) == prefer_slot`` are
+        preferred; the EXISTING F075 date-preference logic then runs within
+        that narrower subset unchanged. When no same-slot candidate exists,
+        selection falls back to today's behavior exactly.
         """
         embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
 
@@ -1617,7 +1652,7 @@ class FactManager:
         # partial indexes.
         await set_local_ef_search(session, 100)
         sql = text(f"""
-            SELECT id, event_date,
+            SELECT id, event_date, subject_key, attribute_key,
                    1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
             FROM heart.facts
             WHERE agent_id = :agent_id
@@ -1633,11 +1668,20 @@ class FactManager:
         if not above:
             return None
 
+        # Codex r7: restrict to same-slot candidates first when requested and
+        # any exist among the above-threshold set; otherwise fall back to the
+        # full set exactly as before prefer_slot existed.
+        candidates = above
+        if prefer_slot is not None:
+            same_slot = [r for r in above if (r.subject_key, r.attribute_key) == prefer_slot]
+            if same_slot:
+                candidates = same_slot
+
         # F075 date preference in Python (rows are distance-ordered, so the
         # first date-match is the nearest one; None == None is a match).
         chosen = next(
-            (r for r in above if r.event_date == candidate_event_date),
-            above[0],
+            (r for r in candidates if r.event_date == candidate_event_date),
+            candidates[0],
         )
 
         # Fetch the ORM object

@@ -1945,6 +1945,75 @@ class TestGate1SameSlotDedupRouting:
         assert r2.id == r1.id  # legacy confirm, not routed past dedup
         is_distinct_mock.assert_not_awaited()
 
+    async def test_find_duplicate_prefers_same_slot_over_closer_cross_slot(self, heart, session, monkeypatch):
+        """Codex r7: _find_duplicate returns exactly ONE candidate, and the
+        D2 guard can only route what that selector surfaces. Seed A in slot
+        (book one, author) at cosine 0.97 to the incoming candidate C, and B
+        in a DIFFERENT slot (book two, author) at cosine 0.99 to C (closer,
+        but unrelated). A and B sit on OPPOSITE sides of C along the same
+        orthogonal axis, so their MUTUAL similarity (~0.926) stays below the
+        0.95 dedup threshold -- seeding them independently must not blind-
+        merge them into each other (that would confound the test before C is
+        even introduced). Without a same-slot preference, _find_duplicate
+        returns the closer B and the guard can't fire (subject_key
+        mismatch), so C -- a genuine value-variant of A -- would blind-
+        confirm into the unrelated B. Post-fix, A is preferred and C is
+        routed + adjudicated against it."""
+        import math
+
+        ep_id = await _insert_episode(session)
+        vec_c = _unit_vec(0)
+        vec_a = [0.0] * 1536
+        vec_a[0] = 0.97
+        vec_a[1] = math.sqrt(1.0 - 0.97 ** 2)
+        vec_b = [0.0] * 1536
+        vec_b[0] = 0.99
+        vec_b[1] = -math.sqrt(1.0 - 0.99 ** 2)  # opposite sign -> low sim(A, B)
+
+        a = await heart.learn(FactInput(
+            content="The author of Book One is Alice Prior.",
+            subject_key="book one", attribute_key="author",
+            source_episode_id=ep_id, source_ordinal=1,
+        ), session=session, precomputed_embedding=vec_a)
+        b = await heart.learn(FactInput(
+            content="The author of Book Two is Bob Middle.",
+            subject_key="book two", attribute_key="author",  # DIFFERENT slot
+            source_episode_id=ep_id, source_ordinal=2,
+        ), session=session, precomputed_embedding=vec_b)
+        assert a.id != b.id  # sanity: seeding did not blind-merge A and B
+
+        # Sanity / unchanged-legacy-path assertion: with no prefer_slot
+        # (flag off / not set), _find_duplicate still returns the CLOSER
+        # cross-slot fact (B, sim 0.99) over the same-slot fact (A, sim 0.97).
+        legacy = await heart.facts._find_duplicate(vec_c, [], session)
+        assert legacy is not None
+        assert legacy[0].id == b.id
+
+        monkeypatch.setattr(
+            "nous.heart.facts.FactManager.is_distinct_fact",
+            AsyncMock(return_value=True))
+        monkeypatch.setattr(
+            "nous.heart.facts.FactManager._classify_fact_pair",
+            AsyncMock(return_value={"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}))
+        s = heart.facts._settings.model_copy(update={"supersession_key_resolution_enabled": True})
+        monkeypatch.setattr(heart.facts, "_settings", s)
+
+        c = await heart.learn(FactInput(
+            content="The author of Book One is Carol Later.",
+            subject_key="book one", attribute_key="author",  # SAME slot as A
+            source_episode_id=ep_id, source_ordinal=3,
+        ), session=session, precomputed_embedding=vec_c)
+
+        # Post-fix: C is routed + adjudicated against A (same slot, later
+        # ordinal wins) -- NOT blind-confirmed into B.
+        assert c.id != a.id and c.id != b.id
+        old = await _get_fact(heart, a.id, session)
+        new = await _get_fact(heart, c.id, session)
+        assert new.active and not old.active and old.superseded_by == new.id
+        # B is untouched -- it was never in C's conflict slot.
+        unrelated = await _get_fact(heart, b.id, session)
+        assert unrelated.active
+
 
 # codex P2 round 7: subject_key/attribute_key canonicalized at the FactInput
 # boundary ──────────────────────────────────────────────────────────────────

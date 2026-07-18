@@ -162,6 +162,7 @@ async def sqlite_find_duplicate(
     exclude_ids: list[UUID],
     session: AsyncSession,
     candidate_event_date=None,
+    prefer_slot: tuple[str, str] | None = None,
 ):
     """Pure-Python duplicate finding using cosine similarity.
 
@@ -171,6 +172,11 @@ async def sqlite_find_duplicate(
     back to the highest cosine. Without this preference, a March-10
     candidate could match a March-12 fact, trigger the F075 bypass, and
     insert a duplicate of an already-stored March-10 fact.
+
+    Codex r7: mirrors production's same-slot preference too — when
+    ``prefer_slot`` is set and any above-threshold match shares that
+    ``(subject_key, attribute_key)`` slot, restrict to those before applying
+    the date/cosine ordering above; otherwise fall back to the full set.
     """
     from nous.storage.models import Fact
 
@@ -198,11 +204,18 @@ async def sqlite_find_duplicate(
                 matches.append((date_match, sim, fact))
     if not matches:
         return None
+
+    candidates = matches
+    if prefer_slot is not None:
+        same_slot = [m for m in matches if (m[2].subject_key, m[2].attribute_key) == prefer_slot]
+        if same_slot:
+            candidates = same_slot
+
     # date-match first (True > False), then highest cosine
-    matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
+    candidates.sort(key=lambda m: (m[0], m[1]), reverse=True)
     # Audit S3: production now returns (fact, similarity) so _learn can
     # band-route the hit — mirror that contract.
-    return matches[0][2], matches[0][1]
+    return candidates[0][2], candidates[0][1]
 
 
 async def sqlite_find_contradiction(
