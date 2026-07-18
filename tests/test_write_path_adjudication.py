@@ -1687,11 +1687,70 @@ class TestGate1ContradictionOrderResolution:
         assert "settings.yaml" in p and "config.toml" in p  # replacement example
         assert "correct" not in _SUPERSESSION_CLASSIFIER_SCHEMA["properties"]["current_fact"]["description"]
 
-    async def test_legacy_subject_path_contradiction_keeps_both(self, heart, session, monkeypatch):
-        """Gate-1 D1 legacy path: R2 flag OFF (default) -> _supersede_by_subject.
-        A CONTRADICTION verdict must KEEP BOTH + flag (mirrors the keyed path),
-        not silently supersede with a wrong-type 'supersedes' edge — the old
-        fall-through behavior at the :1191-area unconditional supersede."""
+    async def test_legacy_subject_path_contradiction_resolves_by_order(self, heart, session, monkeypatch):
+        """Codex r10: the legacy _supersede_by_subject path (R2 flag OFF,
+        the prod default) is the ONLY write-time resolver for unkeyed
+        facts — it must not throw away ordering data it actually has. When
+        the two facts carry DIFFERING learned_at, CONTRADICTION now
+        resolves by statement order (later wins), via the SAME uniform
+        apply_supersession primitive the keyed paths use — not always
+        KEEP-BOTH+flag regardless of available ordering data. The
+        classifier's current_fact="old" verdict is advisory only and must
+        be ignored (same contract as the keyed paths)."""
+        from datetime import UTC, datetime, timedelta
+
+        from sqlalchemy import update as sa_update
+
+        monkeypatch.setattr(heart.facts, "_llm", MagicMock())  # truthy sentinel; classify is mocked below
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.9}),
+        )
+        anchor = _unit_vec(0)
+        candidate = _embedding_at_similarity(0.88)  # inside the 0.80-0.95 F027 band
+
+        old_r = await heart.learn(FactInput(
+            content="The office thermostat is set to seventy two degrees fahrenheit.",
+            subject="office thermostat",
+        ), session=session, precomputed_embedding=anchor)
+
+        # Backdate old_r BEFORE learning new_r, within the same ambient
+        # transaction, so _supersede_by_subject (which fires live during
+        # new_r's learn() call, below) sees genuinely differing learned_at —
+        # same-session learns otherwise share a transaction-constant "now()".
+        await session.execute(
+            sa_update(Fact).where(Fact.id == old_r.id).values(
+                learned_at=datetime.now(UTC) - timedelta(hours=1)
+            )
+        )
+        await session.flush()
+
+        new_r = await heart.learn(FactInput(
+            content="The office thermostat is set to sixty eight degrees fahrenheit.",
+            subject="office thermostat",
+        ), session=session, precomputed_embedding=candidate)
+
+        await session.flush()
+        old = await _get_fact(heart, old_r.id, session)
+        new = await _get_fact(heart, new_r.id, session)
+        assert new.active and new.superseded_by is None  # later-stated WINS
+        assert not old.active and old.superseded_by == new_r.id
+
+        edge_r = await session.execute(
+            select(GraphEdge)
+            .where(GraphEdge.source_id == new_r.id)
+            .where(GraphEdge.target_id == old_r.id)
+        )
+        relations = {e.relation for e in edge_r.scalars().all()}
+        assert "supersedes" in relations
+
+    async def test_legacy_subject_path_contradiction_keeps_both_when_unordered(self, heart, session, monkeypatch):
+        """Codex r10 sibling: when neither fact carries an ordering signal
+        (same-session learns share a transaction-constant learned_at, no
+        ordinals), _pick_contradiction_winner returns None and the legacy
+        path falls back to KEEP-BOTH + flag — not a silent supersede with a
+        wrong-type 'supersedes' edge (the pre-Gate-1 fall-through)."""
         monkeypatch.setattr(heart.facts, "_llm", MagicMock())  # truthy sentinel; classify is mocked below
         monkeypatch.setattr(
             heart.facts,
@@ -2006,8 +2065,30 @@ class TestGate1SameSlotDedupRouting:
         returns the closer B and the guard can't fire (subject_key
         mismatch), so C -- a genuine value-variant of A -- would blind-
         confirm into the unrelated B. Post-fix, A is preferred and C is
-        routed + adjudicated against it."""
+        routed + adjudicated against it.
+
+        Codex r10 (admission seam variant): B is a row _find_duplicate
+        itself examined and judged above the dedup threshold -- exactly as
+        close to C as the routed dupe A -- but r7's slot narrowing skips it.
+        Round-4's same-slot admission query can't see B either (different
+        slot). B must still land in the admission novelty exclusion via
+        probed_ids, or it could zero C's novelty term and get it
+        admission-rejected before R2 ever adjudicates it."""
         import math
+
+        from nous.heart.admission import AdmissionConfig, AdmissionController
+
+        heart.facts._admission_controller = AdmissionController(
+            config=AdmissionConfig(shadow_mode=False, utility_llm_enabled=False)
+        )
+        captured_excludes: list[list] = []
+        original_find_max = heart.facts._find_max_similarity
+
+        async def _capturing_find_max_similarity(embedding, exclude_ids, session):
+            captured_excludes.append(list(exclude_ids))
+            return await original_find_max(embedding, exclude_ids, session)
+
+        monkeypatch.setattr(heart.facts, "_find_max_similarity", _capturing_find_max_similarity)
 
         ep_id = await _insert_episode(session)
         vec_c = _unit_vec(0)
@@ -2018,13 +2099,23 @@ class TestGate1SameSlotDedupRouting:
         vec_b[0] = 0.99
         vec_b[1] = -math.sqrt(1.0 - 0.99 ** 2)  # opposite sign -> low sim(A, B)
 
+        # source_text=<own content> keeps the ROUGE-L confidence dimension
+        # near 1.0 now that a real AdmissionController is wired (the round-7
+        # version of this test predates admission scoring and had no
+        # controller attached) -- without it, _get_source_text falls back to
+        # _insert_episode's generic, content-unrelated summary and ROUGE-L
+        # collapses confidence to 0.0, dropping the composite below the
+        # 0.55 threshold and rejecting the fact outright.
+        a_content = "The author of Book One is Alice Prior."
+        b_content = "The author of Book Two is Bob Middle."
+        c_content = "The author of Book One is Carol Later."
         a = await heart.learn(FactInput(
-            content="The author of Book One is Alice Prior.",
+            content=a_content, source_text=a_content,
             subject_key="book one", attribute_key="author",
             source_episode_id=ep_id, source_ordinal=1,
         ), session=session, precomputed_embedding=vec_a)
         b = await heart.learn(FactInput(
-            content="The author of Book Two is Bob Middle.",
+            content=b_content, source_text=b_content,
             subject_key="book two", attribute_key="author",  # DIFFERENT slot
             source_episode_id=ep_id, source_ordinal=2,
         ), session=session, precomputed_embedding=vec_b)
@@ -2047,10 +2138,18 @@ class TestGate1SameSlotDedupRouting:
         monkeypatch.setattr(heart.facts, "_settings", s)
 
         c = await heart.learn(FactInput(
-            content="The author of Book One is Carol Later.",
+            content=c_content, source_text=c_content,
             subject_key="book one", attribute_key="author",  # SAME slot as A
             source_episode_id=ep_id, source_ordinal=3,
         ), session=session, precomputed_embedding=vec_c)
+
+        # Codex r10: check the admission-exclusion MECHANISM first,
+        # independent of C's eventual admit/reject outcome -- pre-fix, B (an
+        # above-threshold row slot narrowing skipped) is missing from the
+        # excludes, which can (and here does) get C admission-REJECTED
+        # outright; asserting on c.id first would mask this exact-mechanism
+        # check behind an AttributeError on FactRejected.
+        assert b.id in captured_excludes[-1]
 
         # Post-fix: C is routed + adjudicated against A (same slot, later
         # ordinal wins) -- NOT blind-confirmed into B.

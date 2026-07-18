@@ -163,6 +163,7 @@ async def sqlite_find_duplicate(
     session: AsyncSession,
     candidate_event_date=None,
     prefer_slot: tuple[str, str] | None = None,
+    probed_ids: list[UUID] | None = None,
 ):
     """Pure-Python duplicate finding using cosine similarity.
 
@@ -182,6 +183,10 @@ async def sqlite_find_duplicate(
     outranks same-slot narrowing (that identity claim wins regardless of
     slot); narrowing only decides among candidates when no row can claim
     the same event.
+
+    Codex r10: mirrors production's ``probed_ids`` out-param — populated
+    with every above-threshold match's id (not just the one returned) so
+    ``_learn`` can fold them all into the admission novelty exclusion.
     """
     from nous.storage.models import Fact
 
@@ -209,6 +214,8 @@ async def sqlite_find_duplicate(
                 matches.append((date_match, sim, fact))
     if not matches:
         return None
+    if probed_ids is not None:
+        probed_ids.extend(m[2].id for m in matches)
 
     # Codex r9: a same-date match outranks same-slot narrowing entirely.
     if candidate_event_date is not None:

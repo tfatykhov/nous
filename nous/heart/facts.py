@@ -699,6 +699,12 @@ class FactManager:
         band_dupe: Fact | None = None
         band_sim: float = 0.0
         routed_dupe_id: UUID | None = None  # Gate-1 D2: same-slot value-variant routed past dedup
+        # Codex r10: every above-threshold row _find_duplicate examines,
+        # regardless of which one it ultimately selects — used below to
+        # widen the admission novelty exclusion when D2 routing fires (a
+        # row r7's slot narrowing skipped is exactly as close to the
+        # candidate as the routed dupe, so it is equally non-novel context).
+        probed_ids: list[UUID] = []
         if embedding is not None:
             # Codex r7: tell the selector which slot the D2 guard cares about
             # so a cross-slot near-duplicate (closer in embedding space, but
@@ -722,6 +728,7 @@ class FactManager:
                 embedding, exclude_ids, session,
                 candidate_event_date=input.event_date,
                 prefer_slot=prefer_slot,
+                probed_ids=probed_ids,
             )
             if found is not None:
                 dupe, dupe_similarity = found
@@ -816,6 +823,14 @@ class FactManager:
             # still be the nearest active neighbor and zero novelty, so
             # correctness here must not depend on the cap — real conflict
             # clusters are small in practice.
+            #
+            # Codex r10: also union in probed_ids — every above-threshold
+            # row _find_duplicate examined, including ones r7's slot
+            # narrowing SKIPPED (e.g. a closer cross-slot row from a
+            # different conflict slot than the routed pair, which the
+            # same-slot query above can't see). Everything the dedup probe
+            # saw above threshold is definitionally non-novel context for a
+            # routed correction — none of it may zero the novelty term.
             if routed_dupe_id is not None:
                 same_slot_rows = await session.execute(
                     select(Fact.id)
@@ -827,7 +842,7 @@ class FactManager:
                     )
                 )
                 same_slot_ids = [row[0] for row in same_slot_rows.all()]
-                admission_excludes = list({*exclude_ids, routed_dupe_id, *same_slot_ids})
+                admission_excludes = list({*exclude_ids, routed_dupe_id, *same_slot_ids, *probed_ids})
             else:
                 admission_excludes = exclude_ids
             max_sim = await self._find_max_similarity(embedding, admission_excludes, session) if embedding else None
@@ -1309,17 +1324,31 @@ class FactManager:
                                     new_fact.active = False
                                 continue
                             if relation == "CONTRADICTION":
-                                # Gate-1 D1: this legacy path has no ordinal/
-                                # learned_at signal to order by (it only fires
-                                # for unkeyed facts or R2-off deployments) —
-                                # always KEEP BOTH + flag, same as
-                                # _pick_contradiction_winner's unordered
-                                # fallback. The old fall-through silently
-                                # superseded with a wrong-type 'supersedes' edge.
+                                # Gate-1 D1 (codex r10): the legacy path DOES
+                                # have ordering data whenever it's actually
+                                # present on the two rows (same-episode
+                                # source_ordinal, or differing learned_at) —
+                                # _pick_contradiction_winner resolves by
+                                # statement order exactly like the keyed
+                                # paths do. This is the ONLY write-time
+                                # resolver when R2 is off (the prod default),
+                                # so it must not discard ordering data it
+                                # has. KEEP-BOTH+flag only when neither fact
+                                # carries an ordering signal (the true
+                                # unordered case — _pick_contradiction_winner
+                                # returns None). The old fall-through silently
+                                # superseded with a wrong-type 'supersedes'
+                                # edge; this uses the same uniform primitive
+                                # (apply_supersession) the keyed paths use.
                                 new_fact = await self._get_fact_orm(new_fact_id, session)
                                 if new_fact is not None:
-                                    await self._flag_contradiction_pair(old, new_fact, session)
-                                continue  # keep-both; keep scanning remaining candidates
+                                    winner = self._pick_contradiction_winner(old, new_fact)
+                                    if winner is None:
+                                        await self._flag_contradiction_pair(old, new_fact, session)
+                                    else:
+                                        loser = old if winner is new_fact else new_fact
+                                        await self.apply_supersession(winner.id, loser.id, session)
+                                continue  # keep scanning remaining candidates
                             # UPDATE + current=="new" or unknown → fall through to supersede
 
                     old.active = False
@@ -1582,6 +1611,7 @@ class FactManager:
         session: AsyncSession,
         candidate_event_date: date | None = None,
         prefer_slot: tuple[str, str] | None = None,
+        probed_ids: list[UUID] | None = None,
     ) -> tuple[Fact, float] | None:
         """Find a near-duplicate fact by cosine similarity > threshold.
 
@@ -1634,7 +1664,17 @@ class FactManager:
         distinct-event bypass in ``_learn``, and INSERT a duplicate of the
         very row that should have been confirmed. Slot narrowing therefore
         only decides among candidates when no row can claim the same event.
-        """
+
+        Codex r10: ``probed_ids``, when passed, is populated (via
+        ``.extend()``) with the ids of EVERY row in the above-threshold set
+        — not just the one ``chosen`` — so ``_learn`` can fold them all into
+        the admission novelty exclusion when D2 routing fires. r7's slot
+        narrowing can leave a closer, above-threshold, cross-slot row
+        un-selected but still active; that row is exactly as close to the
+        candidate as the routed dupe (both cleared the dedup threshold), so
+        it is equally non-novel context for admission's purposes even though
+        it lost the slot-preference tiebreak. Every other caller passes
+        ``None`` and is unaffected."""
         embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
 
         # Build exclude clause (P1-2)
@@ -1677,6 +1717,8 @@ class FactManager:
         above = [r for r in result.all() if float(r.similarity) > threshold]
         if not above:
             return None
+        if probed_ids is not None:
+            probed_ids.extend(r.id for r in above)
 
         # Codex r9: check for a same-date match across the FULL above-threshold
         # set BEFORE any slot narrowing — a date match wins outright and skips
