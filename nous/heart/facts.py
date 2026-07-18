@@ -1624,6 +1624,16 @@ class FactManager:
         preferred; the EXISTING F075 date-preference logic then runs within
         that narrower subset unchanged. When no same-slot candidate exists,
         selection falls back to today's behavior exactly.
+
+        Codex r9: F075's date-match preference OUTRANKS r7's same-slot
+        narrowing. A same-date above-threshold candidate means "this exact
+        event is already stored," regardless of which conflict slot it sits
+        in (e.g. a pre-migration duplicate that is unkeyed or mis-keyed) —
+        that identity claim outranks slot identity. Applying slot narrowing
+        first could pick a same-slot-but-DIFFERENT-date row, trip the F075
+        distinct-event bypass in ``_learn``, and INSERT a duplicate of the
+        very row that should have been confirmed. Slot narrowing therefore
+        only decides among candidates when no row can claim the same event.
         """
         embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
 
@@ -1668,21 +1678,30 @@ class FactManager:
         if not above:
             return None
 
-        # Codex r7: restrict to same-slot candidates first when requested and
-        # any exist among the above-threshold set; otherwise fall back to the
-        # full set exactly as before prefer_slot existed.
-        candidates = above
-        if prefer_slot is not None:
-            same_slot = [r for r in above if (r.subject_key, r.attribute_key) == prefer_slot]
-            if same_slot:
-                candidates = same_slot
+        # Codex r9: check for a same-date match across the FULL above-threshold
+        # set BEFORE any slot narrowing — a date match wins outright and skips
+        # narrowing entirely (see docstring precedence).
+        date_match = next((r for r in above if r.event_date == candidate_event_date), None)
+        if candidate_event_date is not None and date_match is not None:
+            chosen = date_match
+        else:
+            # Codex r7: restrict to same-slot candidates first when requested
+            # and any exist among the above-threshold set; otherwise fall
+            # back to the full set exactly as before prefer_slot existed.
+            candidates = above
+            if prefer_slot is not None:
+                same_slot = [r for r in above if (r.subject_key, r.attribute_key) == prefer_slot]
+                if same_slot:
+                    candidates = same_slot
 
-        # F075 date preference in Python (rows are distance-ordered, so the
-        # first date-match is the nearest one; None == None is a match).
-        chosen = next(
-            (r for r in candidates if r.event_date == candidate_event_date),
-            candidates[0],
-        )
+            # F075 date preference in Python (rows are distance-ordered, so
+            # the first date-match is the nearest one; None == None is a
+            # match — meaningful here for an undated input against a
+            # narrowed same-slot subset).
+            chosen = next(
+                (r for r in candidates if r.event_date == candidate_event_date),
+                candidates[0],
+            )
 
         # Fetch the ORM object
         fact_result = await session.execute(select(Fact).where(Fact.id == chosen.id))

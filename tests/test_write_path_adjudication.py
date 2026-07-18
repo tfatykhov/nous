@@ -2062,6 +2062,48 @@ class TestGate1SameSlotDedupRouting:
         unrelated = await _get_fact(heart, b.id, session)
         assert unrelated.active
 
+    async def test_date_match_outranks_same_slot_narrowing_in_duplicate_selection(self, heart, session):
+        """Codex r9: F075's date-match preference must outrank r7's
+        same-slot narrowing. Migration shape: a legacy, UNKEYED fact L
+        already represents the March-10 event; same-slot fact S represents
+        a DIFFERENT (March-12) event and is CLOSER in cosine distance; an
+        incoming keyed candidate C is a March-10 duplicate whose embedding
+        clears the dedup threshold against both. Slot narrowing must NOT
+        pick S -- that would trip the F075 distinct-event bypass and INSERT
+        a second row for the same March-10 event instead of confirming
+        against L, which already claims that event regardless of slot."""
+        import math
+        from datetime import date
+
+        vec_c = _unit_vec(0)
+        vec_l = [0.0] * 1536
+        vec_l[0] = 0.97
+        vec_l[1] = math.sqrt(1.0 - 0.97 ** 2)
+        vec_s = [0.0] * 1536
+        vec_s[0] = 0.99
+        vec_s[1] = -math.sqrt(1.0 - 0.99 ** 2)  # opposite sign -> low mutual sim(L, S)
+
+        l = await heart.learn(FactInput(
+            content="The office received a security audit on March tenth.",
+            event_date=date(2026, 3, 10),
+        ), session=session, precomputed_embedding=vec_l)
+        s = await heart.learn(FactInput(
+            content="The office received a security audit on March twelfth.",
+            subject_key="office", attribute_key="security_audit",
+            event_date=date(2026, 3, 12),
+        ), session=session, precomputed_embedding=vec_s)
+        assert l.id != s.id  # sanity: seeding did not blind-merge L and S
+
+        c = await heart.learn(FactInput(
+            content="The office received a security audit on March tenth.",
+            subject_key="office", attribute_key="security_audit",
+            event_date=date(2026, 3, 10),
+        ), session=session, precomputed_embedding=vec_c)
+
+        # Post-fix: the date match on L wins outright -- C confirms into L,
+        # no new row for the same March-10 event.
+        assert c.id == l.id
+
 
 # codex P2 round 7: subject_key/attribute_key canonicalized at the FactInput
 # boundary ──────────────────────────────────────────────────────────────────

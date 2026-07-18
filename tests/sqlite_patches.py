@@ -177,6 +177,11 @@ async def sqlite_find_duplicate(
     ``prefer_slot`` is set and any above-threshold match shares that
     ``(subject_key, attribute_key)`` slot, restrict to those before applying
     the date/cosine ordering above; otherwise fall back to the full set.
+
+    Codex r9: mirrors production's precedence fix — a same-date match
+    outranks same-slot narrowing (that identity claim wins regardless of
+    slot); narrowing only decides among candidates when no row can claim
+    the same event.
     """
     from nous.storage.models import Fact
 
@@ -205,13 +210,21 @@ async def sqlite_find_duplicate(
     if not matches:
         return None
 
+    # Codex r9: a same-date match outranks same-slot narrowing entirely.
+    if candidate_event_date is not None:
+        date_matches = [m for m in matches if m[0]]
+        if date_matches:
+            date_matches.sort(key=lambda m: m[1], reverse=True)
+            return date_matches[0][2], date_matches[0][1]
+
     candidates = matches
     if prefer_slot is not None:
         same_slot = [m for m in matches if (m[2].subject_key, m[2].attribute_key) == prefer_slot]
         if same_slot:
             candidates = same_slot
 
-    # date-match first (True > False), then highest cosine
+    # date-match first (True > False, meaningful for the NULL==NULL
+    # undated-input case), then highest cosine
     candidates.sort(key=lambda m: (m[0], m[1]), reverse=True)
     # Audit S3: production now returns (fact, similarity) so _learn can
     # band-route the hit — mirror that contract.
