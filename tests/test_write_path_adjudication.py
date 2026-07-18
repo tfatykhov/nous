@@ -1410,6 +1410,70 @@ class TestGate1ContradictionOrderResolution:
             )
             assert edge_r.scalars().first() is not None
 
+    async def test_flag_contradiction_pair_converges_on_repeat_sweep(self, heart, monkeypatch):
+        """Final review C1: a KEEP-BOTH pair never sets superseded_by, so it
+        stays active and keeps re-surfacing to resolve_key_conflict_pair on
+        every later sleep sweep / backfill re-run. Calling it TWICE on the
+        same unordered pair must decrement confidence exactly ONCE (not
+        compound toward 0) and must not create a second contradicts edge."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy import update as sa_update
+
+        unique_agent = f"g1-{uuid4().hex[:8]}"
+        heart.facts.agent_id = unique_agent
+        heart.facts._settings = heart.facts._settings.model_copy(
+            update={"supersession_key_resolution_enabled": True}
+        )
+
+        f1 = await heart.learn(FactInput(
+            content="The warehouse shift schedule starts at six in the morning.",
+            subject_key="warehouse", attribute_key="shift_schedule",
+        ))
+        f2 = await heart.learn(FactInput(
+            content="The warehouse shift schedule starts at seven in the morning.",
+            subject_key="warehouse", attribute_key="shift_schedule",
+        ))
+
+        fixed_ts = datetime.now(UTC)
+        async with heart.db.session() as s:
+            await s.execute(
+                sa_update(Fact).where(Fact.id.in_([f1.id, f2.id])).values(learned_at=fixed_ts)
+            )
+            await s.commit()
+
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.95}),
+        )
+
+        result1 = await heart.facts.resolve_key_conflict_pair(f1.id, f2.id, f1.content, f2.content)
+        assert result1 is False  # KEEP-BOTH: no supersession written
+
+        old_after_first = await _get_fact(heart, f1.id)
+        assert old_after_first.confidence == pytest.approx(0.8)  # 1.0 - 0.2, decremented once
+
+        # Repeat sweep re-processes the same still-active, unresolved pair.
+        result2 = await heart.facts.resolve_key_conflict_pair(f1.id, f2.id, f1.content, f2.content)
+        assert result2 is False  # still KEEP-BOTH
+
+        old = await _get_fact(heart, f1.id)
+        new = await _get_fact(heart, f2.id)
+        assert old.active is True and new.active is True
+        assert old.confidence == pytest.approx(0.8)  # unchanged — converged, not re-decremented
+        assert new.contradiction_of == old.id
+
+        async with heart.db.session() as s:
+            edge_r = await s.execute(
+                select(GraphEdge)
+                .where(GraphEdge.source_id == f2.id)
+                .where(GraphEdge.target_id == f1.id)
+                .where(GraphEdge.relation == "contradicts")
+            )
+            edges = edge_r.scalars().all()
+            assert len(edges) == 1  # single edge, not duplicated on repeat
+
     def test_prompt_and_schema_debias_pins(self):
         from nous.heart.facts import _SUPERSESSION_CLASSIFIER_PROMPT_TEMPLATE, _SUPERSESSION_CLASSIFIER_SCHEMA
 

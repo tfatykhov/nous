@@ -417,7 +417,12 @@ class FactManager:
         """True when the same-slot pair differs in VALUE (route to conflict
         resolution); False when it is the same statement (confirm as dup).
         Fail-open TO STORE (True): dropping an update is silent data loss
-        (audit S1); a stored near-dup is recoverable by the sweep."""
+        (audit S1). A stored near-dup is only recoverable by the sleep sweep
+        when supersession_key_resolution_enabled (R2) is on — the sweep
+        early-returns as a no-op when R2 is off. With R2 off (and no
+        input.subject to engage the legacy _supersede_by_subject path), the
+        pair simply accumulates KEEP-BOTH, unflagged — fail-safe (existence
+        preserved, unmerged) rather than recovered."""
         folded_in = " ".join(input.content.lower().split())
         folded_dupe = " ".join((dupe.content or "").lower().split())
         if folded_in == folded_dupe:
@@ -725,10 +730,17 @@ class FactManager:
                     # F027/F084 resolver. The blind-confirm at similarity >= 0.95
                     # (CONTRADICTION_SIMILARITY_MAX) was silently swallowing exactly
                     # these (39pp of MAB answer statements). Fall through to INSERT;
-                    # adjudication happens in _resolve_key_conflicts (R2 flag on) or
-                    # the sleep sweep (flag off). The dupe is shielded ONLY from
-                    # _find_contradiction re-processing (safe_excludes below) — it
-                    # MUST remain visible to _resolve_key_conflicts.
+                    # with R2 (supersession_key_resolution_enabled) on, adjudication
+                    # happens in _resolve_key_conflicts below. With R2 OFF, the sleep
+                    # sweep (_phase_sweep_key_conflicts) does NOT recover this pair —
+                    # it early-returns when the flag is off — so resolution falls to
+                    # the legacy _supersede_by_subject path, and only when the caller
+                    # also set input.subject (later wins); if neither applies, the
+                    # pair simply accumulates KEEP-BOTH, unflagged. Fail-safe: this
+                    # still beats the pre-fix silent swallow — both facts exist and
+                    # are retrievable, they are just unmerged. The dupe is shielded
+                    # ONLY from _find_contradiction re-processing (safe_excludes
+                    # below) — it MUST remain visible to _resolve_key_conflicts.
                     routed_dupe_id = dupe.id
                 else:
                     band_action = await self._classify_dupe_in_band(
@@ -2330,7 +2342,17 @@ class FactManager:
         exactly (unconditional contradiction_of assignment + contradicts edge +
         the same -0.2 confidence decrement on the OLDER fact), so all keep-both
         sites behave uniformly (review store-P2 + devil-P3-2: match existing,
-        don't innovate)."""
+        don't innovate).
+
+        Final review C1: a KEEP-BOTH pair never sets superseded_by, so it stays
+        active and keeps re-surfacing to this same code path on every later
+        sleep sweep / backfill re-run (find_key_conflict_pairs has no
+        already-flagged exclusion and the sweep cursor wraps). Without a
+        convergence guard, each re-run re-decrements `a.confidence` by another
+        -0.2, compounding toward 0. Idempotent: a repeat call for an
+        already-flagged pair is a no-op."""
+        if b.contradiction_of == a.id:
+            return  # already flagged by a prior pass — converge, don't re-decrement
         b.contradiction_of = a.id
         a.confidence = max(0.0, (a.confidence or 1.0) - 0.2)
         await self._create_graph_edge(b.id, a.id, "fact", "fact", "contradicts", 1.0, session)
