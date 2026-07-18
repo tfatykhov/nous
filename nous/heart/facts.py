@@ -2574,10 +2574,11 @@ class FactManager:
 
     async def _flag_contradiction_pair(self, a: Fact, b: Fact, session: AsyncSession) -> None:
         """KEEP-BOTH marking — mirrors _find_contradiction's flag primitives
-        exactly (unconditional contradiction_of assignment + contradicts edge +
-        the same -0.2 confidence decrement on the OLDER fact), so all keep-both
-        sites behave uniformly (review store-P2 + devil-P3-2: match existing,
-        don't innovate).
+        (contradiction_of assignment + contradicts edge + the same -0.2
+        confidence decrement on the OLDER fact), so all keep-both sites
+        behave uniformly (review store-P2 + devil-P3-2: match existing,
+        don't innovate). See r13 below: the column assignment is scoped to
+        first-flag only, not unconditional.
 
         Final review C1: a KEEP-BOTH pair never sets superseded_by, so it stays
         active and keeps re-surfacing to this same code path on every later
@@ -2604,11 +2605,12 @@ class FactManager:
         rollback, since a re-run would hit the (still-set) column fast path
         and exit before ever touching the edge table. The -0.2 decrement is
         the only ONE-TIME effect and stays gated on `already_flagged`
-        (column OR edge — either proves a prior pass); the column
-        assignment and edge creation now run UNCONDITIONALLY every call —
-        both are idempotent (column: same-value reassignment; edge:
-        on_conflict_do_nothing) — so a rolled-back edge is recreated on the
-        next pass while confidence is never touched twice.
+        (column OR edge — either proves a prior pass); edge creation runs
+        UNCONDITIONALLY every call — idempotent via on_conflict_do_nothing —
+        so a rolled-back edge is recreated on the next pass while confidence
+        is never touched twice. (The column assignment was ALSO
+        unconditional at this point in the file's history; r13 below moved
+        it inside the `not already_flagged` guard — see that note for why.)
 
         Codex r12: a sweep revisit can present the SAME pair with (a, b)
         roles REVERSED from the original flagging call (equal-learned_at
@@ -2621,7 +2623,21 @@ class FactManager:
         contradicts edge in the opposite direction. Edge existence is now
         always computed once and used to gate the edge write directly; the
         confidence-decrement guard is unchanged (column match OR edge
-        exists, either direction)."""
+        exists, either direction).
+
+        Codex r13: the column write had the SAME reverse-revisit bug as r12's
+        edge write, and for a different reason — a reversed-roles revisit
+        also sets `b.contradiction_of = a.id` unconditionally, which (with
+        a/b swapped) points the OTHER fact back at the first, leaving both
+        facts pointing at each other on what should be an idempotent no-op.
+        Unlike the edge, the column never needs repair-on-revisit: rollback
+        (backfill_supersession.py) deletes `contradicts` edges but leaves
+        `contradiction_of` as accepted residue, so it is never cleared and
+        never needs recreating. Writing it ONLY on first flag (inside
+        `not already_flagged`) makes a reverse revisit a true no-op while
+        still preserving r1's cluster semantics: a genuinely NEW pair (no
+        column match, no edge) still decrements and the column still
+        reflects last-writer-wins across a cluster."""
         column_match = b.contradiction_of == a.id
         existing = await session.execute(
             select(GraphEdge.id)
@@ -2644,7 +2660,7 @@ class FactManager:
             # confidence must stay there.
             base = 1.0 if a.confidence is None else a.confidence
             a.confidence = max(0.0, base - 0.2)
-        b.contradiction_of = a.id
+            b.contradiction_of = a.id
         if not edge_exists:
             await self._create_graph_edge(b.id, a.id, "fact", "fact", "contradicts", 1.0, session)
 

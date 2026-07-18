@@ -1641,7 +1641,13 @@ class TestGate1ContradictionOrderResolution:
         whatever (b, a) direction THIS call uses. A reversed-roles revisit
         therefore fell through to an unconditional write in the OPPOSITE
         direction from the original edge, creating a second, duplicate
-        contradicts edge for one pair."""
+        contradicts edge for one pair.
+
+        Codex r13: the column write had the same bug — a reversed-roles
+        revisit unconditionally set THIS call's b.contradiction_of = a.id,
+        which (with a/b swapped) pointed f1 back at f2 in addition to f2's
+        original pointer at f1, leaving both facts pointing at each other on
+        what should be an idempotent no-op."""
         from datetime import UTC, datetime
 
         from sqlalchemy import and_, or_
@@ -1689,6 +1695,13 @@ class TestGate1ContradictionOrderResolution:
         f2_after = await _get_fact(heart, f2.id)
         assert f1_after.confidence == pytest.approx(0.8)  # decremented exactly once
         assert f2_after.confidence == pytest.approx(1.0)  # never the "a" (older) role -- untouched
+
+        # Codex r13: the reversed revisit must be a true no-op on the column
+        # too -- only f2 (the original "b") points at f1; f1 must NOT also
+        # point back at f2 just because a later call flagged the pair with
+        # roles reversed.
+        assert f2_after.contradiction_of == f1.id
+        assert f1_after.contradiction_of is None
 
         async with heart.db.session() as s:
             edge_r = await s.execute(
