@@ -2486,7 +2486,12 @@ class FactManager:
             )
             already_flagged = existing.first() is not None
         if not already_flagged:
-            a.confidence = max(0.0, (a.confidence or 1.0) - 0.2)
+            # Codex r8: `a.confidence or 1.0` treats a legitimate 0.0 as
+            # missing and RAISES it to 0.8 on flagging. `is None` is the
+            # correct missing-value check; a fact that is already at 0.0
+            # confidence must stay there.
+            base = 1.0 if a.confidence is None else a.confidence
+            a.confidence = max(0.0, base - 0.2)
         b.contradiction_of = a.id
         await self._create_graph_edge(b.id, a.id, "fact", "fact", "contradicts", 1.0, session)
 
@@ -3395,7 +3400,13 @@ class FactManager:
         sql = text(f"""
             SELECT f1.id AS fact1_id, f2.id AS fact2_id,
                    f1.content AS content1, f2.content AS content2,
-                   f1.created_at AS date1, f2.created_at AS date2,
+                   -- Codex r8: learned_at, not created_at -- the statement-order
+                   -- resolver prompt (and all Gate-1 order semantics) key on
+                   -- learned_at. A backfilled/imported fact's created_at is
+                   -- insertion time, which can differ from when the statement
+                   -- was actually made, letting the resolver supersede the
+                   -- real later correction based on the wrong clock.
+                   f1.learned_at AS date1, f2.learned_at AS date2,
                    f1.subject AS subject, f1.category AS category,
                    1 - (f1.embedding <=> f2.embedding) AS similarity
             FROM heart.facts f1

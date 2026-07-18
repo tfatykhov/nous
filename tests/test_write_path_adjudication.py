@@ -1630,6 +1630,54 @@ class TestGate1ContradictionOrderResolution:
             edges = edge_r.scalars().all()
             assert len(edges) == 1  # edge recreated
 
+    async def test_flag_contradiction_pair_preserves_explicit_zero_confidence(self, heart, monkeypatch):
+        """Codex r8: `a.confidence or 1.0` treats a legitimate 0.0 as missing
+        and RAISES it to 0.8 on flagging -- `is None` is the correct
+        missing-value check. An older fact already at 0.0 confidence must
+        stay at 0.0 after a keep-both flag, not jump up to 0.8."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy import update as sa_update
+
+        unique_agent = f"g1-{uuid4().hex[:8]}"
+        heart.facts.agent_id = unique_agent
+        heart.facts._settings = heart.facts._settings.model_copy(
+            update={"supersession_key_resolution_enabled": True}
+        )
+
+        f1 = await heart.learn(FactInput(
+            content="The warehouse loading dock closes at six in the evening.",
+            subject_key="warehouse", attribute_key="dock_hours",
+        ))
+        f2 = await heart.learn(FactInput(
+            content="The warehouse loading dock closes at seven in the evening.",
+            subject_key="warehouse", attribute_key="dock_hours",
+        ))
+
+        fixed_ts = datetime.now(UTC)
+        async with heart.db.session() as s:
+            await s.execute(
+                sa_update(Fact).where(Fact.id.in_([f1.id, f2.id])).values(learned_at=fixed_ts)
+            )
+            # f1 already carries a legitimate 0.0 confidence (e.g. from a
+            # prior contradiction decrement floor) BEFORE this flag pass.
+            await s.execute(
+                sa_update(Fact).where(Fact.id == f1.id).values(confidence=0.0)
+            )
+            await s.commit()
+
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.95}),
+        )
+
+        result = await heart.facts.resolve_key_conflict_pair(f1.id, f2.id, f1.content, f2.content)
+        assert result is False  # KEEP-BOTH
+
+        f1_after = await _get_fact(heart, f1.id)
+        assert f1_after.confidence == pytest.approx(0.0)  # NOT raised to 0.8
+
     def test_prompt_and_schema_debias_pins(self):
         from nous.heart.facts import _SUPERSESSION_CLASSIFIER_PROMPT_TEMPLATE, _SUPERSESSION_CLASSIFIER_SCHEMA
 

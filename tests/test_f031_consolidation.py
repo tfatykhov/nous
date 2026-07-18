@@ -854,6 +854,71 @@ async def test_contradiction_prompt_includes_full_timestamps_for_same_day_pairs(
     assert "2026-03-01" not in sent_prompt.replace(morning_str, "").replace(evening_str, "")
 
 
+@pytest.mark.postgres_only
+async def test_find_contradiction_candidates_returns_learned_at_not_created_at(heart, session):
+    """Codex r8: the candidate query must source learned_at, not created_at --
+    a backfilled/imported fact's created_at (insertion time) can diverge from
+    when the statement was actually made, letting the statement-order
+    resolver supersede the real later correction based on the wrong clock.
+    Seed two same-subject, similar facts whose created_at ORDER INVERTS
+    their learned_at order; the returned date1/date2 must match learned_at,
+    not created_at."""
+    import math
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update as sa_update
+
+    from nous.storage.models import Fact
+
+    vec_a = [0.0] * 1536
+    vec_a[0] = 1.0
+    vec_b = [0.0] * 1536
+    vec_b[0] = 0.85
+    vec_b[1] = math.sqrt(1.0 - 0.85 ** 2)  # cosine 0.85 vs vec_a -- inside the 0.75-0.95 band
+
+    # check_contradictions=False: the test heart has no LLM configured, so
+    # the LEGACY _supersede_by_subject path (unrelated to this test -- it
+    # keys on Fact.subject, gated separately from F031's candidate finder)
+    # would blindly deactivate f1 at write time (similarity 0.85 clears its
+    # 0.80 threshold with no classifier to disambiguate). Disabling
+    # write-time contradiction work keeps both facts active so the
+    # sleep-cycle find_contradiction_candidates() query under test actually
+    # has a live pair to find.
+    f1 = await heart.facts.learn(FactInput(
+        content="Tim's current timezone setting is Eastern Standard Time.", subject="tim timezone",
+    ), session=session, precomputed_embedding=vec_a, check_contradictions=False)
+    f2 = await heart.facts.learn(FactInput(
+        content="Tim's current timezone setting is Pacific Standard Time.", subject="tim timezone",
+    ), session=session, precomputed_embedding=vec_b, check_contradictions=False)
+
+    # Invert: f1's created_at is LATER than f2's, but f1's learned_at is
+    # EARLIER than f2's -- created_at order and learned_at order disagree.
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    await session.execute(
+        sa_update(Fact).where(Fact.id == f1.id).values(
+            created_at=base + timedelta(hours=2), learned_at=base,
+        )
+    )
+    await session.execute(
+        sa_update(Fact).where(Fact.id == f2.id).values(
+            created_at=base, learned_at=base + timedelta(hours=2),
+        )
+    )
+    await session.flush()
+
+    candidates = await heart.facts.find_contradiction_candidates(limit=10, session=session)
+    assert len(candidates) == 1
+    pair = candidates[0]
+
+    learned_at_by_id = {f1.id: base, f2.id: base + timedelta(hours=2)}
+    created_at_by_id = {f1.id: base + timedelta(hours=2), f2.id: base}
+    assert pair["date1"] == learned_at_by_id[pair["fact1_id"]]
+    assert pair["date2"] == learned_at_by_id[pair["fact2_id"]]
+    # Sanity: NOT the (deliberately inverted) created_at value.
+    assert pair["date1"] != created_at_by_id[pair["fact1_id"]]
+    assert pair["date2"] != created_at_by_id[pair["fact2_id"]]
+
+
 # ===========================================================================
 # Task 3b: Sleep cycle integration
 # ===========================================================================
