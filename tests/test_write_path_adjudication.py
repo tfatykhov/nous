@@ -1474,6 +1474,81 @@ class TestGate1ContradictionOrderResolution:
             edges = edge_r.scalars().all()
             assert len(edges) == 1  # single edge, not duplicated on repeat
 
+    async def test_flag_contradiction_pair_converges_on_cluster(self, heart, monkeypatch):
+        """Codex r1: the column-only guard (b.contradiction_of == a.id) forgets
+        pairs in a 3+ fact cluster. Seed A, B, C same-slot, all unordered (equal
+        learned_at). Flag (A, C) then (B, C) — the second call OVERWRITES
+        C.contradiction_of from A.id to B.id, so a naive column-only check on a
+        THIRD call re-processing (A, C) would no longer see the earlier flag
+        and would re-decrement A.confidence. The edge-based idempotence check
+        must catch this via the existing contradicts edge (either direction)."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy import update as sa_update
+
+        unique_agent = f"g1-{uuid4().hex[:8]}"
+        heart.facts.agent_id = unique_agent
+        heart.facts._settings = heart.facts._settings.model_copy(
+            update={"supersession_key_resolution_enabled": True}
+        )
+
+        a = await heart.learn(FactInput(
+            content="The team standup meeting time is nine in the morning.",
+            subject_key="team", attribute_key="standup_time",
+        ))
+        b = await heart.learn(FactInput(
+            content="The team standup meeting time is ten in the morning.",
+            subject_key="team", attribute_key="standup_time",
+        ))
+        c = await heart.learn(FactInput(
+            content="The team standup meeting time is eleven in the morning.",
+            subject_key="team", attribute_key="standup_time",
+        ))
+
+        fixed_ts = datetime.now(UTC)
+        async with heart.db.session() as s:
+            await s.execute(
+                sa_update(Fact).where(Fact.id.in_([a.id, b.id, c.id])).values(learned_at=fixed_ts)
+            )
+            await s.commit()
+
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.95}),
+        )
+
+        # (A, C): flags C.contradiction_of -> A, decrements A, writes edge C->A.
+        r1 = await heart.facts.resolve_key_conflict_pair(a.id, c.id, a.content, c.content)
+        assert r1 is False
+
+        # (B, C): C.contradiction_of currently points at A (not B), so the
+        # column fast path misses and this proceeds — OVERWRITING
+        # C.contradiction_of -> B, decrementing B, writing edge C->B.
+        r2 = await heart.facts.resolve_key_conflict_pair(b.id, c.id, b.content, c.content)
+        assert r2 is False
+
+        # (A, C) AGAIN: the column now points at B, not A — the column-only
+        # fast path can't catch this repeat. The edge-based check must.
+        r3 = await heart.facts.resolve_key_conflict_pair(a.id, c.id, a.content, c.content)
+        assert r3 is False
+
+        fa = await _get_fact(heart, a.id)
+        fb = await _get_fact(heart, b.id)
+        fc = await _get_fact(heart, c.id)
+        assert fa.confidence == pytest.approx(0.8)  # decremented exactly once, not compounded
+        assert fb.confidence == pytest.approx(0.8)  # decremented exactly once
+        assert fc.confidence == pytest.approx(1.0)  # C is never the "a" (older) side — untouched
+
+        async with heart.db.session() as s:
+            edge_r = await s.execute(
+                select(GraphEdge)
+                .where(GraphEdge.agent_id == unique_agent)
+                .where(GraphEdge.relation == "contradicts")
+            )
+            edges = edge_r.scalars().all()
+            assert len(edges) == 2  # C->A and C->B only; the third call created no new edge
+
     def test_prompt_and_schema_debias_pins(self):
         from nous.heart.facts import _SUPERSESSION_CLASSIFIER_PROMPT_TEMPLATE, _SUPERSESSION_CLASSIFIER_SCHEMA
 

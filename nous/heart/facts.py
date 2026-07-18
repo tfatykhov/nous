@@ -13,7 +13,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -2350,9 +2350,33 @@ class FactManager:
         already-flagged exclusion and the sweep cursor wraps). Without a
         convergence guard, each re-run re-decrements `a.confidence` by another
         -0.2, compounding toward 0. Idempotent: a repeat call for an
-        already-flagged pair is a no-op."""
+        already-flagged pair is a no-op.
+
+        Codex r1: the column-only guard above forgets pairs in a 3+ fact
+        cluster — `contradiction_of` is a single-valued column, so flagging
+        (B, C) after (A, C) overwrites C's column from A.id to B.id; a later
+        re-scan of (A, C) then sees a column mismatch and would re-decrement
+        A.confidence. A `contradicts` edge is written for EVERY flagged pair
+        and is never overwritten, so it is the authoritative idempotence
+        check — query it in EITHER direction. The column check stays as a
+        cheap fast path for the common single-pair case; the edge query is
+        the correctness backstop for clusters."""
         if b.contradiction_of == a.id:
-            return  # already flagged by a prior pass — converge, don't re-decrement
+            return  # fast path: common single-pair case
+        existing = await session.execute(
+            select(GraphEdge.id)
+            .where(GraphEdge.agent_id == self.agent_id)
+            .where(GraphEdge.relation == "contradicts")
+            .where(
+                or_(
+                    and_(GraphEdge.source_id == b.id, GraphEdge.target_id == a.id),
+                    and_(GraphEdge.source_id == a.id, GraphEdge.target_id == b.id),
+                )
+            )
+            .limit(1)
+        )
+        if existing.first() is not None:
+            return  # pair already flagged in a prior pass (cluster case: column may point elsewhere)
         b.contradiction_of = a.id
         a.confidence = max(0.0, (a.confidence or 1.0) - 0.2)
         await self._create_graph_edge(b.id, a.id, "fact", "fact", "contradicts", 1.0, session)
