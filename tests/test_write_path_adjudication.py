@@ -1784,6 +1784,94 @@ class TestGate1ContradictionOrderResolution:
         assert "supersedes" not in relations
         assert "contradicts" in relations
 
+    async def test_keep_both_pair_excluded_from_post_insert_contradiction_scan(self, heart, session, monkeypatch):
+        """Codex r11 FIX 1: a pair the legacy subject path just flagged
+        KEEP-BOTH must not be visible to the post-insert _find_contradiction
+        scan that runs immediately afterward in the same learn() call. Pre-
+        fix, old.id was absent from safe_excludes, so _find_contradiction
+        re-discovered the SAME pair (same 0.85-0.95 band) and re-ran its own
+        inline CONTRADICTION handling — decrementing old.confidence a SECOND
+        time (1.0 -> 0.8 -> 0.6) even though the pair was already flagged
+        once by _supersede_by_subject."""
+        monkeypatch.setattr(heart.facts, "_llm", MagicMock())  # truthy sentinel; classify is mocked below
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.9}),
+        )
+        anchor = _unit_vec(0)
+        candidate = _embedding_at_similarity(0.88)  # inside the 0.80-0.95 F027 band
+
+        old_r = await heart.learn(FactInput(
+            content="The office thermostat is set to seventy two degrees fahrenheit.",
+            subject="office thermostat",
+        ), session=session, precomputed_embedding=anchor)
+        new_r = await heart.learn(FactInput(
+            content="The office thermostat is set to sixty eight degrees fahrenheit.",
+            subject="office thermostat",
+        ), session=session, precomputed_embedding=candidate)
+
+        await session.flush()
+        old = await _get_fact(heart, old_r.id, session)
+        new = await _get_fact(heart, new_r.id, session)
+        assert old.active and new.active  # unordered -> KEEP-BOTH
+        assert new.contradiction_of == old.id
+        assert old.confidence == pytest.approx(0.8), (
+            "old fact must be decremented exactly ONCE by the legacy KEEP-BOTH "
+            "flag — a second decrement means the post-insert scan re-matched "
+            "the same already-flagged pair"
+        )
+
+        edge_r = await session.execute(
+            select(GraphEdge)
+            .where(GraphEdge.source_id == new_r.id)
+            .where(GraphEdge.target_id == old_r.id)
+            .where(GraphEdge.relation == "contradicts")
+        )
+        assert len(edge_r.scalars().all()) == 1
+
+    async def test_legacy_path_loss_skips_contradiction_scan(self, heart, session, monkeypatch):
+        """Codex r11 FIX 2: mirrors test_resolve_key_conflicts_loss_skips_
+        contradiction_scan for the LEGACY _supersede_by_subject path (R2
+        off, the prod default). When the NEW fact loses statement-order
+        resolution (lower source_ordinal, same episode as the existing
+        fact), _find_contradiction must not fire against the now-inactive
+        loser."""
+        monkeypatch.setattr(heart.facts, "_llm", MagicMock())  # truthy sentinel; classify is mocked below
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.9}),
+        )
+        ep_id = await _insert_episode(session)
+        anchor = _unit_vec(0)
+        candidate = _embedding_at_similarity(0.88)  # inside the 0.80-0.95 F027 band
+
+        old_r = await heart.learn(FactInput(
+            content="The office thermostat is set to seventy two degrees fahrenheit.",
+            subject="office thermostat",
+            source_episode_id=ep_id, source_ordinal=200,
+        ), session=session, precomputed_embedding=anchor)
+
+        # current_fact is ignored for CONTRADICTION -- old wins via the
+        # LOWER ordinal on the new fact below, not this verdict.
+        find_contradiction_sentinel = AsyncMock(return_value=None)
+        monkeypatch.setattr(heart.facts, "_find_contradiction", find_contradiction_sentinel)
+
+        new_r = await heart.learn(FactInput(
+            content="The office thermostat is set to sixty eight degrees fahrenheit.",
+            subject="office thermostat",
+            source_episode_id=ep_id, source_ordinal=100,  # LOWER than old's 200 -> new fact loses
+        ), session=session, precomputed_embedding=candidate)
+
+        find_contradiction_sentinel.assert_not_called()
+
+        await session.flush()
+        new_row = await session.get(Fact, new_r.id)
+        assert new_row.active is False or new_row.superseded_by is not None, (
+            "new fact must be inactive after losing legacy order resolution"
+        )
+
 
 # Gate-1 D2 ───────────────────────────────────────────────────────────────────
 # Same-slot value variants must route to conflict resolution, never
@@ -2201,6 +2289,47 @@ class TestGate1SameSlotDedupRouting:
 
         # Post-fix: the date match on L wins outright -- C confirms into L,
         # no new row for the same March-10 event.
+        assert c.id == l.id
+
+    async def test_null_date_match_outranks_same_slot_narrowing_when_candidate_undated(self, heart, session):
+        """Codex r11 FIX 3: r9's date-match preference only fired when
+        candidate_event_date is not None, so an UNDATED candidate with a
+        genuinely undated (NULL==NULL) duplicate elsewhere in the above-
+        threshold set could still be masked by a DATED same-slot variant.
+        Migration shape: a legacy, unkeyed fact L is the true (undated)
+        duplicate; same-slot fact S claims a specific (unrelated) date and
+        is CLOSER in cosine distance. Slot narrowing must not pick S over
+        L just because the candidate itself carries no date to disqualify
+        S outright — S's own specific date, with no counterpart on the
+        undated candidate, is not a confirmable match."""
+        import math
+        from datetime import date
+
+        vec_c = _unit_vec(0)
+        vec_l = [0.0] * 1536
+        vec_l[0] = 0.97
+        vec_l[1] = math.sqrt(1.0 - 0.97 ** 2)
+        vec_s = [0.0] * 1536
+        vec_s[0] = 0.99
+        vec_s[1] = -math.sqrt(1.0 - 0.99 ** 2)  # opposite sign -> low mutual sim(L, S)
+
+        l = await heart.learn(FactInput(
+            content="The office thermostat schedule was reset to factory defaults.",
+        ), session=session, precomputed_embedding=vec_l)  # legacy, unkeyed, undated
+        s = await heart.learn(FactInput(
+            content="The office thermostat schedule changed for the holiday season.",
+            subject_key="office", attribute_key="thermostat_schedule",
+            event_date=date(2026, 3, 12),
+        ), session=session, precomputed_embedding=vec_s)  # same slot as C, but DATED
+        assert l.id != s.id  # sanity: seeding did not blind-merge L and S
+
+        c = await heart.learn(FactInput(
+            content="The office thermostat schedule was reset to factory defaults.",
+            subject_key="office", attribute_key="thermostat_schedule",
+        ), session=session, precomputed_embedding=vec_c)  # undated candidate, same slot as S
+
+        # Post-fix: L (the true undated duplicate) wins outright over S (a
+        # date-incompatible same-slot variant) -- C confirms into L.
         assert c.id == l.id
 
 

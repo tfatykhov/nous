@@ -187,6 +187,12 @@ async def sqlite_find_duplicate(
     Codex r10: mirrors production's ``probed_ids`` out-param — populated
     with every above-threshold match's id (not just the one returned) so
     ``_learn`` can fold them all into the admission novelty exclusion.
+
+    Codex r11: mirrors production's fix for an UNDATED candidate — same-slot
+    narrowing now only keeps date-compatible rows (undated, or an exact
+    match); if none qualify, widen to a date-compatible row anywhere in the
+    full above-threshold set before falling back to legacy (unfiltered)
+    slot narrowing.
     """
     from nous.storage.models import Fact
 
@@ -228,7 +234,15 @@ async def sqlite_find_duplicate(
     if prefer_slot is not None:
         same_slot = [m for m in matches if (m[2].subject_key, m[2].attribute_key) == prefer_slot]
         if same_slot:
-            candidates = same_slot
+            # Codex r11 FIX 3: same-slot rows with an incompatible SPECIFIC
+            # date (m[0] False and event_date not None) must not mask a
+            # genuine date-compatible duplicate elsewhere in the full set.
+            date_compatible_same_slot = [m for m in same_slot if m[0] or m[2].event_date is None]
+            if date_compatible_same_slot:
+                candidates = date_compatible_same_slot
+            else:
+                full_compatible = [m for m in matches if m[0] or m[2].event_date is None]
+                candidates = full_compatible if full_compatible else same_slot
 
     # date-match first (True > False, meaningful for the NULL==NULL
     # undated-input case), then highest cosine
