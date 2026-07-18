@@ -1970,6 +1970,106 @@ class TestGate1ContradictionOrderResolution:
         assert "supersedes" not in relations
         assert "contradicts" in relations
 
+    async def test_pick_contradiction_winner_equal_ordinals_keeps_both(self, heart, session, monkeypatch):
+        """Codex r15: EQUAL same-episode ordinals (e.g. a re-extraction or
+        backfill run assigning duplicate positional ordinals) carry no order
+        signal. The prior `>=` comparison crowned new_fact on a tie, making
+        resolution a coin-flip on call/UUID order -- exactly the corruption
+        class Gate-1 D1 removes. Equal ordinals + equal learned_at (the
+        natural same-session-transaction value) must fall through all the
+        way to None (KEEP-BOTH + flag), not silently supersede."""
+        monkeypatch.setattr(heart.facts, "_llm", MagicMock())  # truthy sentinel; classify is mocked below
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.9}),
+        )
+        ep_id = await _insert_episode(session)
+        anchor = _unit_vec(0)
+        candidate = _embedding_at_similarity(0.88)  # inside the 0.80-0.95 F027 band
+
+        old_r = await heart.learn(FactInput(
+            content="The office thermostat is set to seventy two degrees fahrenheit.",
+            subject="office thermostat",
+            source_episode_id=ep_id, source_ordinal=5,
+        ), session=session, precomputed_embedding=anchor)
+        new_r = await heart.learn(FactInput(
+            content="The office thermostat is set to sixty eight degrees fahrenheit.",
+            subject="office thermostat",
+            source_episode_id=ep_id, source_ordinal=5,  # SAME ordinal as old -- no order signal
+        ), session=session, precomputed_embedding=candidate)
+
+        await session.flush()
+        old = await _get_fact(heart, old_r.id, session)
+        new = await _get_fact(heart, new_r.id, session)
+        assert old.active and new.active  # KEEP-BOTH -- equal ordinal is NOT an order signal
+        assert new.contradiction_of == old.id
+
+        edge_r = await session.execute(
+            select(GraphEdge)
+            .where(GraphEdge.source_id == new_r.id)
+            .where(GraphEdge.target_id == old_r.id)
+        )
+        relations = {e.relation for e in edge_r.scalars().all()}
+        assert "supersedes" not in relations
+        assert "contradicts" in relations
+
+    async def test_pick_contradiction_winner_equal_ordinals_falls_through_to_learned_at(self, heart, session, monkeypatch):
+        """Codex r15 sibling: equal same-episode ordinals fall through to the
+        learned_at tiebreak (not straight to None) when learned_at actually
+        differs -- the later-stated fact still wins by genuine testimony
+        order, just via the next signal in the precedence chain rather than
+        position."""
+        from datetime import UTC, datetime, timedelta
+
+        from sqlalchemy import update as sa_update
+
+        monkeypatch.setattr(heart.facts, "_llm", MagicMock())  # truthy sentinel; classify is mocked below
+        monkeypatch.setattr(
+            heart.facts,
+            "_classify_fact_pair",
+            AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.9}),
+        )
+        ep_id = await _insert_episode(session)
+        anchor = _unit_vec(0)
+        candidate = _embedding_at_similarity(0.88)  # inside the 0.80-0.95 F027 band
+
+        old_r = await heart.learn(FactInput(
+            content="The office thermostat is set to seventy two degrees fahrenheit.",
+            subject="office thermostat",
+            source_episode_id=ep_id, source_ordinal=5,
+        ), session=session, precomputed_embedding=anchor)
+
+        # Backdate old_r so learned_at genuinely differs once the ordinal
+        # tie falls through (same-session learns otherwise share a
+        # transaction-constant "now()").
+        await session.execute(
+            sa_update(Fact).where(Fact.id == old_r.id).values(
+                learned_at=datetime.now(UTC) - timedelta(hours=1)
+            )
+        )
+        await session.flush()
+
+        new_r = await heart.learn(FactInput(
+            content="The office thermostat is set to sixty eight degrees fahrenheit.",
+            subject="office thermostat",
+            source_episode_id=ep_id, source_ordinal=5,  # SAME ordinal as old -- falls through
+        ), session=session, precomputed_embedding=candidate)
+
+        await session.flush()
+        old = await _get_fact(heart, old_r.id, session)
+        new = await _get_fact(heart, new_r.id, session)
+        assert new.active and new.superseded_by is None  # later-learned WINS
+        assert not old.active and old.superseded_by == new_r.id
+
+        edge_r = await session.execute(
+            select(GraphEdge)
+            .where(GraphEdge.source_id == new_r.id)
+            .where(GraphEdge.target_id == old_r.id)
+        )
+        relations = {e.relation for e in edge_r.scalars().all()}
+        assert "supersedes" in relations
+
     async def test_keep_both_pair_excluded_from_post_insert_contradiction_scan(self, heart, session, monkeypatch):
         """Codex r11 FIX 1: a pair the legacy subject path just flagged
         KEEP-BOTH must not be visible to the post-insert _find_contradiction

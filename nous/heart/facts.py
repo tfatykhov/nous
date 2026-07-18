@@ -2560,14 +2560,26 @@ class FactManager:
         """Gate-1 D1: CONTRADICTION resolves by TESTIMONY ORDER, never by which
         claim the model believes is true (a memory store records what was said;
         a user's correction must beat the model's prior). Same-episode ordinal
-        -> later learned_at -> None (KEEP-BOTH + flag, the fail-open default)."""
+        -> later learned_at -> None (KEEP-BOTH + flag, the fail-open default).
+
+        Codex r15: EQUAL same-episode ordinals (e.g. a re-extraction or
+        backfill run that assigns duplicate positional ordinals) carry no
+        order signal — the prior `>=` crowned `new_fact` on a tie, making
+        resolution a coin-flip on call/UUID order rather than genuine
+        testimony order, exactly the corruption class this fix removes.
+        Equality now falls through to the learned_at tiebreak instead of
+        being treated as new_fact reading later."""
         if (
             old_fact.source_ordinal is not None
             and new_fact.source_ordinal is not None
             and old_fact.source_episode_id is not None
             and old_fact.source_episode_id == new_fact.source_episode_id
         ):
-            return new_fact if new_fact.source_ordinal >= old_fact.source_ordinal else old_fact
+            if new_fact.source_ordinal > old_fact.source_ordinal:
+                return new_fact
+            if old_fact.source_ordinal > new_fact.source_ordinal:
+                return old_fact
+            # Equal ordinals: no order signal from position — fall through.
         if old_fact.learned_at != new_fact.learned_at:
             return new_fact if new_fact.learned_at > old_fact.learned_at else old_fact
         return None
