@@ -150,8 +150,11 @@ class PipelineStats:
     n_keyed_r2: int = 0
     # R3v2: count of round-2 keyed candidates dropped because their id
     # already existed in the result set from another leg (same accounting
-    # convention as n_keyed_dup above — closes the observability gap left
-    # by acc.n_keyed_r2_dup being a write-only field in Task 2).
+    # convention as n_keyed_dup above). codex r3: computed primarily by the
+    # assembly-time filter against the FULL cross-leg existing_ids set
+    # (before the K2 slice — a candidate already surfaced elsewhere must
+    # never consume a K2 slot only to be dropped), plus any residual
+    # dedup from _keyed_r2_to_pipeline's own redundant-belt check.
     n_keyed_r2_dup: int = 0
     # R3v2: True iff round 2 ran and EITHER the key-derivation cap or the
     # candidate-fetch cap was hit (possibly-truncated -- reaching exactly
@@ -211,11 +214,26 @@ class _PipelineAccumulator:
     # every other leg is known) — not populated inside _run_stages.
     n_keyed_dup: int = 0
 
-    # R3v2: round-2 keyed fact-leg rows (same Row shape as keyed_results,
-    # ranked by _rank_r2_candidates). Populated inside _run_stages when
-    # keyed_fact_leg_rounds >= 2 and round 1 produced at least one hit.
+    # R3v2: round-2 keyed fact-leg rows (same Row shape as keyed_results),
+    # FULLY RANKED by _rank_r2_candidates but NOT yet sliced to K2 (codex
+    # r3: K2 selection moves to assembly time, after existing_ids is
+    # complete across every leg — see run_recall_pipeline). Populated
+    # inside _run_stages when keyed_fact_leg_rounds >= 2 and round 1
+    # produced at least one hit.
     keyed_r2_results: list = field(default_factory=list)
     keyed_r2_truncated: bool = False
+    # codex r3: True iff round 2 was attempted (mirrors chunks_searched's
+    # "eligible AND attempted" semantics) — consumed at assembly time to
+    # gate the combined keyed_r2 telemetry log line (re-added: this field
+    # was removed as dead state by the final review's Minor 3 before the
+    # telemetry line moved to assembly and needed a "did round 2 run" gate
+    # again).
+    keyed_r2_ran: bool = False
+    # codex r3: stage-time counters threaded through to assembly so the
+    # single combined telemetry log line there can report them alongside
+    # the assembly-time selection count.
+    keyed_r2_keys_examined: int = 0
+    keyed_r2_candidates: int = 0
     # Set during assembly (mirrors n_keyed_dup above) — not populated
     # inside _run_stages.
     n_keyed_r2_dup: int = 0
@@ -354,13 +372,44 @@ async def run_recall_pipeline(
     # hits land after round-1 hits positionally (band is derived below
     # round-1's floor, so this also falls out of the score comparison).
     existing_ids.update(r.id for r in keyed)  # arch-P2-2: single source of truth
-    keyed_r2, acc.n_keyed_r2_dup = _keyed_r2_to_pipeline(acc.keyed_r2_results, settings, existing_ids)
+    # codex r3: K2 selection happens HERE, not in Stage 1.6 — only here is
+    # existing_ids complete across every leg (heart/graph/decisions/chunks/
+    # r1-keyed). acc.keyed_r2_results is the FULL ranked candidate list from
+    # the stage (unsliced); filter it against existing_ids first, THEN take
+    # the top K2 of what remains. Selecting K2 before this point could let a
+    # candidate already surfaced elsewhere consume the only K2 slot and get
+    # dropped right here — silently wasting the slot instead of giving it to
+    # a fresh hop candidate ranked just below it.
+    ranked_r2 = acc.keyed_r2_results
+    filtered_r2 = [r for r in ranked_r2 if r.id not in existing_ids]
+    acc.n_keyed_r2_dup = len(ranked_r2) - len(filtered_r2)
+    k2 = getattr(settings, "keyed_fact_leg_k2", 8)
+    r2_survivors = filtered_r2[:k2]
+    if r2_survivors:
+        await heart.facts.track_access([r.id for r in r2_survivors])
+    keyed_r2, extra_r2_dup = _keyed_r2_to_pipeline(r2_survivors, settings, existing_ids)
+    # redundant belt (mirrors codex r1's vocab-filter pattern): r2_survivors
+    # is already disjoint from existing_ids by construction above, so this
+    # should always be 0 — kept for defense if that invariant ever breaks.
+    acc.n_keyed_r2_dup += extra_r2_dup
     for kr in keyed_r2:
         pos = next(
             (i for i, r in enumerate(results) if (r.score or 0.0) < kr.score),
             len(results),
         )
         results.insert(pos, kr)
+
+    # codex r3: ONE combined telemetry line at assembly, carrying both the
+    # stage-time counters (threaded through the accumulator) and the
+    # assembly-time selection count — "selected" can only be known here,
+    # after cross-leg dedup. Fires only when round 2 was attempted (mirrors
+    # chunks_searched's "eligible AND attempted" semantics).
+    if acc.keyed_r2_ran:
+        logger.info(
+            "keyed_r2: r1_hits=%d keys_examined=%d candidates=%d selected=%d truncated=%s",
+            len(acc.keyed_results), acc.keyed_r2_keys_examined,
+            acc.keyed_r2_candidates, len(keyed_r2), acc.keyed_r2_truncated,
+        )
 
     # Attach contradiction links to matching results
     if acc.contradictions:
@@ -572,6 +621,7 @@ async def _run_stages(
         rounds = getattr(settings, "keyed_fact_leg_rounds", 1)
         if rounds >= 2 and acc.keyed_results:
             try:
+                acc.keyed_r2_ran = True
                 r1_ids = [row.id for row in acc.keyed_results]
                 key_map = await heart.facts.entity_keys_for_facts(r1_ids)
                 r2_keys: list[str] = []
@@ -625,6 +675,7 @@ async def _run_stages(
                 if len(r2_keys) > max_keys:
                     acc.keyed_r2_truncated = True
                     r2_keys = r2_keys[:max_keys]
+                acc.keyed_r2_keys_examined = len(r2_keys)
                 rows2_count = 0
                 if r2_keys:
                     max_cand = getattr(settings, "keyed_fact_leg_r2_max_candidates", 256)
@@ -636,19 +687,20 @@ async def _run_stages(
                         acc.keyed_r2_truncated = True
                     r1_id_set = set(r1_ids)
                     rows2 = [r for r in rows2 if r.id not in r1_id_set]
-                    survivors = _rank_r2_candidates(
-                        rows2, query, getattr(settings, "keyed_fact_leg_k2", 8),
-                    )
-                    acc.keyed_r2_results = survivors
-                    if survivors:
-                        await heart.facts.track_access([r.id for r in survivors])
-                # R3v2: surfaced telemetry (v1's internal-only stats made
-                # live verification needlessly hard - rollout doc §3)
-                logger.info(
-                    "keyed_r2: r1_hits=%d keys_examined=%d candidates=%d selected=%d truncated=%s",
-                    len(acc.keyed_results), len(r2_keys), rows2_count,
-                    len(acc.keyed_r2_results), acc.keyed_r2_truncated,
-                )
+                    # codex r3: rank the FULL candidate list here but do NOT
+                    # slice to K2 or track_access yet — K2 selection moves to
+                    # assembly time (run_recall_pipeline), where the full
+                    # existing_ids set across EVERY leg (heart/graph/
+                    # decisions/chunks/r1-keyed) is known. Selecting K2 here
+                    # let a candidate already surfaced by another leg consume
+                    # the only K2 slot and get silently dropped at assembly —
+                    # wasting the slot instead of giving it to a fresh hop
+                    # candidate ranked just below it.
+                    acc.keyed_r2_results = _rank_r2_candidates(rows2, query)
+                acc.keyed_r2_candidates = rows2_count
+                # Telemetry moved to assembly (run_recall_pipeline): the
+                # "selected" count can only be known there, after cross-leg
+                # dedup — see the combined keyed_r2 log line there.
             except Exception as exc:
                 acc.stage_errors["keyed_r2"] = acc.stage_errors.get("keyed_r2", 0) + 1
                 logger.warning("keyed_r2 fact leg failed: %s", exc)
@@ -1391,7 +1443,7 @@ def _fold_tokens(s: "str | None") -> set:
     return set((normalize_key(s or "", max_len=1000) or "").split())
 
 
-def _rank_r2_candidates(rows: list, query: str, k2: int) -> list:
+def _rank_r2_candidates(rows: list, query: str) -> list:
     """R3v2: THE SIMULATED ROUND-2 RANKING POLICY.
 
     Sim-parity contract (plan Global Constraints, amendment 2): any change
@@ -1402,6 +1454,11 @@ def _rank_r2_candidates(rows: list, query: str, k2: int) -> list:
     word overlap (desc) -> recency (desc) -> id (asc, final tie-break for
     full determinism — the one documented liberty beyond the spec's three
     stated criteria).
+
+    codex r3: returns the FULL sorted list — no K2 slice here. K2 selection
+    moved to assembly time (run_recall_pipeline), where the complete
+    existing_ids set across every leg is known; ranking (this function) and
+    selection (how many survive, and which) are now separate concerns.
     """
     qt = _fold_tokens(query)
 
@@ -1410,7 +1467,7 @@ def _rank_r2_candidates(rows: list, query: str, k2: int) -> list:
         content = len(qt & _fold_tokens(row.content))
         return (-attr, -content, -row.learned_at.timestamp(), str(row.id))
 
-    return sorted(rows, key=_sort_key)[:k2]
+    return sorted(rows, key=_sort_key)
 
 
 def _keyed_r2_to_pipeline(
@@ -1426,6 +1483,11 @@ def _keyed_r2_to_pipeline(
     a fixed offset would break if K were raised. Clamped >= 0; an operator
     setting ``keyed_fact_leg_score`` near 0 has effectively disabled the leg
     already, so the degenerate clamp is an accepted edge.
+
+    codex r3: ``rows`` is expected to already be the K2 survivors selected
+    by the caller (assembly time, after filtering the full ranked candidate
+    list against the complete cross-leg ``existing_ids``) — the ``dups``
+    counter here is a redundant belt, not the primary dedup mechanism.
     """
     out: list[PipelineResult] = []
     dups = 0

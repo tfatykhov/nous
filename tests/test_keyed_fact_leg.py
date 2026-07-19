@@ -850,6 +850,129 @@ class TestCodexR2ExactCapTruncation:
 
 
 # ---------------------------------------------------------------------------
+# codex round 3 (P2): K2 selection must happen at assembly, not in the stage
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def seed_cross_leg_dup_hop_corpus(heart):
+    """Reproduces codex round-3 P2: pre-fix, K2 selection happened INSIDE
+    Stage 1.6, before ``existing_ids`` (the cross-leg dedup set) was
+    complete. A candidate already surfaced by another leg (D, forced into
+    Stage 1 via an embedding matching the query) could still win the only
+    K2 slot at stage time (it ranks first: ``attribute_key="relocation
+    city"`` overlaps 2 query tokens), only to be dropped as a duplicate at
+    assembly — silently wasting the slot a fresh, never-before-seen hop
+    candidate (E) could have filled.
+
+    A is the round-1 hit (keyed on "alpha station", the query's own
+    round-1 key) and also owns the hop key "bridge person" directly (step
+    1 alone supplies it — no content-scan complexity needed here). D and E
+    are both reachable via "bridge person": D ranks first (attribute_key
+    overlap) but duplicates a Stage-1 hit; E ranks second and is otherwise
+    unreachable except via the hop.
+    """
+    agent_id = heart.agent_id
+    a_id, d_id, e_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    vec = await heart._embeddings.embed(_HOP_QUERY)
+    async with heart.db.session() as s:
+        s.add(Fact(
+            id=a_id, agent_id=agent_id,
+            content="Facility records mention routine filing procedures only.",
+            active=True,
+        ))
+        s.add(Fact(
+            id=d_id, agent_id=agent_id,
+            content="A separate memo describes routine intake procedures.",
+            active=True, embedding=vec, attribute_key="relocation city",
+        ))
+        s.add(Fact(
+            id=e_id, agent_id=agent_id,
+            content="A different memo covers unrelated inventory matters.",
+            active=True,
+        ))
+        await s.flush()
+        s.add(FactEntityKey(fact_id=a_id, entity_key="alpha station", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a_id, entity_key="bridge person", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=d_id, entity_key="bridge person", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=e_id, entity_key="bridge person", agent_id=agent_id))
+        await s.commit()
+
+    yield {"A": a_id, "D": d_id, "E": e_id}
+
+    async with heart.db.session() as cleanup:
+        for fid in (a_id, d_id, e_id):
+            f = await cleanup.get(Fact, fid)
+            if f is not None:
+                await cleanup.delete(f)
+        await cleanup.commit()
+
+
+@pytest.mark.postgres_only
+class TestCodexR3K2SelectionAtAssembly:
+    async def test_cross_leg_duplicate_does_not_waste_k2_slot(
+        self, heart, brain, settings, seed_cross_leg_dup_hop_corpus,
+    ):
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_k2": 1,
+        })
+        results, stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+        d_id = seed_cross_leg_dup_hop_corpus["D"]
+        e_id = seed_cross_leg_dup_hop_corpus["E"]
+
+        # D surfaces exactly once (via Stage 1, not re-added as keyed_r2).
+        d_occurrences = [r for r in results if r.id == d_id]
+        assert len(d_occurrences) == 1
+        assert d_occurrences[0].metadata.get("retrieval_leg") != "keyed_r2"
+
+        # E -- the fresh hop candidate -- must merge despite K2=1, since D
+        # (which ranks ahead of it) is a cross-leg duplicate that must not
+        # consume the only slot.
+        e_hit = [r for r in results if r.id == e_id]
+        assert e_hit and e_hit[0].metadata.get("retrieval_leg") == "keyed_r2"
+        assert stats.n_keyed_r2_dup >= 1
+
+    async def test_duplicate_survivor_not_double_tracked(
+        self, heart, brain, settings, seed_cross_leg_dup_hop_corpus,
+    ):
+        # The round-2 assembly step must track_access ONLY its own K2
+        # survivor set. Verified by spying on the call shape rather than
+        # recall_count deltas: Stage 1's own fact search ALSO tracks access
+        # via a fire-and-forget asyncio task (facts.py's _fire_track_access,
+        # scheduled via loop.create_task, not awaited) -- its completion
+        # relative to run_recall_pipeline returning is not deterministic, so
+        # asserting recall_count deltas for D would be racy. The round-2
+        # assembly call is awaited inline, so its exact argument shape IS
+        # deterministic: it passes ONLY the K2 survivor ids.
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_k2": 1,
+        })
+        e_id = seed_cross_leg_dup_hop_corpus["E"]
+
+        tracked_calls: list[list] = []
+        orig_track_access = heart.facts.track_access
+
+        async def _spy_track_access(fact_ids):
+            tracked_calls.append(list(fact_ids))
+            return await orig_track_access(fact_ids)
+
+        heart.facts.track_access = _spy_track_access
+        try:
+            await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+        finally:
+            heart.facts.track_access = orig_track_access
+
+        # A call shaped exactly [e_id] can only be round-2's own survivor
+        # tracking -- Stage 1's fire-and-forget call (if it races into this
+        # window at all) would carry every leg-1 hit's id, never e_id alone,
+        # since E has no embedding/content overlap and Stage 1 never
+        # returns it.
+        assert [e_id] in tracked_calls
+
+
+# ---------------------------------------------------------------------------
 # Entity-candidate extraction (NER-lite) — vocab leg + carry-forward coverage
 # ---------------------------------------------------------------------------
 
