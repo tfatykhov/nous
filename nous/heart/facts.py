@@ -3785,7 +3785,17 @@ class FactManager:
     async def entity_keys_for_facts(self, fact_ids: list[UUID]) -> dict[UUID, list[str]]:
         """R3v2: the fact_entity_keys rows of the given facts, grouped by fact,
         keys sorted alphabetically (deterministic round-2 key derivation).
-        Active-joined + agent-scoped per the F085 read invariant."""
+        Active-joined + agent-scoped per the F085 read invariant.
+
+        codex r4: ``ek.fact_id = ANY(CAST(:ids AS uuid[]))`` casts the BOUND
+        PARAMETER array to ``uuid[]``, not the column to text — the prior
+        ``ek.fact_id::text = ANY(:ids)`` cast the (fact_id, entity_key) PK
+        column itself, defeating its index and forcing a full scan of the
+        agent's key rows per call. Mirrors the existing
+        ``CAST(:ids AS uuid[])`` idiom used elsewhere in this codebase
+        (retrieval_pipeline.py's adjacency-boost and fact-source-episode
+        lookups) — same string-list binding, just the cast moved.
+        """
         if not fact_ids:
             return {}
         async with self.db.session() as session:
@@ -3795,7 +3805,7 @@ class FactManager:
                     "FROM heart.fact_entity_keys ek "
                     "JOIN heart.facts f ON f.id = ek.fact_id "
                     "WHERE ek.agent_id = :a AND f.agent_id = :a AND f.active = true "
-                    "  AND ek.fact_id::text = ANY(:ids) "
+                    "  AND ek.fact_id = ANY(CAST(:ids AS uuid[])) "
                     "ORDER BY ek.fact_id, ek.entity_key"
                 ),
                 {"a": self.agent_id, "ids": [str(i) for i in fact_ids]},

@@ -154,7 +154,9 @@ class PipelineStats:
     # assembly-time filter against the FULL cross-leg existing_ids set
     # (before the K2 slice — a candidate already surfaced elsewhere must
     # never consume a K2 slot only to be dropped), plus any residual
-    # dedup from _keyed_r2_to_pipeline's own redundant-belt check.
+    # dedup from _keyed_r2_to_pipeline's own redundant-belt check. codex
+    # r4: also includes candidates dropped by the same pre-slice filter
+    # for being F071-excluded (already in the current turn's context).
     n_keyed_r2_dup: int = 0
     # R3v2: True iff round 2 ran and EITHER the key-derivation cap or the
     # candidate-fetch cap was hit (possibly-truncated -- reaching exactly
@@ -380,8 +382,24 @@ async def run_recall_pipeline(
     # candidate already surfaced elsewhere consume the only K2 slot and get
     # dropped right here — silently wasting the slot instead of giving it to
     # a fresh hop candidate ranked just below it.
+    #
+    # codex r4: ALSO filter against the F071 exclude_ids set (facts already
+    # in the current turn's system prompt) for the exact same reason — a
+    # top-ranked hop fact that happens to be F071-excluded would otherwise
+    # consume the only K2 slot and die at the F071 filter below (:450-455),
+    # instead of a fresh candidate. Round-1 keyed deliberately does NOT
+    # pre-filter against F071 (v1's accepted convention — n_keyed is
+    # documented as counting "BEFORE the F071 exclude_ids filter"); round-2
+    # does, because its selection already happens here at assembly where
+    # the F071 set is available, and K2 slots are scarce enough that
+    # wasting one on a candidate already known to be excluded is a real
+    # loss round-1's plain allotment doesn't share.
     ranked_r2 = acc.keyed_r2_results
-    filtered_r2 = [r for r in ranked_r2 if r.id not in existing_ids]
+    f071_fact_excludes = (exclude_ids or {}).get("fact", set())
+    filtered_r2 = [
+        r for r in ranked_r2
+        if r.id not in existing_ids and str(r.id) not in f071_fact_excludes
+    ]
     acc.n_keyed_r2_dup = len(ranked_r2) - len(filtered_r2)
     k2 = getattr(settings, "keyed_fact_leg_k2", 8)
     r2_survivors = filtered_r2[:k2]

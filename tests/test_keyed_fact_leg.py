@@ -973,6 +973,88 @@ class TestCodexR3K2SelectionAtAssembly:
 
 
 # ---------------------------------------------------------------------------
+# codex round 4 (P2): F071-excluded candidates must not waste K2 slots either
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def seed_f071_dup_hop_corpus(heart):
+    """Reproduces codex round-4 P2 #1: same family as round 3's cross-leg
+    duplicate bug, but for F071 (context-exclusion) rather than another
+    retrieval leg. Pre-fix, K2 selection at assembly filtered the ranked
+    round-2 candidate list only against ``existing_ids`` (other legs'
+    results) — not against the F071 ``exclude_ids`` set (facts already in
+    the current turn's system prompt). A top-ranked hop candidate (D,
+    ``attribute_key="relocation city"`` overlaps 2 query tokens) that
+    happens to be F071-excluded could still win the only K2 slot, die at
+    the F071 filter downstream (:450-455), and waste the slot a fresh
+    candidate (E, ranked second) could have filled.
+
+    A is the round-1 hit (keyed on "alpha station", the query's own
+    round-1 key) and also owns the hop key "bridge person" directly. D and
+    E are both reachable via "bridge person": D ranks first but will be
+    passed as this test's own ``exclude_ids={"fact": {str(d_id)}}``
+    (simulating "already in context" -- no embedding/Stage-1 involvement
+    needed, unlike round 3's cross-leg duplicate); E ranks second and is
+    otherwise unreachable except via the hop.
+    """
+    agent_id = heart.agent_id
+    a_id, d_id, e_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    async with heart.db.session() as s:
+        s.add(Fact(
+            id=a_id, agent_id=agent_id,
+            content="Facility records mention routine filing procedures only.",
+            active=True,
+        ))
+        s.add(Fact(
+            id=d_id, agent_id=agent_id,
+            content="A separate memo describes routine intake procedures.",
+            active=True, attribute_key="relocation city",
+        ))
+        s.add(Fact(
+            id=e_id, agent_id=agent_id,
+            content="A different memo covers unrelated inventory matters.",
+            active=True,
+        ))
+        await s.flush()
+        s.add(FactEntityKey(fact_id=a_id, entity_key="alpha station", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a_id, entity_key="bridge person", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=d_id, entity_key="bridge person", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=e_id, entity_key="bridge person", agent_id=agent_id))
+        await s.commit()
+
+    yield {"A": a_id, "D": d_id, "E": e_id}
+
+    async with heart.db.session() as cleanup:
+        for fid in (a_id, d_id, e_id):
+            f = await cleanup.get(Fact, fid)
+            if f is not None:
+                await cleanup.delete(f)
+        await cleanup.commit()
+
+
+@pytest.mark.postgres_only
+class TestCodexR4F071AwareK2Selection:
+    async def test_f071_excluded_candidate_does_not_waste_k2_slot(
+        self, heart, brain, settings, seed_f071_dup_hop_corpus,
+    ):
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_k2": 1,
+        })
+        d_id = seed_f071_dup_hop_corpus["D"]
+        e_id = seed_f071_dup_hop_corpus["E"]
+        results, _stats = await run_recall_pipeline(
+            _HOP_QUERY, heart, brain, s, exclude_ids={"fact": {str(d_id)}},
+        )
+        # D never surfaces (correctly excluded); E -- ranked second -- must
+        # merge despite K2=1, since D must not consume the only slot.
+        assert not any(r.id == d_id for r in results)
+        e_hit = [r for r in results if r.id == e_id]
+        assert e_hit and e_hit[0].metadata.get("retrieval_leg") == "keyed_r2"
+
+
+# ---------------------------------------------------------------------------
 # Entity-candidate extraction (NER-lite) — vocab leg + carry-forward coverage
 # ---------------------------------------------------------------------------
 
