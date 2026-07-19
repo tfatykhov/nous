@@ -599,7 +599,18 @@ async def _run_stages(
                 #     MEMBERS may enter the round-2 key set.
                 max_keys = getattr(settings, "keyed_fact_leg_r2_max_keys", 32)
                 for row in acc.keyed_results:
-                    if len(r2_keys) >= max_keys:  # shared budget, stop early
+                    if len(r2_keys) >= max_keys:
+                        # codex r2: this break always skips at least one
+                        # remaining r1 hit's content scan (this row and any
+                        # after it in the loop) — "possibly truncated" under
+                        # the same accepted convention as the candidate-cap
+                        # `>=` check below: an exact fit that happens to
+                        # have nothing more to find still reads as capped,
+                        # since we stopped looking before finding out. Only
+                        # the strict `> max_keys` check after this loop
+                        # caught OVERFLOW from step 1 alone; it can't catch
+                        # this early-exit, so it's flagged here instead.
+                        acc.keyed_r2_truncated = True
                         break
                     for k in extract_entity_candidates(
                         row.content, vocab=vocab, max_candidates=max_keys,

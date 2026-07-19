@@ -766,6 +766,90 @@ class TestExtractEntityCandidatesVocabOnly:
 
 
 # ---------------------------------------------------------------------------
+# codex round 2 (P2): exact key-budget hits must still report truncated
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def seed_exact_cap_hop_corpus(heart):
+    """Reproduces codex round-2 P2: when round-1's own entity-key
+    derivation (step 1) lands EXACTLY on ``keyed_fact_leg_r2_max_keys``, the
+    content-scan loop's early-break (``if len(r2_keys) >= max_keys:
+    break``) fires on its very FIRST iteration — before ANY r1 hit's
+    content is examined — yet the final ``if len(r2_keys) > max_keys``
+    check (strict greater-than) is False, so ``keyed_r2_truncated`` stayed
+    False even though real content (and a real reachable third key) was
+    never looked at.
+
+    A1 and A2 are BOTH round-1 hits (both keyed on "alpha station", the
+    query's own round-1 key). A1's own extra entity key is "widget alpha";
+    A2's is "widget beta" — together (after removing "alpha station",
+    already in seen_k from round 1) step 1 alone yields exactly 2 keys.
+    With ``keyed_fact_leg_r2_max_keys=2``, the content-scan loop's FIRST
+    iteration already sees ``len(r2_keys) == 2 >= 2`` and breaks
+    immediately — neither A1's nor A2's content is ever scanned.
+
+    A2's content contains a lowercase "bridge person" mention — a real
+    vocab member (B is keyed on it) that step 2's content-scan WOULD have
+    found had the loop not broken early. B never surfaces in the merged
+    results either way (the fix only corrects the stats flag, not what
+    gets examined) — asserted below to confirm the skip was real, not a
+    coincidental no-op.
+    """
+    agent_id = heart.agent_id
+    a1_id, a2_id, b_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    base = datetime.now(UTC)
+    async with heart.db.session() as s:
+        s.add(Fact(
+            id=a1_id, agent_id=agent_id,
+            content="A routine facility memo about nothing notable.",
+            active=True, learned_at=base - timedelta(minutes=2),
+        ))
+        s.add(Fact(
+            id=a2_id, agent_id=agent_id,
+            content="Additional notes mention bridge person as a contact.",
+            active=True, learned_at=base - timedelta(minutes=1),
+        ))
+        s.add(Fact(
+            id=b_id, agent_id=agent_id,
+            content="An unrelated office memo about routine matters.",
+            active=True, learned_at=base,
+        ))
+        await s.flush()
+        s.add(FactEntityKey(fact_id=a1_id, entity_key="alpha station", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a1_id, entity_key="widget alpha", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a2_id, entity_key="alpha station", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a2_id, entity_key="widget beta", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=b_id, entity_key="bridge person", agent_id=agent_id))
+        await s.commit()
+
+    yield {"A1": a1_id, "A2": a2_id, "B": b_id}
+
+    async with heart.db.session() as cleanup:
+        for fid in (a1_id, a2_id, b_id):
+            f = await cleanup.get(Fact, fid)
+            if f is not None:
+                await cleanup.delete(f)
+        await cleanup.commit()
+
+
+@pytest.mark.postgres_only
+class TestCodexR2ExactCapTruncation:
+    async def test_exact_cap_hit_reports_truncated(
+        self, heart, brain, settings, seed_exact_cap_hop_corpus,
+    ):
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_r2_max_keys": 2,
+        })
+        results, stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+        assert stats.keyed_r2_truncated is True
+        # Confirms the skip was real: B (reachable only via the unexamined
+        # "bridge person" content mention) never surfaces.
+        assert seed_exact_cap_hop_corpus["B"] not in {r.id for r in results}
+
+
+# ---------------------------------------------------------------------------
 # Entity-candidate extraction (NER-lite) — vocab leg + carry-forward coverage
 # ---------------------------------------------------------------------------
 
