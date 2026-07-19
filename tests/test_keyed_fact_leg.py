@@ -475,6 +475,173 @@ class TestKeyedFactLeg:
 
 
 # ---------------------------------------------------------------------------
+# R3v2: bounded round-2 keyed retrieval
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def seed_hop_corpus(heart):
+    """Two-hop shape for round-2 composition tests.
+
+    Query used throughout ``TestKeyedR2``: ``'Report about "Alpha Station"
+    relocation city'``. ``normalize_key`` strips the quotes/punctuation and
+    folds it to the 6-token set {"report", "about", "alpha", "station",
+    "relocation", "city"}.
+
+    A (round-1 hit): entity keys {"alpha station", "bridge person",
+    "zzz filler key"}. The query's own round-1 candidates are exactly
+    ["alpha station"] (quoted span + capitalized span dedup to one key;
+    "Report" is sentence-initial so it's excluded by the CAP_SPAN
+    lookbehind) -- fetch_by_entity_keys on that single key returns only A.
+    A's content shares zero tokens with the query and has no quoted/
+    capitalized spans, so round-2's content-scan step (step 2) contributes
+    nothing for A -- every round-2 key below comes from step 1 (A's own
+    entity rows). Removing "alpha station" (already in seen_k from round 1)
+    leaves 2 keys in alphabetical order: "bridge person", "zzz filler key".
+    Both are produced unconditionally by step 1 (which is not itself capped),
+    so with ``keyed_fact_leg_r2_max_keys=1`` the post-step total is always 2,
+    guaranteeing truncation regardless of A's content.
+
+    B (the hop, reachable only via "bridge person"): attribute_key=
+    "relocation city" folds to {"relocation", "city"} -- both are query
+    tokens, so attr_overlap(B) = 2. Content shares zero tokens with the
+    query, so content_overlap(B) = 0.
+
+    C (decoy, reachable the same way via "bridge person"): attribute_key=
+    "unrelated" folds to {"unrelated"} -- zero overlap with the query
+    tokens, so attr_overlap(C) = 0. Content also shares zero tokens with
+    the query, so content_overlap(C) = 0.
+
+    Ranking: B's sort key leads with -2 (attr_overlap=2) vs C's -0 -- B
+    always outranks C on the first sort-key component alone, independent of
+    content overlap, learned_at, or id.
+
+    No embeddings are stored and no content overlaps the query, so Stage 1
+    (heart.recall's vector + keyword legs) cannot surface A/B/C by
+    accident -- only the keyed leg's entity_key match can find them.
+    """
+    agent_id = heart.agent_id
+    a_id, b_id, c_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    base = datetime.now(UTC)
+    async with heart.db.session() as s:
+        s.add(Fact(
+            id=a_id, agent_id=agent_id,
+            content="Facility records mention routine filing procedures only.",
+            active=True, learned_at=base - timedelta(minutes=2),
+        ))
+        s.add(Fact(
+            id=b_id, agent_id=agent_id,
+            content="A regional liaison relocated to new administrative duties elsewhere.",
+            active=True, attribute_key="relocation city",
+            learned_at=base - timedelta(minutes=1),
+        ))
+        s.add(Fact(
+            id=c_id, agent_id=agent_id,
+            content="An archival assistant filed unrelated administrative paperwork.",
+            active=True, attribute_key="unrelated",
+            learned_at=base,
+        ))
+        await s.flush()
+        s.add(FactEntityKey(fact_id=a_id, entity_key="alpha station", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a_id, entity_key="bridge person", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a_id, entity_key="zzz filler key", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=b_id, entity_key="bridge person", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=b_id, entity_key="target city", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=c_id, entity_key="bridge person", agent_id=agent_id))
+        await s.commit()
+
+    yield {"A": a_id, "B": b_id, "C": c_id}
+
+    async with heart.db.session() as cleanup:
+        for fid in (a_id, b_id, c_id):
+            f = await cleanup.get(Fact, fid)
+            if f is not None:
+                await cleanup.delete(f)
+        await cleanup.commit()
+
+
+_HOP_QUERY = 'Report about "Alpha Station" relocation city'
+
+
+@pytest.mark.postgres_only
+class TestKeyedR2:
+    async def test_rounds_1_default_byte_identical(self, heart, brain, settings, seed_hop_corpus):
+        s1 = settings.model_copy(update={"keyed_fact_leg_enabled": True})  # rounds default 1
+        base_results, base_stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s1)
+        again_results, _ = await run_recall_pipeline(_HOP_QUERY, heart, brain, s1)
+        assert [(r.id, r.score, r.metadata) for r in base_results] == \
+               [(r.id, r.score, r.metadata) for r in again_results]
+        assert base_stats.n_keyed_r2 == 0 and base_stats.keyed_r2_truncated is False
+        assert not any(r.metadata.get("retrieval_leg") == "keyed_r2" for r in base_results)
+
+    async def test_two_hop_composition(self, heart, brain, settings, seed_hop_corpus):
+        s2 = settings.model_copy(update={"keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2})
+        results, stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s2)
+        r1 = [r for r in results if r.metadata.get("retrieval_leg") == "keyed"]
+        r2 = [r for r in results if r.metadata.get("retrieval_leg") == "keyed_r2"]
+        assert seed_hop_corpus["A"] in {r.id for r in r1}
+        assert seed_hop_corpus["B"] in {r.id for r in r2}          # the hop
+        assert stats.n_keyed_r2 >= 1 and stats.keyed_leg_used
+        # band: every r2 score strictly below every r1 keyed score; r2 after r1 positionally
+        assert max(x.score for x in r2) < min(x.score for x in r1)
+        assert min(results.index(x) for x in r2) > max(results.index(x) for x in r1)
+
+    async def test_ranking_attribute_overlap_beats_content_and_decoy(self, heart, brain, settings, seed_hop_corpus):
+        # B (attribute_key overlaps 2 query tokens) must outrank decoy C
+        # (0 overlap) when both are round-2 candidates. K2=1 keeps only the
+        # top-ranked survivor.
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_k2": 1,
+        })
+        results, _stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+        r2_ids = {r.id for r in results if r.metadata.get("retrieval_leg") == "keyed_r2"}
+        assert r2_ids == {seed_hop_corpus["B"]}
+        assert seed_hop_corpus["C"] not in r2_ids
+
+    async def test_fanout_truncation_is_loud(self, heart, brain, settings, seed_hop_corpus, caplog):
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_r2_max_keys": 1,
+        })
+        with caplog.at_level("INFO"):
+            _, stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+        assert stats.keyed_r2_truncated is True
+        assert any("keyed_r2" in rec.message for rec in caplog.records)   # surfaced telemetry
+
+    async def test_r2_dedups_against_r1_and_survivors_only_tracked(self, heart, brain, settings, seed_hop_corpus):
+        # A (an r1 hit) is also reachable via r2 keys -> must appear ONCE
+        # (leg='keyed'), never duplicated as keyed_r2. With K2=1, decoy C is
+        # fetched as an (untracked) round-2 candidate but not selected -> its
+        # recall_count must stay unchanged; B is selected -> tracked once.
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_k2": 1,
+        })
+        a_id, b_id, c_id = seed_hop_corpus["A"], seed_hop_corpus["B"], seed_hop_corpus["C"]
+
+        async def _recall_count(fid):
+            async with heart.db.session() as sess:
+                return (await sess.get(Fact, fid)).recall_count or 0
+
+        b_before, c_before = await _recall_count(b_id), await _recall_count(c_id)
+
+        results, _stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+
+        occurrences_a = [r for r in results if r.id == a_id]
+        assert len(occurrences_a) == 1
+        assert occurrences_a[0].metadata.get("retrieval_leg") == "keyed"
+
+        r2_ids = {r.id for r in results if r.metadata.get("retrieval_leg") == "keyed_r2"}
+        assert r2_ids == {b_id}
+        assert c_id not in {r.id for r in results}
+
+        b_after, c_after = await _recall_count(b_id), await _recall_count(c_id)
+        assert b_after == b_before + 1
+        assert c_after == c_before
+
+
+# ---------------------------------------------------------------------------
 # Entity-candidate extraction (NER-lite) — vocab leg + carry-forward coverage
 # ---------------------------------------------------------------------------
 

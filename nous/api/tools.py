@@ -985,7 +985,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 "chunks_enabled=%s chunks_searched=%s "
                 "n_chunks_total=%d n_chunks_top10=%d first_chunk_rank=%s "
                 "excluded_in_context=%d "  # F071
-                "n_total=%d",
+                "n_total=%d "
+                "n_keyed_r2=%d keyed_r2_truncated=%s",  # R3v2
                 brain.agent_id,
                 len(query or ""),
                 limit,
@@ -996,6 +997,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 first_chunk_rank if first_chunk_rank is not None else "n/a",
                 stats.excluded_in_context,  # F071
                 len(results),
+                stats.n_keyed_r2,  # R3v2
+                stats.keyed_r2_truncated,  # R3v2
             )
             # F067 Phase 2: optionally fetch parent episode summaries for
             # facts in the result set. Failures are non-fatal — the formatter

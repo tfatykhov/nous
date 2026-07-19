@@ -33,7 +33,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 
-from nous.heart.keys import extract_entity_candidates
+from nous.heart.keys import extract_entity_candidates, normalize_key
 
 if TYPE_CHECKING:
     from nous.brain.brain import Brain
@@ -145,6 +145,13 @@ class PipelineStats:
     # Count of keyed candidates dropped because their id already existed in
     # the result set from another leg (corroboration, not a new find).
     n_keyed_dup: int = 0
+    # R3v2: count of round-2 keyed PipelineResults merged at assembly time
+    # (same accounting convention as n_keyed above).
+    n_keyed_r2: int = 0
+    # R3v2: True iff round 2 ran and EITHER the key-derivation cap or the
+    # candidate-fetch cap was hit (possibly-truncated -- reaching exactly
+    # the candidate LIMIT is indistinguishable from "there were more").
+    keyed_r2_truncated: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +205,16 @@ class _PipelineAccumulator:
     # Set during assembly in run_recall_pipeline (after existing_ids from
     # every other leg is known) — not populated inside _run_stages.
     n_keyed_dup: int = 0
+
+    # R3v2: round-2 keyed fact-leg rows (same Row shape as keyed_results,
+    # ranked by _rank_r2_candidates). Populated inside _run_stages when
+    # keyed_fact_leg_rounds >= 2 and round 1 produced at least one hit.
+    keyed_r2_results: list = field(default_factory=list)
+    keyed_r2_ran: bool = False
+    keyed_r2_truncated: bool = False
+    # Set during assembly (mirrors n_keyed_dup above) — not populated
+    # inside _run_stages.
+    n_keyed_r2_dup: int = 0
 
     # Flags
     searched_decisions: bool = False
@@ -328,6 +345,19 @@ async def run_recall_pipeline(
         )
         results.insert(pos, kr)
 
+    # R3v2: round-2 keyed assembly — same additive-only, score-ordered
+    # insertion pattern as round 1 above, run strictly after it so round-2
+    # hits land after round-1 hits positionally (band is derived below
+    # round-1's floor, so this also falls out of the score comparison).
+    existing_ids.update(r.id for r in keyed)  # arch-P2-2: single source of truth
+    keyed_r2, acc.n_keyed_r2_dup = _keyed_r2_to_pipeline(acc.keyed_r2_results, settings, existing_ids)
+    for kr in keyed_r2:
+        pos = next(
+            (i for i, r in enumerate(results) if (r.score or 0.0) < kr.score),
+            len(results),
+        )
+        results.insert(pos, kr)
+
     # Attach contradiction links to matching results
     if acc.contradictions:
         _attach_contradictions(results, acc.contradictions)
@@ -398,6 +428,8 @@ async def run_recall_pipeline(
         keyed_leg_used=acc.keyed_leg_used,  # R3.3 (F085)
         n_keyed=len(keyed),
         n_keyed_dup=acc.n_keyed_dup,
+        n_keyed_r2=len(keyed_r2),  # R3v2
+        keyed_r2_truncated=acc.keyed_r2_truncated,  # R3v2
     )
     return results, stats
 
@@ -524,6 +556,78 @@ async def _run_stages(
         except Exception as exc:
             acc.stage_errors["keyed"] = acc.stage_errors.get("keyed", 0) + 1
             logger.warning("keyed fact leg failed: %s", exc)
+
+        # R3v2: bounded round 2 — one deterministic, zero-LLM iterative hop
+        # over round-1 hits' own entity keys (Task 2, docs/superpowers/plans/
+        # 2026-07-19-r3v2-iterative-keyed.md). Own try/except (amendment 10)
+        # so a round-2 failure can never take round-1's already-populated
+        # acc.keyed_results down with it. Gated on acc.keyed_results being
+        # non-empty, which also guarantees `vocab`/`candidates` above ran to
+        # completion without raising.
+        rounds = getattr(settings, "keyed_fact_leg_rounds", 1)
+        if rounds >= 2 and acc.keyed_results:
+            try:
+                acc.keyed_r2_ran = True
+                r1_ids = [row.id for row in acc.keyed_results]
+                key_map = await heart.facts.entity_keys_for_facts(r1_ids)
+                r2_keys: list[str] = []
+                seen_k = set(candidates)  # MINUS round-1 query keys
+                # (1) exact + cheap: the round-1 hits' own entity rows, in
+                #     r1 rank order, alphabetical within a fact
+                #     (entity_keys_for_facts already sorts alphabetically).
+                for rid in r1_ids:
+                    for k in key_map.get(rid, []):
+                        if k not in seen_k:
+                            seen_k.add(k)
+                            r2_keys.append(k)
+                # (2) spec 2.2 primary definition: vocab keys appearing in
+                #     round-1 fact CONTENTS (covers entities mentioned but
+                #     not indexed on the hit itself). CRITICAL (devil-P1a):
+                #     extract_entity_candidates' quoted + capitalized-span
+                #     legs emit arbitrary NON-INDEXED spans first —
+                #     unfiltered, they would eat the key cap with keys that
+                #     match nothing. Only VOCAB MEMBERS may enter the
+                #     round-2 key set.
+                max_keys = getattr(settings, "keyed_fact_leg_r2_max_keys", 32)
+                for row in acc.keyed_results:
+                    if len(r2_keys) >= max_keys:  # shared budget, stop early
+                        break
+                    for k in extract_entity_candidates(
+                        row.content, vocab=vocab, max_candidates=max_keys,
+                    ):
+                        if k in vocab and k not in seen_k:  # devil-P1a vocab filter
+                            seen_k.add(k)
+                            r2_keys.append(k)
+                if len(r2_keys) > max_keys:
+                    acc.keyed_r2_truncated = True
+                    r2_keys = r2_keys[:max_keys]
+                rows2_count = 0
+                if r2_keys:
+                    max_cand = getattr(settings, "keyed_fact_leg_r2_max_candidates", 256)
+                    rows2 = await heart.facts.fetch_by_entity_keys(
+                        r2_keys, limit=max_cand, track=False,
+                    )
+                    rows2_count = len(rows2)
+                    if len(rows2) >= max_cand:
+                        acc.keyed_r2_truncated = True
+                    r1_id_set = set(r1_ids)
+                    rows2 = [r for r in rows2 if r.id not in r1_id_set]
+                    survivors = _rank_r2_candidates(
+                        rows2, query, getattr(settings, "keyed_fact_leg_k2", 8),
+                    )
+                    acc.keyed_r2_results = survivors
+                    if survivors:
+                        await heart.facts.track_access([r.id for r in survivors])
+                # R3v2: surfaced telemetry (v1's internal-only stats made
+                # live verification needlessly hard - rollout doc §3)
+                logger.info(
+                    "keyed_r2: r1_hits=%d keys_examined=%d candidates=%d selected=%d truncated=%s",
+                    len(acc.keyed_results), len(r2_keys), rows2_count,
+                    len(acc.keyed_r2_results), acc.keyed_r2_truncated,
+                )
+            except Exception as exc:
+                acc.stage_errors["keyed_r2"] = acc.stage_errors.get("keyed_r2", 0) + 1
+                logger.warning("keyed_r2 fact leg failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Stage 2: F022 Phase 2 cross-type graph expansion from Heart seeds
@@ -1241,6 +1345,74 @@ def _keyed_to_pipeline(
             continue
         metadata = {
             "retrieval_leg": "keyed",
+            "matched_keys": int(row.matched),
+            "subject": row.subject,
+        }
+        if row.event_date is not None:
+            metadata["event_date"] = row.event_date.isoformat()
+        if row.source_episode_id:
+            metadata["source_episode_id"] = row.source_episode_id
+        out.append(PipelineResult(
+            id=row.id, type="fact",
+            description=row.content, score=max(0.0, base - 0.005 * rank),
+            source="heart",
+            metadata=metadata,
+        ))
+    return out, dups
+
+
+def _fold_tokens(s: "str | None") -> set:
+    """R3v2: normalize + tokenize a field for word-overlap ranking. Shared by
+    both the query and candidate fields so both sides fold identically."""
+    return set((normalize_key(s or "", max_len=1000) or "").split())
+
+
+def _rank_r2_candidates(rows: list, query: str, k2: int) -> list:
+    """R3v2: THE SIMULATED ROUND-2 RANKING POLICY.
+
+    Sim-parity contract (plan Global Constraints, amendment 2): any change
+    to this sort key requires MAB re-simulation before the gate-3 replay —
+    this is not an implementation detail free to tune.
+
+    Sort key: attribute-key word overlap with the query (desc) -> content
+    word overlap (desc) -> recency (desc) -> id (asc, final tie-break for
+    full determinism — the one documented liberty beyond the spec's three
+    stated criteria).
+    """
+    qt = _fold_tokens(query)
+
+    def _sort_key(row):
+        attr = len(qt & _fold_tokens(row.attribute_key))
+        content = len(qt & _fold_tokens(row.content))
+        return (-attr, -content, -row.learned_at.timestamp(), str(row.id))
+
+    return sorted(rows, key=_sort_key)[:k2]
+
+
+def _keyed_r2_to_pipeline(
+    rows: list, settings: "Settings", existing_ids: set,
+) -> tuple[list[PipelineResult], int]:
+    """R3v2: convert round-2 keyed candidates into PipelineResults.
+
+    Clone of ``_keyed_to_pipeline`` (same matched/subject/event_date/
+    source_episode_id metadata conventions) with ``retrieval_leg="keyed_r2"``
+    and a band derived TWO decay steps under round-1's worst rank
+    (``keyed_fact_leg_k + 1``, not ``k - 1``) — a deliberate safety margin
+    (devil-P3-3) so round-2 can never outscore round-1 at any configured K;
+    a fixed offset would break if K were raised. Clamped >= 0; an operator
+    setting ``keyed_fact_leg_score`` near 0 has effectively disabled the leg
+    already, so the degenerate clamp is an accepted edge.
+    """
+    out: list[PipelineResult] = []
+    dups = 0
+    k = getattr(settings, "keyed_fact_leg_k", 8)
+    base = max(0.0, getattr(settings, "keyed_fact_leg_score", 0.55) - 0.005 * (k + 1))
+    for rank, row in enumerate(rows):
+        if row.id in existing_ids:
+            dups += 1
+            continue
+        metadata = {
+            "retrieval_leg": "keyed_r2",
             "matched_keys": int(row.matched),
             "subject": row.subject,
         }
