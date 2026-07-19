@@ -215,7 +215,6 @@ class _PipelineAccumulator:
     # ranked by _rank_r2_candidates). Populated inside _run_stages when
     # keyed_fact_leg_rounds >= 2 and round 1 produced at least one hit.
     keyed_r2_results: list = field(default_factory=list)
-    keyed_r2_ran: bool = False
     keyed_r2_truncated: bool = False
     # Set during assembly (mirrors n_keyed_dup above) — not populated
     # inside _run_stages.
@@ -573,7 +572,6 @@ async def _run_stages(
         rounds = getattr(settings, "keyed_fact_leg_rounds", 1)
         if rounds >= 2 and acc.keyed_results:
             try:
-                acc.keyed_r2_ran = True
                 r1_ids = [row.id for row in acc.keyed_results]
                 key_map = await heart.facts.entity_keys_for_facts(r1_ids)
                 r2_keys: list[str] = []

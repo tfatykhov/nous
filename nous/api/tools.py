@@ -303,6 +303,11 @@ def _format_pipeline_text(
         # score-ranked retrieval) so its distinct provenance stays visible.
         if r.metadata.get("retrieval_leg") == "keyed":
             return "[via keyed] "
+        # R3v2: round-2 hop hit — a two-hop associative match is more
+        # surprising in context than a direct keyed hit, so it gets its own
+        # distinct tag rather than falling through untagged.
+        if r.metadata.get("retrieval_leg") == "keyed_r2":
+            return "[via keyed-hop] "
         # Mark a Path-A graph-memory neighbour (now interleaved into the ranked Heart
         # Memory list by score) so its associative provenance stays visible to the agent.
         if r.metadata.get("stage_origin") == "heart_graph_memory" and getattr(r, "edge_relation", None):

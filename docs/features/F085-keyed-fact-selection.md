@@ -468,6 +468,14 @@ are free)"):
    These three specifics are exactly what MAB's re-simulation (gate 1 above) needs to confirm
    against the shipped policy — see THE ranking policy above for the full statement.
 6. **Byte-identity covers results, not logs.** See Provenance / telemetry above.
+7. **SQL-layer `f.id` tie-break added to `fetch_by_entity_keys`'s `ORDER BY` (final review).**
+   `learned_at` is a server-default timestamp — on a bulk-backfilled corpus every row in a batch
+   can share the identical transaction-constant value, so without a final deterministic column
+   WHICH rows survive the `LIMIT` (round 1's 8, round 2's 256) was Postgres-unstable across runs.
+   R3v2's key derivation and MAB's gate-1 re-simulation both lean on candidate-set determinism.
+   This deliberately touches round 1's fetch too — only previously-tied rows can reorder, so it
+   is not a byte-identity violation (pinned by the `recall_deep` snapshot test). MAB's
+   re-simulation of the shipped policy should mirror this same total order.
 
 ## Non-goals
 

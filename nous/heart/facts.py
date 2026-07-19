@@ -3728,6 +3728,17 @@ class FactManager:
         retrieval-leg result, mirroring the dedup-probe rationale above. Callers
         that need tracking for their own survivors call ``track_access``
         separately.
+
+        R3v2 final review: ``ORDER BY`` ends in ``f.id`` as a total-order
+        tie-break. ``learned_at`` is a server-default timestamp — on a
+        bulk-backfilled corpus every row in a batch can share the identical
+        transaction-constant value, so without a final deterministic column
+        WHICH rows survive the ``LIMIT`` (round 1's 8, round 2's 256) is
+        Postgres-unstable across runs. R3v2's key derivation and MAB's
+        gate-1 re-simulation both lean on candidate-set determinism, so this
+        also (deliberately) touches round 1's fetch — only previously-tied
+        rows can reorder, so it is not a byte-identity violation (pinned by
+        the existing ``recall_deep`` snapshot test).
         """
         if not keys:
             return []
@@ -3747,7 +3758,7 @@ class FactManager:
                     "         f.subject, f.event_date, f.source_episode_id, "
                     "         f.attribute_key, f.subject_key "
                     "ORDER BY matched DESC, f.learned_at DESC, "
-                    "         f.source_ordinal DESC NULLS LAST "
+                    "         f.source_ordinal DESC NULLS LAST, f.id "
                     "LIMIT :lim"
                 ),
                 {"a": self.agent_id, "keys": keys, "lim": limit},

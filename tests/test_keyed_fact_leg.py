@@ -14,7 +14,8 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 import pytest_asyncio
 
-from nous.api.retrieval_pipeline import run_recall_pipeline
+from nous.api.retrieval_pipeline import PipelineResult, PipelineStats, run_recall_pipeline
+from nous.api.tools import _format_pipeline_text
 from nous.brain.brain import Brain
 from nous.heart.keys import extract_entity_candidates
 from nous.heart.schemas import FactInput
@@ -639,6 +640,30 @@ class TestKeyedR2:
         b_after, c_after = await _recall_count(b_id), await _recall_count(c_id)
         assert b_after == b_before + 1
         assert c_after == c_before
+
+
+# ---------------------------------------------------------------------------
+# _via_tag provenance rendering (pure formatter test, no DB) — final review fix 1
+# ---------------------------------------------------------------------------
+
+
+def _tagged_fact(retrieval_leg: str) -> PipelineResult:
+    return PipelineResult(
+        id=uuid.uuid4(), type="fact", description="Some fact content",
+        score=0.5, source="heart", metadata={"retrieval_leg": retrieval_leg},
+    )
+
+
+class TestViaTagKeyedProvenance:
+    def test_keyed_r1_tag(self):
+        text = _format_pipeline_text([_tagged_fact("keyed")], PipelineStats(), ["all"])
+        assert "[via keyed] Some fact content" in text
+        assert "[via keyed-hop]" not in text
+
+    def test_keyed_r2_tag_distinct_from_r1(self):
+        text = _format_pipeline_text([_tagged_fact("keyed_r2")], PipelineStats(), ["all"])
+        assert "[via keyed-hop] Some fact content" in text
+        assert "[via keyed] " not in text  # r2 must not fall through to the r1 tag
 
 
 # ---------------------------------------------------------------------------
