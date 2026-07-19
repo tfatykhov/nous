@@ -586,20 +586,29 @@ async def _run_stages(
                             r2_keys.append(k)
                 # (2) spec 2.2 primary definition: vocab keys appearing in
                 #     round-1 fact CONTENTS (covers entities mentioned but
-                #     not indexed on the hit itself). CRITICAL (devil-P1a):
-                #     extract_entity_candidates' quoted + capitalized-span
-                #     legs emit arbitrary NON-INDEXED spans first —
-                #     unfiltered, they would eat the key cap with keys that
-                #     match nothing. Only VOCAB MEMBERS may enter the
-                #     round-2 key set.
+                #     not indexed on the hit itself). CRITICAL (devil-P1a,
+                #     sharpened by codex r1): extract_entity_candidates'
+                #     quoted + capitalized-span legs emit arbitrary
+                #     NON-INDEXED spans first, and its own final
+                #     out[:max_candidates] slice is span-first — so on a raw
+                #     call, >= max_keys junk spans in a fact's content can
+                #     exhaust the cap before the vocab leg's real match ever
+                #     gets appended far enough forward to survive the slice.
+                #     vocab_only=True below skips those spans entirely so
+                #     only vocab members are ever collected. Only VOCAB
+                #     MEMBERS may enter the round-2 key set.
                 max_keys = getattr(settings, "keyed_fact_leg_r2_max_keys", 32)
                 for row in acc.keyed_results:
                     if len(r2_keys) >= max_keys:  # shared budget, stop early
                         break
                     for k in extract_entity_candidates(
                         row.content, vocab=vocab, max_candidates=max_keys,
+                        vocab_only=True,  # codex r1: quoted/cap-span junk
+                        # would otherwise exhaust the extractor's internal
+                        # cap before its own vocab leg's real match ever
+                        # reaches this loop (see keys.py docstring).
                     ):
-                        if k in vocab and k not in seen_k:  # devil-P1a vocab filter
+                        if k in vocab and k not in seen_k:  # redundant belt (codex r1): cheap, guards any future extractor change
                             seen_k.add(k)
                             r2_keys.append(k)
                 if len(r2_keys) > max_keys:

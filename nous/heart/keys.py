@@ -93,12 +93,26 @@ def extract_entity_candidates(
     *,
     vocab: frozenset[str] | None = None,
     max_candidates: int = 8,
+    vocab_only: bool = False,
 ) -> list[str]:
     """NER-lite (R3.3 v1): quoted spans + capitalized spans + known-key
     n-gram matches against the agent's key vocabulary. Returns NORMALIZED,
     deduplicated candidate keys, quoted-first, capped at max_candidates.
     The vocab leg recovers lowercase/sentence-initial entities the
     capitalized-span heuristic misses ("the marriage of figaro").
+
+    R3v2 codex round 1: ``vocab_only=True`` skips the quoted-span and
+    capitalized-span legs entirely and runs ONLY the vocab n-gram leg. The
+    round-2 content scan needs exactly "content mentions matched against the
+    agent's key vocabulary" (the spec's own definition of that step) — the
+    heuristic span legs exist for QUERY-side NER, where a non-indexed span
+    is still a useful candidate to try. On a FACT-CONTENT scan they are pure
+    cap pollution: the return value is truncated to ``max_candidates`` at
+    the very end, quoted/cap-span-first, so >= ``max_candidates`` junk spans
+    in a fact's content exhaust the cap before the vocab leg's real match is
+    ever reached — even though that match IS collected, it just lands past
+    the final slice. Default ``False`` keeps the query-side (round-1
+    candidate extraction) path byte-unchanged.
     """
     seen: set[str] = set()
     out: list[str] = []
@@ -109,12 +123,13 @@ def extract_entity_candidates(
             seen.add(key)
             out.append(key)
 
-    for m in _QUOTED.finditer(text):
-        _add(next(g for g in m.groups() if g))
-    for m in _CAP_SPAN.finditer(text):
-        # trim trailing lowercase connectors captured by the run
-        span = re.sub(r"\s+(?:of|the|de|la|van|von)$", "", m.group(0))
-        _add(span)
+    if not vocab_only:
+        for m in _QUOTED.finditer(text):
+            _add(next(g for g in m.groups() if g))
+        for m in _CAP_SPAN.finditer(text):
+            # trim trailing lowercase connectors captured by the run
+            span = re.sub(r"\s+(?:of|the|de|la|van|von)$", "", m.group(0))
+            _add(span)
     if vocab:
         tokens = (normalize_key(text, max_len=1000) or "").split()
         # codex P2 round 2: the window used to be a fixed 4 tokens, but keys

@@ -667,6 +667,105 @@ class TestViaTagKeyedProvenance:
 
 
 # ---------------------------------------------------------------------------
+# codex round 1 (P2): vocab-only content scan for round-2 key derivation
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def seed_junk_content_hop_corpus(heart):
+    """Reproduces codex round-1 P2: ``extract_entity_candidates``'s internal
+    ``out[:max_candidates]`` slice is quoted/cap-span-first, so >=
+    ``keyed_fact_leg_r2_max_keys`` non-indexed junk spans in a round-1 hit's
+    content can exhaust the cap before the vocab leg's real match is ever
+    reached — even though the vocab leg DOES find it and append it to
+    ``out``, it lands past the slice and never survives to the call site's
+    own ``k in vocab`` filter.
+
+    A is keyed ONLY on "alpha station" (the round-1 query key) — NOT on
+    "bridge person" — so the round-2 hop key can ONLY come from step 2
+    (content-scan), isolating the bug from step 1's entity-rows path. A's
+    content packs 5 distinct quoted junk spans ("Junk One".."Junk Five",
+    none of them vocab members) BEFORE a lowercase "bridge person" mention
+    recoverable only by the vocab n-gram leg. With
+    ``keyed_fact_leg_r2_max_keys=3`` (< 5 junk spans), the pre-fix
+    extractor call (``extract_entity_candidates(content, vocab=vocab,
+    max_candidates=3)``) returns exactly ["junk one", "junk two", "junk
+    three"] — "bridge person" IS found internally but sits at out-index 5,
+    past the ``[:3]`` slice, so it never reaches the call site.
+
+    B is keyed on "bridge person" and is the only candidate reachable via
+    that key — unambiguous once the key correctly reaches round 2.
+    """
+    agent_id = heart.agent_id
+    a_id, b_id = uuid.uuid4(), uuid.uuid4()
+    async with heart.db.session() as s:
+        s.add(Fact(
+            id=a_id, agent_id=agent_id,
+            content=(
+                '"Junk One" "Junk Two" "Junk Three" "Junk Four" "Junk Five" '
+                "mentions bridge person eventually."
+            ),
+            active=True,
+        ))
+        s.add(Fact(
+            id=b_id, agent_id=agent_id,
+            content="A quiet office building underwent minor renovations recently.",
+            active=True,
+        ))
+        await s.flush()
+        s.add(FactEntityKey(fact_id=a_id, entity_key="alpha station", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=b_id, entity_key="bridge person", agent_id=agent_id))
+        await s.commit()
+
+    yield {"A": a_id, "B": b_id}
+
+    async with heart.db.session() as cleanup:
+        for fid in (a_id, b_id):
+            f = await cleanup.get(Fact, fid)
+            if f is not None:
+                await cleanup.delete(f)
+        await cleanup.commit()
+
+
+@pytest.mark.postgres_only
+class TestCodexR1VocabOnlyContentScan:
+    async def test_junk_spans_do_not_exhaust_r2_key_cap(
+        self, heart, brain, settings, seed_junk_content_hop_corpus,
+    ):
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_r2_max_keys": 3,
+        })
+        results, stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+        r2_ids = {r.id for r in results if r.metadata.get("retrieval_leg") == "keyed_r2"}
+        assert seed_junk_content_hop_corpus["B"] in r2_ids
+
+
+class TestExtractEntityCandidatesVocabOnly:
+    def test_vocab_only_skips_quoted_and_cap_spans(self):
+        vocab = frozenset({"bridge person"})
+        text = '"Junk One" "Junk Two" Alpha Beta mentions bridge person eventually.'
+        got = extract_entity_candidates(text, vocab=vocab, vocab_only=True)
+        assert got == ["bridge person"]
+        assert "junk one" not in got
+        assert "alpha beta" not in got
+
+    def test_vocab_only_cap_respected(self):
+        vocab = frozenset({"bridge person", "target city"})
+        text = "mentions bridge person and target city both right here."
+        got = extract_entity_candidates(
+            text, vocab=vocab, vocab_only=True, max_candidates=1,
+        )
+        assert len(got) == 1
+
+    def test_vocab_only_false_is_default_query_side_path_unchanged(self):
+        vocab = frozenset({"marriage of figaro"})
+        text = "who wrote the marriage of figaro?"
+        assert extract_entity_candidates(text, vocab=vocab) == \
+            extract_entity_candidates(text, vocab=vocab, vocab_only=False)
+
+
+# ---------------------------------------------------------------------------
 # Entity-candidate extraction (NER-lite) — vocab leg + carry-forward coverage
 # ---------------------------------------------------------------------------
 
