@@ -424,27 +424,31 @@ which default to `0`/`False` when round 2 never ran.
 ### Acceptance (MAB-owned, external to this repository)
 
 As with R3.3 above, acceptance runs in the MAB team's own harness, outside this repository — this
-repo's deliverable is the mechanism plus unit/integration tests, not the eval run itself. The
-R3v2 requirements doc is not committed here; the gate structure below is as captured by the
-implementation plan (`docs/superpowers/plans/2026-07-19-r3v2-iterative-keyed.md`, Global
-Constraints + its binding review amendments):
+repo's deliverable is the mechanism plus unit/integration tests, not the eval run itself. The four
+gates below are quoted verbatim from the MAB R3v2 requirements doc
+(`nous-r3v2-iterative-keyed-requirements.md`, 2026-07-19, "Acceptance gates (in cost order; 1–2
+are free)"):
 
-1. **Bounded-sim gate (free).** Re-simulate the SHIPPED policy — not the originally-simulated
-   one — since this implementation took one documented liberty (the `str(id)` tie-break) beyond
-   the spec's three stated ranking criteria. "Already green" from the original bounded simulation
-   does not transfer; gate 1 is not satisfied for this code until MAB re-simulates it.
-2. **Displacement / pool-composition check (free).** Round 2 must never evict a round-1 result —
-   this is a POOL-COMPOSITION and POSITIONAL guarantee, not a scoring one. It holds on the
-   `rerank_by_score=False` path (today's default) by construction of the insertion order. Under
-   `rerank_by_score=True` WITH the recency resolver also enabled, a dated, superseded round-1
-   fact CAN be down-ranked (×0.3) below the round-2 band in the FINAL ordering — that is the
-   recency resolver acting on the fact's own supersession state, not round-2 evicting it; the two
-   mechanisms are orthogonal and this is expected, not a bug.
-3. **Decisive replay (≈7M tokens, only after 1–2 pass).** CR n=320 on the re-keyed clone, rounds
-   flag on vs the R3.3 baseline.
-4. **Regression replays.** The round-2 leg must not perturb non-hop retrieval — rounds=1 stays
-   byte-identical by construction (see the byte-identity invariant above), so this gate is
-   expected to be a pure no-op check on the flag-off path.
+1. **Bounded-policy simulation (zero LLM), already green on the eval clone:** mh gold coverage
+   ≥ **0.35 @ K2=8** (measured 0.39) with the fan-out guards ON. Implementation must reproduce
+   ≥ this bar on `nous_mab_wp` before any live code review completes — if the shipped ranking
+   differs from the simulated one, re-simulate first, build second.
+   *(This repo's note: the shipped policy carries three specifics MAB must confirm or re-simulate —
+   key-derivation order, the vocab filter, and the `str(id)` tie-break; see Documented Deviations.
+   "Already green" from the original simulation does not transfer until that check happens.)*
+2. **Displacement check (free):** candidate-pool composition on a probe sample — chunk-channel
+   content unchanged when round-2 contributes; round-2 never evicts round-1 or direct hits (band
+   ordering working).
+   *(This repo's note: the non-eviction guarantee is POOL-COMPOSITION/POSITIONAL. Under
+   `rerank_by_score=True` with the recency resolver enabled, a dated superseded round-1 fact can
+   be ×0.3-down-ranked below the round-2 band in FINAL ordering — that is the resolver acting on
+   the fact's own supersession state, orthogonal to round 2; expected, not eviction.)*
+3. **Decisive replay (≈7M tokens):** CR n=320, rounds=2 vs the 0.759 rounds=1 result on the same
+   repaired clone. Prediction to beat: mh 0.619; the bounded sim ceiling implies mh headroom to
+   ~0.70 if conversion tracks the sh precedent. Aggregate prediction ~0.78 ± 0.02.
+4. **Non-CR regression:** nous-side retrieval suite rounds=1 vs rounds=2 (the eval's AR/LRU agents
+   carry no entity keys; that gate remains nous-side, as in v1). rounds=1 stays byte-identical by
+   construction (see the byte-identity invariant above).
 
 ### Documented Deviations (R3v2, in addition to R3.3's list above)
 
