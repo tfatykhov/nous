@@ -148,6 +148,11 @@ class PipelineStats:
     # R3v2: count of round-2 keyed PipelineResults merged at assembly time
     # (same accounting convention as n_keyed above).
     n_keyed_r2: int = 0
+    # R3v2: count of round-2 keyed candidates dropped because their id
+    # already existed in the result set from another leg (same accounting
+    # convention as n_keyed_dup above — closes the observability gap left
+    # by acc.n_keyed_r2_dup being a write-only field in Task 2).
+    n_keyed_r2_dup: int = 0
     # R3v2: True iff round 2 ran and EITHER the key-derivation cap or the
     # candidate-fetch cap was hit (possibly-truncated -- reaching exactly
     # the candidate LIMIT is indistinguishable from "there were more").
@@ -429,6 +434,7 @@ async def run_recall_pipeline(
         n_keyed=len(keyed),
         n_keyed_dup=acc.n_keyed_dup,
         n_keyed_r2=len(keyed_r2),  # R3v2
+        n_keyed_r2_dup=acc.n_keyed_r2_dup,  # R3v2
         keyed_r2_truncated=acc.keyed_r2_truncated,  # R3v2
     )
     return results, stats
