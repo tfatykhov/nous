@@ -1055,6 +1055,79 @@ class TestCodexR4F071AwareK2Selection:
 
 
 # ---------------------------------------------------------------------------
+# codex round 5 (P2): r1 facts must not consume the SQL-level candidate cap
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def seed_sql_cap_hop_corpus(heart):
+    """Reproduces codex round-5 P2: the last member of the wasted-slot
+    family, this time at the SQL fetch layer. Derived R2 keys often match
+    the r1 facts' own entity rows (they seeded those keys in the first
+    place) — pre-fix, ``fetch_by_entity_keys``'s capped ``LIMIT`` could
+    fill with r1 rows guaranteed to be dropped by the Python-side
+    ``r1_id_set`` filter right after, so a fresh hop fact just beyond the
+    SQL LIMIT was never even fetched.
+
+    A is the round-1 hit (keyed on "alpha station", the query's own
+    round-1 key) and ALSO owns "bridge person" AND "widget echo" as its
+    own entity keys — both become round-2 derived keys via step 1 (which
+    is not itself capped). A therefore matches the derived key set on
+    BOTH keys (``matched=2``). E is keyed ONLY on "bridge person" — it
+    matches on just one derived key (``matched=1``). With
+    ``keyed_fact_leg_r2_max_candidates=1`` (a deliberately tiny SQL
+    LIMIT), the SQL's own ``ORDER BY matched DESC`` ranks A strictly ahead
+    of E: pre-fix, the ``LIMIT 1`` fetch returns ONLY A (E is never even
+    fetched, let alone ranked, before the Python-side filter drops A);
+    post-fix, A is excluded IN THE QUERY itself, so the same ``LIMIT 1``
+    fetch returns E instead.
+    """
+    agent_id = heart.agent_id
+    a_id, e_id = uuid.uuid4(), uuid.uuid4()
+    async with heart.db.session() as s:
+        s.add(Fact(
+            id=a_id, agent_id=agent_id,
+            content="Facility records mention routine filing procedures only.",
+            active=True,
+        ))
+        s.add(Fact(
+            id=e_id, agent_id=agent_id,
+            content="A different memo covers unrelated inventory matters.",
+            active=True,
+        ))
+        await s.flush()
+        s.add(FactEntityKey(fact_id=a_id, entity_key="alpha station", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a_id, entity_key="bridge person", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a_id, entity_key="widget echo", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=e_id, entity_key="bridge person", agent_id=agent_id))
+        await s.commit()
+
+    yield {"A": a_id, "E": e_id}
+
+    async with heart.db.session() as cleanup:
+        for fid in (a_id, e_id):
+            f = await cleanup.get(Fact, fid)
+            if f is not None:
+                await cleanup.delete(f)
+        await cleanup.commit()
+
+
+@pytest.mark.postgres_only
+class TestCodexR5SqlLevelR1Exclusion:
+    async def test_r1_facts_do_not_consume_sql_candidate_cap(
+        self, heart, brain, settings, seed_sql_cap_hop_corpus,
+    ):
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_r2_max_candidates": 1,
+        })
+        e_id = seed_sql_cap_hop_corpus["E"]
+        results, _stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+        e_hit = [r for r in results if r.id == e_id]
+        assert e_hit and e_hit[0].metadata.get("retrieval_leg") == "keyed_r2"
+
+
+# ---------------------------------------------------------------------------
 # Entity-candidate extraction (NER-lite) — vocab leg + carry-forward coverage
 # ---------------------------------------------------------------------------
 

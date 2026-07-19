@@ -3689,7 +3689,10 @@ class FactManager:
             self._entity_vocab_cache = (vocab, now)
         return vocab
 
-    async def fetch_by_entity_keys(self, keys: list[str], limit: int = 8, *, track: bool = True):
+    async def fetch_by_entity_keys(
+        self, keys: list[str], limit: int = 8, *,
+        track: bool = True, exclude_fact_ids: list[UUID] | None = None,
+    ):
         """R3.3: active facts matching any entity key, ranked by matched-key
         count then recency/ordinal. MUST join facts on active=true (entity
         rows survive supersession).
@@ -3739,10 +3742,28 @@ class FactManager:
         also (deliberately) touches round 1's fetch — only previously-tied
         rows can reorder, so it is not a byte-identity violation (pinned by
         the existing ``recall_deep`` snapshot test).
+
+        codex r5: ``exclude_fact_ids`` pushes round-2's r1-exclusion into
+        the SQL fetch itself, rather than relying solely on the Python-side
+        filter downstream. Derived R2 keys often match the r1 facts' own
+        entity rows (they seeded those keys in the first place), so
+        without this, the capped ``LIMIT`` could fill with r1 rows
+        guaranteed to be dropped by the caller's post-fetch filter right
+        after — with a small cap, a fresh hop fact just beyond the LIMIT
+        would never even be fetched. Round-1's own call site passes
+        nothing, so its query is unchanged (no exclude clause appended).
+        Binds the raw UUID list cast to ``uuid[]`` (mirrors
+        ``entity_keys_for_facts``'s r4 fix) so the exclusion doesn't
+        damage the index either.
         """
         if not keys:
             return []
         async with self.db.session() as session:
+            params: dict = {"a": self.agent_id, "keys": keys, "lim": limit}
+            exclude_clause = ""
+            if exclude_fact_ids:
+                exclude_clause = "  AND NOT (f.id = ANY(CAST(:exclude_ids AS uuid[]))) "
+                params["exclude_ids"] = [str(i) for i in exclude_fact_ids]
             rows = await session.execute(
                 text(
                     "SELECT f.id, f.content, f.learned_at, f.source_ordinal, "
@@ -3754,6 +3775,7 @@ class FactManager:
                     "JOIN heart.facts f ON f.id = ek.fact_id "
                     "WHERE ek.agent_id = :a AND ek.entity_key = ANY(:keys) "
                     "  AND f.active = true AND f.agent_id = :a "
+                    + exclude_clause +
                     "GROUP BY f.id, f.content, f.learned_at, f.source_ordinal, "
                     "         f.subject, f.event_date, f.source_episode_id, "
                     "         f.attribute_key, f.subject_key "
@@ -3761,7 +3783,7 @@ class FactManager:
                     "         f.source_ordinal DESC NULLS LAST, f.id "
                     "LIMIT :lim"
                 ),
-                {"a": self.agent_id, "keys": keys, "lim": limit},
+                params,
             )
             result_rows = list(rows)
             if track and result_rows:

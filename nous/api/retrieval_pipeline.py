@@ -235,6 +235,11 @@ class _PipelineAccumulator:
     # single combined telemetry log line there can report them alongside
     # the assembly-time selection count.
     keyed_r2_keys_examined: int = 0
+    # codex r5: fetched candidate count. Now r1-FREE by construction —
+    # fetch_by_entity_keys excludes r1 ids in the SQL itself (exclude_fact_ids),
+    # so this no longer describes a "pre-r1-filter" fan-out count (it did
+    # before r5); the Python-side r1_id_set filter downstream is belt-and-
+    # suspenders and expected to drop 0 rows.
     keyed_r2_candidates: int = 0
     # Set during assembly (mirrors n_keyed_dup above) — not populated
     # inside _run_stages.
@@ -697,12 +702,24 @@ async def _run_stages(
                 rows2_count = 0
                 if r2_keys:
                     max_cand = getattr(settings, "keyed_fact_leg_r2_max_candidates", 256)
+                    # codex r5: exclude r1 ids IN THE QUERY, not just after —
+                    # derived r2_keys often match the r1 facts' own entity
+                    # rows (they seeded those keys), so without this, the
+                    # capped LIMIT could fill with r1 rows guaranteed to be
+                    # dropped by the Python-side filter below, starving a
+                    # fresh hop candidate just beyond the LIMIT of ever
+                    # being fetched at all.
                     rows2 = await heart.facts.fetch_by_entity_keys(
                         r2_keys, limit=max_cand, track=False,
+                        exclude_fact_ids=r1_ids,
                     )
                     rows2_count = len(rows2)
                     if len(rows2) >= max_cand:
                         acc.keyed_r2_truncated = True
+                    # Belt-and-suspenders (codex r5): the SQL fetch above
+                    # already excludes r1 ids, so this is expected to drop
+                    # 0 rows in normal operation — kept as defense in depth
+                    # if that invariant (or a future caller) ever breaks.
                     r1_id_set = set(r1_ids)
                     rows2 = [r for r in rows2 if r.id not in r1_id_set]
                     # codex r3: rank the FULL candidate list here but do NOT

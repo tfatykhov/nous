@@ -396,12 +396,13 @@ Round-2 hits carry `metadata["retrieval_leg"] = "keyed_r2"` (round-1 hits keep `
 the same `matched_keys`/`subject`/`event_date`/`source_episode_id` conventions as round 1's
 `_keyed_to_pipeline`. Two log lines surface the round:
 
-- A dedicated `logger.info` inside the pipeline, fired only when round 2 actually ran (whether or
+- A dedicated `logger.info` at assembly time, fired only when round 2 actually ran (whether or
   not it found anything): `keyed_r2: r1_hits=%d keys_examined=%d candidates=%d selected=%d
-  truncated=%s`. `candidates=` is the PRE-round-1-filter fan-out count — the raw
-  `fetch_by_entity_keys` result size before round-1 ids are excluded — so it reflects the true
-  candidate-set size returned by the database, not the (usually smaller) post-filter/
-  post-ranking count.
+  truncated=%s`. `candidates=` is the `fetch_by_entity_keys` result size — since codex round 5,
+  round-1 ids are excluded IN THE SQL FETCH itself (`exclude_fact_ids`, cast to `uuid[]`), so this
+  count is already r1-free by construction, not merely "before a later Python-side filter" as it
+  was pre-round-5. `selected=` (the assembly-time K2 survivor count, after cross-leg + F071
+  filtering) is the only count that can't be known until assembly.
 - The existing consolidated `recall_deep` INFO line (`nous/api/tools.py`) gains
   `n_keyed_r2=%d keyed_r2_truncated=%s`, appended for grep parity with the round-1 fields already
   there.
