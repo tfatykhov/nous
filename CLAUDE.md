@@ -597,6 +597,10 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_KEYED_FACT_LEG_ENABLED` | `false` | F085 R3.3 master switch: exact entity-key retrieval leg in `run_recall_pipeline`. Land-dark. |
 | `NOUS_KEYED_FACT_LEG_K` | `8` | F085 R3.3: bounded allotment - max keyed facts merged per query. |
 | `NOUS_KEYED_FACT_LEG_SCORE` | `0.55` | F085 R3.3: score band ceiling for keyed hits (RRF [0,1] scale, below the direct-hit head). |
+| `NOUS_KEYED_FACT_LEG_ROUNDS` | `1` | F085 R3v2: keyed-leg retrieval rounds. 1 = v1 behavior (byte-identical); 2 enables the bounded iterative round (multi-hop composition). Land-dark. |
+| `NOUS_KEYED_FACT_LEG_K2` | `8` | F085 R3v2: round-2 allotment - max round-2 keyed facts merged per query. |
+| `NOUS_KEYED_FACT_LEG_R2_MAX_KEYS` | `32` | F085 R3v2 fan-out guard: max round-2 keys examined (truncation is counted, never silent). |
+| `NOUS_KEYED_FACT_LEG_R2_MAX_CANDIDATES` | `256` | F085 R3v2 fan-out guard: hard cap on round-2 candidates fetched before ranking (the p90-587 lesson). |
 
 ### Dashboard (Svelte v2)
 

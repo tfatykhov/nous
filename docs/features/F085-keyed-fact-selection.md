@@ -301,6 +301,183 @@ never sees the pairs D2 stops from being silently swallowed.
   KEEP-BOTH pair's `contradiction_of` value and the (post-C1, at-most-one) `-0.2` confidence decrement are
   accepted residue it does not undo.
 
+## R3 v2 — Bounded Iterative Round (2026-07-19)
+
+**Status:** Shipped, land-dark (`NOUS_KEYED_FACT_LEG_ROUNDS` default `1` — byte-identical to R3.3 above)
+**Branch:** `feat/r3v2-iterative-keyed`
+
+R3.3's keyed leg above is exact single-hop: a query mentioning an entity finds facts keyed on
+that same entity, and nothing more. The MAB team's bounded-simulation work on the R3v2
+requirements doc (`nous-r3v2-iterative-keyed-requirements.md` — external to this repository,
+referenced by name in the implementation plan but not committed here) measured a **0.759** first
+above-noise arm on multi-hop-driven queries (queries whose gold fact is not directly keyed by
+anything in the query text, but IS reachable by hopping through a round-1 hit's own entity keys),
+and a simulated round-2 ceiling of **0.02 → 0.44** once that hop is modeled — with the actual
+bounded policy (guards, ranking, K2 cap) measuring **0.39 @ K2=8** in simulation, close enough to
+the ceiling to justify shipping the mechanism.
+
+### Mechanism
+
+**Trigger:** `keyed_fact_leg_rounds >= 2` AND round 1 produced at least one hit
+(`acc.keyed_results` non-empty). Rounds defaults `1` — the round-2 code path is a hard early-exit
+at that guard, so no new behavior, DB round-trips, or log lines occur unless an operator
+explicitly raises the setting.
+
+**Key derivation** (`nous/api/retrieval_pipeline.py`, Stage 1.6, inside `_run_stages`) — order
+matters because the fan-out cap (below) truncates, so what fills the list FIRST determines what
+survives:
+
+1. The round-1 hits' own `fact_entity_keys` rows (`FactManager.entity_keys_for_facts`), in
+   round-1 rank order, alphabetical within a fact — cheap, exact, and unconditional (this step is
+   NOT itself capped by `keyed_fact_leg_r2_max_keys`).
+2. A vocab-filtered scan of the round-1 hits' CONTENT via `extract_entity_candidates` — covers
+   entities mentioned in a hit's content but not indexed as one of its own entity keys. Only keys
+   that are ALSO members of the agent's entity-key vocabulary may enter the round-2 key set
+   (`k in vocab`); the raw extractor's quoted-span and capitalized-span legs emit arbitrary
+   non-indexed spans first, and unfiltered they would eat the entire key cap with candidates that
+   match nothing in the database — silently dropping round-2 coverage below what was simulated.
+   A shared early-break budget applies across ALL round-1 hits' content scans (not per-row), so
+   the cap is a single fan-out ceiling, not `max_keys` per hit.
+
+Both steps are MINUS the round-1 query's own keys (`seen_k = set(candidates)`), so a key that
+already fired round 1 cannot re-derive itself into round 2.
+
+**Fan-out guards** — `keyed_fact_leg_r2_max_keys` (default 32) caps the combined key set from
+both derivation steps; `keyed_fact_leg_r2_max_candidates` (default 256) caps the candidate rows
+`fetch_by_entity_keys` returns before ranking. Truncation at either cap sets
+`PipelineStats.keyed_r2_truncated = True` — deliberately "possibly truncated" semantics: landing
+exactly ON the candidate `LIMIT` is indistinguishable from "there were more beyond it", so the
+flag fires either way and the `keyed_r2:` log line's separate counts (below) disambiguate for
+anyone inspecting a specific run.
+
+**THE ranking policy** (`_rank_r2_candidates` — **sim-parity contract: any change to this sort
+key requires MAB re-simulation of the shipped policy before the gate-3 decisive replay**;
+"already green" from the original bounded simulation does NOT transfer to a modified policy):
+
+```
+sort key = (
+    -attribute_key_word_overlap_with_query,
+    -content_word_overlap_with_query,
+    -learned_at.timestamp(),
+    str(id),                      # final tie-break, full determinism
+)
+```
+
+Both overlaps fold identically: `normalize_key(field, max_len=1000).split()` intersected with the
+same-folded query tokens, counted. The `str(id)` tie-break is the one documented liberty beyond
+the three criteria the spec states explicitly — MAB should confirm their simulation's own
+tie-handling matches, or re-simulate, before treating gate 1 as satisfied for this shipped policy.
+
+Round-2 candidates are fetched via `fetch_by_entity_keys(..., track=False)` — untracked, since a
+bulk candidate pool that gets filtered down by ranking/K2 before ever surfacing is not itself a
+retrieval-leg result (mirrors the existing dedup-probe rationale in R3.3 above). Only the
+top-`keyed_fact_leg_k2` survivors get `track_access()`, after ranking.
+
+### Band derivation
+
+Round-2 hits score in a band derived from round-1's own floor, not a fixed offset:
+
+```
+base  = max(0.0, keyed_fact_leg_score - 0.005 * (keyed_fact_leg_k + 1))
+score = max(0.0, base - 0.005 * rank)
+```
+
+This sits **two decay steps** under round-1's worst-ranked hit (`k + 1`, not `k - 1`) as a
+deliberate safety margin. Deriving from round-1's actual floor (rather than a fixed sub-band)
+keeps the guarantee config-proof: raising `keyed_fact_leg_k` moves round-1's own floor down, and
+the round-2 band automatically follows it down too, so round-2 can never outscore round-1
+regardless of how the operator has configured K. The `max(0.0, ...)` clamp is an accepted
+degenerate edge — an operator who has set `keyed_fact_leg_score` near 0 has, in effect, already
+disabled the whole keyed leg.
+
+### Provenance / telemetry
+
+Round-2 hits carry `metadata["retrieval_leg"] = "keyed_r2"` (round-1 hits keep `"keyed"`), with
+the same `matched_keys`/`subject`/`event_date`/`source_episode_id` conventions as round 1's
+`_keyed_to_pipeline`. Two log lines surface the round:
+
+- A dedicated `logger.info` at assembly time, fired only when round 2 actually ran (whether or
+  not it found anything): `keyed_r2: r1_hits=%d keys_examined=%d candidates=%d selected=%d
+  truncated=%s`. `candidates=` is the `fetch_by_entity_keys` result size — since codex round 5,
+  round-1 ids are excluded IN THE SQL FETCH itself (`exclude_fact_ids`, cast to `uuid[]`), so this
+  count is already r1-free by construction, not merely "before a later Python-side filter" as it
+  was pre-round-5. `selected=` (the assembly-time K2 survivor count, after cross-leg + F071
+  filtering) is the only count that can't be known until assembly.
+- The existing consolidated `recall_deep` INFO line (`nous/api/tools.py`) gains
+  `n_keyed_r2=%d keyed_r2_truncated=%s`, appended for grep parity with the round-1 fields already
+  there.
+
+The `rounds=1` (default) byte-identity invariant covers RESULTS only (pinned by
+`test_rounds_1_default_byte_identical` + the untouched `recall_deep` text snapshot) — it does NOT
+cover log text. The consolidated `recall_deep` line legitimately gains two fields on every call
+regardless of the flag, since it only ever reads `stats.n_keyed_r2`/`stats.keyed_r2_truncated`,
+which default to `0`/`False` when round 2 never ran.
+
+### Flags
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `NOUS_KEYED_FACT_LEG_ROUNDS` | `1` | Keyed-leg retrieval rounds. `1` = v1 behavior (byte-identical); `2` enables the bounded iterative round. |
+| `NOUS_KEYED_FACT_LEG_K2` | `8` | Round-2 allotment — max round-2 keyed facts merged per query. |
+| `NOUS_KEYED_FACT_LEG_R2_MAX_KEYS` | `32` | Fan-out guard — max round-2 keys examined (truncation counted, never silent). |
+| `NOUS_KEYED_FACT_LEG_R2_MAX_CANDIDATES` | `256` | Fan-out guard — hard cap on round-2 candidates fetched before ranking. |
+
+### Acceptance (MAB-owned, external to this repository)
+
+As with R3.3 above, acceptance runs in the MAB team's own harness, outside this repository — this
+repo's deliverable is the mechanism plus unit/integration tests, not the eval run itself. The four
+gates below are quoted verbatim from the MAB R3v2 requirements doc
+(`nous-r3v2-iterative-keyed-requirements.md`, 2026-07-19, "Acceptance gates (in cost order; 1–2
+are free)"):
+
+1. **Bounded-policy simulation (zero LLM), already green on the eval clone:** mh gold coverage
+   ≥ **0.35 @ K2=8** (measured 0.39) with the fan-out guards ON. Implementation must reproduce
+   ≥ this bar on `nous_mab_wp` before any live code review completes — if the shipped ranking
+   differs from the simulated one, re-simulate first, build second.
+   *(This repo's note: the shipped policy carries three specifics MAB must confirm or re-simulate —
+   key-derivation order, the vocab filter, and the `str(id)` tie-break; see Documented Deviations.
+   "Already green" from the original simulation does not transfer until that check happens.)*
+2. **Displacement check (free):** candidate-pool composition on a probe sample — chunk-channel
+   content unchanged when round-2 contributes; round-2 never evicts round-1 or direct hits (band
+   ordering working).
+   *(This repo's note: the non-eviction guarantee is POOL-COMPOSITION/POSITIONAL. Under
+   `rerank_by_score=True` with the recency resolver enabled, a dated superseded round-1 fact can
+   be ×0.3-down-ranked below the round-2 band in FINAL ordering — that is the resolver acting on
+   the fact's own supersession state, orthogonal to round 2; expected, not eviction.)*
+3. **Decisive replay (≈7M tokens):** CR n=320, rounds=2 vs the 0.759 rounds=1 result on the same
+   repaired clone. Prediction to beat: mh 0.619; the bounded sim ceiling implies mh headroom to
+   ~0.70 if conversion tracks the sh precedent. Aggregate prediction ~0.78 ± 0.02.
+4. **Non-CR regression:** nous-side retrieval suite rounds=1 vs rounds=2 (the eval's AR/LRU agents
+   carry no entity keys; that gate remains nous-side, as in v1). rounds=1 stays byte-identical by
+   construction (see the byte-identity invariant above).
+
+### Documented Deviations (R3v2, in addition to R3.3's list above)
+
+1. **`PipelineOutcome` → `PipelineStats`.** The implementation's return-value naming is
+   `PipelineStats` (matching the rest of this pipeline's existing naming), not whatever name the
+   external spec used.
+2. **`attribute_key` added to the `fetch_by_entity_keys` SELECT.** The spec's ranking policy
+   assumes `attribute_key` is already available on the fetched row; Task 1 added it (and
+   `subject_key`) to the SELECT/GROUP BY as additive columns.
+3. **Band derived from round-1's floor, not a fixed sub-band.** See Band derivation above —
+   chosen for config-proofness under an operator-raised `keyed_fact_leg_k`.
+4. **Round-2 key derivation covers BOTH spec sentences.** The spec describes round-2 keys as
+   entities associated with round-1 hits in two ways (indexed entity rows, and content mentions);
+   this implementation does both — entity rows preferred (step 1), vocab-filtered content scan
+   supplementing (step 2) — rather than picking one interpretation.
+5. **Key-derivation order, the vocab filter, and the `id` tie-break are the sim-parity items.**
+   These three specifics are exactly what MAB's re-simulation (gate 1 above) needs to confirm
+   against the shipped policy — see THE ranking policy above for the full statement.
+6. **Byte-identity covers results, not logs.** See Provenance / telemetry above.
+7. **SQL-layer `f.id` tie-break added to `fetch_by_entity_keys`'s `ORDER BY` (final review).**
+   `learned_at` is a server-default timestamp — on a bulk-backfilled corpus every row in a batch
+   can share the identical transaction-constant value, so without a final deterministic column
+   WHICH rows survive the `LIMIT` (round 1's 8, round 2's 256) was Postgres-unstable across runs.
+   R3v2's key derivation and MAB's gate-1 re-simulation both lean on candidate-set determinism.
+   This deliberately touches round 1's fetch too — only previously-tied rows can reorder, so it
+   is not a byte-identity violation (pinned by the `recall_deep` snapshot test). MAB's
+   re-simulation of the shipped policy should mirror this same total order.
+
 ## Non-goals
 
 - **Multi-hop entity reasoning.** No pronoun/co-reference resolution across facts — v1 is exact single-hop

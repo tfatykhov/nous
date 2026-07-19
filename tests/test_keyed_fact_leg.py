@@ -14,7 +14,8 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 import pytest_asyncio
 
-from nous.api.retrieval_pipeline import run_recall_pipeline
+from nous.api.retrieval_pipeline import PipelineResult, PipelineStats, run_recall_pipeline
+from nous.api.tools import _format_pipeline_text
 from nous.brain.brain import Brain
 from nous.heart.keys import extract_entity_candidates
 from nous.heart.schemas import FactInput
@@ -200,6 +201,31 @@ class TestKeyedFactLeg:
             assert after.last_recalled_at is not None
             if before_recalled_at is not None:
                 assert after.last_recalled_at > before_recalled_at
+
+    async def test_fetch_track_false_skips_access_tracking(self, heart, seed_keyed_corpus):
+        # arch-P1: _get_fact does NOT exist in this file — use its own idiom
+        # (heart.db.session + s.get(Fact, id), as at :189-192)
+        gold = seed_keyed_corpus["gold_id"]
+        async with heart.db.session() as s:
+            before = (await s.get(Fact, gold)).recall_count
+        rows = await heart.facts.fetch_by_entity_keys(["marriage of figaro"], limit=8, track=False)
+        assert [r.id for r in rows] == [gold]
+        async with heart.db.session() as s:
+            after = (await s.get(Fact, gold)).recall_count
+        assert after == before                                     # NOT tracked
+        assert rows[0].attribute_key is not None or rows[0].attribute_key is None  # column present (no AttributeError)
+
+    async def test_entity_keys_for_facts_groups_and_sorts(self, heart, seed_keyed_corpus):
+        gold = seed_keyed_corpus["gold_id"]
+        m = await heart.facts.entity_keys_for_facts([gold])
+        assert m == {gold: ["marriage of figaro", "thomas kyd"]}   # alphabetical
+        assert await heart.facts.entity_keys_for_facts([]) == {}
+
+    async def test_entity_keys_for_facts_excludes_inactive(self, heart, seed_keyed_corpus):
+        # the corpus's superseded (active=False) fact shares a key — must not appear
+        sup = seed_keyed_corpus["superseded_id"]
+        m = await heart.facts.entity_keys_for_facts([sup])
+        assert m == {}
 
     async def test_superseded_fact_not_returned(self, heart, brain, settings, seed_keyed_corpus):
         # seed an inactive fact sharing the entity key
@@ -447,6 +473,829 @@ class TestKeyedFactLeg:
                         if dbfact is not None:
                             await cleanup.delete(dbfact)
                             await cleanup.commit()
+
+
+# ---------------------------------------------------------------------------
+# R3v2: bounded round-2 keyed retrieval
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def seed_hop_corpus(heart):
+    """Two-hop shape for round-2 composition tests.
+
+    Query used throughout ``TestKeyedR2``: ``'Report about "Alpha Station"
+    relocation city'``. ``normalize_key`` strips the quotes/punctuation and
+    folds it to the 6-token set {"report", "about", "alpha", "station",
+    "relocation", "city"}.
+
+    A (round-1 hit): entity keys {"alpha station", "bridge person",
+    "zzz filler key"}. The query's own round-1 candidates are exactly
+    ["alpha station"] (quoted span + capitalized span dedup to one key;
+    "Report" is sentence-initial so it's excluded by the CAP_SPAN
+    lookbehind) -- fetch_by_entity_keys on that single key returns only A.
+    A's content shares zero tokens with the query and has no quoted/
+    capitalized spans, so round-2's content-scan step (step 2) contributes
+    nothing for A -- every round-2 key below comes from step 1 (A's own
+    entity rows). Removing "alpha station" (already in seen_k from round 1)
+    leaves 2 keys in alphabetical order: "bridge person", "zzz filler key".
+    Both are produced unconditionally by step 1 (which is not itself capped),
+    so with ``keyed_fact_leg_r2_max_keys=1`` the post-step total is always 2,
+    guaranteeing truncation regardless of A's content.
+
+    B (the hop, reachable only via "bridge person"): attribute_key=
+    "relocation city" folds to {"relocation", "city"} -- both are query
+    tokens, so attr_overlap(B) = 2. Content shares zero tokens with the
+    query, so content_overlap(B) = 0.
+
+    C (decoy, reachable the same way via "bridge person"): attribute_key=
+    "unrelated" folds to {"unrelated"} -- zero overlap with the query
+    tokens, so attr_overlap(C) = 0. Content also shares zero tokens with
+    the query, so content_overlap(C) = 0.
+
+    Ranking: B's sort key leads with -2 (attr_overlap=2) vs C's -0 -- B
+    always outranks C on the first sort-key component alone, independent of
+    content overlap, learned_at, or id.
+
+    No embeddings are stored and no content overlaps the query, so Stage 1
+    (heart.recall's vector + keyword legs) cannot surface A/B/C by
+    accident -- only the keyed leg's entity_key match can find them.
+    """
+    agent_id = heart.agent_id
+    a_id, b_id, c_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    base = datetime.now(UTC)
+    async with heart.db.session() as s:
+        s.add(Fact(
+            id=a_id, agent_id=agent_id,
+            content="Facility records mention routine filing procedures only.",
+            active=True, learned_at=base - timedelta(minutes=2),
+        ))
+        s.add(Fact(
+            id=b_id, agent_id=agent_id,
+            content="A regional liaison relocated to new administrative duties elsewhere.",
+            active=True, attribute_key="relocation city",
+            learned_at=base - timedelta(minutes=1),
+        ))
+        s.add(Fact(
+            id=c_id, agent_id=agent_id,
+            content="An archival assistant filed unrelated administrative paperwork.",
+            active=True, attribute_key="unrelated",
+            learned_at=base,
+        ))
+        await s.flush()
+        s.add(FactEntityKey(fact_id=a_id, entity_key="alpha station", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a_id, entity_key="bridge person", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a_id, entity_key="zzz filler key", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=b_id, entity_key="bridge person", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=b_id, entity_key="target city", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=c_id, entity_key="bridge person", agent_id=agent_id))
+        await s.commit()
+
+    yield {"A": a_id, "B": b_id, "C": c_id}
+
+    async with heart.db.session() as cleanup:
+        for fid in (a_id, b_id, c_id):
+            f = await cleanup.get(Fact, fid)
+            if f is not None:
+                await cleanup.delete(f)
+        await cleanup.commit()
+
+
+_HOP_QUERY = 'Report about "Alpha Station" relocation city'
+
+
+@pytest.mark.postgres_only
+class TestKeyedR2:
+    async def test_rounds_1_default_byte_identical(self, heart, brain, settings, seed_hop_corpus):
+        s1 = settings.model_copy(update={"keyed_fact_leg_enabled": True})  # rounds default 1
+        base_results, base_stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s1)
+        again_results, _ = await run_recall_pipeline(_HOP_QUERY, heart, brain, s1)
+        assert [(r.id, r.score, r.metadata) for r in base_results] == \
+               [(r.id, r.score, r.metadata) for r in again_results]
+        assert base_stats.n_keyed_r2 == 0 and base_stats.keyed_r2_truncated is False
+        assert not any(r.metadata.get("retrieval_leg") == "keyed_r2" for r in base_results)
+
+    async def test_two_hop_composition(self, heart, brain, settings, seed_hop_corpus):
+        s2 = settings.model_copy(update={"keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2})
+        results, stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s2)
+        r1 = [r for r in results if r.metadata.get("retrieval_leg") == "keyed"]
+        r2 = [r for r in results if r.metadata.get("retrieval_leg") == "keyed_r2"]
+        assert seed_hop_corpus["A"] in {r.id for r in r1}
+        assert seed_hop_corpus["B"] in {r.id for r in r2}          # the hop
+        assert stats.n_keyed_r2 >= 1 and stats.keyed_leg_used
+        # band: every r2 score strictly below every r1 keyed score; r2 after r1 positionally
+        assert max(x.score for x in r2) < min(x.score for x in r1)
+        assert min(results.index(x) for x in r2) > max(results.index(x) for x in r1)
+
+    async def test_ranking_attribute_overlap_beats_content_and_decoy(self, heart, brain, settings, seed_hop_corpus):
+        # B (attribute_key overlaps 2 query tokens) must outrank decoy C
+        # (0 overlap) when both are round-2 candidates. K2=1 keeps only the
+        # top-ranked survivor.
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_k2": 1,
+        })
+        results, _stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+        r2_ids = {r.id for r in results if r.metadata.get("retrieval_leg") == "keyed_r2"}
+        assert r2_ids == {seed_hop_corpus["B"]}
+        assert seed_hop_corpus["C"] not in r2_ids
+
+    async def test_fanout_truncation_is_loud(self, heart, brain, settings, seed_hop_corpus, caplog):
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_r2_max_keys": 1,
+        })
+        with caplog.at_level("INFO"):
+            _, stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+        assert stats.keyed_r2_truncated is True
+        assert any("keyed_r2" in rec.message for rec in caplog.records)   # surfaced telemetry
+
+    async def test_r2_dedups_against_r1_and_survivors_only_tracked(self, heart, brain, settings, seed_hop_corpus):
+        # A (an r1 hit) is also reachable via r2 keys -> must appear ONCE
+        # (leg='keyed'), never duplicated as keyed_r2. With K2=1, decoy C is
+        # fetched as an (untracked) round-2 candidate but not selected -> its
+        # recall_count must stay unchanged; B is selected -> tracked once.
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_k2": 1,
+        })
+        a_id, b_id, c_id = seed_hop_corpus["A"], seed_hop_corpus["B"], seed_hop_corpus["C"]
+
+        async def _recall_count(fid):
+            async with heart.db.session() as sess:
+                return (await sess.get(Fact, fid)).recall_count or 0
+
+        b_before, c_before = await _recall_count(b_id), await _recall_count(c_id)
+
+        results, _stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+
+        occurrences_a = [r for r in results if r.id == a_id]
+        assert len(occurrences_a) == 1
+        assert occurrences_a[0].metadata.get("retrieval_leg") == "keyed"
+
+        r2_ids = {r.id for r in results if r.metadata.get("retrieval_leg") == "keyed_r2"}
+        assert r2_ids == {b_id}
+        assert c_id not in {r.id for r in results}
+
+        b_after, c_after = await _recall_count(b_id), await _recall_count(c_id)
+        assert b_after == b_before + 1
+        assert c_after == c_before
+
+
+# ---------------------------------------------------------------------------
+# _via_tag provenance rendering (pure formatter test, no DB) — final review fix 1
+# ---------------------------------------------------------------------------
+
+
+def _tagged_fact(retrieval_leg: str) -> PipelineResult:
+    return PipelineResult(
+        id=uuid.uuid4(), type="fact", description="Some fact content",
+        score=0.5, source="heart", metadata={"retrieval_leg": retrieval_leg},
+    )
+
+
+class TestViaTagKeyedProvenance:
+    def test_keyed_r1_tag(self):
+        text = _format_pipeline_text([_tagged_fact("keyed")], PipelineStats(), ["all"])
+        assert "[via keyed] Some fact content" in text
+        assert "[via keyed-hop]" not in text
+
+    def test_keyed_r2_tag_distinct_from_r1(self):
+        text = _format_pipeline_text([_tagged_fact("keyed_r2")], PipelineStats(), ["all"])
+        assert "[via keyed-hop] Some fact content" in text
+        assert "[via keyed] " not in text  # r2 must not fall through to the r1 tag
+
+
+# ---------------------------------------------------------------------------
+# codex round 1 (P2): vocab-only content scan for round-2 key derivation
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def seed_junk_content_hop_corpus(heart):
+    """Reproduces codex round-1 P2: ``extract_entity_candidates``'s internal
+    ``out[:max_candidates]`` slice is quoted/cap-span-first, so >=
+    ``keyed_fact_leg_r2_max_keys`` non-indexed junk spans in a round-1 hit's
+    content can exhaust the cap before the vocab leg's real match is ever
+    reached — even though the vocab leg DOES find it and append it to
+    ``out``, it lands past the slice and never survives to the call site's
+    own ``k in vocab`` filter.
+
+    A is keyed ONLY on "alpha station" (the round-1 query key) — NOT on
+    "bridge person" — so the round-2 hop key can ONLY come from step 2
+    (content-scan), isolating the bug from step 1's entity-rows path. A's
+    content packs 5 distinct quoted junk spans ("Junk One".."Junk Five",
+    none of them vocab members) BEFORE a lowercase "bridge person" mention
+    recoverable only by the vocab n-gram leg. With
+    ``keyed_fact_leg_r2_max_keys=3`` (< 5 junk spans), the pre-fix
+    extractor call (``extract_entity_candidates(content, vocab=vocab,
+    max_candidates=3)``) returns exactly ["junk one", "junk two", "junk
+    three"] — "bridge person" IS found internally but sits at out-index 5,
+    past the ``[:3]`` slice, so it never reaches the call site.
+
+    B is keyed on "bridge person" and is the only candidate reachable via
+    that key — unambiguous once the key correctly reaches round 2.
+    """
+    agent_id = heart.agent_id
+    a_id, b_id = uuid.uuid4(), uuid.uuid4()
+    async with heart.db.session() as s:
+        s.add(Fact(
+            id=a_id, agent_id=agent_id,
+            content=(
+                '"Junk One" "Junk Two" "Junk Three" "Junk Four" "Junk Five" '
+                "mentions bridge person eventually."
+            ),
+            active=True,
+        ))
+        s.add(Fact(
+            id=b_id, agent_id=agent_id,
+            content="A quiet office building underwent minor renovations recently.",
+            active=True,
+        ))
+        await s.flush()
+        s.add(FactEntityKey(fact_id=a_id, entity_key="alpha station", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=b_id, entity_key="bridge person", agent_id=agent_id))
+        await s.commit()
+
+    yield {"A": a_id, "B": b_id}
+
+    async with heart.db.session() as cleanup:
+        for fid in (a_id, b_id):
+            f = await cleanup.get(Fact, fid)
+            if f is not None:
+                await cleanup.delete(f)
+        await cleanup.commit()
+
+
+@pytest.mark.postgres_only
+class TestCodexR1VocabOnlyContentScan:
+    async def test_junk_spans_do_not_exhaust_r2_key_cap(
+        self, heart, brain, settings, seed_junk_content_hop_corpus,
+    ):
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_r2_max_keys": 3,
+        })
+        results, stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+        r2_ids = {r.id for r in results if r.metadata.get("retrieval_leg") == "keyed_r2"}
+        assert seed_junk_content_hop_corpus["B"] in r2_ids
+
+
+class TestExtractEntityCandidatesVocabOnly:
+    def test_vocab_only_skips_quoted_and_cap_spans(self):
+        vocab = frozenset({"bridge person"})
+        text = '"Junk One" "Junk Two" Alpha Beta mentions bridge person eventually.'
+        got = extract_entity_candidates(text, vocab=vocab, vocab_only=True)
+        assert got == ["bridge person"]
+        assert "junk one" not in got
+        assert "alpha beta" not in got
+
+    def test_vocab_only_cap_respected(self):
+        vocab = frozenset({"bridge person", "target city"})
+        text = "mentions bridge person and target city both right here."
+        got = extract_entity_candidates(
+            text, vocab=vocab, vocab_only=True, max_candidates=1,
+        )
+        assert len(got) == 1
+
+    def test_vocab_only_false_is_default_query_side_path_unchanged(self):
+        vocab = frozenset({"marriage of figaro"})
+        text = "who wrote the marriage of figaro?"
+        assert extract_entity_candidates(text, vocab=vocab) == \
+            extract_entity_candidates(text, vocab=vocab, vocab_only=False)
+
+
+# ---------------------------------------------------------------------------
+# codex round 2 (P2): exact key-budget hits must still report truncated
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def seed_exact_cap_hop_corpus(heart):
+    """Reproduces codex round-2 P2: when round-1's own entity-key
+    derivation (step 1) lands EXACTLY on ``keyed_fact_leg_r2_max_keys``, the
+    content-scan loop's early-break (``if len(r2_keys) >= max_keys:
+    break``) fires on its very FIRST iteration — before ANY r1 hit's
+    content is examined — yet the final ``if len(r2_keys) > max_keys``
+    check (strict greater-than) is False, so ``keyed_r2_truncated`` stayed
+    False even though real content (and a real reachable third key) was
+    never looked at.
+
+    A1 and A2 are BOTH round-1 hits (both keyed on "alpha station", the
+    query's own round-1 key). A1's own extra entity key is "widget alpha";
+    A2's is "widget beta" — together (after removing "alpha station",
+    already in seen_k from round 1) step 1 alone yields exactly 2 keys.
+    With ``keyed_fact_leg_r2_max_keys=2``, the content-scan loop's FIRST
+    iteration already sees ``len(r2_keys) == 2 >= 2`` and breaks
+    immediately — neither A1's nor A2's content is ever scanned.
+
+    A2's content contains a lowercase "bridge person" mention — a real
+    vocab member (B is keyed on it) that step 2's content-scan WOULD have
+    found had the loop not broken early. B never surfaces in the merged
+    results either way (the fix only corrects the stats flag, not what
+    gets examined) — asserted below to confirm the skip was real, not a
+    coincidental no-op.
+    """
+    agent_id = heart.agent_id
+    a1_id, a2_id, b_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    base = datetime.now(UTC)
+    async with heart.db.session() as s:
+        s.add(Fact(
+            id=a1_id, agent_id=agent_id,
+            content="A routine facility memo about nothing notable.",
+            active=True, learned_at=base - timedelta(minutes=2),
+        ))
+        s.add(Fact(
+            id=a2_id, agent_id=agent_id,
+            content="Additional notes mention bridge person as a contact.",
+            active=True, learned_at=base - timedelta(minutes=1),
+        ))
+        s.add(Fact(
+            id=b_id, agent_id=agent_id,
+            content="An unrelated office memo about routine matters.",
+            active=True, learned_at=base,
+        ))
+        await s.flush()
+        s.add(FactEntityKey(fact_id=a1_id, entity_key="alpha station", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a1_id, entity_key="widget alpha", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a2_id, entity_key="alpha station", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a2_id, entity_key="widget beta", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=b_id, entity_key="bridge person", agent_id=agent_id))
+        await s.commit()
+
+    yield {"A1": a1_id, "A2": a2_id, "B": b_id}
+
+    async with heart.db.session() as cleanup:
+        for fid in (a1_id, a2_id, b_id):
+            f = await cleanup.get(Fact, fid)
+            if f is not None:
+                await cleanup.delete(f)
+        await cleanup.commit()
+
+
+@pytest.mark.postgres_only
+class TestCodexR2ExactCapTruncation:
+    async def test_exact_cap_hit_reports_truncated(
+        self, heart, brain, settings, seed_exact_cap_hop_corpus,
+    ):
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_r2_max_keys": 2,
+        })
+        results, stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+        assert stats.keyed_r2_truncated is True
+        # Confirms the skip was real: B (reachable only via the unexamined
+        # "bridge person" content mention) never surfaces.
+        assert seed_exact_cap_hop_corpus["B"] not in {r.id for r in results}
+
+
+# ---------------------------------------------------------------------------
+# codex round 3 (P2): K2 selection must happen at assembly, not in the stage
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def seed_cross_leg_dup_hop_corpus(heart):
+    """Reproduces codex round-3 P2: pre-fix, K2 selection happened INSIDE
+    Stage 1.6, before ``existing_ids`` (the cross-leg dedup set) was
+    complete. A candidate already surfaced by another leg (D, forced into
+    Stage 1 via an embedding matching the query) could still win the only
+    K2 slot at stage time (it ranks first: ``attribute_key="relocation
+    city"`` overlaps 2 query tokens), only to be dropped as a duplicate at
+    assembly — silently wasting the slot a fresh, never-before-seen hop
+    candidate (E) could have filled.
+
+    A is the round-1 hit (keyed on "alpha station", the query's own
+    round-1 key) and also owns the hop key "bridge person" directly (step
+    1 alone supplies it — no content-scan complexity needed here). D and E
+    are both reachable via "bridge person": D ranks first (attribute_key
+    overlap) but duplicates a Stage-1 hit; E ranks second and is otherwise
+    unreachable except via the hop.
+    """
+    agent_id = heart.agent_id
+    a_id, d_id, e_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    vec = await heart._embeddings.embed(_HOP_QUERY)
+    async with heart.db.session() as s:
+        s.add(Fact(
+            id=a_id, agent_id=agent_id,
+            content="Facility records mention routine filing procedures only.",
+            active=True,
+        ))
+        s.add(Fact(
+            id=d_id, agent_id=agent_id,
+            content="A separate memo describes routine intake procedures.",
+            active=True, embedding=vec, attribute_key="relocation city",
+        ))
+        s.add(Fact(
+            id=e_id, agent_id=agent_id,
+            content="A different memo covers unrelated inventory matters.",
+            active=True,
+        ))
+        await s.flush()
+        s.add(FactEntityKey(fact_id=a_id, entity_key="alpha station", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a_id, entity_key="bridge person", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=d_id, entity_key="bridge person", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=e_id, entity_key="bridge person", agent_id=agent_id))
+        await s.commit()
+
+    yield {"A": a_id, "D": d_id, "E": e_id}
+
+    async with heart.db.session() as cleanup:
+        for fid in (a_id, d_id, e_id):
+            f = await cleanup.get(Fact, fid)
+            if f is not None:
+                await cleanup.delete(f)
+        await cleanup.commit()
+
+
+@pytest.mark.postgres_only
+class TestCodexR3K2SelectionAtAssembly:
+    async def test_cross_leg_duplicate_does_not_waste_k2_slot(
+        self, heart, brain, settings, seed_cross_leg_dup_hop_corpus,
+    ):
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_k2": 1,
+        })
+        results, stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+        d_id = seed_cross_leg_dup_hop_corpus["D"]
+        e_id = seed_cross_leg_dup_hop_corpus["E"]
+
+        # D surfaces exactly once (via Stage 1, not re-added as keyed_r2).
+        d_occurrences = [r for r in results if r.id == d_id]
+        assert len(d_occurrences) == 1
+        assert d_occurrences[0].metadata.get("retrieval_leg") != "keyed_r2"
+
+        # E -- the fresh hop candidate -- must merge despite K2=1, since D
+        # (which ranks ahead of it) is a cross-leg duplicate that must not
+        # consume the only slot.
+        e_hit = [r for r in results if r.id == e_id]
+        assert e_hit and e_hit[0].metadata.get("retrieval_leg") == "keyed_r2"
+        # codex r6: n_keyed_r2_dup is now 0, not >=1, for THIS fixture --
+        # round 6 pushed Stage-1-known-dead fact ids (D is one, via its
+        # embedding match) into the SQL fetch's own exclusion, so D is
+        # excluded IN THE QUERY and never reaches acc.keyed_r2_results at
+        # all -- there is nothing left for the assembly-time filter to
+        # drop. This is round 6 catching the duplicate one layer earlier
+        # than round 3 did, not a regression of round 3's own guarantee
+        # (still verified above: D never re-appears as keyed_r2, E does).
+        assert stats.n_keyed_r2_dup == 0
+
+    async def test_duplicate_survivor_not_double_tracked(
+        self, heart, brain, settings, seed_cross_leg_dup_hop_corpus,
+    ):
+        # The round-2 assembly step must track_access ONLY its own K2
+        # survivor set. Verified by spying on the call shape rather than
+        # recall_count deltas: Stage 1's own fact search ALSO tracks access
+        # via a fire-and-forget asyncio task (facts.py's _fire_track_access,
+        # scheduled via loop.create_task, not awaited) -- its completion
+        # relative to run_recall_pipeline returning is not deterministic, so
+        # asserting recall_count deltas for D would be racy. The round-2
+        # assembly call is awaited inline, so its exact argument shape IS
+        # deterministic: it passes ONLY the K2 survivor ids.
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_k2": 1,
+        })
+        e_id = seed_cross_leg_dup_hop_corpus["E"]
+
+        tracked_calls: list[list] = []
+        orig_track_access = heart.facts.track_access
+
+        async def _spy_track_access(fact_ids):
+            tracked_calls.append(list(fact_ids))
+            return await orig_track_access(fact_ids)
+
+        heart.facts.track_access = _spy_track_access
+        try:
+            await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+        finally:
+            heart.facts.track_access = orig_track_access
+
+        # A call shaped exactly [e_id] can only be round-2's own survivor
+        # tracking -- Stage 1's fire-and-forget call (if it races into this
+        # window at all) would carry every leg-1 hit's id, never e_id alone,
+        # since E has no embedding/content overlap and Stage 1 never
+        # returns it.
+        assert [e_id] in tracked_calls
+
+
+# ---------------------------------------------------------------------------
+# codex round 4 (P2): F071-excluded candidates must not waste K2 slots either
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def seed_f071_dup_hop_corpus(heart):
+    """Reproduces codex round-4 P2 #1: same family as round 3's cross-leg
+    duplicate bug, but for F071 (context-exclusion) rather than another
+    retrieval leg. Pre-fix, K2 selection at assembly filtered the ranked
+    round-2 candidate list only against ``existing_ids`` (other legs'
+    results) — not against the F071 ``exclude_ids`` set (facts already in
+    the current turn's system prompt). A top-ranked hop candidate (D,
+    ``attribute_key="relocation city"`` overlaps 2 query tokens) that
+    happens to be F071-excluded could still win the only K2 slot, die at
+    the F071 filter downstream (:450-455), and waste the slot a fresh
+    candidate (E, ranked second) could have filled.
+
+    A is the round-1 hit (keyed on "alpha station", the query's own
+    round-1 key) and also owns the hop key "bridge person" directly. D and
+    E are both reachable via "bridge person": D ranks first but will be
+    passed as this test's own ``exclude_ids={"fact": {str(d_id)}}``
+    (simulating "already in context" -- no embedding/Stage-1 involvement
+    needed, unlike round 3's cross-leg duplicate); E ranks second and is
+    otherwise unreachable except via the hop.
+    """
+    agent_id = heart.agent_id
+    a_id, d_id, e_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    async with heart.db.session() as s:
+        s.add(Fact(
+            id=a_id, agent_id=agent_id,
+            content="Facility records mention routine filing procedures only.",
+            active=True,
+        ))
+        s.add(Fact(
+            id=d_id, agent_id=agent_id,
+            content="A separate memo describes routine intake procedures.",
+            active=True, attribute_key="relocation city",
+        ))
+        s.add(Fact(
+            id=e_id, agent_id=agent_id,
+            content="A different memo covers unrelated inventory matters.",
+            active=True,
+        ))
+        await s.flush()
+        s.add(FactEntityKey(fact_id=a_id, entity_key="alpha station", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a_id, entity_key="bridge person", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=d_id, entity_key="bridge person", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=e_id, entity_key="bridge person", agent_id=agent_id))
+        await s.commit()
+
+    yield {"A": a_id, "D": d_id, "E": e_id}
+
+    async with heart.db.session() as cleanup:
+        for fid in (a_id, d_id, e_id):
+            f = await cleanup.get(Fact, fid)
+            if f is not None:
+                await cleanup.delete(f)
+        await cleanup.commit()
+
+
+@pytest.mark.postgres_only
+class TestCodexR4F071AwareK2Selection:
+    async def test_f071_excluded_candidate_does_not_waste_k2_slot(
+        self, heart, brain, settings, seed_f071_dup_hop_corpus,
+    ):
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_k2": 1,
+        })
+        d_id = seed_f071_dup_hop_corpus["D"]
+        e_id = seed_f071_dup_hop_corpus["E"]
+        results, _stats = await run_recall_pipeline(
+            _HOP_QUERY, heart, brain, s, exclude_ids={"fact": {str(d_id)}},
+        )
+        # D never surfaces (correctly excluded); E -- ranked second -- must
+        # merge despite K2=1, since D must not consume the only slot.
+        assert not any(r.id == d_id for r in results)
+        e_hit = [r for r in results if r.id == e_id]
+        assert e_hit and e_hit[0].metadata.get("retrieval_leg") == "keyed_r2"
+
+
+# ---------------------------------------------------------------------------
+# codex round 5 (P2): r1 facts must not consume the SQL-level candidate cap
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def seed_sql_cap_hop_corpus(heart):
+    """Reproduces codex round-5 P2: the last member of the wasted-slot
+    family, this time at the SQL fetch layer. Derived R2 keys often match
+    the r1 facts' own entity rows (they seeded those keys in the first
+    place) — pre-fix, ``fetch_by_entity_keys``'s capped ``LIMIT`` could
+    fill with r1 rows guaranteed to be dropped by the Python-side
+    ``r1_id_set`` filter right after, so a fresh hop fact just beyond the
+    SQL LIMIT was never even fetched.
+
+    A is the round-1 hit (keyed on "alpha station", the query's own
+    round-1 key) and ALSO owns "bridge person" AND "widget echo" as its
+    own entity keys — both become round-2 derived keys via step 1 (which
+    is not itself capped). A therefore matches the derived key set on
+    BOTH keys (``matched=2``). E is keyed ONLY on "bridge person" — it
+    matches on just one derived key (``matched=1``). With
+    ``keyed_fact_leg_r2_max_candidates=1`` (a deliberately tiny SQL
+    LIMIT), the SQL's own ``ORDER BY matched DESC`` ranks A strictly ahead
+    of E: pre-fix, the ``LIMIT 1`` fetch returns ONLY A (E is never even
+    fetched, let alone ranked, before the Python-side filter drops A);
+    post-fix, A is excluded IN THE QUERY itself, so the same ``LIMIT 1``
+    fetch returns E instead.
+    """
+    agent_id = heart.agent_id
+    a_id, e_id = uuid.uuid4(), uuid.uuid4()
+    async with heart.db.session() as s:
+        s.add(Fact(
+            id=a_id, agent_id=agent_id,
+            content="Facility records mention routine filing procedures only.",
+            active=True,
+        ))
+        s.add(Fact(
+            id=e_id, agent_id=agent_id,
+            content="A different memo covers unrelated inventory matters.",
+            active=True,
+        ))
+        await s.flush()
+        s.add(FactEntityKey(fact_id=a_id, entity_key="alpha station", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a_id, entity_key="bridge person", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a_id, entity_key="widget echo", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=e_id, entity_key="bridge person", agent_id=agent_id))
+        await s.commit()
+
+    yield {"A": a_id, "E": e_id}
+
+    async with heart.db.session() as cleanup:
+        for fid in (a_id, e_id):
+            f = await cleanup.get(Fact, fid)
+            if f is not None:
+                await cleanup.delete(f)
+        await cleanup.commit()
+
+
+@pytest.mark.postgres_only
+class TestCodexR5SqlLevelR1Exclusion:
+    async def test_r1_facts_do_not_consume_sql_candidate_cap(
+        self, heart, brain, settings, seed_sql_cap_hop_corpus,
+    ):
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_r2_max_candidates": 1,
+        })
+        e_id = seed_sql_cap_hop_corpus["E"]
+        results, _stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+        e_hit = [r for r in results if r.id == e_id]
+        assert e_hit and e_hit[0].metadata.get("retrieval_leg") == "keyed_r2"
+
+
+# ---------------------------------------------------------------------------
+# codex round 6 (P2 #1): key cap must apply AFTER dropping already-seen keys
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def seed_seen_key_then_bridge_corpus(heart):
+    """Reproduces codex round-6 P2 #1: the r1-era vocab_only fix (codex r1)
+    keeps junk (non-indexed) spans out of the round-2 content scan, but the
+    extractor's OWN ``max_candidates`` cap still applies to the RAW
+    (pre-``seen_k``-filter) vocab match list, independent of the caller's
+    remaining budget. A's content mentions "alpha station" (already in
+    ``seen_k`` from the very start — it's the round-1 query's own key) FIRST,
+    then "bridge person" (a fresh key, not one of A's own entity keys, only
+    discoverable via content-scan) SECOND. With ``keyed_fact_leg_r2_max_keys
+    =1``: pre-fix, the extractor's internal ``max_candidates=1`` cap returns
+    only "alpha station" (found first in content) — a match the call site
+    then discards as already-seen — so "bridge person" is truncated away
+    internally and never reaches the caller's own filter at all. Post-fix,
+    the extractor returns BOTH matches uncapped; the caller filters
+    "alpha station" out (already seen) and keeps "bridge person" as the one
+    fresh candidate within budget.
+
+    A is keyed ONLY on "alpha station" (no other entity keys — step 1
+    contributes nothing new, isolating the bug to THIS row's own content
+    scan). E is keyed on "bridge person" and is the hop target.
+    """
+    agent_id = heart.agent_id
+    a_id, e_id = uuid.uuid4(), uuid.uuid4()
+    async with heart.db.session() as s:
+        s.add(Fact(
+            id=a_id, agent_id=agent_id,
+            content=(
+                "This alpha station briefing also references bridge person "
+                "for follow-up."
+            ),
+            active=True,
+        ))
+        s.add(Fact(
+            id=e_id, agent_id=agent_id,
+            content="A different memo covers unrelated inventory matters.",
+            active=True,
+        ))
+        await s.flush()
+        s.add(FactEntityKey(fact_id=a_id, entity_key="alpha station", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=e_id, entity_key="bridge person", agent_id=agent_id))
+        await s.commit()
+
+    yield {"A": a_id, "E": e_id}
+
+    async with heart.db.session() as cleanup:
+        for fid in (a_id, e_id):
+            f = await cleanup.get(Fact, fid)
+            if f is not None:
+                await cleanup.delete(f)
+        await cleanup.commit()
+
+
+@pytest.mark.postgres_only
+class TestCodexR6PostFilterKeyCap:
+    async def test_bridge_key_survives_past_already_seen_matches(
+        self, heart, brain, settings, seed_seen_key_then_bridge_corpus,
+    ):
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_r2_max_keys": 1,
+        })
+        e_id = seed_seen_key_then_bridge_corpus["E"]
+        results, stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+        e_hit = [r for r in results if r.id == e_id]
+        assert e_hit and e_hit[0].metadata.get("retrieval_leg") == "keyed_r2"
+        # Exactly 1 fresh key within a budget of 1 -- nothing was actually
+        # dropped by the budget cap in this scenario.
+        assert stats.keyed_r2_truncated is False
+
+
+# ---------------------------------------------------------------------------
+# codex round 6 (P2 #2): widen the pre-LIMIT SQL exclusion to known-dead ids
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def seed_stage1_dup_sql_cap_corpus(heart):
+    """Reproduces codex round-6 P2 #2: round 5 pushed r1-id exclusion into
+    the SQL fetch, but Stage-1 hits and F071 context ids can ALSO fill the
+    capped LIMIT and die at assembly (round 3/4's filters there only dedup
+    what got fetched -- they can't un-cap a LIMIT that already excluded a
+    fresh candidate from being fetched in the first place).
+
+    A is the round-1 hit (keyed on "alpha station") and also owns "bridge
+    person" AND "widget echo" as its own entity keys -- both become
+    round-2 derived keys via step 1. D is forced into Stage 1 via an
+    embedding matching the query (same trick as round 3's cross-leg-
+    duplicate fixture) and is ALSO keyed on both "bridge person" AND
+    "widget echo" (matched=2, ranks first). E is keyed ONLY on "bridge
+    person" (matched=1, ranks second). With
+    ``keyed_fact_leg_r2_max_candidates=1``: pre-fix (r5 only), the SQL
+    fetch excludes r1 ids (A) but not D -- the LIMIT=1 fetch returns ONLY
+    D, which then dies at assembly's existing_ids dedup (D is already a
+    Stage-1 hit), and E is never even fetched. Post-fix, D is ALSO
+    excluded in the query (Stage-1 hits known at Stage 1.6 time), so the
+    same LIMIT=1 fetch returns E instead.
+    """
+    agent_id = heart.agent_id
+    a_id, d_id, e_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    vec = await heart._embeddings.embed(_HOP_QUERY)
+    async with heart.db.session() as s:
+        s.add(Fact(
+            id=a_id, agent_id=agent_id,
+            content="Facility records mention routine filing procedures only.",
+            active=True,
+        ))
+        s.add(Fact(
+            id=d_id, agent_id=agent_id,
+            content="A separate memo describes routine intake procedures.",
+            active=True, embedding=vec,
+        ))
+        s.add(Fact(
+            id=e_id, agent_id=agent_id,
+            content="A different memo covers unrelated inventory matters.",
+            active=True,
+        ))
+        await s.flush()
+        s.add(FactEntityKey(fact_id=a_id, entity_key="alpha station", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a_id, entity_key="bridge person", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a_id, entity_key="widget echo", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=d_id, entity_key="bridge person", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=d_id, entity_key="widget echo", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=e_id, entity_key="bridge person", agent_id=agent_id))
+        await s.commit()
+
+    yield {"A": a_id, "D": d_id, "E": e_id}
+
+    async with heart.db.session() as cleanup:
+        for fid in (a_id, d_id, e_id):
+            f = await cleanup.get(Fact, fid)
+            if f is not None:
+                await cleanup.delete(f)
+        await cleanup.commit()
+
+
+@pytest.mark.postgres_only
+class TestCodexR6WidenedSqlExclusion:
+    async def test_stage1_duplicate_does_not_consume_sql_candidate_cap(
+        self, heart, brain, settings, seed_stage1_dup_sql_cap_corpus,
+    ):
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_r2_max_candidates": 1,
+        })
+        d_id = seed_stage1_dup_sql_cap_corpus["D"]
+        e_id = seed_stage1_dup_sql_cap_corpus["E"]
+        results, _stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+
+        # D surfaces exactly once (via Stage 1, not re-added as keyed_r2).
+        d_occurrences = [r for r in results if r.id == d_id]
+        assert len(d_occurrences) == 1
+        assert d_occurrences[0].metadata.get("retrieval_leg") != "keyed_r2"
+
+        e_hit = [r for r in results if r.id == e_id]
+        assert e_hit and e_hit[0].metadata.get("retrieval_leg") == "keyed_r2"
 
 
 # ---------------------------------------------------------------------------

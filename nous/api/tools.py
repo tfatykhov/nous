@@ -303,6 +303,11 @@ def _format_pipeline_text(
         # score-ranked retrieval) so its distinct provenance stays visible.
         if r.metadata.get("retrieval_leg") == "keyed":
             return "[via keyed] "
+        # R3v2: round-2 hop hit — a two-hop associative match is more
+        # surprising in context than a direct keyed hit, so it gets its own
+        # distinct tag rather than falling through untagged.
+        if r.metadata.get("retrieval_leg") == "keyed_r2":
+            return "[via keyed-hop] "
         # Mark a Path-A graph-memory neighbour (now interleaved into the ranked Heart
         # Memory list by score) so its associative provenance stays visible to the agent.
         if r.metadata.get("stage_origin") == "heart_graph_memory" and getattr(r, "edge_relation", None):
@@ -985,7 +990,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 "chunks_enabled=%s chunks_searched=%s "
                 "n_chunks_total=%d n_chunks_top10=%d first_chunk_rank=%s "
                 "excluded_in_context=%d "  # F071
-                "n_total=%d",
+                "n_total=%d "
+                "n_keyed_r2=%d keyed_r2_truncated=%s",  # R3v2
                 brain.agent_id,
                 len(query or ""),
                 limit,
@@ -996,6 +1002,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 first_chunk_rank if first_chunk_rank is not None else "n/a",
                 stats.excluded_in_context,  # F071
                 len(results),
+                stats.n_keyed_r2,  # R3v2
+                stats.keyed_r2_truncated,  # R3v2
             )
             # F067 Phase 2: optionally fetch parent episode summaries for
             # facts in the result set. Failures are non-fatal — the formatter

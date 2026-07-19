@@ -3689,7 +3689,10 @@ class FactManager:
             self._entity_vocab_cache = (vocab, now)
         return vocab
 
-    async def fetch_by_entity_keys(self, keys: list[str], limit: int = 8):
+    async def fetch_by_entity_keys(
+        self, keys: list[str], limit: int = 8, *,
+        track: bool = True, exclude_fact_ids: "list[UUID] | set[UUID] | None" = None,
+    ):
         """R3.3: active facts matching any entity key, ranked by matched-key
         count then recency/ordinal. MUST join facts on active=true (entity
         rows survive supersession).
@@ -3720,30 +3723,70 @@ class FactManager:
         use. Skipped when the result set is empty; failures are swallowed
         (mirrors ``track_access``) so a tracking hiccup never turns into a
         lost retrieval result for the caller.
+
+        R3v2: ``track`` defaults True (unchanged default-path behavior). Round-2
+        bulk candidate fetches pass ``track=False`` — only facts that survive to
+        be surfaced to a consumer should accumulate recall signal; a bulk
+        candidate pool that gets filtered down before surfacing is not itself a
+        retrieval-leg result, mirroring the dedup-probe rationale above. Callers
+        that need tracking for their own survivors call ``track_access``
+        separately.
+
+        R3v2 final review: ``ORDER BY`` ends in ``f.id`` as a total-order
+        tie-break. ``learned_at`` is a server-default timestamp — on a
+        bulk-backfilled corpus every row in a batch can share the identical
+        transaction-constant value, so without a final deterministic column
+        WHICH rows survive the ``LIMIT`` (round 1's 8, round 2's 256) is
+        Postgres-unstable across runs. R3v2's key derivation and MAB's
+        gate-1 re-simulation both lean on candidate-set determinism, so this
+        also (deliberately) touches round 1's fetch — only previously-tied
+        rows can reorder, so it is not a byte-identity violation (pinned by
+        the existing ``recall_deep`` snapshot test).
+
+        codex r5: ``exclude_fact_ids`` pushes round-2's r1-exclusion into
+        the SQL fetch itself, rather than relying solely on the Python-side
+        filter downstream. Derived R2 keys often match the r1 facts' own
+        entity rows (they seeded those keys in the first place), so
+        without this, the capped ``LIMIT`` could fill with r1 rows
+        guaranteed to be dropped by the caller's post-fetch filter right
+        after — with a small cap, a fresh hop fact just beyond the LIMIT
+        would never even be fetched. Round-1's own call site passes
+        nothing, so its query is unchanged (no exclude clause appended).
+        Binds the raw UUID list cast to ``uuid[]`` (mirrors
+        ``entity_keys_for_facts``'s r4 fix) so the exclusion doesn't
+        damage the index either.
         """
         if not keys:
             return []
         async with self.db.session() as session:
+            params: dict = {"a": self.agent_id, "keys": keys, "lim": limit}
+            exclude_clause = ""
+            if exclude_fact_ids:
+                exclude_clause = "  AND NOT (f.id = ANY(CAST(:exclude_ids AS uuid[]))) "
+                params["exclude_ids"] = [str(i) for i in exclude_fact_ids]
             rows = await session.execute(
                 text(
                     "SELECT f.id, f.content, f.learned_at, f.source_ordinal, "
                     "       f.subject, f.event_date, "
                     "       f.source_episode_id::text AS source_episode_id, "
+                    "       f.attribute_key, f.subject_key, "
                     "       COUNT(DISTINCT ek.entity_key) AS matched "
                     "FROM heart.fact_entity_keys ek "
                     "JOIN heart.facts f ON f.id = ek.fact_id "
                     "WHERE ek.agent_id = :a AND ek.entity_key = ANY(:keys) "
                     "  AND f.active = true AND f.agent_id = :a "
+                    + exclude_clause +
                     "GROUP BY f.id, f.content, f.learned_at, f.source_ordinal, "
-                    "         f.subject, f.event_date, f.source_episode_id "
+                    "         f.subject, f.event_date, f.source_episode_id, "
+                    "         f.attribute_key, f.subject_key "
                     "ORDER BY matched DESC, f.learned_at DESC, "
-                    "         f.source_ordinal DESC NULLS LAST "
+                    "         f.source_ordinal DESC NULLS LAST, f.id "
                     "LIMIT :lim"
                 ),
-                {"a": self.agent_id, "keys": keys, "lim": limit},
+                params,
             )
             result_rows = list(rows)
-            if result_rows:
+            if track and result_rows:
                 try:
                     await session.execute(
                         update(Fact)
@@ -3760,3 +3803,36 @@ class FactManager:
                         len(result_rows),
                     )
             return result_rows
+
+    async def entity_keys_for_facts(self, fact_ids: list[UUID]) -> dict[UUID, list[str]]:
+        """R3v2: the fact_entity_keys rows of the given facts, grouped by fact,
+        keys sorted alphabetically (deterministic round-2 key derivation).
+        Active-joined + agent-scoped per the F085 read invariant.
+
+        codex r4: ``ek.fact_id = ANY(CAST(:ids AS uuid[]))`` casts the BOUND
+        PARAMETER array to ``uuid[]``, not the column to text — the prior
+        ``ek.fact_id::text = ANY(:ids)`` cast the (fact_id, entity_key) PK
+        column itself, defeating its index and forcing a full scan of the
+        agent's key rows per call. Mirrors the existing
+        ``CAST(:ids AS uuid[])`` idiom used elsewhere in this codebase
+        (retrieval_pipeline.py's adjacency-boost and fact-source-episode
+        lookups) — same string-list binding, just the cast moved.
+        """
+        if not fact_ids:
+            return {}
+        async with self.db.session() as session:
+            rows = await session.execute(
+                text(
+                    "SELECT ek.fact_id, ek.entity_key "
+                    "FROM heart.fact_entity_keys ek "
+                    "JOIN heart.facts f ON f.id = ek.fact_id "
+                    "WHERE ek.agent_id = :a AND f.agent_id = :a AND f.active = true "
+                    "  AND ek.fact_id = ANY(CAST(:ids AS uuid[])) "
+                    "ORDER BY ek.fact_id, ek.entity_key"
+                ),
+                {"a": self.agent_id, "ids": [str(i) for i in fact_ids]},
+            )
+            out: dict[UUID, list[str]] = {}
+            for r in rows:
+                out.setdefault(r.fact_id, []).append(r.entity_key)
+            return out

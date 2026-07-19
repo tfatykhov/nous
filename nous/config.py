@@ -324,6 +324,22 @@ class Settings(BaseSettings):
         default=0.55, ge=0.0, le=1.0,
         description="R3.3: score band ceiling for keyed hits (RRF [0,1] scale, below the direct-hit head).",
     )
+    keyed_fact_leg_rounds: int = Field(
+        default=1, ge=1, le=2,
+        description="R3v2: keyed-leg retrieval rounds. 1 = v1 behavior (byte-identical); 2 enables the bounded iterative round (multi-hop composition). Land-dark.",
+    )
+    keyed_fact_leg_k2: int = Field(
+        default=8, ge=1,
+        description="R3v2: round-2 allotment - max round-2 keyed facts merged per query.",
+    )
+    keyed_fact_leg_r2_max_keys: int = Field(
+        default=32, ge=1,
+        description="R3v2 fan-out guard: max round-2 keys examined (truncation is counted, never silent).",
+    )
+    keyed_fact_leg_r2_max_candidates: int = Field(
+        default=256, ge=1,
+        description="R3v2 fan-out guard: hard cap on round-2 candidates fetched before ranking (the p90-587 lesson).",
+    )
 
     # F017: Budget scaling
     budget_scale_enabled: bool = True
