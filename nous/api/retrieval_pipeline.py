@@ -320,6 +320,7 @@ async def run_recall_pipeline(
     acc = await _run_stages(
         query, heart, brain, settings, limit, memory_types,
         residual_activations, apply_mmr=apply_mmr, date_window=date_window,
+        exclude_ids=exclude_ids,
     )
 
     # Build flat PipelineResult list in stage order
@@ -526,6 +527,7 @@ async def _run_stages(
     residual_activations: dict[UUID, float] | None = None,
     apply_mmr: bool | None = None,
     date_window: "object | None" = None,
+    exclude_ids: dict[str, set[str]] | None = None,
 ) -> _PipelineAccumulator:
     acc = _PipelineAccumulator()
 
@@ -685,16 +687,42 @@ async def _run_stages(
                         # this early-exit, so it's flagged here instead.
                         acc.keyed_r2_truncated = True
                         break
-                    for k in extract_entity_candidates(
-                        row.content, vocab=vocab, max_candidates=max_keys,
-                        vocab_only=True,  # codex r1: quoted/cap-span junk
-                        # would otherwise exhaust the extractor's internal
-                        # cap before its own vocab leg's real match ever
-                        # reaches this loop (see keys.py docstring).
-                    ):
-                        if k in vocab and k not in seen_k:  # redundant belt (codex r1): cheap, guards any future extractor change
-                            seen_k.add(k)
-                            r2_keys.append(k)
+                    # codex r6: extract UNCAPPED (max_candidates=None), then
+                    # filter against seen_k FIRST, THEN cap to the remaining
+                    # budget — in that order. The r1-era vocab_only fix (r1)
+                    # keeps junk spans out, but the extractor's own
+                    # max_candidates cap still applies to the RAW (pre-seen_k
+                    # -filter) match list; a row whose content mentions
+                    # >= max_keys keys that are ALREADY seen (from step 1 or
+                    # an earlier row) before a fresh key can fill that cap
+                    # with useless already-seen matches, truncating the
+                    # fresh key away before this loop's own `k not in
+                    # seen_k` filter ever gets a chance to see it. vocab_only
+                    # mode is bounded by this row's own content tokens, so
+                    # uncapped extraction here is cheap.
+                    fresh = [
+                        k for k in extract_entity_candidates(
+                            row.content, vocab=vocab, max_candidates=None,
+                            vocab_only=True,  # codex r1: quoted/cap-span junk
+                            # would otherwise exhaust the extractor's internal
+                            # cap before its own vocab leg's real match ever
+                            # reaches this loop (see keys.py docstring).
+                        )
+                        if k in vocab and k not in seen_k  # redundant belt (codex r1): cheap, guards any future extractor change
+                    ]
+                    remaining = max_keys - len(r2_keys)
+                    if len(fresh) > remaining:
+                        # codex r6: this row alone had more fresh keys than
+                        # the remaining budget — some are dropped right here,
+                        # possibly with no later row/iteration left to catch
+                        # it via the `>=` break above (e.g. this is the last
+                        # row in acc.keyed_results). Flag it directly so the
+                        # r2 exact-cap truncation semantics hold at this
+                        # finer (within-row) granularity too.
+                        acc.keyed_r2_truncated = True
+                    for k in fresh[:remaining]:
+                        seen_k.add(k)
+                        r2_keys.append(k)
                 if len(r2_keys) > max_keys:
                     acc.keyed_r2_truncated = True
                     r2_keys = r2_keys[:max_keys]
@@ -709,9 +737,27 @@ async def _run_stages(
                     # dropped by the Python-side filter below, starving a
                     # fresh hop candidate just beyond the LIMIT of ever
                     # being fetched at all.
+                    #
+                    # codex r6: widen the exclusion to every fact id ALREADY
+                    # known dead at this point in the pipeline — Stage 1's
+                    # own fact hits (acc.heart_results, type=="fact"; Stage
+                    # 2+/decisions/graph-expanded haven't run yet, this is
+                    # Stage 1.6) and the F071 context-exclusion set
+                    # (exclude_ids["fact"]) can ALSO fill the capped LIMIT
+                    # and die at assembly (round 3/4's filters there only
+                    # dedup what got fetched — they can't un-cap a LIMIT
+                    # that already excluded a fresh candidate). LATER-leg
+                    # duplicates (Stage 2+/decisions/graph-expanded, which
+                    # haven't run yet) remain the assembly filter's job —
+                    # this fetch can only exclude what's knowable NOW.
+                    known_dead_fact_ids = (
+                        set(r1_ids)
+                        | {hr.id for hr in acc.heart_results if hr.type == "fact"}
+                        | {UUID(s) for s in (exclude_ids or {}).get("fact", set())}
+                    )
                     rows2 = await heart.facts.fetch_by_entity_keys(
                         r2_keys, limit=max_cand, track=False,
-                        exclude_fact_ids=r1_ids,
+                        exclude_fact_ids=known_dead_fact_ids,
                     )
                     rows2_count = len(rows2)
                     if len(rows2) >= max_cand:

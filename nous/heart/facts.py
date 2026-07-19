@@ -3691,7 +3691,7 @@ class FactManager:
 
     async def fetch_by_entity_keys(
         self, keys: list[str], limit: int = 8, *,
-        track: bool = True, exclude_fact_ids: list[UUID] | None = None,
+        track: bool = True, exclude_fact_ids: "list[UUID] | set[UUID] | None" = None,
     ):
         """R3.3: active facts matching any entity key, ranked by matched-key
         count then recency/ordinal. MUST join facts on active=true (entity

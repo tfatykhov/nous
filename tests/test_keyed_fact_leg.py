@@ -931,7 +931,15 @@ class TestCodexR3K2SelectionAtAssembly:
         # consume the only slot.
         e_hit = [r for r in results if r.id == e_id]
         assert e_hit and e_hit[0].metadata.get("retrieval_leg") == "keyed_r2"
-        assert stats.n_keyed_r2_dup >= 1
+        # codex r6: n_keyed_r2_dup is now 0, not >=1, for THIS fixture --
+        # round 6 pushed Stage-1-known-dead fact ids (D is one, via its
+        # embedding match) into the SQL fetch's own exclusion, so D is
+        # excluded IN THE QUERY and never reaches acc.keyed_r2_results at
+        # all -- there is nothing left for the assembly-time filter to
+        # drop. This is round 6 catching the duplicate one layer earlier
+        # than round 3 did, not a regression of round 3's own guarantee
+        # (still verified above: D never re-appears as keyed_r2, E does).
+        assert stats.n_keyed_r2_dup == 0
 
     async def test_duplicate_survivor_not_double_tracked(
         self, heart, brain, settings, seed_cross_leg_dup_hop_corpus,
@@ -1123,6 +1131,169 @@ class TestCodexR5SqlLevelR1Exclusion:
         })
         e_id = seed_sql_cap_hop_corpus["E"]
         results, _stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+        e_hit = [r for r in results if r.id == e_id]
+        assert e_hit and e_hit[0].metadata.get("retrieval_leg") == "keyed_r2"
+
+
+# ---------------------------------------------------------------------------
+# codex round 6 (P2 #1): key cap must apply AFTER dropping already-seen keys
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def seed_seen_key_then_bridge_corpus(heart):
+    """Reproduces codex round-6 P2 #1: the r1-era vocab_only fix (codex r1)
+    keeps junk (non-indexed) spans out of the round-2 content scan, but the
+    extractor's OWN ``max_candidates`` cap still applies to the RAW
+    (pre-``seen_k``-filter) vocab match list, independent of the caller's
+    remaining budget. A's content mentions "alpha station" (already in
+    ``seen_k`` from the very start — it's the round-1 query's own key) FIRST,
+    then "bridge person" (a fresh key, not one of A's own entity keys, only
+    discoverable via content-scan) SECOND. With ``keyed_fact_leg_r2_max_keys
+    =1``: pre-fix, the extractor's internal ``max_candidates=1`` cap returns
+    only "alpha station" (found first in content) — a match the call site
+    then discards as already-seen — so "bridge person" is truncated away
+    internally and never reaches the caller's own filter at all. Post-fix,
+    the extractor returns BOTH matches uncapped; the caller filters
+    "alpha station" out (already seen) and keeps "bridge person" as the one
+    fresh candidate within budget.
+
+    A is keyed ONLY on "alpha station" (no other entity keys — step 1
+    contributes nothing new, isolating the bug to THIS row's own content
+    scan). E is keyed on "bridge person" and is the hop target.
+    """
+    agent_id = heart.agent_id
+    a_id, e_id = uuid.uuid4(), uuid.uuid4()
+    async with heart.db.session() as s:
+        s.add(Fact(
+            id=a_id, agent_id=agent_id,
+            content=(
+                "This alpha station briefing also references bridge person "
+                "for follow-up."
+            ),
+            active=True,
+        ))
+        s.add(Fact(
+            id=e_id, agent_id=agent_id,
+            content="A different memo covers unrelated inventory matters.",
+            active=True,
+        ))
+        await s.flush()
+        s.add(FactEntityKey(fact_id=a_id, entity_key="alpha station", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=e_id, entity_key="bridge person", agent_id=agent_id))
+        await s.commit()
+
+    yield {"A": a_id, "E": e_id}
+
+    async with heart.db.session() as cleanup:
+        for fid in (a_id, e_id):
+            f = await cleanup.get(Fact, fid)
+            if f is not None:
+                await cleanup.delete(f)
+        await cleanup.commit()
+
+
+@pytest.mark.postgres_only
+class TestCodexR6PostFilterKeyCap:
+    async def test_bridge_key_survives_past_already_seen_matches(
+        self, heart, brain, settings, seed_seen_key_then_bridge_corpus,
+    ):
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_r2_max_keys": 1,
+        })
+        e_id = seed_seen_key_then_bridge_corpus["E"]
+        results, stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+        e_hit = [r for r in results if r.id == e_id]
+        assert e_hit and e_hit[0].metadata.get("retrieval_leg") == "keyed_r2"
+        # Exactly 1 fresh key within a budget of 1 -- nothing was actually
+        # dropped by the budget cap in this scenario.
+        assert stats.keyed_r2_truncated is False
+
+
+# ---------------------------------------------------------------------------
+# codex round 6 (P2 #2): widen the pre-LIMIT SQL exclusion to known-dead ids
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def seed_stage1_dup_sql_cap_corpus(heart):
+    """Reproduces codex round-6 P2 #2: round 5 pushed r1-id exclusion into
+    the SQL fetch, but Stage-1 hits and F071 context ids can ALSO fill the
+    capped LIMIT and die at assembly (round 3/4's filters there only dedup
+    what got fetched -- they can't un-cap a LIMIT that already excluded a
+    fresh candidate from being fetched in the first place).
+
+    A is the round-1 hit (keyed on "alpha station") and also owns "bridge
+    person" AND "widget echo" as its own entity keys -- both become
+    round-2 derived keys via step 1. D is forced into Stage 1 via an
+    embedding matching the query (same trick as round 3's cross-leg-
+    duplicate fixture) and is ALSO keyed on both "bridge person" AND
+    "widget echo" (matched=2, ranks first). E is keyed ONLY on "bridge
+    person" (matched=1, ranks second). With
+    ``keyed_fact_leg_r2_max_candidates=1``: pre-fix (r5 only), the SQL
+    fetch excludes r1 ids (A) but not D -- the LIMIT=1 fetch returns ONLY
+    D, which then dies at assembly's existing_ids dedup (D is already a
+    Stage-1 hit), and E is never even fetched. Post-fix, D is ALSO
+    excluded in the query (Stage-1 hits known at Stage 1.6 time), so the
+    same LIMIT=1 fetch returns E instead.
+    """
+    agent_id = heart.agent_id
+    a_id, d_id, e_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    vec = await heart._embeddings.embed(_HOP_QUERY)
+    async with heart.db.session() as s:
+        s.add(Fact(
+            id=a_id, agent_id=agent_id,
+            content="Facility records mention routine filing procedures only.",
+            active=True,
+        ))
+        s.add(Fact(
+            id=d_id, agent_id=agent_id,
+            content="A separate memo describes routine intake procedures.",
+            active=True, embedding=vec,
+        ))
+        s.add(Fact(
+            id=e_id, agent_id=agent_id,
+            content="A different memo covers unrelated inventory matters.",
+            active=True,
+        ))
+        await s.flush()
+        s.add(FactEntityKey(fact_id=a_id, entity_key="alpha station", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a_id, entity_key="bridge person", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=a_id, entity_key="widget echo", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=d_id, entity_key="bridge person", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=d_id, entity_key="widget echo", agent_id=agent_id))
+        s.add(FactEntityKey(fact_id=e_id, entity_key="bridge person", agent_id=agent_id))
+        await s.commit()
+
+    yield {"A": a_id, "D": d_id, "E": e_id}
+
+    async with heart.db.session() as cleanup:
+        for fid in (a_id, d_id, e_id):
+            f = await cleanup.get(Fact, fid)
+            if f is not None:
+                await cleanup.delete(f)
+        await cleanup.commit()
+
+
+@pytest.mark.postgres_only
+class TestCodexR6WidenedSqlExclusion:
+    async def test_stage1_duplicate_does_not_consume_sql_candidate_cap(
+        self, heart, brain, settings, seed_stage1_dup_sql_cap_corpus,
+    ):
+        s = settings.model_copy(update={
+            "keyed_fact_leg_enabled": True, "keyed_fact_leg_rounds": 2,
+            "keyed_fact_leg_r2_max_candidates": 1,
+        })
+        d_id = seed_stage1_dup_sql_cap_corpus["D"]
+        e_id = seed_stage1_dup_sql_cap_corpus["E"]
+        results, _stats = await run_recall_pipeline(_HOP_QUERY, heart, brain, s)
+
+        # D surfaces exactly once (via Stage 1, not re-added as keyed_r2).
+        d_occurrences = [r for r in results if r.id == d_id]
+        assert len(d_occurrences) == 1
+        assert d_occurrences[0].metadata.get("retrieval_leg") != "keyed_r2"
+
         e_hit = [r for r in results if r.id == e_id]
         assert e_hit and e_hit[0].metadata.get("retrieval_leg") == "keyed_r2"
 

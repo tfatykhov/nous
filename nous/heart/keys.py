@@ -92,7 +92,7 @@ def extract_entity_candidates(
     text: str,
     *,
     vocab: frozenset[str] | None = None,
-    max_candidates: int = 8,
+    max_candidates: int | None = 8,
     vocab_only: bool = False,
 ) -> list[str]:
     """NER-lite (R3.3 v1): quoted spans + capitalized spans + known-key
@@ -113,6 +113,19 @@ def extract_entity_candidates(
     ever reached — even though that match IS collected, it just lands past
     the final slice. Default ``False`` keeps the query-side (round-1
     candidate extraction) path byte-unchanged.
+
+    R3v2 codex round 6: ``max_candidates=None`` skips the final slice
+    entirely (unbounded). The round-2 content-scan call site needs this:
+    even with ``vocab_only=True``, the extractor's OWN cap still applies to
+    the raw (pre-``seen_k``-filter) match list, independent of the caller's
+    remaining budget — a row whose content mentions >= ``max_candidates``
+    already-seen keys before a fresh one can fill the cap with useless
+    matches, truncating the fresh one away before the caller's own
+    ``seen_k`` filter ever runs. The caller now extracts uncapped, filters
+    against ``seen_k`` first, THEN applies its own remaining-budget cap to
+    the filtered list. ``vocab_only`` mode is bounded by this call's own
+    content tokens, so uncapped extraction is cheap. Default ``8`` keeps
+    every other caller (query-side NER) unchanged.
     """
     seen: set[str] = set()
     out: list[str] = []
@@ -146,7 +159,7 @@ def extract_entity_candidates(
                 if gram in vocab and gram not in seen:
                     seen.add(gram)
                     out.append(gram)
-    return out[:max_candidates]
+    return out if max_candidates is None else out[:max_candidates]
 
 
 _NUMERIC = re.compile(r"[\d\s.,:/-]+")
