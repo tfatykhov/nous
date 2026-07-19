@@ -3689,7 +3689,7 @@ class FactManager:
             self._entity_vocab_cache = (vocab, now)
         return vocab
 
-    async def fetch_by_entity_keys(self, keys: list[str], limit: int = 8):
+    async def fetch_by_entity_keys(self, keys: list[str], limit: int = 8, *, track: bool = True):
         """R3.3: active facts matching any entity key, ranked by matched-key
         count then recency/ordinal. MUST join facts on active=true (entity
         rows survive supersession).
@@ -3720,6 +3720,14 @@ class FactManager:
         use. Skipped when the result set is empty; failures are swallowed
         (mirrors ``track_access``) so a tracking hiccup never turns into a
         lost retrieval result for the caller.
+
+        R3v2: ``track`` defaults True (unchanged default-path behavior). Round-2
+        bulk candidate fetches pass ``track=False`` — only facts that survive to
+        be surfaced to a consumer should accumulate recall signal; a bulk
+        candidate pool that gets filtered down before surfacing is not itself a
+        retrieval-leg result, mirroring the dedup-probe rationale above. Callers
+        that need tracking for their own survivors call ``track_access``
+        separately.
         """
         if not keys:
             return []
@@ -3729,13 +3737,15 @@ class FactManager:
                     "SELECT f.id, f.content, f.learned_at, f.source_ordinal, "
                     "       f.subject, f.event_date, "
                     "       f.source_episode_id::text AS source_episode_id, "
+                    "       f.attribute_key, f.subject_key, "
                     "       COUNT(DISTINCT ek.entity_key) AS matched "
                     "FROM heart.fact_entity_keys ek "
                     "JOIN heart.facts f ON f.id = ek.fact_id "
                     "WHERE ek.agent_id = :a AND ek.entity_key = ANY(:keys) "
                     "  AND f.active = true AND f.agent_id = :a "
                     "GROUP BY f.id, f.content, f.learned_at, f.source_ordinal, "
-                    "         f.subject, f.event_date, f.source_episode_id "
+                    "         f.subject, f.event_date, f.source_episode_id, "
+                    "         f.attribute_key, f.subject_key "
                     "ORDER BY matched DESC, f.learned_at DESC, "
                     "         f.source_ordinal DESC NULLS LAST "
                     "LIMIT :lim"
@@ -3743,7 +3753,7 @@ class FactManager:
                 {"a": self.agent_id, "keys": keys, "lim": limit},
             )
             result_rows = list(rows)
-            if result_rows:
+            if track and result_rows:
                 try:
                     await session.execute(
                         update(Fact)
@@ -3760,3 +3770,26 @@ class FactManager:
                         len(result_rows),
                     )
             return result_rows
+
+    async def entity_keys_for_facts(self, fact_ids: list[UUID]) -> dict[UUID, list[str]]:
+        """R3v2: the fact_entity_keys rows of the given facts, grouped by fact,
+        keys sorted alphabetically (deterministic round-2 key derivation).
+        Active-joined + agent-scoped per the F085 read invariant."""
+        if not fact_ids:
+            return {}
+        async with self.db.session() as session:
+            rows = await session.execute(
+                text(
+                    "SELECT ek.fact_id, ek.entity_key "
+                    "FROM heart.fact_entity_keys ek "
+                    "JOIN heart.facts f ON f.id = ek.fact_id "
+                    "WHERE ek.agent_id = :a AND f.agent_id = :a AND f.active = true "
+                    "  AND ek.fact_id::text = ANY(:ids) "
+                    "ORDER BY ek.fact_id, ek.entity_key"
+                ),
+                {"a": self.agent_id, "ids": [str(i) for i in fact_ids]},
+            )
+            out: dict[UUID, list[str]] = {}
+            for r in rows:
+                out.setdefault(r.fact_id, []).append(r.entity_key)
+            return out

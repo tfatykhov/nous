@@ -201,6 +201,31 @@ class TestKeyedFactLeg:
             if before_recalled_at is not None:
                 assert after.last_recalled_at > before_recalled_at
 
+    async def test_fetch_track_false_skips_access_tracking(self, heart, seed_keyed_corpus):
+        # arch-P1: _get_fact does NOT exist in this file — use its own idiom
+        # (heart.db.session + s.get(Fact, id), as at :189-192)
+        gold = seed_keyed_corpus["gold_id"]
+        async with heart.db.session() as s:
+            before = (await s.get(Fact, gold)).recall_count
+        rows = await heart.facts.fetch_by_entity_keys(["marriage of figaro"], limit=8, track=False)
+        assert [r.id for r in rows] == [gold]
+        async with heart.db.session() as s:
+            after = (await s.get(Fact, gold)).recall_count
+        assert after == before                                     # NOT tracked
+        assert rows[0].attribute_key is not None or rows[0].attribute_key is None  # column present (no AttributeError)
+
+    async def test_entity_keys_for_facts_groups_and_sorts(self, heart, seed_keyed_corpus):
+        gold = seed_keyed_corpus["gold_id"]
+        m = await heart.facts.entity_keys_for_facts([gold])
+        assert m == {gold: ["marriage of figaro", "thomas kyd"]}   # alphabetical
+        assert await heart.facts.entity_keys_for_facts([]) == {}
+
+    async def test_entity_keys_for_facts_excludes_inactive(self, heart, seed_keyed_corpus):
+        # the corpus's superseded (active=False) fact shares a key — must not appear
+        sup = seed_keyed_corpus["superseded_id"]
+        m = await heart.facts.entity_keys_for_facts([sup])
+        assert m == {}
+
     async def test_superseded_fact_not_returned(self, heart, brain, settings, seed_keyed_corpus):
         # seed an inactive fact sharing the entity key
         s = settings.model_copy(update={"keyed_fact_leg_enabled": True})
