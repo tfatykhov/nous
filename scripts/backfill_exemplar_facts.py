@@ -125,20 +125,30 @@ def episode_qualifies(chunk_contents: list[str], threshold: float) -> bool:
 
 
 def build_episode_pairs(chunk_contents: list[str]) -> list[ExemplarPair]:
-    """Parse each chunk INDEPENDENTLY, then re-stamp ordinals with a
-    running per-episode offset so `source_ordinal` is one continuous
-    sequence across the whole episode, never reset at a chunk boundary.
-    Chunk-boundary fragments (a pair split mid-utterance) simply drop the
-    dangling half with no label -- parse_exemplars already skips
-    label-less utterances -- and are harmless to downstream ranking (the
-    MAB measurement's own finding)."""
-    pairs: list[ExemplarPair] = []
-    offset = 0
+    """Parse each chunk INDEPENDENTLY, dedupe exact overlap copies, then
+    re-stamp ordinals 0..n-1 as one continuous per-episode sequence (never
+    reset at a chunk boundary).
+
+    Codex r12: ``chunk_text``'s 80-char overlap means a COMPLETE
+    ``utterance\\nlabel`` pair that falls inside the overlap parses in BOTH
+    neighboring chunks. Deduping on exact ``(text, label)`` here -- BEFORE
+    ordinal restamping and the ``exemplar_max_per_episode`` cap -- keeps an
+    overlap duplicate from spending a cap slot (which would truncate a unique
+    exemplar) or inflating ``source_ordinal`` for later rows. First occurrence
+    wins (preserves order). A truncated chunk-boundary FRAGMENT differs
+    textually (its dangling half has no label and parse_exemplars already drops
+    it), so it is NOT an exact-match duplicate and correctly survives -- the MAB
+    honesty-ledger fragment tolerance."""
+    seen: set[tuple[str, str]] = set()
+    deduped: list[ExemplarPair] = []
     for content in chunk_contents:
-        chunk_pairs = parse_exemplars(content)
-        pairs.extend(replace(p, ordinal=p.ordinal + offset) for p in chunk_pairs)
-        offset += len(chunk_pairs)
-    return pairs
+        for p in parse_exemplars(content):
+            key = (p.text, p.label)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(p)
+    return [replace(p, ordinal=i) for i, p in enumerate(deduped)]
 
 
 async def fetch_db_now(session) -> datetime:

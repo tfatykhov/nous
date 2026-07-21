@@ -1582,6 +1582,34 @@ class TestExemplarBackfill:
     def test_build_episode_pairs_empty_chunk_list(self):
         assert build_episode_pairs([]) == []
 
+    def test_build_episode_pairs_dedupes_overlap_duplicate(self):
+        # Codex r12: chunk_text's 80-char overlap makes a COMPLETE pair inside
+        # the overlap parse in BOTH neighboring chunks. It must be stored ONCE,
+        # with contiguous ordinals (no gap / inflation from the duplicate copy).
+        chunk1 = "utterance one here\nlabel: 1\nutterance two here\nlabel: 2\n"
+        chunk2 = "utterance two here\nlabel: 2\nutterance three here\nlabel: 3\n"  # "two/2" repeated (overlap)
+
+        pairs = build_episode_pairs([chunk1, chunk2])
+
+        assert [(p.text, p.label) for p in pairs] == [
+            ("utterance one here", "1"),
+            ("utterance two here", "2"),
+            ("utterance three here", "3"),
+        ]
+        assert [p.ordinal for p in pairs] == [0, 1, 2]  # contiguous, no dup-inflation
+
+    def test_overlap_dup_does_not_spend_cap(self):
+        # Codex r12: with the overlap duplicate deduped, an exemplar_max_per_episode
+        # cap of N keeps N UNIQUE pairs -- the duplicate does not push a unique
+        # exemplar out. (The cap is `pairs[:cap]` in _embed_and_store_pairs.)
+        chunk1 = "utterance A here\nlabel: 1\nutterance B here\nlabel: 2\n"
+        chunk2 = "utterance B here\nlabel: 2\nutterance C here\nlabel: 3\n"  # "B/2" repeated (overlap)
+
+        pairs = build_episode_pairs([chunk1, chunk2])
+        capped = pairs[:3]  # cap=3
+
+        assert [p.label for p in capped] == ["1", "2", "3"]  # all three UNIQUE survive the cap
+
     async def test_store_episode_pairs_empty_returns_tuple(self, settings):
         # Codex r4: a genuinely-qualifying episode whose chunks parse to ZERO
         # pairs must reach the backfill loop's `stored, skipped, ids = ...` unpack

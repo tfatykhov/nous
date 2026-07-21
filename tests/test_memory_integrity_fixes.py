@@ -192,7 +192,10 @@ class TestKnowledgeExtractorTiebreaker:
         import inspect
         from nous.handlers.knowledge_extractor import KnowledgeExtractor
         src = inspect.getsource(KnowledgeExtractor)
-        assert "find_similar_facts(content, limit=5)" in src  # multi-hit probe (codex P2 r2)
+        # multi-hit probe (codex P2 r2); r11 added exclude_sources so the call
+        # is now multi-line — pin the probe args including the exemplar exclusion.
+        assert "find_similar_facts(" in src
+        assert 'content, limit=5, exclude_sources=("exemplar_extractor",)' in src
         assert "is_distinct_fact" in src                       # gated by tiebreaker
         assert "fact_dedup_tiebreaker_enabled" in src
         # codex P1/P2: accumulate every DISTINCT hit id into learn(exclude_ids=...)
