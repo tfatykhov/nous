@@ -10,7 +10,7 @@ import asyncio
 import logging
 import time
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 from uuid import UUID
 
 from sqlalchemy import and_, func, or_, select, text, update
@@ -39,6 +39,10 @@ logger = logging.getLogger(__name__)
 # module-level cache keyed by instance, so writes from THIS process invalidate
 # it immediately instead of waiting out the TTL.
 _ENTITY_VOCAB_TTL_SECONDS = 300.0
+
+# F086: has_exemplars() exists-probe cache TTL, in seconds. Same rationale
+# and shape as _ENTITY_VOCAB_TTL_SECONDS above.
+_EXEMPLAR_EXISTS_TTL_SECONDS = 300.0
 
 # F027: classifier prompt. Exported so the F027 eval script
 # (scripts/eval/eval_f027_supersession.py) tests the same prompt prod uses.
@@ -143,6 +147,15 @@ _DEDUP_TIEBREAKER_SCHEMA: dict[str, Any] = {
 }
 
 
+class ExemplarHit(NamedTuple):
+    """F086: one row from fetch_exemplars_by_vector — a source='exemplar_extractor'
+    fact ranked by cosine similarity to a query embedding."""
+
+    id: UUID
+    content: str
+    similarity: float
+
+
 class FactManager:
     """Manages semantic memory — what we know."""
 
@@ -204,6 +217,13 @@ class FactManager:
         # now checks its OWN call-local `input.entity_keys` instead of any
         # instance-shared state.
         self._entity_vocab_gen: int = 0
+
+        # F086: has_exemplars() exists-probe cache, same TTL + generation-
+        # counter shape as entity_key_vocabulary above. Invalidated in
+        # learn()'s post-commit finally whenever input.source ==
+        # "exemplar_extractor" (see _invalidate_exemplar_cache).
+        self._exemplar_exists_cache: tuple[bool, float] | None = None
+        self._exemplar_exists_gen: int = 0
 
     def _band_budget_ok(self) -> bool:
         """Advisory in-process per-hour cap on the in-band classifier. Returns
@@ -584,6 +604,13 @@ class FactManager:
                     # input.entity_keys` condition.
                     if input.entity_keys or input.subject_key:
                         self.invalidate_entity_vocab()
+                    # F086: sibling invalidation for has_exemplars(). The
+                    # entity-vocab gate above never fires for exemplar facts
+                    # (subject_key is deliberately None, entity_keys is
+                    # deliberately empty — see exemplar_ingest.py), so this
+                    # needs its own gate on input.source.
+                    if input.source == "exemplar_extractor":
+                        self._invalidate_exemplar_cache()
         # Injected-session callers own their own commit point, so there is no
         # place here to re-invalidate post-commit — the 300s TTL remains the
         # sole staleness bound for this path. No current caller passes
@@ -2066,6 +2093,13 @@ class FactManager:
         class as rounds 2/3/5, fixed there for learn() specifically)."""
         self._entity_vocab_cache = None
         self._entity_vocab_gen += 1
+
+    def _invalidate_exemplar_cache(self) -> None:
+        """F086: clear the cached has_exemplars() probe and bump its
+        generation counter. Mirrors invalidate_entity_vocab (see that
+        docstring for the race this closes)."""
+        self._exemplar_exists_cache = None
+        self._exemplar_exists_gen += 1
 
     async def inherit_conflict_slot_keys(
         self, replacement_id: UUID, source_ids: list[UUID], session: AsyncSession,
@@ -3853,3 +3887,60 @@ class FactManager:
             for r in rows:
                 out.setdefault(r.fact_id, []).append(r.entity_key)
             return out
+
+    async def fetch_exemplars_by_vector(self, query_embedding: list[float], limit: int = 25) -> list[ExemplarHit]:
+        """F086: K nearest active exemplar facts by cosine (source-filtered).
+
+        Same ANN-horizon margin as ``_find_similar_for_dedup`` — the partial
+        HNSW index (migration 066) is scoped to ``source =
+        'exemplar_extractor'`` so this walk never touches the much larger
+        general embedding index.
+        """
+        vec_lit = "[" + ",".join(str(x) for x in query_embedding) + "]"
+        async with self.db.session() as session:
+            await set_local_ef_search(session, 100)
+            rows = (
+                await session.execute(
+                    text("""
+                SELECT id, content,
+                       1 - (embedding <=> CAST(:v AS vector)) AS similarity
+                FROM heart.facts
+                WHERE agent_id = :agent_id
+                  AND active = true
+                  AND source = 'exemplar_extractor'
+                  AND embedding IS NOT NULL
+                ORDER BY embedding <=> CAST(:v AS vector)
+                LIMIT :limit
+            """),
+                    {"v": vec_lit, "agent_id": self.agent_id, "limit": limit},
+                )
+            ).fetchall()
+        return [ExemplarHit(id=r.id, content=r.content, similarity=float(r.similarity)) for r in rows]
+
+    async def has_exemplars(self) -> bool:
+        """F086: cached existence probe for any active exemplar_extractor fact.
+
+        Cached on this instance (TTL ``_EXEMPLAR_EXISTS_TTL_SECONDS``) and
+        invalidated immediately after a same-process ``learn()`` call stores
+        an exemplar fact (see the sibling branch in ``learn()``'s finally
+        block, and ``_invalidate_exemplar_cache``) — same generation-counter
+        race-closing shape as ``entity_key_vocabulary`` (see that method's
+        docstring for why the gen snapshot-before-await is needed).
+        """
+        cached = self._exemplar_exists_cache
+        now = time.monotonic()
+        if cached is not None and now - cached[1] < _EXEMPLAR_EXISTS_TTL_SECONDS:
+            return cached[0]
+        gen = self._exemplar_exists_gen
+        async with self.db.session() as session:
+            result = await session.execute(
+                text(
+                    "SELECT EXISTS(SELECT 1 FROM heart.facts WHERE agent_id = :a "
+                    "AND source = 'exemplar_extractor' AND active = true)"
+                ),
+                {"a": self.agent_id},
+            )
+            exists = bool(result.scalar())
+        if gen == self._exemplar_exists_gen:
+            self._exemplar_exists_cache = (exists, now)
+        return exists

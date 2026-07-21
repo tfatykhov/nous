@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from nous.handlers.exemplar_ingest import ingest_exemplars
 from nous.heart.exemplars import (
@@ -16,6 +16,8 @@ from nous.heart.exemplars import (
     parse_exemplars,
     parse_label,
 )
+from nous.heart.facts import ExemplarHit, FactManager
+from nous.heart.schemas import FactInput, FactRejected
 from nous.storage.models import Episode, Fact
 
 logger = logging.getLogger(__name__)
@@ -323,3 +325,160 @@ async def test_extractor_flag_off_exemplar_leg_never_runs(monkeypatch):
     ingest_sentinel.assert_not_called()
     assert len(heart._captured) == 1
     assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 3: read-side data layer -- source-filtered vector fetch + exists-probe
+# ---------------------------------------------------------------------------
+
+
+async def _delete_facts_for_agent(heart, agent_id):
+    async with heart.db.session() as s:
+        await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
+        await s.commit()
+
+
+@pytest.mark.postgres_only
+class TestExemplarFetch:
+    """HNSW/pgvector-backed coverage for fetch_exemplars_by_vector + has_exemplars.
+
+    Each test uses a freshly-tagged, throwaway agent_id rather than the
+    shared `heart` fixture's default agent -- the shared local Postgres
+    already carries persisted source='exemplar_extractor' rows for the
+    default agent from TestExemplarIngest's non-rollback-isolated writes,
+    so an "empty store" assertion against the shared agent would be flaky.
+    Rows are deleted in a finally block so this suite doesn't grow the
+    shared dev DB across runs either.
+    """
+
+    async def test_fetch_orders_by_cosine_and_filters_source(self, heart):
+        agent_id = f"exemplar-fetch-{uuid4()}"
+        try:
+            query = "how do I reset the pin on my lost debit card"
+            query_vec = await heart._embeddings.embed(query)
+            close_vec = await heart._embeddings.embed_near(query, noise=0.01)
+            mid_vec = await heart._embeddings.embed_near(query, noise=0.05)
+            far_vec = await heart._embeddings.embed_near(query, noise=0.1)
+
+            close_id, mid_id, far_id, normal_id = uuid4(), uuid4(), uuid4(), uuid4()
+            async with heart.db.session() as s:
+                s.add(
+                    Fact(
+                        id=close_id,
+                        agent_id=agent_id,
+                        content="closest exemplar utterance content here\nlabel: 1",
+                        source="exemplar_extractor",
+                        active=True,
+                        embedding=close_vec,
+                    )
+                )
+                s.add(
+                    Fact(
+                        id=mid_id,
+                        agent_id=agent_id,
+                        content="middling exemplar utterance content here\nlabel: 2",
+                        source="exemplar_extractor",
+                        active=True,
+                        embedding=mid_vec,
+                    )
+                )
+                s.add(
+                    Fact(
+                        id=far_id,
+                        agent_id=agent_id,
+                        content="farthest exemplar utterance content here\nlabel: 3",
+                        source="exemplar_extractor",
+                        active=True,
+                        embedding=far_vec,
+                    )
+                )
+                # Non-exemplar fact engineered CLOSER than any exemplar above --
+                # proves the source filter (not just ranking) drives exclusion.
+                s.add(
+                    Fact(
+                        id=normal_id,
+                        agent_id=agent_id,
+                        content="an ordinary non-exemplar fact about card pins",
+                        source="fact_extractor",
+                        active=True,
+                        embedding=query_vec,
+                    )
+                )
+                await s.commit()
+
+            fm = FactManager(heart.db, heart._embeddings, agent_id, settings=heart.settings)
+            hits = await fm.fetch_exemplars_by_vector(query_vec, limit=25)
+
+            assert all(isinstance(h, ExemplarHit) for h in hits)
+            assert [h.id for h in hits] == [close_id, mid_id, far_id]
+            assert normal_id not in [h.id for h in hits]
+            assert hits[0].similarity >= hits[1].similarity >= hits[2].similarity
+
+            limited = await fm.fetch_exemplars_by_vector(query_vec, limit=2)
+            assert [h.id for h in limited] == [close_id, mid_id]
+        finally:
+            await _delete_facts_for_agent(heart, agent_id)
+
+    async def test_fetch_excludes_inactive(self, heart):
+        agent_id = f"exemplar-fetch-{uuid4()}"
+        try:
+            query = "what is the current exchange rate for euros"
+            query_vec = await heart._embeddings.embed(query)
+            active_vec = await heart._embeddings.embed_near(query, noise=0.02)
+            # Engineered CLOSER than the active row -- proves exclusion is
+            # driven by active=false, not by ranking it out naturally.
+            inactive_vec = await heart._embeddings.embed_near(query, noise=0.01)
+
+            active_id, inactive_id = uuid4(), uuid4()
+            async with heart.db.session() as s:
+                s.add(
+                    Fact(
+                        id=active_id,
+                        agent_id=agent_id,
+                        content="active exemplar utterance about exchange rates\nlabel: 4",
+                        source="exemplar_extractor",
+                        active=True,
+                        embedding=active_vec,
+                    )
+                )
+                s.add(
+                    Fact(
+                        id=inactive_id,
+                        agent_id=agent_id,
+                        content="deactivated exemplar utterance about exchange rates\nlabel: 5",
+                        source="exemplar_extractor",
+                        active=False,
+                        embedding=inactive_vec,
+                    )
+                )
+                await s.commit()
+
+            fm = FactManager(heart.db, heart._embeddings, agent_id, settings=heart.settings)
+            hits = await fm.fetch_exemplars_by_vector(query_vec, limit=25)
+
+            assert [h.id for h in hits] == [active_id]
+        finally:
+            await _delete_facts_for_agent(heart, agent_id)
+
+    async def test_has_exemplars_probe_and_invalidation(self, heart):
+        agent_id = f"exemplar-fetch-{uuid4()}"
+        try:
+            fm = FactManager(heart.db, heart._embeddings, agent_id, settings=heart.settings)
+
+            assert await fm.has_exemplars() is False  # empty store for this fresh agent, cached
+
+            result = await fm.learn(
+                FactInput(
+                    content="a freshly learned exemplar utterance for cache invalidation\nlabel: 6",
+                    subject_key=None,
+                    attribute_key="label",
+                    category="exemplar",
+                    confidence=1.0,
+                    source="exemplar_extractor",
+                )
+            )
+            assert not isinstance(result, FactRejected)
+
+            assert await fm.has_exemplars() is True  # invalidated post-commit, no TTL wait
+        finally:
+            await _delete_facts_for_agent(heart, agent_id)
