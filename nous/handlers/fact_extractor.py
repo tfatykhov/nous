@@ -33,6 +33,8 @@ def _parse_episode_uuid(episode_id: str | None) -> UUID | None:
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.handlers import LLMClient, call_background_llm, cap_candidate_facts, parse_llm_json
+from nous.handlers.exemplar_ingest import ingest_exemplars
+from nous.heart.exemplars import is_exemplar_stream
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput, FactRejected
 
@@ -234,6 +236,30 @@ class FactExtractor:
         """
         if not summary:
             return []
+
+        # F086: exemplar streams route modal, checked BEFORE R1 (R1's density
+        # heuristic does not fire on label-streams; this one does, and is
+        # parse-only — zero LLM).
+        if (
+            getattr(self._settings, "exemplar_extraction_enabled", False)
+            and transcript
+            and is_exemplar_stream(transcript, getattr(self._settings, "exemplar_density_threshold", 0.8))
+        ):
+            try:
+                n = await ingest_exemplars(
+                    self._heart, self._settings, transcript,
+                    _parse_episode_uuid(episode_id), self._heart.agent_id, logger,
+                )
+                if n > 0:
+                    return []  # arch-review I2: extract_and_store -> list[UUID]; ids not tracked here
+                logger.warning(
+                    "F086: exemplar leg stored 0 facts for episode %s — falling back to legacy path",
+                    episode_id,
+                )
+                # fall through: zero exemplar facts stored — legacy path
+                # ensures the episode's facts are never silently dropped.
+            except Exception:
+                logger.warning("F086 exemplar leg failed; falling through to legacy", exc_info=True)
 
         # 064 R1.1 modal routing: with the flag on, an ENUMERABLE transcript
         # routes fact storage through the enumerative leg INSTEAD of the

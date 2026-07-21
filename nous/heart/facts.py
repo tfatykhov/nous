@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.admission import AdmissionController, AdmissionResult
+from nous.heart.exemplars import parse_label
 from nous.heart.keys import is_keyable_entity, normalize_key
 from nous.heart.schemas import ContradictionWarning, FactDetail, FactInput, FactRejected, FactSummary
 from nous.heart.search import hybrid_search, hybrid_search_multi, set_local_ef_search
@@ -520,6 +521,8 @@ class FactManager:
         _min_chars_gate = self._settings.fact_min_content_chars if self._settings else 30
         if input.source == "enumerative_extractor" and self._settings is not None:
             _min_chars_gate = self._settings.enumerative_min_content_chars
+        elif input.source == "exemplar_extractor" and self._settings is not None:
+            _min_chars_gate = self._settings.exemplar_min_content_chars
         if (
             session is None
             and self._admission_controller is not None
@@ -643,6 +646,8 @@ class FactManager:
         min_chars = self._settings.fact_min_content_chars if self._settings else 30
         if input.source == "enumerative_extractor" and self._settings is not None:
             min_chars = self._settings.enumerative_min_content_chars
+        elif input.source == "exemplar_extractor" and self._settings is not None:
+            min_chars = self._settings.exemplar_min_content_chars
         if min_chars and len(input.content.strip()) < min_chars:
             logger.info(
                 "Fact rejected by min-content floor (%d < %d): %.60s",
@@ -730,6 +735,18 @@ class FactManager:
                 prefer_slot=prefer_slot,
                 probed_ids=probed_ids,
             )
+            # F086: different label = different exemplar; never dedup-drop
+            # (and never route/classify). Clears the found TUPLE before the
+            # unpack below — `dupe` is only ever bound inside the
+            # `if found is not None:` branch, and the fall-through else
+            # dereferences it via _classify_dupe_in_band, so clearing
+            # `dupe` post-unpack would crash instead of bypassing.
+            if (
+                found is not None
+                and input.source == "exemplar_extractor"
+                and parse_label(found[0].content or "") != parse_label(input.content)
+            ):
+                found = None
             if found is not None:
                 dupe, dupe_similarity = found
                 # F075 dedup bypass: distinct event_dates = distinct events.

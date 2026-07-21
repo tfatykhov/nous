@@ -341,6 +341,44 @@ class Settings(BaseSettings):
         description="R3v2 fan-out guard: hard cap on round-2 candidates fetched before ranking (the p90-587 lesson).",
     )
 
+    # --- F086 ICL exemplar mode ---
+    exemplar_extraction_enabled: bool = Field(
+        default=False,
+        description="F086 write-path master switch: parse-only exemplar extraction of `utterance\\nlabel: N` streams into individually-embedded facts (source='exemplar_extractor'). Zero LLM.",
+    )
+    exemplar_density_threshold: float = Field(
+        default=0.8, ge=0.0, le=1.0,
+        description="F086 exemplar_density score at/above which a transcript routes to exemplar extraction (checked before R1).",
+    )
+    exemplar_max_per_episode: int = Field(
+        default=5000, ge=1,
+        description="F086 cap on exemplar facts stored per episode; truncation logs WARNING (never silent).",
+    )
+    exemplar_min_content_chars: int = Field(
+        default=5, ge=0,
+        description="F086 source-aware min-content floor for exemplar facts (labels/utterances are short; global 30-char floor would reject them).",
+    )
+    exemplar_mode_enabled: bool = Field(
+        default=False,
+        description="F086 read-path master switch: exemplar retrieval leg in run_recall_pipeline (land-dark).",
+    )
+    exemplar_top_k: int = Field(
+        default=25, ge=1,
+        description="F086 max exemplars fetched/injected per query.",
+    )
+    exemplar_leg_score: float = Field(
+        default=0.55, ge=0.0, le=1.0,
+        description="F086 score-band ceiling for exemplar hits (below the RRF direct-hit head; per-rank decay 0.005).",
+    )
+    exemplar_min_similarity: float = Field(
+        default=0.30, ge=0.0, le=1.0,
+        description="F086 cosine floor -- exemplars below this similarity are not merged (bounds false-trigger displacement, gate 2).",
+    )
+    exemplar_max_query_words: int = Field(
+        default=64, ge=1,
+        description="F086 trigger gate: queries longer than this many words are not classification-shaped.",
+    )
+
     # F017: Budget scaling
     budget_scale_enabled: bool = True
 
