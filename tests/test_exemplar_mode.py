@@ -2105,3 +2105,67 @@ class TestExemplarResolverCandidateExclusion:
             async with heart.db.session() as s:
                 await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
                 await s.commit()
+
+
+@pytest.mark.postgres_only
+class TestExemplarCompatibleCandidateDedup:
+    """Codex r15: the exemplar compatibility filter lives INSIDE _find_duplicate's
+    candidate iteration (skip-and-continue), so a normal input whose NEAREST hit is
+    an incompatible exemplar still finds a genuine normal duplicate ranked below."""
+
+    async def test_normal_input_dedups_past_exemplar_to_normal_dupe(self, heart):
+        agent_id = f"exemplar-dedup-select-{uuid4()}"
+        fm = FactManager(heart.db, heart._embeddings, agent_id, settings=heart.settings)
+        content = "The user prefers dark mode in the application settings menu."
+        base = await heart._embeddings.embed(content)
+        ex_id, norm_id = uuid4(), uuid4()
+        async with heart.db.session() as s:
+            # Exemplar at rank-1 (cosine 0.98, closest) — incompatible with a normal
+            # input; a genuine normal dupe at rank-2 (cosine 0.96). Both >0.95.
+            s.add(
+                Fact(
+                    id=ex_id,
+                    agent_id=agent_id,
+                    subject="dark mode pref",
+                    content="does the app support dark mode\nlabel: 1",
+                    source="exemplar_extractor",
+                    active=True,
+                    embedding=_vec_at_cosine(base, 0.98, "ds-ex"),
+                )
+            )
+            s.add(
+                Fact(
+                    id=norm_id,
+                    agent_id=agent_id,
+                    subject="dark mode pref",
+                    content="The user likes using dark mode in the application.",
+                    source="fact_extractor",
+                    active=True,
+                    embedding=_vec_at_cosine(base, 0.96, "ds-norm"),
+                )
+            )
+            await s.commit()
+        try:
+            result = await fm.learn(
+                FactInput(
+                    content=content,
+                    subject="dark mode pref",
+                    category="preference",
+                    confidence=0.9,
+                    source="fact_extractor",
+                ),
+                precomputed_embedding=base,
+            )
+            assert not isinstance(result, FactRejected)
+            # Dedup-confirmed into the NORMAL dupe (rank-2), NOT the exemplar (rank-1);
+            # no new row inserted.
+            assert result.id == norm_id
+            async with heart.db.session() as check:
+                rows = (
+                    await check.execute(text("SELECT id FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
+                ).all()
+                assert len(rows) == 2  # exemplar + normal dupe; no 3rd row
+        finally:
+            async with heart.db.session() as s:
+                await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
+                await s.commit()

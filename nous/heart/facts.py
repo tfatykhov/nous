@@ -764,30 +764,20 @@ class FactManager:
                 )
                 else None
             )
+            # Codex r15 (F086): the exemplar compatibility filter now lives INSIDE
+            # _find_duplicate's candidate iteration (skip-and-continue), replacing
+            # the old _learn-level two-sided guard that cleared `found` at the
+            # first candidate and could miss a real dupe just below an
+            # incompatible exemplar. An exemplar input dedups only against a
+            # same-label exemplar; a normal input only against a non-exemplar row.
             found = await self._find_duplicate(
                 embedding, exclude_ids, session,
                 candidate_event_date=input.event_date,
                 prefer_slot=prefer_slot,
                 probed_ids=probed_ids,
+                input_is_exemplar=is_exemplar,
+                input_label=parse_label(input.content) if is_exemplar else None,
             )
-            # F086: different label = different exemplar; never dedup-drop
-            # (and never route/classify). Clears the found TUPLE before the
-            # unpack below — `dupe` is only ever bound inside the
-            # `if found is not None:` branch, and the fall-through else
-            # dereferences it via _classify_dupe_in_band, so clearing
-            # `dupe` post-unpack would crash instead of bypassing.
-            #
-            # Two-sided: fires when EITHER the incoming input OR its nearest
-            # dupe is an exemplar. A genuine conversational fact whose nearest
-            # neighbor is an exemplar row (labels differ — parse_label returns
-            # None for label-less content) must NOT dedup-confirm into that
-            # exemplar and be lost; it falls through to a normal insert.
-            if (
-                found is not None
-                and (is_exemplar or found[0].source == "exemplar_extractor")
-                and parse_label(found[0].content or "") != parse_label(input.content)
-            ):
-                found = None
             if found is not None:
                 dupe, dupe_similarity = found
                 # F075 dedup bypass: distinct event_dates = distinct events.
@@ -1743,6 +1733,8 @@ class FactManager:
         candidate_event_date: date | None = None,
         prefer_slot: tuple[str, str] | None = None,
         probed_ids: list[UUID] | None = None,
+        input_is_exemplar: bool = False,
+        input_label: str | None = None,
     ) -> tuple[Fact, float] | None:
         """Find a near-duplicate fact by cosine similarity > threshold.
 
@@ -1833,7 +1825,7 @@ class FactManager:
         # partial indexes.
         await set_local_ef_search(session, 100)
         sql = text(f"""
-            SELECT id, event_date, subject_key, attribute_key,
+            SELECT id, event_date, subject_key, attribute_key, source, content,
                    1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
             FROM heart.facts
             WHERE agent_id = :agent_id
@@ -1850,6 +1842,22 @@ class FactManager:
             return None
         if probed_ids is not None:
             probed_ids.extend(r.id for r in above)
+
+        # Codex r15 (F086): exemplar COMPATIBILITY filter, pushed here from the
+        # old _learn-level two-sided guard (which cleared `found` at the FIRST
+        # candidate and could miss a genuine dupe just below an incompatible
+        # exemplar). Skip incompatible candidates and CONTINUE: an exemplar input
+        # dedups only against a SAME-LABEL exemplar; a normal input only against a
+        # non-exemplar row. One mechanism, full isolation both directions.
+        def _exemplar_compatible(r) -> bool:
+            cand_is_exemplar = r.source == "exemplar_extractor"
+            if input_is_exemplar:
+                return cand_is_exemplar and parse_label(r.content or "") == input_label
+            return not cand_is_exemplar
+
+        above = [r for r in above if _exemplar_compatible(r)]
+        if not above:
+            return None
 
         # Codex r9: check for a same-date match across the FULL above-threshold
         # set BEFORE any slot narrowing — a date match wins outright and skips
@@ -3999,6 +4007,28 @@ class FactManager:
                 )
             ).fetchall()
         return [ExemplarHit(id=r.id, content=r.content, similarity=float(r.similarity)) for r in rows]
+
+    async def exemplar_ids_among(self, fact_ids: list[UUID] | set[UUID]) -> set[UUID]:
+        """F086 codex r15: the subset of ``fact_ids`` that are exemplar-source
+        (agent-scoped). Stage 1.7's assembly uses this to drop STRAY exemplar
+        rows -- exemplar-source facts that ordinary recall (BM25/hybrid, or below
+        the leg's top-K/floor) surfaced UNTAGGED and that are NOT in the fetched
+        hit set -- so once the dedicated examples block renders it is the sole
+        exemplar surface. (Resurrected after r10 removed it; r10's fetched-set
+        strip alone missed rows outside the fetched set.)
+        """
+        if not fact_ids:
+            return set()
+        async with self.db.session() as session:
+            rows = await session.execute(
+                text(
+                    "SELECT id FROM heart.facts "
+                    "WHERE agent_id = :a AND source = 'exemplar_extractor' "
+                    "  AND id = ANY(CAST(:ids AS uuid[]))"
+                ),
+                {"a": self.agent_id, "ids": [str(i) for i in fact_ids]},
+            )
+            return {r.id for r in rows}
 
     async def has_exemplars(self) -> bool:
         """F086: cached existence probe for any active exemplar_extractor fact.

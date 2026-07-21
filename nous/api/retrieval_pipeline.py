@@ -498,13 +498,28 @@ async def run_recall_pipeline(
         # exemplar ingest sets source_episode_id), or spreading/Stage 4. Remove
         # every such untagged row whose id is in the post-floor fetched-hit set,
         # regardless of which stage added it, then re-insert them as tagged rows
-        # below. Replacement-guaranteed (r2 lesson): ONLY ids in the fetched set
-        # are removed, so a fetch failure / all-below-floor leaves `results`
-        # untouched, and an exemplar-source row NOT in the fetched set stays
-        # wherever it came from. `existing_ids` is recomputed AFTER the removal
-        # so the score-banded insertion below sees the pruned list.
+        # below. Replacement-guaranteed (r2 lesson): the block only runs when the
+        # leg fired with post-floor hits (`acc.exemplar_hits`), so a fetch
+        # failure / all-below-floor leaves `results` untouched. `existing_ids` is
+        # recomputed AFTER the removal so the score-banded insertion sees the
+        # pruned list.
         fetched_ids = {h.id for h in acc.exemplar_hits}
         results = [r for r in results if not (r.id in fetched_ids and r.metadata.get("retrieval_leg") != "exemplar")]
+        # Codex r15: source-aware strip. The fetched-set strip above misses an
+        # exemplar-source row that ordinary recall (BM25/hybrid, or beyond the
+        # leg's top-K / below the floor) surfaced UNTAGGED but is NOT in the
+        # fetched set — it would linger in Heart Memory next to the examples
+        # block. Once the block renders it is the SOLE exemplar surface, so drop
+        # EVERY remaining untagged exemplar-source fact (rows the leg judged
+        # not-nearest don't belong in Heart Memory). Only runs here, inside the
+        # `if acc.exemplar_hits:` guard — leg not-fired / failed / zero-hits is
+        # untouched.
+        remaining_fact_ids = [
+            r.id for r in results if r.type == "fact" and r.metadata.get("retrieval_leg") != "exemplar"
+        ]
+        stray_exemplar_ids = await heart.facts.exemplar_ids_among(remaining_fact_ids)
+        if stray_exemplar_ids:
+            results = [r for r in results if not (r.type == "fact" and r.id in stray_exemplar_ids)]
         existing_ids = {r.id for r in results}
         exemplar_rows, n_exemplar_dup = _exemplar_to_pipeline(acc.exemplar_hits, settings, existing_ids)
         for er in exemplar_rows:

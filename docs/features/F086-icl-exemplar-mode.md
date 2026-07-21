@@ -222,20 +222,23 @@ query embedded):
    leg added it** (Stage 1, Stage 2b, spreading/Stage 4). `existing_ids` is then recomputed and the tagged
    exemplar rows are inserted with banded score + label/similarity metadata.
 
-**Replacement-guaranteed (codex r2 lesson, preserved r10).** The removal keys on the post-floor **fetched**
-set, so a `fetch_exemplars_by_vector` that raises (caught, non-fatal) or an all-below-floor result leaves
-`results` **untouched** — a non-fatal leg error can never delete an earlier successful result. Two edge
-cases follow directly and are **by design**:
+**Replacement-guaranteed on success only (codex r2 lesson, preserved r10/r15).** The whole block runs only
+when the leg fired with post-floor hits (`acc.exemplar_hits`), so a `fetch_exemplars_by_vector` that raises
+(caught, non-fatal) or an all-below-floor result leaves `results` **untouched** — a non-fatal leg error can
+never delete an earlier successful result (the leg records a stage error and every already-surfaced
+exemplar row stays put).
 
-- An exemplar-source row **not** in the fetched top-K (or below the floor) **stays wherever it came from**
-  (Heart Memory, a graph-neighbor slot, …) as an ordinary fact — it is below the leg's relevance bar, so
-  it is not force-injected into the examples block either.
-- On fetch failure the leg records a stage error and every already-surfaced exemplar row stays put (the
-  leg-not-fired fallback).
+**Source-aware strip (codex r15).** The fetched-set removal alone missed an exemplar-source row that
+ordinary recall (BM25/hybrid, or beyond the leg's top-K / below the floor) surfaced **untagged** but that is
+**not** in the fetched set — it would linger in Heart Memory beside the examples block. So when the block
+renders, it also drops **every** remaining untagged `source='exemplar_extractor'` fact
+(`FactManager.exemplar_ids_among` over the surviving untagged fact ids): once the dedicated examples block
+exists it is the **sole** exemplar surface, and a row the leg judged not-nearest does not belong in Heart
+Memory. (This closes the earlier "stays in Heart Memory" edge.)
 
-Net effect: **mode on + trigger met + fetch succeeds ⇒ an exemplar fact that the leg surfaces appears
-exactly once, only in the `=== Nearest stored examples ===` block, never doubled into Heart Memory or a
-graph slot.** When the leg does **not** fire (read flag off, or mode-on but the trigger heuristic is
+Net effect: **mode on + trigger met + fetch succeeds ⇒ NO exemplar-source fact renders under Heart Memory
+or a graph slot — the leg's nearest examples appear exactly once in the `=== Nearest stored examples ===`
+block, and any other exemplar row ordinary recall surfaced is stripped.** When the leg does **not** fire (read flag off, or mode-on but the trigger heuristic is
 unmet), `results` is touched by nothing — the flag-off byte-identity and the write-on/read-off land-dark
 contract below hold exactly as documented. (Because the replace removes *every* row whose id is in the
 fetched set before `_exemplar_to_pipeline` runs, that helper's own `existing_ids` dedup can no longer fire

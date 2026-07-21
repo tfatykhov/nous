@@ -1683,3 +1683,47 @@ class TestExemplarUniversalReplaceAtMerge:
         assert len(occ) == 1  # exactly once (untagged graph row replaced, not doubled)
         assert occ[0].metadata.get("retrieval_leg") == "exemplar"  # the TAGGED examples-block row
         assert occ[0].source == "heart"
+
+    @pytest.mark.asyncio
+    async def test_stray_untagged_exemplar_stripped_when_leg_fires(self):
+        # Codex r15: an exemplar-source row that ordinary recall surfaced UNTAGGED
+        # but which is NOT in the fetched hit set (BM25/hybrid, or beyond top-K /
+        # below floor) must be dropped once the examples block renders -- it must
+        # not linger in Heart Memory.
+        from uuid import uuid4
+
+        from nous.heart.facts import ExemplarHit
+
+        stray_id = uuid4()
+        fresh_id = uuid4()
+        heart = _make_heart(
+            recall_results=[
+                RecallResult(type="fact", id=stray_id, summary="stray exemplar surfaced untagged", score=0.9),
+            ]
+        )
+        heart.facts.has_exemplars = AsyncMock(return_value=True)
+        # The leg fetches a DIFFERENT hit -> the stray is NOT in the fetched set.
+        heart.facts.fetch_exemplars_by_vector = AsyncMock(
+            return_value=[ExemplarHit(id=fresh_id, content="how do I reset my pin\nlabel: 1", similarity=0.9)]
+        )
+        heart.facts.track_access = AsyncMock()
+        heart.facts.exemplar_ids_among = AsyncMock(return_value={stray_id})  # stray IS exemplar-source
+        heart._embeddings.embed = AsyncMock(return_value=[0.1, 0.2, 0.3, 0.4])
+
+        brain = _make_brain(neighbors_by_node={}, contradictions=[], decision_results=[])
+        settings = _make_settings()
+        settings.exemplar_mode_enabled = True
+        settings.exemplar_top_k = 25
+        settings.exemplar_min_similarity = 0.30
+        settings.exemplar_max_query_words = 64
+
+        results, _ = await run_recall_pipeline(
+            query="what is the capital of france",
+            heart=heart,
+            brain=brain,
+            settings=settings,
+            limit=20,
+        )
+
+        assert not any(r.id == stray_id for r in results)  # stray stripped entirely
+        assert any(r.id == fresh_id and r.metadata.get("retrieval_leg") == "exemplar" for r in results)
