@@ -103,6 +103,20 @@ actionability, the sleep contradiction sweep, and the sleep cluster consolidatio
 
   (This supersedes the earlier `_learn`-level two-sided / same-label Python guard — one rule per source,
   and it holds under any threshold tuning.)
+- **Source-filtered ANN probes ride pgvector iterative scan** (`nous/heart/facts.py`, codex r19 — requires
+  **pgvector ≥ 0.8**, shipped by the `pgvector/pgvector:pg17` compose + CI image, extension `0.8.1`). The
+  `source IS DISTINCT FROM 'exemplar_extractor'` predicate is post-applied to the approximate HNSW walk, so on
+  a corpus where the nearest ~horizon vectors are all exemplar rows the filter could empty the candidate set
+  and hide a genuine normal duplicate below it. Every source-filtered dedup/novelty/contradiction probe now
+  self-issues `set_local_ef_search(session, 100)`, which sets `hnsw.ef_search = 100` **and**
+  `hnsw.iterative_scan = strict_order` (under a savepoint that absorbs the error on pgvector < 0.8): the scan
+  continues past filtered-out tuples in exact distance order until the LIMIT is satisfied (bounded by
+  `hnsw.max_scan_tuples`, default 20 000), so the exemplar exclusion can no longer starve the horizon.
+  `_find_duplicate` and `_find_similar_for_dedup` already widened directly (the shared helper has issued
+  iterative_scan since #495); r19 adds the same call to `_find_max_similarity` (admission novelty, r17) and
+  `_find_contradiction` (band probe, r13) so **no** source-filtered probe silently depends on `_find_duplicate`
+  having run earlier in the same `_learn` transaction. On pgvector < 0.8 only the `ef_search = 100` margin
+  applies (5× the LIMIT) — adequate for the single-agent prod shape, with the residual documented here.
 - **Conflict/contradiction/actionability exemptions** (`nous/heart/facts.py`, one local
   `is_exemplar = input.source == "exemplar_extractor"` in `_learn`): exemplar facts bypass the legacy
   subject-supersession pass, the post-insert `_find_contradiction` scan + domain-compaction check, and the
@@ -371,6 +385,13 @@ before Gate 3 is run, or the measured effect will be an underestimate.
 ---
 
 ## Backfill Runbook: `scripts/backfill_exemplar_facts.py`
+
+> **pgvector ≥ 0.8 requirement (codex r19).** After a backfill lands a large exemplar corpus, the write-path
+> dedup/novelty/contradiction probes rely on `hnsw.iterative_scan` (pgvector ≥ 0.8) to see past the exemplar
+> rows their `source IS DISTINCT FROM 'exemplar_extractor'` filters exclude. The prod/CI image
+> (`pgvector/pgvector:pg17`, extension `0.8.1`) satisfies this. On an older pgvector only the `ef_search = 100`
+> margin applies — verify with `SELECT extversion FROM pg_extension WHERE extname='vector';` before enabling
+> the read leg on a large exemplar corpus.
 
 ```
 python scripts/backfill_exemplar_facts.py --agent-id nous-default [--dry-run] \

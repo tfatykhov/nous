@@ -2428,3 +2428,53 @@ class TestExemplarAdmissionNovelty:
             async with heart.db.session() as s:
                 await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
                 await s.commit()
+
+
+@pytest.mark.postgres_only
+class TestExemplarSourceFilteredIterativeScan:
+    """Codex r19: every source-filtered ANN probe must self-issue the HNSW
+    widening + iterative scan (pgvector >= 0.8) via set_local_ef_search, so the
+    `source IS DISTINCT FROM 'exemplar_extractor'` filter — post-applied to the
+    approximate walk — can never starve the LIMIT-N horizon and hide a genuine
+    normal neighbor below a wall of nearer exemplar rows.
+
+    _find_duplicate and _find_similar_for_dedup already widened directly; these
+    pin the two probes (_find_max_similarity, _find_contradiction) that
+    previously only inherited iterative_scan transitively when _find_duplicate
+    happened to run earlier in the same _learn transaction. Called in isolation
+    (as admission/contradiction paths can be), the pre-r19 probes issued no SET
+    at all — so a large exemplar corpus could empty their horizon."""
+
+    def _record_ef_search(self, monkeypatch):
+        import nous.heart.facts as facts_mod
+
+        calls: list[int] = []
+        real = facts_mod.set_local_ef_search
+
+        async def _rec(session, value):
+            calls.append(value)
+            return await real(session, value)
+
+        monkeypatch.setattr(facts_mod, "set_local_ef_search", _rec)
+        return calls
+
+    async def test_novelty_probe_self_issues_iterative_scan(self, heart, monkeypatch):
+        calls = self._record_ef_search(monkeypatch)
+        agent_id = f"exemplar-r19-nov-{uuid4()}"
+        fm = FactManager(heart.db, heart._embeddings, agent_id, settings=heart.settings)
+        base = await heart._embeddings.embed("how do I reset my card pin")
+        async with heart.db.session() as s:
+            await fm._find_max_similarity(base, [], s)
+        # RED on pre-r19 HEAD: the novelty probe never widened the horizon, so it
+        # relied entirely on _find_duplicate having set iterative_scan earlier.
+        assert 100 in calls
+
+    async def test_contradiction_probe_self_issues_iterative_scan(self, heart, monkeypatch):
+        calls = self._record_ef_search(monkeypatch)
+        agent_id = f"exemplar-r19-con-{uuid4()}"
+        fm = FactManager(heart.db, heart._embeddings, agent_id, settings=heart.settings)
+        base = await heart._embeddings.embed("the deploy target is us-east-1")
+        async with heart.db.session() as s:
+            await fm._find_contradiction(base, "the deploy target is eu-west-1", [], s)
+        # RED on pre-r19 HEAD: the 0.85-0.95 band probe never widened the horizon.
+        assert 100 in calls

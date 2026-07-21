@@ -1191,6 +1191,14 @@ class FactManager:
             for i, eid in enumerate(exclude_ids):
                 params[f"excl_{i}"] = eid
 
+        # Codex r19 (F086): self-issue the HNSW widening + iterative scan
+        # (pgvector >= 0.8) so this band probe does not silently depend on
+        # _find_duplicate having set it earlier in the same _learn transaction.
+        # Its exemplar exclusion AND the narrow 0.85-0.95 band are both
+        # post-applied to the approximate walk, so a wall of nearer
+        # exemplar/out-of-band rows could otherwise empty a fixed horizon and
+        # miss a genuine contradiction just below it.
+        await set_local_ef_search(session, 100)
         # Codex r13 (F086): exemplar rows must NEVER be a contradiction CANDIDATE
         # (symmetric half of FIX 1). source IS DISTINCT FROM keeps NULL-source
         # normal facts in scope.
@@ -1834,13 +1842,17 @@ class FactManager:
             for i, eid in enumerate(exclude_ids):
                 params[f"excl_{i}"] = eid
 
-        # codex P2 (2026-06-09): pgvector applies the agent_id/active
-        # filters AFTER the approximate candidate walk, so on a large
-        # multi-tenant table other agents' nearby vectors could exhaust the
-        # horizon. ef_search=100 (5x the LIMIT) gives ample margin for the
-        # single-agent prod shape; a true multi-tenant deployment should
-        # move to hnsw.iterative_scan (pgvector >= 0.8) or per-agent
-        # partial indexes.
+        # codex P2 (2026-06-09) + Codex r19 (F086): pgvector applies the
+        # agent_id/active/source filters AFTER the approximate candidate walk,
+        # so a wall of nearer rows (e.g. the exemplar corpus excluded at the SQL
+        # level below) could otherwise exhaust a fixed horizon and hide a
+        # genuine normal duplicate under it. set_local_ef_search issues
+        # ef_search=100 (5x the LIMIT) AND `hnsw.iterative_scan = strict_order`
+        # (pgvector >= 0.8, added in #495): the scan continues past filtered-out
+        # tuples in exact distance order until the LIMIT is satisfied (bounded by
+        # hnsw.max_scan_tuples), so the exemplar exclusion below can no longer
+        # starve the horizon. On pgvector < 0.8 only the ef_search margin applies
+        # (the iterative_scan SET is absorbed by a savepoint).
         await set_local_ef_search(session, 100)
         # Codex r16 (F086): exclude exemplar rows AT THE SQL LEVEL. This method
         # is the non-exemplar write-path dedup only (exemplar inputs take the
@@ -1956,6 +1968,16 @@ class FactManager:
             for i, eid in enumerate(exclude_ids):
                 params[f"excl_{i}"] = eid
 
+        # Codex r19 (F086): self-issue the HNSW widening + iterative scan so this
+        # novelty probe does not depend on _find_duplicate having run earlier in
+        # the same transaction. The `source IS DISTINCT FROM 'exemplar_extractor'`
+        # filter is post-applied to the approximate walk; without iterative_scan a
+        # wall of nearer exemplar rows could empty a fixed horizon and hide the
+        # true nearest normal neighbor, mis-scoring novelty (admission could then
+        # over-admit a real duplicate as "novel"). set_local_ef_search issues
+        # `hnsw.iterative_scan = strict_order` (pgvector >= 0.8) which keeps
+        # scanning past filtered tuples until the LIMIT is satisfied.
+        await set_local_ef_search(session, 100)
         sql = text(f"""
             SELECT 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
             FROM heart.facts
