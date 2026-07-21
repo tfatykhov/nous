@@ -124,6 +124,47 @@ class TestFactDedupBehavior:
             if stripped.startswith("#"):
                 continue  # skip comment-only lines
             assert "> 0.85" not in stripped, (
-                f"Found hardcoded '> 0.85' in code line: {stripped!r} "
-                "— should use self._settings.fact_dedup_threshold"
+                f"Found hardcoded '> 0.85' in code line: {stripped!r} — should use self._settings.fact_dedup_threshold"
             )
+
+    @pytest.mark.asyncio
+    async def test_exemplar_row_does_not_block_conversational_fact(self):
+        """Codex r11 (F086): the Leg-1 dedup probe must exclude exemplar rows, so a
+        conversational fact near an ``utterance\\nlabel`` row is NOT confirm-dropped.
+        The mock honors the SQL contract (exemplar returned UNLESS excluded), so this
+        is RED on pre-r11 code (no exclude_sources passed -> exemplar returned ->
+        candidate dropped -> learn not called)."""
+        from nous.handlers.fact_extractor import FactExtractor
+
+        async def _fake_find_similar(content, limit=5, *, exclude_sources=None):
+            # A high-cosine exemplar row is the only near hit; it is returned
+            # UNLESS the caller excludes exemplar sources (the r11 fix).
+            if exclude_sources and "exemplar_extractor" in exclude_sources:
+                return []
+            return [MockSearchResult(score=0.97)]
+
+        heart = MagicMock()
+        heart.find_similar_facts = AsyncMock(side_effect=_fake_find_similar)
+        heart.learn = AsyncMock(return_value=MagicMock(spec=["id", "content"]))
+
+        settings = Settings(_env_file=None, fact_dedup_threshold=0.92)
+        bus = MagicMock()
+        bus.on = MagicMock()
+
+        extractor = FactExtractor(heart, settings, bus)
+        event = Event(
+            type="episode_summarized",
+            agent_id="test-agent",
+            data={
+                "summary": {"summary": "test summary"},
+                "episode_id": "test-ep",
+                "candidate_facts": [
+                    {"content": "The user asked how to reset their card pin", "subject": "pin", "category": "technical"}
+                ],
+            },
+        )
+
+        await extractor.handle(event)
+        heart.learn.assert_called_once()  # stored, not dropped against the exemplar row
+        _, kwargs = heart.find_similar_facts.call_args
+        assert kwargs.get("exclude_sources") == ("exemplar_extractor",)  # probe wired to exclude

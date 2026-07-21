@@ -1860,3 +1860,64 @@ class TestExemplarClusterConsolidationExclusion:
             async with heart.db.session() as s:
                 await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
                 await s.commit()
+
+
+@pytest.mark.postgres_only
+class TestExemplarLeg1DedupExclusion:
+    """Codex r11: the Leg-1 dedup probe (find_similar_for_dedup / find_similar_facts)
+    can exclude exemplar rows so a conversational fact is never confirm-dropped
+    against a backfilled utterance\nlabel row. NULL-source rows stay INCLUDED."""
+
+    async def test_dedup_probe_excludes_exemplars_keeps_nulls(self, heart):
+        agent_id = f"exemplar-dedup-{uuid4()}"
+        fm = FactManager(heart.db, heart._embeddings, agent_id, settings=heart.settings)
+        content = "how do I reset my card pin"
+        base = await heart._embeddings.embed(content)
+        ex_id, null_id, norm_id = uuid4(), uuid4(), uuid4()
+        async with heart.db.session() as s:
+            s.add(
+                Fact(
+                    id=ex_id,
+                    agent_id=agent_id,
+                    content="how do I reset my card pin\nlabel: 1",
+                    source="exemplar_extractor",
+                    active=True,
+                    embedding=_vec_at_cosine(base, 0.98, "dedup-ex"),
+                )
+            )
+            s.add(
+                Fact(
+                    id=null_id,
+                    agent_id=agent_id,
+                    content="a null-source fact about resetting pins",
+                    source=None,
+                    active=True,
+                    embedding=_vec_at_cosine(base, 0.97, "dedup-null"),
+                )
+            )
+            s.add(
+                Fact(
+                    id=norm_id,
+                    agent_id=agent_id,
+                    content="a fact_extractor fact about resetting pins",
+                    source="fact_extractor",
+                    active=True,
+                    embedding=_vec_at_cosine(base, 0.96, "dedup-norm"),
+                )
+            )
+            await s.commit()
+        try:
+            hits_all = await fm.find_similar_for_dedup(content, limit=10)
+            hits_excl = await fm.find_similar_for_dedup(content, limit=10, exclude_sources=("exemplar_extractor",))
+            all_ids = {h.id for h in hits_all}
+            excl_ids = {h.id for h in hits_excl}
+            # Default: the exemplar IS visible (the pre-fix confirm-drop cause).
+            assert ex_id in all_ids
+            # With exclusion: exemplar filtered out, but NULL-source + normal kept.
+            assert ex_id not in excl_ids
+            assert null_id in excl_ids  # NULL source must stay INCLUDED
+            assert norm_id in excl_ids  # a normal-vs-normal high-cosine pair still dedups
+        finally:
+            async with heart.db.session() as s:
+                await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
+                await s.commit()

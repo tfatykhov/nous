@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple
 from uuid import UUID
@@ -2920,6 +2921,8 @@ class FactManager:
         content: str,
         limit: int = 5,
         session: AsyncSession | None = None,
+        *,
+        exclude_sources: Sequence[str] | None = None,
     ) -> list[FactSummary]:
         """Raw-cosine nearest-neighbor probe for write-path dedup (audit S1).
 
@@ -2934,14 +2937,21 @@ class FactManager:
         not a recall, and tracking it inflated ``recall_count`` /
         ``last_recalled_at`` on facts no consumer ever saw (audit S9).
 
+        Codex r11 (F086): ``exclude_sources`` filters those source values out of
+        the candidate set so a NON-exemplar Leg-1 dedup candidate is never
+        confirm-dropped against a backfilled ``exemplar_extractor`` row (which
+        shares near-identical text with conversational utterances but must not
+        swallow them). NULL-source rows always stay INCLUDED. Only the Leg-1
+        dedup probes pass this; other consumers keep full visibility.
+
         Returns ``[]`` when the embedding cannot be generated, so dedup
         degrades the same way ``_learn``'s embed-failure path does.
         Results are similarity-descending.
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._find_similar_for_dedup(content, limit, session)
-        return await self._find_similar_for_dedup(content, limit, session)
+                return await self._find_similar_for_dedup(content, limit, session, exclude_sources)
+        return await self._find_similar_for_dedup(content, limit, session, exclude_sources)
 
     async def get_superseded_contents(
         self,
@@ -2986,6 +2996,7 @@ class FactManager:
         content: str,
         limit: int,
         session: AsyncSession,
+        exclude_sources: Sequence[str] | None = None,
     ) -> list[FactSummary]:
         if not self.embeddings:
             return []
@@ -2999,20 +3010,22 @@ class FactManager:
         # Same ANN-horizon margin as _find_duplicate (codex P2) — filters
         # are post-applied to the approximate walk.
         await set_local_ef_search(session, 100)
-        sql = text("""
-            SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
-            FROM heart.facts
-            WHERE agent_id = :agent_id
-              AND active = true
-              AND embedding IS NOT NULL
-            ORDER BY embedding <=> CAST(:embedding AS vector)
-            LIMIT :limit
-        """)
-        rows = (await session.execute(sql, {
-            "embedding": embedding_str,
-            "agent_id": self.agent_id,
-            "limit": limit,
-        })).all()
+        params: dict = {"embedding": embedding_str, "agent_id": self.agent_id, "limit": limit}
+        # Codex r11: keep NULL-source (ordinary) rows INCLUDED — only rows whose
+        # source is explicitly in exclude_sources are filtered out.
+        exclude_clause = ""
+        if exclude_sources:
+            exclude_clause = "  AND (source IS NULL OR NOT (source = ANY(CAST(:excl AS text[])))) "
+            params["excl"] = list(exclude_sources)
+        sql = text(
+            "SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity "
+            "FROM heart.facts "
+            "WHERE agent_id = :agent_id "
+            "  AND active = true "
+            "  AND embedding IS NOT NULL " + exclude_clause + "ORDER BY embedding <=> CAST(:embedding AS vector) "
+            "LIMIT :limit"
+        )
+        rows = (await session.execute(sql, params)).all()
         if not rows:
             return []
 

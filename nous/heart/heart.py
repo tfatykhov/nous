@@ -10,6 +10,7 @@ transaction injection (P1-1).
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -380,13 +381,20 @@ class Heart:
         content: str,
         limit: int = 5,
         session: AsyncSession | None = None,
+        *,
+        exclude_sources: Sequence[str] | None = None,
     ) -> list[FactSummary]:
         """Raw-cosine nearest-neighbor probe for write-path dedup (audit S1).
 
         Scores are raw cosine similarity in [0, 1] — thresholdable, unlike
         the rank-encoded RRF scores from search_facts. No access tracking.
+
+        Codex r11 (F086): ``exclude_sources`` filters those source values from
+        the candidate set — the Leg-1 dedup probes pass ``("exemplar_extractor",)``
+        so a conversational fact is never swallowed into a backfilled exemplar
+        row. NULL-source rows stay included.
         """
-        return await self.facts.find_similar_for_dedup(content, limit, session)
+        return await self.facts.find_similar_for_dedup(content, limit, session, exclude_sources=exclude_sources)
 
     async def get_superseded_contents(
         self,

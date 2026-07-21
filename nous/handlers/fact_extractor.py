@@ -183,7 +183,10 @@ class FactExtractor:
         # Single raw-cosine probe: similarity-descending, active facts only,
         # no access-tracking side effects (audit S9). Embed failure → [] →
         # store (Leg-2 also degrades on embed failure; consistent).
-        hits = await self._heart.find_similar_facts(content, limit=5)
+        # Codex r11 (F086): exclude exemplar rows so a conversational fact is
+        # never confirm-dropped against a backfilled utterance\nlabel row here,
+        # bypassing _learn's label-aware two-sided guard.
+        hits = await self._heart.find_similar_facts(content, limit=5, exclude_sources=("exemplar_extractor",))
 
         for cand in hits:
             if cand.score is None or cand.score <= threshold:
