@@ -1624,3 +1624,106 @@ class TestPlan12SeedScoreThreading:
             "a neighbor that IS a seed decision must not re-enter via 1-hop"
         )
 
+
+class TestExemplarUniversalReplaceAtMerge:
+    """Codex r10: an exemplar fact surfaced UNTAGGED by ANY leg (here a Stage 2b
+    graph neighbor via an extracted_from edge) is removed at assembly and
+    re-inserted as the tagged examples-block row -- not left doubled under Heart
+    Memory / a graph slot. Generalizes the r1 Stage-1-only strip."""
+
+    @pytest.mark.asyncio
+    async def test_graph_neighbor_exemplar_replaced_by_tagged_row(self):
+        from uuid import uuid4
+
+        from nous.heart.facts import ExemplarHit
+
+        exemplar_id = uuid4()
+        # Stage 2b (Path A) returns the exemplar as an UNTAGGED fact graph-neighbor
+        # of the FACT_ID heart seed (extracted_from edges exist for exemplars).
+        nbr = NeighborResult(
+            id=exemplar_id,
+            node_type="fact",
+            description="exemplar surfaced as an untagged graph neighbor",
+            edge_relation="extracted_from",
+            edge_weight=0.8,
+            created_at=datetime.now(UTC),
+        )
+        heart = _make_heart(recall_results=_make_recall_results())
+        heart.facts.has_exemplars = AsyncMock(return_value=True)
+        heart.facts.fetch_exemplars_by_vector = AsyncMock(
+            return_value=[ExemplarHit(id=exemplar_id, content="how do I reset my pin\nlabel: 1", similarity=0.9)]
+        )
+        heart.facts.track_access = AsyncMock()
+        # r10 removed exemplar_ids_among; mock it so the pre-r10 Stage-1 strip
+        # (which called it) runs cleanly on old code and this test's RED is the
+        # behavioral assertion below, not a MagicMock-not-awaitable TypeError.
+        heart.facts.exemplar_ids_among = AsyncMock(return_value=set())
+        heart._embeddings.embed = AsyncMock(return_value=[0.1, 0.2, 0.3, 0.4])
+
+        brain = _make_brain(
+            neighbors_by_node={FACT_ID: [nbr], EPISODE_ID: []},
+            contradictions=[],
+            decision_results=[],
+        )
+        settings = _make_settings(heart_graph_all_types_enabled=True)
+        settings.exemplar_mode_enabled = True
+        settings.exemplar_top_k = 25
+        settings.exemplar_min_similarity = 0.30
+        settings.exemplar_max_query_words = 64
+
+        results, _ = await run_recall_pipeline(
+            query="what is the capital of france",
+            heart=heart,
+            brain=brain,
+            settings=settings,
+            limit=20,
+        )
+
+        occ = [r for r in results if r.id == exemplar_id]
+        assert len(occ) == 1  # exactly once (untagged graph row replaced, not doubled)
+        assert occ[0].metadata.get("retrieval_leg") == "exemplar"  # the TAGGED examples-block row
+        assert occ[0].source == "heart"
+
+    @pytest.mark.asyncio
+    async def test_stray_untagged_exemplar_stripped_when_leg_fires(self):
+        # Codex r15: an exemplar-source row that ordinary recall surfaced UNTAGGED
+        # but which is NOT in the fetched hit set (BM25/hybrid, or beyond top-K /
+        # below floor) must be dropped once the examples block renders -- it must
+        # not linger in Heart Memory.
+        from uuid import uuid4
+
+        from nous.heart.facts import ExemplarHit
+
+        stray_id = uuid4()
+        fresh_id = uuid4()
+        heart = _make_heart(
+            recall_results=[
+                RecallResult(type="fact", id=stray_id, summary="stray exemplar surfaced untagged", score=0.9),
+            ]
+        )
+        heart.facts.has_exemplars = AsyncMock(return_value=True)
+        # The leg fetches a DIFFERENT hit -> the stray is NOT in the fetched set.
+        heart.facts.fetch_exemplars_by_vector = AsyncMock(
+            return_value=[ExemplarHit(id=fresh_id, content="how do I reset my pin\nlabel: 1", similarity=0.9)]
+        )
+        heart.facts.track_access = AsyncMock()
+        heart.facts.exemplar_ids_among = AsyncMock(return_value={stray_id})  # stray IS exemplar-source
+        heart._embeddings.embed = AsyncMock(return_value=[0.1, 0.2, 0.3, 0.4])
+
+        brain = _make_brain(neighbors_by_node={}, contradictions=[], decision_results=[])
+        settings = _make_settings()
+        settings.exemplar_mode_enabled = True
+        settings.exemplar_top_k = 25
+        settings.exemplar_min_similarity = 0.30
+        settings.exemplar_max_query_words = 64
+
+        results, _ = await run_recall_pipeline(
+            query="what is the capital of france",
+            heart=heart,
+            brain=brain,
+            settings=settings,
+            limit=20,
+        )
+
+        assert not any(r.id == stray_id for r in results)  # stray stripped entirely
+        assert any(r.id == fresh_id and r.metadata.get("retrieval_leg") == "exemplar" for r in results)

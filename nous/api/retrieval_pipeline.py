@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import difflib
 import logging
+import re
 import time
 import weakref
 from dataclasses import dataclass, field, replace
@@ -33,16 +34,54 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from nous.heart.exemplars import parse_label
 from nous.heart.keys import extract_entity_candidates, normalize_key
 
 if TYPE_CHECKING:
     from nous.brain.brain import Brain
     from nous.brain.schemas import DecisionSummary, NeighborResult
     from nous.config import Settings
+    from nous.heart.facts import ExemplarHit
     from nous.heart.heart import Heart
     from nous.heart.schemas import RecallResult
 
 logger = logging.getLogger(__name__)
+
+# F086: memory-referential interrogatives are NOT classification-shaped.
+# Deliberately narrow — trec-style classification queries ARE questions and
+# must trigger. Codex r2: the ambiguous prefixes (`did i/we/you`, `what did`,
+# `what have i/we`) over-matched ordinary banking77 classification shapes like
+# "did I get charged twice" / "did I make a cash withdrawal", silencing the leg
+# on a class the feature targets. They now require an actual stored-memory verb
+# (say/tell/mention/ask/discuss/talk about/give/share) within a few words, so a
+# bare past-tense question is left classification-shaped.
+# Codex r18: `have i/we/you` joins the memory-verb-gated prefixes ("Have I told
+# you my card PIN?" is a memory recall, not a classification utterance), and
+# `remember`/`recall` join the standalone memory-referential words. A bare
+# `\bremember\b` / `\brecall\b` block is defensible across the 5 MAB sources:
+# trec asks what/who/where, banking77/clinic150/nlu are imperative/declarative
+# ("transfer $50", "set an alarm") — none plausibly OPEN a classification
+# utterance with "remember"/"recall", which are inherently about stored history.
+# The standalone phrases (remind me, last time, earlier, ...) match on their own.
+_MEMORY_VERB = (
+    r"(?:say|said|tell|told|mention(?:ed)?|ask(?:ed)?|discuss(?:ed)?"
+    r"|talk(?:ed)?\s+about|give(?:n)?|gave|shar(?:e|ed))"
+)
+_MEMORY_REFERENTIAL = re.compile(
+    r"\b(?:"
+    r"(?:did\s+(?:i|we|you)|have\s+(?:i|we|you)|what\s+did|what\s+have\s+(?:i|we))(?:\s+\w+){0,4}?\s+"
+    + _MEMORY_VERB
+    + r"|remind me|last time|earlier|previous(?:ly)?|remember|recall"
+    r"|we (?:discussed|talked)|you (?:said|told|mentioned)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_classification_shaped(query: str, max_words: int) -> bool:
+    words = query.split()
+    return 0 < len(words) <= max_words and not _MEMORY_REFERENTIAL.search(query)
+
 
 # Spreading-activation result window: at most this many activated nodes are
 # appended per recall (the CTE's historic LIMIT). The CTE is over-fetched at
@@ -162,6 +201,17 @@ class PipelineStats:
     # candidate-fetch cap was hit (possibly-truncated -- reaching exactly
     # the candidate LIMIT is indistinguishable from "there were more").
     keyed_r2_truncated: bool = False
+    # F086: True iff the exemplar leg was flag-enabled, query was
+    # classification-shaped, AND the store existence-probe returned True
+    # (mirrors keyed_leg_used's "eligible AND attempted" semantics).
+    exemplar_leg_used: bool = False
+    # F086: count of exemplar PipelineResults merged at assembly time (after
+    # id-dedup against every other leg). Same accounting convention as
+    # n_keyed above.
+    n_exemplar: int = 0
+    # F086: count of exemplar candidates dropped because their id already
+    # existed in the result set from another leg.
+    n_exemplar_dup: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +294,12 @@ class _PipelineAccumulator:
     # Set during assembly (mirrors n_keyed_dup above) — not populated
     # inside _run_stages.
     n_keyed_r2_dup: int = 0
+
+    # F086: Stage 1.7 exemplar-leg hits — ExemplarHit rows already filtered
+    # by the similarity floor. Set during assembly's own n_exemplar_dup
+    # accounting (mirrors keyed_results above).
+    exemplar_hits: list = field(default_factory=list)
+    exemplar_leg_used: bool = False
 
     # Flags
     searched_decisions: bool = False
@@ -435,6 +491,54 @@ async def run_recall_pipeline(
             acc.keyed_r2_candidates, len(keyed_r2), acc.keyed_r2_truncated,
         )
 
+    # F086: exemplar leg assembly — same additive-only, score-ordered
+    # insertion pattern as the keyed leg above. existing_ids is recomputed
+    # fresh here (rather than reusing the keyed block's set) since keyed_r2
+    # rows were inserted into ``results`` after that set was captured.
+    # No-op (empty acc.exemplar_hits) when the flag is off or nothing
+    # cleared the similarity floor.
+    n_exemplar_dup = 0
+    exemplar_rows: list[PipelineResult] = []
+    if acc.exemplar_hits:
+        # Codex r10: universal replace-at-merge. The leg fired with post-floor
+        # hits, so those exemplar facts must render ONLY in the dedicated
+        # examples block — never doubled under Heart Memory. Any leg can surface
+        # an exemplar fact UNTAGGED into `results`: Stage 1 (ordinary recall),
+        # Stage 2b (graph neighbors — `extracted_from` edges exist because
+        # exemplar ingest sets source_episode_id), or spreading/Stage 4. Remove
+        # every such untagged row whose id is in the post-floor fetched-hit set,
+        # regardless of which stage added it, then re-insert them as tagged rows
+        # below. Replacement-guaranteed (r2 lesson): the block only runs when the
+        # leg fired with post-floor hits (`acc.exemplar_hits`), so a fetch
+        # failure / all-below-floor leaves `results` untouched. `existing_ids` is
+        # recomputed AFTER the removal so the score-banded insertion sees the
+        # pruned list.
+        fetched_ids = {h.id for h in acc.exemplar_hits}
+        results = [r for r in results if not (r.id in fetched_ids and r.metadata.get("retrieval_leg") != "exemplar")]
+        # Codex r15: source-aware strip. The fetched-set strip above misses an
+        # exemplar-source row that ordinary recall (BM25/hybrid, or beyond the
+        # leg's top-K / below the floor) surfaced UNTAGGED but is NOT in the
+        # fetched set — it would linger in Heart Memory next to the examples
+        # block. Once the block renders it is the SOLE exemplar surface, so drop
+        # EVERY remaining untagged exemplar-source fact (rows the leg judged
+        # not-nearest don't belong in Heart Memory). Only runs here, inside the
+        # `if acc.exemplar_hits:` guard — leg not-fired / failed / zero-hits is
+        # untouched.
+        remaining_fact_ids = [
+            r.id for r in results if r.type == "fact" and r.metadata.get("retrieval_leg") != "exemplar"
+        ]
+        stray_exemplar_ids = await heart.facts.exemplar_ids_among(remaining_fact_ids)
+        if stray_exemplar_ids:
+            results = [r for r in results if not (r.type == "fact" and r.id in stray_exemplar_ids)]
+        existing_ids = {r.id for r in results}
+        exemplar_rows, n_exemplar_dup = _exemplar_to_pipeline(acc.exemplar_hits, settings, existing_ids)
+        for er in exemplar_rows:
+            pos = next(
+                (i for i, r in enumerate(results) if (r.score or 0.0) < er.score),
+                len(results),
+            )
+            results.insert(pos, er)
+
     # Attach contradiction links to matching results
     if acc.contradictions:
         _attach_contradictions(results, acc.contradictions)
@@ -508,6 +612,9 @@ async def run_recall_pipeline(
         n_keyed_r2=len(keyed_r2),  # R3v2
         n_keyed_r2_dup=acc.n_keyed_r2_dup,  # R3v2
         keyed_r2_truncated=acc.keyed_r2_truncated,  # R3v2
+        exemplar_leg_used=acc.exemplar_leg_used,  # F086
+        n_exemplar=len(exemplar_rows),  # F086
+        n_exemplar_dup=n_exemplar_dup,  # F086
     )
     return results, stats
 
@@ -785,6 +892,63 @@ async def _run_stages(
             except Exception as exc:
                 acc.stage_errors["keyed_r2"] = acc.stage_errors.get("keyed_r2", 0) + 1
                 logger.warning("keyed_r2 fact leg failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Stage 1.7 (F086): exemplar leg - K nearest labeled examples by cosine.
+    # Land-dark, flag + classification-shaped-query gated. Gated on the same
+    # search_all/"fact" condition as Stage 1.5/1.6 (a memory_types=["episode"]
+    # request has no fact-shaped consumer for these hits).
+    # ------------------------------------------------------------------
+    if (
+        getattr(settings, "exemplar_mode_enabled", False)
+        and (search_all or "fact" in search_types)
+        and _is_classification_shaped(query, getattr(settings, "exemplar_max_query_words", 64))
+    ):
+        try:
+            if await heart.facts.has_exemplars():
+                acc.exemplar_leg_used = True
+                # arch-review M2: exact chunk-leg idiom (retrieval_pipeline.py
+                # Stage 1.5's _search_episode_chunks); the process LRU
+                # (NOUS_EMBEDDING_CACHE_SIZE) makes the repeat embed free.
+                embedder = getattr(heart, "_embeddings", None)
+                q_vec = (await embedder.embed(query)) if embedder is not None else None
+                if q_vec:
+                    # Codex r8: exclude the F071 already-in-context fact set from
+                    # the fetch so ids the assembly-time F071 filter will drop do
+                    # NOT spend the K budget (which would starve fresh
+                    # below-LIMIT examples). This is the F071 cross-context set
+                    # ONLY — Stage-1-surfaced exemplar ids are deliberately NOT
+                    # excluded here (they are re-fetched by the strip-and-refetch
+                    # design and land in the examples block).
+                    f071_excludes = {UUID(s) for s in (exclude_ids or {}).get("fact", set())}
+                    hits = await heart.facts.fetch_exemplars_by_vector(
+                        q_vec,
+                        limit=getattr(settings, "exemplar_top_k", 25),
+                        exclude_fact_ids=f071_excludes or None,
+                    )
+                    floor = getattr(settings, "exemplar_min_similarity", 0.30)
+                    surviving = [h for h in hits if h.similarity >= floor]
+                    acc.exemplar_hits = surviving
+                    if surviving:
+                        # Codex r3: retrieval == access. Track recall on the
+                        # post-floor survivors (the set that will merge) so
+                        # stale_scan does not deactivate an actively-used exemplar
+                        # once past stale_scan_age_days. Below-floor hits are
+                        # never tracked. Mirrors the keyed_r2 survivors-only,
+                        # sync-await precedent (assembly's track_access below).
+                        #
+                        # Codex r10: the Stage-1-specific strip that used to live
+                        # here moved to a UNIVERSAL replace-at-merge at assembly
+                        # time (see the exemplar-leg assembly block in
+                        # run_recall_pipeline) — an exemplar fact can enter
+                        # `results` UNTAGGED from ANY leg (Stage 1, Stage 2b graph
+                        # neighbors, spreading/Stage 4), not just Stage 1, so the
+                        # de-dup-and-retag has to run once over the fully assembled
+                        # `results` list, not per-leg here.
+                        await heart.facts.track_access([h.id for h in surviving])
+        except Exception:
+            logger.warning("exemplar leg failed", exc_info=True)
+            acc.stage_errors["exemplar"] = acc.stage_errors.get("exemplar", 0) + 1
 
     # ------------------------------------------------------------------
     # Stage 2: F022 Phase 2 cross-type graph expansion from Heart seeds
@@ -1514,6 +1678,36 @@ def _keyed_to_pipeline(
             description=row.content, score=max(0.0, base - 0.005 * rank),
             source="heart",
             metadata=metadata,
+        ))
+    return out, dups
+
+
+def _exemplar_to_pipeline(
+    hits: "list[ExemplarHit]", settings: "Settings", existing_ids: set,
+) -> tuple[list[PipelineResult], int]:
+    """F086: convert exemplar-leg hits into PipelineResults.
+
+    Mirrors ``_keyed_to_pipeline``: additive-only, id-deduped against every
+    other leg, scores in a bounded band (base - 0.005*rank, clamped >= 0) so
+    exemplar hits can enter context without displacing higher-scoring
+    direct/chunk hits (the -5.0pp lesson).
+    """
+    out: list[PipelineResult] = []
+    dups = 0
+    base = getattr(settings, "exemplar_leg_score", 0.55)
+    for rank, hit in enumerate(hits):
+        if hit.id in existing_ids:
+            dups += 1
+            continue
+        out.append(PipelineResult(
+            id=hit.id, type="fact",
+            description=hit.content, score=max(0.0, base - 0.005 * rank),
+            source="heart",
+            metadata={
+                "retrieval_leg": "exemplar",
+                "label": parse_label(hit.content),
+                "similarity": hit.similarity,
+            },
         ))
     return out, dups
 

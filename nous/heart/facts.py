@@ -9,8 +9,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 from uuid import UUID
 
 from sqlalchemy import and_, func, or_, select, text, update
@@ -38,6 +39,10 @@ logger = logging.getLogger(__name__)
 # module-level cache keyed by instance, so writes from THIS process invalidate
 # it immediately instead of waiting out the TTL.
 _ENTITY_VOCAB_TTL_SECONDS = 300.0
+
+# F086: has_exemplars() exists-probe cache TTL, in seconds. Same rationale
+# and shape as _ENTITY_VOCAB_TTL_SECONDS above.
+_EXEMPLAR_EXISTS_TTL_SECONDS = 300.0
 
 # F027: classifier prompt. Exported so the F027 eval script
 # (scripts/eval/eval_f027_supersession.py) tests the same prompt prod uses.
@@ -142,6 +147,15 @@ _DEDUP_TIEBREAKER_SCHEMA: dict[str, Any] = {
 }
 
 
+class ExemplarHit(NamedTuple):
+    """F086: one row from fetch_exemplars_by_vector — a source='exemplar_extractor'
+    fact ranked by cosine similarity to a query embedding."""
+
+    id: UUID
+    content: str
+    similarity: float
+
+
 class FactManager:
     """Manages semantic memory — what we know."""
 
@@ -203,6 +217,13 @@ class FactManager:
         # now checks its OWN call-local `input.entity_keys` instead of any
         # instance-shared state.
         self._entity_vocab_gen: int = 0
+
+        # F086: has_exemplars() exists-probe cache, same TTL + generation-
+        # counter shape as entity_key_vocabulary above. Invalidated in
+        # learn()'s post-commit finally whenever input.source ==
+        # "exemplar_extractor" (see _invalidate_exemplar_cache).
+        self._exemplar_exists_cache: tuple[bool, float] | None = None
+        self._exemplar_exists_gen: int = 0
 
     def _band_budget_ok(self) -> bool:
         """Advisory in-process per-hour cap on the in-band classifier. Returns
@@ -520,6 +541,8 @@ class FactManager:
         _min_chars_gate = self._settings.fact_min_content_chars if self._settings else 30
         if input.source == "enumerative_extractor" and self._settings is not None:
             _min_chars_gate = self._settings.enumerative_min_content_chars
+        elif input.source == "exemplar_extractor" and self._settings is not None:
+            _min_chars_gate = self._settings.exemplar_min_content_chars
         if (
             session is None
             and self._admission_controller is not None
@@ -581,6 +604,13 @@ class FactManager:
                     # input.entity_keys` condition.
                     if input.entity_keys or input.subject_key:
                         self.invalidate_entity_vocab()
+                    # F086: sibling invalidation for has_exemplars(). The
+                    # entity-vocab gate above never fires for exemplar facts
+                    # (subject_key is deliberately None, entity_keys is
+                    # deliberately empty — see exemplar_ingest.py), so this
+                    # needs its own gate on input.source.
+                    if input.source == "exemplar_extractor":
+                        self._invalidate_exemplar_cache()
         # Injected-session callers own their own commit point, so there is no
         # place here to re-invalidate post-commit — the 300s TTL remains the
         # sole staleness bound for this path. No current caller passes
@@ -638,11 +668,20 @@ class FactManager:
         utility_override: float | None = None,
         precomputed_embedding: list[float] | None = None,
     ) -> FactDetail | FactRejected:
+        # F086: exemplar facts (utterance/label ICL pairs) are stored verbatim
+        # with an intentionally identical subject and subject_key=None. They must
+        # bypass every conflict/supersession/actionability path below — different
+        # labels are distinct exemplars (the dedup label-guard enforces that), and
+        # the legacy subject-supersession, band classifier, contradiction scan, and
+        # F047 classifier would otherwise destroy pairs or fire per-fact LLM calls.
+        is_exemplar = input.source == "exemplar_extractor"
         # F038-1.2: Reject facts with content < fact_min_content_chars characters.
         # 0 disables the gate entirely (useful for testing / low-noise corpora).
         min_chars = self._settings.fact_min_content_chars if self._settings else 30
         if input.source == "enumerative_extractor" and self._settings is not None:
             min_chars = self._settings.enumerative_min_content_chars
+        elif input.source == "exemplar_extractor" and self._settings is not None:
+            min_chars = self._settings.exemplar_min_content_chars
         if min_chars and len(input.content.strip()) < min_chars:
             logger.info(
                 "Fact rejected by min-content floor (%d < %d): %.60s",
@@ -705,7 +744,17 @@ class FactManager:
         # row r7's slot narrowing skipped is exactly as close to the
         # candidate as the routed dupe, so it is equally non-novel context).
         probed_ids: list[UUID] = []
-        if embedding is not None:
+        if is_exemplar:
+            # Codex r16 (F086): exemplar dedup is an EXACT-content probe, never
+            # cosine. A byte-identical repeat (chunk-overlap copy / resample
+            # re-ingest) confirms; anything else stores, so similar-but-distinct
+            # same-label utterances are always preserved for the kNN read leg —
+            # regardless of fact_native_cosine_threshold. Fall through to INSERT
+            # when no exact match, skipping cosine dedup + all band/D2 logic.
+            exact_dupe = await self._find_exemplar_exact_dupe(input.content, session)
+            if exact_dupe is not None:
+                return await self._confirm_duplicate(exact_dupe, input, session)
+        elif embedding is not None:
             # Codex r7: tell the selector which slot the D2 guard cares about
             # so a cross-slot near-duplicate (closer in embedding space, but
             # from an unrelated conflict slot) cannot mask a same-slot
@@ -724,6 +773,8 @@ class FactManager:
                 )
                 else None
             )
+            # Codex r16: normal inputs only — exemplar rows are excluded at the
+            # SQL level inside _find_duplicate (exemplar inputs never reach here).
             found = await self._find_duplicate(
                 embedding, exclude_ids, session,
                 candidate_event_date=input.event_date,
@@ -876,7 +927,12 @@ class FactManager:
         # the heartbeat falls back to the legacy heuristic path for it.
         actionable_verdict: bool | None = None
         actionable_conf: float | None = None
-        if self._actionability_classifier is not None:
+        if is_exemplar:
+            # F086 zero-LLM: exemplar facts are ICL utterance/label pairs, never
+            # heartbeat-actionable. Hard-set False without the tier-3 Haiku call
+            # (which would otherwise fire per fact, up to exemplar_max_per_episode).
+            actionable_verdict = False
+        elif self._actionability_classifier is not None:
             try:
                 actionable_verdict, actionable_conf, _tier = await self._actionability_classifier.classify(
                     input.content,
@@ -1017,10 +1073,16 @@ class FactManager:
         # not re-discover and re-decrement the same already-flagged pair.
         keep_both_ids: list[UUID] = []
         new_fact_lost = False  # codex r11: set True when either resolver deactivates the new fact
-        if check_contradictions and input.subject and embedding is not None and not (
-            getattr(self._settings, "supersession_key_resolution_enabled", False) is True
-            and input.subject_key
-            and input.attribute_key
+        if (
+            check_contradictions
+            and not is_exemplar
+            and input.subject
+            and embedding is not None
+            and not (
+                getattr(self._settings, "supersession_key_resolution_enabled", False) is True
+                and input.subject_key
+                and input.attribute_key
+            )
         ):
             # Codex r11 FIX 2: the legacy path can also deactivate the new
             # fact via statement-order resolution (existing fact wins) —
@@ -1058,10 +1120,12 @@ class FactManager:
         if band_warning is not None:
             detail.contradiction_warning = band_warning
 
-        if check_contradictions and not new_fact_lost:
+        if check_contradictions and not is_exemplar and not new_fact_lost:
             # Contradiction detection: similarity 0.85-0.95 with different content
             # codex r11: skipped when new fact lost keyed resolution (inactive fact
             # must not trigger contradiction edges or domain compaction).
+            # F086: exemplars also skip this — a same-label near-dupe already
+            # confirmed above, and different-label pairs are distinct by design.
             if embedding is not None:
                 # Codex r11 FIX 1: keep_both_ids excludes pairs either
                 # resolver above already flagged KEEP-BOTH this learn — left
@@ -1127,6 +1191,17 @@ class FactManager:
             for i, eid in enumerate(exclude_ids):
                 params[f"excl_{i}"] = eid
 
+        # Codex r19 (F086): self-issue the HNSW widening + iterative scan
+        # (pgvector >= 0.8) so this band probe does not silently depend on
+        # _find_duplicate having set it earlier in the same _learn transaction.
+        # Its exemplar exclusion AND the narrow 0.85-0.95 band are both
+        # post-applied to the approximate walk, so a wall of nearer
+        # exemplar/out-of-band rows could otherwise empty a fixed horizon and
+        # miss a genuine contradiction just below it.
+        await set_local_ef_search(session, 100)
+        # Codex r13 (F086): exemplar rows must NEVER be a contradiction CANDIDATE
+        # (symmetric half of FIX 1). source IS DISTINCT FROM keeps NULL-source
+        # normal facts in scope.
         sql = text(f"""
             SELECT id, content,
                    1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
@@ -1134,6 +1209,7 @@ class FactManager:
             WHERE agent_id = :agent_id
               AND active = true
               AND embedding IS NOT NULL
+              AND source IS DISTINCT FROM 'exemplar_extractor'
               AND 1 - (embedding <=> CAST(:embedding AS vector)) > :sim_min
               AND 1 - (embedding <=> CAST(:embedding AS vector)) <= :sim_max
               {exclude_clause}
@@ -1312,6 +1388,11 @@ class FactManager:
                 Fact.active == True,  # noqa: E712
                 func.lower(Fact.subject) == subject.lower(),
                 Fact.id != new_fact_id,
+                # Codex r13 (F086): exemplar rows share subject=utterance[:200]
+                # across labels by design — they must NEVER be a supersession
+                # CANDIDATE (the symmetric half of FIX 1, which gated exemplar
+                # INPUTS out). is_distinct_from keeps NULL-source normals in.
+                Fact.source.is_distinct_from("exemplar_extractor"),
             )
         )
         excluded = set(exclude_ids or [])
@@ -1649,6 +1730,29 @@ class FactManager:
             dupe.overrides_prior = True
         return await self._confirm(dupe.id, session)
 
+    async def _find_exemplar_exact_dupe(self, content: str, session: AsyncSession) -> Fact | None:
+        """Codex r16 (F086): EXACT-content dedup probe for exemplar inputs.
+
+        Exemplar dedup is NOT cosine. The only duplicates worth collapsing are
+        byte-identical repeats — chunk-overlap copies and resample re-ingests of
+        the very same ``utterance\\nlabel`` string. Two *similar but distinct*
+        same-label utterances must NEVER collapse regardless of how
+        ``fact_native_cosine_threshold`` is tuned, because corpus diversity is
+        exactly what the kNN read leg depends on. Agent- and source-scoped,
+        active rows only.
+        """
+        result = await session.execute(
+            select(Fact)
+            .where(
+                Fact.agent_id == self.agent_id,
+                Fact.source == "exemplar_extractor",
+                Fact.active == True,  # noqa: E712
+                Fact.content == content,
+            )
+            .limit(1)
+        )
+        return result.scalars().first()
+
     async def _find_duplicate(
         self,
         embedding: list[float],
@@ -1738,14 +1842,25 @@ class FactManager:
             for i, eid in enumerate(exclude_ids):
                 params[f"excl_{i}"] = eid
 
-        # codex P2 (2026-06-09): pgvector applies the agent_id/active
-        # filters AFTER the approximate candidate walk, so on a large
-        # multi-tenant table other agents' nearby vectors could exhaust the
-        # horizon. ef_search=100 (5x the LIMIT) gives ample margin for the
-        # single-agent prod shape; a true multi-tenant deployment should
-        # move to hnsw.iterative_scan (pgvector >= 0.8) or per-agent
-        # partial indexes.
+        # codex P2 (2026-06-09) + Codex r19 (F086): pgvector applies the
+        # agent_id/active/source filters AFTER the approximate candidate walk,
+        # so a wall of nearer rows (e.g. the exemplar corpus excluded at the SQL
+        # level below) could otherwise exhaust a fixed horizon and hide a
+        # genuine normal duplicate under it. set_local_ef_search issues
+        # ef_search=100 (5x the LIMIT) AND `hnsw.iterative_scan = strict_order`
+        # (pgvector >= 0.8, added in #495): the scan continues past filtered-out
+        # tuples in exact distance order until the LIMIT is satisfied (bounded by
+        # hnsw.max_scan_tuples), so the exemplar exclusion below can no longer
+        # starve the horizon. On pgvector < 0.8 only the ef_search margin applies
+        # (the iterative_scan SET is absorbed by a savepoint).
         await set_local_ef_search(session, 100)
+        # Codex r16 (F086): exclude exemplar rows AT THE SQL LEVEL. This method
+        # is the non-exemplar write-path dedup only (exemplar inputs take the
+        # exact-content probe, never cosine), so an exemplar row must never be a
+        # candidate. Doing it in the WHERE — not a Python post-filter over the
+        # LIMIT-20 ANN horizon — means 20+ nearer exemplars can no longer starve
+        # the horizon and hide a genuine normal duplicate below it. IS DISTINCT
+        # FROM keeps NULL-source rows.
         sql = text(f"""
             SELECT id, event_date, subject_key, attribute_key,
                    1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
@@ -1753,6 +1868,7 @@ class FactManager:
             WHERE agent_id = :agent_id
               AND active = true
               AND embedding IS NOT NULL
+              AND source IS DISTINCT FROM 'exemplar_extractor'
               {exclude_clause}
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT 20
@@ -1830,8 +1946,14 @@ class FactManager:
     ) -> float | None:
         """Find highest cosine similarity to any existing active fact.
 
-        Used by admission controller for novelty scoring.
-        Returns None if no facts exist or no embedding available.
+        Used by the admission controller for NOVELTY scoring only (single
+        caller). Codex r17 (F086): exemplar rows are excluded from the scan — a
+        near ``utterance\\nlabel`` row would otherwise drive a genuine
+        conversational fact's novelty to ~0 and let admission REJECT it (not
+        just nudge the weighted term). This is the 7th and final exemplar
+        isolation touchpoint; exemplar inputs themselves bypass admission
+        scoring, so the exclusion only ever changes a NON-exemplar input's
+        novelty. Returns None if no facts exist or no embedding available.
         """
         if not embedding:
             return None
@@ -1846,12 +1968,23 @@ class FactManager:
             for i, eid in enumerate(exclude_ids):
                 params[f"excl_{i}"] = eid
 
+        # Codex r19 (F086): self-issue the HNSW widening + iterative scan so this
+        # novelty probe does not depend on _find_duplicate having run earlier in
+        # the same transaction. The `source IS DISTINCT FROM 'exemplar_extractor'`
+        # filter is post-applied to the approximate walk; without iterative_scan a
+        # wall of nearer exemplar rows could empty a fixed horizon and hide the
+        # true nearest normal neighbor, mis-scoring novelty (admission could then
+        # over-admit a real duplicate as "novel"). set_local_ef_search issues
+        # `hnsw.iterative_scan = strict_order` (pgvector >= 0.8) which keeps
+        # scanning past filtered tuples until the LIMIT is satisfied.
+        await set_local_ef_search(session, 100)
         sql = text(f"""
             SELECT 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
             FROM heart.facts
             WHERE agent_id = :agent_id
               AND active = true
               AND embedding IS NOT NULL
+              AND source IS DISTINCT FROM 'exemplar_extractor'
               {exclude_clause}
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT 1
@@ -2049,6 +2182,13 @@ class FactManager:
         class as rounds 2/3/5, fixed there for learn() specifically)."""
         self._entity_vocab_cache = None
         self._entity_vocab_gen += 1
+
+    def _invalidate_exemplar_cache(self) -> None:
+        """F086: clear the cached has_exemplars() probe and bump its
+        generation counter. Mirrors invalidate_entity_vocab (see that
+        docstring for the race this closes)."""
+        self._exemplar_exists_cache = None
+        self._exemplar_exists_gen += 1
 
     async def inherit_conflict_slot_keys(
         self, replacement_id: UUID, source_ids: list[UUID], session: AsyncSession,
@@ -2837,6 +2977,8 @@ class FactManager:
         content: str,
         limit: int = 5,
         session: AsyncSession | None = None,
+        *,
+        exclude_sources: Sequence[str] | None = None,
     ) -> list[FactSummary]:
         """Raw-cosine nearest-neighbor probe for write-path dedup (audit S1).
 
@@ -2851,14 +2993,21 @@ class FactManager:
         not a recall, and tracking it inflated ``recall_count`` /
         ``last_recalled_at`` on facts no consumer ever saw (audit S9).
 
+        Codex r11 (F086): ``exclude_sources`` filters those source values out of
+        the candidate set so a NON-exemplar Leg-1 dedup candidate is never
+        confirm-dropped against a backfilled ``exemplar_extractor`` row (which
+        shares near-identical text with conversational utterances but must not
+        swallow them). NULL-source rows always stay INCLUDED. Only the Leg-1
+        dedup probes pass this; other consumers keep full visibility.
+
         Returns ``[]`` when the embedding cannot be generated, so dedup
         degrades the same way ``_learn``'s embed-failure path does.
         Results are similarity-descending.
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._find_similar_for_dedup(content, limit, session)
-        return await self._find_similar_for_dedup(content, limit, session)
+                return await self._find_similar_for_dedup(content, limit, session, exclude_sources)
+        return await self._find_similar_for_dedup(content, limit, session, exclude_sources)
 
     async def get_superseded_contents(
         self,
@@ -2903,6 +3052,7 @@ class FactManager:
         content: str,
         limit: int,
         session: AsyncSession,
+        exclude_sources: Sequence[str] | None = None,
     ) -> list[FactSummary]:
         if not self.embeddings:
             return []
@@ -2916,20 +3066,22 @@ class FactManager:
         # Same ANN-horizon margin as _find_duplicate (codex P2) — filters
         # are post-applied to the approximate walk.
         await set_local_ef_search(session, 100)
-        sql = text("""
-            SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
-            FROM heart.facts
-            WHERE agent_id = :agent_id
-              AND active = true
-              AND embedding IS NOT NULL
-            ORDER BY embedding <=> CAST(:embedding AS vector)
-            LIMIT :limit
-        """)
-        rows = (await session.execute(sql, {
-            "embedding": embedding_str,
-            "agent_id": self.agent_id,
-            "limit": limit,
-        })).all()
+        params: dict = {"embedding": embedding_str, "agent_id": self.agent_id, "limit": limit}
+        # Codex r11: keep NULL-source (ordinary) rows INCLUDED — only rows whose
+        # source is explicitly in exclude_sources are filtered out.
+        exclude_clause = ""
+        if exclude_sources:
+            exclude_clause = "  AND (source IS NULL OR NOT (source = ANY(CAST(:excl AS text[])))) "
+            params["excl"] = list(exclude_sources)
+        sql = text(
+            "SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity "
+            "FROM heart.facts "
+            "WHERE agent_id = :agent_id "
+            "  AND active = true "
+            "  AND embedding IS NOT NULL " + exclude_clause + "ORDER BY embedding <=> CAST(:embedding AS vector) "
+            "LIMIT :limit"
+        )
+        rows = (await session.execute(sql, params)).all()
         if not rows:
             return []
 
@@ -3619,6 +3771,17 @@ class FactManager:
               AND f2.active = true
               AND f2.embedding IS NOT NULL
               AND f2.subject IS NOT NULL
+              -- Codex r7 (F086): exemplar facts share the same subject (the
+              -- utterance's first 200 chars) across different labels by design, so
+              -- same-subject/different-label pairs land in this 0.75-0.95 band.
+              -- (Kept free of colon-prefixed word/number tokens on purpose --
+              -- SQLAlchemy text() parses those as bind params even inside a SQL
+              -- comment.) The write-time guards preserve these variants; the sleep
+              -- sweep must not undo that. Exclude exemplars on BOTH sides -- an
+              -- exemplar may neither be resolved nor serve as the resolving
+              -- counterpart against a normal fact. IS DISTINCT FROM keeps
+              -- NULL-source normal facts in scope.
+              AND f2.source IS DISTINCT FROM 'exemplar_extractor'
               AND LOWER(f1.subject) = LOWER(f2.subject)
               AND 1 - (f1.embedding <=> f2.embedding) > 0.75
               AND 1 - (f1.embedding <=> f2.embedding) < 0.95
@@ -3626,6 +3789,7 @@ class FactManager:
               AND f1.active = true
               AND f1.embedding IS NOT NULL
               AND f1.subject IS NOT NULL
+              AND f1.source IS DISTINCT FROM 'exemplar_extractor'
               {cooldown_clause}
             ORDER BY similarity DESC
             LIMIT :limit
@@ -3836,3 +4000,99 @@ class FactManager:
             for r in rows:
                 out.setdefault(r.fact_id, []).append(r.entity_key)
             return out
+
+    async def fetch_exemplars_by_vector(
+        self,
+        query_embedding: list[float],
+        limit: int = 25,
+        *,
+        exclude_fact_ids: list[UUID] | set[UUID] | None = None,
+    ) -> list[ExemplarHit]:
+        """F086: K nearest active exemplar facts by cosine (source-filtered).
+
+        Same ANN-horizon margin as ``_find_similar_for_dedup`` — the partial
+        HNSW index (migration 066) is scoped to ``source =
+        'exemplar_extractor' AND active = true`` so this walk never touches the
+        much larger general embedding index.
+
+        Codex r8: ``exclude_fact_ids`` pushes the caller's F071 cross-context
+        exclusion set into the LIMIT itself (mirrors ``fetch_by_entity_keys``'s
+        idiom) so ids the assembly-time F071 filter will drop don't spend the K
+        budget, starving fresh below-LIMIT examples. NOTE: this is the F071
+        already-in-context set, NOT the Stage-1-surfaced exemplar ids — those
+        are deliberately re-fetched (strip-and-refetch design).
+        """
+        vec_lit = "[" + ",".join(str(x) for x in query_embedding) + "]"
+        params: dict = {"v": vec_lit, "agent_id": self.agent_id, "limit": limit}
+        exclude_clause = ""
+        if exclude_fact_ids:
+            exclude_clause = "  AND NOT (id = ANY(CAST(:exclude_ids AS uuid[]))) "
+            params["exclude_ids"] = [str(i) for i in exclude_fact_ids]
+        async with self.db.session() as session:
+            await set_local_ef_search(session, 100)
+            rows = (
+                await session.execute(
+                    text(
+                        "SELECT id, content, "
+                        "       1 - (embedding <=> CAST(:v AS vector)) AS similarity "
+                        "FROM heart.facts "
+                        "WHERE agent_id = :agent_id "
+                        "  AND active = true "
+                        "  AND source = 'exemplar_extractor' "
+                        "  AND embedding IS NOT NULL " + exclude_clause + "ORDER BY embedding <=> CAST(:v AS vector) "
+                        "LIMIT :limit"
+                    ),
+                    params,
+                )
+            ).fetchall()
+        return [ExemplarHit(id=r.id, content=r.content, similarity=float(r.similarity)) for r in rows]
+
+    async def exemplar_ids_among(self, fact_ids: list[UUID] | set[UUID]) -> set[UUID]:
+        """F086 codex r15: the subset of ``fact_ids`` that are exemplar-source
+        (agent-scoped). Stage 1.7's assembly uses this to drop STRAY exemplar
+        rows -- exemplar-source facts that ordinary recall (BM25/hybrid, or below
+        the leg's top-K/floor) surfaced UNTAGGED and that are NOT in the fetched
+        hit set -- so once the dedicated examples block renders it is the sole
+        exemplar surface. (Resurrected after r10 removed it; r10's fetched-set
+        strip alone missed rows outside the fetched set.)
+        """
+        if not fact_ids:
+            return set()
+        async with self.db.session() as session:
+            rows = await session.execute(
+                text(
+                    "SELECT id FROM heart.facts "
+                    "WHERE agent_id = :a AND source = 'exemplar_extractor' "
+                    "  AND id = ANY(CAST(:ids AS uuid[]))"
+                ),
+                {"a": self.agent_id, "ids": [str(i) for i in fact_ids]},
+            )
+            return {r.id for r in rows}
+
+    async def has_exemplars(self) -> bool:
+        """F086: cached existence probe for any active exemplar_extractor fact.
+
+        Cached on this instance (TTL ``_EXEMPLAR_EXISTS_TTL_SECONDS``) and
+        invalidated immediately after a same-process ``learn()`` call stores
+        an exemplar fact (see the sibling branch in ``learn()``'s finally
+        block, and ``_invalidate_exemplar_cache``) — same generation-counter
+        race-closing shape as ``entity_key_vocabulary`` (see that method's
+        docstring for why the gen snapshot-before-await is needed).
+        """
+        cached = self._exemplar_exists_cache
+        now = time.monotonic()
+        if cached is not None and now - cached[1] < _EXEMPLAR_EXISTS_TTL_SECONDS:
+            return cached[0]
+        gen = self._exemplar_exists_gen
+        async with self.db.session() as session:
+            result = await session.execute(
+                text(
+                    "SELECT EXISTS(SELECT 1 FROM heart.facts WHERE agent_id = :a "
+                    "AND source = 'exemplar_extractor' AND active = true)"
+                ),
+                {"a": self.agent_id},
+            )
+            exists = bool(result.scalar())
+        if gen == self._exemplar_exists_gen:
+            self._exemplar_exists_cache = (exists, now)
+        return exists

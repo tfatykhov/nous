@@ -1,0 +1,586 @@
+# F086 — ICL Exemplar Mode (Exemplar-Gathering Retrieval)
+
+**Status:** Shipped, land-dark (both flags default OFF — write `NOUS_EXEMPLAR_EXTRACTION_ENABLED`, read
+`NOUS_EXEMPLAR_MODE_ENABLED`)
+**Migration:** `066_f086_exemplar_indexes.sql` (index-only, no new columns/tables)
+**Branch:** `feat/icl-exemplar-mode`
+
+---
+
+## Why
+
+The MAB evaluation program's sole decidable loss versus the 2026 field is in-context-learning (ICL)
+classification: **live 0.555 vs the leader's 0.840** (200 questions, 5 sources — banking77, clinic150, nlu,
+trec_coarse, trec_fine; corrected from an earlier double-counted 0.571). Live transcripts show the failure
+shape directly: the agent finds *a* similar stored example over chunk retrieval and copies its label
+("Found the direct match → label: 67", gold 28).
+
+The MAB team's own zero-LLM simulations on the persisted eval agents (`probe_icl_exemplar_knn.py`,
+`probe_icl_exemplar_emb.py`) established that storage is not the bottleneck and that a deterministic rule
+already closes almost the entire gap:
+
+- Lexical (Jaccard) 1-NN over all stored exemplars: **0.67** (beats live, p=0.018).
+- **Embedding kNN (text-embedding-3-large @1536, exemplar granularity): 1-NN 0.76, majority-vote@5 = 0.82,
+  strict-plurality@25 = 0.81, gold-in-top25 = 0.99.** Paired vs live: +70/−17, p=8×10⁻⁹.
+
+The live system loses 26pp not to storage or model capability but to **retrieval granularity**: a chunk
+buries ~40 exemplars, so chunk-level search returns *a* similar region, not the *k nearest labeled
+examples*. F086 closes that granularity gap: store each `utterance\nlabel: N` pair as its own embedded
+`heart.facts` row (write path), and add a land-dark retrieval leg that fetches the K nearest labeled
+examples by cosine and injects them as evidence, not instruction (read path).
+
+---
+
+## Two Falsified Spec Assumptions (and their resolutions)
+
+The original requirements sketch made two assumptions that validation during implementation disproved.
+Both are corrected in the shipped code, not worked around.
+
+1. **"A cheap regex/heuristic classifier at ingest, analogous to the R1 enumerative-density heuristic."**
+   F084's `is_enumerable` (the R1 heuristic) does **not** fire on `utterance\nlabel: N` streams — its
+   regexes are shaped for enumerable prose/tables, and label lines fail both of them. Exemplar detection
+   needed its **own** predicate (`nous/heart/exemplars.py::is_exemplar_stream` /
+   `exemplar_density`), checked *before* R1 in the `FactExtractor.extract_and_store` routing seam so the
+   two modal paths never compete for the same transcript.
+2. **Backfill can read `episodes.transcript`.** Transcript capture at capture time is capped at
+   `NOUS_TRANSCRIPT_MAX_CHARS` (8000 chars) — but the exemplar streams these episodes carry run to
+   ~400k characters. `episodes.transcript` truncates them into uselessness for backfill purposes. The
+   validated finding: `heart.episode_chunks` (F067) persists the streams essentially losslessly
+   (0.2–2.0% loss, chunk-boundary splits only). `scripts/backfill_exemplar_facts.py` therefore reads
+   `heart.episode_chunks`, not `episodes.transcript` — see the Backfill Runbook below for how chunk
+   boundaries are handled without losing cross-chunk ordinal continuity.
+
+---
+
+## Fact Shape (Gate-1 Sim Parity — binding)
+
+`content = f"{utterance}\nlabel: {label}"` — the full pair text, **exactly** what the MAB embedding-kNN
+sim (maj@5 0.82, text-embedding-3-large@1536) embedded. `subject_key=None` on every exemplar fact (keeps
+F084/F085's same-slot conflict routing and entity-key emission fully short-circuited — both require both
+keys / fire on entity presence, and an exemplar fact has neither), `attribute_key="label"` (a marker only,
+not a real conflict-routing key), `source="exemplar_extractor"`, `source_ordinal` = the pair's position
+within its episode, `entity_extraction_complete=True` (so F085's backfill never Haiku-sweeps exemplar
+facts looking for entities that were never meant to exist there).
+
+**Any deviation from this exact content shape invalidates the pre-green Gate 1** (the embedding-kNN sim
+was computed against this exact string, not a summary or a reformatted version of it).
+
+---
+
+## Write Path
+
+`FactExtractor.extract_and_store` checks `is_exemplar_stream(transcript, exemplar_density_threshold)`
+**before** the R1 enumerative branch. If it fires, `nous/handlers/exemplar_ingest.py::ingest_exemplars`
+parses the transcript with `nous/heart/exemplars.py::parse_exemplars` (pure, zero-LLM), caps at
+`exemplar_max_per_episode` with a loud WARNING on truncation, batch-embeds every pair's content, and
+stores each pair via `Heart.learn(fact_input, precomputed_embedding=vec)`. This is **modal, not
+additive**: when the exemplar leg stores anything, the legacy summary-derived candidate facts for that
+transcript are *not* also stored — the transcript routes to exactly one path.
+
+Six guards keep exemplar facts from tripping machinery meant for narrative facts (four at write time, two
+at sleep — the background-machinery family is supersession, contradiction scan, band-classify,
+actionability, the sleep contradiction sweep, and the sleep cluster consolidation):
+
+- **Source-aware min-content floor** (`nous/heart/facts.py`, both enforcement sites): exemplar facts use
+  `exemplar_min_content_chars` (default 5) instead of the global 30-char floor — a labeled pair like
+  `"yes\nlabel: 1"` is well under 30 chars but a completely valid exemplar.
+- **Admission bypass** (`nous/heart/admission.py::bypass_sources`): exemplar facts skip utility/novelty
+  scoring for the same reason enumerative facts do — near-identical banking-style utterances with
+  different labels are the *point*, not low-novelty noise an admission scorer should reject.
+- **Exemplar dedup is EXACT-content, cross-source isolation is in SQL** (`nous/heart/facts.py`, codex r16 —
+  final form). The write-path dedup splits cleanly by source:
+    - **Exemplar inputs** skip cosine entirely and take an **exact-content** probe
+      (`_find_exemplar_exact_dupe`: `WHERE source='exemplar_extractor' AND active AND content=:content`). The
+      only duplicates worth collapsing are byte-identical repeats — chunk-overlap copies and resample
+      re-ingests of the very same `utterance\nlabel` string. Two *similar-but-distinct* same-label utterances
+      **never** collapse, regardless of how `fact_native_cosine_threshold` is tuned, because corpus diversity
+      is exactly what the kNN read leg depends on.
+    - **Normal inputs** run the cosine `_find_duplicate`, which now excludes `source='exemplar_extractor'`
+      **at the SQL level** (`AND source IS DISTINCT FROM 'exemplar_extractor'`, NULL-source rows kept). Done
+      in the `WHERE` rather than a Python post-filter, so 20+ nearer exemplars can no longer fill the
+      LIMIT-20 ANN horizon and hide a genuine normal duplicate below it. A conversational fact therefore
+      dedups only against real conversational rows and is never confirmed *into* an exemplar.
+
+  (This supersedes the earlier `_learn`-level two-sided / same-label Python guard — one rule per source,
+  and it holds under any threshold tuning.)
+- **Source-filtered ANN probes ride pgvector iterative scan** (`nous/heart/facts.py`, codex r19 — requires
+  **pgvector ≥ 0.8**, shipped by the `pgvector/pgvector:pg17` compose + CI image, extension `0.8.1`). The
+  `source IS DISTINCT FROM 'exemplar_extractor'` predicate is post-applied to the approximate HNSW walk, so on
+  a corpus where the nearest ~horizon vectors are all exemplar rows the filter could empty the candidate set
+  and hide a genuine normal duplicate below it. Every source-filtered dedup/novelty/contradiction probe now
+  self-issues `set_local_ef_search(session, 100)`, which sets `hnsw.ef_search = 100` **and**
+  `hnsw.iterative_scan = strict_order` (under a savepoint that absorbs the error on pgvector < 0.8): the scan
+  continues past filtered-out tuples in exact distance order until the LIMIT is satisfied (bounded by
+  `hnsw.max_scan_tuples`, default 20 000), so the exemplar exclusion can no longer starve the horizon.
+  `_find_duplicate` and `_find_similar_for_dedup` already widened directly (the shared helper has issued
+  iterative_scan since #495); r19 adds the same call to `_find_max_similarity` (admission novelty, r17) and
+  `_find_contradiction` (band probe, r13) so **no** source-filtered probe silently depends on `_find_duplicate`
+  having run earlier in the same `_learn` transaction. On pgvector < 0.8 only the `ef_search = 100` margin
+  applies (5× the LIMIT) — adequate for the single-agent prod shape, with the residual documented here.
+- **Conflict/contradiction/actionability exemptions** (`nous/heart/facts.py`, one local
+  `is_exemplar = input.source == "exemplar_extractor"` in `_learn`): exemplar facts bypass the legacy
+  subject-supersession pass, the post-insert `_find_contradiction` scan + domain-compaction check, and the
+  F047 actionability classifier (hard-set `actionable=False`). Exemplars carry an intentionally identical
+  `subject` and `subject_key=None`, so without these gates the legacy subject-supersession would deactivate
+  different-label pairs (destroying exactly the discriminative signal), and the tier-3 Haiku actionability
+  classifier would fire **per exemplar fact** (up to `exemplar_max_per_episode`) — the latter is what keeps
+  the write path genuinely **zero-LLM**, not just zero-LLM at parse time. A same-label near-duplicate that
+  survives the label-guard confirms directly (no F027 band classifier — another per-fact LLM call avoided).
+  **Codex r13 — symmetric CANDIDATE-side exclusion.** FIX 1 gates exemplar *inputs* out of the resolvers,
+  but the resolver **candidate scans** (`_supersede_by_subject`'s same-subject select and
+  `_find_contradiction`'s 0.85–0.95 band neighbor query) still returned exemplar *rows*, so a **normal**
+  fact sharing an exemplar's subject (or landing in its band) could supersede/deactivate the exemplar or be
+  resolved against it. Both candidate scans now exclude `source = 'exemplar_extractor'`
+  (`IS DISTINCT FROM`, NULL-source normals stay in). This closes the previously-accepted write-side residual
+  (a normal fact reaching `_find_contradiction` with an exemplar as top-1 neighbor) and makes the exclusion
+  fully symmetric across the resolver touchpoints.
+  **Codex r17 — admission novelty scan.** The admission controller's novelty
+  probe (`_find_max_similarity`) scanned all active facts with no source filter, so for a **normal**
+  post-backfill fact a near `utterance\nlabel` row drove novelty → ~0 and admission could **reject** the
+  genuine conversational fact outright (not merely nudge the 0.20-weighted term — this supersedes the r11
+  "left admission alone" judgment). That scan now excludes `source = 'exemplar_extractor'`
+  (`IS DISTINCT FROM`, NULLs kept); exemplar inputs themselves bypass admission scoring, so the exclusion
+  only ever affects a non-exemplar input's novelty.
+  **Codex r20 — `fact_learned` event / graph-linking suppression (8th touchpoint).** `Heart.learn` emits an
+  in-process `fact_learned` EventBus event whose **sole** subscriber is the F022 `FactGraphLinker`
+  (active when `cross_type_linking_enabled`, default true). For exemplar writes this is doubly harmful: the
+  bounded (1000) EventBus cannot drain while the `episode_summarized` handler is still running and
+  `exemplar_max_per_episode` (5000) floods it (most events dropped), and every survivor enqueues a cross-type
+  graph-link pass that mints `exemplar → decision/episode` similarity edges — graph pollution for an
+  intentionally isolated corpus. `Heart.learn` now suppresses the bus emission for
+  `input.source == 'exemplar_extractor'` (same one-line source idiom). The **DB audit event**
+  (`FactManager._emit_event` → `nous_system.events`) is retained — it is persistent, never reaches the bus,
+  and is not consumed by the linker, so exemplar writes stay auditable. Both the live ingest and the backfill
+  go through the same `Heart.learn`, so the suppression covers both. That completes the **eight**
+  exemplar-isolation touchpoints: (1) input-side FIX 1, (2) exemplar exact-content dedup + (3) SQL-level
+  exclusion in the normal-input cosine dedup (r16), (4) sleep F031 sweep (r7), (5) sleep cluster
+  consolidation (r9), (6) candidate-side write resolvers (r13), (7) admission novelty (r17),
+  (8) `fact_learned` event / cross-type graph-linking suppression (r20) — plus the Leg-1 pre-learn dedup
+  probes (r11) and the source-filtered ANN probes riding pgvector iterative scan (r19).
+- **Sleep F031 sweep exclusion** (`nous/heart/facts.py::_find_contradiction_candidates`, codex r7 — the
+  fifth, sleep-side member): the background contradiction sweep's same-subject candidate query would
+  otherwise re-discover same-utterance/different-label exemplar pairs (they share `subject = utterance[:200]`
+  and land in F031's 0.75–0.95 band), letting the sleep resolver supersede/merge label variants the
+  write-time guards preserved. The query now excludes `source = 'exemplar_extractor'` on **both** sides
+  (`IS DISTINCT FROM`, so NULL-source normal facts stay in scope) — an exemplar may neither be resolved nor
+  serve as the resolving counterpart against a normal fact. This closes the previously-accepted residual
+  from the sleep side.
+- **Sleep cluster-consolidation exclusion** (`nous/handlers/sleep_handler.py::_phase_cluster_consolidation`,
+  codex r9 — the sixth member): that phase merges any 3–10 active same-subject facts into one and
+  deactivates the originals, which would collapse intentionally-distinct exemplar label variants (same
+  `subject`). Both its candidate-subject count query and its per-subject member fetch now exclude
+  `source = 'exemplar_extractor'` (`is_distinct_from`), so exemplars are never counted toward a cluster nor
+  merged as members. The merged fact carries `source = 'cluster_consolidation'`, so the produced-fact side
+  can never be an exemplar.
+
+**Codex r3 — an exemplar is never persisted without an embedding.** `_embed_and_store_pairs` batch-embeds
+all pairs; on a batch miss it retries once per-pair (`embedder.embed(content)`), and if the vector is
+*still* `None` (or there is no embedder) it **skips** the pair rather than hand `precomputed_embedding=None`
+to `heart.learn`. A NULL-embedding exemplar would be invisible to both `fetch_exemplars_by_vector`
+(`embedding IS NOT NULL`) *and* cosine dedup, so a backfill rerun would silently duplicate it. Skips are
+counted (`skipped_no_embedding`), logged as a loud WARNING, and surfaced in the ingest INFO line and the
+backfill summary — never silent.
+
+---
+
+## Read Path — Stage 1.7 Exemplar Leg
+
+`run_recall_pipeline` gates the leg on `exemplar_mode_enabled` AND a cheap trigger heuristic AND a
+TTL-cached exists-probe (`FactManager.has_exemplars()`), in that order, so the common "flag off" and
+"empty store" cases never pay for anything past a boolean check.
+
+### Trigger heuristic (and its trec rationale)
+
+```python
+_MEMORY_VERB = r"(?:say|said|tell|told|mention(?:ed)?|ask(?:ed)?|discuss(?:ed)?|talk(?:ed)?\s+about)"
+_MEMORY_REFERENTIAL = re.compile(
+    r"\b(?:"
+    r"(?:did\s+(?:i|we|you)|what\s+did|what\s+have\s+(?:i|we))(?:\s+\w+){0,4}?\s+" + _MEMORY_VERB
+    + r"|remind me|last time|earlier|previous(?:ly)?"
+    r"|we (?:discussed|talked)|you (?:said|told|mentioned)"
+    r")\b", re.IGNORECASE)
+
+def _is_classification_shaped(query: str, max_words: int) -> bool:
+    words = query.split()
+    return 0 < len(words) <= max_words and not _MEMORY_REFERENTIAL.search(query)
+```
+
+**The trigger must NOT exclude questions generally** — trec-style classification queries (e.g. "what is
+the capital of france") ARE questions, and trec_coarse's live accuracy is already 0.90 on parametric
+knowledge alone, so a naive "no interrogatives" gate would silence the leg on exactly the source where it
+has the least to prove and the most headroom elsewhere. Only *memory-referential* interrogatives — "what
+did I say about...", "remind me...", "last time we discussed..." — are excluded, because those are asking
+the agent to recall its own conversation history, not to classify an utterance against stored exemplars.
+Long queries (`> exemplar_max_query_words`, default 64) are also excluded — classification-shaped
+utterances are short by construction.
+
+**Codex r2 — the ambiguous prefixes require a memory verb.** `did (i|we|you)`, `what did`, and
+`what have (i|we)` are *not* memory-referential on their own: banking77 carries ordinary
+classification-shaped questions like *"did I get charged twice"* / *"did I make a cash withdrawal"* that
+would have been wrongly blocked (the spec-review M2 risk, materialized). Those three prefixes now only
+match when followed within a few words by an actual stored-memory verb — say/tell/mention/ask/discuss/
+talk about — so a bare past-tense banking question stays classification-shaped and still triggers the
+leg, while *"what did I **say** about my card"* / *"did you **mention** the deadline"* remain excluded.
+The standalone phrases (remind me, last time, earlier, previous(ly), we discussed/talked, you
+said/told/mentioned) still match on their own.
+
+**Codex r18 — have-forms and remember/recall.** `have (i|we|you)` joins the memory-verb-gated prefix set
+(with `give/share` added to the verb list), so *"Have I told you my card PIN?"* / *"have you shared my
+address"* — memory recalls, not classification utterances — are excluded, while an imperative like
+*"transfer fifty dollars to savings"* still triggers. Bare `remember` and `recall` join the standalone
+memory-referential words: across the five MAB sources a bare `\bremember\b` / `\brecall\b` block is
+defensible — trec asks *what/who/where*, and banking77/clinic150/nlu are imperative or declarative
+(*"set an alarm"*, *"transfer $50"*), so none plausibly **open** a classification utterance with
+`remember`/`recall`, which are inherently about stored history. MAB's pre-Gate-3 gold-query scan (below)
+remains the verification step.
+
+### Similarity floor (Gate-2 mechanism)
+
+`exemplar_min_similarity` (default 0.30) is the concrete mechanism behind acceptance Gate 2 (see below):
+"non-exemplar retrieval unchanged when the mode triggers falsely." A false trigger (heuristic fires but the
+query isn't actually classification-shaped) still runs `fetch_exemplars_by_vector`, but hits below the
+floor are dropped before merge — bounding how often an irrelevant exemplar can displace a slot at all. The
+second half of the non-displacement guarantee is the merge itself: hits are converted to `PipelineResult`s
+scored in a band under `exemplar_leg_score` (default 0.55, per-rank decay 0.005) and inserted at their
+**sorted position** (never tail-appended), so a genuine merge can only ever *add* a row, never reorder or
+evict an existing higher-scoring result.
+
+### Embedding-parity operational constraint
+
+Query↔exemplar cosine similarity is only meaningful when the deployment's embedding configuration matches
+the one the sim was computed against: **text-embedding-3-large @ 1536 dimensions**. This is a standing
+operational constraint, not something the code enforces — the mechanism is config-driven (whatever
+`EMBEDDING_MODEL`/`EMBEDDING_DIMENSIONS` the deployment runs), so a deployment running a different
+embedding model or dimensionality is not measuring the same retrieval quality the sim (and therefore Gate
+1) validated. State this in the PR body alongside this doc whenever the read flag is proposed for
+flipping.
+
+### Any-leg routing — exemplars appear ONLY in the examples block (codex r1, generalized r10)
+
+Ordinary recall sees exemplar facts as plain facts — they carry no `retrieval_leg` tag — so **any leg**
+that surfaces an exemplar into the result set would render it under **Heart Memory** without the
+inform-not-force framing. It is not just Stage 1 (vector/FTS recall): with `heart_graph_all_types_enabled`,
+**Stage 2b** pulls exemplar facts as untagged graph neighbors (`extracted_from` edges exist because
+exemplar ingest sets `source_episode_id`), and **spreading / Stage 4** can do the same. To keep the two
+presentations coherent, **when the leg actually fires** (all trigger gates passed, `has_exemplars()` true,
+query embedded):
+
+1. Stage 1.7 fetches the K nearest exemplars (`fetch_exemplars_by_vector`) and applies the similarity
+   floor. Call the survivors the **post-floor hit set**. **Codex r3:** those survivors get `track_access`
+   called on them (recall_count / last_recalled_at) — retrieval == access, so an actively-retrieved
+   exemplar is not later reaped by `stale_scan`. Only survivors are tracked; below-floor hits are not.
+2. **At assembly time (codex r10 — a single universal replace-at-merge), immediately before the exemplar
+   insertion loop**, every row in the fully-assembled `results` list whose id is in the post-floor hit set
+   **and** which is not already tagged `retrieval_leg == "exemplar"` is removed — **regardless of which
+   leg added it** (Stage 1, Stage 2b, spreading/Stage 4). `existing_ids` is then recomputed and the tagged
+   exemplar rows are inserted with banded score + label/similarity metadata.
+
+**Replacement-guaranteed on success only (codex r2 lesson, preserved r10/r15).** The whole block runs only
+when the leg fired with post-floor hits (`acc.exemplar_hits`), so a `fetch_exemplars_by_vector` that raises
+(caught, non-fatal) or an all-below-floor result leaves `results` **untouched** — a non-fatal leg error can
+never delete an earlier successful result (the leg records a stage error and every already-surfaced
+exemplar row stays put).
+
+**Source-aware strip (codex r15).** The fetched-set removal alone missed an exemplar-source row that
+ordinary recall (BM25/hybrid, or beyond the leg's top-K / below the floor) surfaced **untagged** but that is
+**not** in the fetched set — it would linger in Heart Memory beside the examples block. So when the block
+renders, it also drops **every** remaining untagged `source='exemplar_extractor'` fact
+(`FactManager.exemplar_ids_among` over the surviving untagged fact ids): once the dedicated examples block
+exists it is the **sole** exemplar surface, and a row the leg judged not-nearest does not belong in Heart
+Memory. (This closes the earlier "stays in Heart Memory" edge.)
+
+Net effect: **mode on + trigger met + fetch succeeds ⇒ NO exemplar-source fact renders under Heart Memory
+or a graph slot — the leg's nearest examples appear exactly once in the `=== Nearest stored examples ===`
+block, and any other exemplar row ordinary recall surfaced is stripped.** When the leg does **not** fire (read flag off, or mode-on but the trigger heuristic is
+unmet), `results` is touched by nothing — the flag-off byte-identity and the write-on/read-off land-dark
+contract below hold exactly as documented. (Because the replace removes *every* row whose id is in the
+fetched set before `_exemplar_to_pipeline` runs, that helper's own `existing_ids` dedup can no longer fire
+for a fetched id — the r10 removal is the single point of truth; see `test_dedup_against_existing_results`.)
+
+### Do-not-filter-leakage note (spec-review M4)
+
+The MAB team's 0.82 embedding-kNN sim was measured **with** ~7–8/200 (~4pp) instances of question-text
+leakage already present in the stored exemplar corpus. **Do not add a "cleanup" pass that filters this
+leakage** — doing so would change the corpus the sim was computed against and break Gate-1 parity. This is
+a one-line note precisely so nobody "fixes" it later under the impression it's a bug.
+
+---
+
+## Land-Dark Contract (arch-review M3)
+
+**Byte-identical behavior holds only when BOTH flags are off.** `exemplar_extraction_enabled=false` +
+`exemplar_mode_enabled=false` is the byte-identical configuration, pinned by:
+
+- `test_extractor_flag_off_exemplar_leg_never_runs` (write path — legacy candidate extraction runs
+  unchanged, `ingest_exemplars` is never even imported into the call).
+- `test_flag_off_byte_identical` (read path — `has_exemplars` is never called, `PipelineStats.n_exemplar
+  == 0`, no `retrieval_leg == "exemplar"` rows in results).
+- `test_no_exemplars_no_block` (rendering — no `=== Nearest stored examples ===` section emitted).
+
+**Write ON / read OFF is NOT byte-identical to baseline and must not be run in an A/B-compared corpus.**
+With the write flag on and the read flag off, exemplar facts still get stored (`source='exemplar_extractor'`)
+but no read-path logic filters by source — they surface through ordinary Stage-1 fact recall like any other
+fact, since nothing in the read-OFF path excludes `source='exemplar_extractor'` rows (the Stage-1 routing
+above only runs when the *read* flag is on **and** the trigger fires). An A/B comparison that flips only the
+write flag is silently comparing two different fact-store contents, not isolating the read-path mechanism.
+
+---
+
+## Acceptance Gates (quoted verbatim from the MAB requirements doc)
+
+Per the plan's Global Constraints, gates 1–4 below are quoted **verbatim** from
+`nousiclexemplarmoderequirements.md` (2026-07-19), "Acceptance gates (cost order)". They run **externally**
+in the MAB evaluation program's own harness — this repository's deliverable is the mechanism plus
+unit/integration tests, not the eval run itself.
+
+> 1. **Free, already green:** the embedding-kNN sim above IS gate 1 (maj@5 0.82 ≥ bar 0.75 on
+>    the persisted eval agents). If the shipped index/normalization differs from the sim
+>    (different embedding model/dims, different parsing), re-run the sim against the
+>    implementation's own index before building the read path.
+> 2. **Free:** displacement check — non-exemplar retrieval unchanged when the mode triggers
+>    falsely (bounded block, band ordering).
+> 3. **Paid, decisive:** TTL ICL n=200 replay on the persisted agents, mode on vs corrected
+>    0.555. Prediction: 0.75–0.85 (sim 0.82 ± LLM-reader effects, which program precedent
+>    says are net-positive). trec_fine will lag (0.62 sim ceiling; 50 fine labels).
+> 4. nous-side regression on non-ICL workloads (mode dark → byte-identical; mode on →
+>    trigger-precision check).
+
+### Gate-1 re-sim clause — open external precondition for MAB (spec-review C1)
+
+Gate 1's own text above contains a conditional clause that is an **open precondition**, not something this
+repository can satisfy on MAB's behalf: *"if the shipped index/normalization differs from the sim …
+re-run the sim against the implementation's own index before building the read path."* Three things could
+differ between the sim and the shipped implementation, and MAB must check each before treating Gate 1 as
+satisfied for the shipped code:
+
+- **(a) Parser normalization** — the shipped parser strips `User:`/skips `Assistant:` transcript prefixes.
+  This is provably inert on clean `utterance\nlabel: N` chunks (pinned by
+  `test_parse_transcript_skips_assistant_and_strips_user_prefix` and the pure-stream tests in
+  `TestExemplarParser`), but MAB should confirm the corpus their sim ran against doesn't carry some other
+  prefix shape this parser doesn't normalize.
+- **(b) Embedding model/dims** — see the Embedding-parity constraint above.
+- **(c) The shipped, source-filtered index itself** — `fetch_exemplars_by_vector` queries a partial HNSW
+  index filtered to `source = 'exemplar_extractor'` (migration 066). If the sim's own kNN implementation
+  used a different similarity metric, `ef_search` setting, or candidate pool, re-run
+  `probe_icl_exemplar_emb.py` against the shipped `source='exemplar_extractor'` rows directly and confirm
+  maj@5 ≥ 0.75 before flipping `NOUS_EXEMPLAR_MODE_ENABLED`.
+
+### Gate-4 composite note (spec-review M3)
+
+Gate 4's "mode dark → byte-identical" clause is not one test but a **composite** of three, each covering a
+different layer of the pipeline:
+
+1. **Formatter snapshot** — `test_no_exemplars_no_block` (Task 5) + the pre-existing `recall_deep` text
+   snapshot test, proving the rendered text is unchanged when no exemplar rows exist.
+2. **Read-results identity test** — `test_flag_off_byte_identical` (Task 4, `TestExemplarLeg`), proving
+   `run_recall_pipeline`'s structured results and stats are unchanged when the read flag is off (not just
+   that the *text* looks the same).
+3. **Write mock-not-called test** — `test_extractor_flag_off_exemplar_leg_never_runs` (Task 2), proving the
+   write path never even imports/calls `ingest_exemplars` when the write flag is off.
+
+All three must stay green for the "mode dark → byte-identical" half of Gate 4 to hold; the "mode on →
+trigger-precision check" half is the pre-gate-3 blocklist scan described next.
+
+### Pre-Gate-3 blocklist scan item for MAB (spec-review M2)
+
+Before running Gate 3 (the paid, decisive n=200 replay), **MAB should scan all 5 sources' gold queries
+against `_MEMORY_REFERENTIAL`** (the trigger heuristic's blocklist regex, quoted above) and check for false
+positives — a gold query that happens to match the blocklist would silently skip the exemplar leg for that
+question, understating gate-3's measured effect. The **banking77** highest-risk case — conversational
+banking questions shaped like *"did I get charged twice for this transaction?"* — is now addressed
+**in-pattern** (codex r2: the `did (i|we|you)` / `what did` / `what have (i|we)` prefixes require a
+stored-memory verb, so a bare past-tense banking question no longer matches; pinned by
+`TestClassificationShapedTrigger`). The gold-query scan nonetheless **stays as the verification step**:
+if any gold query in any of the 5 sources still matches, the blocklist patterns need further narrowing
+before Gate 3 is run, or the measured effect will be an underestimate.
+
+---
+
+## Backfill Runbook: `scripts/backfill_exemplar_facts.py`
+
+> **pgvector ≥ 0.8 requirement (codex r19).** After a backfill lands a large exemplar corpus, the write-path
+> dedup/novelty/contradiction probes rely on `hnsw.iterative_scan` (pgvector ≥ 0.8) to see past the exemplar
+> rows their `source IS DISTINCT FROM 'exemplar_extractor'` filters exclude. The prod/CI image
+> (`pgvector/pgvector:pg17`, extension `0.8.1`) satisfies this. On an older pgvector only the `ef_search = 100`
+> margin applies — verify with `SELECT extversion FROM pg_extension WHERE extname='vector';` before enabling
+> the read leg on a large exemplar corpus.
+
+```
+python scripts/backfill_exemplar_facts.py --agent-id nous-default [--dry-run] \
+  [--max-episodes N] [--since YYYY-MM-DD] [--density-threshold 0.8] \
+  [--source-kinds dialogue] [--log-level INFO]
+
+python scripts/backfill_exemplar_facts.py --agent-id nous-default \
+  --phase rollback --manifest <path> [--dry-run]                      # preferred: exact
+python scripts/backfill_exemplar_facts.py --agent-id nous-default \
+  --phase rollback --watermark <iso-ts> [--dry-run] [--include-live-writes]   # fallback
+```
+
+**Reads `heart.episode_chunks`, not `episodes.transcript`** (see Falsified Assumption #2 above), grouped
+by `episode_id` and ordered by `chunk_index`. Three pure, unit-tested functions do the assembly:
+
+1. **`group_chunks_by_episode`** — groups a flat chunk-row result set into `{episode_id: [content, ...]}`,
+   contents ordered by `chunk_index` regardless of the input row order.
+2. **`episode_qualifies`** — runs `is_exemplar_stream` on the episode's **concatenated** chunk text, not
+   per-chunk. A lone chunk can look diluted at a boundary split (e.g. half a pair on either side of the
+   split) even when the whole episode is a genuine, high-density exemplar stream — qualification has to
+   see the whole episode to judge it correctly.
+3. **`build_episode_pairs`** — parses **each chunk independently** via `parse_exemplars` (chunk-boundary
+   fragments — an utterance split mid-text — simply drop their label-less half; parse_exemplars already
+   skips label-less utterances, and the MAB measurement itself found such fragments harmless to ranking),
+   then **re-stamps every pair's ordinal with a running per-episode offset** so `source_ordinal` is one
+   continuous sequence across the whole episode, never reset at a chunk boundary.
+
+**Dialogue-only by default (`--source-kinds`, codex r5).** The chunk query reads **only**
+`source_kind = 'dialogue'` chunks by default. `heart.episode_chunks` also holds F069 `ingest_document`
+bodies and F024 attachment files as `document` (and reserves `code`) chunks (migration 052 CHECK set:
+`dialogue`/`document`/`code`), and a document that happens to contain `label:` lines would otherwise
+qualify an episode and pollute the ICL exemplar corpus with non-dialogue content. Old rows default
+`dialogue`, so the default exactly matches the transcript-backfill contract. `--source-kinds`
+(comma-separated, validated against the CHECK set) is the escape hatch: pass `--source-kinds
+dialogue,document` **only when you deliberately mean** to backfill an attachment/document corpus (F024
+attachment-ingested exemplar *files* land as `document` chunks) — the widening must be an explicit
+operator choice, never an accident.
+
+The live-mode store loop (`_store_episode_pairs`) is a thin wrapper around the **shared**
+`nous/handlers/exemplar_ingest.py::_embed_and_store_pairs` helper — the one cap+embed+learn
+implementation, also used by `ingest_exemplars` (the live write path). The two callers differ only in *how*
+the pair list gets assembled: `ingest_exemplars` parses one transcript in a single `parse_exemplars` call
+(ordinals always start at 0); the backfill assembles pairs across an episode's chunks with continuing
+ordinals via `build_episode_pairs` *before* handing the already-ordinaled list to the shared helper. The
+backfill deliberately does **not** call `ingest_exemplars` per chunk — that would reset each chunk's
+ordinals back to 0 and violate ordinal continuation. The episode-level cap (`exemplar_max_per_episode`) is
+applied inside `_embed_and_store_pairs` on the whole, already-concatenated pair list, with the same
+loud-truncation-WARNING convention on both paths.
+
+**Idempotency** relies on the same mechanism as the live write path: re-running re-embeds identical
+content, and `Heart.learn`'s native-cosine dedup (0.95 threshold) confirms rather than duplicates — except
+the label-aware guard never drops a different-label near-duplicate, which is exactly the correct re-run
+behavior (a genuinely new label for previously-seen text must still be stored).
+
+**SMOKE TEST FIRST:** `--dry-run`, then `--max-episodes 2`, before a full live run (threshold-yield
+discipline — a density threshold that behaves as expected on a 2-episode sample can still surprise at
+corpus scale).
+
+### Rollback: manifest (preferred, exact) vs watermark (fallback) — codex r8
+
+Each live backfill prints **two** rollback handles up-front, before any write: the DB-clock `SELECT now()`
+watermark ("ROLLBACK KEY") **and** a "ROLLBACK MANIFEST" path. On completion it writes the manifest — a
+JSONL file (one `{"fact_id": "<uuid>"}` per line) under `reports/`, holding **only the ids this run newly
+inserted**. `--dry-run` prints the manifest path it *would* write but writes nothing.
+
+**New-rows-only (codex r9).** Before storing, the run snapshots the agent's existing
+`source='exemplar_extractor'` ids; the manifest is the set of returned ids **minus** that snapshot. Without
+this, an idempotent **rerun** (where every pair dedup-confirms into an existing row, inserting nothing)
+would manifest the *earlier* run's ids, so rolling back the rerun would deactivate the earlier run's rows.
+With it, a rerun's manifest is empty and its rollback is a no-op. **Residual:** a live row inserted *during*
+the run that this run then dedup-confirms into is newer than the snapshot, so it could still be manifested —
+a narrow window; the watermark chunk-timestamp guard remains the backstop for it.
+
+**`--phase rollback --manifest <path>` is the preferred, exact mode.** It soft-deactivates exactly the
+listed ids (agent- and source-scoped, active rows only):
+
+```sql
+UPDATE heart.facts SET active = false
+WHERE agent_id = :agent_id AND source = 'exemplar_extractor' AND active = true
+  AND id = ANY(CAST(:ids AS uuid[]));
+```
+
+Because a concurrent **live** write's fact id is never in a backfill's manifest, this mode **cannot** touch
+a live write — it closes the race the watermark mode cannot.
+
+**`--phase rollback --watermark <iso-ts>` is the fallback** (use only when no manifest exists). It keys on
+`created_at >= watermark`, so it **may catch concurrent live writes** and prints a loud WARNING saying so.
+The race it cannot fully avoid: an in-flight live extraction reading **pre-watermark** chunks can commit its
+facts **after** the watermark; the chunk-timestamp guard below only catches facts whose *source chunk
+itself* is newer than the watermark (a JOIN against `heart.episode_chunks` on `source_episode_id`, both
+sides' `created_at >= watermark`), so a nonzero count aborts (no writes) unless `--include-live-writes` is
+passed. `--dry-run` reports both counts and never aborts. **The manifest closes the pre-watermark-chunk case
+the chunk-timestamp guard leaves open** — prefer it whenever the printed manifest is available.
+
+Both modes are soft-deactivation, never a hard delete; reactivation is the inverse.
+
+---
+
+## Flags (all 9, verified against `nous/config.py`)
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `NOUS_EXEMPLAR_EXTRACTION_ENABLED` | `false` | Write-path master switch: parse-only exemplar extraction of `utterance\nlabel: N` streams into individually-embedded facts (`source='exemplar_extractor'`). Zero LLM. |
+| `NOUS_EXEMPLAR_DENSITY_THRESHOLD` | `0.8` | `exemplar_density` score at/above which a transcript routes to exemplar extraction (checked before R1). |
+| `NOUS_EXEMPLAR_MAX_PER_EPISODE` | `5000` | Cap on exemplar facts stored per episode; truncation logs WARNING (never silent). |
+| `NOUS_EXEMPLAR_MIN_CONTENT_CHARS` | `5` | Source-aware min-content floor for exemplar facts (labels/utterances are short; the global 30-char floor would reject them). |
+| `NOUS_EXEMPLAR_MODE_ENABLED` | `false` | Read-path master switch: exemplar retrieval leg in `run_recall_pipeline` (land-dark). |
+| `NOUS_EXEMPLAR_TOP_K` | `25` | Max exemplars fetched/injected per query. |
+| `NOUS_EXEMPLAR_LEG_SCORE` | `0.55` | Score-band ceiling for exemplar hits (below the RRF direct-hit head; per-rank decay 0.005). |
+| `NOUS_EXEMPLAR_MIN_SIMILARITY` | `0.30` | Cosine floor — exemplars below this similarity are not merged (bounds false-trigger displacement, Gate 2). |
+| `NOUS_EXEMPLAR_MAX_QUERY_WORDS` | `64` | Trigger gate: queries longer than this many words are not classification-shaped. |
+
+---
+
+## Migration 066 (index-only)
+
+| Object | Type | Description |
+|--------|------|-------------|
+| `idx_facts_exemplar_embedding` | partial HNSW on `heart.facts(embedding)` `WHERE source = 'exemplar_extractor' AND active = true` | Keeps the exemplar cosine walk off the global embedding index; the `active = true` predicate (codex r7) drops rollback-deactivated exemplars out of the ANN candidate horizon. Matches `fetch_exemplars_by_vector`'s WHERE (source + active) so the planner uses the partial index. |
+| `idx_facts_exemplar_agent` | partial btree on `heart.facts(agent_id)` `WHERE source = 'exemplar_extractor' AND active = true` | Supports `has_exemplars()`'s existence probe. |
+
+**Codex r7 re-create note.** Migration 066 was amended in place (branch is unmerged) to add `active = true`
+to the HNSW predicate, and it now runs `DROP INDEX IF EXISTS heart.idx_facts_exemplar_embedding;` before
+the `CREATE`. The migrator tracks by filename, so a **pre-merge dev DB** that already recorded 066 will
+**not** rerun it automatically — re-create the index manually by running 066's two `DROP`/`CREATE`
+statements, or by deleting the `066` row from `nous_system.schema_migrations` and re-running the migrator
+(safe: the file is drop-then-create idempotent). Fresh DBs get the corrected predicate directly.
+
+No new columns or tables — F086 reuses the existing `heart.facts` schema in full (option B from the
+requirements doc; see Documented Deviations below for why).
+
+---
+
+## Documented Deviations from the Requirements Text
+
+1. **Detection is a NEW predicate, not "the R1 heuristic."** Validated: `is_enumerable` provably does not
+   fire on label-streams. See Falsified Assumption #1 above.
+2. **Backfill reads `heart.episode_chunks`, not `episodes.transcript`.** Validated: the 8000-char capture
+   cap. See Falsified Assumption #2 above.
+3. **`subject_key=NULL`, while the requirements doc's option-B sketch implied keyed rows** ("value=label" as
+   an attribute on a keyed fact). The requirements text is silent on `subject_key` specifically; leaving it
+   `NULL` is a deliberate collision-safety choice — F084/F085's same-slot conflict routing and entity-key
+   emission both key off `subject_key`/entity presence, and near-identical exemplar utterances with
+   different labels must never be treated as same-slot conflicts.
+4. **`value=label` is encoded in the content text, not a separate column.** `heart.facts` has no `value`
+   column and `FactInput` has no `value` field — the label lives in the pair text itself plus
+   `attribute_key='label'` as a marker, recoverable via `parse_label`. This encoding is also *forced* by
+   Gate-1 sim parity regardless: the sim embedded the full `utterance\nlabel: N` string, not a
+   utterance-only field with the label elsewhere.
+5. **A similarity floor (`NOUS_EXEMPLAR_MIN_SIMILARITY`) was added.** The requirements doc's Gate 2
+   ("non-exemplar retrieval unchanged when the mode triggers falsely") needs a concrete mechanism; the
+   floor plus score-banded stable insertion are that mechanism (see Similarity floor above).
+6. **A write-side flag (`NOUS_EXEMPLAR_EXTRACTION_ENABLED`) was added.** The requirements doc names only
+   the read flag (`NOUS_EXEMPLAR_MODE_ENABLED`); land-dark discipline needs both, since the write path
+   must also be independently gateable — see the Land-Dark Contract above for why write-on/read-off is
+   *not* an equivalent-to-baseline configuration.
+7. **The backfill re-derives ordinals itself rather than calling `ingest_exemplars` per chunk.** Task 2's
+   `ingest_exemplars` parses one transcript in a single call and always starts pair ordinals at 0; the
+   backfill needs ordinals to continue across an episode's chunk boundaries, so
+   `scripts/backfill_exemplar_facts.py::build_episode_pairs` re-parses each chunk independently and
+   re-stamps ordinals with a running offset. Storage itself is **not** duplicated: both the live write path
+   and the backfill call the shared `nous/handlers/exemplar_ingest.py::_embed_and_store_pairs`
+   cap+embed+learn helper (refactored out in b5b60c4) — only the pair-assembly step differs between the two.
+
+**Not a deviation** (spec-review M1): the memory-referential-only trigger blocklist is a faithful
+operationalization of the requirements doc's own qualifier — "classification-shaped (short utterance, no
+interrogative **about stored content**)" — not a narrowing of it. trec_coarse's own gold queries are
+interrogative and must trigger (supported by its 0.90-live / 0.82-sim numbers); only interrogatives asking
+about the agent's own conversation history are excluded.
+
+---
+
+## Non-Goals (v1, per the requirements doc)
+
+- **Multi-round exemplar gathering.** A single embedding round already reaches 0.82 sim; iterate only if a
+  future replay shows conversion loss.
+- **LLM-based trigger classification.** The trigger heuristic is regex + word-count only, zero LLM calls.
+- **Recsys-style reasoning.** Out of scope (the requirements doc calls this "data-blocked").
+- **Label-space reasoning beyond injection.** The leg injects labeled examples as evidence; it does not
+  reason about the label space itself (e.g. label hierarchies, confusable-label clustering).

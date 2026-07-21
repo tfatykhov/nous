@@ -10,6 +10,7 @@ transaction injection (P1-1).
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -319,7 +320,19 @@ class Heart:
 
         # F022 Phase 2: Emit on in-process EventBus for cross-type graph linking.
         # The DB audit event (via FactManager._emit_event) does NOT reach the bus.
-        if self._bus is not None:
+        #
+        # Codex r20 (F086) — exemplar isolation touchpoint 8. Exemplar writes are
+        # SUPPRESSED here: the bounded (1000) EventBus cannot drain while the
+        # episode_summarized handler is still running, and exemplar_max_per_episode
+        # (5000) would flood it — most events dropped, and for each survivor the
+        # sole subscriber (FactGraphLinker, active when cross_type_linking_enabled,
+        # default true) enqueues a cross-type graph-link pass that mints
+        # exemplar->decision/episode similarity edges. That is graph pollution for
+        # an intentionally isolated corpus, so skipping emission is the intent, not
+        # a side effect. The DB audit event above is retained (persistent, not
+        # bus-bound, not consumed by the linker). Gate on input.source — the same
+        # idiom as the other isolation touchpoints.
+        if self._bus is not None and input.source != "exemplar_extractor":
             await self._bus.emit(Event(
                 type="fact_learned",
                 agent_id=self.agent_id,
@@ -380,13 +393,20 @@ class Heart:
         content: str,
         limit: int = 5,
         session: AsyncSession | None = None,
+        *,
+        exclude_sources: Sequence[str] | None = None,
     ) -> list[FactSummary]:
         """Raw-cosine nearest-neighbor probe for write-path dedup (audit S1).
 
         Scores are raw cosine similarity in [0, 1] — thresholdable, unlike
         the rank-encoded RRF scores from search_facts. No access tracking.
+
+        Codex r11 (F086): ``exclude_sources`` filters those source values from
+        the candidate set — the Leg-1 dedup probes pass ``("exemplar_extractor",)``
+        so a conversational fact is never swallowed into a backfilled exemplar
+        row. NULL-source rows stay included.
         """
-        return await self.facts.find_similar_for_dedup(content, limit, session)
+        return await self.facts.find_similar_for_dedup(content, limit, session, exclude_sources=exclude_sources)
 
     async def get_superseded_contents(
         self,

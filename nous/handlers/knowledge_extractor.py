@@ -149,7 +149,12 @@ class KnowledgeExtractor:
                     getattr(self._settings, "fact_dedup_tiebreaker_enabled", False) is True
                 )
                 is_duplicate = False
-                for cand in await self._heart.find_similar_facts(content, limit=5):
+                # Codex r11 (F086): exclude exemplar rows from the Leg-1 dedup
+                # probe so a conversational fact is not confirm-dropped against a
+                # backfilled utterance\nlabel row (bypassing _learn's guard).
+                for cand in await self._heart.find_similar_facts(
+                    content, limit=5, exclude_sources=("exemplar_extractor",)
+                ):
                     if cand.score is None or cand.score <= 0.85:
                         break  # similarity-descending: nothing further clears it
                     if not (tiebreaker_on and

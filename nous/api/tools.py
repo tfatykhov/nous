@@ -26,6 +26,7 @@ from uuid import UUID
 from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
 from nous.config import Settings
+from nous.heart.exemplars import parse_label
 from nous.heart.heart import Heart
 from nous.heart.schemas import CensorInput, FactInput, FactRejected, ProcedureInput
 from nous.skills.parser import SkillParser
@@ -277,7 +278,11 @@ def _format_pipeline_text(
     query + heart/brain state — except when ``parent_episodes`` is provided
     (F067 Phase 2), in which case a `=== Parent Episode Context ===` section
     is appended at the end. When ``parent_episodes`` is empty/None, output
-    remains byte-identical for backwards compatibility.
+    remains byte-identical for backwards compatibility. F086: ``results``
+    entries tagged ``metadata["retrieval_leg"] == "exemplar"`` are excluded
+    from the Heart Memory section and rendered instead in a trailing
+    `=== Nearest stored examples ===` section; absent when no exemplar rows
+    are present (default, flag off).
     """
     search_all = "all" in search_types
     results_text: list[str] = []
@@ -322,8 +327,16 @@ def _format_pipeline_text(
     # (default) => the default recall_deep output stays byte-identical.
     heart_results = [
         r for r in results
-        if r.source == "heart"
-        or r.metadata.get("stage_origin") == "heart_graph_memory"
+        if (
+            r.source == "heart"
+            or r.metadata.get("stage_origin") == "heart_graph_memory"
+        )
+        and r.metadata.get("retrieval_leg") != "exemplar"
+    ]
+    # F086: ICL exemplar-leg hits get their own dedicated section (rendered
+    # near the end of the function) instead of the Heart Memory list.
+    exemplar_rows = [
+        r for r in results if r.metadata.get("retrieval_leg") == "exemplar"
     ]
     heart_section_eligible = search_all or any(
         t in search_types for t in ["episode", "fact", "procedure", "censor"]
@@ -380,7 +393,10 @@ def _format_pipeline_text(
                         f"{i}. [{result.type}] {_via_tag(result)}{result.description}{_recency_tag(result)} "
                         f"(id: {result.id}, score: {result.score:.3f})"
                     )
-        else:
+        elif not exemplar_rows:
+            # Codex r14: suppress the empty-section placeholder when the examples
+            # block will render below — "No results found." would contradict it.
+            # Byte-identical (placeholder retained) when there are no exemplars.
             results_text.append("=== Heart Memory ===\nNo results found.")
 
     # ------------------------------------------------------------------
@@ -454,7 +470,9 @@ def _format_pipeline_text(
                     f"{j}. [via graph: {n.edge_relation}] {n.description} "
                     f"(id: {n.id}, score: {n.score:.3f})"
                 )
-        else:
+        elif not exemplar_rows:
+            # Codex r14: same as Heart Memory above — no empty placeholder when
+            # the examples block will render. Byte-identical without exemplars.
             results_text.append("\n=== Brain Decisions ===\nNo results found.")
 
     # ------------------------------------------------------------------
@@ -467,7 +485,13 @@ def _format_pipeline_text(
             f"{tgt_type}({str(tgt_id)[:8]})"
         )
 
-    if not results_text:
+    # Codex r14: a classification-shaped recall can return ONLY exemplar hits
+    # (the target path) — heart_results/decisions are then empty but the
+    # dedicated examples block below WILL render, so "No results found." would
+    # contradict it. Emit the no-results line only when there is genuinely
+    # nothing to show, exemplar block included. When exemplar_rows is empty
+    # (flag off / no exemplars) this is byte-identical to the old check.
+    if not results_text and not exemplar_rows:
         results_text.append("No results found.")
 
     # F067 Phase 2: append parent episode summaries when provided. Skipped
@@ -477,6 +501,32 @@ def _format_pipeline_text(
         results_text.append("\n=== Parent Episode Context ===")
         for ep_id, summary in parent_episodes:
             results_text.append(f"- ({ep_id[:8]}) {summary}")
+
+    # F086: ICL exemplar leg — nearest stored labeled examples. Kept out of
+    # the Heart Memory section and framed as evidence the agent may
+    # override (inform-not-force), per the F083 injection-precision lesson.
+    if exemplar_rows:
+        results_text.append("\n=== Nearest stored examples ===")
+        results_text.append(
+            "The stored examples most similar to the query, with their stored labels. "
+            "Treat them as evidence for classification-style answers; you may override "
+            "them if your own judgment clearly disagrees."
+        )
+        for i, r in enumerate(exemplar_rows, 1):
+            sim = r.metadata.get("similarity")
+            sim_s = f" [sim {sim:.2f}]" if isinstance(sim, (int, float)) else ""
+            # Codex r16: truncate the UTTERANCE portion only, then ALWAYS append
+            # the label line — a >500-char utterance must never lose its label to
+            # the slice (the label is the whole point of an exemplar).
+            desc = r.description or ""
+            label = r.metadata.get("label")
+            if label is None:
+                label = parse_label(desc)
+            if label is not None:
+                utterance = desc.rsplit("\nlabel:", 1)[0]
+                results_text.append(f"{i}.{sim_s} {utterance[:500]}\nlabel: {label}")
+            else:
+                results_text.append(f"{i}.{sim_s} {desc[:500]}")
 
     return "\n".join(results_text)
 
@@ -991,7 +1041,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 "n_chunks_total=%d n_chunks_top10=%d first_chunk_rank=%s "
                 "excluded_in_context=%d "  # F071
                 "n_total=%d "
-                "n_keyed_r2=%d keyed_r2_truncated=%s",  # R3v2
+                "n_keyed_r2=%d keyed_r2_truncated=%s "  # R3v2
+                "exemplar_leg_used=%s n_exemplar=%d",  # F086
                 brain.agent_id,
                 len(query or ""),
                 limit,
@@ -1004,6 +1055,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 len(results),
                 stats.n_keyed_r2,  # R3v2
                 stats.keyed_r2_truncated,  # R3v2
+                stats.exemplar_leg_used,  # F086
+                stats.n_exemplar,  # F086
             )
             # F067 Phase 2: optionally fetch parent episode summaries for
             # facts in the result set. Failures are non-fatal — the formatter

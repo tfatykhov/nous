@@ -136,6 +136,10 @@ class AdmissionConfig:
             # conversational facts); quality control = density gate + dedup +
             # per-episode cap. Derived source — must still carry an embedding.
             "enumerative_extractor",
+            # F086: exemplar facts bypass utility scoring for the same reason
+            # as enumerative_extractor above; quality control = density gate +
+            # label-aware dedup + per-episode cap, not utility relevance.
+            "exemplar_extractor",
         ]
     )
     utility_llm_enabled: bool = True

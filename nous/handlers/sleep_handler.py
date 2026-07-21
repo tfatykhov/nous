@@ -1484,13 +1484,19 @@ class SleepHandler:
             min_facts = settings.cluster_consolidation_min_facts
             max_facts = settings.cluster_consolidation_max_facts
             async with self._heart.db.session() as session:
-                # Find subjects with min_facts <= count <= max_facts active facts
+                # Find subjects with min_facts <= count <= max_facts active facts.
+                # Codex r9 (F086): exemplar facts share subject=utterance[:200]
+                # across different labels by design, so a same-subject exemplar
+                # cluster must NEVER be consolidated (the 6th background-machinery
+                # member). Exclude them from BOTH the count and the member fetch
+                # below; is_distinct_from keeps NULL-source normal facts in scope.
                 stmt = (
                     select(Fact.subject, func.count().label("cnt"))
                     .where(
                         Fact.agent_id == self._heart.agent_id,
                         Fact.active == True,  # noqa: E712
                         Fact.subject.isnot(None),
+                        Fact.source.is_distinct_from("exemplar_extractor"),
                     )
                     .group_by(Fact.subject)
                     .having(func.count() >= min_facts)
@@ -1519,6 +1525,7 @@ class SleepHandler:
                             Fact.agent_id == self._heart.agent_id,
                             Fact.active == True,  # noqa: E712
                             Fact.subject == subject,
+                            Fact.source.is_distinct_from("exemplar_extractor"),  # codex r9: never a cluster member
                         )
                         .order_by(Fact.created_at.desc())
                     )

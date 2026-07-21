@@ -192,7 +192,10 @@ class TestKnowledgeExtractorTiebreaker:
         import inspect
         from nous.handlers.knowledge_extractor import KnowledgeExtractor
         src = inspect.getsource(KnowledgeExtractor)
-        assert "find_similar_facts(content, limit=5)" in src  # multi-hit probe (codex P2 r2)
+        # multi-hit probe (codex P2 r2); r11 added exclude_sources so the call
+        # is now multi-line — pin the probe args including the exemplar exclusion.
+        assert "find_similar_facts(" in src
+        assert 'content, limit=5, exclude_sources=("exemplar_extractor",)' in src
         assert "is_distinct_fact" in src                       # gated by tiebreaker
         assert "fact_dedup_tiebreaker_enabled" in src
         # codex P1/P2: accumulate every DISTINCT hit id into learn(exclude_ids=...)
@@ -809,7 +812,8 @@ class TestFindDuplicateSelection:
 
     @staticmethod
     def _row(similarity, event_date=None):
-        return SimpleNamespace(id=uuid4(), event_date=event_date, similarity=similarity)
+        # codex r16: real rows always carry `source`; the mock was stale.
+        return SimpleNamespace(id=uuid4(), event_date=event_date, similarity=similarity, source=None)
 
     @pytest.mark.asyncio
     async def test_same_date_preferred_over_nearer_different_date(self):
