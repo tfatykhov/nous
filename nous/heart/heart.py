@@ -320,7 +320,19 @@ class Heart:
 
         # F022 Phase 2: Emit on in-process EventBus for cross-type graph linking.
         # The DB audit event (via FactManager._emit_event) does NOT reach the bus.
-        if self._bus is not None:
+        #
+        # Codex r20 (F086) — exemplar isolation touchpoint 8. Exemplar writes are
+        # SUPPRESSED here: the bounded (1000) EventBus cannot drain while the
+        # episode_summarized handler is still running, and exemplar_max_per_episode
+        # (5000) would flood it — most events dropped, and for each survivor the
+        # sole subscriber (FactGraphLinker, active when cross_type_linking_enabled,
+        # default true) enqueues a cross-type graph-link pass that mints
+        # exemplar->decision/episode similarity edges. That is graph pollution for
+        # an intentionally isolated corpus, so skipping emission is the intent, not
+        # a side effect. The DB audit event above is retained (persistent, not
+        # bus-bound, not consumed by the linker). Gate on input.source — the same
+        # idiom as the other isolation touchpoints.
+        if self._bus is not None and input.source != "exemplar_extractor":
             await self._bus.emit(Event(
                 type="fact_learned",
                 agent_id=self.agent_id,

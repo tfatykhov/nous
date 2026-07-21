@@ -506,6 +506,51 @@ class TestExemplarIngest:
         rows = await _fact_rows(heart, episode_id)
         assert len(rows) == 3 and all(r.active for r in rows)
 
+    async def test_exemplar_writes_emit_no_fact_learned_bus_event(self, heart, settings):
+        # Codex r20 (isolation touchpoint 8): exemplar writes must NOT emit the
+        # in-process `fact_learned` bus event. Its sole subscriber is the F022
+        # cross-type linker, which would mint exemplar->decision/episode edges
+        # (graph pollution for an isolated corpus) and flood the bounded
+        # 1000-slot EventBus. A normal fact learned in the same transaction pool
+        # still emits — proving the gate is source-scoped, not a blanket mute.
+        captured: list = []
+
+        class _CaptureBus:
+            async def emit(self, event):
+                captured.append(event)
+
+        prev_bus = heart._bus
+        heart._bus = _CaptureBus()
+        try:
+            episode_id = await _insert_episode(heart)
+            tag = str(episode_id)
+            stream = (
+                f"how do I reset my card pin {tag}\nlabel: 21\n"
+                f"my card is lost {tag}\nlabel: 41\n"
+                f"what is the exchange rate {tag}\nlabel: 32\n"
+            )
+            n = await ingest_exemplars(heart, settings, stream, episode_id, heart.agent_id, logger)
+            assert n == 3
+            # RED on pre-r20 HEAD: the 3 exemplar writes each emitted fact_learned.
+            assert [e for e in captured if e.type == "fact_learned"] == []
+
+            # Control: a normal fact into the SAME marker episode still emits once.
+            normal = FactInput(
+                content=f"The user prefers dark mode in the dashboard {tag}.",
+                subject=f"ui preference {tag}",
+                category="general",
+                confidence=0.9,
+                source="fact_extractor",
+                source_episode_id=episode_id,
+            )
+            result = await heart.learn(normal)
+            assert not isinstance(result, FactRejected)
+            normal_events = [e for e in captured if e.type == "fact_learned"]
+            assert len(normal_events) == 1
+            assert normal_events[0].data["fact_id"] == str(result.id)
+        finally:
+            heart._bus = prev_bus
+
 
 # ---------------------------------------------------------------------------
 # Task 2: modal routing seam in FactExtractor.extract_and_store (no DB)

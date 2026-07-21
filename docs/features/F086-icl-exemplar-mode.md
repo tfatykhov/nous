@@ -134,17 +134,29 @@ actionability, the sleep contradiction sweep, and the sleep cluster consolidatio
   (`IS DISTINCT FROM`, NULL-source normals stay in). This closes the previously-accepted write-side residual
   (a normal fact reaching `_find_contradiction` with an exemplar as top-1 neighbor) and makes the exclusion
   fully symmetric across the resolver touchpoints.
-  **Codex r17 — admission novelty scan (7th and final touchpoint).** The admission controller's novelty
+  **Codex r17 — admission novelty scan.** The admission controller's novelty
   probe (`_find_max_similarity`) scanned all active facts with no source filter, so for a **normal**
   post-backfill fact a near `utterance\nlabel` row drove novelty → ~0 and admission could **reject** the
   genuine conversational fact outright (not merely nudge the 0.20-weighted term — this supersedes the r11
   "left admission alone" judgment). That scan now excludes `source = 'exemplar_extractor'`
   (`IS DISTINCT FROM`, NULLs kept); exemplar inputs themselves bypass admission scoring, so the exclusion
-  only ever affects a non-exemplar input's novelty. That completes the **seven** exemplar-isolation
-  touchpoints: (1) input-side FIX 1, (2) exemplar exact-content dedup + (3) SQL-level exclusion in the
-  normal-input cosine dedup (r16), (4) sleep F031 sweep (r7), (5) sleep cluster consolidation (r9),
-  (6) candidate-side write resolvers (r13), (7) admission novelty (r17) — plus the Leg-1 pre-learn dedup
-  probes (r11).
+  only ever affects a non-exemplar input's novelty.
+  **Codex r20 — `fact_learned` event / graph-linking suppression (8th touchpoint).** `Heart.learn` emits an
+  in-process `fact_learned` EventBus event whose **sole** subscriber is the F022 `FactGraphLinker`
+  (active when `cross_type_linking_enabled`, default true). For exemplar writes this is doubly harmful: the
+  bounded (1000) EventBus cannot drain while the `episode_summarized` handler is still running and
+  `exemplar_max_per_episode` (5000) floods it (most events dropped), and every survivor enqueues a cross-type
+  graph-link pass that mints `exemplar → decision/episode` similarity edges — graph pollution for an
+  intentionally isolated corpus. `Heart.learn` now suppresses the bus emission for
+  `input.source == 'exemplar_extractor'` (same one-line source idiom). The **DB audit event**
+  (`FactManager._emit_event` → `nous_system.events`) is retained — it is persistent, never reaches the bus,
+  and is not consumed by the linker, so exemplar writes stay auditable. Both the live ingest and the backfill
+  go through the same `Heart.learn`, so the suppression covers both. That completes the **eight**
+  exemplar-isolation touchpoints: (1) input-side FIX 1, (2) exemplar exact-content dedup + (3) SQL-level
+  exclusion in the normal-input cosine dedup (r16), (4) sleep F031 sweep (r7), (5) sleep cluster
+  consolidation (r9), (6) candidate-side write resolvers (r13), (7) admission novelty (r17),
+  (8) `fact_learned` event / cross-type graph-linking suppression (r20) — plus the Leg-1 pre-learn dedup
+  probes (r11) and the source-filtered ANN probes riding pgvector iterative scan (r19).
 - **Sleep F031 sweep exclusion** (`nous/heart/facts.py::_find_contradiction_candidates`, codex r7 — the
   fifth, sleep-side member): the background contradiction sweep's same-subject candidate query would
   otherwise re-discover same-utterance/different-label exemplar pairs (they share `subject = utterance[:200]`
