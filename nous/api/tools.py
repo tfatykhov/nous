@@ -277,7 +277,11 @@ def _format_pipeline_text(
     query + heart/brain state — except when ``parent_episodes`` is provided
     (F067 Phase 2), in which case a `=== Parent Episode Context ===` section
     is appended at the end. When ``parent_episodes`` is empty/None, output
-    remains byte-identical for backwards compatibility.
+    remains byte-identical for backwards compatibility. F086: ``results``
+    entries tagged ``metadata["retrieval_leg"] == "exemplar"`` are excluded
+    from the Heart Memory section and rendered instead in a trailing
+    `=== Nearest stored examples ===` section; absent when no exemplar rows
+    are present (default, flag off).
     """
     search_all = "all" in search_types
     results_text: list[str] = []
@@ -322,8 +326,16 @@ def _format_pipeline_text(
     # (default) => the default recall_deep output stays byte-identical.
     heart_results = [
         r for r in results
-        if r.source == "heart"
-        or r.metadata.get("stage_origin") == "heart_graph_memory"
+        if (
+            r.source == "heart"
+            or r.metadata.get("stage_origin") == "heart_graph_memory"
+        )
+        and r.metadata.get("retrieval_leg") != "exemplar"
+    ]
+    # F086: ICL exemplar-leg hits get their own dedicated section (rendered
+    # near the end of the function) instead of the Heart Memory list.
+    exemplar_rows = [
+        r for r in results if r.metadata.get("retrieval_leg") == "exemplar"
     ]
     heart_section_eligible = search_all or any(
         t in search_types for t in ["episode", "fact", "procedure", "censor"]
@@ -477,6 +489,21 @@ def _format_pipeline_text(
         results_text.append("\n=== Parent Episode Context ===")
         for ep_id, summary in parent_episodes:
             results_text.append(f"- ({ep_id[:8]}) {summary}")
+
+    # F086: ICL exemplar leg — nearest stored labeled examples. Kept out of
+    # the Heart Memory section and framed as evidence the agent may
+    # override (inform-not-force), per the F083 injection-precision lesson.
+    if exemplar_rows:
+        results_text.append("\n=== Nearest stored examples ===")
+        results_text.append(
+            "The stored examples most similar to the query, with their stored labels. "
+            "Treat them as evidence for classification-style answers; you may override "
+            "them if your own judgment clearly disagrees."
+        )
+        for i, r in enumerate(exemplar_rows, 1):
+            sim = r.metadata.get("similarity")
+            sim_s = f" [sim {sim:.2f}]" if isinstance(sim, (int, float)) else ""
+            results_text.append(f"{i}.{sim_s} {r.description[:500]}")
 
     return "\n".join(results_text)
 
@@ -991,7 +1018,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 "n_chunks_total=%d n_chunks_top10=%d first_chunk_rank=%s "
                 "excluded_in_context=%d "  # F071
                 "n_total=%d "
-                "n_keyed_r2=%d keyed_r2_truncated=%s",  # R3v2
+                "n_keyed_r2=%d keyed_r2_truncated=%s "  # R3v2
+                "exemplar_leg_used=%s n_exemplar=%d",  # F086
                 brain.agent_id,
                 len(query or ""),
                 limit,
@@ -1004,6 +1032,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 len(results),
                 stats.n_keyed_r2,  # R3v2
                 stats.keyed_r2_truncated,  # R3v2
+                stats.exemplar_leg_used,  # F086
+                stats.n_exemplar,  # F086
             )
             # F067 Phase 2: optionally fetch parent episode summaries for
             # facts in the result set. Failures are non-fatal — the formatter

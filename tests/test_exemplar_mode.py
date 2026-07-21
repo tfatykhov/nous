@@ -9,7 +9,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select, text
 
-from nous.api.retrieval_pipeline import run_recall_pipeline
+from nous.api.retrieval_pipeline import PipelineResult, PipelineStats, run_recall_pipeline
+from nous.api.tools import _format_pipeline_text
 from nous.brain.brain import Brain
 from nous.handlers.exemplar_ingest import ingest_exemplars
 from nous.heart.exemplars import (
@@ -728,3 +729,69 @@ class TestExemplarLeg:
                 if f is not None:
                     await cleanup.delete(f)
                 await cleanup.commit()
+
+
+# ---------------------------------------------------------------------------
+# Task 5: recall_deep rendering block + telemetry
+# ---------------------------------------------------------------------------
+
+
+def _exemplar_result(idx: int, similarity: float) -> PipelineResult:
+    return PipelineResult(
+        id=uuid4(),
+        type="fact",
+        description=f"a synthetic exemplar utterance {idx}\nlabel: {idx}",
+        score=0.55 - 0.005 * idx,
+        source="heart",
+        metadata={"retrieval_leg": "exemplar", "label": str(idx), "similarity": similarity},
+    )
+
+
+class TestExemplarRendering:
+    def test_exemplars_render_in_dedicated_block_not_heart_memory(self):
+        normal_fact = PipelineResult(
+            id=uuid4(),
+            type="fact",
+            description="An ordinary recalled fact.",
+            score=0.9,
+            source="heart",
+            metadata={},
+        )
+        ex1 = _exemplar_result(1, 0.91)
+        ex2 = _exemplar_result(2, 0.80)
+        results = [normal_fact, ex1, ex2]
+        stats = PipelineStats()
+
+        text = _format_pipeline_text(results, stats, ["all"])
+
+        assert "=== Nearest stored examples ===" in text
+        assert "you may override" in text
+
+        before, after = text.split("=== Nearest stored examples ===", 1)
+        # Exemplar rows are absent from the Heart Memory section (everything
+        # before the dedicated block) and present after it.
+        assert "synthetic exemplar utterance 1" not in before
+        assert "synthetic exemplar utterance 2" not in before
+        assert "a synthetic exemplar utterance 1\nlabel: 1" in after
+        assert "a synthetic exemplar utterance 2\nlabel: 2" in after
+        assert "[sim 0.91]" in after
+        assert "[sim 0.80]" in after
+
+        # The normal fact still renders in the Heart Memory section.
+        assert "An ordinary recalled fact." in before
+
+    def test_no_exemplars_no_block(self):
+        normal_fact = PipelineResult(
+            id=uuid4(),
+            type="fact",
+            description="An ordinary recalled fact.",
+            score=0.9,
+            source="heart",
+            metadata={},
+        )
+        results = [normal_fact]
+        stats = PipelineStats()
+
+        text = _format_pipeline_text(results, stats, ["all"])
+
+        assert "=== Nearest stored examples ===" not in text
