@@ -1204,6 +1204,9 @@ class FactManager:
             for i, eid in enumerate(exclude_ids):
                 params[f"excl_{i}"] = eid
 
+        # Codex r13 (F086): exemplar rows must NEVER be a contradiction CANDIDATE
+        # (symmetric half of FIX 1). source IS DISTINCT FROM keeps NULL-source
+        # normal facts in scope.
         sql = text(f"""
             SELECT id, content,
                    1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
@@ -1211,6 +1214,7 @@ class FactManager:
             WHERE agent_id = :agent_id
               AND active = true
               AND embedding IS NOT NULL
+              AND source IS DISTINCT FROM 'exemplar_extractor'
               AND 1 - (embedding <=> CAST(:embedding AS vector)) > :sim_min
               AND 1 - (embedding <=> CAST(:embedding AS vector)) <= :sim_max
               {exclude_clause}
@@ -1389,6 +1393,11 @@ class FactManager:
                 Fact.active == True,  # noqa: E712
                 func.lower(Fact.subject) == subject.lower(),
                 Fact.id != new_fact_id,
+                # Codex r13 (F086): exemplar rows share subject=utterance[:200]
+                # across labels by design — they must NEVER be a supersession
+                # CANDIDATE (the symmetric half of FIX 1, which gated exemplar
+                # INPUTS out). is_distinct_from keeps NULL-source normals in.
+                Fact.source.is_distinct_from("exemplar_extractor"),
             )
         )
         excluded = set(exclude_ids or [])

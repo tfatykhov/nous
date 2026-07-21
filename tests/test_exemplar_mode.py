@@ -1949,3 +1949,141 @@ class TestExemplarLeg1DedupExclusion:
             async with heart.db.session() as s:
                 await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
                 await s.commit()
+
+
+@pytest.mark.postgres_only
+class TestExemplarResolverCandidateExclusion:
+    """Codex r13: the write-time resolver CANDIDATE scans (_supersede_by_subject,
+    _find_contradiction) must never return exemplar rows -- the symmetric half of
+    FIX 1 (which gated exemplar INPUTS out). A normal fact must not supersede /
+    resolve against an exemplar."""
+
+    async def _fm(self, heart, agent_id):
+        return FactManager(heart.db, heart._embeddings, agent_id, settings=heart.settings)
+
+    async def test_normal_fact_does_not_supersede_exemplar(self, heart):
+        agent_id = f"exemplar-resolver-sup-{uuid4()}"
+        fm = await self._fm(heart, agent_id)
+        base = await heart._embeddings.embed("how do I reset my pin")
+        ex_id = uuid4()
+        async with heart.db.session() as s:
+            s.add(
+                Fact(
+                    id=ex_id,
+                    agent_id=agent_id,
+                    subject="reset pin question",
+                    content="how do I reset my pin\nlabel: 1",
+                    source="exemplar_extractor",
+                    active=True,
+                    embedding=base,
+                )
+            )
+            await s.commit()
+        try:
+            # Normal fact, SAME subject, cosine 0.90 to the exemplar (>0.80 band).
+            n_vec = _vec_at_cosine(base, 0.90, "resolver-sup-n")
+            result = await fm.learn(
+                FactInput(
+                    content="The user's card pin can be reset in the settings menu.",
+                    subject="reset pin question",
+                    category="general",
+                    confidence=0.9,
+                    source="fact_extractor",
+                ),
+                precomputed_embedding=n_vec,
+            )
+            assert not isinstance(result, FactRejected)
+            async with heart.db.session() as check:
+                ex = await check.get(Fact, ex_id)
+                assert ex.active is True and ex.superseded_by is None  # exemplar untouched
+                n = await check.get(Fact, result.id)
+                assert n.active is True  # normal fact stored
+        finally:
+            async with heart.db.session() as s:
+                await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
+                await s.commit()
+
+    async def test_normal_fact_no_contradiction_against_exemplar(self, heart):
+        agent_id = f"exemplar-resolver-con-{uuid4()}"
+        fm = await self._fm(heart, agent_id)
+        base = await heart._embeddings.embed("how do I reset my pin")
+        ex_id = uuid4()
+        async with heart.db.session() as s:
+            s.add(
+                Fact(
+                    id=ex_id,
+                    agent_id=agent_id,
+                    subject="an exemplar subject",
+                    content="how do I reset my pin\nlabel: 1",
+                    source="exemplar_extractor",
+                    active=True,
+                    embedding=base,
+                )
+            )
+            await s.commit()
+        try:
+            # Normal fact in the 0.85-0.95 contradiction band of the exemplar,
+            # DIFFERENT subject (so only _find_contradiction is in play).
+            n_vec = _vec_at_cosine(base, 0.90, "resolver-con-n")
+            result = await fm.learn(
+                FactInput(
+                    content="A completely different conversational statement about pins here.",
+                    subject="a normal conversational subject",
+                    category="general",
+                    confidence=0.9,
+                    source="fact_extractor",
+                ),
+                precomputed_embedding=n_vec,
+            )
+            assert not isinstance(result, FactRejected)
+            # No contradiction resolved against the exemplar; both intact.
+            assert result.contradiction_warning is None
+            async with heart.db.session() as check:
+                ex = await check.get(Fact, ex_id)
+                n = await check.get(Fact, result.id)
+                assert ex.active is True
+                assert n.active is True
+        finally:
+            async with heart.db.session() as s:
+                await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
+                await s.commit()
+
+    async def test_normal_vs_normal_supersession_still_works(self, heart):
+        # Regression: the exemplar exclusion must NOT over-filter normal candidates.
+        agent_id = f"exemplar-resolver-nn-{uuid4()}"
+        fm = await self._fm(heart, agent_id)
+        base = await heart._embeddings.embed("nous version fact")
+        old_id = uuid4()
+        async with heart.db.session() as s:
+            s.add(
+                Fact(
+                    id=old_id,
+                    agent_id=agent_id,
+                    subject="nous version",
+                    content="The Nous framework version is currently 0.1 release.",
+                    source="fact_extractor",
+                    active=True,
+                    embedding=base,
+                )
+            )
+            await s.commit()
+        try:
+            n_vec = _vec_at_cosine(base, 0.90, "nn-supersede")
+            result = await fm.learn(
+                FactInput(
+                    content="The Nous framework version is currently 0.2 release.",
+                    subject="nous version",
+                    category="general",
+                    confidence=0.9,
+                    source="fact_extractor",
+                ),
+                precomputed_embedding=n_vec,
+            )
+            assert not isinstance(result, FactRejected)
+            async with heart.db.session() as check:
+                old = await check.get(Fact, old_id)
+                assert old.active is False  # normal-vs-normal supersession still fires
+        finally:
+            async with heart.db.session() as s:
+                await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
+                await s.commit()

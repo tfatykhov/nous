@@ -105,6 +105,15 @@ actionability, the sleep contradiction sweep, and the sleep cluster consolidatio
   classifier would fire **per exemplar fact** (up to `exemplar_max_per_episode`) — the latter is what keeps
   the write path genuinely **zero-LLM**, not just zero-LLM at parse time. A same-label near-duplicate that
   survives the label-guard confirms directly (no F027 band classifier — another per-fact LLM call avoided).
+  **Codex r13 — symmetric CANDIDATE-side exclusion.** FIX 1 gates exemplar *inputs* out of the resolvers,
+  but the resolver **candidate scans** (`_supersede_by_subject`'s same-subject select and
+  `_find_contradiction`'s 0.85–0.95 band neighbor query) still returned exemplar *rows*, so a **normal**
+  fact sharing an exemplar's subject (or landing in its band) could supersede/deactivate the exemplar or be
+  resolved against it. Both candidate scans now exclude `source = 'exemplar_extractor'`
+  (`IS DISTINCT FROM`, NULL-source normals stay in). This closes the previously-accepted write-side residual
+  (a normal fact reaching `_find_contradiction` with an exemplar as top-1 neighbor) and makes the exclusion
+  fully symmetric across every resolver touchpoint (input-side FIX 1, sleep sweep r7, cluster r9, Leg-1
+  probes r11, and now the candidate-side write resolvers).
 - **Sleep F031 sweep exclusion** (`nous/heart/facts.py::_find_contradiction_candidates`, codex r7 — the
   fifth, sleep-side member): the background contradiction sweep's same-subject candidate query would
   otherwise re-discover same-utterance/different-label exemplar pairs (they share `subject = utterance[:200]`
