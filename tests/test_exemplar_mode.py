@@ -63,6 +63,11 @@ TRANSCRIPT_STREAM = (
     "Assistant: Stored.\n"
     "User: what's the exchange rate\nlabel: 32\n"
 )
+# Codex r6: high label FREQUENCY (density 1.0) but no alternation STRUCTURE —
+# three utterances then three labels parse to a single malformed pair.
+MALFORMED_DENSE_STREAM = (
+    "how do I reset my card pin\nmy card is lost\nwhat is the exchange rate\nlabel: 21\nlabel: 41\nlabel: 32\n"
+)
 
 
 class TestExemplarParser:
@@ -79,6 +84,15 @@ class TestExemplarParser:
     def test_is_exemplar_stream_threshold(self):
         assert is_exemplar_stream(PURE_STREAM, threshold=0.8)
         assert not is_exemplar_stream("just chatting about the weather today", threshold=0.8)
+
+    def test_is_exemplar_stream_requires_parsed_pairs(self):
+        # Codex r6: label frequency alone (3 utterances then 3 labels) scores
+        # density 1.0 but parses to ONE malformed pair -> NOT an exemplar stream.
+        assert exemplar_density(MALFORMED_DENSE_STREAM) >= 0.8  # frequency score is high
+        assert len(parse_exemplars(MALFORMED_DENSE_STREAM)) < 3  # ...but structure is absent
+        assert not is_exemplar_stream(MALFORMED_DENSE_STREAM, threshold=0.8)
+        # A genuine interleaved stream still qualifies (>= 3 parsed pairs).
+        assert is_exemplar_stream(PURE_STREAM, threshold=0.8)
 
     def test_parse_pure_stream(self):
         pairs = parse_exemplars(PURE_STREAM)
@@ -538,6 +552,42 @@ async def test_extractor_flag_off_exemplar_leg_never_runs(monkeypatch):
 
     ingest_sentinel.assert_not_called()
     assert len(heart._captured) == 1
+    assert len(result) == 1
+
+
+@pytest.mark.asyncio
+async def test_extractor_malformed_stream_falls_through_to_legacy(monkeypatch):
+    """Codex r6: a high-density-but-unstructured stream (3 utterances then 3
+    labels) must NOT route modal even with the flag on — is_exemplar_stream now
+    requires >= 3 parsed pairs, so the extractor falls through to legacy
+    candidate extraction and the real facts are stored (no exemplar rows, no
+    lost legacy facts)."""
+    ingest_sentinel = AsyncMock(side_effect=AssertionError("exemplar leg ran on a malformed stream"))
+    monkeypatch.setattr("nous.handlers.fact_extractor.ingest_exemplars", ingest_sentinel)
+
+    from nous.handlers import fact_extractor as fe_mod
+
+    heart = _stub_heart()
+    ext = fe_mod.FactExtractor.__new__(fe_mod.FactExtractor)
+    ext._heart = heart
+    ext._settings = SimpleNamespace(
+        exemplar_extraction_enabled=True,
+        exemplar_density_threshold=0.8,
+        extraction_enumerative_enabled=False,
+    )
+    ext._dedup_via_search = False
+    ext._llm = object()
+
+    result = await ext.extract_and_store(
+        summary=_VALID_SUMMARY,
+        episode_id=str(uuid4()),
+        transcript=MALFORMED_DENSE_STREAM,
+    )
+
+    ingest_sentinel.assert_not_called()  # modal routing did NOT fire
+    assert len(heart._captured) == 1
+    assert "Tim likes coffee" in heart._captured[0].content  # legacy candidate stored
+    assert not any(fi.source == "exemplar_extractor" for fi in heart._captured)
     assert len(result) == 1
 
 
@@ -1326,20 +1376,24 @@ class TestExemplarBackfill:
         assert build_episode_pairs([]) == []
 
     async def test_store_episode_pairs_empty_returns_tuple(self, settings):
-        # Codex r4: a density-qualified episode whose chunks parse to ZERO pairs
-        # must reach the backfill loop's `stored, skipped = ...` unpack without a
-        # TypeError. Realistic trigger: a chunk boundary splits every utterance
-        # from its label (a chunk of utterances, then a chunk of labels) -- the
-        # CONCATENATED text is label-dense enough to qualify, but each chunk
-        # parses independently to [] (utterances with no following label; labels
-        # with no preceding utterance). The empty-pairs early return must be
-        # (0, 0), not a bare 0. _stub_heart is never touched (empty pairs
-        # short-circuit before any embed/learn).
-        utterances_chunk = "how do I reset my card pin\nmy card is lost\nwhat is the exchange rate\n"
-        labels_chunk = "label: 21\nlabel: 41\nlabel: 32\n"
-        assert episode_qualifies([utterances_chunk, labels_chunk], threshold=0.8)
-        pairs = build_episode_pairs([utterances_chunk, labels_chunk])
-        assert pairs == []  # ...but per-chunk parse yields no pairs
+        # Codex r4: a genuinely-qualifying episode whose chunks parse to ZERO
+        # pairs must reach the backfill loop's `stored, skipped = ...` unpack
+        # without a TypeError. Realistic trigger: chunk boundaries fall BETWEEN
+        # each utterance and its label, so the CONCATENATED episode is a genuine
+        # >= 3-pair exemplar stream (qualifies under the codex-r6 alternation
+        # gate), but each chunk parses INDEPENDENTLY to [] (an utterance with no
+        # following label; a label with no preceding utterance). The empty-pairs
+        # early return must be (0, 0), not a bare 0. _stub_heart is never touched
+        # (empty pairs short-circuit before any embed/learn).
+        chunks = [
+            "how do I reset my card pin",  # utterance, no label -> []
+            "label: 21\nmy card is lost",  # orphan label + utterance -> []
+            "label: 41\nwhat is the exchange rate",  # orphan label + utterance -> []
+            "label: 32",  # orphan label -> []
+        ]
+        assert episode_qualifies(chunks, threshold=0.8)  # concatenated = 3 real pairs
+        pairs = build_episode_pairs(chunks)
+        assert pairs == []  # ...but per-chunk parse yields none
 
         stored, skipped = await _store_episode_pairs(_stub_heart(), settings, pairs, uuid4(), logger)
         assert (stored, skipped) == (0, 0)

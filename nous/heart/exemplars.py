@@ -54,7 +54,17 @@ def exemplar_density(text: str) -> float:
 
 
 def is_exemplar_stream(text: str, threshold: float) -> bool:
-    return exemplar_density(text) >= threshold
+    # Codex r6: density is a label-FREQUENCY score — "3 utterances then 3
+    # labels" scores 1.0 yet parse_exemplars yields ONE malformed pair (the
+    # three utterances collapse into the first label; the trailing labels have
+    # no preceding utterance and drop). Routing modal on that skips legacy
+    # extraction and loses the real facts. The predicate is authoritative for
+    # BOTH the extractor seam and backfill qualification, so it must also
+    # require the actual alternation STRUCTURE: at least _MIN_PAIRS parsed
+    # (utterance, label) pairs. parse_exemplars is a cheap regex walk.
+    if exemplar_density(text) < threshold:
+        return False
+    return len(parse_exemplars(text)) >= _MIN_PAIRS
 
 
 def parse_exemplars(text: str) -> list[ExemplarPair]:
