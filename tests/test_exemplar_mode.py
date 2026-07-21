@@ -12,7 +12,12 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select, text
 
-from nous.api.retrieval_pipeline import PipelineResult, PipelineStats, run_recall_pipeline
+from nous.api.retrieval_pipeline import (
+    PipelineResult,
+    PipelineStats,
+    _is_classification_shaped,
+    run_recall_pipeline,
+)
 from nous.api.tools import _format_pipeline_text
 from nous.brain.brain import Brain
 from nous.handlers.exemplar_ingest import ingest_exemplars
@@ -101,6 +106,38 @@ class TestExemplarParser:
         assert parse_label("some utterance\nlabel: 42") == "42"
         assert parse_label("no label here") is None
         assert parse_label("text\nlabel: atm_support") == "atm_support"
+
+
+class TestClassificationShapedTrigger:
+    """Codex r2: the memory-referential blocklist must require a real stored-memory
+    verb after the ambiguous `did i/we/you` / `what did` / `what have i/we` prefixes,
+    so ordinary banking77-shaped past-tense questions still trigger the leg."""
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "did I get charged twice",  # banking77 shape — must NOT be blocked
+            "did I make a cash withdrawal",
+            "what is the capital of france",  # trec shape
+            "did you increase my limit",
+        ],
+    )
+    def test_classification_shapes_trigger(self, query):
+        assert _is_classification_shaped(query, 64) is True
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "what did I say about my card",
+            "did you mention the deadline",
+            "did we discuss the refund",
+            "remind me what we discussed",
+            "last time we talked",
+            "you said the account was closed",
+        ],
+    )
+    def test_memory_referential_excluded(self, query):
+        assert _is_classification_shaped(query, 64) is False
 
 
 # ---------------------------------------------------------------------------
@@ -940,6 +977,78 @@ class TestExemplarLeg:
             assert [(r.id, r.type, r.score) for r in on_results] == [(r.id, r.type, r.score) for r in off_results]
             # The exemplar fact is still present in Heart Memory, untouched.
             assert any(r.id == exemplar_id and r.metadata.get("retrieval_leg") != "exemplar" for r in on_results)
+        finally:
+            async with heart.db.session() as cleanup:
+                f = await cleanup.get(Fact, exemplar_id)
+                if f is not None:
+                    await cleanup.delete(f)
+                await cleanup.commit()
+
+    async def test_stage1_exemplar_survives_fetch_failure(self, heart, brain, settings, monkeypatch):
+        # Codex r2: a non-fatal leg error must NOT delete a successful Stage-1
+        # result. The strip happens only AFTER fetch + floor succeed, so a fetch
+        # that raises leaves the Stage-1 exemplar in Heart Memory (untagged).
+        exemplar_id = uuid4()
+        query_vec = await heart._embeddings.embed(self._QUERY)
+        async with heart.db.session() as seed:
+            seed.add(
+                Fact(
+                    id=exemplar_id,
+                    agent_id=heart.agent_id,
+                    content="how do I reset my card pin\nlabel: 21",
+                    source="exemplar_extractor",
+                    active=True,
+                    embedding=query_vec,
+                )
+            )
+            await seed.commit()
+        try:
+            s = settings.model_copy(update={"exemplar_mode_enabled": True})
+            monkeypatch.setattr(heart.facts, "has_exemplars", AsyncMock(return_value=True))
+            monkeypatch.setattr(heart.facts, "fetch_exemplars_by_vector", AsyncMock(side_effect=RuntimeError("boom")))
+            results, stats = await run_recall_pipeline(self._QUERY, heart, brain, s)
+
+            assert stats.n_stage_errors.get("exemplar") == 1
+            occ = [r for r in results if r.id == exemplar_id]
+            assert len(occ) == 1 and occ[0].metadata.get("retrieval_leg") != "exemplar"
+        finally:
+            async with heart.db.session() as cleanup:
+                f = await cleanup.get(Fact, exemplar_id)
+                if f is not None:
+                    await cleanup.delete(f)
+                await cleanup.commit()
+
+    async def test_stage1_exemplar_survives_all_below_floor(self, heart, brain, settings, monkeypatch):
+        # Codex r2: if every fetched hit falls below the floor, nothing replaces
+        # the Stage-1 exemplar -> it must remain in Heart Memory (no strip).
+        exemplar_id = uuid4()
+        query_vec = await heart._embeddings.embed(self._QUERY)
+        async with heart.db.session() as seed:
+            seed.add(
+                Fact(
+                    id=exemplar_id,
+                    agent_id=heart.agent_id,
+                    content="how do I reset my card pin\nlabel: 21",
+                    source="exemplar_extractor",
+                    active=True,
+                    embedding=query_vec,
+                )
+            )
+            await seed.commit()
+        try:
+            s = settings.model_copy(update={"exemplar_mode_enabled": True})
+            below = ExemplarHit(
+                id=exemplar_id,
+                content="how do I reset my card pin\nlabel: 21",
+                similarity=s.exemplar_min_similarity - 0.05,
+            )
+            monkeypatch.setattr(heart.facts, "has_exemplars", AsyncMock(return_value=True))
+            monkeypatch.setattr(heart.facts, "fetch_exemplars_by_vector", AsyncMock(return_value=[below]))
+            results, stats = await run_recall_pipeline(self._QUERY, heart, brain, s)
+
+            assert stats.n_exemplar == 0
+            occ = [r for r in results if r.id == exemplar_id]
+            assert len(occ) == 1 and occ[0].metadata.get("retrieval_leg") != "exemplar"
         finally:
             async with heart.db.session() as cleanup:
                 f = await cleanup.get(Fact, exemplar_id)

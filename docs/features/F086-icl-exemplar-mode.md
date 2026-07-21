@@ -115,9 +115,13 @@ TTL-cached exists-probe (`FactManager.has_exemplars()`), in that order, so the c
 ### Trigger heuristic (and its trec rationale)
 
 ```python
+_MEMORY_VERB = r"(?:say|said|tell|told|mention(?:ed)?|ask(?:ed)?|discuss(?:ed)?|talk(?:ed)?\s+about)"
 _MEMORY_REFERENTIAL = re.compile(
-    r"\b(did (i|we|you)|what did|what have (i|we)|remind me|last time|earlier"
-    r"|previous(ly)?|we (discussed|talked)|you (said|told|mentioned))\b", re.IGNORECASE)
+    r"\b(?:"
+    r"(?:did\s+(?:i|we|you)|what\s+did|what\s+have\s+(?:i|we))(?:\s+\w+){0,4}?\s+" + _MEMORY_VERB
+    + r"|remind me|last time|earlier|previous(?:ly)?"
+    r"|we (?:discussed|talked)|you (?:said|told|mentioned)"
+    r")\b", re.IGNORECASE)
 
 def _is_classification_shaped(query: str, max_words: int) -> bool:
     words = query.split()
@@ -132,6 +136,16 @@ did I say about...", "remind me...", "last time we discussed..." — are exclude
 the agent to recall its own conversation history, not to classify an utterance against stored exemplars.
 Long queries (`> exemplar_max_query_words`, default 64) are also excluded — classification-shaped
 utterances are short by construction.
+
+**Codex r2 — the ambiguous prefixes require a memory verb.** `did (i|we|you)`, `what did`, and
+`what have (i|we)` are *not* memory-referential on their own: banking77 carries ordinary
+classification-shaped questions like *"did I get charged twice"* / *"did I make a cash withdrawal"* that
+would have been wrongly blocked (the spec-review M2 risk, materialized). Those three prefixes now only
+match when followed within a few words by an actual stored-memory verb — say/tell/mention/ask/discuss/
+talk about — so a bare past-tense banking question stays classification-shaped and still triggers the
+leg, while *"what did I **say** about my card"* / *"did you **mention** the deadline"* remain excluded.
+The standalone phrases (remind me, last time, earlier, previous(ly), we discussed/talked, you
+said/told/mentioned) still match on their own.
 
 ### Similarity floor (Gate-2 mechanism)
 
@@ -161,20 +175,32 @@ so a query that surfaces an exemplar through normal vector/FTS recall would rend
 Memory** without the inform-not-force framing. To keep the two presentations coherent, **when the leg
 actually fires** (all trigger gates passed, `has_exemplars()` true, query embedded), Stage 1.7:
 
-1. Batch-identifies which already-surfaced Stage-1 fact ids are exemplar-source
+1. Fetches the K nearest exemplars (`fetch_exemplars_by_vector`) and applies the similarity floor. Call
+   the survivors the **post-floor hit set**.
+2. Batch-identifies which already-surfaced Stage-1 fact ids are exemplar-source
    (`FactManager.exemplar_ids_among`, one agent-scoped
    `SELECT id … WHERE source='exemplar_extractor' AND id = ANY(...)`).
-2. **Removes** those rows from the Stage-1 results in the accumulator.
-3. Does **not** exclude their ids from `fetch_exemplars_by_vector` — they are the nearest exemplars and
-   must come back through the leg into the dedicated examples block with banded score + label/similarity
-   metadata.
+3. **Removes from Heart Memory only** the exemplar-source Stage-1 rows whose id is in the post-floor hit
+   set — i.e. only rows whose replacement in the examples block is guaranteed. Those hits come back
+   through the leg with banded score + label/similarity metadata.
 
-Net effect: **mode on + trigger met ⇒ an exemplar fact appears exactly once, only in the
-`=== Nearest stored examples ===` block, never in Heart Memory.** When the leg does **not** fire (read
-flag off, or mode-on but the trigger heuristic is unmet), Stage-1 results are touched by nothing — the
-flag-off byte-identity and the write-on/read-off land-dark contract below hold exactly as documented.
-(Assembly-side dedup remains as belt-and-suspenders for the rare case where a *non-exemplar* Stage-1 fact
-shares an id with a returned hit — `test_dedup_against_existing_results`.)
+**Codex r2 — strip only after a successful fetch, and only what is replaced.** The strip happens *after*
+step 1, never before, so a `fetch_exemplars_by_vector` that raises (caught, non-fatal) or an
+all-below-floor result leaves `acc.heart_results` **untouched** — a non-fatal leg error can never delete
+an earlier successful Stage-1 result. Two edge cases follow directly and are **by design**:
+
+- A Stage-1 exemplar that is **not** in the fetched top-K (or falls below the floor) **stays in Heart
+  Memory** as an ordinary fact — it is below the leg's relevance bar, so it is not force-injected into
+  the examples block either.
+- On fetch failure the leg records a stage error and every Stage-1 exemplar stays put (the leg-not-fired
+  fallback).
+
+Net effect: **mode on + trigger met + fetch succeeds ⇒ an exemplar fact that the leg surfaces appears
+exactly once, only in the `=== Nearest stored examples ===` block, never doubled into Heart Memory.**
+When the leg does **not** fire (read flag off, or mode-on but the trigger heuristic is unmet), Stage-1
+results are touched by nothing — the flag-off byte-identity and the write-on/read-off land-dark contract
+below hold exactly as documented. (Assembly-side dedup remains as belt-and-suspenders for the rare case
+where a *non-exemplar* Stage-1 fact shares an id with a returned hit — `test_dedup_against_existing_results`.)
 
 ### Do-not-filter-leakage note (spec-review M4)
 
@@ -265,11 +291,13 @@ trigger-precision check" half is the pre-gate-3 blocklist scan described next.
 Before running Gate 3 (the paid, decisive n=200 replay), **MAB should scan all 5 sources' gold queries
 against `_MEMORY_REFERENTIAL`** (the trigger heuristic's blocklist regex, quoted above) and check for false
 positives — a gold query that happens to match the blocklist would silently skip the exemplar leg for that
-question, understating gate-3's measured effect. **banking77 is the highest-risk source**: conversational
-banking questions shaped like *"did I get charged twice for this transaction?"* match the `did (i|we|you)`
-pattern even though they are ordinary classification-shaped utterances, not memory-referential ones. If any
-gold query in any of the 5 sources matches, the blocklist patterns need adjusting (narrowing) before Gate 3
-is run, or the measured effect will be an underestimate.
+question, understating gate-3's measured effect. The **banking77** highest-risk case — conversational
+banking questions shaped like *"did I get charged twice for this transaction?"* — is now addressed
+**in-pattern** (codex r2: the `did (i|we|you)` / `what did` / `what have (i|we)` prefixes require a
+stored-memory verb, so a bare past-tense banking question no longer matches; pinned by
+`TestClassificationShapedTrigger`). The gold-query scan nonetheless **stays as the verification step**:
+if any gold query in any of the 5 sources still matches, the blocklist patterns need further narrowing
+before Gate 3 is run, or the measured effect will be an underestimate.
 
 ---
 

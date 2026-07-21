@@ -49,10 +49,21 @@ logger = logging.getLogger(__name__)
 
 # F086: memory-referential interrogatives are NOT classification-shaped.
 # Deliberately narrow — trec-style classification queries ARE questions and
-# must trigger.
+# must trigger. Codex r2: the ambiguous prefixes (`did i/we/you`, `what did`,
+# `what have i/we`) over-matched ordinary banking77 classification shapes like
+# "did I get charged twice" / "did I make a cash withdrawal", silencing the leg
+# on a class the feature targets. They now require an actual stored-memory verb
+# (say/tell/mention/ask/discuss/talk about) within a few words, so a bare
+# past-tense question is left classification-shaped. The standalone
+# memory-referential phrases (remind me, last time, ...) match on their own.
+_MEMORY_VERB = r"(?:say|said|tell|told|mention(?:ed)?|ask(?:ed)?|discuss(?:ed)?|talk(?:ed)?\s+about)"
 _MEMORY_REFERENTIAL = re.compile(
-    r"\b(did (i|we|you)|what did|what have (i|we)|remind me|last time|earlier"
-    r"|previous(ly)?|we (discussed|talked)|you (said|told|mentioned))\b",
+    r"\b(?:"
+    r"(?:did\s+(?:i|we|you)|what\s+did|what\s+have\s+(?:i|we))(?:\s+\w+){0,4}?\s+"
+    + _MEMORY_VERB
+    + r"|remind me|last time|earlier|previous(?:ly)?"
+    r"|we (?:discussed|talked)|you (?:said|told|mentioned)"
+    r")\b",
     re.IGNORECASE,
 )
 
@@ -864,27 +875,35 @@ async def _run_stages(
                 embedder = getattr(heart, "_embeddings", None)
                 q_vec = (await embedder.embed(query)) if embedder is not None else None
                 if q_vec:
-                    # Codex r1: the leg is firing, so exemplar facts must render
-                    # ONLY in the dedicated examples block — not doubled into
-                    # Heart Memory. Stage 1 sees exemplar facts as ordinary
-                    # facts (no retrieval_leg tag), so strip any exemplar-source
-                    # rows it already surfaced from the accumulator here. Their
-                    # ids are NOT excluded from the fetch below: they are the
-                    # nearest exemplars and must come back through the leg with
-                    # banded score + label/similarity metadata. Assembly-side
-                    # dedup stays as belt-and-suspenders for the rare non-
-                    # exemplar id collision (test_dedup_against_existing_results).
-                    stage1_fact_ids = [hr.id for hr in acc.heart_results if hr.type == "fact"]
-                    exemplar_in_stage1 = await heart.facts.exemplar_ids_among(stage1_fact_ids)
-                    if exemplar_in_stage1:
-                        acc.heart_results = [
-                            hr for hr in acc.heart_results if not (hr.type == "fact" and hr.id in exemplar_in_stage1)
-                        ]
                     hits = await heart.facts.fetch_exemplars_by_vector(
                         q_vec, limit=getattr(settings, "exemplar_top_k", 25)
                     )
                     floor = getattr(settings, "exemplar_min_similarity", 0.30)
-                    acc.exemplar_hits = [h for h in hits if h.similarity >= floor]
+                    surviving = [h for h in hits if h.similarity >= floor]
+                    acc.exemplar_hits = surviving
+                    # Codex r1+r2: the leg is firing, so exemplar facts must
+                    # render ONLY in the dedicated examples block — not doubled
+                    # into Heart Memory. Stage 1 sees exemplar facts as ordinary
+                    # facts (no retrieval_leg tag), so strip the exemplar-source
+                    # rows it surfaced. Codex r2: strip AFTER the fetch + floor
+                    # succeed, and ONLY rows whose replacement is guaranteed —
+                    # exemplar-source Stage-1 hits whose id is in the post-floor
+                    # set. A fetch failure (caught below, before this point) or
+                    # an all-below-floor result therefore leaves acc.heart_results
+                    # untouched (Stage-1 exemplars stay as ordinary facts — the
+                    # leg-not-fired fallback). A Stage-1 exemplar NOT in the
+                    # fetched top-K also stays in Heart Memory. Assembly-side
+                    # dedup remains belt-and-suspenders for the rare non-exemplar
+                    # id collision (test_dedup_against_existing_results).
+                    if surviving:
+                        surviving_ids = {h.id for h in surviving}
+                        stage1_fact_ids = [hr.id for hr in acc.heart_results if hr.type == "fact"]
+                        stage1_exemplar_ids = await heart.facts.exemplar_ids_among(stage1_fact_ids)
+                        to_strip = stage1_exemplar_ids & surviving_ids
+                        if to_strip:
+                            acc.heart_results = [
+                                hr for hr in acc.heart_results if not (hr.type == "fact" and hr.id in to_strip)
+                            ]
         except Exception:
             logger.warning("exemplar leg failed", exc_info=True)
             acc.stage_errors["exemplar"] = acc.stage_errors.get("exemplar", 0) + 1
