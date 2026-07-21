@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """F086: backfill ICL exemplar facts from stored episode_chunks. Zero-LLM
-(parse-only), mirrors scripts/backfill_enumerative_facts.py's dry-run/
-watermark conventions and scripts/backfill_r3_entity_keys.py's rollback
-phase.
+(parse-only), mirrors scripts/backfill_enumerative_facts.py's dry-run
+conventions and scripts/backfill_r3_entity_keys.py's DB-clock watermark +
+rollback phase conventions.
 
 Reads heart.episode_chunks (NOT episodes.transcript -- transcript capture
 is capped at NOUS_TRANSCRIPT_MAX_CHARS=8000 chars at ingest, but the
@@ -15,11 +15,13 @@ measurement), but an episode's QUALIFICATION (is_exemplar_stream) runs on
 the CONCATENATED chunk text -- a single chunk can look diluted at a
 boundary split even when the whole episode is a genuine exemplar stream.
 `source_ordinal` continues across chunk boundaries (a running per-episode
-offset), NOT reset per chunk -- this backfill does its own small
-embed+learn loop (mirroring nous/handlers/exemplar_ingest.py's
-ingest_exemplars) instead of calling ingest_exemplars per chunk, because
+offset), NOT reset per chunk -- this backfill assembles its own
+ordinal-continuous pair list (build_episode_pairs) rather than calling
+nous/handlers/exemplar_ingest.py's ingest_exemplars once per chunk, since
 ingest_exemplars parses one transcript in a single call and always starts
-ordinals at 0.
+ordinals at 0. The actual cap+embed+learn storage step IS shared with
+ingest_exemplars via the common `_embed_and_store_pairs` helper -- only
+the pair-assembly step differs between the two callers.
 
 Idempotent: re-running re-embeds identical content and Heart.learn's
 native-cosine dedup (0.95 threshold) confirms rather than duplicates,
@@ -44,6 +46,17 @@ NOUS_EXEMPLAR_EXTRACTION_ENABLED) carry source='exemplar_extractor'.
     plausibly produced by a concurrent live write (NOUS_EXEMPLAR_
     EXTRACTION_ENABLED processing a freshly-completed episode), not by the
     run being rolled back.
+
+The printed watermark is ALWAYS sourced from the DATABASE's own clock
+(`fetch_db_now`, `SELECT now()`), never the app host's `datetime.now()`.
+The watermark is later compared against a DB-generated column
+(`heart.facts.created_at` / `heart.episode_chunks.created_at`) by
+`--phase rollback`; if the app host's clock is even slightly AHEAD of the
+database server's, rows THIS run inserts get a DB-assigned `created_at`
+EARLIER than a client-sourced watermark, so a later `--phase rollback
+--watermark <that-value>`'s `created_at >= :watermark` predicate would
+silently miss rows from the very run it should undo (the same clock-skew
+lesson `scripts/backfill_r3_entity_keys.py`'s `fetch_db_now` fixed for R3).
 """
 
 from __future__ import annotations
@@ -53,15 +66,20 @@ import asyncio
 import logging
 import sys
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import NamedTuple
 from uuid import UUID
 
 from sqlalchemy import text
 
 from nous.config import Settings
+
+# _embed_and_store_pairs is the shared cap+embed+learn implementation this
+# backfill's _store_episode_pairs wraps -- see that function's docstring
+# for why the two callers can't just call ingest_exemplars directly
+# (ordinal continuation across chunk boundaries).
+from nous.handlers.exemplar_ingest import _embed_and_store_pairs
 from nous.heart.exemplars import ExemplarPair, is_exemplar_stream, parse_exemplars
-from nous.heart.schemas import FactInput, FactRejected
 from nous.storage.database import Database
 
 logger = logging.getLogger("exemplar-backfill")
@@ -119,6 +137,20 @@ def build_episode_pairs(chunk_contents: list[str]) -> list[ExemplarPair]:
     return pairs
 
 
+async def fetch_db_now(session) -> datetime:
+    """Fetch the current time from the DATABASE's own clock (`SELECT
+    now()`), never the app host's. Every timestamp this script compares
+    against the rollback watermark (`heart.facts.created_at`,
+    `heart.episode_chunks.created_at`) is a DB-generated column --
+    sourcing the watermark itself from `datetime.now()` on the app host
+    risks clock skew silently breaking the `created_at >= watermark`
+    rollback predicate (mirrors `scripts/backfill_r3_entity_keys.py`'s
+    identically-named helper). Returns a timezone-aware datetime
+    (Postgres `timestamptz` maps to one automatically).
+    """
+    return (await session.execute(text("SELECT now()"))).scalar_one()
+
+
 async def select_backfill_chunks(session, agent_id: str, since, limit: int) -> list:
     """Return (episode_id, chunk_index, content) rows for up to `limit`
     DISTINCT episodes (oldest-first by started_at; 0 = all), scoped to
@@ -163,75 +195,25 @@ async def select_backfill_chunks(session, agent_id: str, since, limit: int) -> l
 
 async def _store_episode_pairs(heart, settings, pairs: list[ExemplarPair], episode_id: UUID, logger) -> int:
     """Cap + embed + learn one episode's full (already ordinal-continuous)
-    pair list. Mirrors nous/handlers/exemplar_ingest.py's ingest_exemplars
-    embed_batch + per-fact heart.learn(precomputed_embedding=...) loop, but
-    operates over pairs assembled from MULTIPLE chunks -- calling
-    ingest_exemplars once per chunk would reset each chunk's ordinals to 0,
-    breaking cross-chunk continuation.
+    pair list. Thin wrapper around ``_embed_and_store_pairs``
+    (nous/handlers/exemplar_ingest.py) -- the same cap+embed+learn
+    implementation ``ingest_exemplars`` uses, shared rather than
+    duplicated. Kept as its own function (rather than calling the shared
+    helper directly from ``_run_backfill``'s loop) for this backfill's own
+    log-message prefix and callsite clarity. Operates over pairs already
+    assembled from MULTIPLE chunks with continuing ordinals
+    (``build_episode_pairs``) -- calling ``ingest_exemplars`` once per
+    chunk would instead reset each chunk's ordinals to 0, breaking
+    cross-chunk continuation.
     """
-    cap = settings.exemplar_max_per_episode
-    truncated = len(pairs) > cap
-    if truncated:
-        logger.warning(
-            "F086 exemplar backfill: %d pairs exceed exemplar_max_per_episode=%d "
-            "for episode=%s -- coverage is TRUNCATED (truncated=true)",
-            len(pairs),
-            cap,
-            episode_id,
-        )
-        pairs = pairs[:cap]
-    if not pairs:
-        return 0
-
-    inputs = [
-        FactInput(
-            content=f"{p.text}\nlabel: {p.label}",
-            subject=p.text[:200],
-            subject_key=None,  # keeps D2/R2 same-slot machinery short-circuited
-            attribute_key="label",
-            category="exemplar",
-            confidence=1.0,
-            source="exemplar_extractor",
-            source_episode_id=episode_id,
-            source_text=f"{p.text}\nlabel: {p.label}",
-            source_ordinal=p.ordinal,
-            entity_keys=[],
-            entity_extraction_complete=True,  # F085 backfill must skip these
-        )
-        for p in pairs
-    ]
-    embedder = getattr(heart, "_embeddings", None)
-    vectors: list = [None] * len(inputs)
-    if embedder is not None:
-        try:
-            vectors = await embedder.embed_batch([i.content for i in inputs])
-        except Exception:
-            logger.warning(
-                "F086 exemplar backfill: batch embed failed for episode=%s; falling back to per-fact",
-                episode_id,
-                exc_info=True,
-            )
-            vectors = [None] * len(inputs)
-
-    # Same isinstance(FactRejected) + unseen-id counting convention as
-    # ingest_exemplars (Task 2) -- a dedup-confirm returns the EXISTING
-    # row's FactDetail, not None.
-    stored = 0
-    seen_ids: set = set()
-    for fi, vec in zip(inputs, vectors):
-        try:
-            result = await heart.learn(fi, precomputed_embedding=vec)
-            if not isinstance(result, FactRejected) and result.id not in seen_ids:
-                seen_ids.add(result.id)
-                stored += 1
-        except Exception:
-            logger.warning(
-                "F086 exemplar backfill: learn failed for episode=%s ordinal=%s",
-                episode_id,
-                fi.source_ordinal,
-                exc_info=True,
-            )
-    return stored
+    return await _embed_and_store_pairs(
+        heart,
+        settings,
+        pairs,
+        episode_id,
+        logger,
+        log_prefix="F086 exemplar backfill",
+    )
 
 
 async def rollback_exemplar_facts(
@@ -312,12 +294,16 @@ async def _run_backfill(
 
     threshold = density_threshold if density_threshold is not None else settings.exemplar_density_threshold
 
-    watermark = datetime.now(UTC).isoformat()
-    print(f"ROLLBACK KEY (created_at watermark): {watermark}")
-
     db = Database(settings)
     await db.connect()
     try:
+        # Watermark fetched from the DB's own clock (see fetch_db_now's
+        # docstring), immediately after connect and before any write --
+        # as close as possible to the first write this run could make.
+        async with db.session() as session:
+            watermark = (await fetch_db_now(session)).isoformat()
+        print(f"ROLLBACK KEY (created_at watermark): {watermark}")
+
         async with db.session() as session:
             rows = await select_backfill_chunks(session, agent_id, since, max_episodes)
 

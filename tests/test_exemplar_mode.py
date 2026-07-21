@@ -1,6 +1,7 @@
 """F086 ICL exemplar mode tests."""
 
 import logging
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -878,3 +879,48 @@ class TestExemplarBackfill:
 
     def test_build_episode_pairs_empty_chunk_list(self):
         assert build_episode_pairs([]) == []
+
+
+@pytest.mark.postgres_only
+class TestExemplarBackfillWatermark:
+    """The ROLLBACK KEY watermark must come from the DATABASE's own clock
+    (`SELECT now()`), never the app host's `datetime.now()` -- clock skew
+    between host and DB would otherwise make a later `--phase rollback
+    --watermark <printed-value>`'s `created_at >= :watermark` predicate
+    silently miss rows THIS run itself writes (the exact bug
+    scripts/backfill_r3_entity_keys.py's `fetch_db_now` already fixed for
+    R3; this pins the same fix for F086)."""
+
+    async def test_fetch_db_now_returns_tz_aware_db_clock(self, session):
+        from scripts.backfill_exemplar_facts import fetch_db_now
+
+        result = await fetch_db_now(session)
+
+        assert isinstance(result, datetime)
+        assert result.tzinfo is not None
+
+    async def test_run_backfill_watermark_not_sourced_from_app_clock(self, monkeypatch, capsys):
+        import scripts.backfill_exemplar_facts as bf
+
+        # Poison the app-host clock to an obviously-wrong, recognizable
+        # value. A correct (DB-clock-sourced) implementation's printed
+        # watermark must NOT reflect this value at all.
+        class _PoisonedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(1999, 1, 1, tzinfo=UTC)
+
+        monkeypatch.setattr(bf, "datetime", _PoisonedDatetime)
+
+        rc = await bf._run_backfill(
+            agent_id=f"exemplar-watermark-{uuid4()}",
+            since=None,
+            max_episodes=1,
+            density_threshold=None,
+            dry_run=True,
+        )
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "ROLLBACK KEY" in out
+        assert "1999-01-01" not in out
