@@ -1090,6 +1090,14 @@ class TestExemplarLeg:
                 await cleanup.commit()
 
     async def test_dedup_against_existing_results(self, heart, brain, settings, monkeypatch):
+        # Codex r10: when the leg returns an id a prior leg already surfaced into
+        # `results` (here a Stage-1 row), the universal replace-at-merge removes
+        # the untagged row and re-inserts it TAGGED -- it appears exactly once, in
+        # the examples block. This SUPERSEDES the pre-r10 assembly-dedup belt (which
+        # this test asserted as n_exemplar_dup==1): r10's removal guarantees no
+        # collision reaches _exemplar_to_pipeline, so n_exemplar_dup==0. The seed
+        # is source='exemplar_extractor' because in prod the source-filtered fetch
+        # only ever returns a real exemplar's id.
         fact_id = uuid4()
         query_vec = await heart._embeddings.embed(self._QUERY)
         async with heart.db.session() as seed:
@@ -1098,6 +1106,7 @@ class TestExemplarLeg:
                     id=fact_id,
                     agent_id=heart.agent_id,
                     content="A fact engineered to be found by Stage 1 AND returned by the exemplar leg.",
+                    source="exemplar_extractor",
                     active=True,
                     embedding=query_vec,
                 )
@@ -1117,8 +1126,8 @@ class TestExemplarLeg:
 
             occurrences = [r for r in results if r.id == fact_id]
             assert len(occurrences) == 1
-            assert occurrences[0].metadata.get("retrieval_leg") != "exemplar"
-            assert stats.n_exemplar_dup == 1
+            assert occurrences[0].metadata.get("retrieval_leg") == "exemplar"  # replaced by the tagged row
+            assert stats.n_exemplar_dup == 0  # r10 removal => no assembly collision
             assert any(r.id == fresh_hit.id and r.metadata.get("retrieval_leg") == "exemplar" for r in results)
         finally:
             async with heart.db.session() as cleanup:
@@ -1161,11 +1170,12 @@ class TestExemplarLeg:
                 await cleanup.commit()
 
     async def test_stage1_exemplar_routed_to_examples_block(self, heart, brain, settings, monkeypatch):
-        # Codex r1: both flags on + trigger fires + a REAL exemplar fact that
+        # Codex r1/r10: both flags on + trigger fires + a REAL exemplar fact that
         # Stage 1 surfaces (untagged) -> it appears ONCE, in the dedicated
         # examples block (retrieval_leg=="exemplar"), NOT in Heart Memory, and
         # the non-exemplar Stage-1 subsequence is order-identical to flag-off.
-        # The real exemplar_ids_among SELECT runs against the seeded row.
+        # The r10 universal replace-at-merge removes the untagged Stage-1 row
+        # (id in the post-floor fetched set) and re-inserts it tagged.
         exemplar_id = uuid4()
         query_vec = await heart._embeddings.embed(self._QUERY)
         async with heart.db.session() as seed:

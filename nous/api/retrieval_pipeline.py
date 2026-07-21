@@ -490,10 +490,23 @@ async def run_recall_pipeline(
     n_exemplar_dup = 0
     exemplar_rows: list[PipelineResult] = []
     if acc.exemplar_hits:
+        # Codex r10: universal replace-at-merge. The leg fired with post-floor
+        # hits, so those exemplar facts must render ONLY in the dedicated
+        # examples block — never doubled under Heart Memory. Any leg can surface
+        # an exemplar fact UNTAGGED into `results`: Stage 1 (ordinary recall),
+        # Stage 2b (graph neighbors — `extracted_from` edges exist because
+        # exemplar ingest sets source_episode_id), or spreading/Stage 4. Remove
+        # every such untagged row whose id is in the post-floor fetched-hit set,
+        # regardless of which stage added it, then re-insert them as tagged rows
+        # below. Replacement-guaranteed (r2 lesson): ONLY ids in the fetched set
+        # are removed, so a fetch failure / all-below-floor leaves `results`
+        # untouched, and an exemplar-source row NOT in the fetched set stays
+        # wherever it came from. `existing_ids` is recomputed AFTER the removal
+        # so the score-banded insertion below sees the pruned list.
+        fetched_ids = {h.id for h in acc.exemplar_hits}
+        results = [r for r in results if not (r.id in fetched_ids and r.metadata.get("retrieval_leg") != "exemplar")]
         existing_ids = {r.id for r in results}
-        exemplar_rows, n_exemplar_dup = _exemplar_to_pipeline(
-            acc.exemplar_hits, settings, existing_ids
-        )
+        exemplar_rows, n_exemplar_dup = _exemplar_to_pipeline(acc.exemplar_hits, settings, existing_ids)
         for er in exemplar_rows:
             pos = next(
                 (i for i, r in enumerate(results) if (r.score or 0.0) < er.score),
@@ -892,37 +905,22 @@ async def _run_stages(
                     surviving = [h for h in hits if h.similarity >= floor]
                     acc.exemplar_hits = surviving
                     if surviving:
-                        surviving_ids = {h.id for h in surviving}
                         # Codex r3: retrieval == access. Track recall on the
                         # post-floor survivors (the set that will merge) so
-                        # stale_scan does not deactivate an actively-used
-                        # exemplar once past stale_scan_age_days. Below-floor
-                        # hits are never tracked. Mirrors the keyed_r2
-                        # survivors-only, sync-await precedent (assembly's
-                        # track_access(r2_survivors) in run_recall_pipeline).
-                        await heart.facts.track_access(list(surviving_ids))
-                        # Codex r1+r2: the leg is firing, so exemplar facts must
-                        # render ONLY in the dedicated examples block — not
-                        # doubled into Heart Memory. Stage 1 sees exemplar facts
-                        # as ordinary facts (no retrieval_leg tag), so strip the
-                        # exemplar-source rows it surfaced. Codex r2: strip AFTER
-                        # the fetch + floor succeed, and ONLY rows whose
-                        # replacement is guaranteed — exemplar-source Stage-1 hits
-                        # whose id is in the post-floor set. A fetch failure
-                        # (caught below, before this point) or an all-below-floor
-                        # result therefore leaves acc.heart_results untouched
-                        # (Stage-1 exemplars stay as ordinary facts — the
-                        # leg-not-fired fallback). A Stage-1 exemplar NOT in the
-                        # fetched top-K also stays in Heart Memory. Assembly-side
-                        # dedup remains belt-and-suspenders for the rare
-                        # non-exemplar id collision (test_dedup_against_existing_results).
-                        stage1_fact_ids = [hr.id for hr in acc.heart_results if hr.type == "fact"]
-                        stage1_exemplar_ids = await heart.facts.exemplar_ids_among(stage1_fact_ids)
-                        to_strip = stage1_exemplar_ids & surviving_ids
-                        if to_strip:
-                            acc.heart_results = [
-                                hr for hr in acc.heart_results if not (hr.type == "fact" and hr.id in to_strip)
-                            ]
+                        # stale_scan does not deactivate an actively-used exemplar
+                        # once past stale_scan_age_days. Below-floor hits are
+                        # never tracked. Mirrors the keyed_r2 survivors-only,
+                        # sync-await precedent (assembly's track_access below).
+                        #
+                        # Codex r10: the Stage-1-specific strip that used to live
+                        # here moved to a UNIVERSAL replace-at-merge at assembly
+                        # time (see the exemplar-leg assembly block in
+                        # run_recall_pipeline) — an exemplar fact can enter
+                        # `results` UNTAGGED from ANY leg (Stage 1, Stage 2b graph
+                        # neighbors, spreading/Stage 4), not just Stage 1, so the
+                        # de-dup-and-retag has to run once over the fully assembled
+                        # `results` list, not per-leg here.
+                        await heart.facts.track_access([h.id for h in surviving])
         except Exception:
             logger.warning("exemplar leg failed", exc_info=True)
             acc.stage_errors["exemplar"] = acc.stage_errors.get("exemplar", 0) + 1

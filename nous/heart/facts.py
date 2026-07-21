@@ -3978,30 +3978,6 @@ class FactManager:
             ).fetchall()
         return [ExemplarHit(id=r.id, content=r.content, similarity=float(r.similarity)) for r in rows]
 
-    async def exemplar_ids_among(self, fact_ids: list[UUID] | set[UUID]) -> set[UUID]:
-        """F086 codex r1: the subset of ``fact_ids`` that are exemplar-source (agent-scoped).
-
-        Stage 1.7 uses this, when the exemplar leg actually fires, to strip
-        exemplar facts that ordinary Stage-1 recall surfaced (those carry no
-        ``retrieval_leg`` tag) so they render ONLY in the dedicated examples
-        block, never in Heart Memory. Their ids are deliberately NOT excluded
-        from ``fetch_exemplars_by_vector`` — they are the nearest exemplars and
-        must come back through the leg with banded score + label/similarity
-        metadata.
-        """
-        if not fact_ids:
-            return set()
-        async with self.db.session() as session:
-            rows = await session.execute(
-                text(
-                    "SELECT id FROM heart.facts "
-                    "WHERE agent_id = :a AND source = 'exemplar_extractor' "
-                    "  AND id = ANY(CAST(:ids AS uuid[]))"
-                ),
-                {"a": self.agent_id, "ids": [str(i) for i in fact_ids]},
-            )
-            return {r.id for r in rows}
-
     async def has_exemplars(self) -> bool:
         """F086: cached existence probe for any active exemplar_extractor fact.
 

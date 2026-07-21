@@ -193,42 +193,44 @@ embedding model or dimensionality is not measuring the same retrieval quality th
 1) validated. State this in the PR body alongside this doc whenever the read flag is proposed for
 flipping.
 
-### Stage-1 routing — exemplars appear ONLY in the examples block (codex r1)
+### Any-leg routing — exemplars appear ONLY in the examples block (codex r1, generalized r10)
 
-Stage 1 (ordinary fact recall) sees exemplar facts as plain facts — they carry no `retrieval_leg` tag —
-so a query that surfaces an exemplar through normal vector/FTS recall would render it under **Heart
-Memory** without the inform-not-force framing. To keep the two presentations coherent, **when the leg
-actually fires** (all trigger gates passed, `has_exemplars()` true, query embedded), Stage 1.7:
+Ordinary recall sees exemplar facts as plain facts — they carry no `retrieval_leg` tag — so **any leg**
+that surfaces an exemplar into the result set would render it under **Heart Memory** without the
+inform-not-force framing. It is not just Stage 1 (vector/FTS recall): with `heart_graph_all_types_enabled`,
+**Stage 2b** pulls exemplar facts as untagged graph neighbors (`extracted_from` edges exist because
+exemplar ingest sets `source_episode_id`), and **spreading / Stage 4** can do the same. To keep the two
+presentations coherent, **when the leg actually fires** (all trigger gates passed, `has_exemplars()` true,
+query embedded):
 
-1. Fetches the K nearest exemplars (`fetch_exemplars_by_vector`) and applies the similarity floor. Call
-   the survivors the **post-floor hit set**. **Codex r3:** those survivors get `track_access` called on
-   them (recall_count / last_recalled_at) — retrieval == access, so an actively-retrieved exemplar is not
-   later reaped by `stale_scan`. Only survivors are tracked; below-floor hits are not. This mirrors the
-   keyed_r2 survivors-only, sync-await precedent in assembly.
-2. Batch-identifies which already-surfaced Stage-1 fact ids are exemplar-source
-   (`FactManager.exemplar_ids_among`, one agent-scoped
-   `SELECT id … WHERE source='exemplar_extractor' AND id = ANY(...)`).
-3. **Removes from Heart Memory only** the exemplar-source Stage-1 rows whose id is in the post-floor hit
-   set — i.e. only rows whose replacement in the examples block is guaranteed. Those hits come back
-   through the leg with banded score + label/similarity metadata.
+1. Stage 1.7 fetches the K nearest exemplars (`fetch_exemplars_by_vector`) and applies the similarity
+   floor. Call the survivors the **post-floor hit set**. **Codex r3:** those survivors get `track_access`
+   called on them (recall_count / last_recalled_at) — retrieval == access, so an actively-retrieved
+   exemplar is not later reaped by `stale_scan`. Only survivors are tracked; below-floor hits are not.
+2. **At assembly time (codex r10 — a single universal replace-at-merge), immediately before the exemplar
+   insertion loop**, every row in the fully-assembled `results` list whose id is in the post-floor hit set
+   **and** which is not already tagged `retrieval_leg == "exemplar"` is removed — **regardless of which
+   leg added it** (Stage 1, Stage 2b, spreading/Stage 4). `existing_ids` is then recomputed and the tagged
+   exemplar rows are inserted with banded score + label/similarity metadata.
 
-**Codex r2 — strip only after a successful fetch, and only what is replaced.** The strip happens *after*
-step 1, never before, so a `fetch_exemplars_by_vector` that raises (caught, non-fatal) or an
-all-below-floor result leaves `acc.heart_results` **untouched** — a non-fatal leg error can never delete
-an earlier successful Stage-1 result. Two edge cases follow directly and are **by design**:
+**Replacement-guaranteed (codex r2 lesson, preserved r10).** The removal keys on the post-floor **fetched**
+set, so a `fetch_exemplars_by_vector` that raises (caught, non-fatal) or an all-below-floor result leaves
+`results` **untouched** — a non-fatal leg error can never delete an earlier successful result. Two edge
+cases follow directly and are **by design**:
 
-- A Stage-1 exemplar that is **not** in the fetched top-K (or falls below the floor) **stays in Heart
-  Memory** as an ordinary fact — it is below the leg's relevance bar, so it is not force-injected into
-  the examples block either.
-- On fetch failure the leg records a stage error and every Stage-1 exemplar stays put (the leg-not-fired
-  fallback).
+- An exemplar-source row **not** in the fetched top-K (or below the floor) **stays wherever it came from**
+  (Heart Memory, a graph-neighbor slot, …) as an ordinary fact — it is below the leg's relevance bar, so
+  it is not force-injected into the examples block either.
+- On fetch failure the leg records a stage error and every already-surfaced exemplar row stays put (the
+  leg-not-fired fallback).
 
 Net effect: **mode on + trigger met + fetch succeeds ⇒ an exemplar fact that the leg surfaces appears
-exactly once, only in the `=== Nearest stored examples ===` block, never doubled into Heart Memory.**
-When the leg does **not** fire (read flag off, or mode-on but the trigger heuristic is unmet), Stage-1
-results are touched by nothing — the flag-off byte-identity and the write-on/read-off land-dark contract
-below hold exactly as documented. (Assembly-side dedup remains as belt-and-suspenders for the rare case
-where a *non-exemplar* Stage-1 fact shares an id with a returned hit — `test_dedup_against_existing_results`.)
+exactly once, only in the `=== Nearest stored examples ===` block, never doubled into Heart Memory or a
+graph slot.** When the leg does **not** fire (read flag off, or mode-on but the trigger heuristic is
+unmet), `results` is touched by nothing — the flag-off byte-identity and the write-on/read-off land-dark
+contract below hold exactly as documented. (Because the replace removes *every* row whose id is in the
+fetched set before `_exemplar_to_pipeline` runs, that helper's own `existing_ids` dedup can no longer fire
+for a fetched id — the r10 removal is the single point of truth; see `test_dedup_against_existing_results`.)
 
 ### Do-not-filter-leakage note (spec-review M4)
 
