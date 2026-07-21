@@ -53,15 +53,25 @@ logger = logging.getLogger(__name__)
 # `what have i/we`) over-matched ordinary banking77 classification shapes like
 # "did I get charged twice" / "did I make a cash withdrawal", silencing the leg
 # on a class the feature targets. They now require an actual stored-memory verb
-# (say/tell/mention/ask/discuss/talk about) within a few words, so a bare
-# past-tense question is left classification-shaped. The standalone
-# memory-referential phrases (remind me, last time, ...) match on their own.
-_MEMORY_VERB = r"(?:say|said|tell|told|mention(?:ed)?|ask(?:ed)?|discuss(?:ed)?|talk(?:ed)?\s+about)"
+# (say/tell/mention/ask/discuss/talk about/give/share) within a few words, so a
+# bare past-tense question is left classification-shaped.
+# Codex r18: `have i/we/you` joins the memory-verb-gated prefixes ("Have I told
+# you my card PIN?" is a memory recall, not a classification utterance), and
+# `remember`/`recall` join the standalone memory-referential words. A bare
+# `\bremember\b` / `\brecall\b` block is defensible across the 5 MAB sources:
+# trec asks what/who/where, banking77/clinic150/nlu are imperative/declarative
+# ("transfer $50", "set an alarm") — none plausibly OPEN a classification
+# utterance with "remember"/"recall", which are inherently about stored history.
+# The standalone phrases (remind me, last time, earlier, ...) match on their own.
+_MEMORY_VERB = (
+    r"(?:say|said|tell|told|mention(?:ed)?|ask(?:ed)?|discuss(?:ed)?"
+    r"|talk(?:ed)?\s+about|give(?:n)?|gave|shar(?:e|ed))"
+)
 _MEMORY_REFERENTIAL = re.compile(
     r"\b(?:"
-    r"(?:did\s+(?:i|we|you)|what\s+did|what\s+have\s+(?:i|we))(?:\s+\w+){0,4}?\s+"
+    r"(?:did\s+(?:i|we|you)|have\s+(?:i|we|you)|what\s+did|what\s+have\s+(?:i|we))(?:\s+\w+){0,4}?\s+"
     + _MEMORY_VERB
-    + r"|remind me|last time|earlier|previous(?:ly)?"
+    + r"|remind me|last time|earlier|previous(?:ly)?|remember|recall"
     r"|we (?:discussed|talked)|you (?:said|told|mentioned)"
     r")\b",
     re.IGNORECASE,

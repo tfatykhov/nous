@@ -198,6 +198,16 @@ leg, while *"what did I **say** about my card"* / *"did you **mention** the dead
 The standalone phrases (remind me, last time, earlier, previous(ly), we discussed/talked, you
 said/told/mentioned) still match on their own.
 
+**Codex r18 — have-forms and remember/recall.** `have (i|we|you)` joins the memory-verb-gated prefix set
+(with `give/share` added to the verb list), so *"Have I told you my card PIN?"* / *"have you shared my
+address"* — memory recalls, not classification utterances — are excluded, while an imperative like
+*"transfer fifty dollars to savings"* still triggers. Bare `remember` and `recall` join the standalone
+memory-referential words: across the five MAB sources a bare `\bremember\b` / `\brecall\b` block is
+defensible — trec asks *what/who/where*, and banking77/clinic150/nlu are imperative or declarative
+(*"set an alarm"*, *"transfer $50"*), so none plausibly **open** a classification utterance with
+`remember`/`recall`, which are inherently about stored history. MAB's pre-Gate-3 gold-query scan (below)
+remains the verification step.
+
 ### Similarity floor (Gate-2 mechanism)
 
 `exemplar_min_similarity` (default 0.30) is the concrete mechanism behind acceptance Gate 2 (see below):

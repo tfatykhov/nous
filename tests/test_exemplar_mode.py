@@ -136,6 +136,8 @@ class TestClassificationShapedTrigger:
             "did I make a cash withdrawal",
             "what is the capital of france",  # trec shape
             "did you increase my limit",
+            "transfer fifty dollars to savings",  # imperative — r18 have/remember additions must not catch it
+            "set an alarm for seven am",
         ],
     )
     def test_classification_shapes_trigger(self, query):
@@ -150,6 +152,11 @@ class TestClassificationShapedTrigger:
             "remind me what we discussed",
             "last time we talked",
             "you said the account was closed",
+            # Codex r18: have-forms + standalone remember/recall.
+            "Have I told you my card PIN?",
+            "have you shared my address",
+            "Do you remember my accountant's name?",
+            "recall what we set up",
         ],
     )
     def test_memory_referential_excluded(self, query):
