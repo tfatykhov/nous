@@ -795,3 +795,86 @@ class TestExemplarRendering:
         text = _format_pipeline_text(results, stats, ["all"])
 
         assert "=== Nearest stored examples ===" not in text
+
+
+# ---------------------------------------------------------------------------
+# Task 6: backfill pure-function logic (chunk grouping, qualification,
+# ordinal continuation). DB e2e (embed/learn/dedup/cap) is already covered
+# by TestExemplarIngest above -- these target only the backfill's own new
+# logic: turning a flat episode_chunks row set into per-episode,
+# ordinal-continuous ExemplarPair lists.
+# ---------------------------------------------------------------------------
+
+from scripts.backfill_exemplar_facts import (  # noqa: E402
+    ChunkRow,
+    build_episode_pairs,
+    episode_qualifies,
+    group_chunks_by_episode,
+)
+
+
+class TestExemplarBackfill:
+    def test_group_chunks_by_episode_orders_by_chunk_index(self):
+        ep_a, ep_b = uuid4(), uuid4()
+        rows = [
+            ChunkRow(episode_id=ep_a, chunk_index=1, content="a1"),
+            ChunkRow(episode_id=ep_b, chunk_index=0, content="b0"),
+            ChunkRow(episode_id=ep_a, chunk_index=0, content="a0"),
+        ]
+
+        grouped = group_chunks_by_episode(rows)
+
+        assert grouped[ep_a] == ["a0", "a1"]
+        assert grouped[ep_b] == ["b0"]
+
+    def test_group_chunks_by_episode_input_order_irrelevant(self):
+        """Rows arriving out of chunk_index order (e.g. an unordered result
+        set) still group into the correct per-episode content order."""
+        ep = uuid4()
+        rows = [
+            ChunkRow(episode_id=ep, chunk_index=2, content="c2"),
+            ChunkRow(episode_id=ep, chunk_index=0, content="c0"),
+            ChunkRow(episode_id=ep, chunk_index=1, content="c1"),
+        ]
+
+        grouped = group_chunks_by_episode(rows)
+
+        assert grouped[ep] == ["c0", "c1", "c2"]
+
+    def test_episode_qualifies_on_concatenated_density(self):
+        # A chunk boundary can split a stream such that no SINGLE chunk
+        # clears the density threshold alone, but the CONCATENATED text
+        # across all of an episode's chunks does.
+        chunk1 = "how do I reset my card pin\nlabel: 21\nmy card is lost\n"
+        chunk2 = "label: 41\nwhat's the exchange rate\nlabel: 32\n"
+
+        assert episode_qualifies([chunk1, chunk2], threshold=0.8)
+        assert not episode_qualifies(["just chatting about the weather today"], threshold=0.8)
+
+    def test_build_episode_pairs_continues_ordinal_across_chunks(self):
+        chunk1 = "how do I reset my card pin\nlabel: 21\nmy card is lost\nlabel: 41\n"
+        chunk2 = "what's the exchange rate\nlabel: 32\nwhen is the bank open\nlabel: 10\n"
+
+        pairs = build_episode_pairs([chunk1, chunk2])
+
+        assert [p.label for p in pairs] == ["21", "41", "32", "10"]
+        # Ordinals form ONE continuous sequence across the chunk boundary,
+        # not [0, 1] then [0, 1] again.
+        assert [p.ordinal for p in pairs] == [0, 1, 2, 3]
+
+    def test_build_episode_pairs_chunk_boundary_fragment_is_harmless(self):
+        # An utterance split mid-text across the chunk boundary: chunk1's
+        # dangling "my card is" has no label line and is dropped (parse_
+        # exemplars already skips label-less utterances); chunk2's "lost"
+        # pairs with label 41 as its own (fragment) utterance. The
+        # fragment does not corrupt ordinal continuation.
+        chunk1 = "how do I reset my card pin\nlabel: 21\nmy card is"
+        chunk2 = "lost\nlabel: 41\n"
+
+        pairs = build_episode_pairs([chunk1, chunk2])
+
+        assert [p.label for p in pairs] == ["21", "41"]
+        assert [p.ordinal for p in pairs] == [0, 1]
+
+    def test_build_episode_pairs_empty_chunk_list(self):
+        assert build_episode_pairs([]) == []
