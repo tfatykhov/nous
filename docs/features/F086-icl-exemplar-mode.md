@@ -330,7 +330,9 @@ python scripts/backfill_exemplar_facts.py --agent-id nous-default [--dry-run] \
   [--source-kinds dialogue] [--log-level INFO]
 
 python scripts/backfill_exemplar_facts.py --agent-id nous-default \
-  --phase rollback --watermark <iso-ts> [--dry-run] [--include-live-writes]
+  --phase rollback --manifest <path> [--dry-run]                      # preferred: exact
+python scripts/backfill_exemplar_facts.py --agent-id nous-default \
+  --phase rollback --watermark <iso-ts> [--dry-run] [--include-live-writes]   # fallback
 ```
 
 **Reads `heart.episode_chunks`, not `episodes.transcript`** (see Falsified Assumption #2 above), grouped
@@ -379,24 +381,35 @@ behavior (a genuinely new label for previously-seen text must still be stored).
 discipline — a density threshold that behaves as expected on a 2-episode sample can still surprise at
 corpus scale).
 
-### Watermark / rollback
+### Rollback: manifest (preferred, exact) vs watermark (fallback) — codex r8
 
-The CLI prints a DB-clock `SELECT now()` watermark ("ROLLBACK KEY") before any write (never the app host's
-clock — matches `scripts/backfill_r3_entity_keys.py`'s codex-round-14 lesson about clock skew silently
-breaking a `created_at >= watermark` predicate). `--phase rollback --watermark <iso-ts>` soft-deactivates:
+Each live backfill prints **two** rollback handles up-front, before any write: the DB-clock `SELECT now()`
+watermark ("ROLLBACK KEY") **and** a "ROLLBACK MANIFEST" path. On completion it writes the manifest — a
+JSONL file (one `{"fact_id": "<uuid>"}` per line) under `reports/`, holding the **exact** fact ids the run
+created. `--dry-run` prints the manifest path it *would* write but writes nothing.
+
+**`--phase rollback --manifest <path>` is the preferred, exact mode.** It soft-deactivates exactly the
+listed ids (agent- and source-scoped, active rows only):
 
 ```sql
 UPDATE heart.facts SET active = false
-WHERE agent_id = :agent_id AND source = 'exemplar_extractor' AND created_at >= :watermark;
+WHERE agent_id = :agent_id AND source = 'exemplar_extractor' AND active = true
+  AND id = ANY(CAST(:ids AS uuid[]));
 ```
 
-— never a hard delete; reactivation is the inverse. Before writing, the rollback counts exemplar facts
-whose *source chunk itself* is also newer than the watermark (a JOIN against `heart.episode_chunks` on
-`source_episode_id`, both sides' `created_at >= watermark`). A nonzero count means those facts derive from
-content that did not exist yet when the run being undone started — they were plausibly produced by a
-concurrent **live** write (`NOUS_EXEMPLAR_EXTRACTION_ENABLED` processing a freshly-completed episode), not
-by the backfill run being rolled back. Rollback **aborts with no writes** in that case unless
-`--include-live-writes` is passed. `--dry-run` always reports both counts and never aborts.
+Because a concurrent **live** write's fact id is never in a backfill's manifest, this mode **cannot** touch
+a live write — it closes the race the watermark mode cannot.
+
+**`--phase rollback --watermark <iso-ts>` is the fallback** (use only when no manifest exists). It keys on
+`created_at >= watermark`, so it **may catch concurrent live writes** and prints a loud WARNING saying so.
+The race it cannot fully avoid: an in-flight live extraction reading **pre-watermark** chunks can commit its
+facts **after** the watermark; the chunk-timestamp guard below only catches facts whose *source chunk
+itself* is newer than the watermark (a JOIN against `heart.episode_chunks` on `source_episode_id`, both
+sides' `created_at >= watermark`), so a nonzero count aborts (no writes) unless `--include-live-writes` is
+passed. `--dry-run` reports both counts and never aborts. **The manifest closes the pre-watermark-chunk case
+the chunk-timestamp guard leaves open** — prefer it whenever the printed manifest is available.
+
+Both modes are soft-deactivation, never a hard delete; reactivation is the inverse.
 
 ---
 

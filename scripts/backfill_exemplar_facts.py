@@ -63,10 +63,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
+import os
+import re
 import sys
 from dataclasses import replace
 from datetime import date, datetime
+from pathlib import Path
 from typing import NamedTuple
 from uuid import UUID
 
@@ -203,7 +207,31 @@ async def select_backfill_chunks(
     return result.all()
 
 
-async def _store_episode_pairs(heart, settings, pairs: list[ExemplarPair], episode_id: UUID, logger) -> tuple[int, int]:
+def _manifest_path_for(agent_id: str, watermark: str) -> str:
+    """Codex r8: deterministic rollback-manifest path for a backfill run,
+    derived from agent_id + the DB-clock watermark so it can be printed
+    up-front (alongside the ROLLBACK KEY) before any write. Lives under the
+    ``reports/`` dir next to the eval reports."""
+    safe = re.sub(r"[^0-9A-Za-z]+", "_", f"{agent_id}_{watermark}")
+    return str(Path("reports") / f"f086_exemplar_backfill_{safe}.jsonl")
+
+
+def _read_manifest_ids(path: str) -> list[UUID]:
+    """Codex r8: read the fact ids from a backfill rollback manifest (JSONL,
+    one ``{"fact_id": "<uuid>"}`` object per line)."""
+    ids: list[UUID] = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            ids.append(UUID(json.loads(line)["fact_id"]))
+    return ids
+
+
+async def _store_episode_pairs(
+    heart, settings, pairs: list[ExemplarPair], episode_id: UUID, logger
+) -> tuple[int, int, list[UUID]]:
     """Cap + embed + learn one episode's full (already ordinal-continuous)
     pair list. Thin wrapper around ``_embed_and_store_pairs``
     (nous/handlers/exemplar_ingest.py) -- the same cap+embed+learn
@@ -282,6 +310,45 @@ async def rollback_exemplar_facts(
     return {"facts_deactivated": result.rowcount, "live_write_facts": n_live_write_facts}
 
 
+async def rollback_exemplar_facts_by_manifest(
+    session,
+    *,
+    agent_id: str,
+    fact_ids: list[UUID],
+    dry_run: bool,
+) -> dict[str, int]:
+    """Codex r8: soft-deactivate EXACTLY the exemplar facts named in a backfill
+    manifest (agent- and source-scoped, active rows only). This is the exact
+    rollback mode -- unlike the watermark fallback it cannot catch a concurrent
+    live write, because a live write's fact id is never in a backfill manifest.
+    Never commits -- the caller does.
+    """
+    if not fact_ids:
+        return {"facts_deactivated": 0}
+    ids = [str(i) for i in fact_ids]
+    if dry_run:
+        n = (
+            await session.execute(
+                text(
+                    "SELECT COUNT(*) FROM heart.facts WHERE agent_id = :a "
+                    "AND source = 'exemplar_extractor' AND active = true "
+                    "AND id = ANY(CAST(:ids AS uuid[]))"
+                ),
+                {"a": agent_id, "ids": ids},
+            )
+        ).scalar_one()
+        return {"facts_deactivated": n}
+    result = await session.execute(
+        text(
+            "UPDATE heart.facts SET active = false WHERE agent_id = :a "
+            "AND source = 'exemplar_extractor' AND active = true "
+            "AND id = ANY(CAST(:ids AS uuid[]))"
+        ),
+        {"a": agent_id, "ids": ids},
+    )
+    return {"facts_deactivated": result.rowcount}
+
+
 async def _run_backfill(
     *,
     agent_id: str,
@@ -314,6 +381,11 @@ async def _run_backfill(
         async with db.session() as session:
             watermark = (await fetch_db_now(session)).isoformat()
         print(f"ROLLBACK KEY (created_at watermark): {watermark}")
+        # Codex r8: the EXACT rollback manifest path (preferred over the
+        # watermark, which cannot distinguish a concurrent live write). Computed
+        # up-front so it is printed even if the run later fails.
+        manifest_path = _manifest_path_for(agent_id, watermark)
+        print(f"ROLLBACK MANIFEST (exact fact ids, preferred): {manifest_path}")
 
         async with db.session() as session:
             rows = await select_backfill_chunks(session, agent_id, since, max_episodes, source_kinds)
@@ -330,7 +402,8 @@ async def _run_backfill(
             print(
                 f"DRY RUN [source_kinds={','.join(source_kinds)}]: {len(by_episode)} episodes with chunks, "
                 f"{len(qualifying)} classified exemplar streams, "
-                f"{total_pairs} candidate pairs -- no writes."
+                f"{total_pairs} candidate pairs -- no writes. "
+                f"Would write rollback manifest to {manifest_path}."
             )
             return 0
 
@@ -349,16 +422,27 @@ async def _run_backfill(
 
         total = 0
         total_skipped = 0
+        created_ids: list[UUID] = []
         async with heart:
             for episode_id, contents in qualifying.items():
                 pairs = build_episode_pairs(contents)
-                stored, skipped = await _store_episode_pairs(heart, settings, pairs, episode_id, logger)
+                stored, skipped, ids = await _store_episode_pairs(heart, settings, pairs, episode_id, logger)
                 total += stored
                 total_skipped += skipped
+                created_ids.extend(ids)
+
+        # Codex r8: write the EXACT rollback manifest (one fact id per JSONL
+        # line). --phase rollback --manifest deactivates exactly these ids, so a
+        # concurrent live write (never in this manifest) is never touched.
+        Path(manifest_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(manifest_path, "w", encoding="utf-8") as fh:
+            for fid in created_ids:
+                fh.write(json.dumps({"fact_id": str(fid)}) + "\n")
 
         print(
             f"Backfilled {total} exemplar facts across {len(qualifying)} episodes "
-            f"({total_skipped} skipped: no embedding)."
+            f"({total_skipped} skipped: no embedding). "
+            f"Wrote {len(created_ids)} fact id(s) to rollback manifest {manifest_path}."
         )
         return 0
     except Exception:
@@ -371,7 +455,8 @@ async def _run_backfill(
 async def _run_rollback(
     *,
     agent_id: str,
-    watermark: datetime,
+    watermark: datetime | None,
+    manifest_path: str | None,
     dry_run: bool,
     include_live_writes: bool,
 ) -> int:
@@ -380,20 +465,35 @@ async def _run_rollback(
     await db.connect()
     try:
         async with db.session() as session:
-            counts = await rollback_exemplar_facts(
-                session,
-                agent_id=agent_id,
-                watermark=watermark,
-                dry_run=dry_run,
-                include_live_writes=include_live_writes,
-            )
+            if manifest_path is not None:
+                fact_ids = _read_manifest_ids(manifest_path)
+                counts = await rollback_exemplar_facts_by_manifest(
+                    session, agent_id=agent_id, fact_ids=fact_ids, dry_run=dry_run
+                )
+                mode = "manifest"
+            else:
+                # Codex r8: watermark is the FALLBACK -- it keys on created_at and
+                # cannot distinguish a concurrent live write from a backfill row.
+                print(
+                    "WARNING: --watermark rollback is the FALLBACK mode. It deactivates ALL "
+                    "exemplar facts created at/after the watermark by created_at, which MAY catch "
+                    "concurrent live writes (the chunk-timestamp guard only catches post-watermark "
+                    "chunks). Prefer --manifest for an EXACT rollback.",
+                    file=sys.stderr,
+                )
+                counts = await rollback_exemplar_facts(
+                    session,
+                    agent_id=agent_id,
+                    watermark=watermark,
+                    dry_run=dry_run,
+                    include_live_writes=include_live_writes,
+                )
+                mode = "watermark"
             if not dry_run:
                 await session.commit()
         label = "DRY RUN " if dry_run else ""
-        print(
-            f"[rollback] {label}facts_deactivated={counts['facts_deactivated']} "
-            f"live_write_facts={counts['live_write_facts']}"
-        )
+        extra = f" live_write_facts={counts['live_write_facts']}" if "live_write_facts" in counts else ""
+        print(f"[rollback:{mode}] {label}facts_deactivated={counts['facts_deactivated']}{extra}")
         return 0
     except Exception:
         logger.exception("Rollback failed")
@@ -455,11 +555,21 @@ def main() -> None:
         help="'backfill' (default) or 'rollback' (requires --watermark).",
     )
     parser.add_argument(
+        "--manifest",
+        type=str,
+        default=None,
+        help="Path to the exact rollback manifest (the 'ROLLBACK MANIFEST' JSONL "
+        "printed by a prior backfill run). PREFERRED for --phase rollback -- "
+        "deactivates exactly the fact ids it created, so a concurrent live write "
+        "is never touched. Ignored outside --phase rollback.",
+    )
+    parser.add_argument(
         "--watermark",
         type=str,
         default=None,
         help="ISO-8601, timezone-aware timestamp (the 'ROLLBACK KEY' printed by "
-        "a prior run). Required for --phase rollback; ignored otherwise.",
+        "a prior run). FALLBACK for --phase rollback when no manifest is available "
+        "(warns -- may catch concurrent live writes). Ignored otherwise.",
     )
     parser.add_argument(
         "--include-live-writes",
@@ -478,19 +588,29 @@ def main() -> None:
     )
 
     if args.phase == "rollback":
-        if not args.watermark:
-            parser.error("--phase rollback requires --watermark <iso-ts>")
-        try:
-            watermark = datetime.fromisoformat(args.watermark)
-        except ValueError:
-            parser.error(f"--watermark is not a valid ISO-8601 timestamp: {args.watermark!r}")
-        if watermark.tzinfo is None:
-            parser.error("--watermark must be timezone-aware (e.g. include '+00:00' or 'Z')")
+        # Codex r8: manifest is the preferred exact mode; watermark is the
+        # fallback. Require one. If both are given, manifest wins.
+        if not args.manifest and not args.watermark:
+            parser.error("--phase rollback requires --manifest <path> (preferred) or --watermark <iso-ts> (fallback)")
+        watermark = None
+        manifest_path = None
+        if args.manifest:
+            if not os.path.exists(args.manifest):
+                parser.error(f"--manifest file not found: {args.manifest!r}")
+            manifest_path = args.manifest
+        else:
+            try:
+                watermark = datetime.fromisoformat(args.watermark)
+            except ValueError:
+                parser.error(f"--watermark is not a valid ISO-8601 timestamp: {args.watermark!r}")
+            if watermark.tzinfo is None:
+                parser.error("--watermark must be timezone-aware (e.g. include '+00:00' or 'Z')")
         sys.exit(
             asyncio.run(
                 _run_rollback(
                     agent_id=args.agent_id,
                     watermark=watermark,
+                    manifest_path=manifest_path,
                     dry_run=args.dry_run,
                     include_live_writes=args.include_live_writes,
                 )

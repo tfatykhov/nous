@@ -17,7 +17,7 @@ async def _embed_and_store_pairs(
     logger: logging.Logger,
     *,
     log_prefix: str,
-) -> tuple[int, int]:
+) -> tuple[int, int, list[UUID]]:
     """Cap + embed + learn an already-ordinaled list of exemplar pairs.
 
     Shared by ``ingest_exemplars`` below (single-transcript, live write
@@ -29,15 +29,17 @@ async def _embed_and_store_pairs(
     it gets capped, embedded, or stored -- this is the one shared
     cap+embed+learn implementation.
 
-    Returns ``(stored, skipped_no_embedding)``. ``stored`` is the count of
-    ``heart.learn`` calls that did not come back as ``FactRejected`` (deduped
-    against distinct new ids within this call). A dedup-confirm within the
-    SAME batch is only counted once via ``seen_ids``; a confirm against a
+    Returns ``(stored, skipped_no_embedding, created_ids)``. ``stored`` is the
+    count of ``heart.learn`` calls that did not come back as ``FactRejected``
+    (deduped against distinct new ids within this call). A dedup-confirm within
+    the SAME batch is only counted once via ``seen_ids``; a confirm against a
     PRE-EXISTING fact from an earlier call still increments it even though no
     new row was created -- ``stored`` is telemetry only. ``skipped_no_embedding``
     counts pairs dropped because no embedding could be produced (codex r3 --
-    an exemplar row must never persist with a NULL embedding). Callers that
-    need an authoritative count of newly stored facts must query the DB.
+    an exemplar row must never persist with a NULL embedding). ``created_ids``
+    is the distinct fact ids this call touched (codex r8 -- the backfill writes
+    them to an exact rollback manifest). Callers that need an authoritative
+    count of newly stored facts must query the DB.
     """
     cap = settings.exemplar_max_per_episode
     if len(pairs) > cap:
@@ -50,7 +52,7 @@ async def _embed_and_store_pairs(
         )
         pairs = pairs[:cap]
     if not pairs:
-        return 0, 0  # (stored, skipped_no_embedding) — callers unpack a tuple (codex r4)
+        return 0, 0, []  # (stored, skipped_no_embedding, created_ids) — callers unpack (codex r4/r8)
 
     inputs = [
         FactInput(
@@ -133,7 +135,13 @@ async def _embed_and_store_pairs(
             skipped_no_embedding,
             episode_id,
         )
-    return stored, skipped_no_embedding
+    # Codex r8: return the distinct fact ids this call touched (seen_ids) so the
+    # backfill can write an EXACT rollback manifest. seen_ids holds one id per
+    # non-rejected learn result; a same-content dedup-confirm resolves to the
+    # existing row's id, so in the targeted live-write race (pre-watermark chunk
+    # processed live, committing DIFFERENT-content facts post-watermark) no live
+    # id ever enters this set -- the manifest stays exact for that race.
+    return stored, skipped_no_embedding, list(seen_ids)
 
 
 async def ingest_exemplars(
@@ -152,7 +160,7 @@ async def ingest_exemplars(
     if not pairs:
         return 0
     truncated = len(pairs) > settings.exemplar_max_per_episode
-    stored, skipped_no_embedding = await _embed_and_store_pairs(
+    stored, skipped_no_embedding, _created_ids = await _embed_and_store_pairs(
         heart,
         settings,
         pairs,

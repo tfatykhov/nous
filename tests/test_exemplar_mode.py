@@ -1,9 +1,11 @@
 """F086 ICL exemplar mode tests."""
 
+import json
 import logging
 import math
 import random as _random
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -430,6 +432,24 @@ class TestExemplarIngest:
         rows = await _fact_rows(heart, episode_id)
         assert len(rows) == 3
         assert all(r.embedding is not None for r in rows)
+
+    async def test_store_episode_pairs_returns_created_ids(self, heart, settings):
+        # Codex r8: the backfill's store wrapper returns the exact created fact
+        # ids so _run_backfill can write an EXACT rollback manifest.
+        from scripts.backfill_exemplar_facts import _store_episode_pairs
+
+        episode_id = await _insert_episode(heart)
+        tag = str(episode_id)
+        pairs = parse_exemplars(
+            f"how do I reset my card pin {tag}\nlabel: 21\n"
+            f"my card is lost {tag}\nlabel: 41\n"
+            f"what is the exchange rate {tag}\nlabel: 32\n"
+        )
+        stored, skipped, created_ids = await _store_episode_pairs(heart, settings, pairs, episode_id, logger)
+
+        assert stored == 3 and skipped == 0
+        rows = await _fact_rows(heart, episode_id)
+        assert set(created_ids) == {r.id for r in rows}
 
 
 # ---------------------------------------------------------------------------
@@ -940,12 +960,13 @@ class TestExemplarLeg:
 
         results, stats = await run_recall_pipeline(self._QUERY, heart, brain, s)
 
-        # Codex r1: the leg fetches without a fetch-side exclusion (Stage-1
-        # exemplar rows are stripped from the accumulator instead, then
-        # re-fetched into the banded examples block). Pin the call shape.
+        # Codex r1/r8: Stage-1 exemplar rows are stripped from the accumulator
+        # and re-fetched into the banded block (not excluded from the fetch).
+        # r8 threads the F071 cross-context set as exclude_fact_ids, which is
+        # None here (no exclude_ids passed). Pin the call shape.
         fetch_mock.assert_awaited_once()
         assert fetch_mock.await_args.kwargs["limit"] == s.exemplar_top_k
-        assert "exclude_fact_ids" not in fetch_mock.await_args.kwargs
+        assert fetch_mock.await_args.kwargs.get("exclude_fact_ids") is None
 
         exemplar_rows = [r for r in results if r.metadata.get("retrieval_leg") == "exemplar"]
         assert len(exemplar_rows) == 3
@@ -1303,6 +1324,52 @@ class TestExemplarLeg:
                         await cleanup.delete(f)
                 await cleanup.commit()
 
+    async def test_f071_excluded_ids_not_consuming_fetch_limit(self, heart, brain, settings, monkeypatch):
+        # Codex r8: when F071 excludes the nearest exemplar id, the K-limited
+        # fetch must skip it so a fresh below-LIMIT exemplar is fetched + merges,
+        # instead of the excluded id consuming the K=1 slot only to be dropped at
+        # assembly (leaving the block empty while a fresh example sat past LIMIT).
+        top_id, fresh_id = uuid4(), uuid4()
+        top_vec = await heart._embeddings.embed_near(self._QUERY, noise=0.01)  # nearest
+        fresh_vec = await heart._embeddings.embed_near(self._QUERY, noise=0.05)  # 2nd nearest
+        async with heart.db.session() as seed:
+            seed.add(
+                Fact(
+                    id=top_id,
+                    agent_id=heart.agent_id,
+                    content="closest exemplar utterance\nlabel: 1",
+                    source="exemplar_extractor",
+                    active=True,
+                    embedding=top_vec,
+                )
+            )
+            seed.add(
+                Fact(
+                    id=fresh_id,
+                    agent_id=heart.agent_id,
+                    content="fresh exemplar utterance\nlabel: 2",
+                    source="exemplar_extractor",
+                    active=True,
+                    embedding=fresh_vec,
+                )
+            )
+            await seed.commit()
+        try:
+            s = settings.model_copy(update={"exemplar_mode_enabled": True, "exemplar_top_k": 1})
+            monkeypatch.setattr(heart.facts, "has_exemplars", AsyncMock(return_value=True))
+            # F071 excludes the NEAREST (top) exemplar id from the current turn.
+            results, _ = await run_recall_pipeline(self._QUERY, heart, brain, s, exclude_ids={"fact": {str(top_id)}})
+            ex_ids = {r.id for r in results if r.metadata.get("retrieval_leg") == "exemplar"}
+            assert fresh_id in ex_ids  # fetched despite K=1, because top was excluded pre-LIMIT
+            assert top_id not in ex_ids  # F071-excluded, never surfaced
+        finally:
+            async with heart.db.session() as cleanup:
+                for fid in (top_id, fresh_id):
+                    f = await cleanup.get(Fact, fid)
+                    if f is not None:
+                        await cleanup.delete(f)
+                await cleanup.commit()
+
 
 # ---------------------------------------------------------------------------
 # Task 5: recall_deep rendering block + telemetry
@@ -1380,10 +1447,14 @@ class TestExemplarRendering:
 
 from scripts.backfill_exemplar_facts import (  # noqa: E402
     ChunkRow,
+    _manifest_path_for,
+    _read_manifest_ids,
     _store_episode_pairs,
     build_episode_pairs,
     episode_qualifies,
     group_chunks_by_episode,
+    rollback_exemplar_facts,
+    rollback_exemplar_facts_by_manifest,
 )
 
 
@@ -1455,14 +1526,14 @@ class TestExemplarBackfill:
 
     async def test_store_episode_pairs_empty_returns_tuple(self, settings):
         # Codex r4: a genuinely-qualifying episode whose chunks parse to ZERO
-        # pairs must reach the backfill loop's `stored, skipped = ...` unpack
+        # pairs must reach the backfill loop's `stored, skipped, ids = ...` unpack
         # without a TypeError. Realistic trigger: chunk boundaries fall BETWEEN
         # each utterance and its label, so the CONCATENATED episode is a genuine
         # >= 3-pair exemplar stream (qualifies under the codex-r6 alternation
         # gate), but each chunk parses INDEPENDENTLY to [] (an utterance with no
         # following label; a label with no preceding utterance). The empty-pairs
-        # early return must be (0, 0), not a bare 0. _stub_heart is never touched
-        # (empty pairs short-circuit before any embed/learn).
+        # early return must be (0, 0, []), not a bare 0. _stub_heart is never
+        # touched (empty pairs short-circuit before any embed/learn).
         chunks = [
             "how do I reset my card pin",  # utterance, no label -> []
             "label: 21\nmy card is lost",  # orphan label + utterance -> []
@@ -1473,8 +1544,80 @@ class TestExemplarBackfill:
         pairs = build_episode_pairs(chunks)
         assert pairs == []  # ...but per-chunk parse yields none
 
-        stored, skipped = await _store_episode_pairs(_stub_heart(), settings, pairs, uuid4(), logger)
-        assert (stored, skipped) == (0, 0)
+        stored, skipped, created_ids = await _store_episode_pairs(_stub_heart(), settings, pairs, uuid4(), logger)
+        assert (stored, skipped, created_ids) == (0, 0, [])
+
+    def test_manifest_roundtrip(self, tmp_path):
+        # Codex r8: the rollback manifest is JSONL, one {"fact_id": "<uuid>"} per
+        # line; _read_manifest_ids round-trips exactly the ids written.
+        ids = [uuid4(), uuid4(), uuid4()]
+        p = tmp_path / "manifest.jsonl"
+        p.write_text("\n".join(json.dumps({"fact_id": str(i)}) for i in ids) + "\n", encoding="utf-8")
+        assert _read_manifest_ids(str(p)) == ids
+
+    def test_manifest_path_is_filesystem_safe(self):
+        # The path derives from agent_id + an ISO watermark (colons, '+') and must
+        # be a single safe filename under reports/.
+        path = _manifest_path_for("nous-default", "2026-07-21T01:02:03+00:00")
+        assert "reports" in path and path.endswith(".jsonl")
+        assert ":" not in Path(path).name and "+" not in Path(path).name
+
+
+@pytest.mark.postgres_only
+class TestExemplarManifestRollback:
+    """Codex r8: manifest rollback is EXACT (only backfill-created ids); the
+    watermark fallback keys on created_at and cannot spare a concurrent live
+    write committed after the watermark."""
+
+    async def test_manifest_rollback_exact_vs_watermark_catches_live(self, heart):
+        agent_id = f"exemplar-manifest-{uuid4()}"
+        backfill_id, live_id = uuid4(), uuid4()
+        async with heart.db.session() as s:
+            watermark = (await s.execute(text("SELECT now()"))).scalar_one()
+            # Both rows created AFTER the watermark; only backfill_id is in the manifest.
+            s.add(
+                Fact(
+                    id=backfill_id,
+                    agent_id=agent_id,
+                    content="backfilled exemplar\nlabel: 1",
+                    source="exemplar_extractor",
+                    active=True,
+                    created_at=watermark + timedelta(seconds=1),
+                )
+            )
+            s.add(
+                Fact(
+                    id=live_id,
+                    agent_id=agent_id,
+                    content="live exemplar\nlabel: 2",
+                    source="exemplar_extractor",
+                    active=True,
+                    created_at=watermark + timedelta(seconds=2),
+                )
+            )
+            await s.commit()
+        try:
+            # Watermark fallback (dry-run) would catch BOTH — including the live row.
+            async with heart.db.session() as s:
+                wm = await rollback_exemplar_facts(s, agent_id=agent_id, watermark=watermark, dry_run=True)
+            assert wm["facts_deactivated"] == 2  # the fallback's imprecision (the bug it can't avoid)
+
+            # Manifest mode deactivates ONLY the backfill id; the live row survives.
+            async with heart.db.session() as s:
+                mf = await rollback_exemplar_facts_by_manifest(
+                    s, agent_id=agent_id, fact_ids=[backfill_id], dry_run=False
+                )
+                await s.commit()
+            assert mf["facts_deactivated"] == 1
+            async with heart.db.session() as s:
+                bf = await s.get(Fact, backfill_id)
+                lv = await s.get(Fact, live_id)
+                assert bf.active is False  # backfill row rolled back
+                assert lv.active is True  # concurrent live write untouched
+        finally:
+            async with heart.db.session() as s:
+                await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
+                await s.commit()
 
     @pytest.mark.postgres_only
     async def test_backfill_reads_dialogue_only_by_default(self, heart):

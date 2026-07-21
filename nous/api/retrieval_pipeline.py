@@ -875,8 +875,18 @@ async def _run_stages(
                 embedder = getattr(heart, "_embeddings", None)
                 q_vec = (await embedder.embed(query)) if embedder is not None else None
                 if q_vec:
+                    # Codex r8: exclude the F071 already-in-context fact set from
+                    # the fetch so ids the assembly-time F071 filter will drop do
+                    # NOT spend the K budget (which would starve fresh
+                    # below-LIMIT examples). This is the F071 cross-context set
+                    # ONLY — Stage-1-surfaced exemplar ids are deliberately NOT
+                    # excluded here (they are re-fetched by the strip-and-refetch
+                    # design and land in the examples block).
+                    f071_excludes = {UUID(s) for s in (exclude_ids or {}).get("fact", set())}
                     hits = await heart.facts.fetch_exemplars_by_vector(
-                        q_vec, limit=getattr(settings, "exemplar_top_k", 25)
+                        q_vec,
+                        limit=getattr(settings, "exemplar_top_k", 25),
+                        exclude_fact_ids=f071_excludes or None,
                     )
                     floor = getattr(settings, "exemplar_min_similarity", 0.30)
                     surviving = [h for h in hits if h.similarity >= floor]

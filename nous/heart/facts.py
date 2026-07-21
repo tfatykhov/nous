@@ -3932,31 +3932,48 @@ class FactManager:
                 out.setdefault(r.fact_id, []).append(r.entity_key)
             return out
 
-    async def fetch_exemplars_by_vector(self, query_embedding: list[float], limit: int = 25) -> list[ExemplarHit]:
+    async def fetch_exemplars_by_vector(
+        self,
+        query_embedding: list[float],
+        limit: int = 25,
+        *,
+        exclude_fact_ids: list[UUID] | set[UUID] | None = None,
+    ) -> list[ExemplarHit]:
         """F086: K nearest active exemplar facts by cosine (source-filtered).
 
         Same ANN-horizon margin as ``_find_similar_for_dedup`` — the partial
         HNSW index (migration 066) is scoped to ``source =
-        'exemplar_extractor'`` so this walk never touches the much larger
-        general embedding index.
+        'exemplar_extractor' AND active = true`` so this walk never touches the
+        much larger general embedding index.
+
+        Codex r8: ``exclude_fact_ids`` pushes the caller's F071 cross-context
+        exclusion set into the LIMIT itself (mirrors ``fetch_by_entity_keys``'s
+        idiom) so ids the assembly-time F071 filter will drop don't spend the K
+        budget, starving fresh below-LIMIT examples. NOTE: this is the F071
+        already-in-context set, NOT the Stage-1-surfaced exemplar ids — those
+        are deliberately re-fetched (strip-and-refetch design).
         """
         vec_lit = "[" + ",".join(str(x) for x in query_embedding) + "]"
+        params: dict = {"v": vec_lit, "agent_id": self.agent_id, "limit": limit}
+        exclude_clause = ""
+        if exclude_fact_ids:
+            exclude_clause = "  AND NOT (id = ANY(CAST(:exclude_ids AS uuid[]))) "
+            params["exclude_ids"] = [str(i) for i in exclude_fact_ids]
         async with self.db.session() as session:
             await set_local_ef_search(session, 100)
             rows = (
                 await session.execute(
-                    text("""
-                SELECT id, content,
-                       1 - (embedding <=> CAST(:v AS vector)) AS similarity
-                FROM heart.facts
-                WHERE agent_id = :agent_id
-                  AND active = true
-                  AND source = 'exemplar_extractor'
-                  AND embedding IS NOT NULL
-                ORDER BY embedding <=> CAST(:v AS vector)
-                LIMIT :limit
-            """),
-                    {"v": vec_lit, "agent_id": self.agent_id, "limit": limit},
+                    text(
+                        "SELECT id, content, "
+                        "       1 - (embedding <=> CAST(:v AS vector)) AS similarity "
+                        "FROM heart.facts "
+                        "WHERE agent_id = :agent_id "
+                        "  AND active = true "
+                        "  AND source = 'exemplar_extractor' "
+                        "  AND embedding IS NOT NULL " + exclude_clause + "ORDER BY embedding <=> CAST(:v AS vector) "
+                        "LIMIT :limit"
+                    ),
+                    params,
                 )
             ).fetchall()
         return [ExemplarHit(id=r.id, content=r.content, similarity=float(r.similarity)) for r in rows]
