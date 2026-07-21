@@ -1,6 +1,8 @@
 """F086 ICL exemplar mode tests."""
 
 import logging
+import math
+import random as _random
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -26,6 +28,27 @@ from nous.heart.schemas import FactInput, FactRejected
 from nous.storage.models import Episode, Fact
 
 logger = logging.getLogger(__name__)
+
+
+def _vec_at_cosine(base: list[float], cos: float, seed: str) -> list[float]:
+    """Construct a unit vector with EXACT cosine ``cos`` to unit vector ``base``.
+
+    ``v = cos*base + sqrt(1-cos^2)*orthonormal`` where ``orthonormal`` is a unit
+    vector orthogonal to ``base``. The dot product is deterministically ``cos``
+    (callers verify it), so a near-dupe fixture can pin BOTH the 0.80
+    supersession band AND the 0.95 native-cosine dedup gate at once — unlike
+    ``embed_near``'s per-dim gaussian, which lands ~0.787 and straddles 0.80.
+    """
+    rng = _random.Random(seed)
+    raw = [rng.gauss(0, 1) for _ in base]
+    dot_rb = sum(r * b for r, b in zip(raw, base))
+    orth = [r - dot_rb * b for r, b in zip(raw, base)]
+    onorm = math.sqrt(sum(x * x for x in orth))
+    orth = [x / onorm for x in orth]
+    v = [cos * b + math.sqrt(1 - cos * cos) * o for b, o in zip(base, orth)]
+    vnorm = math.sqrt(sum(x * x for x in v))
+    return [x / vnorm for x in v]
+
 
 PURE_STREAM = "how do I reset my card pin\nlabel: 21\nmy card is lost\nlabel: 41\nwhat's the exchange rate\nlabel: 32\n"
 TRANSCRIPT_STREAM = (
@@ -166,13 +189,19 @@ class TestExemplarIngest:
 
         # A and C use the IDENTICAL content string -> the real (deterministic,
         # hash-seeded) mock embedder already gives them equal vectors, no
-        # forcing needed. B differs only in its label suffix, so the real
-        # embedder would give it an uncorrelated vector; force it NEAR (not
-        # identical to) A's real embedding so _find_duplicate surfaces it as
-        # a would-be dupe of A, while still ranking strictly below C's exact
-        # (cosine 1.0) match against A -- deterministic regardless of any
-        # distance tie-breaking.
-        vec_b_near = await heart._embeddings.embed_near(content_a, noise=0.02)
+        # forcing needed. B differs only in its label suffix; force its vector
+        # to an EXACT cosine of 0.97 to A's -- deterministically >= 0.95 (so it
+        # reaches the native-cosine dedup gate and the label-guard MUST fire)
+        # AND > 0.80 (so it also enters the legacy subject-supersession band,
+        # pinning FIX 1's exemplar exemption -- pre-fix this row got
+        # active=False + superseded_by set). embed_near(noise=0.02) landed
+        # ~0.787: below the dedup gate (guard untested) and straddling 0.80
+        # (flaky). A and B share the SAME utterance text -> the SAME subject, so
+        # the legacy supersession path is genuinely reachable here.
+        base_a = await heart._embeddings.embed(content_a)
+        vec_b_near = _vec_at_cosine(base_a, 0.97, "f086-fix3-b")
+        assert abs(sum(x * b for x, b in zip(vec_b_near, base_a)) - 0.97) < 1e-9
+        assert 0.97 >= 0.95 and 0.97 > 0.80
         real_embed = heart._embeddings.embed
 
         async def _forced_embed_batch(texts):
@@ -201,10 +230,57 @@ class TestExemplarIngest:
         assert n_b == 1  # different label -> stored as new, not dropped
 
         rows = await _fact_rows(heart, episode_id)
-        # A and B both persisted as distinct rows; C deduped against A.
-        assert len(rows) == 2
-        labels = sorted(r.content.splitlines()[-1] for r in rows)
+        # FIX 1: both A and B remain ACTIVE with NO supersession link -- the
+        # legacy subject-supersession is exempted for exemplars even at
+        # cosine 0.97 (> 0.80 band). C deduped against A (confirm, no new row).
+        active_rows = [r for r in rows if r.active]
+        assert len(active_rows) == 2
+        assert all(r.superseded_by is None for r in active_rows)
+        labels = sorted(r.content.splitlines()[-1] for r in active_rows)
         assert labels == ["label: 0", "label: 1"]
+
+    async def test_normal_fact_not_dedup_dropped_into_exemplar(self, heart, settings):
+        """FIX 4 (two-sided guard): a genuine conversational fact whose nearest
+        neighbor is an exemplar row must NOT dedup-confirm into that exemplar
+        and vanish. Pre-fix the guard checked only ``input.source``, so a
+        non-exemplar input dedup-dropped into an exemplar dupe."""
+        episode_id = await _insert_episode(heart)
+        tag = str(episode_id)
+
+        # Store an exemplar row first.
+        exemplar_stream = f"how do I reset my card pin {tag}\nlabel: 21\n"
+        n_ex = await ingest_exemplars(heart, settings, exemplar_stream, episode_id, heart.agent_id, logger)
+        assert n_ex == 1
+
+        # A normal fact engineered at EXACT cosine 0.97 to the stored exemplar's
+        # embedding (>= the 0.95 native-cosine dedup gate). parse_label(normal)
+        # is None != "21", so the two-sided guard (dupe side is exemplar) must
+        # clear `found` and INSERT the normal fact rather than confirm-drop it.
+        exemplar_content = f"how do I reset my card pin {tag}\nlabel: 21"
+        base_ex = await heart._embeddings.embed(exemplar_content)
+        normal_content = f"The user asked how to reset the card pin during session {tag}."
+        vec_normal = _vec_at_cosine(base_ex, 0.97, "f086-fix4-normal")
+        assert abs(sum(x * b for x, b in zip(vec_normal, base_ex)) - 0.97) < 1e-9
+
+        result = await heart.learn(
+            FactInput(
+                content=normal_content,
+                subject="card pin reset help",
+                category="general",
+                confidence=0.9,
+                source="fact_extractor",
+                source_episode_id=episode_id,
+            ),
+            precomputed_embedding=vec_normal,
+        )
+        assert not isinstance(result, FactRejected)
+
+        rows = await _fact_rows(heart, episode_id)
+        active_rows = [r for r in rows if r.active]
+        # Both the exemplar AND the normal fact are present and active.
+        assert len(active_rows) == 2
+        sources = sorted(r.source for r in active_rows)
+        assert sources == ["exemplar_extractor", "fact_extractor"]
 
     async def test_cap_truncates_loudly(self, heart, settings, caplog):
         episode_id = await _insert_episode(heart)
@@ -531,6 +607,13 @@ class TestExemplarLeg:
     _QUERY = "what is the capital of france"
 
     async def test_flag_off_byte_identical(self, heart, brain, settings, monkeypatch):
+        # Baseline flag-off run (exemplar_mode_enabled defaults False).
+        baseline_results, baseline_stats = await run_recall_pipeline(self._QUERY, heart, brain, settings)
+
+        # Second flag-off run with has_exemplars sentinel'd: proves the leg
+        # never executes AND that flag-off output stays byte-identical to the
+        # baseline (full ordered results + exemplar stats fields), the Gate-4
+        # composite claim. Mirrors the floor test's ordered-id comparison.
         sentinel = AsyncMock(side_effect=AssertionError("exemplar leg ran with flag off"))
         monkeypatch.setattr(heart.facts, "has_exemplars", sentinel)
 
@@ -540,6 +623,14 @@ class TestExemplarLeg:
         assert stats.exemplar_leg_used is False
         assert stats.n_exemplar == 0
         assert not any(r.metadata.get("retrieval_leg") == "exemplar" for r in results)
+        # Full ordered results identical to the baseline flag-off run.
+        assert [(r.id, r.type, r.score) for r in results] == [(r.id, r.type, r.score) for r in baseline_results]
+        # Exemplar-leg stats fields inert and equal to baseline.
+        assert (stats.exemplar_leg_used, stats.n_exemplar, stats.n_exemplar_dup) == (
+            baseline_stats.exemplar_leg_used,
+            baseline_stats.n_exemplar,
+            baseline_stats.n_exemplar_dup,
+        )
 
     async def test_trigger_gates(self, heart, brain, settings, monkeypatch):
         s = settings.model_copy(update={"exemplar_mode_enabled": True})
@@ -582,10 +673,19 @@ class TestExemplarLeg:
     async def test_leg_merges_banded_not_tail(self, heart, brain, settings, monkeypatch):
         s = settings.model_copy(update={"exemplar_mode_enabled": True})
         hits = [_mk_hit(i, 0.9 - 0.05 * i) for i in range(3)]
+        fetch_mock = AsyncMock(return_value=hits)
         monkeypatch.setattr(heart.facts, "has_exemplars", AsyncMock(return_value=True))
-        monkeypatch.setattr(heart.facts, "fetch_exemplars_by_vector", AsyncMock(return_value=hits))
+        monkeypatch.setattr(heart.facts, "fetch_exemplars_by_vector", fetch_mock)
 
         results, stats = await run_recall_pipeline(self._QUERY, heart, brain, s)
+
+        # FIX 5: pin the new call shape -- the leg passes limit + the fetch-side
+        # exclude_fact_ids exclusion. The exclusion value is Stage-1-dependent
+        # (shared dev DB), so assert on the kwarg's presence + limit, not an
+        # exact set (which would be brittle).
+        fetch_mock.assert_awaited_once()
+        assert fetch_mock.await_args.kwargs["limit"] == s.exemplar_top_k
+        assert "exclude_fact_ids" in fetch_mock.await_args.kwargs
 
         exemplar_rows = [r for r in results if r.metadata.get("retrieval_leg") == "exemplar"]
         assert len(exemplar_rows) == 3

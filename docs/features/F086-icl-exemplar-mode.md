@@ -77,7 +77,7 @@ stores each pair via `Heart.learn(fact_input, precomputed_embedding=vec)`. This 
 additive**: when the exemplar leg stores anything, the legacy summary-derived candidate facts for that
 transcript are *not* also stored — the transcript routes to exactly one path.
 
-Three write-path guards keep exemplar facts from tripping machinery meant for narrative facts:
+Four write-path guards keep exemplar facts from tripping machinery meant for narrative facts:
 
 - **Source-aware min-content floor** (`nous/heart/facts.py`, both enforcement sites): exemplar facts use
   `exemplar_min_content_chars` (default 5) instead of the global 30-char floor — a labeled pair like
@@ -89,7 +89,20 @@ Three write-path guards keep exemplar facts from tripping machinery meant for na
   confirm a near-identical utterance as a duplicate is bypassed whenever the candidate's `parse_label(...)`
   differs from the incoming fact's label — **different-label near-duplicates must never dedup-drop**,
   since two banking utterances that are nearly identical text but carry different labels are exactly the
-  discriminative signal exemplar retrieval needs.
+  discriminative signal exemplar retrieval needs. The guard is **two-sided**: it fires when *either* the
+  incoming input *or* its nearest stored dupe is an exemplar. Without the dupe-side term, a genuine
+  conversational fact whose nearest neighbor happens to be an exemplar row (labels differ —
+  `parse_label` returns `None` for label-less content) would dedup-confirm *into* that exemplar and be
+  lost.
+- **Conflict/contradiction/actionability exemptions** (`nous/heart/facts.py`, one local
+  `is_exemplar = input.source == "exemplar_extractor"` in `_learn`): exemplar facts bypass the legacy
+  subject-supersession pass, the post-insert `_find_contradiction` scan + domain-compaction check, and the
+  F047 actionability classifier (hard-set `actionable=False`). Exemplars carry an intentionally identical
+  `subject` and `subject_key=None`, so without these gates the legacy subject-supersession would deactivate
+  different-label pairs (destroying exactly the discriminative signal), and the tier-3 Haiku actionability
+  classifier would fire **per exemplar fact** (up to `exemplar_max_per_episode`) — the latter is what keeps
+  the write path genuinely **zero-LLM**, not just zero-LLM at parse time. A same-label near-duplicate that
+  survives the label-guard confirms directly (no F027 band classifier — another per-fact LLM call avoided).
 
 ---
 
@@ -263,12 +276,16 @@ by `episode_id` and ordered by `chunk_index`. Three pure, unit-tested functions 
    then **re-stamps every pair's ordinal with a running per-episode offset** so `source_ordinal` is one
    continuous sequence across the whole episode, never reset at a chunk boundary.
 
-The live-mode store loop (`_store_episode_pairs`) mirrors `ingest_exemplars`' embed_batch + per-fact
-`heart.learn(precomputed_embedding=...)` pattern, but is its own small loop rather than a call into
-`ingest_exemplars` per chunk — calling `ingest_exemplars` once per chunk would reset each chunk's ordinals
-back to 0, which would violate ordinal continuation. The episode-level cap (`exemplar_max_per_episode`)
-applies to the whole, already-concatenated pair list, with the same loud-truncation-WARNING convention as
-the live write path.
+The live-mode store loop (`_store_episode_pairs`) is a thin wrapper around the **shared**
+`nous/handlers/exemplar_ingest.py::_embed_and_store_pairs` helper — the one cap+embed+learn
+implementation, also used by `ingest_exemplars` (the live write path). The two callers differ only in *how*
+the pair list gets assembled: `ingest_exemplars` parses one transcript in a single `parse_exemplars` call
+(ordinals always start at 0); the backfill assembles pairs across an episode's chunks with continuing
+ordinals via `build_episode_pairs` *before* handing the already-ordinaled list to the shared helper. The
+backfill deliberately does **not** call `ingest_exemplars` per chunk — that would reset each chunk's
+ordinals back to 0 and violate ordinal continuation. The episode-level cap (`exemplar_max_per_episode`) is
+applied inside `_embed_and_store_pairs` on the whole, already-concatenated pair list, with the same
+loud-truncation-WARNING convention on both paths.
 
 **Idempotency** relies on the same mechanism as the live write path: re-running re-embeds identical
 content, and `Heart.learn`'s native-cosine dedup (0.95 threshold) confirms rather than duplicates — except
@@ -355,8 +372,9 @@ requirements doc; see Documented Deviations below for why).
    `ingest_exemplars` parses one transcript in a single call and always starts pair ordinals at 0; the
    backfill needs ordinals to continue across an episode's chunk boundaries, so
    `scripts/backfill_exemplar_facts.py::build_episode_pairs` re-parses each chunk independently and
-   re-stamps ordinals with a running offset, then stores via its own small embed+learn loop rather than
-   modifying `ingest_exemplars`' already-shipped, already-tested signature.
+   re-stamps ordinals with a running offset. Storage itself is **not** duplicated: both the live write path
+   and the backfill call the shared `nous/handlers/exemplar_ingest.py::_embed_and_store_pairs`
+   cap+embed+learn helper (refactored out in b5b60c4) — only the pair-assembly step differs between the two.
 
 **Not a deviation** (spec-review M1): the memory-referential-only trigger blocklist is a faithful
 operationalization of the requirements doc's own qualifier — "classification-shaped (short utterance, no

@@ -668,6 +668,13 @@ class FactManager:
         utility_override: float | None = None,
         precomputed_embedding: list[float] | None = None,
     ) -> FactDetail | FactRejected:
+        # F086: exemplar facts (utterance/label ICL pairs) are stored verbatim
+        # with an intentionally identical subject and subject_key=None. They must
+        # bypass every conflict/supersession/actionability path below — different
+        # labels are distinct exemplars (the dedup label-guard enforces that), and
+        # the legacy subject-supersession, band classifier, contradiction scan, and
+        # F047 classifier would otherwise destroy pairs or fire per-fact LLM calls.
+        is_exemplar = input.source == "exemplar_extractor"
         # F038-1.2: Reject facts with content < fact_min_content_chars characters.
         # 0 disables the gate entirely (useful for testing / low-noise corpora).
         min_chars = self._settings.fact_min_content_chars if self._settings else 30
@@ -768,9 +775,15 @@ class FactManager:
             # `if found is not None:` branch, and the fall-through else
             # dereferences it via _classify_dupe_in_band, so clearing
             # `dupe` post-unpack would crash instead of bypassing.
+            #
+            # Two-sided: fires when EITHER the incoming input OR its nearest
+            # dupe is an exemplar. A genuine conversational fact whose nearest
+            # neighbor is an exemplar row (labels differ — parse_label returns
+            # None for label-less content) must NOT dedup-confirm into that
+            # exemplar and be lost; it falls through to a normal insert.
             if (
                 found is not None
-                and input.source == "exemplar_extractor"
+                and (is_exemplar or found[0].source == "exemplar_extractor")
                 and parse_label(found[0].content or "") != parse_label(input.content)
             ):
                 found = None
@@ -822,6 +835,12 @@ class FactManager:
                     # ONLY from _find_contradiction re-processing (safe_excludes
                     # below) — it MUST remain visible to _resolve_key_conflicts.
                     routed_dupe_id = dupe.id
+                elif is_exemplar:
+                    # F086: reaching here means the label-guard above did NOT
+                    # clear `found`, i.e. the labels MATCH — a same-label
+                    # near-dupe IS a genuine duplicate. Confirm directly; never
+                    # run the F027 band classifier (zero-LLM for exemplars).
+                    return await self._confirm_duplicate(dupe, input, session)
                 else:
                     band_action = await self._classify_dupe_in_band(
                         dupe, dupe_similarity, input, check_contradictions
@@ -920,7 +939,12 @@ class FactManager:
         # the heartbeat falls back to the legacy heuristic path for it.
         actionable_verdict: bool | None = None
         actionable_conf: float | None = None
-        if self._actionability_classifier is not None:
+        if is_exemplar:
+            # F086 zero-LLM: exemplar facts are ICL utterance/label pairs, never
+            # heartbeat-actionable. Hard-set False without the tier-3 Haiku call
+            # (which would otherwise fire per fact, up to exemplar_max_per_episode).
+            actionable_verdict = False
+        elif self._actionability_classifier is not None:
             try:
                 actionable_verdict, actionable_conf, _tier = await self._actionability_classifier.classify(
                     input.content,
@@ -1061,10 +1085,16 @@ class FactManager:
         # not re-discover and re-decrement the same already-flagged pair.
         keep_both_ids: list[UUID] = []
         new_fact_lost = False  # codex r11: set True when either resolver deactivates the new fact
-        if check_contradictions and input.subject and embedding is not None and not (
-            getattr(self._settings, "supersession_key_resolution_enabled", False) is True
-            and input.subject_key
-            and input.attribute_key
+        if (
+            check_contradictions
+            and not is_exemplar
+            and input.subject
+            and embedding is not None
+            and not (
+                getattr(self._settings, "supersession_key_resolution_enabled", False) is True
+                and input.subject_key
+                and input.attribute_key
+            )
         ):
             # Codex r11 FIX 2: the legacy path can also deactivate the new
             # fact via statement-order resolution (existing fact wins) —
@@ -1102,10 +1132,12 @@ class FactManager:
         if band_warning is not None:
             detail.contradiction_warning = band_warning
 
-        if check_contradictions and not new_fact_lost:
+        if check_contradictions and not is_exemplar and not new_fact_lost:
             # Contradiction detection: similarity 0.85-0.95 with different content
             # codex r11: skipped when new fact lost keyed resolution (inactive fact
             # must not trigger contradiction edges or domain compaction).
+            # F086: exemplars also skip this — a same-label near-dupe already
+            # confirmed above, and different-label pairs are distinct by design.
             if embedding is not None:
                 # Codex r11 FIX 1: keep_both_ids excludes pairs either
                 # resolver above already flagged KEEP-BOTH this learn — left
@@ -3888,31 +3920,49 @@ class FactManager:
                 out.setdefault(r.fact_id, []).append(r.entity_key)
             return out
 
-    async def fetch_exemplars_by_vector(self, query_embedding: list[float], limit: int = 25) -> list[ExemplarHit]:
+    async def fetch_exemplars_by_vector(
+        self,
+        query_embedding: list[float],
+        limit: int = 25,
+        *,
+        exclude_fact_ids: list[UUID] | set[UUID] | None = None,
+    ) -> list[ExemplarHit]:
         """F086: K nearest active exemplar facts by cosine (source-filtered).
 
         Same ANN-horizon margin as ``_find_similar_for_dedup`` — the partial
         HNSW index (migration 066) is scoped to ``source =
         'exemplar_extractor'`` so this walk never touches the much larger
         general embedding index.
+
+        ``exclude_fact_ids`` pushes the caller's already-surfaced fact ids into
+        the SQL LIMIT itself (mirrors ``fetch_by_entity_keys``'s r5 idiom). The
+        Stage 1.7 caller passes Stage 1's own fact hits so those rows don't
+        consume LIMIT slots only to be dropped as duplicates at assembly —
+        starving a fresh exemplar just beyond the LIMIT.
         """
         vec_lit = "[" + ",".join(str(x) for x in query_embedding) + "]"
+        params: dict = {"v": vec_lit, "agent_id": self.agent_id, "limit": limit}
+        exclude_clause = ""
+        if exclude_fact_ids:
+            exclude_clause = "  AND NOT (id = ANY(CAST(:exclude_ids AS uuid[]))) "
+            params["exclude_ids"] = [str(i) for i in exclude_fact_ids]
         async with self.db.session() as session:
             await set_local_ef_search(session, 100)
             rows = (
                 await session.execute(
-                    text("""
-                SELECT id, content,
-                       1 - (embedding <=> CAST(:v AS vector)) AS similarity
-                FROM heart.facts
-                WHERE agent_id = :agent_id
-                  AND active = true
-                  AND source = 'exemplar_extractor'
-                  AND embedding IS NOT NULL
-                ORDER BY embedding <=> CAST(:v AS vector)
-                LIMIT :limit
-            """),
-                    {"v": vec_lit, "agent_id": self.agent_id, "limit": limit},
+                    text(
+                        "SELECT id, content, "
+                        "       1 - (embedding <=> CAST(:v AS vector)) AS similarity "
+                        "FROM heart.facts "
+                        "WHERE agent_id = :agent_id "
+                        "  AND active = true "
+                        "  AND source = 'exemplar_extractor' "
+                        "  AND embedding IS NOT NULL "
+                        + exclude_clause +
+                        "ORDER BY embedding <=> CAST(:v AS vector) "
+                        "LIMIT :limit"
+                    ),
+                    params,
                 )
             ).fetchall()
         return [ExemplarHit(id=r.id, content=r.content, similarity=float(r.similarity)) for r in rows]

@@ -864,8 +864,15 @@ async def _run_stages(
                 embedder = getattr(heart, "_embeddings", None)
                 q_vec = (await embedder.embed(query)) if embedder is not None else None
                 if q_vec:
+                    # FIX 5: exclude Stage 1's own fact hits from the LIMIT so
+                    # exemplar rows already surfaced there don't consume slots
+                    # only to drop as dups at assembly (same intent as the
+                    # keyed_r2 known_dead exclusion above). Assembly-side dedup
+                    # stays as belt-and-suspenders.
+                    already_surfaced = {hr.id for hr in acc.heart_results if hr.type == "fact"}
                     hits = await heart.facts.fetch_exemplars_by_vector(
-                        q_vec, limit=getattr(settings, "exemplar_top_k", 25)
+                        q_vec, limit=getattr(settings, "exemplar_top_k", 25),
+                        exclude_fact_ids=already_surfaced or None,
                     )
                     floor = getattr(settings, "exemplar_min_similarity", 0.30)
                     acc.exemplar_hits = [h for h in hits if h.similarity >= floor]
