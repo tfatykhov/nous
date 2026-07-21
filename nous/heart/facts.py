@@ -3702,6 +3702,17 @@ class FactManager:
               AND f2.active = true
               AND f2.embedding IS NOT NULL
               AND f2.subject IS NOT NULL
+              -- Codex r7 (F086): exemplar facts share the same subject (the
+              -- utterance's first 200 chars) across different labels by design, so
+              -- same-subject/different-label pairs land in this 0.75-0.95 band.
+              -- (Kept free of colon-prefixed word/number tokens on purpose --
+              -- SQLAlchemy text() parses those as bind params even inside a SQL
+              -- comment.) The write-time guards preserve these variants; the sleep
+              -- sweep must not undo that. Exclude exemplars on BOTH sides -- an
+              -- exemplar may neither be resolved nor serve as the resolving
+              -- counterpart against a normal fact. IS DISTINCT FROM keeps
+              -- NULL-source normal facts in scope.
+              AND f2.source IS DISTINCT FROM 'exemplar_extractor'
               AND LOWER(f1.subject) = LOWER(f2.subject)
               AND 1 - (f1.embedding <=> f2.embedding) > 0.75
               AND 1 - (f1.embedding <=> f2.embedding) < 0.95
@@ -3709,6 +3720,7 @@ class FactManager:
               AND f1.active = true
               AND f1.embedding IS NOT NULL
               AND f1.subject IS NOT NULL
+              AND f1.source IS DISTINCT FROM 'exemplar_extractor'
               {cooldown_clause}
             ORDER BY similarity DESC
             LIMIT :limit

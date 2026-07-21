@@ -77,7 +77,9 @@ stores each pair via `Heart.learn(fact_input, precomputed_embedding=vec)`. This 
 additive**: when the exemplar leg stores anything, the legacy summary-derived candidate facts for that
 transcript are *not* also stored — the transcript routes to exactly one path.
 
-Four write-path guards keep exemplar facts from tripping machinery meant for narrative facts:
+Five guards keep exemplar facts from tripping machinery meant for narrative facts (four at write time, one
+at sleep — the background-machinery family is supersession, contradiction scan, band-classify,
+actionability, and now the sleep sweep):
 
 - **Source-aware min-content floor** (`nous/heart/facts.py`, both enforcement sites): exemplar facts use
   `exemplar_min_content_chars` (default 5) instead of the global 30-char floor — a labeled pair like
@@ -103,6 +105,14 @@ Four write-path guards keep exemplar facts from tripping machinery meant for nar
   classifier would fire **per exemplar fact** (up to `exemplar_max_per_episode`) — the latter is what keeps
   the write path genuinely **zero-LLM**, not just zero-LLM at parse time. A same-label near-duplicate that
   survives the label-guard confirms directly (no F027 band classifier — another per-fact LLM call avoided).
+- **Sleep F031 sweep exclusion** (`nous/heart/facts.py::_find_contradiction_candidates`, codex r7 — the
+  fifth, sleep-side member): the background contradiction sweep's same-subject candidate query would
+  otherwise re-discover same-utterance/different-label exemplar pairs (they share `subject = utterance[:200]`
+  and land in F031's 0.75–0.95 band), letting the sleep resolver supersede/merge label variants the
+  write-time guards preserved. The query now excludes `source = 'exemplar_extractor'` on **both** sides
+  (`IS DISTINCT FROM`, so NULL-source normal facts stay in scope) — an exemplar may neither be resolved nor
+  serve as the resolving counterpart against a normal fact. This closes the previously-accepted residual
+  from the sleep side.
 
 **Codex r3 — an exemplar is never persisted without an embedding.** `_embed_and_store_pairs` batch-embeds
 all pairs; on a batch miss it retries once per-pair (`embedder.embed(content)`), and if the vector is
@@ -410,8 +420,15 @@ by the backfill run being rolled back. Rollback **aborts with no writes** in tha
 
 | Object | Type | Description |
 |--------|------|-------------|
-| `idx_facts_exemplar_embedding` | partial HNSW on `heart.facts(embedding)` `WHERE source = 'exemplar_extractor'` | Keeps the exemplar cosine walk off the global embedding index. |
+| `idx_facts_exemplar_embedding` | partial HNSW on `heart.facts(embedding)` `WHERE source = 'exemplar_extractor' AND active = true` | Keeps the exemplar cosine walk off the global embedding index; the `active = true` predicate (codex r7) drops rollback-deactivated exemplars out of the ANN candidate horizon. Matches `fetch_exemplars_by_vector`'s WHERE (source + active) so the planner uses the partial index. |
 | `idx_facts_exemplar_agent` | partial btree on `heart.facts(agent_id)` `WHERE source = 'exemplar_extractor' AND active = true` | Supports `has_exemplars()`'s existence probe. |
+
+**Codex r7 re-create note.** Migration 066 was amended in place (branch is unmerged) to add `active = true`
+to the HNSW predicate, and it now runs `DROP INDEX IF EXISTS heart.idx_facts_exemplar_embedding;` before
+the `CREATE`. The migrator tracks by filename, so a **pre-merge dev DB** that already recorded 066 will
+**not** rerun it automatically — re-create the index manually by running 066's two `DROP`/`CREATE`
+statements, or by deleting the `066` row from `nous_system.schema_migrations` and re-running the migrator
+(safe: the file is drop-then-create idempotent). Fresh DBs get the corrected predicate directly.
 
 No new columns or tables — F086 reuses the existing `heart.facts` schema in full (option B from the
 requirements doc; see Documented Deviations below for why).

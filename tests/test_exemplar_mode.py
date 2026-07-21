@@ -748,6 +748,84 @@ class TestExemplarFetch:
             await _delete_facts_for_agent(heart, agent_id)
 
 
+@pytest.mark.postgres_only
+class TestExemplarSleepSweepExclusion:
+    """Codex r7: the F031 sleep contradiction sweep must never resolve exemplar
+    facts — same-utterance/different-label pairs share subject=utterance[:200]
+    and land in the 0.75-0.95 band, so the write-time guards' preserved variants
+    must not be undone by the background resolver."""
+
+    async def test_find_contradiction_candidates_excludes_exemplars(self, heart):
+        agent_id = f"exemplar-sweep-{uuid4()}"
+        # In-band (0.75-0.95) same-subject pairs for both an exemplar cluster and
+        # a normal cluster; the sweep query must skip the exemplar pair on BOTH
+        # sides but still surface the normal pair.
+        ex_base = await heart._embeddings.embed("exemplar sweep base vector seed")
+        ex_near = _vec_at_cosine(ex_base, 0.85, "sweep-ex")
+        nm_base = await heart._embeddings.embed("normal sweep base vector seed")
+        nm_near = _vec_at_cosine(nm_base, 0.85, "sweep-nm")
+        ex_a, ex_b, nm_a, nm_b = uuid4(), uuid4(), uuid4(), uuid4()
+        async with heart.db.session() as s:
+            s.add(
+                Fact(
+                    id=ex_a,
+                    agent_id=agent_id,
+                    subject="reset pin question",
+                    content="how do I reset my pin\nlabel: 1",
+                    source="exemplar_extractor",
+                    active=True,
+                    embedding=ex_base,
+                )
+            )
+            s.add(
+                Fact(
+                    id=ex_b,
+                    agent_id=agent_id,
+                    subject="reset pin question",
+                    content="how do I reset my pin\nlabel: 2",
+                    source="exemplar_extractor",
+                    active=True,
+                    embedding=ex_near,
+                )
+            )
+            s.add(
+                Fact(
+                    id=nm_a,
+                    agent_id=agent_id,
+                    subject="user home city",
+                    content="the user lives in Paris",
+                    source="fact_extractor",
+                    active=True,
+                    embedding=nm_base,
+                )
+            )
+            s.add(
+                Fact(
+                    id=nm_b,
+                    agent_id=agent_id,
+                    subject="user home city",
+                    content="the user lives in Lyon",
+                    source="fact_extractor",
+                    active=True,
+                    embedding=nm_near,
+                )
+            )
+            await s.commit()
+        try:
+            fm = FactManager(heart.db, heart._embeddings, agent_id, settings=heart.settings)
+            candidates = await fm.find_contradiction_candidates(limit=50)
+            ids_in_pairs = {c["fact1_id"] for c in candidates} | {c["fact2_id"] for c in candidates}
+            # Exemplar pair excluded on BOTH sides — never resolved, never a counterpart.
+            assert ex_a not in ids_in_pairs
+            assert ex_b not in ids_in_pairs
+            # The normal same-subject in-band pair IS still surfaced (sweep not broken).
+            assert any({c["fact1_id"], c["fact2_id"]} == {nm_a, nm_b} for c in candidates)
+        finally:
+            async with heart.db.session() as s:
+                await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
+                await s.commit()
+
+
 # ---------------------------------------------------------------------------
 # Task 4: read-path Stage 1.7 exemplar leg in run_recall_pipeline
 # ---------------------------------------------------------------------------
