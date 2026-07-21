@@ -6,8 +6,11 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select, text
 
+from nous.api.retrieval_pipeline import run_recall_pipeline
+from nous.brain.brain import Brain
 from nous.handlers.exemplar_ingest import ingest_exemplars
 from nous.heart.exemplars import (
     ExemplarPair,  # noqa: F401 -- imported to assert the exported type exists
@@ -482,3 +485,246 @@ class TestExemplarFetch:
             assert await fm.has_exemplars() is True  # invalidated post-commit, no TTL wait
         finally:
             await _delete_facts_for_agent(heart, agent_id)
+
+
+# ---------------------------------------------------------------------------
+# Task 4: read-path Stage 1.7 exemplar leg in run_recall_pipeline
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def brain(db, settings):
+    """Brain without embeddings (keyword-only mode) -- per-file fixture,
+    mirroring tests/test_keyed_fact_leg.py:29 (no conftest `brain` fixture
+    exists)."""
+    b = Brain(database=db, settings=settings)
+    yield b
+    await b.close()
+
+
+def _mk_hit(idx: int, similarity: float) -> ExemplarHit:
+    return ExemplarHit(
+        id=uuid4(),
+        content=f"a synthetic exemplar utterance {idx}\nlabel: {idx}",
+        similarity=similarity,
+    )
+
+
+@pytest.mark.postgres_only
+class TestExemplarLeg:
+    """Task 4: Stage 1.7 exemplar retrieval leg.
+
+    ``heart.facts.has_exemplars``/``fetch_exemplars_by_vector`` are
+    monkeypatched throughout -- Task 3 (``TestExemplarFetch`` above) already
+    covers their real DB behavior. Mocking them here keeps these
+    pipeline-level tests fast and immune to the shared, ever-growing dev
+    Postgres accidentally surfacing pre-existing exemplar rows (persisted by
+    ``TestExemplarIngest``) via Stage 1's own unfiltered fact search -- a real
+    seeded exemplar fact similar enough to clear the leg's own similarity
+    floor would also rank in Stage 1's plain vector search (which has no
+    absolute floor), making "the leg found something Stage 1 didn't"
+    impossible to isolate with real embeddings alone.
+    """
+
+    _QUERY = "what is the capital of france"
+
+    async def test_flag_off_byte_identical(self, heart, brain, settings, monkeypatch):
+        sentinel = AsyncMock(side_effect=AssertionError("exemplar leg ran with flag off"))
+        monkeypatch.setattr(heart.facts, "has_exemplars", sentinel)
+
+        results, stats = await run_recall_pipeline(self._QUERY, heart, brain, settings)
+
+        sentinel.assert_not_called()
+        assert stats.exemplar_leg_used is False
+        assert stats.n_exemplar == 0
+        assert not any(r.metadata.get("retrieval_leg") == "exemplar" for r in results)
+
+    async def test_trigger_gates(self, heart, brain, settings, monkeypatch):
+        s = settings.model_copy(update={"exemplar_mode_enabled": True})
+
+        # Long query (> exemplar_max_query_words) -> skipped before has_exemplars.
+        monkeypatch.setattr(
+            heart.facts,
+            "has_exemplars",
+            AsyncMock(side_effect=AssertionError("must not be called for a too-long query")),
+        )
+        long_query = " ".join(["word"] * (s.exemplar_max_query_words + 1))
+        _, stats = await run_recall_pipeline(long_query, heart, brain, s)
+        assert stats.exemplar_leg_used is False
+
+        # Memory-referential query -> skipped before has_exemplars.
+        monkeypatch.setattr(
+            heart.facts,
+            "has_exemplars",
+            AsyncMock(side_effect=AssertionError("must not be called for a memory-referential query")),
+        )
+        _, stats = await run_recall_pipeline("what did I say about my card", heart, brain, s)
+        assert stats.exemplar_leg_used is False
+
+        # Plain question -- trec-shape MUST trigger.
+        monkeypatch.setattr(heart.facts, "has_exemplars", AsyncMock(return_value=True))
+        monkeypatch.setattr(heart.facts, "fetch_exemplars_by_vector", AsyncMock(return_value=[]))
+        _, stats = await run_recall_pipeline(self._QUERY, heart, brain, s)
+        assert stats.exemplar_leg_used is True
+
+        # Empty exemplar store -> skipped via the exists-probe; fetch never runs.
+        monkeypatch.setattr(heart.facts, "has_exemplars", AsyncMock(return_value=False))
+        monkeypatch.setattr(
+            heart.facts,
+            "fetch_exemplars_by_vector",
+            AsyncMock(side_effect=AssertionError("fetch must not run against an empty store")),
+        )
+        _, stats = await run_recall_pipeline(self._QUERY, heart, brain, s)
+        assert stats.exemplar_leg_used is False
+
+    async def test_leg_merges_banded_not_tail(self, heart, brain, settings, monkeypatch):
+        s = settings.model_copy(update={"exemplar_mode_enabled": True})
+        hits = [_mk_hit(i, 0.9 - 0.05 * i) for i in range(3)]
+        monkeypatch.setattr(heart.facts, "has_exemplars", AsyncMock(return_value=True))
+        monkeypatch.setattr(heart.facts, "fetch_exemplars_by_vector", AsyncMock(return_value=hits))
+
+        results, stats = await run_recall_pipeline(self._QUERY, heart, brain, s)
+
+        exemplar_rows = [r for r in results if r.metadata.get("retrieval_leg") == "exemplar"]
+        assert len(exemplar_rows) == 3
+        assert stats.n_exemplar == 3
+        assert stats.exemplar_leg_used is True
+        # Banded, not tail-appended: every result strictly BEFORE an exemplar
+        # row must have a score >= it (the -5.0pp wasted-slot lesson -- a
+        # dumb list.append() would let a lower-scoring existing result sit
+        # ahead of a higher-scoring exemplar row). The shared dev Postgres
+        # may hold arbitrarily many higher-scoring unrelated results, so this
+        # checks the insertion invariant directly rather than a fixed top-K
+        # window.
+        for er in exemplar_rows:
+            idx = results.index(er)
+            assert all((results[i].score or 0.0) >= er.score for i in range(idx))
+        for rank, hit in enumerate(hits):
+            row = next(r for r in exemplar_rows if r.id == hit.id)
+            assert row.type == "fact" and row.source == "heart"
+            assert row.metadata["label"] == parse_label(hit.content)
+            assert row.metadata["similarity"] == hit.similarity
+            assert row.score == max(0.0, s.exemplar_leg_score - 0.005 * rank)
+
+    async def test_similarity_floor_bounds_false_trigger(self, heart, brain, settings, monkeypatch):
+        # spec-review I3a: hits below exemplar_min_similarity must not merge,
+        # AND the non-exemplar result ordering must be untouched.
+        off_results, _ = await run_recall_pipeline(self._QUERY, heart, brain, settings)
+
+        s = settings.model_copy(update={"exemplar_mode_enabled": True})
+        far_hits = [_mk_hit(i, s.exemplar_min_similarity - 0.05) for i in range(2)]
+        monkeypatch.setattr(heart.facts, "has_exemplars", AsyncMock(return_value=True))
+        monkeypatch.setattr(heart.facts, "fetch_exemplars_by_vector", AsyncMock(return_value=far_hits))
+
+        on_results, stats = await run_recall_pipeline(self._QUERY, heart, brain, s)
+
+        assert not any(r.metadata.get("retrieval_leg") == "exemplar" for r in on_results)
+        assert stats.n_exemplar == 0
+        assert [r.id for r in on_results] == [r.id for r in off_results]
+
+    async def test_merged_exemplars_do_not_displace(self, heart, brain, settings, monkeypatch):
+        # spec-review I3b: additive-only -- the non-exemplar SUBSEQUENCE must
+        # keep the exact membership+order of the flag-off run.
+        fact_id = uuid4()
+        query_vec = await heart._embeddings.embed(self._QUERY)
+        async with heart.db.session() as seed:
+            seed.add(
+                Fact(
+                    id=fact_id,
+                    agent_id=heart.agent_id,
+                    content="A baseline fact engineered to rank for the displacement test query.",
+                    active=True,
+                    embedding=query_vec,
+                )
+            )
+            await seed.commit()
+        try:
+            off_results, _ = await run_recall_pipeline(self._QUERY, heart, brain, settings)
+
+            s = settings.model_copy(update={"exemplar_mode_enabled": True})
+            hits = [_mk_hit(i, 0.8 - 0.05 * i) for i in range(2)]
+            monkeypatch.setattr(heart.facts, "has_exemplars", AsyncMock(return_value=True))
+            monkeypatch.setattr(heart.facts, "fetch_exemplars_by_vector", AsyncMock(return_value=hits))
+            on_results, _ = await run_recall_pipeline(self._QUERY, heart, brain, s)
+
+            exemplar_ids = {r.id for r in on_results if r.metadata.get("retrieval_leg") == "exemplar"}
+            assert exemplar_ids  # the leg actually merged something
+            non_exemplar_on = [r.id for r in on_results if r.id not in exemplar_ids]
+            assert non_exemplar_on == [r.id for r in off_results]
+        finally:
+            async with heart.db.session() as cleanup:
+                f = await cleanup.get(Fact, fact_id)
+                if f is not None:
+                    await cleanup.delete(f)
+                await cleanup.commit()
+
+    async def test_dedup_against_existing_results(self, heart, brain, settings, monkeypatch):
+        fact_id = uuid4()
+        query_vec = await heart._embeddings.embed(self._QUERY)
+        async with heart.db.session() as seed:
+            seed.add(
+                Fact(
+                    id=fact_id,
+                    agent_id=heart.agent_id,
+                    content="A fact engineered to be found by Stage 1 AND returned by the exemplar leg.",
+                    active=True,
+                    embedding=query_vec,
+                )
+            )
+            await seed.commit()
+        try:
+            s = settings.model_copy(update={"exemplar_mode_enabled": True})
+            dup_hit = ExemplarHit(id=fact_id, content="dup\nlabel: 0", similarity=0.95)
+            fresh_hit = _mk_hit(99, 0.9)
+            monkeypatch.setattr(heart.facts, "has_exemplars", AsyncMock(return_value=True))
+            monkeypatch.setattr(
+                heart.facts,
+                "fetch_exemplars_by_vector",
+                AsyncMock(return_value=[dup_hit, fresh_hit]),
+            )
+            results, stats = await run_recall_pipeline(self._QUERY, heart, brain, s)
+
+            occurrences = [r for r in results if r.id == fact_id]
+            assert len(occurrences) == 1
+            assert occurrences[0].metadata.get("retrieval_leg") != "exemplar"
+            assert stats.n_exemplar_dup == 1
+            assert any(r.id == fresh_hit.id and r.metadata.get("retrieval_leg") == "exemplar" for r in results)
+        finally:
+            async with heart.db.session() as cleanup:
+                f = await cleanup.get(Fact, fact_id)
+                if f is not None:
+                    await cleanup.delete(f)
+                await cleanup.commit()
+
+    async def test_stage_error_isolated(self, heart, brain, settings, monkeypatch):
+        fact_id = uuid4()
+        query_vec = await heart._embeddings.embed(self._QUERY)
+        async with heart.db.session() as seed:
+            seed.add(
+                Fact(
+                    id=fact_id,
+                    agent_id=heart.agent_id,
+                    content="A baseline fact that must survive an exemplar leg failure untouched.",
+                    active=True,
+                    embedding=query_vec,
+                )
+            )
+            await seed.commit()
+        try:
+            s = settings.model_copy(update={"exemplar_mode_enabled": True})
+            monkeypatch.setattr(heart.facts, "has_exemplars", AsyncMock(return_value=True))
+            monkeypatch.setattr(
+                heart.facts,
+                "fetch_exemplars_by_vector",
+                AsyncMock(side_effect=RuntimeError("boom")),
+            )
+            results, stats = await run_recall_pipeline(self._QUERY, heart, brain, s)
+
+            assert stats.n_stage_errors.get("exemplar") == 1
+            assert any(r.id == fact_id for r in results)
+        finally:
+            async with heart.db.session() as cleanup:
+                f = await cleanup.get(Fact, fact_id)
+                if f is not None:
+                    await cleanup.delete(f)
+                await cleanup.commit()

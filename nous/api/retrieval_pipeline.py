@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import difflib
 import logging
+import re
 import time
 import weakref
 from dataclasses import dataclass, field, replace
@@ -33,16 +34,33 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from nous.heart.exemplars import parse_label
 from nous.heart.keys import extract_entity_candidates, normalize_key
 
 if TYPE_CHECKING:
     from nous.brain.brain import Brain
     from nous.brain.schemas import DecisionSummary, NeighborResult
     from nous.config import Settings
+    from nous.heart.facts import ExemplarHit
     from nous.heart.heart import Heart
     from nous.heart.schemas import RecallResult
 
 logger = logging.getLogger(__name__)
+
+# F086: memory-referential interrogatives are NOT classification-shaped.
+# Deliberately narrow — trec-style classification queries ARE questions and
+# must trigger.
+_MEMORY_REFERENTIAL = re.compile(
+    r"\b(did (i|we|you)|what did|what have (i|we)|remind me|last time|earlier"
+    r"|previous(ly)?|we (discussed|talked)|you (said|told|mentioned))\b",
+    re.IGNORECASE,
+)
+
+
+def _is_classification_shaped(query: str, max_words: int) -> bool:
+    words = query.split()
+    return 0 < len(words) <= max_words and not _MEMORY_REFERENTIAL.search(query)
+
 
 # Spreading-activation result window: at most this many activated nodes are
 # appended per recall (the CTE's historic LIMIT). The CTE is over-fetched at
@@ -162,6 +180,17 @@ class PipelineStats:
     # candidate-fetch cap was hit (possibly-truncated -- reaching exactly
     # the candidate LIMIT is indistinguishable from "there were more").
     keyed_r2_truncated: bool = False
+    # F086: True iff the exemplar leg was flag-enabled, query was
+    # classification-shaped, AND the store existence-probe returned True
+    # (mirrors keyed_leg_used's "eligible AND attempted" semantics).
+    exemplar_leg_used: bool = False
+    # F086: count of exemplar PipelineResults merged at assembly time (after
+    # id-dedup against every other leg). Same accounting convention as
+    # n_keyed above.
+    n_exemplar: int = 0
+    # F086: count of exemplar candidates dropped because their id already
+    # existed in the result set from another leg.
+    n_exemplar_dup: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +273,12 @@ class _PipelineAccumulator:
     # Set during assembly (mirrors n_keyed_dup above) — not populated
     # inside _run_stages.
     n_keyed_r2_dup: int = 0
+
+    # F086: Stage 1.7 exemplar-leg hits — ExemplarHit rows already filtered
+    # by the similarity floor. Set during assembly's own n_exemplar_dup
+    # accounting (mirrors keyed_results above).
+    exemplar_hits: list = field(default_factory=list)
+    exemplar_leg_used: bool = False
 
     # Flags
     searched_decisions: bool = False
@@ -435,6 +470,26 @@ async def run_recall_pipeline(
             acc.keyed_r2_candidates, len(keyed_r2), acc.keyed_r2_truncated,
         )
 
+    # F086: exemplar leg assembly — same additive-only, score-ordered
+    # insertion pattern as the keyed leg above. existing_ids is recomputed
+    # fresh here (rather than reusing the keyed block's set) since keyed_r2
+    # rows were inserted into ``results`` after that set was captured.
+    # No-op (empty acc.exemplar_hits) when the flag is off or nothing
+    # cleared the similarity floor.
+    n_exemplar_dup = 0
+    exemplar_rows: list[PipelineResult] = []
+    if acc.exemplar_hits:
+        existing_ids = {r.id for r in results}
+        exemplar_rows, n_exemplar_dup = _exemplar_to_pipeline(
+            acc.exemplar_hits, settings, existing_ids
+        )
+        for er in exemplar_rows:
+            pos = next(
+                (i for i, r in enumerate(results) if (r.score or 0.0) < er.score),
+                len(results),
+            )
+            results.insert(pos, er)
+
     # Attach contradiction links to matching results
     if acc.contradictions:
         _attach_contradictions(results, acc.contradictions)
@@ -508,6 +563,9 @@ async def run_recall_pipeline(
         n_keyed_r2=len(keyed_r2),  # R3v2
         n_keyed_r2_dup=acc.n_keyed_r2_dup,  # R3v2
         keyed_r2_truncated=acc.keyed_r2_truncated,  # R3v2
+        exemplar_leg_used=acc.exemplar_leg_used,  # F086
+        n_exemplar=len(exemplar_rows),  # F086
+        n_exemplar_dup=n_exemplar_dup,  # F086
     )
     return results, stats
 
@@ -785,6 +843,35 @@ async def _run_stages(
             except Exception as exc:
                 acc.stage_errors["keyed_r2"] = acc.stage_errors.get("keyed_r2", 0) + 1
                 logger.warning("keyed_r2 fact leg failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Stage 1.7 (F086): exemplar leg - K nearest labeled examples by cosine.
+    # Land-dark, flag + classification-shaped-query gated. Gated on the same
+    # search_all/"fact" condition as Stage 1.5/1.6 (a memory_types=["episode"]
+    # request has no fact-shaped consumer for these hits).
+    # ------------------------------------------------------------------
+    if (
+        getattr(settings, "exemplar_mode_enabled", False)
+        and (search_all or "fact" in search_types)
+        and _is_classification_shaped(query, getattr(settings, "exemplar_max_query_words", 64))
+    ):
+        try:
+            if await heart.facts.has_exemplars():
+                acc.exemplar_leg_used = True
+                # arch-review M2: exact chunk-leg idiom (retrieval_pipeline.py
+                # Stage 1.5's _search_episode_chunks); the process LRU
+                # (NOUS_EMBEDDING_CACHE_SIZE) makes the repeat embed free.
+                embedder = getattr(heart, "_embeddings", None)
+                q_vec = (await embedder.embed(query)) if embedder is not None else None
+                if q_vec:
+                    hits = await heart.facts.fetch_exemplars_by_vector(
+                        q_vec, limit=getattr(settings, "exemplar_top_k", 25)
+                    )
+                    floor = getattr(settings, "exemplar_min_similarity", 0.30)
+                    acc.exemplar_hits = [h for h in hits if h.similarity >= floor]
+        except Exception:
+            logger.warning("exemplar leg failed", exc_info=True)
+            acc.stage_errors["exemplar"] = acc.stage_errors.get("exemplar", 0) + 1
 
     # ------------------------------------------------------------------
     # Stage 2: F022 Phase 2 cross-type graph expansion from Heart seeds
@@ -1514,6 +1601,36 @@ def _keyed_to_pipeline(
             description=row.content, score=max(0.0, base - 0.005 * rank),
             source="heart",
             metadata=metadata,
+        ))
+    return out, dups
+
+
+def _exemplar_to_pipeline(
+    hits: "list[ExemplarHit]", settings: "Settings", existing_ids: set,
+) -> tuple[list[PipelineResult], int]:
+    """F086: convert exemplar-leg hits into PipelineResults.
+
+    Mirrors ``_keyed_to_pipeline``: additive-only, id-deduped against every
+    other leg, scores in a bounded band (base - 0.005*rank, clamped >= 0) so
+    exemplar hits can enter context without displacing higher-scoring
+    direct/chunk hits (the -5.0pp lesson).
+    """
+    out: list[PipelineResult] = []
+    dups = 0
+    base = getattr(settings, "exemplar_leg_score", 0.55)
+    for rank, hit in enumerate(hits):
+        if hit.id in existing_ids:
+            dups += 1
+            continue
+        out.append(PipelineResult(
+            id=hit.id, type="fact",
+            description=hit.content, score=max(0.0, base - 0.005 * rank),
+            source="heart",
+            metadata={
+                "retrieval_leg": "exemplar",
+                "label": parse_label(hit.content),
+                "similarity": hit.similarity,
+            },
         ))
     return out, dups
 
