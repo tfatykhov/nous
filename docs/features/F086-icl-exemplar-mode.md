@@ -154,6 +154,28 @@ embedding model or dimensionality is not measuring the same retrieval quality th
 1) validated. State this in the PR body alongside this doc whenever the read flag is proposed for
 flipping.
 
+### Stage-1 routing — exemplars appear ONLY in the examples block (codex r1)
+
+Stage 1 (ordinary fact recall) sees exemplar facts as plain facts — they carry no `retrieval_leg` tag —
+so a query that surfaces an exemplar through normal vector/FTS recall would render it under **Heart
+Memory** without the inform-not-force framing. To keep the two presentations coherent, **when the leg
+actually fires** (all trigger gates passed, `has_exemplars()` true, query embedded), Stage 1.7:
+
+1. Batch-identifies which already-surfaced Stage-1 fact ids are exemplar-source
+   (`FactManager.exemplar_ids_among`, one agent-scoped
+   `SELECT id … WHERE source='exemplar_extractor' AND id = ANY(...)`).
+2. **Removes** those rows from the Stage-1 results in the accumulator.
+3. Does **not** exclude their ids from `fetch_exemplars_by_vector` — they are the nearest exemplars and
+   must come back through the leg into the dedicated examples block with banded score + label/similarity
+   metadata.
+
+Net effect: **mode on + trigger met ⇒ an exemplar fact appears exactly once, only in the
+`=== Nearest stored examples ===` block, never in Heart Memory.** When the leg does **not** fire (read
+flag off, or mode-on but the trigger heuristic is unmet), Stage-1 results are touched by nothing — the
+flag-off byte-identity and the write-on/read-off land-dark contract below hold exactly as documented.
+(Assembly-side dedup remains as belt-and-suspenders for the rare case where a *non-exemplar* Stage-1 fact
+shares an id with a returned hit — `test_dedup_against_existing_results`.)
+
 ### Do-not-filter-leakage note (spec-review M4)
 
 The MAB team's 0.82 embedding-kNN sim was measured **with** ~7–8/200 (~4pp) instances of question-text
@@ -177,9 +199,9 @@ a one-line note precisely so nobody "fixes" it later under the impression it's a
 **Write ON / read OFF is NOT byte-identical to baseline and must not be run in an A/B-compared corpus.**
 With the write flag on and the read flag off, exemplar facts still get stored (`source='exemplar_extractor'`)
 but no read-path logic filters by source — they surface through ordinary Stage-1 fact recall like any other
-fact, since nothing in the default recall path excludes `source='exemplar_extractor'` rows. An A/B
-comparison that flips only the write flag is silently comparing two different fact-store contents, not
-isolating the read-path mechanism.
+fact, since nothing in the read-OFF path excludes `source='exemplar_extractor'` rows (the Stage-1 routing
+above only runs when the *read* flag is on **and** the trigger fires). An A/B comparison that flips only the
+write flag is silently comparing two different fact-store contents, not isolating the read-path mechanism.
 
 ---
 

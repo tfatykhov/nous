@@ -864,15 +864,24 @@ async def _run_stages(
                 embedder = getattr(heart, "_embeddings", None)
                 q_vec = (await embedder.embed(query)) if embedder is not None else None
                 if q_vec:
-                    # FIX 5: exclude Stage 1's own fact hits from the LIMIT so
-                    # exemplar rows already surfaced there don't consume slots
-                    # only to drop as dups at assembly (same intent as the
-                    # keyed_r2 known_dead exclusion above). Assembly-side dedup
-                    # stays as belt-and-suspenders.
-                    already_surfaced = {hr.id for hr in acc.heart_results if hr.type == "fact"}
+                    # Codex r1: the leg is firing, so exemplar facts must render
+                    # ONLY in the dedicated examples block — not doubled into
+                    # Heart Memory. Stage 1 sees exemplar facts as ordinary
+                    # facts (no retrieval_leg tag), so strip any exemplar-source
+                    # rows it already surfaced from the accumulator here. Their
+                    # ids are NOT excluded from the fetch below: they are the
+                    # nearest exemplars and must come back through the leg with
+                    # banded score + label/similarity metadata. Assembly-side
+                    # dedup stays as belt-and-suspenders for the rare non-
+                    # exemplar id collision (test_dedup_against_existing_results).
+                    stage1_fact_ids = [hr.id for hr in acc.heart_results if hr.type == "fact"]
+                    exemplar_in_stage1 = await heart.facts.exemplar_ids_among(stage1_fact_ids)
+                    if exemplar_in_stage1:
+                        acc.heart_results = [
+                            hr for hr in acc.heart_results if not (hr.type == "fact" and hr.id in exemplar_in_stage1)
+                        ]
                     hits = await heart.facts.fetch_exemplars_by_vector(
-                        q_vec, limit=getattr(settings, "exemplar_top_k", 25),
-                        exclude_fact_ids=already_surfaced or None,
+                        q_vec, limit=getattr(settings, "exemplar_top_k", 25)
                     )
                     floor = getattr(settings, "exemplar_min_similarity", 0.30)
                     acc.exemplar_hits = [h for h in hits if h.similarity >= floor]

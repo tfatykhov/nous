@@ -130,6 +130,36 @@ class TestExemplarIngest:
     confuse a residual row from an earlier test or an earlier suite run for
     a duplicate of this test's own facts."""
 
+    @pytest_asyncio.fixture(autouse=True)
+    async def _cleanup_shared_agent_rows(self, heart):
+        """Hard-delete this class's writes from the SHARED ``nous-default`` agent
+        after each test. Unlike ``TestExemplarFetch`` (T3), this class cannot use
+        a throwaway agent_id — ``ingest_exemplars`` stores via ``heart.learn``
+        under the passed heart's own agent_id, and every heart-family fixture
+        (``heart`` / ``heart_with_strict_admission``) shares the ``Settings()``
+        default agent. Left behind, these exemplar rows crowd the LIMIT-10 fact
+        search of later-alphabetical suites (``test_write_path_adjudication``) in
+        a fresh full-suite run. Facts are deleted before their marker episodes
+        so the ``facts.source_episode_id`` FK never trips."""
+        yield
+        marker = "F086 exemplar ingest test episode."
+        async with heart.db.session() as s:
+            # Delete every fact tied to a marker episode (any source — the FIX 4
+            # test also writes a fact_extractor fact into its episode) BEFORE the
+            # episodes, so the facts.source_episode_id FK never trips.
+            await s.execute(
+                text(
+                    "DELETE FROM heart.facts WHERE source_episode_id IN "
+                    "(SELECT id FROM heart.episodes WHERE agent_id = :a AND summary = :summary)"
+                ),
+                {"a": heart.agent_id, "summary": marker},
+            )
+            await s.execute(
+                text("DELETE FROM heart.episodes WHERE agent_id = :a AND summary = :summary"),
+                {"a": heart.agent_id, "summary": marker},
+            )
+            await s.commit()
+
     async def test_ingest_stores_pair_facts(self, heart, settings):
         episode_id = await _insert_episode(heart)
         tag = str(episode_id)
@@ -679,13 +709,12 @@ class TestExemplarLeg:
 
         results, stats = await run_recall_pipeline(self._QUERY, heart, brain, s)
 
-        # FIX 5: pin the new call shape -- the leg passes limit + the fetch-side
-        # exclude_fact_ids exclusion. The exclusion value is Stage-1-dependent
-        # (shared dev DB), so assert on the kwarg's presence + limit, not an
-        # exact set (which would be brittle).
+        # Codex r1: the leg fetches without a fetch-side exclusion (Stage-1
+        # exemplar rows are stripped from the accumulator instead, then
+        # re-fetched into the banded examples block). Pin the call shape.
         fetch_mock.assert_awaited_once()
         assert fetch_mock.await_args.kwargs["limit"] == s.exemplar_top_k
-        assert "exclude_fact_ids" in fetch_mock.await_args.kwargs
+        assert "exclude_fact_ids" not in fetch_mock.await_args.kwargs
 
         exemplar_rows = [r for r in results if r.metadata.get("retrieval_leg") == "exemplar"]
         assert len(exemplar_rows) == 3
@@ -827,6 +856,93 @@ class TestExemplarLeg:
         finally:
             async with heart.db.session() as cleanup:
                 f = await cleanup.get(Fact, fact_id)
+                if f is not None:
+                    await cleanup.delete(f)
+                await cleanup.commit()
+
+    async def test_stage1_exemplar_routed_to_examples_block(self, heart, brain, settings, monkeypatch):
+        # Codex r1: both flags on + trigger fires + a REAL exemplar fact that
+        # Stage 1 surfaces (untagged) -> it appears ONCE, in the dedicated
+        # examples block (retrieval_leg=="exemplar"), NOT in Heart Memory, and
+        # the non-exemplar Stage-1 subsequence is order-identical to flag-off.
+        # The real exemplar_ids_among SELECT runs against the seeded row.
+        exemplar_id = uuid4()
+        query_vec = await heart._embeddings.embed(self._QUERY)
+        async with heart.db.session() as seed:
+            seed.add(
+                Fact(
+                    id=exemplar_id,
+                    agent_id=heart.agent_id,
+                    content="how do I reset my card pin\nlabel: 21",
+                    source="exemplar_extractor",
+                    active=True,
+                    embedding=query_vec,
+                )
+            )
+            await seed.commit()
+        try:
+            # Flag off: the exemplar fact surfaces in Heart Memory, untagged.
+            off_results, _ = await run_recall_pipeline(self._QUERY, heart, brain, settings)
+            off_occ = [r for r in off_results if r.id == exemplar_id]
+            assert len(off_occ) == 1 and off_occ[0].metadata.get("retrieval_leg") != "exemplar"
+
+            s = settings.model_copy(update={"exemplar_mode_enabled": True})
+            hit = ExemplarHit(id=exemplar_id, content="how do I reset my card pin\nlabel: 21", similarity=0.95)
+            monkeypatch.setattr(heart.facts, "has_exemplars", AsyncMock(return_value=True))
+            monkeypatch.setattr(heart.facts, "fetch_exemplars_by_vector", AsyncMock(return_value=[hit]))
+            on_results, stats = await run_recall_pipeline(self._QUERY, heart, brain, s)
+
+            occ = [r for r in on_results if r.id == exemplar_id]
+            assert len(occ) == 1  # appears exactly once
+            assert occ[0].metadata.get("retrieval_leg") == "exemplar"  # ONLY in the examples block
+            # Non-exemplar subsequence == flag-off minus the now-routed exemplar row.
+            non_ex_on = [r.id for r in on_results if r.metadata.get("retrieval_leg") != "exemplar"]
+            non_ex_off = [r.id for r in off_results if r.id != exemplar_id]
+            assert non_ex_on == non_ex_off
+        finally:
+            async with heart.db.session() as cleanup:
+                f = await cleanup.get(Fact, exemplar_id)
+                if f is not None:
+                    await cleanup.delete(f)
+                await cleanup.commit()
+
+    async def test_mode_on_trigger_unmet_stage1_untouched(self, heart, brain, settings, monkeypatch):
+        # Codex r1: mode ON but the trigger is NOT met (memory-referential query)
+        # -> the leg never runs, has_exemplars is never called, and Stage-1
+        # results are byte-identical to the flag-off run (no exemplar stripping).
+        mem_query = "what did I say about my card"
+        exemplar_id = uuid4()
+        query_vec = await heart._embeddings.embed(mem_query)
+        async with heart.db.session() as seed:
+            seed.add(
+                Fact(
+                    id=exemplar_id,
+                    agent_id=heart.agent_id,
+                    content="how do I reset my card pin\nlabel: 21",
+                    source="exemplar_extractor",
+                    active=True,
+                    embedding=query_vec,
+                )
+            )
+            await seed.commit()
+        try:
+            off_results, _ = await run_recall_pipeline(mem_query, heart, brain, settings)
+
+            s = settings.model_copy(update={"exemplar_mode_enabled": True})
+            monkeypatch.setattr(
+                heart.facts,
+                "has_exemplars",
+                AsyncMock(side_effect=AssertionError("leg must not fire on an unmet trigger")),
+            )
+            on_results, stats = await run_recall_pipeline(mem_query, heart, brain, s)
+
+            assert stats.exemplar_leg_used is False
+            assert [(r.id, r.type, r.score) for r in on_results] == [(r.id, r.type, r.score) for r in off_results]
+            # The exemplar fact is still present in Heart Memory, untouched.
+            assert any(r.id == exemplar_id and r.metadata.get("retrieval_leg") != "exemplar" for r in on_results)
+        finally:
+            async with heart.db.session() as cleanup:
+                f = await cleanup.get(Fact, exemplar_id)
                 if f is not None:
                     await cleanup.delete(f)
                 await cleanup.commit()

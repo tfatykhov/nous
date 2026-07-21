@@ -3920,52 +3920,58 @@ class FactManager:
                 out.setdefault(r.fact_id, []).append(r.entity_key)
             return out
 
-    async def fetch_exemplars_by_vector(
-        self,
-        query_embedding: list[float],
-        limit: int = 25,
-        *,
-        exclude_fact_ids: list[UUID] | set[UUID] | None = None,
-    ) -> list[ExemplarHit]:
+    async def fetch_exemplars_by_vector(self, query_embedding: list[float], limit: int = 25) -> list[ExemplarHit]:
         """F086: K nearest active exemplar facts by cosine (source-filtered).
 
         Same ANN-horizon margin as ``_find_similar_for_dedup`` — the partial
         HNSW index (migration 066) is scoped to ``source =
         'exemplar_extractor'`` so this walk never touches the much larger
         general embedding index.
-
-        ``exclude_fact_ids`` pushes the caller's already-surfaced fact ids into
-        the SQL LIMIT itself (mirrors ``fetch_by_entity_keys``'s r5 idiom). The
-        Stage 1.7 caller passes Stage 1's own fact hits so those rows don't
-        consume LIMIT slots only to be dropped as duplicates at assembly —
-        starving a fresh exemplar just beyond the LIMIT.
         """
         vec_lit = "[" + ",".join(str(x) for x in query_embedding) + "]"
-        params: dict = {"v": vec_lit, "agent_id": self.agent_id, "limit": limit}
-        exclude_clause = ""
-        if exclude_fact_ids:
-            exclude_clause = "  AND NOT (id = ANY(CAST(:exclude_ids AS uuid[]))) "
-            params["exclude_ids"] = [str(i) for i in exclude_fact_ids]
         async with self.db.session() as session:
             await set_local_ef_search(session, 100)
             rows = (
                 await session.execute(
-                    text(
-                        "SELECT id, content, "
-                        "       1 - (embedding <=> CAST(:v AS vector)) AS similarity "
-                        "FROM heart.facts "
-                        "WHERE agent_id = :agent_id "
-                        "  AND active = true "
-                        "  AND source = 'exemplar_extractor' "
-                        "  AND embedding IS NOT NULL "
-                        + exclude_clause +
-                        "ORDER BY embedding <=> CAST(:v AS vector) "
-                        "LIMIT :limit"
-                    ),
-                    params,
+                    text("""
+                SELECT id, content,
+                       1 - (embedding <=> CAST(:v AS vector)) AS similarity
+                FROM heart.facts
+                WHERE agent_id = :agent_id
+                  AND active = true
+                  AND source = 'exemplar_extractor'
+                  AND embedding IS NOT NULL
+                ORDER BY embedding <=> CAST(:v AS vector)
+                LIMIT :limit
+            """),
+                    {"v": vec_lit, "agent_id": self.agent_id, "limit": limit},
                 )
             ).fetchall()
         return [ExemplarHit(id=r.id, content=r.content, similarity=float(r.similarity)) for r in rows]
+
+    async def exemplar_ids_among(self, fact_ids: list[UUID] | set[UUID]) -> set[UUID]:
+        """F086 codex r1: the subset of ``fact_ids`` that are exemplar-source (agent-scoped).
+
+        Stage 1.7 uses this, when the exemplar leg actually fires, to strip
+        exemplar facts that ordinary Stage-1 recall surfaced (those carry no
+        ``retrieval_leg`` tag) so they render ONLY in the dedicated examples
+        block, never in Heart Memory. Their ids are deliberately NOT excluded
+        from ``fetch_exemplars_by_vector`` — they are the nearest exemplars and
+        must come back through the leg with banded score + label/similarity
+        metadata.
+        """
+        if not fact_ids:
+            return set()
+        async with self.db.session() as session:
+            rows = await session.execute(
+                text(
+                    "SELECT id FROM heart.facts "
+                    "WHERE agent_id = :a AND source = 'exemplar_extractor' "
+                    "  AND id = ANY(CAST(:ids AS uuid[]))"
+                ),
+                {"a": self.agent_id, "ids": [str(i) for i in fact_ids]},
+            )
+            return {r.id for r in rows}
 
     async def has_exemplars(self) -> bool:
         """F086: cached existence probe for any active exemplar_extractor fact.
