@@ -20,7 +20,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.admission import AdmissionController, AdmissionResult
-from nous.heart.exemplars import parse_label
 from nous.heart.keys import is_keyable_entity, normalize_key
 from nous.heart.schemas import ContradictionWarning, FactDetail, FactInput, FactRejected, FactSummary
 from nous.heart.search import hybrid_search, hybrid_search_multi, set_local_ef_search
@@ -745,7 +744,17 @@ class FactManager:
         # row r7's slot narrowing skipped is exactly as close to the
         # candidate as the routed dupe, so it is equally non-novel context).
         probed_ids: list[UUID] = []
-        if embedding is not None:
+        if is_exemplar:
+            # Codex r16 (F086): exemplar dedup is an EXACT-content probe, never
+            # cosine. A byte-identical repeat (chunk-overlap copy / resample
+            # re-ingest) confirms; anything else stores, so similar-but-distinct
+            # same-label utterances are always preserved for the kNN read leg —
+            # regardless of fact_native_cosine_threshold. Fall through to INSERT
+            # when no exact match, skipping cosine dedup + all band/D2 logic.
+            exact_dupe = await self._find_exemplar_exact_dupe(input.content, session)
+            if exact_dupe is not None:
+                return await self._confirm_duplicate(exact_dupe, input, session)
+        elif embedding is not None:
             # Codex r7: tell the selector which slot the D2 guard cares about
             # so a cross-slot near-duplicate (closer in embedding space, but
             # from an unrelated conflict slot) cannot mask a same-slot
@@ -764,19 +773,13 @@ class FactManager:
                 )
                 else None
             )
-            # Codex r15 (F086): the exemplar compatibility filter now lives INSIDE
-            # _find_duplicate's candidate iteration (skip-and-continue), replacing
-            # the old _learn-level two-sided guard that cleared `found` at the
-            # first candidate and could miss a real dupe just below an
-            # incompatible exemplar. An exemplar input dedups only against a
-            # same-label exemplar; a normal input only against a non-exemplar row.
+            # Codex r16: normal inputs only — exemplar rows are excluded at the
+            # SQL level inside _find_duplicate (exemplar inputs never reach here).
             found = await self._find_duplicate(
                 embedding, exclude_ids, session,
                 candidate_event_date=input.event_date,
                 prefer_slot=prefer_slot,
                 probed_ids=probed_ids,
-                input_is_exemplar=is_exemplar,
-                input_label=parse_label(input.content) if is_exemplar else None,
             )
             if found is not None:
                 dupe, dupe_similarity = found
@@ -826,12 +829,6 @@ class FactManager:
                     # ONLY from _find_contradiction re-processing (safe_excludes
                     # below) — it MUST remain visible to _resolve_key_conflicts.
                     routed_dupe_id = dupe.id
-                elif is_exemplar:
-                    # F086: reaching here means the label-guard above did NOT
-                    # clear `found`, i.e. the labels MATCH — a same-label
-                    # near-dupe IS a genuine duplicate. Confirm directly; never
-                    # run the F027 band classifier (zero-LLM for exemplars).
-                    return await self._confirm_duplicate(dupe, input, session)
                 else:
                     band_action = await self._classify_dupe_in_band(
                         dupe, dupe_similarity, input, check_contradictions
@@ -1725,6 +1722,29 @@ class FactManager:
             dupe.overrides_prior = True
         return await self._confirm(dupe.id, session)
 
+    async def _find_exemplar_exact_dupe(self, content: str, session: AsyncSession) -> Fact | None:
+        """Codex r16 (F086): EXACT-content dedup probe for exemplar inputs.
+
+        Exemplar dedup is NOT cosine. The only duplicates worth collapsing are
+        byte-identical repeats — chunk-overlap copies and resample re-ingests of
+        the very same ``utterance\\nlabel`` string. Two *similar but distinct*
+        same-label utterances must NEVER collapse regardless of how
+        ``fact_native_cosine_threshold`` is tuned, because corpus diversity is
+        exactly what the kNN read leg depends on. Agent- and source-scoped,
+        active rows only.
+        """
+        result = await session.execute(
+            select(Fact)
+            .where(
+                Fact.agent_id == self.agent_id,
+                Fact.source == "exemplar_extractor",
+                Fact.active == True,  # noqa: E712
+                Fact.content == content,
+            )
+            .limit(1)
+        )
+        return result.scalars().first()
+
     async def _find_duplicate(
         self,
         embedding: list[float],
@@ -1733,8 +1753,6 @@ class FactManager:
         candidate_event_date: date | None = None,
         prefer_slot: tuple[str, str] | None = None,
         probed_ids: list[UUID] | None = None,
-        input_is_exemplar: bool = False,
-        input_label: str | None = None,
     ) -> tuple[Fact, float] | None:
         """Find a near-duplicate fact by cosine similarity > threshold.
 
@@ -1824,13 +1842,21 @@ class FactManager:
         # move to hnsw.iterative_scan (pgvector >= 0.8) or per-agent
         # partial indexes.
         await set_local_ef_search(session, 100)
+        # Codex r16 (F086): exclude exemplar rows AT THE SQL LEVEL. This method
+        # is the non-exemplar write-path dedup only (exemplar inputs take the
+        # exact-content probe, never cosine), so an exemplar row must never be a
+        # candidate. Doing it in the WHERE — not a Python post-filter over the
+        # LIMIT-20 ANN horizon — means 20+ nearer exemplars can no longer starve
+        # the horizon and hide a genuine normal duplicate below it. IS DISTINCT
+        # FROM keeps NULL-source rows.
         sql = text(f"""
-            SELECT id, event_date, subject_key, attribute_key, source, content,
+            SELECT id, event_date, subject_key, attribute_key,
                    1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
             FROM heart.facts
             WHERE agent_id = :agent_id
               AND active = true
               AND embedding IS NOT NULL
+              AND source IS DISTINCT FROM 'exemplar_extractor'
               {exclude_clause}
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT 20
@@ -1842,22 +1868,6 @@ class FactManager:
             return None
         if probed_ids is not None:
             probed_ids.extend(r.id for r in above)
-
-        # Codex r15 (F086): exemplar COMPATIBILITY filter, pushed here from the
-        # old _learn-level two-sided guard (which cleared `found` at the FIRST
-        # candidate and could miss a genuine dupe just below an incompatible
-        # exemplar). Skip incompatible candidates and CONTINUE: an exemplar input
-        # dedups only against a SAME-LABEL exemplar; a normal input only against a
-        # non-exemplar row. One mechanism, full isolation both directions.
-        def _exemplar_compatible(r) -> bool:
-            cand_is_exemplar = r.source == "exemplar_extractor"
-            if input_is_exemplar:
-                return cand_is_exemplar and parse_label(r.content or "") == input_label
-            return not cand_is_exemplar
-
-        above = [r for r in above if _exemplar_compatible(r)]
-        if not above:
-            return None
 
         # Codex r9: check for a same-date match across the FULL above-threshold
         # set BEFORE any slot narrowing — a date match wins outright and skips

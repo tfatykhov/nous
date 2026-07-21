@@ -26,6 +26,7 @@ from uuid import UUID
 from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
 from nous.config import Settings
+from nous.heart.exemplars import parse_label
 from nous.heart.heart import Heart
 from nous.heart.schemas import CensorInput, FactInput, FactRejected, ProcedureInput
 from nous.skills.parser import SkillParser
@@ -514,7 +515,18 @@ def _format_pipeline_text(
         for i, r in enumerate(exemplar_rows, 1):
             sim = r.metadata.get("similarity")
             sim_s = f" [sim {sim:.2f}]" if isinstance(sim, (int, float)) else ""
-            results_text.append(f"{i}.{sim_s} {r.description[:500]}")
+            # Codex r16: truncate the UTTERANCE portion only, then ALWAYS append
+            # the label line — a >500-char utterance must never lose its label to
+            # the slice (the label is the whole point of an exemplar).
+            desc = r.description or ""
+            label = r.metadata.get("label")
+            if label is None:
+                label = parse_label(desc)
+            if label is not None:
+                utterance = desc.rsplit("\nlabel:", 1)[0]
+                results_text.append(f"{i}.{sim_s} {utterance[:500]}\nlabel: {label}")
+            else:
+                results_text.append(f"{i}.{sim_s} {desc[:500]}")
 
     return "\n".join(results_text)
 

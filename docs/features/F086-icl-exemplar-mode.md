@@ -87,15 +87,22 @@ actionability, the sleep contradiction sweep, and the sleep cluster consolidatio
 - **Admission bypass** (`nous/heart/admission.py::bypass_sources`): exemplar facts skip utility/novelty
   scoring for the same reason enumerative facts do — near-identical banking-style utterances with
   different labels are the *point*, not low-novelty noise an admission scorer should reject.
-- **Label-aware dedup guard** (`nous/heart/facts.py`): the near-duplicate check that would otherwise
-  confirm a near-identical utterance as a duplicate is bypassed whenever the candidate's `parse_label(...)`
-  differs from the incoming fact's label — **different-label near-duplicates must never dedup-drop**,
-  since two banking utterances that are nearly identical text but carry different labels are exactly the
-  discriminative signal exemplar retrieval needs. The guard is **two-sided**: it fires when *either* the
-  incoming input *or* its nearest stored dupe is an exemplar. Without the dupe-side term, a genuine
-  conversational fact whose nearest neighbor happens to be an exemplar row (labels differ —
-  `parse_label` returns `None` for label-less content) would dedup-confirm *into* that exemplar and be
-  lost.
+- **Exemplar dedup is EXACT-content, cross-source isolation is in SQL** (`nous/heart/facts.py`, codex r16 —
+  final form). The write-path dedup splits cleanly by source:
+    - **Exemplar inputs** skip cosine entirely and take an **exact-content** probe
+      (`_find_exemplar_exact_dupe`: `WHERE source='exemplar_extractor' AND active AND content=:content`). The
+      only duplicates worth collapsing are byte-identical repeats — chunk-overlap copies and resample
+      re-ingests of the very same `utterance\nlabel` string. Two *similar-but-distinct* same-label utterances
+      **never** collapse, regardless of how `fact_native_cosine_threshold` is tuned, because corpus diversity
+      is exactly what the kNN read leg depends on.
+    - **Normal inputs** run the cosine `_find_duplicate`, which now excludes `source='exemplar_extractor'`
+      **at the SQL level** (`AND source IS DISTINCT FROM 'exemplar_extractor'`, NULL-source rows kept). Done
+      in the `WHERE` rather than a Python post-filter, so 20+ nearer exemplars can no longer fill the
+      LIMIT-20 ANN horizon and hide a genuine normal duplicate below it. A conversational fact therefore
+      dedups only against real conversational rows and is never confirmed *into* an exemplar.
+
+  (This supersedes the earlier `_learn`-level two-sided / same-label Python guard — one rule per source,
+  and it holds under any threshold tuning.)
 - **Conflict/contradiction/actionability exemptions** (`nous/heart/facts.py`, one local
   `is_exemplar = input.source == "exemplar_extractor"` in `_learn`): exemplar facts bypass the legacy
   subject-supersession pass, the post-insert `_find_contradiction` scan + domain-compaction check, and the

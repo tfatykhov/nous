@@ -1512,6 +1512,24 @@ class TestExemplarRendering:
         assert "No results found." in text
         assert "=== Nearest stored examples ===" not in text
 
+    def test_long_exemplar_utterance_keeps_label_line(self):
+        # Codex r16: a >500-char utterance must keep its label line — truncate
+        # the utterance only, always append the label.
+        long_utt = "x" * 600
+        r = PipelineResult(
+            id=uuid4(),
+            type="fact",
+            description=f"{long_utt}\nlabel: 42",
+            score=0.5,
+            source="heart",
+            metadata={"retrieval_leg": "exemplar", "label": "42", "similarity": 0.9},
+        )
+        text = _format_pipeline_text([r], PipelineStats(), ["all"])
+
+        assert "\nlabel: 42" in text  # label survives the truncation
+        assert any(line.strip() == "label: 42" for line in text.split("\n"))
+        assert ("x" * 600) not in text  # utterance bounded to 500, not the full 600
+
 
 # ---------------------------------------------------------------------------
 # Task 6: backfill pure-function logic (chunk grouping, qualification,
@@ -2165,6 +2183,130 @@ class TestExemplarCompatibleCandidateDedup:
                     await check.execute(text("SELECT id FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
                 ).all()
                 assert len(rows) == 2  # exemplar + normal dupe; no 3rd row
+        finally:
+            async with heart.db.session() as s:
+                await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
+                await s.commit()
+
+
+@pytest.mark.postgres_only
+class TestExemplarExactContentDedup:
+    """Codex r16: exemplar dedup is an EXACT-content probe, not cosine. Overlap
+    copies / resample repeats (byte-identical) dedup; similar-but-distinct
+    same-label utterances NEVER collapse (kNN read leg needs corpus diversity)."""
+
+    async def test_similar_distinct_same_label_both_stored_and_exact_dedups(self, heart):
+        agent_id = f"exemplar-exact-{uuid4()}"
+        # Tuned-DOWN threshold: cosine dedup WOULD collapse these; exact-content won't.
+        settings = heart.settings.model_copy(update={"fact_native_cosine_threshold": 0.85})
+        fm = FactManager(heart.db, heart._embeddings, agent_id, settings=settings)
+        base = await heart._embeddings.embed("how do I reset my card pin")
+        c1 = "how do I reset my card pin\nlabel: 5"
+        c2 = "how can I reset the pin on my debit card\nlabel: 5"  # distinct text, same label
+
+        def _fi(content):
+            return FactInput(
+                content=content,
+                subject=content[:200],
+                attribute_key="label",
+                category="exemplar",
+                confidence=1.0,
+                source="exemplar_extractor",
+            )
+
+        try:
+            r1 = await fm.learn(_fi(c1), precomputed_embedding=base)
+            # c2 embedding at cosine 0.90 to base (> 0.85 threshold) — cosine dedup
+            # would confirm it into c1; exact-content stores it.
+            r2 = await fm.learn(_fi(c2), precomputed_embedding=_vec_at_cosine(base, 0.90, "exact-c2"))
+            assert not isinstance(r1, FactRejected) and not isinstance(r2, FactRejected)
+            assert r2.id != r1.id  # NOT collapsed
+
+            async with heart.db.session() as check:
+                n = (
+                    await check.execute(
+                        text("SELECT count(*) FROM heart.facts WHERE agent_id = :a AND active = true"),
+                        {"a": agent_id},
+                    )
+                ).scalar_one()
+            assert n == 2  # both distinct same-label exemplars stored
+
+            # Byte-identical repeat of c1 -> exact dedup-confirm, no new row.
+            r3 = await fm.learn(_fi(c1), precomputed_embedding=base)
+            assert r3.id == r1.id
+            async with heart.db.session() as check:
+                n2 = (
+                    await check.execute(
+                        text("SELECT count(*) FROM heart.facts WHERE agent_id = :a AND active = true"),
+                        {"a": agent_id},
+                    )
+                ).scalar_one()
+            assert n2 == 2  # still 2 — exact repeat deduped
+        finally:
+            async with heart.db.session() as s:
+                await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
+                await s.commit()
+
+    async def test_normal_input_finds_dupe_below_exemplar_horizon(self, heart):
+        # Codex r16: exemplar rows are excluded AT THE SQL LEVEL, so 20+ nearer
+        # exemplars can't fill the LIMIT-20 ANN horizon and hide a genuine normal
+        # duplicate below it (the pre-fix Python post-filter left `above` empty).
+        agent_id = f"exemplar-horizon-{uuid4()}"
+        fm = FactManager(heart.db, heart._embeddings, agent_id, settings=heart.settings)
+        content = "The user enabled two-factor authentication on their account today."
+        base = await heart._embeddings.embed(content)
+        norm_id = uuid4()
+        async with heart.db.session() as s:
+            for i in range(20):
+                s.add(
+                    Fact(
+                        id=uuid4(),
+                        agent_id=agent_id,
+                        subject=f"ex {i}",
+                        content=f"exemplar utterance number {i}\nlabel: {i}",
+                        source="exemplar_extractor",
+                        active=True,
+                        embedding=_vec_at_cosine(base, 0.99, f"horizon-ex-{i}"),
+                    )
+                )
+            s.add(
+                Fact(
+                    id=norm_id,
+                    agent_id=agent_id,
+                    subject="a distinct normal subject",
+                    content="The user switched on 2FA for their login recently.",
+                    source="fact_extractor",
+                    active=True,
+                    embedding=_vec_at_cosine(base, 0.96, "horizon-norm"),
+                )
+            )
+            await s.commit()
+        try:
+            # Distinct subject from the normal dupe so supersession doesn't fire —
+            # isolates the dedup selection.
+            result = await fm.learn(
+                FactInput(
+                    content=content,
+                    subject="two factor auth preference",
+                    category="general",
+                    confidence=0.9,
+                    source="fact_extractor",
+                ),
+                precomputed_embedding=base,
+            )
+            assert not isinstance(result, FactRejected)
+            assert result.id == norm_id  # confirmed into the normal dupe below the exemplar horizon
+            async with heart.db.session() as check:
+                n = (
+                    await check.execute(
+                        text(
+                            "SELECT count(*) FROM heart.facts WHERE agent_id = :a "
+                            "AND source = 'fact_extractor' AND active = true"
+                        ),
+                        {"a": agent_id},
+                    )
+                ).scalar_one()
+            assert n == 1  # no NEW normal row inserted
         finally:
             async with heart.db.session() as s:
                 await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})

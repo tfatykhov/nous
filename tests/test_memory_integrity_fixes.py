@@ -812,7 +812,8 @@ class TestFindDuplicateSelection:
 
     @staticmethod
     def _row(similarity, event_date=None):
-        return SimpleNamespace(id=uuid4(), event_date=event_date, similarity=similarity)
+        # codex r16: real rows always carry `source`; the mock was stale.
+        return SimpleNamespace(id=uuid4(), event_date=event_date, similarity=similarity, source=None)
 
     @pytest.mark.asyncio
     async def test_same_date_preferred_over_nearer_different_date(self):
