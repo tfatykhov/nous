@@ -77,9 +77,9 @@ stores each pair via `Heart.learn(fact_input, precomputed_embedding=vec)`. This 
 additive**: when the exemplar leg stores anything, the legacy summary-derived candidate facts for that
 transcript are *not* also stored — the transcript routes to exactly one path.
 
-Five guards keep exemplar facts from tripping machinery meant for narrative facts (four at write time, one
+Six guards keep exemplar facts from tripping machinery meant for narrative facts (four at write time, two
 at sleep — the background-machinery family is supersession, contradiction scan, band-classify,
-actionability, and now the sleep sweep):
+actionability, the sleep contradiction sweep, and the sleep cluster consolidation):
 
 - **Source-aware min-content floor** (`nous/heart/facts.py`, both enforcement sites): exemplar facts use
   `exemplar_min_content_chars` (default 5) instead of the global 30-char floor — a labeled pair like
@@ -113,6 +113,13 @@ actionability, and now the sleep sweep):
   (`IS DISTINCT FROM`, so NULL-source normal facts stay in scope) — an exemplar may neither be resolved nor
   serve as the resolving counterpart against a normal fact. This closes the previously-accepted residual
   from the sleep side.
+- **Sleep cluster-consolidation exclusion** (`nous/handlers/sleep_handler.py::_phase_cluster_consolidation`,
+  codex r9 — the sixth member): that phase merges any 3–10 active same-subject facts into one and
+  deactivates the originals, which would collapse intentionally-distinct exemplar label variants (same
+  `subject`). Both its candidate-subject count query and its per-subject member fetch now exclude
+  `source = 'exemplar_extractor'` (`is_distinct_from`), so exemplars are never counted toward a cluster nor
+  merged as members. The merged fact carries `source = 'cluster_consolidation'`, so the produced-fact side
+  can never be an exemplar.
 
 **Codex r3 — an exemplar is never persisted without an embedding.** `_embed_and_store_pairs` batch-embeds
 all pairs; on a batch miss it retries once per-pair (`embedder.embed(content)`), and if the vector is
@@ -385,8 +392,16 @@ corpus scale).
 
 Each live backfill prints **two** rollback handles up-front, before any write: the DB-clock `SELECT now()`
 watermark ("ROLLBACK KEY") **and** a "ROLLBACK MANIFEST" path. On completion it writes the manifest — a
-JSONL file (one `{"fact_id": "<uuid>"}` per line) under `reports/`, holding the **exact** fact ids the run
-created. `--dry-run` prints the manifest path it *would* write but writes nothing.
+JSONL file (one `{"fact_id": "<uuid>"}` per line) under `reports/`, holding **only the ids this run newly
+inserted**. `--dry-run` prints the manifest path it *would* write but writes nothing.
+
+**New-rows-only (codex r9).** Before storing, the run snapshots the agent's existing
+`source='exemplar_extractor'` ids; the manifest is the set of returned ids **minus** that snapshot. Without
+this, an idempotent **rerun** (where every pair dedup-confirms into an existing row, inserting nothing)
+would manifest the *earlier* run's ids, so rolling back the rerun would deactivate the earlier run's rows.
+With it, a rerun's manifest is empty and its rollback is a no-op. **Residual:** a live row inserted *during*
+the run that this run then dedup-confirms into is newer than the snapshot, so it could still be manifested —
+a narrow window; the watermark chunk-timestamp guard remains the backstop for it.
 
 **`--phase rollback --manifest <path>` is the preferred, exact mode.** It soft-deactivates exactly the
 listed ids (agent- and source-scoped, active rows only):

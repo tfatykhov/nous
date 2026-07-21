@@ -420,6 +420,26 @@ async def _run_backfill(
         # Override agent_id from CLI arg (Settings() reads it from env).
         heart.facts.agent_id = agent_id
 
+        # Codex r9: pre-run snapshot of existing exemplar ids so the manifest
+        # holds only NEWLY-INSERTED rows. On an idempotent rerun, learn returns
+        # the EXISTING row's FactDetail for a dedup-confirm, whose id would
+        # otherwise land in the manifest and let a rollback of THIS run
+        # deactivate an earlier run's (or a live) row even though this run
+        # inserted nothing. One query (~15k ids is fine). RESIDUAL: a live row
+        # inserted DURING this run that this run then dedup-confirms into is
+        # newer than the snapshot, so it could still be manifested -- a narrow
+        # window (runbook note); the watermark chunk-guard remains the backstop.
+        async with db.session() as session:
+            pre_existing_ids = {
+                row[0]
+                for row in (
+                    await session.execute(
+                        text("SELECT id FROM heart.facts WHERE agent_id = :a AND source = 'exemplar_extractor'"),
+                        {"a": agent_id},
+                    )
+                ).all()
+            }
+
         total = 0
         total_skipped = 0
         created_ids: list[UUID] = []
@@ -431,18 +451,20 @@ async def _run_backfill(
                 total_skipped += skipped
                 created_ids.extend(ids)
 
-        # Codex r8: write the EXACT rollback manifest (one fact id per JSONL
-        # line). --phase rollback --manifest deactivates exactly these ids, so a
-        # concurrent live write (never in this manifest) is never touched.
+        # Codex r8+r9: write the EXACT rollback manifest -- one fact id per JSONL
+        # line, ONLY ids not present before the run (new insertions). --phase
+        # rollback --manifest deactivates exactly these, so neither a prior run's
+        # rows (dedup-confirmed this run) nor a concurrent live write are touched.
+        new_ids = [i for i in created_ids if i not in pre_existing_ids]
         Path(manifest_path).parent.mkdir(parents=True, exist_ok=True)
         with open(manifest_path, "w", encoding="utf-8") as fh:
-            for fid in created_ids:
+            for fid in new_ids:
                 fh.write(json.dumps({"fact_id": str(fid)}) + "\n")
 
         print(
             f"Backfilled {total} exemplar facts across {len(qualifying)} episodes "
             f"({total_skipped} skipped: no embedding). "
-            f"Wrote {len(created_ids)} fact id(s) to rollback manifest {manifest_path}."
+            f"Wrote {len(new_ids)} newly-inserted fact id(s) to rollback manifest {manifest_path}."
         )
         return 0
     except Exception:

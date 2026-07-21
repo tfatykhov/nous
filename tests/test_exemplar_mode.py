@@ -7,7 +7,7 @@ import random as _random
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -450,6 +450,54 @@ class TestExemplarIngest:
         assert stored == 3 and skipped == 0
         rows = await _fact_rows(heart, episode_id)
         assert set(created_ids) == {r.id for r in rows}
+
+    async def test_rerun_manifest_is_new_rows_only(self, heart, settings):
+        # Codex r9: a backfill RERUN inserts nothing (every pair dedup-confirms
+        # into an existing row), so the new-rows-only manifest is EMPTY and a
+        # manifest-rollback of the rerun deactivates nothing -- run 1's rows
+        # survive. Exercises the real dedup-confirm behavior + the pre-run
+        # snapshot filter that _run_backfill applies. (_run_backfill itself is
+        # OpenAI-gated; this mirrors its `created_ids - snapshot` line against
+        # the real store path.)
+        from scripts.backfill_exemplar_facts import _store_episode_pairs, rollback_exemplar_facts_by_manifest
+
+        episode_id = await _insert_episode(heart)
+        tag = str(episode_id)
+        pairs = parse_exemplars(
+            f"how do I reset my card pin {tag}\nlabel: 21\n"
+            f"my card is lost {tag}\nlabel: 41\n"
+            f"what is the exchange rate {tag}\nlabel: 32\n"
+        )
+
+        async def _snapshot():
+            async with heart.db.session() as s:
+                return {
+                    r[0]
+                    for r in (
+                        await s.execute(
+                            text("SELECT id FROM heart.facts WHERE agent_id = :a AND source = 'exemplar_extractor'"),
+                            {"a": heart.agent_id},
+                        )
+                    ).all()
+                }
+
+        snap1 = await _snapshot()
+        _, _, ids1 = await _store_episode_pairs(heart, settings, pairs, episode_id, logger)
+        new1 = [i for i in ids1 if i not in snap1]
+        assert len(new1) == 3  # first run inserts 3 new rows
+
+        snap2 = await _snapshot()  # now contains run-1 ids
+        _, _, ids2 = await _store_episode_pairs(heart, settings, pairs, episode_id, logger)
+        new2 = [i for i in ids2 if i not in snap2]
+        assert new2 == []  # rerun dedup-confirmed everything -> nothing new to manifest
+
+        # Manifest-rollback of run 2's (empty) manifest is a no-op; run-1 rows survive.
+        async with heart.db.session() as s:
+            counts = await rollback_exemplar_facts_by_manifest(s, agent_id=heart.agent_id, fact_ids=new2, dry_run=False)
+            await s.commit()
+        assert counts["facts_deactivated"] == 0
+        rows = await _fact_rows(heart, episode_id)
+        assert len(rows) == 3 and all(r.active for r in rows)
 
 
 # ---------------------------------------------------------------------------
@@ -1715,3 +1763,90 @@ class TestExemplarBackfillWatermark:
         out = capsys.readouterr().out
         assert "ROLLBACK KEY" in out
         assert "1999-01-01" not in out
+
+
+@pytest.mark.postgres_only
+class TestExemplarClusterConsolidationExclusion:
+    """Codex r9: the sleep cluster-consolidation phase must never merge exemplar
+    facts (same subject=utterance[:200] across labels is by design) — the 6th
+    background-machinery guard."""
+
+    async def test_cluster_consolidation_skips_exemplars(self, heart):
+        from nous.handlers.sleep_handler import SleepHandler
+
+        agent_id = f"exemplar-cluster-{uuid4()}"
+        orig_heart_agent = heart.agent_id
+        orig_facts_agent = heart.facts.agent_id
+        heart.agent_id = agent_id
+        heart.facts.agent_id = agent_id
+        ex_ids = [uuid4(), uuid4(), uuid4()]
+        nm_ids = [uuid4(), uuid4(), uuid4()]
+        try:
+            async with heart.db.session() as s:
+                for i, fid in enumerate(ex_ids):
+                    s.add(
+                        Fact(
+                            id=fid,
+                            agent_id=agent_id,
+                            subject="reset pin utterance",
+                            content=f"how do I reset my pin\nlabel: {i}",
+                            source="exemplar_extractor",
+                            active=True,
+                            embedding=await heart._embeddings.embed(f"exemplar cluster seed {i}"),
+                        )
+                    )
+                for i, fid in enumerate(nm_ids):
+                    s.add(
+                        Fact(
+                            id=fid,
+                            agent_id=agent_id,
+                            subject="user favorite color",
+                            content=f"the user's favorite color observation number {i}",
+                            source="fact_extractor",
+                            active=True,
+                            embedding=await heart._embeddings.embed(f"normal cluster seed {i}"),
+                        )
+                    )
+                await s.commit()
+
+            # Mock LLM that APPROVES the merge for whatever cluster it is shown.
+            llm = MagicMock()
+            resp = MagicMock()
+            resp.content = [
+                {
+                    "type": "tool_use",
+                    "id": "t",
+                    "name": "merge_facts",
+                    "input": {
+                        "should_merge": True,
+                        "merged_content": "The user's favorite color, consolidated into one fact.",
+                        "confidence": 0.9,
+                    },
+                }
+            ]
+            llm.call = AsyncMock(return_value=resp)
+            bus = MagicMock()
+            bus.emit = AsyncMock()
+
+            handler = SleepHandler(MagicMock(), heart, heart.settings, bus, llm)
+            ok = await handler._phase_cluster_consolidation({})
+            assert ok
+
+            async with heart.db.session() as check:
+                # Exemplars never a cluster member -> all still active.
+                for fid in ex_ids:
+                    f = await check.get(Fact, fid)
+                    assert f is not None and f.active is True
+                # The normal same-subject cluster still consolidates -> originals merged.
+                nm_active = 0
+                for fid in nm_ids:
+                    f = await check.get(Fact, fid)
+                    if f is not None and f.active:
+                        nm_active += 1
+                assert nm_active == 0
+        finally:
+            heart.agent_id = orig_heart_agent
+            heart.facts.agent_id = orig_facts_agent
+            async with heart.db.session() as s:
+                await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
+                await s.commit()
