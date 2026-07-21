@@ -104,6 +104,14 @@ Four write-path guards keep exemplar facts from tripping machinery meant for nar
   the write path genuinely **zero-LLM**, not just zero-LLM at parse time. A same-label near-duplicate that
   survives the label-guard confirms directly (no F027 band classifier — another per-fact LLM call avoided).
 
+**Codex r3 — an exemplar is never persisted without an embedding.** `_embed_and_store_pairs` batch-embeds
+all pairs; on a batch miss it retries once per-pair (`embedder.embed(content)`), and if the vector is
+*still* `None` (or there is no embedder) it **skips** the pair rather than hand `precomputed_embedding=None`
+to `heart.learn`. A NULL-embedding exemplar would be invisible to both `fetch_exemplars_by_vector`
+(`embedding IS NOT NULL`) *and* cosine dedup, so a backfill rerun would silently duplicate it. Skips are
+counted (`skipped_no_embedding`), logged as a loud WARNING, and surfaced in the ingest INFO line and the
+backfill summary — never silent.
+
 ---
 
 ## Read Path — Stage 1.7 Exemplar Leg
@@ -176,7 +184,10 @@ Memory** without the inform-not-force framing. To keep the two presentations coh
 actually fires** (all trigger gates passed, `has_exemplars()` true, query embedded), Stage 1.7:
 
 1. Fetches the K nearest exemplars (`fetch_exemplars_by_vector`) and applies the similarity floor. Call
-   the survivors the **post-floor hit set**.
+   the survivors the **post-floor hit set**. **Codex r3:** those survivors get `track_access` called on
+   them (recall_count / last_recalled_at) — retrieval == access, so an actively-retrieved exemplar is not
+   later reaped by `stale_scan`. Only survivors are tracked; below-floor hits are not. This mirrors the
+   keyed_r2 survivors-only, sync-await precedent in assembly.
 2. Batch-identifies which already-surfaced Stage-1 fact ids are exemplar-source
    (`FactManager.exemplar_ids_among`, one agent-scoped
    `SELECT id … WHERE source='exemplar_extractor' AND id = ANY(...)`).

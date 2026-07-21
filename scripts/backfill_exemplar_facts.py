@@ -193,7 +193,7 @@ async def select_backfill_chunks(session, agent_id: str, since, limit: int) -> l
     return result.all()
 
 
-async def _store_episode_pairs(heart, settings, pairs: list[ExemplarPair], episode_id: UUID, logger) -> int:
+async def _store_episode_pairs(heart, settings, pairs: list[ExemplarPair], episode_id: UUID, logger) -> tuple[int, int]:
     """Cap + embed + learn one episode's full (already ordinal-continuous)
     pair list. Thin wrapper around ``_embed_and_store_pairs``
     (nous/handlers/exemplar_ingest.py) -- the same cap+embed+learn
@@ -337,12 +337,18 @@ async def _run_backfill(
         heart.facts.agent_id = agent_id
 
         total = 0
+        total_skipped = 0
         async with heart:
             for episode_id, contents in qualifying.items():
                 pairs = build_episode_pairs(contents)
-                total += await _store_episode_pairs(heart, settings, pairs, episode_id, logger)
+                stored, skipped = await _store_episode_pairs(heart, settings, pairs, episode_id, logger)
+                total += stored
+                total_skipped += skipped
 
-        print(f"Backfilled {total} exemplar facts across {len(qualifying)} episodes.")
+        print(
+            f"Backfilled {total} exemplar facts across {len(qualifying)} episodes "
+            f"({total_skipped} skipped: no embedding)."
+        )
         return 0
     except Exception:
         logger.exception("Backfill failed")

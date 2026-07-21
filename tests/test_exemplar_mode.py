@@ -365,6 +365,58 @@ class TestExemplarIngest:
         assert len(rows) == 2
         assert any("truncat" in r.message.lower() for r in caplog.records)
 
+    async def test_unembeddable_pairs_skipped_loudly(self, heart, settings, monkeypatch, caplog):
+        # Codex r3: when batch AND per-pair embed both fail, an exemplar must
+        # NOT be persisted with a NULL embedding (invisible to retrieval + dedup
+        # -> silently duplicated on rerun). It is skipped, counted, WARNED.
+        episode_id = await _insert_episode(heart)
+        tag = str(episode_id)
+        stream = (
+            f"how do I reset my card pin {tag}\nlabel: 21\n"
+            f"my card is lost {tag}\nlabel: 41\n"
+            f"what is the exchange rate {tag}\nlabel: 32\n"
+        )
+
+        async def _raise_batch(texts):
+            raise RuntimeError("batch embed down")
+
+        async def _raise_embed(text):
+            raise RuntimeError("embed down")
+
+        monkeypatch.setattr(heart._embeddings, "embed_batch", _raise_batch)
+        monkeypatch.setattr(heart._embeddings, "embed", _raise_embed)
+
+        with caplog.at_level("WARNING"):
+            n = await ingest_exemplars(heart, settings, stream, episode_id, heart.agent_id, logger)
+
+        assert n == 0
+        rows = await _fact_rows(heart, episode_id)
+        assert len(rows) == 0  # nothing persisted with a NULL embedding
+        assert any("SKIPPED 3" in r.getMessage() for r in caplog.records)
+
+    async def test_per_pair_embed_recovers_batch_failure(self, heart, settings, monkeypatch):
+        # Codex r3: a batch-embed failure alone must NOT lose pairs — the
+        # per-pair retry recovers them and all three store normally.
+        episode_id = await _insert_episode(heart)
+        tag = str(episode_id)
+        stream = (
+            f"how do I reset my card pin {tag}\nlabel: 21\n"
+            f"my card is lost {tag}\nlabel: 41\n"
+            f"what is the exchange rate {tag}\nlabel: 32\n"
+        )
+
+        async def _raise_batch(texts):
+            raise RuntimeError("batch embed down")
+
+        monkeypatch.setattr(heart._embeddings, "embed_batch", _raise_batch)
+        # embed (per-pair) stays real -> recovery path stores all 3.
+
+        n = await ingest_exemplars(heart, settings, stream, episode_id, heart.agent_id, logger)
+        assert n == 3
+        rows = await _fact_rows(heart, episode_id)
+        assert len(rows) == 3
+        assert all(r.embedding is not None for r in rows)
+
 
 # ---------------------------------------------------------------------------
 # Task 2: modal routing seam in FactExtractor.extract_and_store (no DB)
@@ -376,11 +428,25 @@ class _StubResult:
         self.id = uuid4()
 
 
+class _StubEmbeddings:
+    """Minimal embedder so the exemplar store path (codex r3: no NULL-embedding
+    rows, skip when no vector) actually reaches learn in the stub-heart routing
+    tests — the modal-routing assertions are about WHICH inputs get stored, so a
+    constant non-None vector is enough."""
+
+    async def embed_batch(self, texts):
+        return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
+
+    async def embed(self, text):
+        return [0.1, 0.2, 0.3, 0.4]
+
+
 def _stub_heart():
     captured = []
 
     class _StubHeart:
         agent_id = "test-agent"
+        _embeddings = _StubEmbeddings()
 
         async def learn(self, fact_input, **kw):
             captured.append(fact_input)
@@ -1054,6 +1120,59 @@ class TestExemplarLeg:
                 f = await cleanup.get(Fact, exemplar_id)
                 if f is not None:
                     await cleanup.delete(f)
+                await cleanup.commit()
+
+    async def test_surfaced_exemplars_tracked(self, heart, brain, settings, monkeypatch):
+        # Codex r3: post-floor survivors get recall tracked (retrieval == access)
+        # so stale_scan can't reap an actively-used exemplar; below-floor hits do not.
+        above_id, below_id = uuid4(), uuid4()
+        # Give both facts the SAME embedding so ordinary Stage-1 recall (which
+        # also tracks access on its own hits, with no similarity floor) treats
+        # them identically — the exemplar leg's extra +1 on the survivor is then
+        # the ONLY difference between the two recall_counts, robust to whatever
+        # Stage-1 does.
+        query_vec = await heart._embeddings.embed(self._QUERY)
+        async with heart.db.session() as seed:
+            for fid, content in (
+                (above_id, "tracking exemplar above floor\nlabel: 1"),
+                (below_id, "tracking exemplar below floor\nlabel: 2"),
+            ):
+                seed.add(
+                    Fact(
+                        id=fid,
+                        agent_id=heart.agent_id,
+                        content=content,
+                        source="exemplar_extractor",
+                        active=True,
+                        embedding=query_vec,
+                        recall_count=0,
+                    )
+                )
+            await seed.commit()
+        try:
+            s = settings.model_copy(update={"exemplar_mode_enabled": True})
+            floor = s.exemplar_min_similarity
+            hits = [
+                ExemplarHit(id=above_id, content="tracking exemplar above floor\nlabel: 1", similarity=floor + 0.1),
+                ExemplarHit(id=below_id, content="tracking exemplar below floor\nlabel: 2", similarity=floor - 0.1),
+            ]
+            monkeypatch.setattr(heart.facts, "has_exemplars", AsyncMock(return_value=True))
+            monkeypatch.setattr(heart.facts, "fetch_exemplars_by_vector", AsyncMock(return_value=hits))
+            await run_recall_pipeline(self._QUERY, heart, brain, s)
+
+            async with heart.db.session() as check:
+                above = await check.get(Fact, above_id)
+                below = await check.get(Fact, below_id)
+                # The leg tracked the survivor exactly once MORE than the
+                # below-floor hit (which the leg never tracks).
+                assert above.recall_count == below.recall_count + 1
+                assert above.last_recalled_at is not None
+        finally:
+            async with heart.db.session() as cleanup:
+                for fid in (above_id, below_id):
+                    f = await cleanup.get(Fact, fid)
+                    if f is not None:
+                        await cleanup.delete(f)
                 await cleanup.commit()
 
 
