@@ -151,14 +151,23 @@ async def fetch_db_now(session) -> datetime:
     return (await session.execute(text("SELECT now()"))).scalar_one()
 
 
-async def select_backfill_chunks(session, agent_id: str, since, limit: int) -> list:
+async def select_backfill_chunks(
+    session, agent_id: str, since, limit: int, source_kinds: list[str] | tuple[str, ...] = ("dialogue",)
+) -> list:
     """Return (episode_id, chunk_index, content) rows for up to `limit`
     DISTINCT episodes (oldest-first by started_at; 0 = all), scoped to
     agent_id. Mirrors the enumerative backfill's episode-eligibility
     predicate (select_backfill_episodes: open OR closed, never abandoned)
     then joins to episode_chunks for content instead of transcript.
+
+    Codex r5: only chunks whose ``source_kind`` is in ``source_kinds`` are read
+    (default ``('dialogue',)``). A DOCUMENT/CODE chunk (F024 attachment,
+    ``ingest_document``) that happens to carry ``label:`` lines must not qualify
+    an episode and pollute the ICL exemplar corpus. Old rows default 'dialogue'
+    (migration 052), matching the transcript-backfill contract; widen only
+    deliberately via ``--source-kinds`` when backfilling an attachment corpus.
     """
-    params: dict = {"agent_id": agent_id}
+    params: dict = {"agent_id": agent_id, "source_kinds": list(source_kinds)}
     since_clause = ""
     if since is not None:
         since_clause = "AND started_at >= :since"
@@ -185,6 +194,7 @@ async def select_backfill_chunks(session, agent_id: str, since, limit: int) -> l
             FROM heart.episode_chunks ec
             JOIN eligible_episodes e ON e.id = ec.episode_id
             WHERE ec.agent_id = :agent_id
+              AND ec.source_kind = ANY(CAST(:source_kinds AS text[]))
             ORDER BY ec.episode_id, ec.chunk_index
             """
         ),
@@ -279,6 +289,7 @@ async def _run_backfill(
     max_episodes: int,
     density_threshold: float | None,
     dry_run: bool,
+    source_kinds: list[str] | tuple[str, ...] = ("dialogue",),
 ) -> int:
     settings = Settings()
 
@@ -305,7 +316,7 @@ async def _run_backfill(
         print(f"ROLLBACK KEY (created_at watermark): {watermark}")
 
         async with db.session() as session:
-            rows = await select_backfill_chunks(session, agent_id, since, max_episodes)
+            rows = await select_backfill_chunks(session, agent_id, since, max_episodes, source_kinds)
 
         by_episode = group_chunks_by_episode(rows)
         qualifying = {
@@ -317,7 +328,7 @@ async def _run_backfill(
         if dry_run:
             total_pairs = sum(len(build_episode_pairs(contents)) for contents in qualifying.values())
             print(
-                f"DRY RUN: {len(by_episode)} episodes with chunks, "
+                f"DRY RUN [source_kinds={','.join(source_kinds)}]: {len(by_episode)} episodes with chunks, "
                 f"{len(qualifying)} classified exemplar streams, "
                 f"{total_pairs} candidate pairs -- no writes."
             )
@@ -430,6 +441,14 @@ def main() -> None:
         help="Override exemplar density threshold (0.0-1.0).",
     )
     parser.add_argument(
+        "--source-kinds",
+        default="dialogue",
+        help="Comma-separated episode_chunks source_kind(s) to read (default 'dialogue'). "
+        "Valid: dialogue, document, code (migration-052 CHECK set). Widen to 'dialogue,document' "
+        "ONLY to deliberately backfill an attachment/document corpus -- document/code chunks with "
+        "label: lines would otherwise pollute the dialogue ICL corpus.",
+    )
+    parser.add_argument(
         "--phase",
         choices=["backfill", "rollback"],
         default="backfill",
@@ -489,6 +508,17 @@ def main() -> None:
             )
             sys.exit(2)
 
+    # Codex r5: validate --source-kinds against the migration-052 CHECK set so a
+    # typo fails loudly here rather than silently reading zero chunks.
+    _VALID_SOURCE_KINDS = ("dialogue", "document", "code")
+    source_kinds = [k.strip() for k in args.source_kinds.split(",") if k.strip()]
+    invalid = [k for k in source_kinds if k not in _VALID_SOURCE_KINDS]
+    if not source_kinds or invalid:
+        parser.error(
+            f"--source-kinds must be a comma-separated subset of {','.join(_VALID_SOURCE_KINDS)} "
+            f"(got {args.source_kinds!r})"
+        )
+
     sys.exit(
         asyncio.run(
             _run_backfill(
@@ -497,6 +527,7 @@ def main() -> None:
                 max_episodes=args.max_episodes,
                 density_threshold=args.density_threshold,
                 dry_run=args.dry_run,
+                source_kinds=source_kinds,
             )
         )
     )

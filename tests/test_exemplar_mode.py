@@ -30,7 +30,7 @@ from nous.heart.exemplars import (
 )
 from nous.heart.facts import ExemplarHit, FactManager
 from nous.heart.schemas import FactInput, FactRejected
-from nous.storage.models import Episode, Fact
+from nous.storage.models import Episode, EpisodeChunk, Fact
 
 logger = logging.getLogger(__name__)
 
@@ -1343,6 +1343,58 @@ class TestExemplarBackfill:
 
         stored, skipped = await _store_episode_pairs(_stub_heart(), settings, pairs, uuid4(), logger)
         assert (stored, skipped) == (0, 0)
+
+    @pytest.mark.postgres_only
+    async def test_backfill_reads_dialogue_only_by_default(self, heart):
+        # Codex r5: a DOCUMENT chunk full of label: lines (F069 ingest_document /
+        # F024 attachment) must NOT be read by the default dialogue-only backfill
+        # — otherwise it qualifies an episode and pollutes the ICL corpus.
+        # --source-kinds dialogue,document is the deliberate escape hatch.
+        from scripts.backfill_exemplar_facts import select_backfill_chunks
+
+        agent_id = f"exemplar-srckind-{uuid4()}"
+        doc_content = "how do I reset my card pin\nlabel: 21\nmy card is lost\nlabel: 41\nwhat is the rate\nlabel: 32\n"
+        dialogue_content = "just chatting about the weather with no labels at all here\n"
+        async with heart.db.session() as s:
+            ep = Episode(agent_id=agent_id, summary="src-kind filter test", ended_at=datetime.now(UTC))
+            s.add(ep)
+            await s.flush()
+            s.add(
+                EpisodeChunk(
+                    agent_id=agent_id,
+                    episode_id=ep.id,
+                    chunk_index=0,
+                    content=dialogue_content,
+                    source_kind="dialogue",
+                )
+            )
+            s.add(
+                EpisodeChunk(
+                    agent_id=agent_id,
+                    episode_id=ep.id,
+                    chunk_index=1,
+                    content=doc_content,
+                    source_kind="document",
+                )
+            )
+            await s.commit()
+        try:
+            async with heart.db.session() as s:
+                default_rows = await select_backfill_chunks(s, agent_id, None, 0)
+            default_contents = [r.content for r in default_rows]
+            # Default: only the dialogue chunk; the label-dense DOCUMENT chunk is excluded.
+            assert dialogue_content in default_contents
+            assert doc_content not in default_contents
+
+            async with heart.db.session() as s:
+                widened_rows = await select_backfill_chunks(s, agent_id, None, 0, ["dialogue", "document"])
+            # Widened: the document chunk is now read (deliberate escape hatch).
+            assert doc_content in [r.content for r in widened_rows]
+        finally:
+            async with heart.db.session() as s:
+                await s.execute(text("DELETE FROM heart.episode_chunks WHERE agent_id = :a"), {"a": agent_id})
+                await s.execute(text("DELETE FROM heart.episodes WHERE agent_id = :a"), {"a": agent_id})
+                await s.commit()
 
 
 @pytest.mark.postgres_only

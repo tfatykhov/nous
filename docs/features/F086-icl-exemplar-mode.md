@@ -316,7 +316,8 @@ before Gate 3 is run, or the measured effect will be an underestimate.
 
 ```
 python scripts/backfill_exemplar_facts.py --agent-id nous-default [--dry-run] \
-  [--max-episodes N] [--since YYYY-MM-DD] [--density-threshold 0.8] [--log-level INFO]
+  [--max-episodes N] [--since YYYY-MM-DD] [--density-threshold 0.8] \
+  [--source-kinds dialogue] [--log-level INFO]
 
 python scripts/backfill_exemplar_facts.py --agent-id nous-default \
   --phase rollback --watermark <iso-ts> [--dry-run] [--include-live-writes]
@@ -336,6 +337,17 @@ by `episode_id` and ordered by `chunk_index`. Three pure, unit-tested functions 
    skips label-less utterances, and the MAB measurement itself found such fragments harmless to ranking),
    then **re-stamps every pair's ordinal with a running per-episode offset** so `source_ordinal` is one
    continuous sequence across the whole episode, never reset at a chunk boundary.
+
+**Dialogue-only by default (`--source-kinds`, codex r5).** The chunk query reads **only**
+`source_kind = 'dialogue'` chunks by default. `heart.episode_chunks` also holds F069 `ingest_document`
+bodies and F024 attachment files as `document` (and reserves `code`) chunks (migration 052 CHECK set:
+`dialogue`/`document`/`code`), and a document that happens to contain `label:` lines would otherwise
+qualify an episode and pollute the ICL exemplar corpus with non-dialogue content. Old rows default
+`dialogue`, so the default exactly matches the transcript-backfill contract. `--source-kinds`
+(comma-separated, validated against the CHECK set) is the escape hatch: pass `--source-kinds
+dialogue,document` **only when you deliberately mean** to backfill an attachment/document corpus (F024
+attachment-ingested exemplar *files* land as `document` chunks) — the widening must be an explicit
+operator choice, never an accident.
 
 The live-mode store loop (`_store_episode_pairs`) is a thin wrapper around the **shared**
 `nous/handlers/exemplar_ingest.py::_embed_and_store_pairs` helper — the one cap+embed+learn
