@@ -50,7 +50,7 @@ async def _embed_and_store_pairs(
         )
         pairs = pairs[:cap]
     if not pairs:
-        return 0
+        return 0, 0  # (stored, skipped_no_embedding) — callers unpack a tuple (codex r4)
 
     inputs = [
         FactInput(

@@ -1252,6 +1252,7 @@ class TestExemplarRendering:
 
 from scripts.backfill_exemplar_facts import (  # noqa: E402
     ChunkRow,
+    _store_episode_pairs,
     build_episode_pairs,
     episode_qualifies,
     group_chunks_by_episode,
@@ -1323,6 +1324,25 @@ class TestExemplarBackfill:
 
     def test_build_episode_pairs_empty_chunk_list(self):
         assert build_episode_pairs([]) == []
+
+    async def test_store_episode_pairs_empty_returns_tuple(self, settings):
+        # Codex r4: a density-qualified episode whose chunks parse to ZERO pairs
+        # must reach the backfill loop's `stored, skipped = ...` unpack without a
+        # TypeError. Realistic trigger: a chunk boundary splits every utterance
+        # from its label (a chunk of utterances, then a chunk of labels) -- the
+        # CONCATENATED text is label-dense enough to qualify, but each chunk
+        # parses independently to [] (utterances with no following label; labels
+        # with no preceding utterance). The empty-pairs early return must be
+        # (0, 0), not a bare 0. _stub_heart is never touched (empty pairs
+        # short-circuit before any embed/learn).
+        utterances_chunk = "how do I reset my card pin\nmy card is lost\nwhat is the exchange rate\n"
+        labels_chunk = "label: 21\nlabel: 41\nlabel: 32\n"
+        assert episode_qualifies([utterances_chunk, labels_chunk], threshold=0.8)
+        pairs = build_episode_pairs([utterances_chunk, labels_chunk])
+        assert pairs == []  # ...but per-chunk parse yields no pairs
+
+        stored, skipped = await _store_episode_pairs(_stub_heart(), settings, pairs, uuid4(), logger)
+        assert (stored, skipped) == (0, 0)
 
 
 @pytest.mark.postgres_only
