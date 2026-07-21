@@ -1934,8 +1934,14 @@ class FactManager:
     ) -> float | None:
         """Find highest cosine similarity to any existing active fact.
 
-        Used by admission controller for novelty scoring.
-        Returns None if no facts exist or no embedding available.
+        Used by the admission controller for NOVELTY scoring only (single
+        caller). Codex r17 (F086): exemplar rows are excluded from the scan — a
+        near ``utterance\\nlabel`` row would otherwise drive a genuine
+        conversational fact's novelty to ~0 and let admission REJECT it (not
+        just nudge the weighted term). This is the 7th and final exemplar
+        isolation touchpoint; exemplar inputs themselves bypass admission
+        scoring, so the exclusion only ever changes a NON-exemplar input's
+        novelty. Returns None if no facts exist or no embedding available.
         """
         if not embedding:
             return None
@@ -1956,6 +1962,7 @@ class FactManager:
             WHERE agent_id = :agent_id
               AND active = true
               AND embedding IS NOT NULL
+              AND source IS DISTINCT FROM 'exemplar_extractor'
               {exclude_clause}
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT 1

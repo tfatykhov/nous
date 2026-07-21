@@ -119,8 +119,18 @@ actionability, the sleep contradiction sweep, and the sleep cluster consolidatio
   resolved against it. Both candidate scans now exclude `source = 'exemplar_extractor'`
   (`IS DISTINCT FROM`, NULL-source normals stay in). This closes the previously-accepted write-side residual
   (a normal fact reaching `_find_contradiction` with an exemplar as top-1 neighbor) and makes the exclusion
-  fully symmetric across every resolver touchpoint (input-side FIX 1, sleep sweep r7, cluster r9, Leg-1
-  probes r11, and now the candidate-side write resolvers).
+  fully symmetric across the resolver touchpoints.
+  **Codex r17 — admission novelty scan (7th and final touchpoint).** The admission controller's novelty
+  probe (`_find_max_similarity`) scanned all active facts with no source filter, so for a **normal**
+  post-backfill fact a near `utterance\nlabel` row drove novelty → ~0 and admission could **reject** the
+  genuine conversational fact outright (not merely nudge the 0.20-weighted term — this supersedes the r11
+  "left admission alone" judgment). That scan now excludes `source = 'exemplar_extractor'`
+  (`IS DISTINCT FROM`, NULLs kept); exemplar inputs themselves bypass admission scoring, so the exclusion
+  only ever affects a non-exemplar input's novelty. That completes the **seven** exemplar-isolation
+  touchpoints: (1) input-side FIX 1, (2) exemplar exact-content dedup + (3) SQL-level exclusion in the
+  normal-input cosine dedup (r16), (4) sleep F031 sweep (r7), (5) sleep cluster consolidation (r9),
+  (6) candidate-side write resolvers (r13), (7) admission novelty (r17) — plus the Leg-1 pre-learn dedup
+  probes (r11).
 - **Sleep F031 sweep exclusion** (`nous/heart/facts.py::_find_contradiction_candidates`, codex r7 — the
   fifth, sleep-side member): the background contradiction sweep's same-subject candidate query would
   otherwise re-discover same-utterance/different-label exemplar pairs (they share `subject = utterance[:200]`

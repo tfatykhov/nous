@@ -2311,3 +2311,113 @@ class TestExemplarExactContentDedup:
             async with heart.db.session() as s:
                 await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
                 await s.commit()
+
+
+@pytest.mark.postgres_only
+class TestExemplarAdmissionNovelty:
+    """Codex r17: admission's novelty probe (_find_max_similarity) excludes
+    exemplar rows, so a near utterance\nlabel row can no longer collapse a
+    normal fact's novelty and get it admission-REJECTED."""
+
+    async def test_novelty_probe_excludes_exemplar_sees_normal(self, heart):
+        agent_id = f"exemplar-novelty-{uuid4()}"
+        fm = FactManager(heart.db, heart._embeddings, agent_id, settings=heart.settings)
+        base = await heart._embeddings.embed("how do I reset my card pin")
+        async with heart.db.session() as s:
+            s.add(
+                Fact(
+                    id=uuid4(),
+                    agent_id=agent_id,
+                    subject="ex",
+                    content="how do I reset my pin\nlabel: 1",
+                    source="exemplar_extractor",
+                    active=True,
+                    embedding=_vec_at_cosine(base, 0.98, "nov-ex"),
+                )
+            )
+            s.add(
+                Fact(
+                    id=uuid4(),
+                    agent_id=agent_id,
+                    subject="nm",
+                    content="the user resets their card pin from time to time",
+                    source="fact_extractor",
+                    active=True,
+                    embedding=_vec_at_cosine(base, 0.90, "nov-nm"),
+                )
+            )
+            await s.commit()
+        try:
+            async with heart.db.session() as s:
+                max_sim = await fm._find_max_similarity(base, [], s)
+            # The exemplar (0.98) is excluded; the NORMAL neighbor (0.90) is seen
+            # (proves the exclusion AND that the probe still works for normals).
+            assert max_sim == pytest.approx(0.90, abs=0.02)
+        finally:
+            async with heart.db.session() as s:
+                await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
+                await s.commit()
+
+    async def _admit_probe(self, heart, agent_id, neighbor_source, cosine):
+        """Seed a single near neighbor of the given source + cosine, then learn a
+        normal candidate under admission threshold 0.55 (chosen so the novelty
+        flip decides: fix composite 0.58 admits, exemplar-collapsed 0.48 rejects,
+        a normal neighbor's 0.50 rejects)."""
+        from nous.heart.admission import AdmissionConfig, AdmissionController
+
+        fm = FactManager(heart.db, heart._embeddings, agent_id, settings=heart.settings)
+        fm._admission_controller = AdmissionController(
+            config=AdmissionConfig(shadow_mode=False, utility_llm_enabled=False, threshold=0.55)
+        )
+        base = await heart._embeddings.embed("how do I reset my card pin")
+        async with heart.db.session() as s:
+            s.add(
+                Fact(
+                    id=uuid4(),
+                    agent_id=agent_id,
+                    subject="neighbor",
+                    content="how do I reset my pin\nlabel: 1"
+                    if neighbor_source == "exemplar_extractor"
+                    else "a normal fact about how the user resets their pin sometimes",
+                    source=neighbor_source,
+                    active=True,
+                    embedding=_vec_at_cosine(base, cosine, f"admit-{neighbor_source}"),
+                )
+            )
+            await s.commit()
+        return await fm.learn(
+            FactInput(
+                content="The user asked how to reset the pin on their debit card today.",
+                subject="pin reset help",
+                category="general",
+                confidence=0.9,
+                source="fact_extractor",
+            ),
+            precomputed_embedding=base,
+        )
+
+    async def test_admission_admits_normal_whose_only_neighbor_is_exemplar(self, heart):
+        # Exemplar neighbor at cosine 0.99 — excluded from BOTH dedup and the
+        # novelty scan, so the candidate reaches admission with full novelty and
+        # is ADMITTED (pre-fix: novelty collapsed -> rejected).
+        agent_id = f"exemplar-admit-ex-{uuid4()}"
+        try:
+            result = await self._admit_probe(heart, agent_id, "exemplar_extractor", 0.99)
+            assert not isinstance(result, FactRejected)
+        finally:
+            async with heart.db.session() as s:
+                await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
+                await s.commit()
+
+    async def test_admission_still_rejects_against_normal_neighbor(self, heart):
+        # Probe not broken: a near NORMAL neighbor at cosine 0.90 (below the 0.95
+        # dedup threshold, so it reaches admission) still collapses novelty and
+        # the candidate is REJECTED — the exclusion does not over-filter normals.
+        agent_id = f"exemplar-admit-nm-{uuid4()}"
+        try:
+            result = await self._admit_probe(heart, agent_id, "fact_extractor", 0.90)
+            assert isinstance(result, FactRejected)
+        finally:
+            async with heart.db.session() as s:
+                await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent_id})
+                await s.commit()
