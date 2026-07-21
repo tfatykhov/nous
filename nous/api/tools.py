@@ -392,7 +392,10 @@ def _format_pipeline_text(
                         f"{i}. [{result.type}] {_via_tag(result)}{result.description}{_recency_tag(result)} "
                         f"(id: {result.id}, score: {result.score:.3f})"
                     )
-        else:
+        elif not exemplar_rows:
+            # Codex r14: suppress the empty-section placeholder when the examples
+            # block will render below — "No results found." would contradict it.
+            # Byte-identical (placeholder retained) when there are no exemplars.
             results_text.append("=== Heart Memory ===\nNo results found.")
 
     # ------------------------------------------------------------------
@@ -466,7 +469,9 @@ def _format_pipeline_text(
                     f"{j}. [via graph: {n.edge_relation}] {n.description} "
                     f"(id: {n.id}, score: {n.score:.3f})"
                 )
-        else:
+        elif not exemplar_rows:
+            # Codex r14: same as Heart Memory above — no empty placeholder when
+            # the examples block will render. Byte-identical without exemplars.
             results_text.append("\n=== Brain Decisions ===\nNo results found.")
 
     # ------------------------------------------------------------------
@@ -479,7 +484,13 @@ def _format_pipeline_text(
             f"{tgt_type}({str(tgt_id)[:8]})"
         )
 
-    if not results_text:
+    # Codex r14: a classification-shaped recall can return ONLY exemplar hits
+    # (the target path) — heart_results/decisions are then empty but the
+    # dedicated examples block below WILL render, so "No results found." would
+    # contradict it. Emit the no-results line only when there is genuinely
+    # nothing to show, exemplar block included. When exemplar_rows is empty
+    # (flag off / no exemplars) this is byte-identical to the old check.
+    if not results_text and not exemplar_rows:
         results_text.append("No results found.")
 
     # F067 Phase 2: append parent episode summaries when provided. Skipped

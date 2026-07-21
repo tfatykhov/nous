@@ -1494,6 +1494,24 @@ class TestExemplarRendering:
 
         assert "=== Nearest stored examples ===" not in text
 
+    def test_exemplar_only_recall_suppresses_no_results_line(self):
+        # Codex r14: a classification-shaped recall returning ONLY exemplar hits
+        # (the target path) must render the examples block WITHOUT the
+        # contradictory "No results found." line.
+        results = [_exemplar_result(1, 0.91), _exemplar_result(2, 0.80)]
+        stats = PipelineStats()
+
+        text = _format_pipeline_text(results, stats, ["all"])
+
+        assert "=== Nearest stored examples ===" in text
+        assert "No results found." not in text
+
+    def test_genuinely_empty_still_reports_no_results(self):
+        # Byte-identical to the old behavior when there are no exemplars either.
+        text = _format_pipeline_text([], PipelineStats(), ["all"])
+        assert "No results found." in text
+        assert "=== Nearest stored examples ===" not in text
+
 
 # ---------------------------------------------------------------------------
 # Task 6: backfill pure-function logic (chunk grouping, qualification,
