@@ -629,3 +629,61 @@ class TestLineAwareTruncation:
             assert out.endswith("...")
         finally:
             await heart.close()
+
+
+class TestProfileInstrumentation:
+    @pytest.mark.asyncio
+    async def test_all_deduped_state_logged_and_section_omitted(self, db, mock_embeddings, settings, caplog):
+        """tests-P3-2 + observability: all-facts-deduped is distinguishable from
+        no-facts-exist (raw=1 deduped_out=1 final=0), and the ContextSection is
+        omitted entirely."""
+        import logging
+        content = "Tim uses spaces not tabs consistently everywhere"
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt=f"### Preferences\n- {content}",
+        )
+        try:
+            async with db.session() as session:
+                await heart.learn(
+                    FactInput(content=content, category="preference", subject="instr-subj"),
+                    session=session,
+                )
+                await session.commit()
+            with caplog.at_level(logging.INFO, logger="nous.cognitive.context"):
+                result = await engine.build(
+                    agent_id=s.agent_id, session_id="s-instr",
+                    input_text="hello", frame=_frame(),
+                )
+            assert _profile_section(result) is None
+            profile_logs = [r for r in caplog.records if "User Profile:" in r.getMessage()]
+            assert profile_logs, "expected a User Profile instrumentation log line"
+            msg = profile_logs[0].getMessage()
+            assert "raw=1" in msg and "deduped_out=1" in msg and "final=0" in msg
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_truncated_flag_true_when_budget_tiny(self, db, mock_embeddings, settings, caplog):
+        """tests-P3-3: the truncated=True branch fires under a tiny budget."""
+        import logging
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"context_budget_overrides": {"user_profile": 10}},
+        )
+        try:
+            async with db.session() as session:
+                for i in range(5):
+                    await heart.learn(
+                        FactInput(content=f"Verbose distinct preference number {i} with plenty of padding words attached", category="preference", subject=f"trunc-{i}"),
+                        session=session,
+                    )
+                await session.commit()
+            with caplog.at_level(logging.INFO, logger="nous.cognitive.context"):
+                await engine.build(
+                    agent_id=s.agent_id, session_id="s-trunc",
+                    input_text="hello", frame=_frame(),
+                )
+            profile_logs = [r for r in caplog.records if "User Profile:" in r.getMessage()]
+            assert profile_logs and "truncated=True" in profile_logs[0].getMessage()
+        finally:
+            await heart.close()

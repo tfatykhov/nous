@@ -513,6 +513,7 @@ class ContextEngine:
                     limit=self._settings.profile_fact_limit,
                     session=session,
                 )
+                raw_count = len(profile_facts)
                 if profile_facts and _effective_identity:
                     # Filter out facts already restated by the identity prompt.
                     # "line" (default): directional per-line coverage — suppress only
@@ -541,6 +542,7 @@ class ContextEngine:
                                 _effective_identity,
                             ) < _IDENTITY_OVERLAP_THRESHOLD
                         ]
+                deduped_out = raw_count - len(profile_facts)
 
                 # Gap-2 parity with the Tier-3 fact path, gated by its OWN dark
                 # flag (prod already runs recency_resolver_enabled=true — see
@@ -553,11 +555,14 @@ class ContextEngine:
                     profile_facts.sort(
                         key=lambda f: (getattr(f, "score", 1.0) or 0.0), reverse=True
                     )
+                was_truncated = False
                 if profile_facts:
                     profile_text = self._format_facts(profile_facts)
+                    _full_len = len(profile_text)
                     profile_text = self._truncate_to_budget_lines(
                         profile_text, self._scaled_budget(budget.user_profile)
                     )
+                    was_truncated = len(profile_text) < _full_len
                     sections.append(
                         ContextSection(
                             priority=1,
@@ -567,6 +572,13 @@ class ContextEngine:
                             tier=SECTION_TIERS.get("User Profile", "dynamic"),
                         )
                     )
+                # final = post-dedup fact count (pre-truncation; truncated flag
+                # carries the rest). Distinguishes 0-existed / all-deduped /
+                # budget-truncated — the three states that were indistinguishable.
+                logger.info(
+                    "User Profile: raw=%d deduped_out=%d final=%d truncated=%s",
+                    raw_count, deduped_out, len(profile_facts), was_truncated,
+                )
             except Exception:
                 logger.warning("Failed to load user profile facts for Tier 1 context")
 
