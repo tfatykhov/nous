@@ -555,7 +555,9 @@ class ContextEngine:
                     )
                 if profile_facts:
                     profile_text = self._format_facts(profile_facts)
-                    profile_text = self._truncate_to_budget(profile_text, self._scaled_budget(budget.user_profile))
+                    profile_text = self._truncate_to_budget_lines(
+                        profile_text, self._scaled_budget(budget.user_profile)
+                    )
                     sections.append(
                         ContextSection(
                             priority=1,
@@ -1423,6 +1425,30 @@ class ContextEngine:
         if len(text) <= max_chars:
             return text
         return text[: max_chars - 3] + "..."
+
+    def _truncate_to_budget_lines(self, text: str, token_budget: int) -> str:
+        """Truncate to budget by dropping whole trailing lines.
+
+        Unlike ``_truncate_to_budget`` (raw char slice), this never emits a
+        mid-word/mid-fact fragment — used for list-shaped sections (User
+        Profile) where a guillotined tail line can cut a qualifier off a
+        preference. Falls back to the char slice when even the first line
+        exceeds the budget.
+        """
+        max_chars = token_budget * self.CHARS_PER_TOKEN
+        if len(text) <= max_chars:
+            return text
+        kept: list[str] = []
+        used = 0
+        for ln in text.split("\n"):
+            add = len(ln) + (1 if kept else 0)  # +1 for the joining newline
+            if used + add > max_chars:
+                break
+            kept.append(ln)
+            used += add
+        if not kept:
+            return self._truncate_to_budget(text, token_budget)
+        return "\n".join(kept)
 
     def _format_decisions(self, decisions: list) -> str:
         """Format decision summaries for context.

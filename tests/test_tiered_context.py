@@ -592,3 +592,40 @@ class TestTier1Selection:
             assert "[current" not in profile.content
         finally:
             await heart.close()
+
+
+class TestLineAwareTruncation:
+    @pytest.mark.asyncio
+    async def test_drops_whole_lines_only(self, db, mock_embeddings, settings):
+        engine, heart, s = await _fresh_engine(db, mock_embeddings, settings, identity_prompt="")
+        try:
+            lines = [f"- fact number {i} with some padding text here" for i in range(10)]
+            text = "\n".join(lines)
+            # Budget fits ~3 lines: 3 lines * ~44 chars ≈ 131 chars ≤ 33*4=132
+            out = engine._truncate_to_budget_lines(text, 33)
+            assert len(out) <= 33 * engine.CHARS_PER_TOKEN
+            for ln in out.split("\n"):
+                assert ln in lines  # every emitted line is intact — no mid-word slice
+            assert not out.endswith("...")
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_under_budget_unchanged(self, db, mock_embeddings, settings):
+        engine, heart, s = await _fresh_engine(db, mock_embeddings, settings, identity_prompt="")
+        try:
+            text = "- short line"
+            assert engine._truncate_to_budget_lines(text, 100) == text
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_single_huge_line_falls_back_to_char_slice(self, db, mock_embeddings, settings):
+        engine, heart, s = await _fresh_engine(db, mock_embeddings, settings, identity_prompt="")
+        try:
+            text = "x" * 10_000
+            out = engine._truncate_to_budget_lines(text, 25)
+            assert out == engine._truncate_to_budget(text, 25)
+            assert out.endswith("...")
+        finally:
+            await heart.close()
