@@ -218,6 +218,17 @@ class Settings(BaseSettings):
         default="line",
         description="User Profile vs identity dedup: 'line' (per-line coverage, default) or 'blob' (legacy whole-blob overlap).",
     )
+    profile_fact_limit: int = Field(
+        default=20, ge=1,
+        description="Max preference/person/rule facts fetched for the Tier-1 User Profile section. Was hardcoded 20.",
+    )
+    # Dark flag (2026-07-23 plan): prod runs NOUS_RECENCY_RESOLVER_ENABLED=true,
+    # so the Tier-1 recency pass must NOT piggyback on that flag or it goes live
+    # on deploy. Effective activation requires BOTH this AND recency_resolver_enabled.
+    profile_recency_enabled: bool = Field(
+        default=False,
+        description="Apply the pre-turn recency resolver (_resolve_recency) + demotion sort to Tier-1 User Profile facts. Requires recency_resolver_enabled too.",
+    )
     fact_pin_top_k: int = Field(
         default=0, ge=0,
         description=(

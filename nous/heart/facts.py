@@ -2947,7 +2947,11 @@ class FactManager:
         )
         if active_only:
             stmt = stmt.where(Fact.active == True)  # noqa: E712
-        stmt = stmt.order_by(Fact.confidence.desc()).limit(limit)
+        # Tie-break equal confidence by recency so a newer correction is never
+        # crowded out by an older fact at the same confidence (2026-07-23 plan).
+        # Unconditional (no flag): replaces DB-undefined tie order with a
+        # deterministic one.
+        stmt = stmt.order_by(Fact.confidence.desc(), Fact.learned_at.desc()).limit(limit)
         result = await session.execute(stmt)
         facts = result.scalars().all()
         return [

@@ -510,6 +510,7 @@ class ContextEngine:
                 profile_facts = await self._heart.list_facts_by_category(
                     categories=TIER1_FACT_CATEGORIES,
                     active_only=True,
+                    limit=self._settings.profile_fact_limit,
                     session=session,
                 )
                 if profile_facts and _effective_identity:
@@ -540,6 +541,18 @@ class ContextEngine:
                                 _effective_identity,
                             ) < _IDENTITY_OVERLAP_THRESHOLD
                         ]
+
+                # Gap-2 parity with the Tier-3 fact path, gated by its OWN dark
+                # flag (prod already runs recency_resolver_enabled=true — see
+                # config.py note): tag current/superseded on event_date conflicts.
+                # The stable sort keeps confidence order for untouched facts and
+                # sinks demoted (score*0.3) facts to the tail, where line-aware
+                # truncation drops them first.
+                if getattr(self._settings, "profile_recency_enabled", False):
+                    profile_facts = self._resolve_recency(list(profile_facts))
+                    profile_facts.sort(
+                        key=lambda f: (getattr(f, "score", 1.0) or 0.0), reverse=True
+                    )
                 if profile_facts:
                     profile_text = self._format_facts(profile_facts)
                     profile_text = self._truncate_to_budget(profile_text, self._scaled_budget(budget.user_profile))

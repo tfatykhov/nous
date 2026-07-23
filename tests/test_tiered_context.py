@@ -463,3 +463,132 @@ class TestProfileDedupScope:
             assert profile is None or "email delivery for weekly reports" not in profile.content
         finally:
             await heart.close()
+
+
+class TestTier1Selection:
+    @pytest.mark.asyncio
+    async def test_equal_confidence_ordered_by_learned_at_desc(self, db, mock_embeddings, settings):
+        """learned_at DESC tiebreak: equal-confidence facts come newest-first.
+        NOTE (correctness-F3 / tests-P1-2): pre-implementation the tie order is
+        DB-UNDEFINED, so the red run may pass by luck occasionally — 5 rows make
+        accidental full order ~1/120. Post-implementation it is deterministic."""
+        from datetime import datetime, timedelta, timezone
+        from sqlalchemy import text as sqltext
+        engine, heart, s = await _fresh_engine(db, mock_embeddings, settings, identity_prompt="")
+        try:
+            ids = []
+            base = datetime.now(timezone.utc)
+            async with db.session() as session:
+                for i in range(5):
+                    r = await heart.learn(
+                        FactInput(content=f"Tim distinct person fact number {i} here", category="person", subject=f"tb-{i}", confidence=0.9),
+                        session=session,
+                    )
+                    await session.execute(
+                        sqltext("UPDATE heart.facts SET learned_at = :t WHERE id = :id"),
+                        {"t": base - timedelta(days=i), "id": r.id},
+                    )
+                    ids.append(r.id)  # ids[0] newest ... ids[4] oldest
+                await session.commit()
+            got = [f.id for f in await heart.list_facts_by_category(categories=["person"], limit=50)]
+            assert [i for i in got if i in ids] == ids  # strict learned_at DESC within equal confidence
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_profile_limit_setting_respected(self, db, mock_embeddings, settings):
+        """NOUS_PROFILE_FACT_LIMIT caps the Tier-1 fetch. Fresh agent + exactly 4
+        facts + empty identity (dedup skipped) => exactly 2 bullets render.
+        NOTE (correctness-F2): model_copy(update=...) does NOT raise for the
+        not-yet-existing field pre-impl; the red assertion is the bullet count
+        (4 > 2 because the limit isn't consumed)."""
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"profile_fact_limit": 2},
+        )
+        try:
+            async with db.session() as session:
+                for i in range(4):
+                    await heart.learn(
+                        FactInput(content=f"Distinct preference number {i} about unrelated topic {i}", category="preference", subject=f"limit-subj-{i}"),
+                        session=session,
+                    )
+                await session.commit()
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-limit",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None  # anti-vacuous (tests-P2-1)
+            bullet_count = sum(
+                1 for ln in profile.content.splitlines() if ln.strip().startswith("- ")
+            )
+            assert bullet_count == 2
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_recency_pass_tags_superseded_profile_fact(self, db, mock_embeddings, settings):
+        """With BOTH profile_recency_enabled and recency_resolver_enabled on,
+        conflicting same-subject dated facts get current/superseded tags in the
+        User Profile section and the older sinks last. Fresh agent with ONLY
+        these 2 facts (tests-P1-3: shared-agent budget pressure could truncate
+        the demoted tail line and break the assertion)."""
+        from datetime import date
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"profile_recency_enabled": True, "recency_resolver_enabled": True},
+        )
+        try:
+            async with db.session() as session:
+                await heart.learn(
+                    FactInput(content="Tim works at Initech as senior engineer", category="person", subject="recency-subj", event_date=date(2025, 1, 15)),
+                    session=session,
+                )
+                await heart.learn(
+                    FactInput(content="Tim works at Globex as senior engineer", category="person", subject="recency-subj", event_date=date(2026, 6, 15)),
+                    session=session,
+                )
+                await session.commit()
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-recency",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None
+            assert "[superseded 2025-01]" in profile.content
+            assert "[current 2026-06]" in profile.content
+            assert profile.content.index("Globex") < profile.content.index("Initech")
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_recency_pass_dark_by_default(self, db, mock_embeddings, settings):
+        """devil-P1: with profile_recency_enabled at its default (False), NO tags
+        appear even though recency_resolver_enabled=True (prod's config)."""
+        from datetime import date
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"recency_resolver_enabled": True},
+        )
+        try:
+            async with db.session() as session:
+                await heart.learn(
+                    FactInput(content="Tim works at Initech as senior engineer", category="person", subject="recency-subj", event_date=date(2025, 1, 15)),
+                    session=session,
+                )
+                await heart.learn(
+                    FactInput(content="Tim works at Globex as senior engineer", category="person", subject="recency-subj", event_date=date(2026, 6, 15)),
+                    session=session,
+                )
+                await session.commit()
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-recency-dark",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None
+            assert "[superseded" not in profile.content
+            assert "[current" not in profile.content
+        finally:
+            await heart.close()
