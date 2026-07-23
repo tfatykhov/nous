@@ -63,6 +63,31 @@ def _inline_name(s: object) -> str:
     """
     return str(s or "").replace("\r", " ").replace("\n", " ").replace("\t", " ")
 
+
+def _identity_coverage(fact_head: str, identity_lines: list[str]) -> float:
+    """Max fraction of the fact's meaningful (>=3-char) words covered by a
+    SINGLE identity line.
+
+    Directional on purpose: the legacy blob-level ``text_overlap`` made the
+    fact the smaller word-set vs the whole identity prompt, so ~60% scattered
+    vocabulary anywhere in the blob suppressed the fact. A per-line coverage
+    only suppresses when one line (e.g. the verbatim "- {content}" bullet
+    auto_seed_from_facts wrote) actually restates the fact. On a single-line
+    identity this degenerates to the blob metric — deliberate no-op.
+    """
+    fact_words = {w for w in fact_head.lower().split() if len(w) >= 3}
+    if not fact_words:
+        return 0.0
+    best = 0.0
+    for line in identity_lines:
+        line_words = {w for w in line.lower().split() if len(w) >= 3}
+        if not line_words:
+            continue
+        cov = len(fact_words & line_words) / len(fact_words)
+        if cov > best:
+            best = cov
+    return best
+
 # Sources exempt from relevance filter gap detection
 FILTER_EXEMPT_SOURCES: set[str] = {
     "pre_prune_extraction",
@@ -89,6 +114,12 @@ _SYSTEM_EPISODE_MARKERS = ("SYSTEM TASK", "SYSTEM:", "DO NOT USE TOOLS")
 
 # Minimum text_overlap ratio to consider a fact redundant with identity prompt
 _IDENTITY_OVERLAP_THRESHOLD = 0.6
+
+# Line-mode threshold (2026-07-23 plan): directional per-line coverage needs a
+# HIGHER bar than blob overlap — a same-slot correction shares ~0.67 of its
+# words with the bullet it corrects (scaffolding words), and corrections
+# reaching the prompt is the point of the fix. Verbatim-seeded bullets score 1.0.
+_IDENTITY_LINE_COVERAGE_THRESHOLD = 0.75
 
 
 def _is_system_episode(episode) -> bool:
@@ -482,14 +513,33 @@ class ContextEngine:
                     session=session,
                 )
                 if profile_facts and _effective_identity:
-                    # Filter out facts whose content overlaps with identity
-                    profile_facts = [
-                        f for f in profile_facts
-                        if text_overlap(
-                            (getattr(f, "content", "") or "")[:200],
-                            _effective_identity,
-                        ) < _IDENTITY_OVERLAP_THRESHOLD
-                    ]
+                    # Filter out facts already restated by the identity prompt.
+                    # "line" (default): directional per-line coverage — suppress only
+                    # when a single identity line covers >=_IDENTITY_LINE_COVERAGE_THRESHOLD
+                    # of the fact's words (the verbatim auto-seed bullets). "blob"
+                    # (legacy kill-switch, also the fallback for unknown values):
+                    # whole-identity text_overlap, which over-matched scattered
+                    # vocabulary and hid post-initiation facts (P1).
+                    scope = getattr(self._settings, "profile_identity_dedup_scope", "line")
+                    if scope == "line":
+                        identity_lines = [
+                            ln for ln in _effective_identity.splitlines() if ln.strip()
+                        ]
+                        profile_facts = [
+                            f for f in profile_facts
+                            if _identity_coverage(
+                                (getattr(f, "content", "") or "")[:200],
+                                identity_lines,
+                            ) < _IDENTITY_LINE_COVERAGE_THRESHOLD
+                        ]
+                    else:
+                        profile_facts = [
+                            f for f in profile_facts
+                            if text_overlap(
+                                (getattr(f, "content", "") or "")[:200],
+                                _effective_identity,
+                            ) < _IDENTITY_OVERLAP_THRESHOLD
+                        ]
                 if profile_facts:
                     profile_text = self._format_facts(profile_facts)
                     profile_text = self._truncate_to_budget(profile_text, self._scaled_budget(budget.user_profile))

@@ -74,6 +74,35 @@ def _frame(frame_id: str = "task") -> FrameSelection:
     )
 
 
+async def _fresh_engine(db, mock_embeddings, base_settings, *, identity_prompt: str, settings_update: dict | None = None):
+    """Fresh-agent isolation: mint a unique agent so committed facts from other
+    tests in this module (session-scoped db, no truncation) can't pollute
+    presence/absence/count assertions. Derives from the conftest `settings`
+    fixture (NOT a raw Settings() — that would re-read env/.env and drift from
+    the test config). Returns (engine, heart, settings). Caller must
+    `await heart.close()` when done."""
+    from sqlalchemy import text as sqltext
+    agent_id = f"test-upf-{_uuid.uuid4().hex[:8]}"
+    async with db.session() as session:
+        await session.execute(
+            sqltext("INSERT INTO nous_system.agents (id, name, config) VALUES (:id, :name, '{}'::jsonb) ON CONFLICT (id) DO NOTHING"),
+            {"id": agent_id, "name": "UPF Test Agent"},
+        )
+        await session.commit()
+    upd = {"agent_id": agent_id}
+    if settings_update:
+        upd.update(settings_update)
+    s = base_settings.model_copy(update=upd)
+    heart = Heart(db, s, embedding_provider=mock_embeddings)
+    brain = Brain(database=db, settings=s)
+    engine = ContextEngine(brain, heart, s, identity_prompt=identity_prompt)
+    return engine, heart, s
+
+
+def _profile_section(result):
+    return next((s for s in result.sections if s.label == "User Profile"), None)
+
+
 # ---------------------------------------------------------------------------
 # Budget
 # ---------------------------------------------------------------------------
@@ -260,3 +289,177 @@ class TestListByCategory:
         facts = await fresh_heart.list_facts_by_category(categories=["preference"])
         assert len(facts) == 0
         await fresh_heart.close()
+
+
+from nous.cognitive.context import _identity_coverage
+
+
+class TestIdentityCoverage:
+    """Directional per-line dedup helper (P1 fix)."""
+
+    def test_verbatim_seeded_fact_fully_covered(self):
+        # auto_seed_from_facts writes facts verbatim as "- {content}" lines
+        fact = "Tim prefers Celsius for all temperature readings"
+        identity_lines = [
+            "### Preferences",
+            "- Tim prefers Celsius for all temperature readings",
+            "- Tim wants concise answers",
+        ]
+        assert _identity_coverage(fact, identity_lines) >= 0.99
+
+    def test_scattered_vocabulary_not_covered(self):
+        # Words appear ACROSS lines but no single line covers the fact —
+        # the blob-level bug this helper fixes (max single-line ≈ 0.43)
+        fact = "Tim prefers email delivery for weekly reports"
+        identity_lines = [
+            "- Tim prefers Celsius for temperature",
+            "- send delivery notifications to Telegram",
+            "- weekly summary reports enabled",
+            "- contact via email is tfatykhov@gmail.com",
+        ]
+        assert _identity_coverage(fact, identity_lines) < 0.6
+
+    def test_correction_survives_line_threshold(self):
+        # devil-P2: a same-slot CORRECTION shares scaffolding words with the
+        # bullet it corrects (4/6 ≈ 0.667) — must stay BELOW the 0.75 line
+        # threshold so corrections reach the prompt, while verbatim (1.0) dedups.
+        from nous.cognitive.context import _IDENTITY_LINE_COVERAGE_THRESHOLD
+        fact = "Tim prefers Celsius for temperature readings"
+        identity_lines = ["- Tim prefers Fahrenheit for temperature"]
+        cov = _identity_coverage(fact, identity_lines)
+        assert 0.6 <= cov < _IDENTITY_LINE_COVERAGE_THRESHOLD
+
+    def test_short_header_line_does_not_suppress(self):
+        # Directional coverage: a short "### Preferences" header must not
+        # cover a fact that merely contains the word "preferences" (1/8 = 0.125)
+        fact = "Tim has strong preferences about code review workflows"
+        identity_lines = ["### Preferences"]
+        assert _identity_coverage(fact, identity_lines) < 0.3
+
+    def test_single_line_identity_equals_blob_metric(self):
+        # devil-P2a: on a single-line prose identity, per-line coverage equals
+        # the legacy blob metric (fact is the smaller set) — a DELIBERATE no-op,
+        # pinned here so it is never mistaken for a regression.
+        from nous.utils import text_overlap
+        fact = "Tim is a cognitive agent developer"
+        prose = "Tim is a cognitive agent developer building Nous on Minsky principles"
+        assert abs(_identity_coverage(fact, [prose]) - text_overlap(fact, prose)) < 1e-9
+
+    def test_empty_inputs(self):
+        assert _identity_coverage("", ["- something"]) == 0.0
+        assert _identity_coverage("a fact here", []) == 0.0
+
+
+class TestProfileDedupScope:
+    @pytest.mark.asyncio
+    async def test_line_scope_retains_scattered_vocab_fact(self, db, mock_embeddings, settings):
+        """A fact whose words are scattered across identity lines survives 'line' scope."""
+        identity = (
+            "### Preferences\n"
+            "- Tim prefers Celsius for temperature\n"
+            "- send delivery notifications to Telegram\n"
+            "- weekly summary reports enabled\n"
+            "- contact via email always"
+        )
+        engine, heart, s = await _fresh_engine(db, mock_embeddings, settings, identity_prompt=identity)
+        try:
+            async with db.session() as session:
+                await heart.learn(
+                    FactInput(content="Tim prefers email delivery for weekly reports", category="preference", subject="Tim"),
+                    session=session,
+                )
+                await session.commit()
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-dedup-line",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None
+            assert "email delivery for weekly reports" in profile.content
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_line_scope_still_dedups_verbatim_seeded_fact(self, db, mock_embeddings, settings):
+        """A fact restated verbatim as an identity bullet is still suppressed.
+        (Green-first pin: legacy blob mode also suppresses this — correctness-F1.)"""
+        content = "Tim prefers Celsius for all temperature readings"
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt=f"### Preferences\n- {content}",
+        )
+        try:
+            async with db.session() as session:
+                await heart.learn(
+                    FactInput(content=content, category="preference", subject="Tim"),
+                    session=session,
+                )
+                await session.commit()
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-dedup-verbatim",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is None or content not in profile.content
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_blob_scope_reproduces_legacy_suppression(self, db, mock_embeddings, settings):
+        """scope='blob' suppresses the scattered-vocab fact exactly like today."""
+        identity = (
+            "### Preferences\n"
+            "- Tim prefers Celsius for temperature\n"
+            "- send delivery notifications to Telegram\n"
+            "- weekly summary reports enabled\n"
+            "- contact via email always"
+        )
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt=identity,
+            settings_update={"profile_identity_dedup_scope": "blob"},
+        )
+        try:
+            async with db.session() as session:
+                await heart.learn(
+                    FactInput(content="Tim prefers email delivery for weekly reports", category="preference", subject="Tim"),
+                    session=session,
+                )
+                await session.commit()
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-dedup-blob",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is None or "email delivery for weekly reports" not in profile.content
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_unknown_scope_falls_back_to_blob(self, db, mock_embeddings, settings):
+        """tests-P3-1: a typo'd scope value degrades to legacy blob suppression,
+        never to no-dedup."""
+        identity = (
+            "### Preferences\n"
+            "- Tim prefers Celsius for temperature\n"
+            "- send delivery notifications to Telegram\n"
+            "- weekly summary reports enabled\n"
+            "- contact via email always"
+        )
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt=identity,
+            settings_update={"profile_identity_dedup_scope": "garbage"},
+        )
+        try:
+            async with db.session() as session:
+                await heart.learn(
+                    FactInput(content="Tim prefers email delivery for weekly reports", category="preference", subject="Tim"),
+                    session=session,
+                )
+                await session.commit()
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-dedup-typo",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is None or "email delivery for weekly reports" not in profile.content
+        finally:
+            await heart.close()

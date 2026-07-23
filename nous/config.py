@@ -207,6 +207,17 @@ class Settings(BaseSettings):
         default=0, ge=0,
         description="Render the top-N facts in the Relevant Facts section untruncated (0 = all capped).",
     )
+    # User Profile identity dedup scope (2026-07-23 plan). "line" = directional
+    # per-line coverage at _IDENTITY_LINE_COVERAGE_THRESHOLD (a fact is suppressed
+    # only when ONE identity line covers >=75% of its meaningful words — fixes the
+    # P1 over-suppression where blob-level overlap hid every post-initiation
+    # preference/person/rule fact). "blob" = legacy whole-identity text_overlap
+    # at 0.6 (kill-switch). Unknown values fall back to "blob" (fail-safe:
+    # a typo degrades to today's behavior, never to no-dedup).
+    profile_identity_dedup_scope: str = Field(
+        default="line",
+        description="User Profile vs identity dedup: 'line' (per-line coverage, default) or 'blob' (legacy whole-blob overlap).",
+    )
     fact_pin_top_k: int = Field(
         default=0, ge=0,
         description=(
