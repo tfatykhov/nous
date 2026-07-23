@@ -207,6 +207,28 @@ class Settings(BaseSettings):
         default=0, ge=0,
         description="Render the top-N facts in the Relevant Facts section untruncated (0 = all capped).",
     )
+    # User Profile identity dedup scope (2026-07-23 plan). "line" = directional
+    # per-line coverage at _IDENTITY_LINE_COVERAGE_THRESHOLD (a fact is suppressed
+    # only when ONE identity line covers >=75% of its meaningful words — fixes the
+    # P1 over-suppression where blob-level overlap hid every post-initiation
+    # preference/person/rule fact). "blob" = legacy whole-identity text_overlap
+    # at 0.6 (kill-switch). Unknown values fall back to "blob" (fail-safe:
+    # a typo degrades to today's behavior, never to no-dedup).
+    profile_identity_dedup_scope: str = Field(
+        default="line",
+        description="User Profile vs identity dedup: 'line' (per-line coverage, default) or 'blob' (legacy whole-blob overlap).",
+    )
+    profile_fact_limit: int = Field(
+        default=20, ge=1,
+        description="Max preference/person/rule facts fetched for the Tier-1 User Profile section. Was hardcoded 20.",
+    )
+    # Dark flag (2026-07-23 plan): prod runs NOUS_RECENCY_RESOLVER_ENABLED=true,
+    # so the Tier-1 recency pass must NOT piggyback on that flag or it goes live
+    # on deploy. Effective activation requires BOTH this AND recency_resolver_enabled.
+    profile_recency_enabled: bool = Field(
+        default=False,
+        description="Apply the pre-turn recency resolver (_resolve_recency) + demotion sort to Tier-1 User Profile facts. Requires recency_resolver_enabled too.",
+    )
     fact_pin_top_k: int = Field(
         default=0, ge=0,
         description=(

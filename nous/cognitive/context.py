@@ -63,6 +63,31 @@ def _inline_name(s: object) -> str:
     """
     return str(s or "").replace("\r", " ").replace("\n", " ").replace("\t", " ")
 
+
+def _identity_coverage(fact_head: str, identity_lines: list[str]) -> float:
+    """Max fraction of the fact's meaningful (>=3-char) words covered by a
+    SINGLE identity line.
+
+    Directional on purpose: the legacy blob-level ``text_overlap`` made the
+    fact the smaller word-set vs the whole identity prompt, so ~60% scattered
+    vocabulary anywhere in the blob suppressed the fact. A per-line coverage
+    only suppresses when one line (e.g. the verbatim "- {content}" bullet
+    auto_seed_from_facts wrote) actually restates the fact. On a single-line
+    identity this degenerates to the blob metric — deliberate no-op.
+    """
+    fact_words = {w for w in fact_head.lower().split() if len(w) >= 3}
+    if not fact_words:
+        return 0.0
+    best = 0.0
+    for line in identity_lines:
+        line_words = {w for w in line.lower().split() if len(w) >= 3}
+        if not line_words:
+            continue
+        cov = len(fact_words & line_words) / len(fact_words)
+        if cov > best:
+            best = cov
+    return best
+
 # Sources exempt from relevance filter gap detection
 FILTER_EXEMPT_SOURCES: set[str] = {
     "pre_prune_extraction",
@@ -89,6 +114,12 @@ _SYSTEM_EPISODE_MARKERS = ("SYSTEM TASK", "SYSTEM:", "DO NOT USE TOOLS")
 
 # Minimum text_overlap ratio to consider a fact redundant with identity prompt
 _IDENTITY_OVERLAP_THRESHOLD = 0.6
+
+# Line-mode threshold (2026-07-23 plan): directional per-line coverage needs a
+# HIGHER bar than blob overlap — a same-slot correction shares ~0.67 of its
+# words with the bullet it corrects (scaffolding words), and corrections
+# reaching the prompt is the point of the fix. Verbatim-seeded bullets score 1.0.
+_IDENTITY_LINE_COVERAGE_THRESHOLD = 0.75
 
 
 def _is_system_episode(episode) -> bool:
@@ -223,6 +254,10 @@ class ContextEngine:
         )
 
         # 1. Identity (always included)
+        # NOTE: Identity and User Profile both carry priority=1; sorted() is
+        # stable, so Identity renders first ONLY because this append precedes
+        # the User Profile append below. Pinned by
+        # tests/test_tiered_context.py::TestSectionOrder.
         # 008: Use identity_override from DB if available, fall back to static
         _effective_identity = identity_override or self._identity_prompt
         if _effective_identity:
@@ -479,20 +514,59 @@ class ContextEngine:
                 profile_facts = await self._heart.list_facts_by_category(
                     categories=TIER1_FACT_CATEGORIES,
                     active_only=True,
+                    limit=self._settings.profile_fact_limit,
                     session=session,
                 )
+                raw_count = len(profile_facts)
                 if profile_facts and _effective_identity:
-                    # Filter out facts whose content overlaps with identity
-                    profile_facts = [
-                        f for f in profile_facts
-                        if text_overlap(
-                            (getattr(f, "content", "") or "")[:200],
-                            _effective_identity,
-                        ) < _IDENTITY_OVERLAP_THRESHOLD
-                    ]
+                    # Filter out facts already restated by the identity prompt.
+                    # "line" (default): directional per-line coverage — suppress only
+                    # when a single identity line covers >=_IDENTITY_LINE_COVERAGE_THRESHOLD
+                    # of the fact's words (the verbatim auto-seed bullets). "blob"
+                    # (legacy kill-switch, also the fallback for unknown values):
+                    # whole-identity text_overlap, which over-matched scattered
+                    # vocabulary and hid post-initiation facts (P1).
+                    scope = getattr(self._settings, "profile_identity_dedup_scope", "line")
+                    if scope == "line":
+                        identity_lines = [
+                            ln for ln in _effective_identity.splitlines() if ln.strip()
+                        ]
+                        profile_facts = [
+                            f for f in profile_facts
+                            if _identity_coverage(
+                                (getattr(f, "content", "") or "")[:200],
+                                identity_lines,
+                            ) < _IDENTITY_LINE_COVERAGE_THRESHOLD
+                        ]
+                    else:
+                        profile_facts = [
+                            f for f in profile_facts
+                            if text_overlap(
+                                (getattr(f, "content", "") or "")[:200],
+                                _effective_identity,
+                            ) < _IDENTITY_OVERLAP_THRESHOLD
+                        ]
+                deduped_out = raw_count - len(profile_facts)
+
+                # Gap-2 parity with the Tier-3 fact path, gated by its OWN dark
+                # flag (prod already runs recency_resolver_enabled=true — see
+                # config.py note): tag current/superseded on event_date conflicts.
+                # The stable sort keeps confidence order for untouched facts and
+                # sinks demoted (score*0.3) facts to the tail, where line-aware
+                # truncation drops them first.
+                if getattr(self._settings, "profile_recency_enabled", False):
+                    profile_facts = self._resolve_recency(list(profile_facts))
+                    profile_facts.sort(
+                        key=lambda f: (getattr(f, "score", 1.0) or 0.0), reverse=True
+                    )
+                was_truncated = False
                 if profile_facts:
                     profile_text = self._format_facts(profile_facts)
-                    profile_text = self._truncate_to_budget(profile_text, self._scaled_budget(budget.user_profile))
+                    _full_len = len(profile_text)
+                    profile_text = self._truncate_to_budget_lines(
+                        profile_text, self._scaled_budget(budget.user_profile)
+                    )
+                    was_truncated = len(profile_text) < _full_len
                     sections.append(
                         ContextSection(
                             priority=1,
@@ -502,6 +576,13 @@ class ContextEngine:
                             tier=SECTION_TIERS.get("User Profile", "dynamic"),
                         )
                     )
+                # final = post-dedup fact count (pre-truncation; truncated flag
+                # carries the rest). Distinguishes 0-existed / all-deduped /
+                # budget-truncated — the three states that were indistinguishable.
+                logger.info(
+                    "User Profile: raw=%d deduped_out=%d final=%d truncated=%s",
+                    raw_count, deduped_out, len(profile_facts), was_truncated,
+                )
             except Exception:
                 logger.warning("Failed to load user profile facts for Tier 1 context")
 
@@ -1360,6 +1441,30 @@ class ContextEngine:
         if len(text) <= max_chars:
             return text
         return text[: max_chars - 3] + "..."
+
+    def _truncate_to_budget_lines(self, text: str, token_budget: int) -> str:
+        """Truncate to budget by dropping whole trailing lines.
+
+        Unlike ``_truncate_to_budget`` (raw char slice), this never emits a
+        mid-word/mid-fact fragment — used for list-shaped sections (User
+        Profile) where a guillotined tail line can cut a qualifier off a
+        preference. Falls back to the char slice when even the first line
+        exceeds the budget.
+        """
+        max_chars = token_budget * self.CHARS_PER_TOKEN
+        if len(text) <= max_chars:
+            return text
+        kept: list[str] = []
+        used = 0
+        for ln in text.split("\n"):
+            add = len(ln) + (1 if kept else 0)  # +1 for the joining newline
+            if used + add > max_chars:
+                break
+            kept.append(ln)
+            used += add
+        if not kept:
+            return self._truncate_to_budget(text, token_budget)
+        return "\n".join(kept)
 
     def _format_decisions(self, decisions: list) -> str:
         """Format decision summaries for context.
