@@ -687,3 +687,30 @@ class TestProfileInstrumentation:
             assert profile_logs and "truncated=True" in profile_logs[0].getMessage()
         finally:
             await heart.close()
+
+
+class TestSectionOrder:
+    @pytest.mark.asyncio
+    async def test_identity_precedes_user_profile(self, db, mock_embeddings, settings):
+        """Both sections carry priority=1; stable sort makes insertion order the
+        contract. Pin it so a build() body reorder can't silently flip the prompt."""
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings,
+            identity_prompt="You are Nous, a cognitive agent for testing.",
+        )
+        try:
+            async with db.session() as session:
+                await heart.learn(
+                    FactInput(content="Tim enjoys hiking in national parks on weekends", category="person", subject="order-subj"),
+                    session=session,
+                )
+                await session.commit()
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-order",
+                input_text="hello", frame=_frame(),
+            )
+            sp = result.system_prompt
+            assert "## Identity" in sp and "## User Profile" in sp
+            assert sp.index("## Identity") < sp.index("## User Profile")
+        finally:
+            await heart.close()

@@ -254,6 +254,10 @@ class ContextEngine:
         )
 
         # 1. Identity (always included)
+        # NOTE: Identity and User Profile both carry priority=1; sorted() is
+        # stable, so Identity renders first ONLY because this append precedes
+        # the User Profile append below. Pinned by
+        # tests/test_tiered_context.py::TestSectionOrder.
         # 008: Use identity_override from DB if available, fall back to static
         _effective_identity = identity_override or self._identity_prompt
         if _effective_identity:
