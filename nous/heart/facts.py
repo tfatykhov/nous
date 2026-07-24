@@ -3711,6 +3711,32 @@ class FactManager:
         fact.active = False
         await session.flush()
 
+    async def set_tag(
+        self, fact_id: UUID, tag: str, present: bool, session: AsyncSession | None = None
+    ) -> None:
+        """Add or remove a tag on a fact's tags ARRAY (idempotent)."""
+        if session is None:
+            async with self.db.session() as session:
+                await self._set_tag(fact_id, tag, present, session)
+                await session.commit()
+                return
+        await self._set_tag(fact_id, tag, present, session)
+
+    async def _set_tag(self, fact_id: UUID, tag: str, present: bool, session: AsyncSession) -> None:
+        fact = await self._get_fact_orm(fact_id, session)
+        if fact is None:
+            raise ValueError(f"Fact {fact_id} not found")
+        tags = list(fact.tags or [])
+        if present:
+            if tag not in tags:
+                tags.append(tag)
+        else:
+            tags = [t for t in tags if t != tag]
+        # Reassign a new list: ARRAY(Text) is not a Mutable type, so in-place
+        # append/remove would not be flushed by the ORM.
+        fact.tags = tags
+        await session.flush()
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------

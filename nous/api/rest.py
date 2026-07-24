@@ -54,7 +54,7 @@ from nous.api.models import Attachment
 from nous.api.runner import AgentRunner
 from nous.brain import Brain
 from nous.cognitive import CognitiveLayer
-from nous.cognitive.context import TIER1_FACT_CATEGORIES
+from nous.cognitive.context import PROFILE_CORE_TAG, TIER1_FACT_CATEGORIES
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
@@ -529,6 +529,12 @@ def create_app(
         except ValueError:
             return JSONResponse({"error": "invalid limit"}, status_code=400)
         active_only = request.query_params.get("active", "true").lower() != "false"
+        # ?core=true audits the curated core set (facts tagged PROFILE_CORE_TAG).
+        require_tag = (
+            PROFILE_CORE_TAG
+            if request.query_params.get("core", "").lower() == "true"
+            else None
+        )
         try:
             facts = await heart.list_facts_by_category(
                 categories=TIER1_FACT_CATEGORIES,
@@ -537,6 +543,7 @@ def create_app(
                 # Mirror the prompt path (docstring promise: "exactly what the
                 # agent can draw from") — 2026-07-24 pollution fix.
                 exclude_sources=settings.profile_exclude_sources or None,
+                require_tag=require_tag,
             )
             return JSONResponse(
                 {"facts": [f.model_dump(mode="json") for f in facts], "total": len(facts)}
@@ -684,6 +691,46 @@ def create_app(
             logger.error("delete_fact failed: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
         return JSONResponse({"status": "deactivated"})
+
+    async def set_fact_core(request: Request) -> JSONResponse:
+        """POST /facts/{fact_id}/core — toggle the profile_core curation tag.
+
+        Adds/removes PROFILE_CORE_TAG on a Tier-1 profile fact so the User
+        Profile core-selection path renders it. Guard chain mirrors update_fact:
+        400 bad id -> 404 missing -> 409 already_superseded -> 409 not_profile_fact.
+        """
+        from uuid import UUID as _UUID
+
+        try:
+            fact_id = _UUID(request.path_params["fact_id"])
+        except ValueError:
+            return JSONResponse({"error": "invalid fact id"}, status_code=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        core = body.get("core")
+        if not isinstance(core, bool):
+            return JSONResponse({"error": "core (bool) is required"}, status_code=400)
+        try:
+            async with database.session() as session:
+                try:
+                    target = await heart.get_current_fact(fact_id, session=session)
+                except ValueError:
+                    return JSONResponse({"error": "fact not found"}, status_code=404)
+                if str(target.id) != str(fact_id):
+                    return JSONResponse(
+                        {"error": "already_superseded", "current_fact_id": str(target.id)},
+                        status_code=409,
+                    )
+                if target.category not in TIER1_FACT_CATEGORIES:
+                    return JSONResponse({"error": "not_profile_fact"}, status_code=409)
+                await heart.set_fact_tag(fact_id, PROFILE_CORE_TAG, core, session=session)
+                await session.commit()
+        except Exception as e:
+            logger.error("set_fact_core failed: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse({"status": "core_set" if core else "core_unset"})
 
     async def list_chunks(request: Request) -> JSONResponse:
         """GET /chunks?q=&episode_id=&limit=&offset= — browse F067 episode chunks.
@@ -2782,6 +2829,7 @@ def create_app(
         Route("/decisions/{id}", get_decision),
         Route("/episodes", list_episodes),
         Route("/profile/facts", list_profile_facts),
+        Route("/facts/{fact_id}/core", set_fact_core, methods=["POST"]),
         Route("/facts/{fact_id}", update_fact, methods=["PUT"]),
         Route("/facts/{fact_id}", delete_fact, methods=["DELETE"]),
         Route("/facts", search_facts),

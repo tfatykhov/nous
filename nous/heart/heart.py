@@ -463,6 +463,12 @@ class Heart:
         """Soft-delete a fact."""
         await self.facts.deactivate(fact_id, session)
 
+    async def set_fact_tag(
+        self, fact_id: UUID, tag: str, present: bool, session: AsyncSession | None = None
+    ) -> None:
+        """Add or remove a tag on a fact (curation surface for profile core)."""
+        await self.facts.set_tag(fact_id, tag, present, session)
+
     async def link_facts(
         self,
         source_id: UUID,
