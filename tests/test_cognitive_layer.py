@@ -32,7 +32,7 @@ from nous.cognitive.schemas import (
     TurnResult,
 )
 from nous.heart import CensorInput, FactInput, ProcedureInput
-from nous.storage.models import Event
+from nous.storage.models import Event, Fact
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -439,19 +439,25 @@ async def test_end_session_reflection_extracts_facts(cognitive, heart, session):
 
     # 2026-07-24 pollution fix: reflection lessons are LESSONS, not user rules —
     # category technical/lesson_learned/0.7, never rule (rule polluted the
-    # Tier-1 User Profile at conf 1.0). Filter to THIS test's facts: the shared
-    # Postgres search pool contains other tests' facts.
-    own = [
-        f for f in all_facts
-        if "validate input before database writes" in f.content
-        or "connection pooling for better performance" in f.content
-    ]
-    assert own, "expected this test's learned facts in the search results"
-    for f in own:
-        detail = await heart.get_fact(f.id, session=session)
-        assert detail.category == "technical"
-        assert detail.subject == "lesson_learned"
-        assert detail.confidence == pytest.approx(0.7)
+    # Tier-1 User Profile at conf 1.0). Assert via direct SQL in this session:
+    # hybrid search ranks by mock-embedding vectors here, so this test's own
+    # facts are not reliably in the search head (the len>=1 assert above
+    # historically passed via other tests' facts).
+    rows = (
+        await session.execute(
+            select(Fact.category, Fact.subject, Fact.confidence).where(
+                Fact.content.in_([
+                    "Always validate input before database writes",
+                    "Use connection pooling for better performance",
+                ])
+            )
+        )
+    ).all()
+    assert len(rows) == 2, f"expected both reflection lessons stored, got {rows}"
+    for category, subject, confidence in rows:
+        assert category == "technical"
+        assert subject == "lesson_learned"
+        assert confidence == pytest.approx(0.7)
 
 
 async def test_end_session_without_pre_turn(cognitive, session):
