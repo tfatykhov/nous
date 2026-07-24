@@ -553,6 +553,8 @@ def create_app(
         """
         from uuid import UUID as _UUID
 
+        from sqlalchemy import text as sa_text
+
         from nous.heart import FactInput
 
         try:
@@ -577,30 +579,62 @@ def create_app(
                 {"error": f"category must be one of {TIER1_FACT_CATEGORIES}"}, status_code=400
             )
         try:
-            target = await heart.get_current_fact(fact_id)
-        except ValueError:
-            return JSONResponse({"error": "fact not found"}, status_code=404)
-        if str(target.id) != str(fact_id):
-            return JSONResponse(
-                {"error": "already_superseded", "current_fact_id": str(target.id)},
-                status_code=409,
-            )
-        if target.category not in TIER1_FACT_CATEGORIES:
-            return JSONResponse({"error": "not_profile_fact"}, status_code=409)
-        new_input = FactInput(
-            content=content,
-            category=body_category or target.category,
-            subject=body.get("subject") if "subject" in body else target.subject,
-            confidence=body.get("confidence") if body.get("confidence") is not None else target.confidence,
-        )
-        try:
-            new_fact = await heart.supersede_fact(fact_id, new_input)
-        except ValueError:
-            return JSONResponse({"error": "fact not found"}, status_code=404)
+            # One session for the whole check-then-write: a per-fact advisory
+            # xact lock serializes concurrent edits of the same fact so the
+            # loser re-reads under the lock and hits the advertised 409
+            # (codex r1: both requests could pass the current-id check before
+            # either committed). Lock is transaction-scoped — released on
+            # commit/rollback with the session.
+            async with database.session() as session:
+                await session.execute(
+                    sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": f"nous_fact_edit:{fact_id}"},
+                )
+                try:
+                    target = await heart.get_current_fact(fact_id, session=session)
+                except ValueError:
+                    return JSONResponse({"error": "fact not found"}, status_code=404)
+                if str(target.id) != str(fact_id):
+                    return JSONResponse(
+                        {"error": "already_superseded", "current_fact_id": str(target.id)},
+                        status_code=409,
+                    )
+                if target.category not in TIER1_FACT_CATEGORIES:
+                    return JSONResponse({"error": "not_profile_fact"}, status_code=409)
+                # Exact-content pre-check (codex r1): an edit that exactly
+                # matches ANOTHER active fact dedup-confirms it, so the
+                # content-inequality signal below cannot see the merge —
+                # detect it up front.
+                exact_row = await session.execute(
+                    sa_text(
+                        "SELECT id FROM heart.facts "
+                        "WHERE agent_id = :a AND content = :c AND active AND id != :fid "
+                        "LIMIT 1"
+                    ),
+                    {"a": settings.agent_id, "c": content, "fid": str(fact_id)},
+                )
+                exact_dupe_id = exact_row.scalar_one_or_none()
+                new_input = FactInput(
+                    content=content,
+                    category=body_category or target.category,
+                    subject=body.get("subject") if "subject" in body else target.subject,
+                    confidence=body.get("confidence") if body.get("confidence") is not None else target.confidence,
+                )
+                try:
+                    new_fact = await heart.supersede_fact(fact_id, new_input, session=session)
+                except ValueError:
+                    return JSONResponse({"error": "fact not found"}, status_code=404)
+                await session.commit()
+            # Injected-session supersede skips its own post-commit vocab
+            # invalidation (facts.py contract: commit owner invalidates).
+            heart.facts.invalidate_entity_vocab()
         except Exception as e:
             logger.error("update_fact failed: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
-        if (new_fact.content or "").strip() != content:
+        merged = (new_fact.content or "").strip() != content or (
+            exact_dupe_id is not None and str(new_fact.id) == str(exact_dupe_id)
+        )
+        if merged:
             return JSONResponse({
                 "status": "merged_into_existing",
                 "new_fact_id": str(new_fact.id),
@@ -612,25 +646,37 @@ def create_app(
         """DELETE /facts/{fact_id} — soft-delete (deactivate) a Tier-1 fact."""
         from uuid import UUID as _UUID
 
+        from sqlalchemy import text as sa_text
+
         try:
             fact_id = _UUID(request.path_params["fact_id"])
         except ValueError:
             return JSONResponse({"error": "invalid fact id"}, status_code=400)
         try:
-            target = await heart.get_current_fact(fact_id)
-        except ValueError:
-            return JSONResponse({"error": "fact not found"}, status_code=404)
-        if str(target.id) != str(fact_id):
-            return JSONResponse(
-                {"error": "already_superseded", "current_fact_id": str(target.id)},
-                status_code=409,
-            )
-        if target.category not in TIER1_FACT_CATEGORIES:
-            return JSONResponse({"error": "not_profile_fact"}, status_code=409)
-        try:
-            await heart.deactivate_fact(fact_id)
-        except ValueError:
-            return JSONResponse({"error": "fact not found"}, status_code=404)
+            # Same per-fact advisory xact lock + single session as update_fact
+            # so a DELETE racing a PUT on the same fact serializes and the
+            # loser sees the already_superseded/missing state (codex r1).
+            async with database.session() as session:
+                await session.execute(
+                    sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": f"nous_fact_edit:{fact_id}"},
+                )
+                try:
+                    target = await heart.get_current_fact(fact_id, session=session)
+                except ValueError:
+                    return JSONResponse({"error": "fact not found"}, status_code=404)
+                if str(target.id) != str(fact_id):
+                    return JSONResponse(
+                        {"error": "already_superseded", "current_fact_id": str(target.id)},
+                        status_code=409,
+                    )
+                if target.category not in TIER1_FACT_CATEGORIES:
+                    return JSONResponse({"error": "not_profile_fact"}, status_code=409)
+                try:
+                    await heart.deactivate_fact(fact_id, session=session)
+                except ValueError:
+                    return JSONResponse({"error": "fact not found"}, status_code=404)
+                await session.commit()
         except Exception as e:
             logger.error("delete_fact failed: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)

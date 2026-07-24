@@ -311,3 +311,54 @@ class TestAlreadySuperseded:
         assert resp.status_code == 409
         assert resp.json()["error"] == "already_superseded"
         assert resp.json()["current_fact_id"] == new_id
+
+
+class TestCodexRound1Contracts:
+    """Codex r1 P2s: exact-duplicate edits must report merged_into_existing
+    (content equality masks the dedup-confirm), and concurrent stale edits on
+    the same fact must serialize (advisory xact lock) so the loser gets the
+    advertised 409 instead of double-superseding."""
+
+    @pytest.mark.asyncio
+    async def test_exact_duplicate_edit_reports_merge(self, client, heart, db):
+        # Hash-seeded mock embeddings: identical content -> identical vector ->
+        # cosine 1.0 >= threshold, so the dedup-confirm path fires
+        # deterministically without a constant-embedding stub.
+        dupe_content = "Tim keeps his calendar blocked for focus time on Fridays"
+        async with db.session() as session:
+            a = await heart.learn(
+                FactInput(content="Tim prefers asynchronous communication over meetings", category="preference", subject="codex-a"),
+                session=session,
+            )
+            b = await heart.learn(
+                FactInput(content=dupe_content, category="preference", subject="codex-b"),
+                session=session,
+            )
+            await session.commit()
+        resp = await client.put(f"/facts/{a.id}", json={"content": dupe_content})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "merged_into_existing"
+        assert body["new_fact_id"] == str(b.id)
+        assert body["stored_content"] == dupe_content
+        listing = (await client.get("/profile/facts")).json()
+        assert str(a.id) not in [x["id"] for x in listing["facts"]]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_edits_serialize_one_wins(self, client, heart, db):
+        import asyncio
+
+        async with db.session() as session:
+            a = await heart.learn(
+                FactInput(content="Tim writes project notes in markdown files locally", category="preference", subject="codex-race"),
+                session=session,
+            )
+            await session.commit()
+        r1, r2 = await asyncio.gather(
+            client.put(f"/facts/{a.id}", json={"content": "Tim writes project notes in Obsidian vaults nowadays"}),
+            client.put(f"/facts/{a.id}", json={"content": "Tim writes project notes in Notion databases nowadays"}),
+        )
+        codes = sorted([r1.status_code, r2.status_code])
+        assert codes == [200, 409], f"expected one winner + one stale 409, got {codes}"
+        loser = r1 if r1.status_code == 409 else r2
+        assert loser.json()["error"] == "already_superseded"
