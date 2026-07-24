@@ -71,3 +71,15 @@ def test_ab_contact_fact_email_was_not_demoted():
     assert not classify_event_noise_ab("Tim's email was tim@example.com")
     assert not classify_event_noise_ab("Tim's work email was updated to timur@fanniemae.com")
     assert classify_event_noise_ab("The email was sent at nine this morning")
+
+
+def test_ab_standing_directive_worded_as_request_survives():
+    """codex r3: a directive can be WORDED as a request — standing-rule
+    language suppresses the B match. A (delivery) is deliberately unguarded."""
+    assert not classify_event_noise_ab("The user asked to always verify the current date before scheduling")
+    assert not classify_event_noise_ab("Tim requested that reports must never include raw credentials")
+    assert not classify_event_noise_ab("The user asked that going forward summaries be sent as HTML")
+    # plain requests still demote
+    assert classify_event_noise_ab("The user asked for the weather forecast for Annapolis")
+    # A is unguarded: a delivery event with 'always' is still a delivery event
+    assert classify_event_noise_ab("The report was sent to the personal Gmail as always")

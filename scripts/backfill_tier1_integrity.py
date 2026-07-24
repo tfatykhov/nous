@@ -112,6 +112,12 @@ EVENT_NOISE_PATTERN_B = re.compile(
     re.IGNORECASE,
 )
 EVENT_NOISE_PATTERNS_AB = (EVENT_NOISE_PATTERN_A, EVENT_NOISE_PATTERN_B)
+# Standing-directive guard for B (codex r3): a rule can be WORDED as a request
+# ("The user asked to always verify the date...") — standing-rule language
+# suppresses a B match so genuine directives survive the scrub.
+STANDING_RULE_GUARD = re.compile(
+    r"\b(always|never|must|going forward|from now on|standing)\b", re.IGNORECASE
+)
 # C: dated-logistics (flight codes, m/d dates, clock times, tomorrow, weekdays).
 EVENT_NOISE_PATTERN_C = re.compile(
     r"(\bUA[0-9]{3,4}\b|[0-9]{1,2}/[0-9]{1,2}|[0-9]{1,2}:[0-9]{2} ?(am|pm)|"
@@ -122,10 +128,20 @@ EVENT_NOISE_PATTERN_C = re.compile(
 
 def classify_event_noise_ab(content: str) -> bool:
     """True if the fact reads as a delivery event (A) or a request/action the
-    user or assistant took (B) — session events, not durable user profile."""
+    user or assistant took (B) — session events, not durable user profile.
+
+    A B-match is suppressed when the content carries standing-rule language
+    (always/never/must/going forward/...) — a directive worded as a request is
+    still a directive (codex r3). A (delivery events) is NOT guarded: 'the
+    forecast was always sent to X' is still a delivery event.
+    """
     if not content:
         return False
-    return any(p.search(content) for p in EVENT_NOISE_PATTERNS_AB)
+    if EVENT_NOISE_PATTERN_A.search(content):
+        return True
+    if EVENT_NOISE_PATTERN_B.search(content):
+        return not STANDING_RULE_GUARD.search(content)
+    return False
 
 
 def classify_event_noise_c(content: str) -> bool:
@@ -188,6 +204,21 @@ async def phase_capture(session, *, agent_id: str, dry_run: bool) -> dict:
     return {"tier1_rows": n_tier1, "capture_table_exists": False, "created": True}
 
 
+async def _require_capture(session, *, phase: str) -> None:
+    """Abort a phase when the rollback snapshot doesn't exist (codex r3):
+    a mutating phase run before capture would demote categories with no
+    original state to restore — a simple phase-order mistake must not be
+    able to change prod facts irreversibly."""
+    cap_exists = (
+        await session.execute(text("SELECT to_regclass(:t)"), {"t": CAPTURE_TABLE})
+    ).scalar_one_or_none()
+    if cap_exists is None:
+        raise SystemExit(
+            f"{phase} phase requires the capture table ({CAPTURE_TABLE}) — "
+            "run --phase capture --apply first."
+        )
+
+
 async def phase_mechanical(session, *, agent_id: str, dry_run: bool) -> dict:
     """tier-1 `rule` rows from contradiction_resolution / cluster_consolidation
     -> technical (lessons / doc atoms by construction)."""
@@ -202,6 +233,7 @@ async def phase_mechanical(session, *, agent_id: str, dry_run: bool) -> dict:
     ).scalar_one()
     if dry_run:
         return {"eligible": n, "updated": 0}
+    await _require_capture(session, phase="mechanical")
     result = await session.execute(
         text(
             f"UPDATE heart.facts SET category = 'technical', updated_at = NOW() "
@@ -242,6 +274,7 @@ async def phase_regex(session, *, agent_id: str, dry_run: bool) -> dict:
     if dry_run or not demote_ids:
         return {"scanned": len(rows), "ab_hits": counts["AB"], "c_hits": counts["C"], "updated": 0}
 
+    await _require_capture(session, phase="regex")
     result = await session.execute(
         text(
             "UPDATE heart.facts SET category = 'technical', updated_at = NOW() "
@@ -302,16 +335,7 @@ async def phase_haiku(
     kept row first, starving the tail under a budget.
     """
     # Checkpoint store lives on OUR capture table — requires capture to have run.
-    cap_exists = (
-        await session.execute(
-            text("SELECT to_regclass(:t)"), {"t": CAPTURE_TABLE}
-        )
-    ).scalar_one_or_none()
-    if cap_exists is None:
-        raise SystemExit(
-            f"haiku phase requires the capture table ({CAPTURE_TABLE}) — "
-            "run --phase capture --apply first."
-        )
+    await _require_capture(session, phase="haiku")
     if not dry_run:
         await session.execute(
             text(f"ALTER TABLE {CAPTURE_TABLE} ADD COLUMN IF NOT EXISTS haiku_verdict TEXT")
