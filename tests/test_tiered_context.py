@@ -1131,6 +1131,52 @@ class TestSessionProfileLeg:
         finally:
             await heart.close()
 
+    @pytest.mark.asyncio
+    async def test_leg_respects_fact_skip_and_zero_budget(self, db, mock_embeddings, settings):
+        """codex r1: the leg honors the retrieval plan's skip_types={'fact'}
+        (greeting/no-fact turns) and a budget=0 operator disable."""
+        from nous.cognitive.intent import RetrievalPlan
+
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"profile_intent_leg_enabled": True},
+        )
+        try:
+            async with db.session() as session:
+                await heart.learn(
+                    FactInput(content="Tim's trading rule vbnqrskiptok sell underwater positions promptly", category="rule", subject="skip-domain"),
+                    session=session,
+                )
+                await session.commit()
+            plan = RetrievalPlan(skip_types={"fact"})
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-leg-skip",
+                input_text="what about vbnqrskiptok", frame=_frame(),
+                retrieval_plan=plan,
+            )
+            assert _session_profile_section(result) is None
+        finally:
+            await heart.close()
+
+        engine2, heart2, s2 = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"profile_intent_leg_enabled": True, "profile_intent_leg_budget": 0},
+        )
+        try:
+            async with db.session() as session:
+                await heart2.learn(
+                    FactInput(content="Tim's trading rule wmzeroBudgtok sell underwater positions promptly", category="rule", subject="zb-domain"),
+                    session=session,
+                )
+                await session.commit()
+            result = await engine2.build(
+                agent_id=s2.agent_id, session_id="s-leg-zb",
+                input_text="what about wmzeroBudgtok", frame=_frame(),
+            )
+            assert _session_profile_section(result) is None
+        finally:
+            await heart2.close()
+
 
 class TestCensorLineAwareTruncation:
     @pytest.mark.asyncio

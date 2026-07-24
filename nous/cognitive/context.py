@@ -859,7 +859,15 @@ class ContextEngine:
         # budget.user_profile. priority=6 TIES Relevant Facts above; sorted() is
         # stable, so this renders immediately after (mirrors the priority-1
         # Identity/User-Profile tie note at the top of build()).
-        if getattr(self._settings, "profile_intent_leg_enabled", False):
+        if (
+            getattr(self._settings, "profile_intent_leg_enabled", False)
+            # codex r1: respect the retrieval plan's fact skip (greetings /
+            # short acks set skip_types={"fact"} — a no-fact turn must not
+            # grow a profile leg) and the budget=0 operator disable, matching
+            # every other section's gating conventions.
+            and "fact" not in skip_types
+            and self._settings.profile_intent_leg_budget > 0
+        ):
             try:
                 # Mirror the Tier-3 fact leg EXACTLY: same query text (topic-
                 # prefixed _default_query unless a per-type query was supplied).
