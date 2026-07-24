@@ -542,6 +542,100 @@ def create_app(
             logger.error("list_profile_facts failed: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def update_fact(request: Request) -> JSONResponse:
+        """PUT /facts/{fact_id} — edit a Tier-1 fact's content via supersession.
+
+        Nous never edits fact content in place: the old fact is deactivated
+        with superseded_by set, the replacement is re-embedded. If the new
+        content dedups into a DIFFERENT existing fact (native cosine gate),
+        heart confirms that fact instead of storing the edit — we report that
+        honestly as merged_into_existing (never a silent false success).
+        """
+        from uuid import UUID as _UUID
+
+        from nous.heart import FactInput
+
+        try:
+            fact_id = _UUID(request.path_params["fact_id"])
+        except ValueError:
+            return JSONResponse({"error": "invalid fact id"}, status_code=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        content = (body.get("content") or "").strip()
+        if not content:
+            return JSONResponse({"error": "content is required"}, status_code=400)
+        min_chars = settings.fact_min_content_chars
+        if min_chars and len(content) < min_chars:
+            return JSONResponse(
+                {"error": f"content too short (min {min_chars} chars)"}, status_code=400
+            )
+        body_category = (body.get("category") or "").strip() or None
+        if body_category is not None and body_category not in TIER1_FACT_CATEGORIES:
+            return JSONResponse(
+                {"error": f"category must be one of {TIER1_FACT_CATEGORIES}"}, status_code=400
+            )
+        try:
+            target = await heart.get_current_fact(fact_id)
+        except ValueError:
+            return JSONResponse({"error": "fact not found"}, status_code=404)
+        if str(target.id) != str(fact_id):
+            return JSONResponse(
+                {"error": "already_superseded", "current_fact_id": str(target.id)},
+                status_code=409,
+            )
+        if target.category not in TIER1_FACT_CATEGORIES:
+            return JSONResponse({"error": "not_profile_fact"}, status_code=409)
+        new_input = FactInput(
+            content=content,
+            category=body_category or target.category,
+            subject=body.get("subject") if "subject" in body else target.subject,
+            confidence=body.get("confidence") if body.get("confidence") is not None else target.confidence,
+        )
+        try:
+            new_fact = await heart.supersede_fact(fact_id, new_input)
+        except ValueError:
+            return JSONResponse({"error": "fact not found"}, status_code=404)
+        except Exception as e:
+            logger.error("update_fact failed: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+        if (new_fact.content or "").strip() != content:
+            return JSONResponse({
+                "status": "merged_into_existing",
+                "new_fact_id": str(new_fact.id),
+                "stored_content": new_fact.content,
+            })
+        return JSONResponse({"status": "superseded", "new_fact_id": str(new_fact.id)})
+
+    async def delete_fact(request: Request) -> JSONResponse:
+        """DELETE /facts/{fact_id} — soft-delete (deactivate) a Tier-1 fact."""
+        from uuid import UUID as _UUID
+
+        try:
+            fact_id = _UUID(request.path_params["fact_id"])
+        except ValueError:
+            return JSONResponse({"error": "invalid fact id"}, status_code=400)
+        try:
+            target = await heart.get_current_fact(fact_id)
+        except ValueError:
+            return JSONResponse({"error": "fact not found"}, status_code=404)
+        if str(target.id) != str(fact_id):
+            return JSONResponse(
+                {"error": "already_superseded", "current_fact_id": str(target.id)},
+                status_code=409,
+            )
+        if target.category not in TIER1_FACT_CATEGORIES:
+            return JSONResponse({"error": "not_profile_fact"}, status_code=409)
+        try:
+            await heart.deactivate_fact(fact_id)
+        except ValueError:
+            return JSONResponse({"error": "fact not found"}, status_code=404)
+        except Exception as e:
+            logger.error("delete_fact failed: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse({"status": "deactivated"})
+
     async def list_chunks(request: Request) -> JSONResponse:
         """GET /chunks?q=&episode_id=&limit=&offset= — browse F067 episode chunks.
 
@@ -2639,6 +2733,8 @@ def create_app(
         Route("/decisions/{id}", get_decision),
         Route("/episodes", list_episodes),
         Route("/profile/facts", list_profile_facts),
+        Route("/facts/{fact_id}", update_fact, methods=["PUT"]),
+        Route("/facts/{fact_id}", delete_fact, methods=["DELETE"]),
         Route("/facts", search_facts),
         Route("/chunks", list_chunks),
         Route("/censors/{id}", update_censor, methods=["PUT"]),
