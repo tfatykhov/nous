@@ -417,12 +417,17 @@ async def phase_haiku(
 
 
 async def phase_verify(session, *, agent_id: str) -> dict:
-    """Read-only post-state report: (category, source) counts + annotated top-40."""
+    """Read-only post-state report: (category, source) counts + annotated top-40.
+
+    ACTIVE facts only (codex r4): the User Profile selection is active-only,
+    so retired/superseded rows still carrying tier-1 categories must not
+    pollute the report.
+    """
     grp = (
         await session.execute(
             text(
                 "SELECT category, source, COUNT(*) AS n FROM heart.facts "
-                "WHERE agent_id = :a AND category = ANY(:cats) "
+                "WHERE agent_id = :a AND category = ANY(:cats) AND active = TRUE "
                 "GROUP BY category, source ORDER BY n DESC"
             ),
             {"a": agent_id, "cats": list(TIER1_CATEGORIES)},
@@ -441,6 +446,7 @@ async def phase_verify(session, *, agent_id: str) -> dict:
             text(
                 "SELECT content, category, source, confidence, learned_at "
                 "FROM heart.facts WHERE agent_id = :a AND category = ANY(:cats) "
+                "AND active = TRUE "
                 "ORDER BY confidence DESC, learned_at DESC LIMIT 40"
             ),
             {"a": agent_id, "cats": list(TIER1_CATEGORIES)},
