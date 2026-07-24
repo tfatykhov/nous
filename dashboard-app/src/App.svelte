@@ -18,6 +18,7 @@
   import Rubric from './views/Rubric.svelte';
   import Density from './views/Density.svelte';
   import Consolidation from './views/Consolidation.svelte';
+  import Identity from './views/Identity.svelte';
 
   // ── Router ────────────────────────────────────────────────────
   initRouter();
@@ -193,6 +194,8 @@
     <DagView />
   {:else if $currentRoute === 'subtasks'}
     <Subtasks />
+  {:else if $currentRoute === 'identity'}
+    <Identity />
   {/if}
 </main>
 

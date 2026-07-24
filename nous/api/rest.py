@@ -54,6 +54,7 @@ from nous.api.models import Attachment
 from nous.api.runner import AgentRunner
 from nous.brain import Brain
 from nous.cognitive import CognitiveLayer
+from nous.cognitive.context import TIER1_FACT_CATEGORIES
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
@@ -513,6 +514,173 @@ def create_app(
         except Exception as e:
             logger.error("Search/browse facts error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def list_profile_facts(request: Request) -> JSONResponse:
+        """GET /profile/facts — Tier-1 user-profile facts (preference/person/rule).
+
+        Same accessor + ordering (confidence DESC, learned_at DESC) as the
+        system-prompt User Profile section, so the dashboard shows exactly
+        what the agent can draw from.
+        """
+        try:
+            limit = int(request.query_params.get("limit", "100"))
+            if limit < 1:
+                raise ValueError
+        except ValueError:
+            return JSONResponse({"error": "invalid limit"}, status_code=400)
+        active_only = request.query_params.get("active", "true").lower() != "false"
+        try:
+            facts = await heart.list_facts_by_category(
+                categories=TIER1_FACT_CATEGORIES,
+                active_only=active_only,
+                limit=limit,
+            )
+            return JSONResponse(
+                {"facts": [f.model_dump(mode="json") for f in facts], "total": len(facts)}
+            )
+        except Exception as e:
+            logger.error("list_profile_facts failed: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def update_fact(request: Request) -> JSONResponse:
+        """PUT /facts/{fact_id} — edit a Tier-1 fact's content via supersession.
+
+        Nous never edits fact content in place: the old fact is deactivated
+        with superseded_by set, the replacement is re-embedded. If the new
+        content dedups into a DIFFERENT existing fact (native cosine gate),
+        heart confirms that fact instead of storing the edit — we report that
+        honestly as merged_into_existing (never a silent false success).
+        """
+        from uuid import UUID as _UUID
+
+        from sqlalchemy import text as sa_text
+
+        from nous.heart import FactInput
+
+        try:
+            fact_id = _UUID(request.path_params["fact_id"])
+        except ValueError:
+            return JSONResponse({"error": "invalid fact id"}, status_code=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        content = (body.get("content") or "").strip()
+        if not content:
+            return JSONResponse({"error": "content is required"}, status_code=400)
+        min_chars = settings.fact_min_content_chars
+        if min_chars and len(content) < min_chars:
+            return JSONResponse(
+                {"error": f"content too short (min {min_chars} chars)"}, status_code=400
+            )
+        body_category = (body.get("category") or "").strip() or None
+        if body_category is not None and body_category not in TIER1_FACT_CATEGORIES:
+            return JSONResponse(
+                {"error": f"category must be one of {TIER1_FACT_CATEGORIES}"}, status_code=400
+            )
+        try:
+            # One session for the whole check-then-write: a per-fact advisory
+            # xact lock serializes concurrent edits of the same fact so the
+            # loser re-reads under the lock and hits the advertised 409
+            # (codex r1: both requests could pass the current-id check before
+            # either committed). Lock is transaction-scoped — released on
+            # commit/rollback with the session.
+            async with database.session() as session:
+                await session.execute(
+                    sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": f"nous_fact_edit:{fact_id}"},
+                )
+                try:
+                    target = await heart.get_current_fact(fact_id, session=session)
+                except ValueError:
+                    return JSONResponse({"error": "fact not found"}, status_code=404)
+                if str(target.id) != str(fact_id):
+                    return JSONResponse(
+                        {"error": "already_superseded", "current_fact_id": str(target.id)},
+                        status_code=409,
+                    )
+                if target.category not in TIER1_FACT_CATEGORIES:
+                    return JSONResponse({"error": "not_profile_fact"}, status_code=409)
+                # Exact-content pre-check (codex r1): an edit that exactly
+                # matches ANOTHER active fact dedup-confirms it, so the
+                # content-inequality signal below cannot see the merge —
+                # detect it up front.
+                exact_row = await session.execute(
+                    sa_text(
+                        "SELECT id FROM heart.facts "
+                        "WHERE agent_id = :a AND content = :c AND active AND id != :fid "
+                        "LIMIT 1"
+                    ),
+                    {"a": settings.agent_id, "c": content, "fid": str(fact_id)},
+                )
+                exact_dupe_id = exact_row.scalar_one_or_none()
+                new_input = FactInput(
+                    content=content,
+                    category=body_category or target.category,
+                    subject=body.get("subject") if "subject" in body else target.subject,
+                    confidence=body.get("confidence") if body.get("confidence") is not None else target.confidence,
+                )
+                try:
+                    new_fact = await heart.supersede_fact(fact_id, new_input, session=session)
+                except ValueError:
+                    return JSONResponse({"error": "fact not found"}, status_code=404)
+                await session.commit()
+            # Injected-session supersede skips its own post-commit vocab
+            # invalidation (facts.py contract: commit owner invalidates).
+            heart.facts.invalidate_entity_vocab()
+        except Exception as e:
+            logger.error("update_fact failed: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+        merged = (new_fact.content or "").strip() != content or (
+            exact_dupe_id is not None and str(new_fact.id) == str(exact_dupe_id)
+        )
+        if merged:
+            return JSONResponse({
+                "status": "merged_into_existing",
+                "new_fact_id": str(new_fact.id),
+                "stored_content": new_fact.content,
+            })
+        return JSONResponse({"status": "superseded", "new_fact_id": str(new_fact.id)})
+
+    async def delete_fact(request: Request) -> JSONResponse:
+        """DELETE /facts/{fact_id} — soft-delete (deactivate) a Tier-1 fact."""
+        from uuid import UUID as _UUID
+
+        from sqlalchemy import text as sa_text
+
+        try:
+            fact_id = _UUID(request.path_params["fact_id"])
+        except ValueError:
+            return JSONResponse({"error": "invalid fact id"}, status_code=400)
+        try:
+            # Same per-fact advisory xact lock + single session as update_fact
+            # so a DELETE racing a PUT on the same fact serializes and the
+            # loser sees the already_superseded/missing state (codex r1).
+            async with database.session() as session:
+                await session.execute(
+                    sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": f"nous_fact_edit:{fact_id}"},
+                )
+                try:
+                    target = await heart.get_current_fact(fact_id, session=session)
+                except ValueError:
+                    return JSONResponse({"error": "fact not found"}, status_code=404)
+                if str(target.id) != str(fact_id):
+                    return JSONResponse(
+                        {"error": "already_superseded", "current_fact_id": str(target.id)},
+                        status_code=409,
+                    )
+                if target.category not in TIER1_FACT_CATEGORIES:
+                    return JSONResponse({"error": "not_profile_fact"}, status_code=409)
+                try:
+                    await heart.deactivate_fact(fact_id, session=session)
+                except ValueError:
+                    return JSONResponse({"error": "fact not found"}, status_code=404)
+                await session.commit()
+        except Exception as e:
+            logger.error("delete_fact failed: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse({"status": "deactivated"})
 
     async def list_chunks(request: Request) -> JSONResponse:
         """GET /chunks?q=&episode_id=&limit=&offset= — browse F067 episode chunks.
@@ -2610,6 +2778,9 @@ def create_app(
         Route("/decisions/{id}/review", review_decision, methods=["POST"]),
         Route("/decisions/{id}", get_decision),
         Route("/episodes", list_episodes),
+        Route("/profile/facts", list_profile_facts),
+        Route("/facts/{fact_id}", update_fact, methods=["PUT"]),
+        Route("/facts/{fact_id}", delete_fact, methods=["DELETE"]),
         Route("/facts", search_facts),
         Route("/chunks", list_chunks),
         Route("/censors/{id}", update_censor, methods=["PUT"]),
