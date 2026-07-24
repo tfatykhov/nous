@@ -672,6 +672,49 @@ class TestStructuredReflection:
         assert result is True
 
     @pytest.mark.asyncio
+    async def test_reflect_never_stores_category_rule(self):
+        """2026-07-24 pollution fix: sleep reflections produce LESSONS — an LLM
+        'rule' category is mapped to 'technical' (structured path) and the
+        lessons loop stores technical (was hardcoded rule). Genuine user rules
+        never arrive via sleep reflection; 'rule' polluted the Tier-1 profile."""
+        handler, brain, heart, bus, llm_client = _make_sleep_handler()
+
+        ep1 = MagicMock()
+        ep1.summary = "Episode 1 about testing"
+        ep2 = MagicMock()
+        ep2.summary = "Episode 2 about debugging"
+        heart.list_episodes = AsyncMock(return_value=[ep1, ep2])
+        heart.learn = AsyncMock(return_value=MagicMock())
+        heart.search_facts = AsyncMock(return_value=[])
+
+        reflection = {
+            "patterns": [],
+            "lessons": ["Single-session lessons should age out"],
+            "connections": [],
+            "gaps": [],
+            "summary": "Test reflection summary",
+            "facts": [
+                {"subject": "s1", "content": "LLM mislabeled lesson", "category": "rule"},
+                {"subject": "s2", "content": "A genuine preference", "category": "preference"},
+            ],
+        }
+        response = MagicMock()
+        response.content = [
+            {"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection}
+        ]
+        llm_client.call = AsyncMock(return_value=response)
+
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        assert await handler._phase_reflect(sleep_stats) is True
+
+        stored = [c.args[0] for c in heart.learn.call_args_list]
+        by_content = {f.content: f for f in stored}
+        assert by_content["LLM mislabeled lesson"].category == "technical"
+        assert by_content["A genuine preference"].category == "preference"
+        assert by_content["Single-session lessons should age out"].category == "technical"
+        assert all(f.category != "rule" for f in stored)
+
+    @pytest.mark.asyncio
     async def test_reflect_handles_structured_call_failure(self):
         """If structured LLM call returns None, reflect returns True (no-op)."""
         handler, brain, heart, bus, llm_client = _make_sleep_handler()
