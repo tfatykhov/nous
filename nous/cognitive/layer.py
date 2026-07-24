@@ -1913,7 +1913,13 @@ class CognitiveLayer:
                     # whole top-20). technical/lesson_learned/0.7 matches the
                     # sleep-reflection fallback convention and moves lessons
                     # into the Tier-3 semantic pool instead of the always-on
-                    # profile.
+                    # profile. A genuine profile fact voiced in-session
+                    # ("Tim prefers X") is NOT lost by the fixed category:
+                    # the episode summarizer -> fact extractor pipeline
+                    # processes the same transcript with per-fact LLM
+                    # categorization — this crude "learned:" line parser is a
+                    # supplementary lessons channel, not the profile channel
+                    # (pre-fix it hardcoded "rule", which was equally blind).
                     fact_input = FactInput(
                         content=learned_text,
                         source="reflection",
