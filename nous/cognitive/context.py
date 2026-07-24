@@ -28,6 +28,10 @@ logger = logging.getLogger(__name__)
 # Tier 1 fact categories — loaded by category (always-on), excluded from Tier 3 search
 TIER1_FACT_CATEGORIES = ["preference", "person", "rule"]
 
+# Profile core membership marker (2026-07-24 plan). A module CONSTANT, not a
+# setting: a runtime-changeable tag string would orphan already-tagged facts.
+PROFILE_CORE_TAG = "profile_core"
+
 # F036: Section tier classification for prompt cache optimization
 SECTION_TIERS: dict[str, str] = {
     "Identity": "static",
@@ -39,6 +43,7 @@ SECTION_TIERS: dict[str, str] = {
     "User Profile": "semi_stable",
     "Active Censors": "semi_stable",
     "Current Frame": "semi_stable",
+    "Session Profile": "dynamic",  # Task 2: per-turn intent leg, never cached.
 }
 # Everything else defaults to "dynamic" via ContextSection.tier default
 
@@ -509,17 +514,64 @@ class ContextEngine:
 
         # 1b. User Profile (Tier 1 — always loaded, no semantic search)
         # Dedup against identity prompt to avoid repeating the same info
+        # profile_fact_ids: ids of the facts rendered into the User Profile
+        # section — the double-injection guard for the Task-2 Session Profile
+        # leg. Initialized BEFORE the try-block so it is always defined even
+        # when the block is skipped (budget 0) or raises (correctness-P2-2:
+        # recalled_ids["fact"] holds only non-tier-1 facts, so this set is the
+        # only real guard against re-injecting a tier-1 fact via the leg).
+        profile_fact_ids: set[str] = set()
         if budget.user_profile > 0:
             try:
-                profile_facts = await self._heart.list_facts_by_category(
-                    categories=TIER1_FACT_CATEGORIES,
-                    active_only=True,
-                    limit=self._settings.profile_fact_limit,
-                    session=session,
+                _exclude_sources = self._settings.profile_exclude_sources or None
+                core_mode = getattr(self._settings, "profile_core_enabled", False)
+                core_tagged_ids: set[str] = set()
+                tagged_count = 0
+                probation_count = 0
+                profile_facts = None
+                if core_mode:
+                    # Curated core = tagged facts + probation (untagged, recently
+                    # learned) tier-1 facts, tagged first, deduped by id, capped.
+                    _limit = self._settings.profile_core_limit
+                    tagged = await self._heart.list_facts_by_category(
+                        categories=TIER1_FACT_CATEGORIES,
+                        active_only=True,
+                        limit=_limit,
+                        session=session,
+                        exclude_sources=_exclude_sources,
+                        require_tag=PROFILE_CORE_TAG,
+                    )
+                    probation: list = []
+                    _prob_days = getattr(self._settings, "profile_core_probation_days", 0)
+                    if _prob_days > 0:
+                        probation = await self._heart.list_facts_by_category(
+                            categories=TIER1_FACT_CATEGORIES,
+                            active_only=True,
+                            limit=_limit,
+                            session=session,
+                            exclude_sources=_exclude_sources,
+                            learned_within_days=_prob_days,
+                        )
+                    core_tagged_ids = {str(f.id) for f in tagged}
+                    probation_only = [f for f in probation if str(f.id) not in core_tagged_ids]
+                    combined = (list(tagged) + probation_only)[:_limit]
+                    if combined:
+                        profile_facts = combined
+                        tagged_count = len(tagged)
+                        probation_count = len(probation_only)
+                    # else: empty core → fall through to legacy top-N below.
+                if profile_facts is None:
+                    # Legacy top-N (flag off, or flag on with empty core):
                     # 2026-07-24: reflection lessons are not user profile data
                     # (they filled all 20 slots at conf 1.0 — see config note).
-                    exclude_sources=self._settings.profile_exclude_sources or None,
-                )
+                    core_tagged_ids = set()
+                    profile_facts = await self._heart.list_facts_by_category(
+                        categories=TIER1_FACT_CATEGORIES,
+                        active_only=True,
+                        limit=self._settings.profile_fact_limit,
+                        session=session,
+                        exclude_sources=_exclude_sources,
+                    )
                 raw_count = len(profile_facts)
                 if profile_facts and _effective_identity:
                     # Filter out facts already restated by the identity prompt.
@@ -530,13 +582,18 @@ class ContextEngine:
                     # whole-identity text_overlap, which over-matched scattered
                     # vocabulary and hid post-initiation facts (P1).
                     scope = getattr(self._settings, "profile_identity_dedup_scope", "line")
+                    # Core-TAGGED facts bypass identity dedup: an explicit human
+                    # tag outranks a word-overlap heuristic (otherwise tagging a
+                    # Celsius core fact while identity mentions Celsius makes the
+                    # tag silently inert). Probation/legacy facts dedup normally.
                     if scope == "line":
                         identity_lines = [
                             ln for ln in _effective_identity.splitlines() if ln.strip()
                         ]
                         profile_facts = [
                             f for f in profile_facts
-                            if _identity_coverage(
+                            if str(getattr(f, "id", "")) in core_tagged_ids
+                            or _identity_coverage(
                                 (getattr(f, "content", "") or "")[:200],
                                 identity_lines,
                             ) < _IDENTITY_LINE_COVERAGE_THRESHOLD
@@ -544,7 +601,8 @@ class ContextEngine:
                     else:
                         profile_facts = [
                             f for f in profile_facts
-                            if text_overlap(
+                            if str(getattr(f, "id", "")) in core_tagged_ids
+                            or text_overlap(
                                 (getattr(f, "content", "") or "")[:200],
                                 _effective_identity,
                             ) < _IDENTITY_OVERLAP_THRESHOLD
@@ -565,6 +623,13 @@ class ContextEngine:
                 was_truncated = False
                 if profile_facts:
                     profile_text = self._format_facts(profile_facts)
+                    # Double-injection guard for the Task-2 leg: the ids of the
+                    # facts we render here (pre-truncation is intentional — a
+                    # budget-dropped fact is still "claimed" by this section and
+                    # must not re-inject via the leg).
+                    profile_fact_ids = {
+                        str(getattr(f, "id", "")) for f in profile_facts if getattr(f, "id", None)
+                    }
                     _full_len = len(profile_text)
                     profile_text = self._truncate_to_budget_lines(
                         profile_text, self._scaled_budget(budget.user_profile)
@@ -582,9 +647,10 @@ class ContextEngine:
                 # final = post-dedup fact count (pre-truncation; truncated flag
                 # carries the rest). Distinguishes 0-existed / all-deduped /
                 # budget-truncated — the three states that were indistinguishable.
+                # core/tagged/probation surface the curated-core split (Task 1).
                 logger.info(
-                    "User Profile: raw=%d deduped_out=%d final=%d truncated=%s",
-                    raw_count, deduped_out, len(profile_facts), was_truncated,
+                    "User Profile: core=%s tagged=%d probation=%d raw=%d deduped_out=%d final=%d truncated=%s",
+                    core_mode, tagged_count, probation_count, raw_count, deduped_out, len(profile_facts), was_truncated,
                 )
             except Exception:
                 logger.warning("Failed to load user profile facts for Tier 1 context")
@@ -596,16 +662,30 @@ class ContextEngine:
                 if censors:
                     _active_censor_names = [str(getattr(c, "id", "")) for c in censors]
                     censor_text = self._format_censors(censors)
-                    censor_text = self._truncate_to_budget(censor_text, budget.censors)
-                    sections.append(
-                        ContextSection(
-                            priority=2,
-                            label="Active Censors",
-                            content=censor_text,
-                            token_estimate=self._estimate_tokens(censor_text),
-                            tier=SECTION_TIERS.get("Active Censors", "dynamic"),
-                        )
+                    # Line-aware + strict: an enforcement rule must never be
+                    # char-sliced mid-sentence (a partial "Do not sell..." can
+                    # invert meaning) — if even the first rule over-budgets,
+                    # render nothing and warn (codex #574 r4).
+                    censor_text = self._truncate_to_budget_lines(
+                        censor_text, budget.censors, strict=True
                     )
+                    if censor_text:
+                        sections.append(
+                            ContextSection(
+                                priority=2,
+                                label="Active Censors",
+                                content=censor_text,
+                                token_estimate=self._estimate_tokens(censor_text),
+                                tier=SECTION_TIERS.get("Active Censors", "dynamic"),
+                            )
+                        )
+                    else:
+                        logger.warning(
+                            "Active Censors section dropped: first censor exceeds "
+                            "the %d-token budget — raise budget.censors or shorten "
+                            "the censor.",
+                            budget.censors,
+                        )
             except Exception:
                 logger.warning("Failed to load censors during context build")
 
@@ -783,6 +863,81 @@ class ContextEngine:
                     )
             except Exception as e:
                 logger.warning("Heart.search_facts failed during context build: %s", e)
+
+        # 6a. Session Profile intent leg (Task 2, land dark): intent-selected
+        # tier-1 domain facts (trading stances, sailing contacts, project
+        # conventions) — the tier-1 facts the always-on core never shows and
+        # Tier-3 search excludes. Own budget setting, independent of
+        # budget.user_profile. priority=6 TIES Relevant Facts above; sorted() is
+        # stable, so this renders immediately after (mirrors the priority-1
+        # Identity/User-Profile tie note at the top of build()).
+        if (
+            getattr(self._settings, "profile_intent_leg_enabled", False)
+            # codex r1: respect the retrieval plan's fact skip (greetings /
+            # short acks set skip_types={"fact"} — a no-fact turn must not
+            # grow a profile leg) and the budget=0 operator disable, matching
+            # every other section's gating conventions.
+            and "fact" not in skip_types
+            and self._settings.profile_intent_leg_budget > 0
+        ):
+            try:
+                # Mirror the Tier-3 fact leg EXACTLY: same query text (topic-
+                # prefixed _default_query unless a per-type query was supplied).
+                q_text = _query_texts.get("fact", _default_query)
+                leg_facts = await self._heart.search_facts(
+                    q_text,
+                    limit=self._settings.profile_intent_leg_limit,
+                    session=session,
+                    include_categories=TIER1_FACT_CATEGORIES,
+                    # codex r3: domain facts require a LEXICAL anchor in the
+                    # turn — the RRF missing-leg penalty is nearly free
+                    # (vector-only rank-0 normalizes to ~0.97), so the score
+                    # floor alone cannot exclude nearest-neighbor noise.
+                    require_keyword_hit=True,
+                )
+                if leg_facts:
+                    # Pipeline parity with the Tier-3 fact path: staleness then
+                    # the adaptive relevance floor (hybrid RRF always returns
+                    # something — without the floor, marginal facts inject on
+                    # every domain-ish turn).
+                    leg_facts = self._apply_staleness_penalty(leg_facts)
+                    # codex r2/r4: absolute score floor as belt-and-braces on
+                    # top of the keyword-anchor gate — applied ONLY when
+                    # embeddings exist (same convention as the Tier-3
+                    # thresholds: keyword-only ts_rank_cd scores live on a much
+                    # lower scale and would be wrongly filtered).
+                    if self._has_embeddings:
+                        _floor = self._settings.profile_intent_leg_min_score
+                        leg_facts = [
+                            f for f in leg_facts
+                            if (getattr(f, "score", 0) or 0) >= _floor
+                        ]
+                    leg_facts = self._apply_relevance_filter(leg_facts, "fact")
+                    # Double-injection guard: drop facts already rendered in the
+                    # User Profile section (Task 1's profile_fact_ids). The
+                    # recalled_ids["fact"] set holds only non-tier-1 facts
+                    # (category-disjoint from this leg), so excluding it would be
+                    # a documented no-op — profile_fact_ids is the real guard.
+                    leg_facts = [
+                        f for f in leg_facts
+                        if str(getattr(f, "id", "")) not in profile_fact_ids
+                    ]
+                if leg_facts:
+                    leg_text = self._format_facts(leg_facts)
+                    leg_text = self._truncate_to_budget_lines(
+                        leg_text, self._settings.profile_intent_leg_budget
+                    )
+                    sections.append(
+                        ContextSection(
+                            priority=6,
+                            label="Session Profile",
+                            content=leg_text,
+                            token_estimate=self._estimate_tokens(leg_text),
+                            tier=SECTION_TIERS.get("Session Profile", "dynamic"),
+                        )
+                    )
+            except Exception as e:
+                logger.warning("Session Profile intent leg failed during context build: %s", e)
 
         # 6b. Recall backstop (2026-07-13 plan): empty final fact list => tell the
         # agent to recall before answering. Fires on search failure too (the
@@ -1445,14 +1600,18 @@ class ContextEngine:
             return text
         return text[: max_chars - 3] + "..."
 
-    def _truncate_to_budget_lines(self, text: str, token_budget: int) -> str:
+    def _truncate_to_budget_lines(
+        self, text: str, token_budget: int, *, strict: bool = False
+    ) -> str:
         """Truncate to budget by dropping whole trailing lines.
 
         Unlike ``_truncate_to_budget`` (raw char slice), this never emits a
         mid-word/mid-fact fragment — used for list-shaped sections (User
         Profile) where a guillotined tail line can cut a qualifier off a
-        preference. Falls back to the char slice when even the first line
-        exceeds the budget.
+        preference. When even the FIRST line exceeds the budget: default mode
+        falls back to the char slice; ``strict=True`` returns "" instead
+        (codex #574 r4 — an enforcement rule like a censor must NEVER render
+        partially; a sliced "Do not sell..." can invert meaning).
         """
         max_chars = token_budget * self.CHARS_PER_TOKEN
         if len(text) <= max_chars:
@@ -1466,6 +1625,8 @@ class ContextEngine:
             kept.append(ln)
             used += add
         if not kept:
+            if strict:
+                return ""
             return self._truncate_to_budget(text, token_budget)
         return "\n".join(kept)
 

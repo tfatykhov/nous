@@ -240,6 +240,53 @@ class Settings(BaseSettings):
         default_factory=lambda: ["reflection", "sleep_reflection"],
         description="Sources whose RULE facts are excluded from the Tier-1 User Profile section (SQL-level, NULL-source facts always kept, preference/person facts from these sources are kept). Empty list disables.",
     )
+    # Profile core/intent split (2026-07-24 plan). Both land dark. The User
+    # Profile section, when profile_core_enabled, renders a curated always-on
+    # CORE (facts tagged PROFILE_CORE_TAG) plus a probation window of recently
+    # learned untagged tier-1 facts (so a new universal fact appears
+    # immediately and ages out unless the owner tags it). Zero tagged + zero
+    # probation falls back to legacy top-N (no fresh-agent cliff). Flag off is
+    # byte-identical legacy.
+    profile_core_enabled: bool = Field(
+        default=False,
+        description="Render the User Profile section as curated core (PROFILE_CORE_TAG) + probation window instead of legacy top-N. Land dark.",
+    )
+    profile_core_limit: int = Field(
+        default=12, ge=1,
+        description="Max facts in the curated User Profile core (tagged + probation, tagged first).",
+    )
+    profile_core_probation_days: int = Field(
+        default=14, ge=0,
+        description="Untagged tier-1 facts learned within this many days join the core as probation (0 disables probation).",
+    )
+    # Session Profile intent leg (Task 2, land dark). A per-turn hybrid-search
+    # leg restricted to tier-1 categories, surfacing domain facts (trading,
+    # sailing, project conventions) only when the turn is about that domain —
+    # the ~327 tier-1 facts the always-on core never shows and Tier-3 search
+    # excludes. Rendered as its own `dynamic` section (never cached), so
+    # per-session variation is cache-free.
+    profile_intent_leg_enabled: bool = Field(
+        default=False,
+        description="Enable the Session Profile intent leg (tier-1 domain facts selected by turn intent). Land dark.",
+    )
+    profile_intent_leg_limit: int = Field(
+        default=5, ge=1,
+        description="Max facts fetched by the Session Profile intent leg.",
+    )
+    profile_intent_leg_budget: int = Field(
+        default=300, ge=0,
+        description="Token budget for the Session Profile intent leg section (line-aware truncation).",
+    )
+    profile_intent_leg_min_score: float = Field(
+        default=0.7, ge=0.0, le=1.0,
+        description=(
+            "Absolute RRF-score floor for the Session Profile leg (applied "
+            "before the adaptive relevance filter, which pads to a >=3 "
+            "minimum). 0.7 excludes vector-only nearest-neighbor noise "
+            "(single-leg rank-1 tops out ~0.69 at default weights) while "
+            "keeping dual-leg domain matches (~0.98). 0 disables the gate."
+        ),
+    )
     fact_pin_top_k: int = Field(
         default=0, ge=0,
         description=(

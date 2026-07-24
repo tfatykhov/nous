@@ -2922,17 +2922,23 @@ class FactManager:
         limit: int = 20,
         session: AsyncSession | None = None,
         exclude_sources: list[str] | None = None,
+        require_tag: str | None = None,
+        learned_within_days: int | None = None,
     ) -> list[FactSummary]:
         """Load facts by category without semantic search.
 
         Used for Tier 1 always-on context (preference, person, rule facts).
         ``exclude_sources`` filters at SQL level (so excluded rows never
         consume the LIMIT), NULL-safe: NULL-source legacy facts always kept.
+        ``require_tag`` restricts to facts carrying that tag in the ``tags``
+        ARRAY (profile core curation); ``learned_within_days`` restricts to
+        facts learned within the window (probation). Both default None →
+        byte-identical to callers that omit them.
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._list_by_category(categories, active_only, limit, session, exclude_sources)
-        return await self._list_by_category(categories, active_only, limit, session, exclude_sources)
+                return await self._list_by_category(categories, active_only, limit, session, exclude_sources, require_tag, learned_within_days)
+        return await self._list_by_category(categories, active_only, limit, session, exclude_sources, require_tag, learned_within_days)
 
     async def _list_by_category(
         self,
@@ -2941,6 +2947,8 @@ class FactManager:
         limit: int,
         session: AsyncSession,
         exclude_sources: list[str] | None = None,
+        require_tag: str | None = None,
+        learned_within_days: int | None = None,
     ) -> list[FactSummary]:
         stmt = (
             select(Fact)
@@ -2951,6 +2959,14 @@ class FactManager:
         )
         if active_only:
             stmt = stmt.where(Fact.active == True)  # noqa: E712
+        if require_tag is not None:
+            # ARRAY membership: `require_tag = ANY(tags)`. NULL-tags rows are
+            # correctly excluded (they carry no tag).
+            stmt = stmt.where(Fact.tags.any(require_tag))
+        if learned_within_days is not None:
+            from datetime import datetime, timedelta, timezone
+            cutoff = datetime.now(timezone.utc) - timedelta(days=learned_within_days)
+            stmt = stmt.where(Fact.learned_at >= cutoff)
         if exclude_sources:
             # Category-scoped (codex r1): only RULE facts from excluded sources
             # are filtered — the polluting combination. A genuine sleep-reflected
@@ -3147,6 +3163,8 @@ class FactManager:
         session: AsyncSession | None = None,
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
         date_window: "DateWindow | None" = None,
+        include_categories: list[str] | None = None,
+        require_keyword_hit: bool = False,
     ) -> list[FactSummary]:
         """Hybrid search over facts.
 
@@ -3156,11 +3174,18 @@ class FactManager:
                 Defaults to None (single-query path; backwards compatible).
             date_window: F075 L3 — when set, fuses the date-window retrieval
                 leg into the results via _rrf_merge_n.
+            include_categories: restrict to these categories (plain IN). Symmetric
+                to ``exclude_categories``; used by the Session Profile intent leg
+                to search only tier-1 categories. Default None → no restriction.
+            require_keyword_hit: only return docs the FTS leg matched (codex
+                #574 r3 — the RRF missing-leg penalty is nearly free, so score
+                floors cannot exclude vector-only nearest-neighbor noise).
+                Forces the single-query path (variant fusion unsupported).
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window)
-        return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window)
+                return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window, include_categories, require_keyword_hit)
+        return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window, include_categories, require_keyword_hit)
 
     async def _search(
         self,
@@ -3172,6 +3197,8 @@ class FactManager:
         session: AsyncSession,
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
         date_window: "DateWindow | None" = None,
+        include_categories: list[str] | None = None,
+        require_keyword_hit: bool = False,
     ) -> list[FactSummary]:
         # Generate query embedding
         embedding = None
@@ -3192,6 +3219,15 @@ class FactManager:
             extra_where += f" AND (t.category IS NULL OR t.category NOT IN ({placeholders}))"
             for i, cat in enumerate(exclude_categories):
                 extra_params[f"exc_{i}"] = cat
+        if include_categories:
+            # Session Profile leg: restrict to these categories. Plain IN (no
+            # NULL guard) — a NULL-category row is correctly excluded from an
+            # include-list, unlike exclude's NULL-safe form. Added to extra_where
+            # so it reaches BOTH the vector and FTS legs (shared filter_clauses).
+            placeholders = ", ".join(f":inc_{i}" for i in range(len(include_categories)))
+            extra_where += f" AND t.category IN ({placeholders})"
+            for i, cat in enumerate(include_categories):
+                extra_params[f"inc_{i}"] = cat
 
         # Note: hybrid_search always applies active=true filter.
         # For active_only=False, we need a different approach.
@@ -3204,7 +3240,7 @@ class FactManager:
             # so for inactive facts we do a simpler query.
             return await self._search_all(query, embedding, limit, category, session)
 
-        if variant_pairs and len(variant_pairs) > 1:
+        if variant_pairs and len(variant_pairs) > 1 and not require_keyword_hit:
             results = await hybrid_search_multi(
                 session=session,
                 table="heart.facts",
@@ -3224,6 +3260,7 @@ class FactManager:
                 extra_where=extra_where,
                 extra_params=extra_params,
                 limit=limit,
+                require_keyword_hit=require_keyword_hit,
             )
 
         # F075 L3: fuse the date-window leg (position-based RRF). Present only when
@@ -3679,6 +3716,32 @@ class FactManager:
         if fact is None:
             raise ValueError(f"Fact {fact_id} not found")
         fact.active = False
+        await session.flush()
+
+    async def set_tag(
+        self, fact_id: UUID, tag: str, present: bool, session: AsyncSession | None = None
+    ) -> None:
+        """Add or remove a tag on a fact's tags ARRAY (idempotent)."""
+        if session is None:
+            async with self.db.session() as session:
+                await self._set_tag(fact_id, tag, present, session)
+                await session.commit()
+                return
+        await self._set_tag(fact_id, tag, present, session)
+
+    async def _set_tag(self, fact_id: UUID, tag: str, present: bool, session: AsyncSession) -> None:
+        fact = await self._get_fact_orm(fact_id, session)
+        if fact is None:
+            raise ValueError(f"Fact {fact_id} not found")
+        tags = list(fact.tags or [])
+        if present:
+            if tag not in tags:
+                tags.append(tag)
+        else:
+            tags = [t for t in tags if t != tag]
+        # Reassign a new list: ARRAY(Text) is not a Mutable type, so in-place
+        # append/remove would not be flushed by the ORM.
+        fact.tags = tags
         await session.flush()
 
     # ------------------------------------------------------------------

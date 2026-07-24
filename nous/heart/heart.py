@@ -384,9 +384,15 @@ class Heart:
         active_only: bool = True,
         exclude_categories: list[str] | None = None,
         session: AsyncSession | None = None,
+        include_categories: list[str] | None = None,
+        require_keyword_hit: bool = False,
     ) -> list[FactSummary]:
         """Hybrid search over facts."""
-        return await self.facts.search(query, limit, category, active_only, exclude_categories, session)
+        return await self.facts.search(
+            query, limit, category, active_only, exclude_categories, session,
+            include_categories=include_categories,
+            require_keyword_hit=require_keyword_hit,
+        )
 
     async def find_similar_facts(
         self,
@@ -423,9 +429,14 @@ class Heart:
         limit: int = 20,
         session: AsyncSession | None = None,
         exclude_sources: list[str] | None = None,
+        require_tag: str | None = None,
+        learned_within_days: int | None = None,
     ) -> list[FactSummary]:
         """Load facts by category without semantic search (Tier 1)."""
-        return await self.facts.list_by_category(categories, active_only, limit, session, exclude_sources)
+        return await self.facts.list_by_category(
+            categories, active_only, limit, session, exclude_sources,
+            require_tag=require_tag, learned_within_days=learned_within_days,
+        )
 
     async def get_current_fact(self, fact_id: UUID, session: AsyncSession | None = None) -> FactDetail:
         """Follow superseded_by chain to find current version."""
@@ -453,6 +464,12 @@ class Heart:
     async def deactivate_fact(self, fact_id: UUID, session: AsyncSession | None = None) -> None:
         """Soft-delete a fact."""
         await self.facts.deactivate(fact_id, session)
+
+    async def set_fact_tag(
+        self, fact_id: UUID, tag: str, present: bool, session: AsyncSession | None = None
+    ) -> None:
+        """Add or remove a tag on a fact (curation surface for profile core)."""
+        await self.facts.set_tag(fact_id, tag, present, session)
 
     async def link_facts(
         self,

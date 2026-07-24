@@ -23,6 +23,7 @@ SECTION_MARKERS: dict[str, str] = {
     "## Working Memory": "working_memory",
     "## Related Decisions": "related_decisions",
     "## Relevant Facts": "relevant_facts",
+    "## Session Profile": "session_profile",
     "## Known Procedures": "known_procedures",
     "## Procedure Catalog": "procedure_catalog",        # F079 catalog-first breadth
     "## Recommended Procedures": "recommended_procedures",  # F079 option C Critic pointer

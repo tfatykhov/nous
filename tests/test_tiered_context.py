@@ -795,3 +795,616 @@ class TestProfileSourceExclusion:
             assert "cache eviction tuning" not in profile.content  # rule excluded
         finally:
             await heart.close()
+
+
+async def _tag_fact(db, fact_id, tag="profile_core"):
+    """Add a tag to a fact's ARRAY column via SQL (Task 3 builds the API path)."""
+    from sqlalchemy import text as sqltext
+    async with db.session() as session:
+        await session.execute(
+            sqltext("UPDATE heart.facts SET tags = array_append(coalesce(tags, '{}'::text[]), :tag) WHERE id = :id"),
+            {"tag": tag, "id": fact_id},
+        )
+        await session.commit()
+
+
+async def _set_learned_at(db, fact_id, when):
+    from sqlalchemy import text as sqltext
+    async with db.session() as session:
+        await session.execute(
+            sqltext("UPDATE heart.facts SET learned_at = :t WHERE id = :id"),
+            {"t": when, "id": fact_id},
+        )
+        await session.commit()
+
+
+class TestProfileCore:
+    # codex r2 (#574): fresh-engine fixtures use Postgres-only SQL (::jsonb,
+    # generated tsvector) — skip cleanly under the default sqlite backend.
+    pytestmark = pytest.mark.postgres_only
+
+    """Task 1: curated core (PROFILE_CORE_TAG) + probation window selection."""
+
+    @pytest.mark.asyncio
+    async def test_tagged_only_render(self, db, mock_embeddings, settings):
+        """core on, probation off: only the tagged fact renders."""
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"profile_core_enabled": True, "profile_core_probation_days": 0},
+        )
+        try:
+            async with db.session() as session:
+                r_tag = await heart.learn(
+                    FactInput(content="Tim prefers Celsius for all temperature readings", category="preference", subject="core-tag"),
+                    session=session,
+                )
+                await heart.learn(
+                    FactInput(content="Tim enjoys sailing near the marina on weekends", category="person", subject="core-untag"),
+                    session=session,
+                )
+                await session.commit()
+            await _tag_fact(db, r_tag.id)
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-core-tag",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None
+            assert "Celsius" in profile.content
+            assert "sailing near the marina" not in profile.content
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_probation_fresh_appears_old_absent(self, db, mock_embeddings, settings):
+        """core on, no tags: a fresh untagged fact joins via probation; an old one does not."""
+        from datetime import datetime, timedelta, timezone
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"profile_core_enabled": True, "profile_core_probation_days": 14},
+        )
+        try:
+            async with db.session() as session:
+                r_fresh = await heart.learn(
+                    FactInput(content="Tim just adopted a beagle named Biscuit recently", category="person", subject="prob-fresh"),
+                    session=session,
+                )
+                r_old = await heart.learn(
+                    FactInput(content="Tim once visited the Grand Canyon long ago", category="person", subject="prob-old"),
+                    session=session,
+                )
+                await session.commit()
+            now = datetime.now(timezone.utc)
+            await _set_learned_at(db, r_fresh.id, now)
+            await _set_learned_at(db, r_old.id, now - timedelta(days=30))
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-core-prob",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None
+            assert "beagle named Biscuit" in profile.content
+            assert "Grand Canyon" not in profile.content
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_tagged_bypasses_identity_dedup(self, db, mock_embeddings, settings):
+        """A tagged fact whose content is fully covered by an identity line still
+        renders (explicit tag outranks the dedup heuristic). Legacy would drop it
+        (see TestProfileInstrumentation::test_all_deduped_state)."""
+        content = "Tim uses spaces not tabs consistently everywhere"
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings,
+            identity_prompt=f"### Preferences\n- {content}",
+            settings_update={"profile_core_enabled": True, "profile_core_probation_days": 0},
+        )
+        try:
+            async with db.session() as session:
+                r = await heart.learn(
+                    FactInput(content=content, category="preference", subject="core-dedup"),
+                    session=session,
+                )
+                await session.commit()
+            await _tag_fact(db, r.id)
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-core-dedup",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None
+            assert content in profile.content
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_empty_core_falls_back_to_legacy(self, db, mock_embeddings, settings):
+        """core on but zero tagged + zero probation → legacy top-N (no cliff)."""
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"profile_core_enabled": True, "profile_core_probation_days": 0},
+        )
+        try:
+            async with db.session() as session:
+                await heart.learn(
+                    FactInput(content="Tim prefers metric units for distance always", category="preference", subject="core-fallback"),
+                    session=session,
+                )
+                await session.commit()
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-core-fallback",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None
+            assert "metric units for distance" in profile.content
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_flag_off_byte_identical(self, db, mock_embeddings, settings):
+        """flag off (default): a tagged fact is treated exactly like any other —
+        legacy top-N renders both tagged and untagged facts (tag inert)."""
+        engine, heart, s = await _fresh_engine(db, mock_embeddings, settings, identity_prompt="")
+        try:
+            async with db.session() as session:
+                r_tag = await heart.learn(
+                    FactInput(content="Tim prefers Fahrenheit surprisingly for baking only", category="preference", subject="off-tag"),
+                    session=session,
+                )
+                await heart.learn(
+                    FactInput(content="Tim keeps a workshop in the garage for projects", category="person", subject="off-untag"),
+                    session=session,
+                )
+                await session.commit()
+            await _tag_fact(db, r_tag.id)
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-off",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None
+            assert "Fahrenheit surprisingly for baking" in profile.content
+            assert "workshop in the garage" in profile.content
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_cap_respected_tagged_first(self, db, mock_embeddings, settings):
+        """core_limit caps the combined set tagged-first: with limit 1, the tagged
+        fact wins over a fresh probation candidate."""
+        from datetime import datetime, timezone
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={
+                "profile_core_enabled": True,
+                "profile_core_limit": 1,
+                "profile_core_probation_days": 14,
+            },
+        )
+        try:
+            async with db.session() as session:
+                r_tag = await heart.learn(
+                    FactInput(content="Tim prefers Celsius for all temperature readings", category="preference", subject="cap-tag"),
+                    session=session,
+                )
+                r_prob = await heart.learn(
+                    FactInput(content="Tim recently started learning to play the cello", category="person", subject="cap-prob"),
+                    session=session,
+                )
+                await session.commit()
+            await _tag_fact(db, r_tag.id)
+            await _set_learned_at(db, r_prob.id, datetime.now(timezone.utc))
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-cap",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None
+            assert "Celsius" in profile.content
+            assert "play the cello" not in profile.content
+        finally:
+            await heart.close()
+
+
+def _session_profile_section(result):
+    return next((s for s in result.sections if s.label == "Session Profile"), None)
+
+
+class TestSessionProfileLeg:
+    # codex r2 (#574): fresh-engine fixtures use Postgres-only SQL (::jsonb,
+    # generated tsvector) — skip cleanly under the default sqlite backend.
+    pytestmark = pytest.mark.postgres_only
+
+    """Task 2: intent-selected tier-1 domain facts, rendered as a dynamic
+    section. postgres_only — the leg exercises hybrid FTS+vector search; the
+    unique-token FTS leg drives deterministic membership (rank is probabilistic
+    under the orthogonal mock-vector leg, so assertions are membership-only)."""
+
+    @pytest.mark.postgres_only
+    @pytest.mark.asyncio
+    async def test_leg_surfaces_domain_fact_and_excludes_core(self, db, mock_embeddings, settings):
+        """A non-core domain fact matching the turn appears in Session Profile;
+        a core-tagged fact (already in User Profile) never repeats there."""
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={
+                "profile_core_enabled": True,
+                "profile_core_probation_days": 0,
+                "profile_intent_leg_enabled": True,
+            },
+        )
+        try:
+            async with db.session() as session:
+                r_core = await heart.learn(
+                    FactInput(content="Tim prefers Celsius uniqtokencore for all temperatures", category="preference", subject="leg-core"),
+                    session=session,
+                )
+                await heart.learn(
+                    FactInput(content="Tim's trading rule zqxjflktoken sell underwater positions promptly", category="rule", subject="leg-domain"),
+                    session=session,
+                )
+                await session.commit()
+            await _tag_fact(db, r_core.id)
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-leg-pos",
+                input_text="what about zqxjflktoken", frame=_frame(),
+            )
+            sp = _session_profile_section(result)
+            assert sp is not None
+            assert "zqxjflktoken" in sp.content  # domain fact surfaced
+            assert "uniqtokencore" not in sp.content  # core fact not double-injected
+            # core fact still lives in User Profile
+            profile = _profile_section(result)
+            assert profile is not None and "uniqtokencore" in profile.content
+        finally:
+            await heart.close()
+
+    @pytest.mark.postgres_only
+    @pytest.mark.asyncio
+    async def test_leg_absent_domain_fact_for_unrelated_input(self, db, mock_embeddings, settings):
+        """Unrelated input: the domain fact is not FTS-matched and is outranked
+        out of the fetch by FTS-matching decoys, so it does not surface.
+
+        A runtime vector_weight=0.0 override isolates the deterministic FTS leg
+        (mock vectors are orthogonal-but-arbitrary, so at the default 0.7 vector
+        weight the domain fact's hash-seeded vector rank is unpredictable — the
+        plan's stated approach is to let the keyword leg drive the match). The
+        weight is resolved module-globally via RuntimeConfig, so a settings
+        override would be inert; set the runtime override and clear it after."""
+        from nous.runtime_config import RuntimeConfig
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={
+                "profile_core_enabled": True,
+                "profile_core_probation_days": 0,
+                "profile_intent_leg_enabled": True,
+            },
+        )
+        RuntimeConfig.get().set_vector_weight(0.0)
+        try:
+            async with db.session() as session:
+                r_core = await heart.learn(
+                    FactInput(content="Tim prefers Celsius uniqtokencore for all temperatures", category="preference", subject="negleg-core"),
+                    session=session,
+                )
+                await heart.learn(
+                    FactInput(content="Tim's trading rule zqxjflktoken sell underwater positions promptly", category="rule", subject="negleg-domain"),
+                    session=session,
+                )
+                for i in range(6):
+                    await heart.learn(
+                        FactInput(content=f"Sailing note wntokendecoy marina slip number {i} details", category="person", subject=f"negleg-decoy-{i}"),
+                        session=session,
+                    )
+                await session.commit()
+            # Tag the core fact so the User Profile is a small curated set — the
+            # decoys/domain stay OUT of profile_fact_ids and remain leg-eligible.
+            await _tag_fact(db, r_core.id)
+            # Query = the decoys' shared token + stopwords only. plainto_tsquery
+            # ANDs its lexemes, so a non-stopword extra word (e.g. "tell") would
+            # require that word in the fact too and match nothing; "what about"
+            # are stopwords, leaving just "wntokendecoy".
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-leg-neg",
+                input_text="what about wntokendecoy", frame=_frame(),
+            )
+            sp = _session_profile_section(result)
+            assert sp is not None  # decoys populate the section
+            assert "zqxjflktoken" not in sp.content  # domain fact NOT surfaced
+        finally:
+            RuntimeConfig.get().clear_vector_weight()
+            await heart.close()
+
+    @pytest.mark.postgres_only
+    @pytest.mark.asyncio
+    async def test_leg_absent_when_flag_off(self, db, mock_embeddings, settings):
+        """Flag off (default): no Session Profile section at all."""
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+        )
+        try:
+            async with db.session() as session:
+                await heart.learn(
+                    FactInput(content="Tim's trading rule zqxjflktoken sell underwater positions promptly", category="rule", subject="offleg-domain"),
+                    session=session,
+                )
+                await session.commit()
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-leg-off",
+                input_text="what about zqxjflktoken", frame=_frame(),
+            )
+            assert _session_profile_section(result) is None
+            assert "## Session Profile" not in result.system_prompt
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_leg_requires_keyword_anchor(self, db, mock_embeddings, settings):
+        """codex r3: the RRF missing-leg penalty rank (limit+1) is nearly free
+        (a vector-only rank-0 hit normalizes to ~0.97), so a score floor CANNOT
+        exclude nearest-neighbor noise — the leg requires a keyword-leg
+        (lexical) anchor instead. Core mode is enabled with a DIFFERENT tagged
+        fact so the domain fact is NOT masked by the profile_fact_ids
+        double-injection guard (the earlier test's silent pass cause)."""
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"profile_intent_leg_enabled": True, "profile_core_enabled": True,
+                             "profile_core_probation_days": 0},
+        )
+        try:
+            async with db.session() as session:
+                core_fact = await heart.learn(
+                    FactInput(content="Tim prefers Celsius for all temperature readings", category="preference", subject="anchor-core"),
+                    session=session,
+                )
+                await heart.learn(
+                    FactInput(content="Tim's trading rule qanchortok sell underwater positions promptly", category="rule", subject="anchor-domain"),
+                    session=session,
+                )
+                await session.commit()
+            await heart.set_fact_tag(core_fact.id, "profile_core", True)
+
+            # Unrelated input: vector leg still ranks the domain fact (~0.97
+            # merged score!) but the FTS leg has no match -> keyword-anchor
+            # gate drops it -> no Session Profile section.
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-leg-anchor-neg",
+                input_text="completely unrelated musings about gardens", frame=_frame(),
+            )
+            assert _session_profile_section(result) is None
+
+            # Domain input: FTS matches the unique token -> leg renders it.
+            result2 = await engine.build(
+                agent_id=s.agent_id, session_id="s-leg-anchor-pos",
+                input_text="what about qanchortok", frame=_frame(),
+            )
+            leg = _session_profile_section(result2)
+            assert leg is not None
+            assert "qanchortok" in leg.content
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_leg_respects_fact_skip_and_zero_budget(self, db, mock_embeddings, settings):
+        """codex r1: the leg honors the retrieval plan's skip_types={'fact'}
+        (greeting/no-fact turns) and a budget=0 operator disable."""
+        from nous.cognitive.intent import RetrievalPlan
+
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"profile_intent_leg_enabled": True},
+        )
+        try:
+            async with db.session() as session:
+                await heart.learn(
+                    FactInput(content="Tim's trading rule vbnqrskiptok sell underwater positions promptly", category="rule", subject="skip-domain"),
+                    session=session,
+                )
+                await session.commit()
+            plan = RetrievalPlan(skip_types={"fact"})
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-leg-skip",
+                input_text="what about vbnqrskiptok", frame=_frame(),
+                retrieval_plan=plan,
+            )
+            assert _session_profile_section(result) is None
+        finally:
+            await heart.close()
+
+        engine2, heart2, s2 = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"profile_intent_leg_enabled": True, "profile_intent_leg_budget": 0},
+        )
+        try:
+            async with db.session() as session:
+                await heart2.learn(
+                    FactInput(content="Tim's trading rule wmzeroBudgtok sell underwater positions promptly", category="rule", subject="zb-domain"),
+                    session=session,
+                )
+                await session.commit()
+            result = await engine2.build(
+                agent_id=s2.agent_id, session_id="s-leg-zb",
+                input_text="what about wmzeroBudgtok", frame=_frame(),
+            )
+            assert _session_profile_section(result) is None
+        finally:
+            await heart2.close()
+
+
+class TestCodexRound4:
+    # codex r4 (#574): keyword-channel-off + no-embedder configs + strict censors.
+    pytestmark = pytest.mark.postgres_only
+
+    @pytest.mark.asyncio
+    async def test_leg_works_with_keyword_channel_disabled(self, db, mock_embeddings, settings):
+        """require_keyword_hit forces the FTS leg even when the keyword channel
+        toggle is off — else the filter would drop every result."""
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"profile_intent_leg_enabled": True,
+                             "hybrid_search_keyword_enabled": False,
+                             "profile_core_enabled": True,
+                             "profile_core_probation_days": 0},
+        )
+        try:
+            async with db.session() as session:
+                decoy = await heart.learn(
+                    FactInput(content="Tim prefers Celsius for all temperature readings", category="preference", subject="kwoff-core"),
+                    session=session,
+                )
+                await heart.learn(
+                    FactInput(content="Tim's trading rule qkwofftok sell underwater positions promptly", category="rule", subject="kwoff-domain"),
+                    session=session,
+                )
+                await session.commit()
+            # core mode + tagged decoy => the domain fact is NOT in the User
+            # Profile render, so profile_fact_ids does not mask the leg.
+            await heart.set_fact_tag(decoy.id, "profile_core", True)
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-leg-kwoff",
+                input_text="what about qkwofftok", frame=_frame(),
+            )
+            leg = _session_profile_section(result)
+            assert leg is not None and "qkwofftok" in leg.content
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_leg_floor_skipped_without_embeddings(self, db, settings):
+        """Keyword-only deployments score on the ts_rank scale (<<0.7) — the
+        RRF floor must not filter their legitimate FTS hits."""
+        from sqlalchemy import text as sqltext
+        agent_id = f"test-upf-{_uuid.uuid4().hex[:8]}"
+        async with db.session() as session:
+            await session.execute(
+                sqltext("INSERT INTO nous_system.agents (id, name, config) VALUES (:id, :n, '{}'::jsonb) ON CONFLICT (id) DO NOTHING"),
+                {"id": agent_id, "n": "UPF NoEmbed Agent"},
+            )
+            await session.commit()
+        s = settings.model_copy(update={"agent_id": agent_id, "profile_intent_leg_enabled": True,
+                                        "profile_core_enabled": True, "profile_core_probation_days": 0})
+        heart = Heart(db, s, embedding_provider=None)
+        brain = Brain(database=db, settings=s)
+        engine = ContextEngine(brain, heart, s, identity_prompt="")
+        try:
+            async with db.session() as session:
+                decoy = await heart.learn(
+                    FactInput(content="Tim prefers Celsius for all temperature readings", category="preference", subject="noemb-core"),
+                    session=session,
+                )
+                await heart.learn(
+                    FactInput(content="Tim's trading rule qnoembtok sell underwater positions promptly", category="rule", subject="noemb-domain"),
+                    session=session,
+                )
+                await session.commit()
+            # core mode + tagged decoy => domain fact not masked by
+            # profile_fact_ids (it never renders in the User Profile section).
+            await heart.set_fact_tag(decoy.id, "profile_core", True)
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-leg-noemb",
+                input_text="what about qnoembtok", frame=_frame(),
+            )
+            leg = _session_profile_section(result)
+            assert leg is not None and "qnoembtok" in leg.content
+        finally:
+            await heart.close()
+            await brain.close()
+
+
+class TestCensorLineAwareTruncation:
+    # codex r2 (#574): fresh-engine fixtures use Postgres-only SQL (::jsonb,
+    # generated tsvector) — skip cleanly under the default sqlite backend.
+    pytestmark = pytest.mark.postgres_only
+
+    @pytest.mark.asyncio
+    async def test_censor_section_drops_whole_lines(self, db, mock_embeddings, settings):
+        """The Active Censors section uses line-aware truncation: an over-budget
+        censor list drops whole rules, never char-slicing a rule mid-sentence."""
+        from nous.heart import CensorInput
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"context_budget_overrides": {"censors": 60}},
+        )
+        try:
+            async with db.session() as session:
+                for i in range(4):
+                    await heart.add_censor(
+                        CensorInput(
+                            trigger_pattern=f"pattern number {i} triggering phrase here",
+                            reason=f"reason number {i} explaining the enforcement rule in detail",
+                            action="steer",
+                        ),
+                        session=session,
+                    )
+                await session.commit()
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-censor",
+                input_text="hello", frame=_frame(),
+            )
+            censor_sec = next((sec for sec in result.sections if sec.label == "Active Censors"), None)
+            assert censor_sec is not None
+            full = engine._format_censors(await heart.list_censors())
+            full_lines = set(full.split("\n"))
+            rendered_lines = [ln for ln in censor_sec.content.split("\n") if ln]
+            assert rendered_lines, "expected at least one rendered censor line"
+            for ln in rendered_lines:
+                assert ln in full_lines  # every rendered line is a whole formatted rule
+            assert not censor_sec.content.endswith("...")  # no char-slice signature
+            assert len(censor_sec.content) < len(full)  # actually truncated
+        finally:
+            await heart.close()
+
+
+
+def test_truncate_lines_strict_returns_empty_for_oversized_first_line():
+    """codex r4: strict mode never char-slices — a censor whose first rule
+    exceeds the whole budget renders NOTHING rather than a partial rule."""
+    from types import SimpleNamespace
+    from nous.cognitive.context import ContextEngine
+
+    engine = ContextEngine.__new__(ContextEngine)
+    engine._settings = SimpleNamespace()
+    text = "x" * 10_000
+    assert engine._truncate_to_budget_lines(text, 25, strict=True) == ""
+    # default mode still falls back to the char slice
+    assert engine._truncate_to_budget_lines(text, 25).endswith("...")
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_require_keyword_hit_survives_small_limit(db, mock_embeddings, settings):
+    """codex #574 r5: the keyword filter must run BEFORE the merge slice — at
+    limit=1 a vector-only hit could otherwise consume the whole slice and
+    starve the keyword-anchored fact out."""
+    from sqlalchemy import text as sqltext
+    agent_id = f"test-upf-{_uuid.uuid4().hex[:8]}"
+    async with db.session() as session:
+        await session.execute(
+            sqltext("INSERT INTO nous_system.agents (id, name, config) VALUES (:id, :n, '{}'::jsonb) ON CONFLICT (id) DO NOTHING"),
+            {"id": agent_id, "n": "UPF SmallLimit Agent"},
+        )
+        await session.commit()
+    s = settings.model_copy(update={"agent_id": agent_id})
+    heart = Heart(db, s, embedding_provider=mock_embeddings)
+    try:
+        async with db.session() as session:
+            for i in range(4):
+                await heart.learn(
+                    FactInput(content=f"Distinct decoy preference number {i} about unrelated topic {i}", category="preference", subject=f"sl-decoy-{i}"),
+                    session=session,
+                )
+            await heart.learn(
+                FactInput(content="Tim's trading rule qsmalllimtok sell underwater positions promptly", category="rule", subject="sl-domain"),
+                session=session,
+            )
+            await session.commit()
+        hits = await heart.search_facts(
+            "what about qsmalllimtok", limit=1,
+            include_categories=["preference", "person", "rule"],
+            require_keyword_hit=True,
+        )
+        assert len(hits) == 1
+        assert "qsmalllimtok" in hits[0].content
+    finally:
+        await heart.close()

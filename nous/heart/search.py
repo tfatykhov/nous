@@ -189,6 +189,7 @@ async def hybrid_search(
     limit: int = 10,
     vector_weight: float | None = None,
     active_filter: bool = True,
+    require_keyword_hit: bool = False,
 ) -> list[tuple[UUID, float]]:
     """Hybrid vector + keyword search over a Heart table using RRF.
 
@@ -263,7 +264,10 @@ async def hybrid_search(
     # missing channel cancels out when one channel is empty).
     # Force-on path when embedding is None preserves the keyword-only
     # fallback: callers that intentionally pass embedding=None still get FTS.
-    keyword_enabled = _resolve_keyword_enabled() or embedding is None
+    # codex #574 r4: require_keyword_hit is meaningless without the keyword
+    # leg — force it on even when the channel toggle is off, else the filter
+    # would drop EVERY result in a vector-only deployment.
+    keyword_enabled = _resolve_keyword_enabled() or embedding is None or require_keyword_hit
     if keyword_enabled:
         keyword_sql = text(f"""
             SELECT t.id,
@@ -282,7 +286,29 @@ async def hybrid_search(
         # Keyword-only fallback — return keyword results directly
         return keyword_results[:limit]
 
-    return _rrf_merge(vector_results, keyword_results, rrf_k, vector_weight, limit)
+    # Codex #574 r5: when filtering to keyword hits, merge WITHOUT truncation —
+    # _rrf_merge slices to `limit` before the filter runs, and any fixed
+    # expansion can still be consumed entirely by vector-only hits (verified:
+    # at limit=1 with 4 decoys the keyword-anchored fact ranked 4th in the
+    # merged list and a 3x window still starved it). Candidate count is
+    # bounded by the SQL legs' limit_expanded, so this is cheap.
+    merge_limit = (
+        max(limit, len(vector_results) + len(keyword_results))
+        if require_keyword_hit
+        else limit
+    )
+    merged = _rrf_merge(vector_results, keyword_results, rrf_k, vector_weight, merge_limit)
+    if require_keyword_hit:
+        # Codex #574 r3: _rrf_merge's missing-leg penalty rank (limit+1) is
+        # nearly free at typical k (a vector-only rank-0 hit normalizes to
+        # ~0.97), so score floors cannot exclude nearest-neighbor noise.
+        # Callers that need a LEXICAL anchor (e.g. the Session Profile leg —
+        # domain facts only for domain turns) filter to docs the keyword leg
+        # actually matched. No keyword hits => empty result, by design.
+        allowed = {doc_id for doc_id, _ in keyword_results}
+        merged = [(doc_id, score) for doc_id, score in merged if doc_id in allowed]
+        merged = merged[:limit]
+    return merged
 
 
 # ---------------------------------------------------------------------------

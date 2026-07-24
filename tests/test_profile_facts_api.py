@@ -318,6 +318,92 @@ class TestAlreadySuperseded:
         assert resp.json()["current_fact_id"] == new_id
 
 
+class TestFactCoreToggle:
+    """Task 3: POST /facts/{id}/core toggles the profile_core curation tag.
+
+    Guard chain mirrors update_fact (400 bad id -> 404 missing ->
+    409 already_superseded -> 409 not_profile_fact), then set/unset the tag.
+    """
+
+    @pytest.mark.asyncio
+    async def test_toggle_round_trip_visible_in_tags(self, client, heart, db):
+        async with db.session() as session:
+            f = await heart.learn(FactInput(content="Tim prefers Celsius for all temperature readings always", category="preference", subject="core-a"), session=session)
+            await session.commit()
+        resp = await client.post(f"/facts/{f.id}/core", json={"core": True})
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "core_set"
+        by_id = {x["id"]: x for x in (await client.get("/profile/facts")).json()["facts"]}
+        assert "profile_core" in (by_id[str(f.id)]["tags"] or [])
+        resp = await client.post(f"/facts/{f.id}/core", json={"core": False})
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "core_unset"
+        by_id = {x["id"]: x for x in (await client.get("/profile/facts")).json()["facts"]}
+        assert "profile_core" not in (by_id[str(f.id)]["tags"] or [])
+
+    @pytest.mark.asyncio
+    async def test_core_filter_returns_only_tagged(self, client, heart, db):
+        async with db.session() as session:
+            a = await heart.learn(FactInput(content="Tim always emails in HTML with a single renderer rule", category="rule", subject="core-tagged"), session=session)
+            b = await heart.learn(FactInput(content="Tim enjoys sailing on weekends near the marina docks", category="person", subject="core-untagged"), session=session)
+            await session.commit()
+        assert (await client.post(f"/facts/{a.id}/core", json={"core": True})).status_code == 200
+        listing = (await client.get("/profile/facts?core=true")).json()
+        ids = [x["id"] for x in listing["facts"]]
+        assert str(a.id) in ids
+        assert str(b.id) not in ids
+        assert all("profile_core" in (x["tags"] or []) for x in listing["facts"])
+
+    @pytest.mark.asyncio
+    async def test_idempotent_add_and_remove(self, client, heart, db):
+        async with db.session() as session:
+            f = await heart.learn(FactInput(content="Tim resolves tomorrow relative to the message send date", category="rule", subject="core-idem"), session=session)
+            await session.commit()
+        assert (await client.post(f"/facts/{f.id}/core", json={"core": True})).status_code == 200
+        assert (await client.post(f"/facts/{f.id}/core", json={"core": True})).status_code == 200
+        tags = {x["id"]: (x["tags"] or []) for x in (await client.get("/profile/facts")).json()["facts"]}[str(f.id)]
+        assert tags.count("profile_core") == 1
+        assert (await client.post(f"/facts/{f.id}/core", json={"core": False})).status_code == 200
+        assert (await client.post(f"/facts/{f.id}/core", json={"core": False})).status_code == 200
+        tags = {x["id"]: (x["tags"] or []) for x in (await client.get("/profile/facts")).json()["facts"]}[str(f.id)]
+        assert "profile_core" not in tags
+
+    @pytest.mark.asyncio
+    async def test_bad_id_400_and_unknown_404(self, client):
+        import uuid as _u
+        assert (await client.post("/facts/not-a-uuid/core", json={"core": True})).status_code == 400
+        assert (await client.post(f"/facts/{_u.uuid4()}/core", json={"core": True})).status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_missing_core_field_400(self, client, heart, db):
+        async with db.session() as session:
+            f = await heart.learn(FactInput(content="Tim keeps a persistent workspace across all his sessions", category="rule", subject="core-nobody"), session=session)
+            await session.commit()
+        assert (await client.post(f"/facts/{f.id}/core", json={})).status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_non_tier1_target_409(self, client, heart, db):
+        async with db.session() as session:
+            t = await heart.learn(FactInput(content="Postgres runs with the pgvector extension enabled by default", category="technical", subject="core-scope"), session=session)
+            await session.commit()
+        resp = await client.post(f"/facts/{t.id}/core", json={"core": True})
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "not_profile_fact"
+
+    @pytest.mark.asyncio
+    async def test_superseded_target_409(self, client, heart, db):
+        async with db.session() as session:
+            a = await heart.learn(FactInput(content="Tim schedules deep work blocks in the early morning hours", category="preference", subject="core-chain"), session=session)
+            await session.commit()
+        first = await client.put(f"/facts/{a.id}", json={"content": "Tim schedules deep work blocks in the late evening hours"})
+        assert first.status_code == 200
+        new_id = first.json()["new_fact_id"]
+        resp = await client.post(f"/facts/{a.id}/core", json={"core": True})
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "already_superseded"
+        assert resp.json()["current_fact_id"] == new_id
+
+
 class TestCodexRound1Contracts:
     """Codex r1 P2s: exact-duplicate edits must report merged_into_existing
     (content equality masks the dedup-confirm), and concurrent stale edits on
@@ -367,3 +453,28 @@ class TestCodexRound1Contracts:
         assert codes == [200, 409], f"expected one winner + one stale 409, got {codes}"
         loser = r1 if r1.status_code == 409 else r2
         assert loser.json()["error"] == "already_superseded"
+
+
+class TestCoreTagFollowsMerge:
+    """codex #574 r5: when a supersede-edit dedup-merges into a third fact,
+    curation must follow the merge — the surviving fact gains profile_core."""
+
+    @pytest.mark.asyncio
+    async def test_core_tag_survives_merged_into_existing(self, client, heart, db):
+        dupe_content = "Tim keeps deployment notes in the shared runbook always"
+        async with db.session() as session:
+            a = await heart.learn(FactInput(content="Tim tracks deployments in a personal logbook daily", category="preference", subject="merge-core-a"), session=session)
+            b = await heart.learn(FactInput(content=dupe_content, category="preference", subject="merge-core-b"), session=session)
+            await session.commit()
+        # tag A as core, then edit A into B's exact content -> dedup-merge into B
+        resp = await client.post(f"/facts/{a.id}/core", json={"core": True})
+        assert resp.status_code == 200
+        resp = await client.put(f"/facts/{a.id}", json={"content": dupe_content})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "merged_into_existing"
+        assert body["new_fact_id"] == str(b.id)
+        core_list = (await client.get("/profile/facts?core=true")).json()
+        core_ids = [f["id"] for f in core_list["facts"]]
+        assert str(b.id) in core_ids  # curation followed the merge
+        assert str(a.id) not in core_ids  # old fact retired
