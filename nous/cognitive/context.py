@@ -28,6 +28,10 @@ logger = logging.getLogger(__name__)
 # Tier 1 fact categories — loaded by category (always-on), excluded from Tier 3 search
 TIER1_FACT_CATEGORIES = ["preference", "person", "rule"]
 
+# Profile core membership marker (2026-07-24 plan). A module CONSTANT, not a
+# setting: a runtime-changeable tag string would orphan already-tagged facts.
+PROFILE_CORE_TAG = "profile_core"
+
 # F036: Section tier classification for prompt cache optimization
 SECTION_TIERS: dict[str, str] = {
     "Identity": "static",
@@ -509,17 +513,64 @@ class ContextEngine:
 
         # 1b. User Profile (Tier 1 — always loaded, no semantic search)
         # Dedup against identity prompt to avoid repeating the same info
+        # profile_fact_ids: ids of the facts rendered into the User Profile
+        # section — the double-injection guard for the Task-2 Session Profile
+        # leg. Initialized BEFORE the try-block so it is always defined even
+        # when the block is skipped (budget 0) or raises (correctness-P2-2:
+        # recalled_ids["fact"] holds only non-tier-1 facts, so this set is the
+        # only real guard against re-injecting a tier-1 fact via the leg).
+        profile_fact_ids: set[str] = set()
         if budget.user_profile > 0:
             try:
-                profile_facts = await self._heart.list_facts_by_category(
-                    categories=TIER1_FACT_CATEGORIES,
-                    active_only=True,
-                    limit=self._settings.profile_fact_limit,
-                    session=session,
+                _exclude_sources = self._settings.profile_exclude_sources or None
+                core_mode = getattr(self._settings, "profile_core_enabled", False)
+                core_tagged_ids: set[str] = set()
+                tagged_count = 0
+                probation_count = 0
+                profile_facts = None
+                if core_mode:
+                    # Curated core = tagged facts + probation (untagged, recently
+                    # learned) tier-1 facts, tagged first, deduped by id, capped.
+                    _limit = self._settings.profile_core_limit
+                    tagged = await self._heart.list_facts_by_category(
+                        categories=TIER1_FACT_CATEGORIES,
+                        active_only=True,
+                        limit=_limit,
+                        session=session,
+                        exclude_sources=_exclude_sources,
+                        require_tag=PROFILE_CORE_TAG,
+                    )
+                    probation: list = []
+                    _prob_days = getattr(self._settings, "profile_core_probation_days", 0)
+                    if _prob_days > 0:
+                        probation = await self._heart.list_facts_by_category(
+                            categories=TIER1_FACT_CATEGORIES,
+                            active_only=True,
+                            limit=_limit,
+                            session=session,
+                            exclude_sources=_exclude_sources,
+                            learned_within_days=_prob_days,
+                        )
+                    core_tagged_ids = {str(f.id) for f in tagged}
+                    probation_only = [f for f in probation if str(f.id) not in core_tagged_ids]
+                    combined = (list(tagged) + probation_only)[:_limit]
+                    if combined:
+                        profile_facts = combined
+                        tagged_count = len(tagged)
+                        probation_count = len(probation_only)
+                    # else: empty core → fall through to legacy top-N below.
+                if profile_facts is None:
+                    # Legacy top-N (flag off, or flag on with empty core):
                     # 2026-07-24: reflection lessons are not user profile data
                     # (they filled all 20 slots at conf 1.0 — see config note).
-                    exclude_sources=self._settings.profile_exclude_sources or None,
-                )
+                    core_tagged_ids = set()
+                    profile_facts = await self._heart.list_facts_by_category(
+                        categories=TIER1_FACT_CATEGORIES,
+                        active_only=True,
+                        limit=self._settings.profile_fact_limit,
+                        session=session,
+                        exclude_sources=_exclude_sources,
+                    )
                 raw_count = len(profile_facts)
                 if profile_facts and _effective_identity:
                     # Filter out facts already restated by the identity prompt.
@@ -530,13 +581,18 @@ class ContextEngine:
                     # whole-identity text_overlap, which over-matched scattered
                     # vocabulary and hid post-initiation facts (P1).
                     scope = getattr(self._settings, "profile_identity_dedup_scope", "line")
+                    # Core-TAGGED facts bypass identity dedup: an explicit human
+                    # tag outranks a word-overlap heuristic (otherwise tagging a
+                    # Celsius core fact while identity mentions Celsius makes the
+                    # tag silently inert). Probation/legacy facts dedup normally.
                     if scope == "line":
                         identity_lines = [
                             ln for ln in _effective_identity.splitlines() if ln.strip()
                         ]
                         profile_facts = [
                             f for f in profile_facts
-                            if _identity_coverage(
+                            if str(getattr(f, "id", "")) in core_tagged_ids
+                            or _identity_coverage(
                                 (getattr(f, "content", "") or "")[:200],
                                 identity_lines,
                             ) < _IDENTITY_LINE_COVERAGE_THRESHOLD
@@ -544,7 +600,8 @@ class ContextEngine:
                     else:
                         profile_facts = [
                             f for f in profile_facts
-                            if text_overlap(
+                            if str(getattr(f, "id", "")) in core_tagged_ids
+                            or text_overlap(
                                 (getattr(f, "content", "") or "")[:200],
                                 _effective_identity,
                             ) < _IDENTITY_OVERLAP_THRESHOLD
@@ -565,6 +622,13 @@ class ContextEngine:
                 was_truncated = False
                 if profile_facts:
                     profile_text = self._format_facts(profile_facts)
+                    # Double-injection guard for the Task-2 leg: the ids of the
+                    # facts we render here (pre-truncation is intentional — a
+                    # budget-dropped fact is still "claimed" by this section and
+                    # must not re-inject via the leg).
+                    profile_fact_ids = {
+                        str(getattr(f, "id", "")) for f in profile_facts if getattr(f, "id", None)
+                    }
                     _full_len = len(profile_text)
                     profile_text = self._truncate_to_budget_lines(
                         profile_text, self._scaled_budget(budget.user_profile)
@@ -582,9 +646,10 @@ class ContextEngine:
                 # final = post-dedup fact count (pre-truncation; truncated flag
                 # carries the rest). Distinguishes 0-existed / all-deduped /
                 # budget-truncated — the three states that were indistinguishable.
+                # core/tagged/probation surface the curated-core split (Task 1).
                 logger.info(
-                    "User Profile: raw=%d deduped_out=%d final=%d truncated=%s",
-                    raw_count, deduped_out, len(profile_facts), was_truncated,
+                    "User Profile: core=%s tagged=%d probation=%d raw=%d deduped_out=%d final=%d truncated=%s",
+                    core_mode, tagged_count, probation_count, raw_count, deduped_out, len(profile_facts), was_truncated,
                 )
             except Exception:
                 logger.warning("Failed to load user profile facts for Tier 1 context")

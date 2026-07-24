@@ -795,3 +795,209 @@ class TestProfileSourceExclusion:
             assert "cache eviction tuning" not in profile.content  # rule excluded
         finally:
             await heart.close()
+
+
+async def _tag_fact(db, fact_id, tag="profile_core"):
+    """Add a tag to a fact's ARRAY column via SQL (Task 3 builds the API path)."""
+    from sqlalchemy import text as sqltext
+    async with db.session() as session:
+        await session.execute(
+            sqltext("UPDATE heart.facts SET tags = array_append(coalesce(tags, '{}'::text[]), :tag) WHERE id = :id"),
+            {"tag": tag, "id": fact_id},
+        )
+        await session.commit()
+
+
+async def _set_learned_at(db, fact_id, when):
+    from sqlalchemy import text as sqltext
+    async with db.session() as session:
+        await session.execute(
+            sqltext("UPDATE heart.facts SET learned_at = :t WHERE id = :id"),
+            {"t": when, "id": fact_id},
+        )
+        await session.commit()
+
+
+class TestProfileCore:
+    """Task 1: curated core (PROFILE_CORE_TAG) + probation window selection."""
+
+    @pytest.mark.asyncio
+    async def test_tagged_only_render(self, db, mock_embeddings, settings):
+        """core on, probation off: only the tagged fact renders."""
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"profile_core_enabled": True, "profile_core_probation_days": 0},
+        )
+        try:
+            async with db.session() as session:
+                r_tag = await heart.learn(
+                    FactInput(content="Tim prefers Celsius for all temperature readings", category="preference", subject="core-tag"),
+                    session=session,
+                )
+                await heart.learn(
+                    FactInput(content="Tim enjoys sailing near the marina on weekends", category="person", subject="core-untag"),
+                    session=session,
+                )
+                await session.commit()
+            await _tag_fact(db, r_tag.id)
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-core-tag",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None
+            assert "Celsius" in profile.content
+            assert "sailing near the marina" not in profile.content
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_probation_fresh_appears_old_absent(self, db, mock_embeddings, settings):
+        """core on, no tags: a fresh untagged fact joins via probation; an old one does not."""
+        from datetime import datetime, timedelta, timezone
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"profile_core_enabled": True, "profile_core_probation_days": 14},
+        )
+        try:
+            async with db.session() as session:
+                r_fresh = await heart.learn(
+                    FactInput(content="Tim just adopted a beagle named Biscuit recently", category="person", subject="prob-fresh"),
+                    session=session,
+                )
+                r_old = await heart.learn(
+                    FactInput(content="Tim once visited the Grand Canyon long ago", category="person", subject="prob-old"),
+                    session=session,
+                )
+                await session.commit()
+            now = datetime.now(timezone.utc)
+            await _set_learned_at(db, r_fresh.id, now)
+            await _set_learned_at(db, r_old.id, now - timedelta(days=30))
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-core-prob",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None
+            assert "beagle named Biscuit" in profile.content
+            assert "Grand Canyon" not in profile.content
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_tagged_bypasses_identity_dedup(self, db, mock_embeddings, settings):
+        """A tagged fact whose content is fully covered by an identity line still
+        renders (explicit tag outranks the dedup heuristic). Legacy would drop it
+        (see TestProfileInstrumentation::test_all_deduped_state)."""
+        content = "Tim uses spaces not tabs consistently everywhere"
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings,
+            identity_prompt=f"### Preferences\n- {content}",
+            settings_update={"profile_core_enabled": True, "profile_core_probation_days": 0},
+        )
+        try:
+            async with db.session() as session:
+                r = await heart.learn(
+                    FactInput(content=content, category="preference", subject="core-dedup"),
+                    session=session,
+                )
+                await session.commit()
+            await _tag_fact(db, r.id)
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-core-dedup",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None
+            assert content in profile.content
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_empty_core_falls_back_to_legacy(self, db, mock_embeddings, settings):
+        """core on but zero tagged + zero probation → legacy top-N (no cliff)."""
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"profile_core_enabled": True, "profile_core_probation_days": 0},
+        )
+        try:
+            async with db.session() as session:
+                await heart.learn(
+                    FactInput(content="Tim prefers metric units for distance always", category="preference", subject="core-fallback"),
+                    session=session,
+                )
+                await session.commit()
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-core-fallback",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None
+            assert "metric units for distance" in profile.content
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_flag_off_byte_identical(self, db, mock_embeddings, settings):
+        """flag off (default): a tagged fact is treated exactly like any other —
+        legacy top-N renders both tagged and untagged facts (tag inert)."""
+        engine, heart, s = await _fresh_engine(db, mock_embeddings, settings, identity_prompt="")
+        try:
+            async with db.session() as session:
+                r_tag = await heart.learn(
+                    FactInput(content="Tim prefers Fahrenheit surprisingly for baking only", category="preference", subject="off-tag"),
+                    session=session,
+                )
+                await heart.learn(
+                    FactInput(content="Tim keeps a workshop in the garage for projects", category="person", subject="off-untag"),
+                    session=session,
+                )
+                await session.commit()
+            await _tag_fact(db, r_tag.id)
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-off",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None
+            assert "Fahrenheit surprisingly for baking" in profile.content
+            assert "workshop in the garage" in profile.content
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_cap_respected_tagged_first(self, db, mock_embeddings, settings):
+        """core_limit caps the combined set tagged-first: with limit 1, the tagged
+        fact wins over a fresh probation candidate."""
+        from datetime import datetime, timezone
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={
+                "profile_core_enabled": True,
+                "profile_core_limit": 1,
+                "profile_core_probation_days": 14,
+            },
+        )
+        try:
+            async with db.session() as session:
+                r_tag = await heart.learn(
+                    FactInput(content="Tim prefers Celsius for all temperature readings", category="preference", subject="cap-tag"),
+                    session=session,
+                )
+                r_prob = await heart.learn(
+                    FactInput(content="Tim recently started learning to play the cello", category="person", subject="cap-prob"),
+                    session=session,
+                )
+                await session.commit()
+            await _tag_fact(db, r_tag.id)
+            await _set_learned_at(db, r_prob.id, datetime.now(timezone.utc))
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-cap",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None
+            assert "Celsius" in profile.content
+            assert "play the cello" not in profile.content
+        finally:
+            await heart.close()

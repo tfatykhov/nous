@@ -2922,17 +2922,23 @@ class FactManager:
         limit: int = 20,
         session: AsyncSession | None = None,
         exclude_sources: list[str] | None = None,
+        require_tag: str | None = None,
+        learned_within_days: int | None = None,
     ) -> list[FactSummary]:
         """Load facts by category without semantic search.
 
         Used for Tier 1 always-on context (preference, person, rule facts).
         ``exclude_sources`` filters at SQL level (so excluded rows never
         consume the LIMIT), NULL-safe: NULL-source legacy facts always kept.
+        ``require_tag`` restricts to facts carrying that tag in the ``tags``
+        ARRAY (profile core curation); ``learned_within_days`` restricts to
+        facts learned within the window (probation). Both default None →
+        byte-identical to callers that omit them.
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._list_by_category(categories, active_only, limit, session, exclude_sources)
-        return await self._list_by_category(categories, active_only, limit, session, exclude_sources)
+                return await self._list_by_category(categories, active_only, limit, session, exclude_sources, require_tag, learned_within_days)
+        return await self._list_by_category(categories, active_only, limit, session, exclude_sources, require_tag, learned_within_days)
 
     async def _list_by_category(
         self,
@@ -2941,6 +2947,8 @@ class FactManager:
         limit: int,
         session: AsyncSession,
         exclude_sources: list[str] | None = None,
+        require_tag: str | None = None,
+        learned_within_days: int | None = None,
     ) -> list[FactSummary]:
         stmt = (
             select(Fact)
@@ -2951,6 +2959,14 @@ class FactManager:
         )
         if active_only:
             stmt = stmt.where(Fact.active == True)  # noqa: E712
+        if require_tag is not None:
+            # ARRAY membership: `require_tag = ANY(tags)`. NULL-tags rows are
+            # correctly excluded (they carry no tag).
+            stmt = stmt.where(Fact.tags.any(require_tag))
+        if learned_within_days is not None:
+            from datetime import datetime, timedelta, timezone
+            cutoff = datetime.now(timezone.utc) - timedelta(days=learned_within_days)
+            stmt = stmt.where(Fact.learned_at >= cutoff)
         if exclude_sources:
             # Category-scoped (codex r1): only RULE facts from excluded sources
             # are filtered — the polluting combination. A genuine sleep-reflected

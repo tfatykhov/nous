@@ -423,9 +423,14 @@ class Heart:
         limit: int = 20,
         session: AsyncSession | None = None,
         exclude_sources: list[str] | None = None,
+        require_tag: str | None = None,
+        learned_within_days: int | None = None,
     ) -> list[FactSummary]:
         """Load facts by category without semantic search (Tier 1)."""
-        return await self.facts.list_by_category(categories, active_only, limit, session, exclude_sources)
+        return await self.facts.list_by_category(
+            categories, active_only, limit, session, exclude_sources,
+            require_tag=require_tag, learned_within_days=learned_within_days,
+        )
 
     async def get_current_fact(self, fact_id: UUID, session: AsyncSession | None = None) -> FactDetail:
         """Follow superseded_by chain to find current version."""

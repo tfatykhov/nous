@@ -240,6 +240,25 @@ class Settings(BaseSettings):
         default_factory=lambda: ["reflection", "sleep_reflection"],
         description="Sources whose RULE facts are excluded from the Tier-1 User Profile section (SQL-level, NULL-source facts always kept, preference/person facts from these sources are kept). Empty list disables.",
     )
+    # Profile core/intent split (2026-07-24 plan). Both land dark. The User
+    # Profile section, when profile_core_enabled, renders a curated always-on
+    # CORE (facts tagged PROFILE_CORE_TAG) plus a probation window of recently
+    # learned untagged tier-1 facts (so a new universal fact appears
+    # immediately and ages out unless the owner tags it). Zero tagged + zero
+    # probation falls back to legacy top-N (no fresh-agent cliff). Flag off is
+    # byte-identical legacy.
+    profile_core_enabled: bool = Field(
+        default=False,
+        description="Render the User Profile section as curated core (PROFILE_CORE_TAG) + probation window instead of legacy top-N. Land dark.",
+    )
+    profile_core_limit: int = Field(
+        default=12, ge=1,
+        description="Max facts in the curated User Profile core (tagged + probation, tagged first).",
+    )
+    profile_core_probation_days: int = Field(
+        default=14, ge=0,
+        description="Untagged tier-1 facts learned within this many days join the core as probation (0 disables probation).",
+    )
     fact_pin_top_k: int = Field(
         default=0, ge=0,
         description=(
