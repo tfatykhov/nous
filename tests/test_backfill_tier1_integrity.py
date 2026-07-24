@@ -74,12 +74,40 @@ def test_ab_contact_fact_email_was_not_demoted():
 
 
 def test_ab_standing_directive_worded_as_request_survives():
-    """codex r3: a directive can be WORDED as a request — standing-rule
-    language suppresses the B match. A (delivery) is deliberately unguarded."""
+    """codex r3 (widened after the prod dry-run): durable preference/directive
+    language suppresses BOTH A and B matches — a directive worded as a request
+    is still a directive, and a recurring-delivery statement reads as a
+    routing preference."""
     assert not classify_event_noise_ab("The user asked to always verify the current date before scheduling")
     assert not classify_event_noise_ab("Tim requested that reports must never include raw credentials")
     assert not classify_event_noise_ab("The user asked that going forward summaries be sent as HTML")
     # plain requests still demote
     assert classify_event_noise_ab("The user asked for the weather forecast for Annapolis")
-    # A is unguarded: a delivery event with 'always' is still a delivery event
-    assert classify_event_noise_ab("The report was sent to the personal Gmail as always")
+    assert not classify_event_noise_ab("The report was sent to the personal Gmail as always")
+
+
+def test_ab_delivery_routing_preferences_survive():
+    """Regression from the FIRST PROD DRY-RUN (2026-07-24): pattern A's
+    'sent to' matched genuine delivery-routing preferences. The durable-
+    language guard (prefers/wants/...) now suppresses A matches too."""
+    assert not classify_event_noise_ab(
+        "User prefers sailing forecasts sent to Gmail only (Tfatykhov@gmail.com), not other channels."
+    )
+    assert not classify_event_noise_ab(
+        "User wants all reports and research deliverables sent to both their personal and work email inboxes."
+    )
+    assert not classify_event_noise_ab(
+        "User wants forecast emails sent to personal inbox with a cc to work email."
+    )
+    # plain receipts (no durable language) still demote
+    assert classify_event_noise_ab("The Annapolis Weekend Forecast email was sent to timur_fatykhov@fanniemae.com.")
+    assert classify_event_noise_ab("The forecast was sent to timandeugene@gmail.com.")
+    assert classify_event_noise_ab("The user sent a list of fixes at 17:24 UTC.")
+
+
+def test_ab_preposition_like_does_not_shield_noise():
+    """codex #573: bare 'like' is usually the preposition — it must not
+    suppress a genuine noise match; verb forms (likes / would like) do."""
+    assert classify_event_noise_ab("The user asked for a draft like last week's summary")
+    assert not classify_event_noise_ab("Tim likes concise answers with code samples")
+    assert not classify_event_noise_ab("Tim would like reports sent to his work inbox")

@@ -112,11 +112,18 @@ EVENT_NOISE_PATTERN_B = re.compile(
     re.IGNORECASE,
 )
 EVENT_NOISE_PATTERNS_AB = (EVENT_NOISE_PATTERN_A, EVENT_NOISE_PATTERN_B)
-# Standing-directive guard for B (codex r3): a rule can be WORDED as a request
-# ("The user asked to always verify the date...") — standing-rule language
-# suppresses a B match so genuine directives survive the scrub.
-STANDING_RULE_GUARD = re.compile(
-    r"\b(always|never|must|going forward|from now on|standing)\b", re.IGNORECASE
+# Durable-language guard for A AND B (codex r3, WIDENED after the prod dry-run
+# 2026-07-24): the first prod regex dry-run surfaced genuine delivery-routing
+# PREFERENCES matching A ("User prefers sailing forecasts sent to Gmail only",
+# "User wants all reports ... sent to both inboxes") — `sent to` is not only a
+# receipt marker. Preference/directive language suppresses an A or B match;
+# the asymmetric cost rules here: a kept noise row is one stray profile line,
+# a demoted genuine preference is exactly the data the profile exists for.
+# `likes` (verb) / `would like` only — bare `like` is usually the preposition
+# ("a draft like last week's summary") and must not shield noise (codex #573).
+DURABLE_LANGUAGE_GUARD = re.compile(
+    r"\b(prefers?|wants?|likes|would like|always|never|must|going forward|from now on|standing)\b",
+    re.IGNORECASE,
 )
 # C: dated-logistics (flight codes, m/d dates, clock times, tomorrow, weekdays).
 EVENT_NOISE_PATTERN_C = re.compile(
@@ -130,17 +137,16 @@ def classify_event_noise_ab(content: str) -> bool:
     """True if the fact reads as a delivery event (A) or a request/action the
     user or assistant took (B) — session events, not durable user profile.
 
-    A B-match is suppressed when the content carries standing-rule language
-    (always/never/must/going forward/...) — a directive worded as a request is
-    still a directive (codex r3). A (delivery events) is NOT guarded: 'the
-    forecast was always sent to X' is still a delivery event.
+    Both A and B matches are suppressed when the content carries durable
+    preference/directive language (prefers/wants/always/never/...): the prod
+    dry-run proved delivery-routing preferences match A, and a directive
+    worded as a request matches B. Kept-noise costs one stray line; a demoted
+    genuine preference is the exact data the profile exists to hold.
     """
     if not content:
         return False
-    if EVENT_NOISE_PATTERN_A.search(content):
-        return True
-    if EVENT_NOISE_PATTERN_B.search(content):
-        return not STANDING_RULE_GUARD.search(content)
+    if any(p.search(content) for p in EVENT_NOISE_PATTERNS_AB):
+        return not DURABLE_LANGUAGE_GUARD.search(content)
     return False
 
 
@@ -221,9 +227,16 @@ async def _require_capture(session, *, phase: str) -> None:
 
 async def phase_mechanical(session, *, agent_id: str, dry_run: bool) -> dict:
     """tier-1 `rule` rows from contradiction_resolution / cluster_consolidation
-    -> technical (lessons / doc atoms by construction)."""
+    -> technical.
+
+    Scoped to subject='lesson_learned' (2026-07-24 prod dry-run): the blanket
+    version would have demoted a genuine delivery preference stored as a
+    contradiction_resolution rule ("User wants all reports ... sent to both
+    inboxes"). Rows with other subjects flow to the Haiku phase instead.
+    """
     predicate = (
-        "agent_id = :a AND category = 'rule' AND source = ANY(:srcs)"
+        "agent_id = :a AND category = 'rule' AND source = ANY(:srcs) "
+        "AND subject = 'lesson_learned'"
     )
     params = {"a": agent_id, "srcs": list(_MECHANICAL_SOURCES)}
     n = (
@@ -469,17 +482,23 @@ async def phase_verify(session, *, agent_id: str) -> dict:
 # --- CLI -------------------------------------------------------------------
 
 def _build_settings(args) -> Settings:
-    """Settings() with any provided --db-* overrides (init kwargs beat env)."""
+    """Settings() with any provided --db-* overrides.
+
+    The DB fields carry validation_alias="DB_HOST" etc. (unprefixed env vars,
+    per config convention), so init kwargs MUST use the ALIAS names — the
+    snake_case field names are silently ignored by pydantic when an alias is
+    set (2026-07-24 prod-run bug: --db-host had no effect).
+    """
     overrides: dict[str, object] = {}
-    for value, field in (
-        (args.db_host, "db_host"),
-        (args.db_port, "db_port"),
-        (args.db_user, "db_user"),
-        (args.db_password, "db_password"),
-        (args.db_name, "db_name"),
+    for value, alias in (
+        (args.db_host, "DB_HOST"),
+        (args.db_port, "DB_PORT"),
+        (args.db_user, "DB_USER"),
+        (args.db_password, "DB_PASSWORD"),
+        (args.db_name, "DB_NAME"),
     ):
         if value is not None:
-            overrides[field] = value
+            overrides[alias] = value
     return Settings(**overrides)
 
 
