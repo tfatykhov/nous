@@ -1171,3 +1171,25 @@ export interface ConsolidationCycleDetail {
   cycle: ConsolidationCycle | null;
   actions: ConsolidationAction[];
 }
+
+// ── Identity view (GET /identity, PUT /identity/{section}, /profile/facts, /facts/{id}) ──
+
+/** Full response from GET /identity. */
+export interface IdentityResponse {
+  agent_id: string;
+  is_initiated: boolean | null;
+  sections: Record<string, string>;
+}
+
+/** Response from PUT /facts/{fact_id} — supersede-edit of a Tier-1 fact. */
+export interface FactUpdateResponse {
+  status: 'superseded' | 'merged_into_existing';
+  new_fact_id: string;
+  stored_content?: string;
+}
+
+/** Response from GET /profile/facts. */
+export interface ProfileFactsResponse {
+  facts: BrowserFact[];  // superset cast — endpoint omits some BrowserFact fields; view reads none of them
+  total: number;
+}
