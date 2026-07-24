@@ -714,6 +714,15 @@ def create_app(
             return JSONResponse({"error": "core (bool) is required"}, status_code=400)
         try:
             async with database.session() as session:
+                # Same per-fact advisory xact lock as update_fact/delete_fact:
+                # serializes against a concurrent supersede/deactivate so the
+                # tag is never applied to a row that just became superseded
+                # (branch-review P2 — consistency with the file's convention).
+                from sqlalchemy import text as sa_text
+                await session.execute(
+                    sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": f"nous_fact_edit:{fact_id}"},
+                )
                 try:
                     target = await heart.get_current_fact(fact_id, session=session)
                 except ValueError:
