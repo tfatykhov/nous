@@ -275,3 +275,39 @@ class TestMergedIntoExisting:
         # old fact retired either way
         listing = (await client.get("/profile/facts")).json()
         assert str(a.id) not in [x["id"] for x in listing["facts"]]
+
+
+class TestAlreadySuperseded:
+    """rev2-branch P2-1: the 409 already_superseded branch (stale-tab double
+    submit on a retired id) is part of the public contract — pin it."""
+
+    @pytest.mark.asyncio
+    async def test_put_and_delete_on_superseded_fact_409(self, client, heart, db):
+        async with db.session() as session:
+            a = await heart.learn(
+                FactInput(
+                    content="Tim schedules deep work in the early morning hours",
+                    category="preference",
+                    subject="chain-a",
+                ),
+                session=session,
+            )
+            await session.commit()
+        first = await client.put(
+            f"/facts/{a.id}",
+            json={"content": "Tim schedules deep work in the late evening hours"},
+        )
+        assert first.status_code == 200
+        new_id = first.json()["new_fact_id"]
+        # Stale-tab double submit against the retired id: PUT then DELETE.
+        resp = await client.put(
+            f"/facts/{a.id}",
+            json={"content": "Another perfectly valid replacement content string here"},
+        )
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "already_superseded"
+        assert resp.json()["current_fact_id"] == new_id
+        resp = await client.delete(f"/facts/{a.id}")
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "already_superseded"
+        assert resp.json()["current_fact_id"] == new_id
