@@ -422,9 +422,10 @@ class Heart:
         active_only: bool = True,
         limit: int = 20,
         session: AsyncSession | None = None,
+        exclude_sources: list[str] | None = None,
     ) -> list[FactSummary]:
         """Load facts by category without semantic search (Tier 1)."""
-        return await self.facts.list_by_category(categories, active_only, limit, session)
+        return await self.facts.list_by_category(categories, active_only, limit, session, exclude_sources)
 
     async def get_current_fact(self, fact_id: UUID, session: AsyncSession | None = None) -> FactDetail:
         """Follow superseded_by chain to find current version."""

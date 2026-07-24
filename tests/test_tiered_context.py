@@ -714,3 +714,56 @@ class TestSectionOrder:
             assert sp.index("## Identity") < sp.index("## User Profile")
         finally:
             await heart.close()
+
+
+class TestProfileSourceExclusion:
+    """2026-07-24 pollution fix: reflection-sourced facts are excluded from the
+    Tier-1 User Profile at SQL level (NULL-source legacy facts always kept)."""
+
+    @pytest.mark.asyncio
+    async def test_reflection_source_excluded_null_source_kept(self, db, mock_embeddings, settings):
+        engine, heart, s = await _fresh_engine(db, mock_embeddings, settings, identity_prompt="")
+        try:
+            async with db.session() as session:
+                await heart.learn(
+                    FactInput(content="Legacy pollution lesson about firmware update procedures", category="rule", subject="pol-1", source="reflection"),
+                    session=session,
+                )
+                await heart.learn(
+                    FactInput(content="Tim prefers dark roast coffee every single morning", category="preference", subject="pol-2"),
+                    session=session,
+                )
+                await session.commit()
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-srcexcl",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None
+            assert "dark roast coffee" in profile.content  # NULL-source kept
+            assert "firmware update procedures" not in profile.content  # reflection excluded
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_empty_exclusion_list_restores_legacy(self, db, mock_embeddings, settings):
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"profile_exclude_sources": []},
+        )
+        try:
+            async with db.session() as session:
+                await heart.learn(
+                    FactInput(content="Legacy pollution lesson about widget calibration steps", category="rule", subject="pol-3", source="reflection"),
+                    session=session,
+                )
+                await session.commit()
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-srcexcl-off",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None
+            assert "widget calibration steps" in profile.content
+        finally:
+            await heart.close()
