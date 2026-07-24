@@ -633,6 +633,9 @@ The dashboard is a Svelte SPA under `dashboard-app/`. Build with `cd dashboard-a
 | GET | `/decisions/{id}` | Decision detail |
 | GET | `/episodes` | List recent episodes |
 | GET | `/facts?q=query` | Search facts |
+| PUT | `/facts/{fact_id}` | Edit a Tier-1 fact via supersession (new versioned fact, re-embedded; reports merged_into_existing on dedup-swallow) |
+| DELETE | `/facts/{fact_id}` | Deactivate (soft-delete) a Tier-1 fact |
+| GET | `/profile/facts` | Tier-1 user-profile facts (preference/person/rule), prompt-order |
 | GET | `/censors` | Active censors |
 | PUT | `/censors/{id}` | Update censor fields (trigger_action, action_instruction, unblock_pattern) |
 | GET | `/procedures` | List procedures |
