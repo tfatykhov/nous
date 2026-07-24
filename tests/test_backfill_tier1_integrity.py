@@ -103,3 +103,11 @@ def test_ab_delivery_routing_preferences_survive():
     assert classify_event_noise_ab("The Annapolis Weekend Forecast email was sent to timur_fatykhov@fanniemae.com.")
     assert classify_event_noise_ab("The forecast was sent to timandeugene@gmail.com.")
     assert classify_event_noise_ab("The user sent a list of fixes at 17:24 UTC.")
+
+
+def test_ab_preposition_like_does_not_shield_noise():
+    """codex #573: bare 'like' is usually the preposition — it must not
+    suppress a genuine noise match; verb forms (likes / would like) do."""
+    assert classify_event_noise_ab("The user asked for a draft like last week's summary")
+    assert not classify_event_noise_ab("Tim likes concise answers with code samples")
+    assert not classify_event_noise_ab("Tim would like reports sent to his work inbox")

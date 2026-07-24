@@ -119,8 +119,10 @@ EVENT_NOISE_PATTERNS_AB = (EVENT_NOISE_PATTERN_A, EVENT_NOISE_PATTERN_B)
 # receipt marker. Preference/directive language suppresses an A or B match;
 # the asymmetric cost rules here: a kept noise row is one stray profile line,
 # a demoted genuine preference is exactly the data the profile exists for.
+# `likes` (verb) / `would like` only — bare `like` is usually the preposition
+# ("a draft like last week's summary") and must not shield noise (codex #573).
 DURABLE_LANGUAGE_GUARD = re.compile(
-    r"\b(prefers?|wants?|likes?|always|never|must|going forward|from now on|standing)\b",
+    r"\b(prefers?|wants?|likes|would like|always|never|must|going forward|from now on|standing)\b",
     re.IGNORECASE,
 )
 # C: dated-logistics (flight codes, m/d dates, clock times, tomorrow, weekdays).
