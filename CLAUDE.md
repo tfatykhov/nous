@@ -580,6 +580,12 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_SUPERSESSION_LINEAGE_MODE` | `off` | Annotate injected facts that supersede an earlier fact: `tag` (generic marker) / `named` (quotes stale value — anchoring risk, A/B first) / `off`. |
 | `NOUS_RECALL_BACKSTOP_ENABLED` | `false` | Inject a "call recall_deep before answering" instruction when pre-turn fact retrieval returns zero facts. |
 | `NOUS_PROFILE_EXCLUDE_SOURCES` | `["reflection", "sleep_reflection"]` | Fact sources excluded (SQL-level, NULL-source facts always kept) from the Tier-1 User Profile section AND `GET /profile/facts`. Reflection lessons are lessons, not user profile data — 1,148 conf-1.0 reflection facts filled all 20 profile slots (2026-07-24 diagnosis). Empty list disables. Write paths no longer emit category `rule` from reflections. |
+| `NOUS_PROFILE_CORE_ENABLED` | `false` | **Land-dark.** Core/intent profile split: the User Profile section renders ONLY `profile_core`-tagged facts (curated via dashboard/`POST /facts/{id}/core`) plus a probation window; tagged facts BYPASS the identity dedup (explicit curation outranks the heuristic). Zero tagged+probation facts → legacy top-N fallback. Flip post-deploy after initial tagging. |
+| `NOUS_PROFILE_CORE_LIMIT` | `12` | Max facts in the curated core render (tagged first, then probation). |
+| `NOUS_PROFILE_CORE_PROBATION_DAYS` | `14` | Untagged tier-1 facts learned within this window join the core render automatically (so a new universal preference never silently vanishes pre-curation). `0` disables probation. |
+| `NOUS_PROFILE_INTENT_LEG_ENABLED` | `false` | **Land-dark.** Session Profile leg: hybrid search restricted to tier-1 categories on the turn's resolved query, staleness+relevance-filtered, rendered as a `dynamic`-tier `## Session Profile` section (never part of the cached prefix) with core/profile IDs excluded. Surfaces domain facts (trading, sailing) only on domain turns. |
+| `NOUS_PROFILE_INTENT_LEG_LIMIT` | `5` | Max facts fetched/rendered by the Session Profile leg. |
+| `NOUS_PROFILE_INTENT_LEG_BUDGET` | `300` | Token budget for the Session Profile section (line-aware truncation). |
 | `NOUS_PROFILE_IDENTITY_DEDUP_SCOPE` | `line` | User Profile vs identity dedup (2026-07-23): `line` = directional per-line coverage (suppress a fact only when ONE identity line covers ≥75% of its meaningful words — fixes the P1 over-suppression that hid every post-initiation preference/person/rule fact; corrections sharing ~67% scaffolding words with the bullet they correct now survive); `blob` = legacy whole-identity overlap at 0.6 (kill-switch; also the fallback for unknown values). On a single-line prose identity the two modes coincide (deliberate no-op — prod identity verified multi-line bulleted 2026-07-23). |
 | `NOUS_PROFILE_FACT_LIMIT` | `20` | Max preference/person/rule facts fetched for the Tier-1 User Profile section (was hardcoded 20). Section budget still applies after formatting; overflow now drops whole fact lines (never a mid-word slice), newest-first retained within equal confidence. |
 | `NOUS_PROFILE_RECENCY_ENABLED` | `false` | **Land-dark.** Apply the pre-turn recency resolver (`_resolve_recency`: current/superseded tags + demotion sort on event_date conflicts) to Tier-1 User Profile facts. Requires `NOUS_RECENCY_RESOLVER_ENABLED=true` as well (already true in prod) — gated separately precisely so the Tier-1 pass does NOT go live on deploy day alongside the dedup fix. Flip after observing the dedup fix in prod. |
@@ -636,7 +642,8 @@ The dashboard is a Svelte SPA under `dashboard-app/`. Build with `cd dashboard-a
 | GET | `/facts?q=query` | Search facts |
 | PUT | `/facts/{fact_id}` | Edit a Tier-1 fact via supersession (new versioned fact, re-embedded; reports merged_into_existing on dedup-swallow) |
 | DELETE | `/facts/{fact_id}` | Deactivate (soft-delete) a Tier-1 fact |
-| GET | `/profile/facts` | Tier-1 user-profile facts (preference/person/rule), prompt-order |
+| GET | `/profile/facts` | Tier-1 user-profile facts (preference/person/rule), prompt-order; `?core=true` filters to the curated core set |
+| POST | `/facts/{fact_id}/core` | Toggle the `profile_core` curation tag on a Tier-1 fact (`{"core": true|false}`) |
 | GET | `/censors` | Active censors |
 | PUT | `/censors/{id}` | Update censor fields (trigger_action, action_instruction, unblock_pattern) |
 | GET | `/procedures` | List procedures |
