@@ -819,6 +819,10 @@ async def _set_learned_at(db, fact_id, when):
 
 
 class TestProfileCore:
+    # codex r2 (#574): fresh-engine fixtures use Postgres-only SQL (::jsonb,
+    # generated tsvector) — skip cleanly under the default sqlite backend.
+    pytestmark = pytest.mark.postgres_only
+
     """Task 1: curated core (PROFILE_CORE_TAG) + probation window selection."""
 
     @pytest.mark.asyncio
@@ -1008,6 +1012,10 @@ def _session_profile_section(result):
 
 
 class TestSessionProfileLeg:
+    # codex r2 (#574): fresh-engine fixtures use Postgres-only SQL (::jsonb,
+    # generated tsvector) — skip cleanly under the default sqlite backend.
+    pytestmark = pytest.mark.postgres_only
+
     """Task 2: intent-selected tier-1 domain facts, rendered as a dynamic
     section. postgres_only — the leg exercises hybrid FTS+vector search; the
     unique-token FTS leg drives deterministic membership (rank is probabilistic
@@ -1132,6 +1140,34 @@ class TestSessionProfileLeg:
             await heart.close()
 
     @pytest.mark.asyncio
+    async def test_leg_min_score_gate_blocks_vector_only_noise(self, db, mock_embeddings, settings):
+        """codex r2: on an unrelated turn the vector leg still ranks SOME tier-1
+        fact first (nearest-neighbor noise). The absolute floor (default 0.7)
+        excludes it deterministically: a single-leg rank-1 match tops out at
+        vector_weight * k/(k+1) ~= 0.69 < 0.7 at default weights; a genuine
+        domain match hits both legs (~0.98)."""
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"profile_intent_leg_enabled": True},
+        )
+        try:
+            async with db.session() as session:
+                await heart.learn(
+                    FactInput(content="Tim's trading rule qgatefloortok sell underwater positions promptly", category="rule", subject="gate-domain"),
+                    session=session,
+                )
+                await session.commit()
+            # Unrelated input: no keyword-leg match, so the fact can only
+            # arrive via the vector leg (score <= ~0.69) -> gated out.
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-leg-gate",
+                input_text="completely unrelated musings about gardens", frame=_frame(),
+            )
+            assert _session_profile_section(result) is None
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
     async def test_leg_respects_fact_skip_and_zero_budget(self, db, mock_embeddings, settings):
         """codex r1: the leg honors the retrieval plan's skip_types={'fact'}
         (greeting/no-fact turns) and a budget=0 operator disable."""
@@ -1179,6 +1215,10 @@ class TestSessionProfileLeg:
 
 
 class TestCensorLineAwareTruncation:
+    # codex r2 (#574): fresh-engine fixtures use Postgres-only SQL (::jsonb,
+    # generated tsvector) — skip cleanly under the default sqlite backend.
+    pytestmark = pytest.mark.postgres_only
+
     @pytest.mark.asyncio
     async def test_censor_section_drops_whole_lines(self, db, mock_embeddings, settings):
         """The Active Censors section uses line-aware truncation: an over-budget

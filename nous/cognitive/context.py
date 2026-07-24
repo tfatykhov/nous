@@ -884,6 +884,18 @@ class ContextEngine:
                     # something — without the floor, marginal facts inject on
                     # every domain-ish turn).
                     leg_facts = self._apply_staleness_penalty(leg_facts)
+                    # codex r2: absolute score gate BEFORE the adaptive filter
+                    # (which pads to a >=3 minimum and can never return empty).
+                    # RRF math makes the default 0.7 floor a clean separator: a
+                    # vector-ONLY rank-1 hit tops out at vector_weight*k/(k+1)
+                    # ~= 0.69 (nearest-neighbor noise on an unrelated turn),
+                    # while a genuine domain match hits BOTH legs (~0.98).
+                    # Empty result => no Session Profile section, by design.
+                    _floor = self._settings.profile_intent_leg_min_score
+                    leg_facts = [
+                        f for f in leg_facts
+                        if (getattr(f, "score", 0) or 0) >= _floor
+                    ]
                     leg_facts = self._apply_relevance_filter(leg_facts, "fact")
                     # Double-injection guard: drop facts already rendered in the
                     # User Profile section (Task 1's profile_fact_ids). The

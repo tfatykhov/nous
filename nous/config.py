@@ -277,6 +277,16 @@ class Settings(BaseSettings):
         default=300, ge=0,
         description="Token budget for the Session Profile intent leg section (line-aware truncation).",
     )
+    profile_intent_leg_min_score: float = Field(
+        default=0.7, ge=0.0, le=1.0,
+        description=(
+            "Absolute RRF-score floor for the Session Profile leg (applied "
+            "before the adaptive relevance filter, which pads to a >=3 "
+            "minimum). 0.7 excludes vector-only nearest-neighbor noise "
+            "(single-leg rank-1 tops out ~0.69 at default weights) while "
+            "keeping dual-leg domain matches (~0.98). 0 disables the gate."
+        ),
+    )
     fact_pin_top_k: int = Field(
         default=0, ge=0,
         description=(
