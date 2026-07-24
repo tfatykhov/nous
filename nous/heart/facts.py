@@ -2952,10 +2952,19 @@ class FactManager:
         if active_only:
             stmt = stmt.where(Fact.active == True)  # noqa: E712
         if exclude_sources:
-            # NULL-safe: a plain NOT IN silently drops NULL-source rows
-            # (legacy facts predate source stamping).
+            # Category-scoped (codex r1): only RULE facts from excluded sources
+            # are filtered — the polluting combination. A genuine sleep-reflected
+            # preference/person fact must stay: Tier-1 is its ONLY pre-turn
+            # channel (tier-1 categories are excluded from tier-3 search), so a
+            # source-only predicate would strand it entirely. NULL-safe: a plain
+            # NOT IN silently drops NULL-source rows (legacy facts predate
+            # source stamping).
             stmt = stmt.where(
-                or_(Fact.source.is_(None), Fact.source.notin_(exclude_sources))
+                or_(
+                    Fact.source.is_(None),
+                    Fact.source.notin_(exclude_sources),
+                    Fact.category != "rule",
+                )
             )
         # Tie-break equal confidence by recency so a newer correction is never
         # crowded out by an older fact at the same confidence (2026-07-23 plan).

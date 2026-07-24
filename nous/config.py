@@ -232,11 +232,13 @@ class Settings(BaseSettings):
     # 2026-07-24 pollution fix: reflection lessons are lessons, not user profile
     # data — 1,148 conf-1.0 reflection facts (category "rule") filled all 20
     # profile slots. Applied at SQL level inside list_by_category (a Python
-    # post-filter would let excluded rows consume the LIMIT) and NULL-safe
-    # (NULL-source legacy facts always kept).
+    # post-filter would let excluded rows consume the LIMIT), NULL-safe
+    # (NULL-source legacy facts always kept), and category-scoped: only RULE
+    # facts from these sources are excluded — a genuine sleep-reflected
+    # preference/person fact stays (Tier-1 is its only pre-turn channel).
     profile_exclude_sources: list[str] = Field(
         default_factory=lambda: ["reflection", "sleep_reflection"],
-        description="Fact sources excluded from the Tier-1 User Profile section (SQL-level, NULL-source facts always kept). Empty list disables.",
+        description="Sources whose RULE facts are excluded from the Tier-1 User Profile section (SQL-level, NULL-source facts always kept, preference/person facts from these sources are kept). Empty list disables.",
     )
     fact_pin_top_k: int = Field(
         default=0, ge=0,

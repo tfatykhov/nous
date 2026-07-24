@@ -754,6 +754,16 @@ class SleepHandler:
                 if isinstance(fact, dict) and fact.get("content"):
                     subject = fact.get("subject", "reflection")
 
+                    # Sleep reflections produce lessons; genuine user rules
+                    # arrive via user_direct/correction paths. "rule" here
+                    # polluted the Tier-1 User Profile (2026-07-24). The schema
+                    # enum no longer offers it — this is drift defense.
+                    # Normalized BEFORE the UPDATES: branch so
+                    # _handle_updates_prefix never learns/supersedes with a
+                    # drifted "rule" category either (codex r1).
+                    if fact.get("category") == "rule":
+                        fact = {**fact, "category": "technical"}
+
                     # F031: UPDATES prefix — supersede existing fact (case-insensitive)
                     if isinstance(subject, str) and subject.upper().startswith("UPDATES:"):
                         updated = await self._handle_updates_prefix(
@@ -763,20 +773,12 @@ class SleepHandler:
                             stored += 1
                         continue
 
-                    category = fact.get("category", "concept")
-                    if category == "rule":
-                        # Sleep reflections produce lessons; genuine user rules
-                        # arrive via user_direct/correction paths. "rule" here
-                        # polluted the Tier-1 User Profile (2026-07-24). The
-                        # schema enum no longer offers it — this is drift
-                        # defense.
-                        category = "technical"
                     result = await self._heart.learn(FactInput(
                         subject=subject,
                         content=fact["content"],
                         source="sleep_reflection",
                         confidence=0.8,
-                        category=category,
+                        category=fact.get("category", "concept"),
                     ))
                     if isinstance(result, FactRejected):
                         logger.debug("Admission rejected sleep-reflected fact: %s", fact["content"][:50])

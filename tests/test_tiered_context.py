@@ -767,3 +767,31 @@ class TestProfileSourceExclusion:
             assert "widget calibration steps" in profile.content
         finally:
             await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_sleep_reflected_preference_kept(self, db, mock_embeddings, settings):
+        """codex r1: the exclusion is category-scoped — a GENUINE sleep-reflected
+        preference must stay (Tier-1 is its only pre-turn channel; tier-1
+        categories are excluded from tier-3 search)."""
+        engine, heart, s = await _fresh_engine(db, mock_embeddings, settings, identity_prompt="")
+        try:
+            async with db.session() as session:
+                await heart.learn(
+                    FactInput(content="Tim prefers weekly summaries delivered on Monday mornings", category="preference", subject="pol-4", source="sleep_reflection"),
+                    session=session,
+                )
+                await heart.learn(
+                    FactInput(content="Legacy pollution lesson about cache eviction tuning", category="rule", subject="pol-5", source="sleep_reflection"),
+                    session=session,
+                )
+                await session.commit()
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-srcexcl-pref",
+                input_text="hello", frame=_frame(),
+            )
+            profile = _profile_section(result)
+            assert profile is not None
+            assert "weekly summaries delivered on Monday" in profile.content  # preference kept
+            assert "cache eviction tuning" not in profile.content  # rule excluded
+        finally:
+            await heart.close()
