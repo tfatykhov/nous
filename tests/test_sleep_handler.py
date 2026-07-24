@@ -711,7 +711,44 @@ class TestStructuredReflection:
         by_content = {f.content: f for f in stored}
         assert by_content["LLM mislabeled lesson"].category == "technical"
         assert by_content["A genuine preference"].category == "preference"
-        assert by_content["Single-session lessons should age out"].category == "technical"
+        assert all(f.category != "rule" for f in stored)
+
+    @pytest.mark.asyncio
+    async def test_reflect_fallback_lessons_not_rule(self):
+        """The no-structured-facts fallback stores lessons as technical
+        (was hardcoded category='rule' — Tier-1 pollution fix, 2026-07-24)."""
+        handler, brain, heart, bus, llm_client = _make_sleep_handler()
+
+        ep1 = MagicMock()
+        ep1.summary = "Episode 1 about testing"
+        ep2 = MagicMock()
+        ep2.summary = "Episode 2 about debugging"
+        heart.list_episodes = AsyncMock(return_value=[ep1, ep2])
+        heart.learn = AsyncMock(return_value=MagicMock())
+        heart.search_facts = AsyncMock(return_value=[])
+
+        reflection = {
+            "patterns": [],
+            "lessons": ["Single-session lessons should age out"],
+            "connections": [],
+            "gaps": [],
+            "summary": "Test reflection summary",
+            "facts": [],
+        }
+        response = MagicMock()
+        response.content = [
+            {"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection}
+        ]
+        llm_client.call = AsyncMock(return_value=response)
+
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        assert await handler._phase_reflect(sleep_stats) is True
+
+        stored = [c.args[0] for c in heart.learn.call_args_list]
+        by_content = {f.content: f for f in stored}
+        lesson = by_content["Single-session lessons should age out"]
+        assert lesson.category == "technical"
+        assert lesson.subject == "lesson_learned"
         assert all(f.category != "rule" for f in stored)
 
     @pytest.mark.asyncio
