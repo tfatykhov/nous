@@ -54,6 +54,7 @@ from nous.api.models import Attachment
 from nous.api.runner import AgentRunner
 from nous.brain import Brain
 from nous.cognitive import CognitiveLayer
+from nous.cognitive.context import TIER1_FACT_CATEGORIES
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
@@ -512,6 +513,33 @@ def create_app(
                 })
         except Exception as e:
             logger.error("Search/browse facts error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def list_profile_facts(request: Request) -> JSONResponse:
+        """GET /profile/facts — Tier-1 user-profile facts (preference/person/rule).
+
+        Same accessor + ordering (confidence DESC, learned_at DESC) as the
+        system-prompt User Profile section, so the dashboard shows exactly
+        what the agent can draw from.
+        """
+        try:
+            limit = int(request.query_params.get("limit", "100"))
+            if limit < 1:
+                raise ValueError
+        except ValueError:
+            return JSONResponse({"error": "invalid limit"}, status_code=400)
+        active_only = request.query_params.get("active", "true").lower() != "false"
+        try:
+            facts = await heart.list_facts_by_category(
+                categories=TIER1_FACT_CATEGORIES,
+                active_only=active_only,
+                limit=limit,
+            )
+            return JSONResponse(
+                {"facts": [f.model_dump(mode="json") for f in facts], "total": len(facts)}
+            )
+        except Exception as e:
+            logger.error("list_profile_facts failed: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
     async def list_chunks(request: Request) -> JSONResponse:
@@ -2610,6 +2638,7 @@ def create_app(
         Route("/decisions/{id}/review", review_decision, methods=["POST"]),
         Route("/decisions/{id}", get_decision),
         Route("/episodes", list_episodes),
+        Route("/profile/facts", list_profile_facts),
         Route("/facts", search_facts),
         Route("/chunks", list_chunks),
         Route("/censors/{id}", update_censor, methods=["PUT"]),
