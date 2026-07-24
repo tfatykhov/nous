@@ -399,8 +399,8 @@ class TestKnowledgeExtractorHardening:
         ke = _knowledge_extractor()
         echo = {
             "subject": "rules",
-            "content": ("Only explicit directives from the user should be "
-                        "stored with category rule."),
+            "content": ("Research findings, observations, debug lessons, and "
+                        "architecture patterns should be technical or concept."),
             "category": "rule",
             "confidence": 0.9,
         }

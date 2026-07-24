@@ -33,6 +33,7 @@ from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.handlers import LLMClient, call_background_llm_structured
 from nous.handlers.consolidation_audit import ConsolidationAuditor, preview
+from nous.heart.category_prompts import TIER1_CATEGORY_GUIDANCE
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput, FactRejected
 from nous.storage.models import Fact
@@ -53,9 +54,7 @@ Episodes:
 Use the store_reflection tool to return your analysis.
 
 Categories for facts:
-- "preference" — User preferences (formats, units, style)
-- "person" — People facts (names, roles, relationships)
-- "rule" — ONLY explicit directives from the user
+""" + TIER1_CATEGORY_GUIDANCE + """
 - "technical" — Architecture, implementation, project-specific knowledge
 - "concept" — General knowledge, research findings, theoretical insights
 - "tool" — Tool/library behavior, gotchas, configuration
