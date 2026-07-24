@@ -437,6 +437,22 @@ async def test_end_session_reflection_extracts_facts(cognitive, heart, session):
     all_facts = facts + facts2
     assert len(all_facts) >= 1
 
+    # 2026-07-24 pollution fix: reflection lessons are LESSONS, not user rules —
+    # category technical/lesson_learned/0.7, never rule (rule polluted the
+    # Tier-1 User Profile at conf 1.0). Filter to THIS test's facts: the shared
+    # Postgres search pool contains other tests' facts.
+    own = [
+        f for f in all_facts
+        if "validate input before database writes" in f.content
+        or "connection pooling for better performance" in f.content
+    ]
+    assert own, "expected this test's learned facts in the search results"
+    for f in own:
+        detail = await heart.get_fact(f.id, session=session)
+        assert detail.category == "technical"
+        assert detail.subject == "lesson_learned"
+        assert detail.confidence == pytest.approx(0.7)
+
 
 async def test_end_session_without_pre_turn(cognitive, session):
     """end_session without prior pre_turn handles gracefully (P3-10)."""
