@@ -96,9 +96,12 @@ _TOKENS_PER_LLM_CALL = 250
 # --- Event-noise classifiers (pure; unit-tested) ---------------------------
 #
 # A (word-bounded): delivery past-passive. The `\b`s block "present to" /
-# "consent to" substring hits on "sent to".
+# "consent to" substring hits on "sent to". `email was` is qualified to the
+# DELIVERY event (`email was sent`) — bare `email was` also matches durable
+# contact facts ("Tim's email was tim@example.com"), which are valid `person`
+# profile data (codex r2).
 EVENT_NOISE_PATTERN_A = re.compile(
-    r"(\bwas sent\b|\bsent to\b|\bdelivered to\b|\bwas emailed\b|\bemail was\b)",
+    r"(\bwas sent\b|\bsent to\b|\bdelivered to\b|\bwas emailed\b|\bemail was sent\b)",
     re.IGNORECASE,
 )
 # B: request-verb anchored at the statement start. `instructed` is deliberately

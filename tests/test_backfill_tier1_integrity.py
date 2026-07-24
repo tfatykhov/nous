@@ -63,3 +63,11 @@ def test_c_keeps_dateless_profile_facts():
     assert not classify_event_noise_c("Tim prefers Celsius for temperature readings")
     assert not classify_event_noise_c("HARD RULE: Sources must be cited")
     assert not classify_event_noise_c("The user requested to trigger sleep mode")
+
+
+def test_ab_contact_fact_email_was_not_demoted():
+    """codex r2: bare 'email was' matched durable contact facts — pattern A is
+    qualified to the delivery event ('email was sent')."""
+    assert not classify_event_noise_ab("Tim's email was tim@example.com")
+    assert not classify_event_noise_ab("Tim's work email was updated to timur@fanniemae.com")
+    assert classify_event_noise_ab("The email was sent at nine this morning")
