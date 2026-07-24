@@ -534,6 +534,9 @@ def create_app(
                 categories=TIER1_FACT_CATEGORIES,
                 active_only=active_only,
                 limit=limit,
+                # Mirror the prompt path (docstring promise: "exactly what the
+                # agent can draw from") — 2026-07-24 pollution fix.
+                exclude_sources=settings.profile_exclude_sources or None,
             )
             return JSONResponse(
                 {"facts": [f.model_dump(mode="json") for f in facts], "total": len(facts)}

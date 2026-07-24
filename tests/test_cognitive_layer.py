@@ -32,7 +32,7 @@ from nous.cognitive.schemas import (
     TurnResult,
 )
 from nous.heart import CensorInput, FactInput, ProcedureInput
-from nous.storage.models import Event
+from nous.storage.models import Event, Fact
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -436,6 +436,28 @@ async def test_end_session_reflection_extracts_facts(cognitive, heart, session):
     # At least some of the learned facts should have been stored
     all_facts = facts + facts2
     assert len(all_facts) >= 1
+
+    # 2026-07-24 pollution fix: reflection lessons are LESSONS, not user rules —
+    # category technical/lesson_learned/0.7, never rule (rule polluted the
+    # Tier-1 User Profile at conf 1.0). Assert via direct SQL in this session:
+    # hybrid search ranks by mock-embedding vectors here, so this test's own
+    # facts are not reliably in the search head (the len>=1 assert above
+    # historically passed via other tests' facts).
+    rows = (
+        await session.execute(
+            select(Fact.category, Fact.subject, Fact.confidence).where(
+                Fact.content.in_([
+                    "Always validate input before database writes",
+                    "Use connection pooling for better performance",
+                ])
+            )
+        )
+    ).all()
+    assert len(rows) == 2, f"expected both reflection lessons stored, got {rows}"
+    for category, subject, confidence in rows:
+        assert category == "technical"
+        assert subject == "lesson_learned"
+        assert confidence == pytest.approx(0.7)
 
 
 async def test_end_session_without_pre_turn(cognitive, session):

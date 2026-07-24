@@ -1906,11 +1906,26 @@ class CognitiveLayer:
                 if not learned_text:
                     continue
                 try:
-                    # P1-5: Construct FactInput pydantic model
+                    # P1-5: Construct FactInput pydantic model.
+                    # Session lessons are LESSONS, not user directives —
+                    # category "rule" here polluted the Tier-1 User Profile
+                    # (2026-07-24: 1,148 conf-1.0 reflection facts filled the
+                    # whole top-20). technical/lesson_learned/0.7 matches the
+                    # sleep-reflection fallback convention and moves lessons
+                    # into the Tier-3 semantic pool instead of the always-on
+                    # profile. A genuine profile fact voiced in-session
+                    # ("Tim prefers X") is NOT lost by the fixed category:
+                    # the episode summarizer -> fact extractor pipeline
+                    # processes the same transcript with per-fact LLM
+                    # categorization — this crude "learned:" line parser is a
+                    # supplementary lessons channel, not the profile channel
+                    # (pre-fix it hardcoded "rule", which was equally blind).
                     fact_input = FactInput(
                         content=learned_text,
                         source="reflection",
-                        category="rule",
+                        category="technical",
+                        subject="lesson_learned",
+                        confidence=0.7,
                         source_episode_id=ep_uuid,
                     )
                     await self._heart.learn(fact_input, session=session)

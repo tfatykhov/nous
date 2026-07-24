@@ -672,6 +672,86 @@ class TestStructuredReflection:
         assert result is True
 
     @pytest.mark.asyncio
+    async def test_reflect_never_stores_category_rule(self):
+        """2026-07-24 pollution fix: sleep reflections produce LESSONS — an LLM
+        'rule' category is mapped to 'technical' (structured path) and the
+        lessons loop stores technical (was hardcoded rule). Genuine user rules
+        never arrive via sleep reflection; 'rule' polluted the Tier-1 profile."""
+        handler, brain, heart, bus, llm_client = _make_sleep_handler()
+
+        ep1 = MagicMock()
+        ep1.summary = "Episode 1 about testing"
+        ep2 = MagicMock()
+        ep2.summary = "Episode 2 about debugging"
+        heart.list_episodes = AsyncMock(return_value=[ep1, ep2])
+        heart.learn = AsyncMock(return_value=MagicMock())
+        heart.search_facts = AsyncMock(return_value=[])
+
+        reflection = {
+            "patterns": [],
+            "lessons": ["Single-session lessons should age out"],
+            "connections": [],
+            "gaps": [],
+            "summary": "Test reflection summary",
+            "facts": [
+                {"subject": "s1", "content": "LLM mislabeled lesson", "category": "rule"},
+                {"subject": "s2", "content": "A genuine preference", "category": "preference"},
+            ],
+        }
+        response = MagicMock()
+        response.content = [
+            {"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection}
+        ]
+        llm_client.call = AsyncMock(return_value=response)
+
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        assert await handler._phase_reflect(sleep_stats) is True
+
+        stored = [c.args[0] for c in heart.learn.call_args_list]
+        by_content = {f.content: f for f in stored}
+        assert by_content["LLM mislabeled lesson"].category == "technical"
+        assert by_content["A genuine preference"].category == "preference"
+        assert all(f.category != "rule" for f in stored)
+
+    @pytest.mark.asyncio
+    async def test_reflect_fallback_lessons_not_rule(self):
+        """The no-structured-facts fallback stores lessons as technical
+        (was hardcoded category='rule' — Tier-1 pollution fix, 2026-07-24)."""
+        handler, brain, heart, bus, llm_client = _make_sleep_handler()
+
+        ep1 = MagicMock()
+        ep1.summary = "Episode 1 about testing"
+        ep2 = MagicMock()
+        ep2.summary = "Episode 2 about debugging"
+        heart.list_episodes = AsyncMock(return_value=[ep1, ep2])
+        heart.learn = AsyncMock(return_value=MagicMock())
+        heart.search_facts = AsyncMock(return_value=[])
+
+        reflection = {
+            "patterns": [],
+            "lessons": ["Single-session lessons should age out"],
+            "connections": [],
+            "gaps": [],
+            "summary": "Test reflection summary",
+            "facts": [],
+        }
+        response = MagicMock()
+        response.content = [
+            {"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection}
+        ]
+        llm_client.call = AsyncMock(return_value=response)
+
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        assert await handler._phase_reflect(sleep_stats) is True
+
+        stored = [c.args[0] for c in heart.learn.call_args_list]
+        by_content = {f.content: f for f in stored}
+        lesson = by_content["Single-session lessons should age out"]
+        assert lesson.category == "technical"
+        assert lesson.subject == "lesson_learned"
+        assert all(f.category != "rule" for f in stored)
+
+    @pytest.mark.asyncio
     async def test_reflect_handles_structured_call_failure(self):
         """If structured LLM call returns None, reflect returns True (no-op)."""
         handler, brain, heart, bus, llm_client = _make_sleep_handler()
@@ -1285,3 +1365,42 @@ class TestSleepLLMInputCaps:
         # fact_b: 1000 b's in prompt, not 1200
         assert "b" * 1000 in prompt_text
         assert "b" * 1001 not in prompt_text
+
+    @pytest.mark.asyncio
+    async def test_reflect_updates_prefix_category_normalized(self):
+        """codex r1: the rule→technical normalization happens BEFORE the
+        UPDATES: branch, so _handle_updates_prefix never sees a drifted
+        'rule' category."""
+        handler, brain, heart, bus, llm_client = _make_sleep_handler()
+
+        ep1 = MagicMock()
+        ep1.summary = "Episode 1 about testing"
+        ep2 = MagicMock()
+        ep2.summary = "Episode 2 about debugging"
+        heart.list_episodes = AsyncMock(return_value=[ep1, ep2])
+        heart.learn = AsyncMock(return_value=MagicMock())
+        heart.search_facts = AsyncMock(return_value=[])
+        handler._handle_updates_prefix = AsyncMock(return_value=True)
+
+        reflection = {
+            "patterns": [],
+            "lessons": [],
+            "connections": [],
+            "gaps": [],
+            "summary": "Test reflection summary",
+            "facts": [
+                {"subject": "UPDATES: old lesson", "content": "Updated lesson text", "category": "rule"},
+            ],
+        }
+        response = MagicMock()
+        response.content = [
+            {"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection}
+        ]
+        llm_client.call = AsyncMock(return_value=response)
+
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        assert await handler._phase_reflect(sleep_stats) is True
+
+        handler._handle_updates_prefix.assert_awaited_once()
+        passed_fact = handler._handle_updates_prefix.await_args.args[1]
+        assert passed_fact["category"] == "technical"

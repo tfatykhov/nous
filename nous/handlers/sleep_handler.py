@@ -120,7 +120,11 @@ _REFLECTION_SCHEMA: dict[str, Any] = {
                     },
                     "category": {
                         "type": "string",
-                        "enum": ["technical", "preference", "person", "tool", "concept", "rule"],
+                        # "rule" removed 2026-07-24: sleep reflections produce
+                        # lessons, never user directives — LLM-chosen "rule"
+                        # polluted the Tier-1 User Profile (a post-map below
+                        # also guards against drift).
+                        "enum": ["technical", "preference", "person", "tool", "concept"],
                         "description": "Fact category",
                     },
                 },
@@ -750,6 +754,16 @@ class SleepHandler:
                 if isinstance(fact, dict) and fact.get("content"):
                     subject = fact.get("subject", "reflection")
 
+                    # Sleep reflections produce lessons; genuine user rules
+                    # arrive via user_direct/correction paths. "rule" here
+                    # polluted the Tier-1 User Profile (2026-07-24). The schema
+                    # enum no longer offers it — this is drift defense.
+                    # Normalized BEFORE the UPDATES: branch so
+                    # _handle_updates_prefix never learns/supersedes with a
+                    # drifted "rule" category either (codex r1).
+                    if fact.get("category") == "rule":
+                        fact = {**fact, "category": "technical"}
+
                     # F031: UPDATES prefix — supersede existing fact (case-insensitive)
                     if isinstance(subject, str) and subject.upper().startswith("UPDATES:"):
                         updated = await self._handle_updates_prefix(
@@ -812,7 +826,9 @@ class SleepHandler:
                         content=lesson,
                         source="sleep_reflection",
                         confidence=0.7,
-                        category="rule",
+                        # Was "rule" — lessons are not user directives
+                        # (Tier-1 pollution fix, 2026-07-24).
+                        category="technical",
                     ))
                     if isinstance(result, FactRejected):
                         logger.debug("Admission rejected sleep-reflected fact: %s", lesson[:50])

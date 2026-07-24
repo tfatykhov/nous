@@ -516,6 +516,9 @@ class ContextEngine:
                     active_only=True,
                     limit=self._settings.profile_fact_limit,
                     session=session,
+                    # 2026-07-24: reflection lessons are not user profile data
+                    # (they filled all 20 slots at conf 1.0 — see config note).
+                    exclude_sources=self._settings.profile_exclude_sources or None,
                 )
                 raw_count = len(profile_facts)
                 if profile_facts and _effective_identity:

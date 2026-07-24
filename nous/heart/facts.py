@@ -2921,15 +2921,18 @@ class FactManager:
         active_only: bool = True,
         limit: int = 20,
         session: AsyncSession | None = None,
+        exclude_sources: list[str] | None = None,
     ) -> list[FactSummary]:
         """Load facts by category without semantic search.
 
         Used for Tier 1 always-on context (preference, person, rule facts).
+        ``exclude_sources`` filters at SQL level (so excluded rows never
+        consume the LIMIT), NULL-safe: NULL-source legacy facts always kept.
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._list_by_category(categories, active_only, limit, session)
-        return await self._list_by_category(categories, active_only, limit, session)
+                return await self._list_by_category(categories, active_only, limit, session, exclude_sources)
+        return await self._list_by_category(categories, active_only, limit, session, exclude_sources)
 
     async def _list_by_category(
         self,
@@ -2937,6 +2940,7 @@ class FactManager:
         active_only: bool,
         limit: int,
         session: AsyncSession,
+        exclude_sources: list[str] | None = None,
     ) -> list[FactSummary]:
         stmt = (
             select(Fact)
@@ -2947,6 +2951,21 @@ class FactManager:
         )
         if active_only:
             stmt = stmt.where(Fact.active == True)  # noqa: E712
+        if exclude_sources:
+            # Category-scoped (codex r1): only RULE facts from excluded sources
+            # are filtered — the polluting combination. A genuine sleep-reflected
+            # preference/person fact must stay: Tier-1 is its ONLY pre-turn
+            # channel (tier-1 categories are excluded from tier-3 search), so a
+            # source-only predicate would strand it entirely. NULL-safe: a plain
+            # NOT IN silently drops NULL-source rows (legacy facts predate
+            # source stamping).
+            stmt = stmt.where(
+                or_(
+                    Fact.source.is_(None),
+                    Fact.source.notin_(exclude_sources),
+                    Fact.category != "rule",
+                )
+            )
         # Tie-break equal confidence by recency so a newer correction is never
         # crowded out by an older fact at the same confidence (2026-07-23 plan).
         # Unconditional (no flag): replaces DB-undefined tie order with a
