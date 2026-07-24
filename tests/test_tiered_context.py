@@ -1369,3 +1369,42 @@ def test_truncate_lines_strict_returns_empty_for_oversized_first_line():
     assert engine._truncate_to_budget_lines(text, 25, strict=True) == ""
     # default mode still falls back to the char slice
     assert engine._truncate_to_budget_lines(text, 25).endswith("...")
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_require_keyword_hit_survives_small_limit(db, mock_embeddings, settings):
+    """codex #574 r5: the keyword filter must run BEFORE the merge slice — at
+    limit=1 a vector-only hit could otherwise consume the whole slice and
+    starve the keyword-anchored fact out."""
+    from sqlalchemy import text as sqltext
+    agent_id = f"test-upf-{_uuid.uuid4().hex[:8]}"
+    async with db.session() as session:
+        await session.execute(
+            sqltext("INSERT INTO nous_system.agents (id, name, config) VALUES (:id, :n, '{}'::jsonb) ON CONFLICT (id) DO NOTHING"),
+            {"id": agent_id, "n": "UPF SmallLimit Agent"},
+        )
+        await session.commit()
+    s = settings.model_copy(update={"agent_id": agent_id})
+    heart = Heart(db, s, embedding_provider=mock_embeddings)
+    try:
+        async with db.session() as session:
+            for i in range(4):
+                await heart.learn(
+                    FactInput(content=f"Distinct decoy preference number {i} about unrelated topic {i}", category="preference", subject=f"sl-decoy-{i}"),
+                    session=session,
+                )
+            await heart.learn(
+                FactInput(content="Tim's trading rule qsmalllimtok sell underwater positions promptly", category="rule", subject="sl-domain"),
+                session=session,
+            )
+            await session.commit()
+        hits = await heart.search_facts(
+            "what about qsmalllimtok", limit=1,
+            include_categories=["preference", "person", "rule"],
+            require_keyword_hit=True,
+        )
+        assert len(hits) == 1
+        assert "qsmalllimtok" in hits[0].content
+    finally:
+        await heart.close()

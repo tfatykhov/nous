@@ -453,3 +453,28 @@ class TestCodexRound1Contracts:
         assert codes == [200, 409], f"expected one winner + one stale 409, got {codes}"
         loser = r1 if r1.status_code == 409 else r2
         assert loser.json()["error"] == "already_superseded"
+
+
+class TestCoreTagFollowsMerge:
+    """codex #574 r5: when a supersede-edit dedup-merges into a third fact,
+    curation must follow the merge — the surviving fact gains profile_core."""
+
+    @pytest.mark.asyncio
+    async def test_core_tag_survives_merged_into_existing(self, client, heart, db):
+        dupe_content = "Tim keeps deployment notes in the shared runbook always"
+        async with db.session() as session:
+            a = await heart.learn(FactInput(content="Tim tracks deployments in a personal logbook daily", category="preference", subject="merge-core-a"), session=session)
+            b = await heart.learn(FactInput(content=dupe_content, category="preference", subject="merge-core-b"), session=session)
+            await session.commit()
+        # tag A as core, then edit A into B's exact content -> dedup-merge into B
+        resp = await client.post(f"/facts/{a.id}/core", json={"core": True})
+        assert resp.status_code == 200
+        resp = await client.put(f"/facts/{a.id}", json={"content": dupe_content})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "merged_into_existing"
+        assert body["new_fact_id"] == str(b.id)
+        core_list = (await client.get("/profile/facts?core=true")).json()
+        core_ids = [f["id"] for f in core_list["facts"]]
+        assert str(b.id) in core_ids  # curation followed the merge
+        assert str(a.id) not in core_ids  # old fact retired

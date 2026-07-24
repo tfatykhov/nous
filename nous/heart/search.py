@@ -286,7 +286,18 @@ async def hybrid_search(
         # Keyword-only fallback — return keyword results directly
         return keyword_results[:limit]
 
-    merged = _rrf_merge(vector_results, keyword_results, rrf_k, vector_weight, limit)
+    # Codex #574 r5: when filtering to keyword hits, merge WITHOUT truncation —
+    # _rrf_merge slices to `limit` before the filter runs, and any fixed
+    # expansion can still be consumed entirely by vector-only hits (verified:
+    # at limit=1 with 4 decoys the keyword-anchored fact ranked 4th in the
+    # merged list and a 3x window still starved it). Candidate count is
+    # bounded by the SQL legs' limit_expanded, so this is cheap.
+    merge_limit = (
+        max(limit, len(vector_results) + len(keyword_results))
+        if require_keyword_hit
+        else limit
+    )
+    merged = _rrf_merge(vector_results, keyword_results, rrf_k, vector_weight, merge_limit)
     if require_keyword_hit:
         # Codex #574 r3: _rrf_merge's missing-leg penalty rank (limit+1) is
         # nearly free at typical k (a vector-only rank-0 hit normalizes to
@@ -296,6 +307,7 @@ async def hybrid_search(
         # actually matched. No keyword hits => empty result, by design.
         allowed = {doc_id for doc_id, _ in keyword_results}
         merged = [(doc_id, score) for doc_id, score in merged if doc_id in allowed]
+        merged = merged[:limit]
     return merged
 
 

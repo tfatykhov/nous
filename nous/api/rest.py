@@ -638,6 +638,13 @@ def create_app(
                     new_fact = await heart.supersede_fact(fact_id, new_input, session=session)
                 except ValueError:
                     return JSONResponse({"error": "fact not found"}, status_code=404)
+                # codex #574 r5: on a dedup-merge, supersede returns a
+                # pre-existing THIRD fact — FactInput.tags never lands there.
+                # Curation must follow the merge: if the edited fact was core
+                # and the surviving fact isn't, tag it.
+                from nous.cognitive.context import PROFILE_CORE_TAG as _CORE_TAG
+                if _CORE_TAG in (target.tags or []) and _CORE_TAG not in (new_fact.tags or []):
+                    await heart.set_fact_tag(new_fact.id, _CORE_TAG, True, session=session)
                 await session.commit()
             # Injected-session supersede skips its own post-commit vocab
             # invalidation (facts.py contract: commit owner invalidates).
