@@ -662,18 +662,30 @@ class ContextEngine:
                 if censors:
                     _active_censor_names = [str(getattr(c, "id", "")) for c in censors]
                     censor_text = self._format_censors(censors)
-                    # Line-aware: an enforcement rule must never be char-sliced
-                    # mid-sentence (a truncated censor renders a partial rule).
-                    censor_text = self._truncate_to_budget_lines(censor_text, budget.censors)
-                    sections.append(
-                        ContextSection(
-                            priority=2,
-                            label="Active Censors",
-                            content=censor_text,
-                            token_estimate=self._estimate_tokens(censor_text),
-                            tier=SECTION_TIERS.get("Active Censors", "dynamic"),
-                        )
+                    # Line-aware + strict: an enforcement rule must never be
+                    # char-sliced mid-sentence (a partial "Do not sell..." can
+                    # invert meaning) — if even the first rule over-budgets,
+                    # render nothing and warn (codex #574 r4).
+                    censor_text = self._truncate_to_budget_lines(
+                        censor_text, budget.censors, strict=True
                     )
+                    if censor_text:
+                        sections.append(
+                            ContextSection(
+                                priority=2,
+                                label="Active Censors",
+                                content=censor_text,
+                                token_estimate=self._estimate_tokens(censor_text),
+                                tier=SECTION_TIERS.get("Active Censors", "dynamic"),
+                            )
+                        )
+                    else:
+                        logger.warning(
+                            "Active Censors section dropped: first censor exceeds "
+                            "the %d-token budget — raise budget.censors or shorten "
+                            "the censor.",
+                            budget.censors,
+                        )
             except Exception:
                 logger.warning("Failed to load censors during context build")
 
@@ -889,18 +901,17 @@ class ContextEngine:
                     # something — without the floor, marginal facts inject on
                     # every domain-ish turn).
                     leg_facts = self._apply_staleness_penalty(leg_facts)
-                    # codex r2: absolute score gate BEFORE the adaptive filter
-                    # (which pads to a >=3 minimum and can never return empty).
-                    # RRF math makes the default 0.7 floor a clean separator: a
-                    # vector-ONLY rank-1 hit tops out at vector_weight*k/(k+1)
-                    # ~= 0.69 (nearest-neighbor noise on an unrelated turn),
-                    # while a genuine domain match hits BOTH legs (~0.98).
-                    # Empty result => no Session Profile section, by design.
-                    _floor = self._settings.profile_intent_leg_min_score
-                    leg_facts = [
-                        f for f in leg_facts
-                        if (getattr(f, "score", 0) or 0) >= _floor
-                    ]
+                    # codex r2/r4: absolute score floor as belt-and-braces on
+                    # top of the keyword-anchor gate — applied ONLY when
+                    # embeddings exist (same convention as the Tier-3
+                    # thresholds: keyword-only ts_rank_cd scores live on a much
+                    # lower scale and would be wrongly filtered).
+                    if self._has_embeddings:
+                        _floor = self._settings.profile_intent_leg_min_score
+                        leg_facts = [
+                            f for f in leg_facts
+                            if (getattr(f, "score", 0) or 0) >= _floor
+                        ]
                     leg_facts = self._apply_relevance_filter(leg_facts, "fact")
                     # Double-injection guard: drop facts already rendered in the
                     # User Profile section (Task 1's profile_fact_ids). The
@@ -1589,14 +1600,18 @@ class ContextEngine:
             return text
         return text[: max_chars - 3] + "..."
 
-    def _truncate_to_budget_lines(self, text: str, token_budget: int) -> str:
+    def _truncate_to_budget_lines(
+        self, text: str, token_budget: int, *, strict: bool = False
+    ) -> str:
         """Truncate to budget by dropping whole trailing lines.
 
         Unlike ``_truncate_to_budget`` (raw char slice), this never emits a
         mid-word/mid-fact fragment — used for list-shaped sections (User
         Profile) where a guillotined tail line can cut a qualifier off a
-        preference. Falls back to the char slice when even the first line
-        exceeds the budget.
+        preference. When even the FIRST line exceeds the budget: default mode
+        falls back to the char slice; ``strict=True`` returns "" instead
+        (codex #574 r4 — an enforcement rule like a censor must NEVER render
+        partially; a sliced "Do not sell..." can invert meaning).
         """
         max_chars = token_budget * self.CHARS_PER_TOKEN
         if len(text) <= max_chars:
@@ -1610,6 +1625,8 @@ class ContextEngine:
             kept.append(ln)
             used += add
         if not kept:
+            if strict:
+                return ""
             return self._truncate_to_budget(text, token_budget)
         return "\n".join(kept)
 

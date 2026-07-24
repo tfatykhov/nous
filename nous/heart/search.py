@@ -264,7 +264,10 @@ async def hybrid_search(
     # missing channel cancels out when one channel is empty).
     # Force-on path when embedding is None preserves the keyword-only
     # fallback: callers that intentionally pass embedding=None still get FTS.
-    keyword_enabled = _resolve_keyword_enabled() or embedding is None
+    # codex #574 r4: require_keyword_hit is meaningless without the keyword
+    # leg — force it on even when the channel toggle is off, else the filter
+    # would drop EVERY result in a vector-only deployment.
+    keyword_enabled = _resolve_keyword_enabled() or embedding is None or require_keyword_hit
     if keyword_enabled:
         keyword_sql = text(f"""
             SELECT t.id,

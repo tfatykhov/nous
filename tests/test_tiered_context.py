@@ -1232,6 +1232,86 @@ class TestSessionProfileLeg:
             await heart2.close()
 
 
+class TestCodexRound4:
+    # codex r4 (#574): keyword-channel-off + no-embedder configs + strict censors.
+    pytestmark = pytest.mark.postgres_only
+
+    @pytest.mark.asyncio
+    async def test_leg_works_with_keyword_channel_disabled(self, db, mock_embeddings, settings):
+        """require_keyword_hit forces the FTS leg even when the keyword channel
+        toggle is off — else the filter would drop every result."""
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"profile_intent_leg_enabled": True,
+                             "hybrid_search_keyword_enabled": False,
+                             "profile_core_enabled": True,
+                             "profile_core_probation_days": 0},
+        )
+        try:
+            async with db.session() as session:
+                decoy = await heart.learn(
+                    FactInput(content="Tim prefers Celsius for all temperature readings", category="preference", subject="kwoff-core"),
+                    session=session,
+                )
+                await heart.learn(
+                    FactInput(content="Tim's trading rule qkwofftok sell underwater positions promptly", category="rule", subject="kwoff-domain"),
+                    session=session,
+                )
+                await session.commit()
+            # core mode + tagged decoy => the domain fact is NOT in the User
+            # Profile render, so profile_fact_ids does not mask the leg.
+            await heart.set_fact_tag(decoy.id, "profile_core", True)
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-leg-kwoff",
+                input_text="what about qkwofftok", frame=_frame(),
+            )
+            leg = _session_profile_section(result)
+            assert leg is not None and "qkwofftok" in leg.content
+        finally:
+            await heart.close()
+
+    @pytest.mark.asyncio
+    async def test_leg_floor_skipped_without_embeddings(self, db, settings):
+        """Keyword-only deployments score on the ts_rank scale (<<0.7) — the
+        RRF floor must not filter their legitimate FTS hits."""
+        from sqlalchemy import text as sqltext
+        agent_id = f"test-upf-{_uuid.uuid4().hex[:8]}"
+        async with db.session() as session:
+            await session.execute(
+                sqltext("INSERT INTO nous_system.agents (id, name, config) VALUES (:id, :n, '{}'::jsonb) ON CONFLICT (id) DO NOTHING"),
+                {"id": agent_id, "n": "UPF NoEmbed Agent"},
+            )
+            await session.commit()
+        s = settings.model_copy(update={"agent_id": agent_id, "profile_intent_leg_enabled": True,
+                                        "profile_core_enabled": True, "profile_core_probation_days": 0})
+        heart = Heart(db, s, embedding_provider=None)
+        brain = Brain(database=db, settings=s)
+        engine = ContextEngine(brain, heart, s, identity_prompt="")
+        try:
+            async with db.session() as session:
+                decoy = await heart.learn(
+                    FactInput(content="Tim prefers Celsius for all temperature readings", category="preference", subject="noemb-core"),
+                    session=session,
+                )
+                await heart.learn(
+                    FactInput(content="Tim's trading rule qnoembtok sell underwater positions promptly", category="rule", subject="noemb-domain"),
+                    session=session,
+                )
+                await session.commit()
+            # core mode + tagged decoy => domain fact not masked by
+            # profile_fact_ids (it never renders in the User Profile section).
+            await heart.set_fact_tag(decoy.id, "profile_core", True)
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-leg-noemb",
+                input_text="what about qnoembtok", frame=_frame(),
+            )
+            leg = _session_profile_section(result)
+            assert leg is not None and "qnoembtok" in leg.content
+        finally:
+            await heart.close()
+            await brain.close()
+
+
 class TestCensorLineAwareTruncation:
     # codex r2 (#574): fresh-engine fixtures use Postgres-only SQL (::jsonb,
     # generated tsvector) — skip cleanly under the default sqlite backend.
@@ -1274,3 +1354,18 @@ class TestCensorLineAwareTruncation:
             assert len(censor_sec.content) < len(full)  # actually truncated
         finally:
             await heart.close()
+
+
+
+def test_truncate_lines_strict_returns_empty_for_oversized_first_line():
+    """codex r4: strict mode never char-slices — a censor whose first rule
+    exceeds the whole budget renders NOTHING rather than a partial rule."""
+    from types import SimpleNamespace
+    from nous.cognitive.context import ContextEngine
+
+    engine = ContextEngine.__new__(ContextEngine)
+    engine._settings = SimpleNamespace()
+    text = "x" * 10_000
+    assert engine._truncate_to_budget_lines(text, 25, strict=True) == ""
+    # default mode still falls back to the char slice
+    assert engine._truncate_to_budget_lines(text, 25).endswith("...")

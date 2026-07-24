@@ -629,6 +629,10 @@ def create_app(
                     category=body_category or target.category,
                     subject=body.get("subject") if "subject" in body else target.subject,
                     confidence=body.get("confidence") if body.get("confidence") is not None else target.confidence,
+                    # codex #574 r4: supersession must not strip curation — an
+                    # edited core fact previously lost profile_core and vanished
+                    # from the curated User Profile. Inherit ALL tags.
+                    tags=list(target.tags or []),
                 )
                 try:
                     new_fact = await heart.supersede_fact(fact_id, new_input, session=session)
