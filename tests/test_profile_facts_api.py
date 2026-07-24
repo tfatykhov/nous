@@ -7,6 +7,11 @@ from httpx import ASGITransport, AsyncClient
 
 from nous.heart import FactInput, Heart
 
+# Codex r2: the fixtures use Postgres-specific SQL (nous_system schema, ::jsonb,
+# vector casts, advisory locks) — skip cleanly under the default sqlite backend
+# instead of erroring (conftest skips postgres_only when NOUS_TEST_DB != postgres).
+pytestmark = pytest.mark.postgres_only
+
 _PROFILE_AGENT = f"test-profile-{_uuid.uuid4().hex[:8]}"
 
 
