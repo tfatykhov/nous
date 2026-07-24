@@ -83,7 +83,7 @@ _EXTRACTION_SCHEMA = {
                     },
                     "category": {
                         "type": "string",
-                        "enum": ["preference", "person", "rule", "technical", "concept", "tool"],
+                        "enum": ["technical", "concept", "tool"],
                     },
                     "confidence": {"type": "number"},
                     "overrides_prior": {
@@ -344,6 +344,16 @@ class EnumerativeExtractor:
             # revisit it.
             entity_extraction_complete = "entities" in f
 
+            # Tier-1 category integrity (2026-07-24 audit): the enumerative
+            # extractor is a document/transcript atomizer — its atoms belong in
+            # keyed/semantic retrieval, not the always-on User Profile. The
+            # schema enum no longer offers person/preference/rule; post-map any
+            # drifted label to technical (enum sample: preference 100% / person
+            # ~90% / rule ~80% noise). Mirrors #571: enum removal + drift guard.
+            category = f.get("category")
+            if category in ("preference", "person", "rule"):
+                category = "technical"
+
             inputs.append(
                 FactInput(
                     content=content,
@@ -352,7 +362,7 @@ class EnumerativeExtractor:
                     attribute_key=akey,
                     entity_keys=entity_keys,
                     entity_extraction_complete=entity_extraction_complete,
-                    category=f.get("category"),
+                    category=category,
                     confidence=min(max(float(f.get("confidence", 0.8)), 0.0), 1.0),
                     source="enumerative_extractor",
                     source_episode_id=episode_id,

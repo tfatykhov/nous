@@ -171,7 +171,7 @@ def create_mcp_server(
                             "description": "What kind of knowledge",
                         },
                         "content": {"type": "string", "description": "The knowledge to teach"},
-                        "domain": {"type": "string", "description": "Domain or category (optional)"},
+                        "domain": {"type": "string", "description": "Domain or category (optional). person/preference/rule are reserved for durable facts about the user; use technical/concept for session events or task detail."},
                         "source": {"type": "string", "description": "Where this knowledge came from"},
                     },
                     "required": ["type", "content"],

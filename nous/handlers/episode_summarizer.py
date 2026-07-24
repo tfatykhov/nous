@@ -25,6 +25,7 @@ from nous.handlers import (
 )
 from nous.brain.brain import Brain
 from nous.brain.graph_linker import GraphLinker
+from nous.heart.category_prompts import TIER1_CATEGORY_GUIDANCE
 from nous.heart.heart import Heart
 
 logger = logging.getLogger(__name__)
@@ -65,9 +66,7 @@ Return ONLY valid JSON (no markdown, no explanation):
 }}
 
 Categories for candidate_facts:
-- "preference" — User preferences (formats, units, style)
-- "person" — People facts (names, roles, relationships)
-- "rule" — ONLY explicit directives from the user
+""" + TIER1_CATEGORY_GUIDANCE + """
 - "technical" — Architecture, implementation, project-specific knowledge
 - "concept" — General knowledge, research findings, theoretical insights
 - "tool" — Tool/library behavior, gotchas, configuration
@@ -158,7 +157,8 @@ categories above, extract each of the following as its OWN candidate_fact:
     (filenames, word counts), figures/forecasts/data they requested, current
     configuration or state. category: "status"
   - Personal facts about the user: location, background, identity, traits.
-    category: "person"
+    category: "person" — durable identity only; session events involving the
+    user use category: event.
   - Specific named details tied to the above: people, numbers, IDs, versions,
     settings, measurements.
 Emit one fact per discrete, separately-queryable item — do not bundle several

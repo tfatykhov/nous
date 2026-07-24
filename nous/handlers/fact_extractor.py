@@ -34,6 +34,7 @@ from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.handlers import LLMClient, call_background_llm, cap_candidate_facts, parse_llm_json
 from nous.handlers.exemplar_ingest import ingest_exemplars
+from nous.heart.category_prompts import TIER1_CATEGORY_GUIDANCE
 from nous.heart.exemplars import is_exemplar_stream
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput, FactRejected
@@ -62,9 +63,7 @@ Return ONLY a valid JSON array (empty array if nothing worth storing):
 ]
 
 Categories (use the RIGHT one — this affects how facts are loaded):
-- "preference" — User preferences (formats, units, style). Loaded EVERY turn.
-- "person" — People facts (names, roles, relationships). Loaded EVERY turn.
-- "rule" — ONLY explicit directives from the user (e.g., "never push to main"). Loaded EVERY turn.
+""" + TIER1_CATEGORY_GUIDANCE + """
 - "technical" — Architecture, implementation, or project-specific knowledge. Loaded only when relevant.
 - "concept" — General knowledge, research findings, theoretical insights. Loaded only when relevant.
 - "tool" — Tool/library behavior, gotchas, configuration. Loaded only when relevant.

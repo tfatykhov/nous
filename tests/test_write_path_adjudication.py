@@ -5358,3 +5358,54 @@ async def test_failed_store_does_not_block_retry_in_later_chunk(monkeypatch, set
     )
 
 
+
+# ---------------------------------------------------------------------------
+# Tier-1 category integrity (2026-07-24): the enumerative extractor is a
+# document/transcript atomizer — its atoms must never enter the always-on
+# User Profile. Enum removal + post-map drift guard (mirrors #571 sleep).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("tier1", ["preference", "person", "rule"])
+def test_enumerative_tier1_category_post_mapped_to_technical(settings_fixture, tier1):
+    """A drifted tier-1 category on an enumerative fact is stored as technical."""
+    ex = EnumerativeExtractor.__new__(EnumerativeExtractor)
+    ex._settings = settings_fixture()
+
+    raw = [{
+        "content": "The subject has some documented attribute value here.",
+        "subject_key": "subject",
+        "attribute_key": "attribute",
+        "category": tier1,
+    }]
+    inputs = ex._to_fact_inputs(raw, chunk_index=0, episode_id=uuid4())
+    assert len(inputs) == 1
+    assert inputs[0].category == "technical", (
+        f"tier-1 category {tier1!r} must post-map to technical; "
+        f"got {inputs[0].category!r}"
+    )
+
+
+def test_enumerative_schema_enum_excludes_tier1_categories():
+    """The schema offered to the LLM must not advertise the tier-1 categories."""
+    from nous.handlers.enumerative_extractor import _EXTRACTION_SCHEMA
+
+    enum = _EXTRACTION_SCHEMA["properties"]["facts"]["items"]["properties"]["category"]["enum"]
+    for tier1 in ("preference", "person", "rule"):
+        assert tier1 not in enum, f"{tier1!r} must not be in the enumerative category enum"
+
+
+def test_enumerative_non_tier1_category_passes_through(settings_fixture):
+    """A non-tier-1 category (concept) is stored unchanged — map is tier-1-only."""
+    ex = EnumerativeExtractor.__new__(EnumerativeExtractor)
+    ex._settings = settings_fixture()
+
+    raw = [{
+        "content": "The subject has some documented attribute value here.",
+        "subject_key": "subject",
+        "attribute_key": "attribute",
+        "category": "concept",
+    }]
+    inputs = ex._to_fact_inputs(raw, chunk_index=0, episode_id=uuid4())
+    assert len(inputs) == 1
+    assert inputs[0].category == "concept"

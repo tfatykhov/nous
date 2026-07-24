@@ -838,7 +838,11 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
         Args:
             content: The fact content
-            category: preference, technical, person, tool, concept, or rule
+            category: preference, technical, person, tool, concept, or rule.
+                person/preference/rule are RESERVED for durable facts about the
+                user (identity, stable preferences, standing directives) — they
+                load into every future prompt. Session events, dated one-offs,
+                and task detail use technical/concept instead.
             subject: What/who the fact is about
             confidence: 0.0-1.0 confidence level
             source: Where this fact came from
@@ -1769,7 +1773,13 @@ _LEARN_FACT_SCHEMA: dict[str, Any] = {
         "content": {"type": "string", "description": "The fact content"},
         "category": {
             "type": "string",
-            "description": "Fact category",
+            "description": (
+                "Fact category. person/preference/rule are RESERVED for durable "
+                "facts about the user (identity, stable preferences, standing "
+                "directives) — they are injected into every future prompt. "
+                "Session events, dated one-offs, and task detail use "
+                "technical/concept instead."
+            ),
             "enum": ["preference", "technical", "person", "tool", "concept", "rule"],
         },
         "subject": {"type": "string", "description": "What/who the fact is about"},
