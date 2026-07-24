@@ -3164,6 +3164,7 @@ class FactManager:
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
         date_window: "DateWindow | None" = None,
         include_categories: list[str] | None = None,
+        require_keyword_hit: bool = False,
     ) -> list[FactSummary]:
         """Hybrid search over facts.
 
@@ -3176,11 +3177,15 @@ class FactManager:
             include_categories: restrict to these categories (plain IN). Symmetric
                 to ``exclude_categories``; used by the Session Profile intent leg
                 to search only tier-1 categories. Default None → no restriction.
+            require_keyword_hit: only return docs the FTS leg matched (codex
+                #574 r3 — the RRF missing-leg penalty is nearly free, so score
+                floors cannot exclude vector-only nearest-neighbor noise).
+                Forces the single-query path (variant fusion unsupported).
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window, include_categories)
-        return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window, include_categories)
+                return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window, include_categories, require_keyword_hit)
+        return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window, include_categories, require_keyword_hit)
 
     async def _search(
         self,
@@ -3193,6 +3198,7 @@ class FactManager:
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
         date_window: "DateWindow | None" = None,
         include_categories: list[str] | None = None,
+        require_keyword_hit: bool = False,
     ) -> list[FactSummary]:
         # Generate query embedding
         embedding = None
@@ -3234,7 +3240,7 @@ class FactManager:
             # so for inactive facts we do a simpler query.
             return await self._search_all(query, embedding, limit, category, session)
 
-        if variant_pairs and len(variant_pairs) > 1:
+        if variant_pairs and len(variant_pairs) > 1 and not require_keyword_hit:
             results = await hybrid_search_multi(
                 session=session,
                 table="heart.facts",
@@ -3254,6 +3260,7 @@ class FactManager:
                 extra_where=extra_where,
                 extra_params=extra_params,
                 limit=limit,
+                require_keyword_hit=require_keyword_hit,
             )
 
         # F075 L3: fuse the date-window leg (position-based RRF). Present only when

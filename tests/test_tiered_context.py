@@ -1140,30 +1140,48 @@ class TestSessionProfileLeg:
             await heart.close()
 
     @pytest.mark.asyncio
-    async def test_leg_min_score_gate_blocks_vector_only_noise(self, db, mock_embeddings, settings):
-        """codex r2: on an unrelated turn the vector leg still ranks SOME tier-1
-        fact first (nearest-neighbor noise). The absolute floor (default 0.7)
-        excludes it deterministically: a single-leg rank-1 match tops out at
-        vector_weight * k/(k+1) ~= 0.69 < 0.7 at default weights; a genuine
-        domain match hits both legs (~0.98)."""
+    async def test_leg_requires_keyword_anchor(self, db, mock_embeddings, settings):
+        """codex r3: the RRF missing-leg penalty rank (limit+1) is nearly free
+        (a vector-only rank-0 hit normalizes to ~0.97), so a score floor CANNOT
+        exclude nearest-neighbor noise — the leg requires a keyword-leg
+        (lexical) anchor instead. Core mode is enabled with a DIFFERENT tagged
+        fact so the domain fact is NOT masked by the profile_fact_ids
+        double-injection guard (the earlier test's silent pass cause)."""
         engine, heart, s = await _fresh_engine(
             db, mock_embeddings, settings, identity_prompt="",
-            settings_update={"profile_intent_leg_enabled": True},
+            settings_update={"profile_intent_leg_enabled": True, "profile_core_enabled": True,
+                             "profile_core_probation_days": 0},
         )
         try:
             async with db.session() as session:
+                core_fact = await heart.learn(
+                    FactInput(content="Tim prefers Celsius for all temperature readings", category="preference", subject="anchor-core"),
+                    session=session,
+                )
                 await heart.learn(
-                    FactInput(content="Tim's trading rule qgatefloortok sell underwater positions promptly", category="rule", subject="gate-domain"),
+                    FactInput(content="Tim's trading rule qanchortok sell underwater positions promptly", category="rule", subject="anchor-domain"),
                     session=session,
                 )
                 await session.commit()
-            # Unrelated input: no keyword-leg match, so the fact can only
-            # arrive via the vector leg (score <= ~0.69) -> gated out.
+            await heart.set_fact_tag(core_fact.id, "profile_core", True)
+
+            # Unrelated input: vector leg still ranks the domain fact (~0.97
+            # merged score!) but the FTS leg has no match -> keyword-anchor
+            # gate drops it -> no Session Profile section.
             result = await engine.build(
-                agent_id=s.agent_id, session_id="s-leg-gate",
+                agent_id=s.agent_id, session_id="s-leg-anchor-neg",
                 input_text="completely unrelated musings about gardens", frame=_frame(),
             )
             assert _session_profile_section(result) is None
+
+            # Domain input: FTS matches the unique token -> leg renders it.
+            result2 = await engine.build(
+                agent_id=s.agent_id, session_id="s-leg-anchor-pos",
+                input_text="what about qanchortok", frame=_frame(),
+            )
+            leg = _session_profile_section(result2)
+            assert leg is not None
+            assert "qanchortok" in leg.content
         finally:
             await heart.close()
 

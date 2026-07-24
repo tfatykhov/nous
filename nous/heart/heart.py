@@ -385,11 +385,13 @@ class Heart:
         exclude_categories: list[str] | None = None,
         session: AsyncSession | None = None,
         include_categories: list[str] | None = None,
+        require_keyword_hit: bool = False,
     ) -> list[FactSummary]:
         """Hybrid search over facts."""
         return await self.facts.search(
             query, limit, category, active_only, exclude_categories, session,
             include_categories=include_categories,
+            require_keyword_hit=require_keyword_hit,
         )
 
     async def find_similar_facts(

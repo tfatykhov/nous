@@ -189,6 +189,7 @@ async def hybrid_search(
     limit: int = 10,
     vector_weight: float | None = None,
     active_filter: bool = True,
+    require_keyword_hit: bool = False,
 ) -> list[tuple[UUID, float]]:
     """Hybrid vector + keyword search over a Heart table using RRF.
 
@@ -282,7 +283,17 @@ async def hybrid_search(
         # Keyword-only fallback — return keyword results directly
         return keyword_results[:limit]
 
-    return _rrf_merge(vector_results, keyword_results, rrf_k, vector_weight, limit)
+    merged = _rrf_merge(vector_results, keyword_results, rrf_k, vector_weight, limit)
+    if require_keyword_hit:
+        # Codex #574 r3: _rrf_merge's missing-leg penalty rank (limit+1) is
+        # nearly free at typical k (a vector-only rank-0 hit normalizes to
+        # ~0.97), so score floors cannot exclude nearest-neighbor noise.
+        # Callers that need a LEXICAL anchor (e.g. the Session Profile leg —
+        # domain facts only for domain turns) filter to docs the keyword leg
+        # actually matched. No keyword hits => empty result, by design.
+        allowed = {doc_id for doc_id, _ in keyword_results}
+        merged = [(doc_id, score) for doc_id, score in merged if doc_id in allowed]
+    return merged
 
 
 # ---------------------------------------------------------------------------

@@ -877,6 +877,11 @@ class ContextEngine:
                     limit=self._settings.profile_intent_leg_limit,
                     session=session,
                     include_categories=TIER1_FACT_CATEGORIES,
+                    # codex r3: domain facts require a LEXICAL anchor in the
+                    # turn — the RRF missing-leg penalty is nearly free
+                    # (vector-only rank-0 normalizes to ~0.97), so the score
+                    # floor alone cannot exclude nearest-neighbor noise.
+                    require_keyword_hit=True,
                 )
                 if leg_facts:
                     # Pipeline parity with the Tier-3 fact path: staleness then
