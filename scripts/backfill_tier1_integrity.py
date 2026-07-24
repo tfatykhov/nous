@@ -291,14 +291,56 @@ async def phase_haiku(
     session, *, agent_id: str, client, budget_calls: int, dry_run: bool
 ) -> dict:
     """Per-row Haiku judgment on the remaining tier-1 survivors from the
-    doc-atom sources. Resumable (skips rows already `technical`)."""
-    rows = (
+    doc-atom sources.
+
+    Resumable via a CHECKPOINT column on the capture table (codex r1): kept
+    ('profile') rows must be excluded on rerun too — relying on the
+    not_profile->technical mutation alone re-selects (and re-bills) every
+    kept row first, starving the tail under a budget.
+    """
+    # Checkpoint store lives on OUR capture table — requires capture to have run.
+    cap_exists = (
+        await session.execute(
+            text("SELECT to_regclass(:t)"), {"t": CAPTURE_TABLE}
+        )
+    ).scalar_one_or_none()
+    if cap_exists is None:
+        raise SystemExit(
+            f"haiku phase requires the capture table ({CAPTURE_TABLE}) — "
+            "run --phase capture --apply first."
+        )
+    if not dry_run:
+        await session.execute(
+            text(f"ALTER TABLE {CAPTURE_TABLE} ADD COLUMN IF NOT EXISTS haiku_verdict TEXT")
+        )
+    # Use the checkpoint exclusion whenever the column exists — including in
+    # dry-run, so a post-resume dry-run reports the true remaining set (a
+    # pre-apply dry-run has no column yet and must not reference it).
+    schema_name, table_name = CAPTURE_TABLE.split(".", 1)
+    has_ckpt = (
         await session.execute(
             text(
-                "SELECT id, content FROM heart.facts "
-                "WHERE agent_id = :a AND category = ANY(:cats) AND source = ANY(:srcs) "
-                "AND active = TRUE ORDER BY learned_at DESC, id DESC"
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = :s AND table_name = :t AND column_name = 'haiku_verdict'"
             ),
+            {"s": schema_name, "t": table_name},
+        )
+    ).scalar_one_or_none() is not None
+
+    base_query = (
+        "SELECT f.id, f.content FROM heart.facts f "
+        "WHERE f.agent_id = :a AND f.category = ANY(:cats) AND f.source = ANY(:srcs) "
+        "AND f.active = TRUE "
+    )
+    if has_ckpt:
+        base_query += (
+            f"AND NOT EXISTS (SELECT 1 FROM {CAPTURE_TABLE} b "
+            "     WHERE b.id = f.id AND b.haiku_verdict IS NOT NULL) "
+        )
+    base_query += "ORDER BY f.learned_at DESC, f.id DESC"
+    rows = (
+        await session.execute(
+            text(base_query),
             {"a": agent_id, "cats": list(TIER1_CATEGORIES), "srcs": list(_C_SOURCES)},
         )
     ).mappings().all()
@@ -328,6 +370,22 @@ async def phase_haiku(
                 {"id": row["id"]},
             )
             demoted += 1
+        # Checkpoint BOTH verdicts so reruns page past judged rows. A fact
+        # created after capture is absent from the capture table — insert a
+        # checkpoint-only row for it (category NULL marks post-capture rows;
+        # the scoped rollback ignores them since NULL <> 'technical' is NULL).
+        updated = await session.execute(
+            text(f"UPDATE {CAPTURE_TABLE} SET haiku_verdict = :v WHERE id = :id"),
+            {"v": verdict, "id": row["id"]},
+        )
+        if updated.rowcount == 0:
+            await session.execute(
+                text(
+                    f"INSERT INTO {CAPTURE_TABLE} (id, category, subject, haiku_verdict) "
+                    "VALUES (:id, NULL, NULL, :v)"
+                ),
+                {"id": row["id"], "v": verdict},
+            )
     return {"eligible": len(rows), "llm_calls": calls, "demoted": demoted}
 
 
