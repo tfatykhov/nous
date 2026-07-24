@@ -68,9 +68,17 @@
   // about to disappear so a per-row message would vanish with it.
   let factsPanelMsg = $state<string | null>(null);
 
+  // Mirrors PROFILE_CORE_TAG in nous/cognitive/context.py — the curated
+  // always-on core membership tag toggled via POST /facts/{id}/core.
+  const PROFILE_CORE_TAG = 'profile_core';
+
   function truncate(s: string, n: number): string {
     if (!s) return '';
     return s.length > n ? s.slice(0, n) + '…' : s;
+  }
+
+  function isCore(row: BrowserFact): boolean {
+    return (row.tags ?? []).includes(PROFILE_CORE_TAG);
   }
 
   async function loadFacts() {
@@ -94,6 +102,7 @@
       content_display: truncate(f.content, 120),
       confidence_display: f.confidence.toFixed(2),
       active_display: f.active ? 'yes' : 'no',
+      core_display: isCore(f) ? '★ core' : '',
     })),
   );
 
@@ -128,6 +137,21 @@
           truncate(resp.stored_content ?? '', 120) +
           '"';
       }
+      clearFactRow(row.id);
+      await loadFacts();
+    } catch (e) {
+      factStatus[row.id] = 'error';
+      factMsg[row.id] = e instanceof Error ? e.message : 'Error';
+    }
+  }
+
+  // Toggle profile_core membership. Reversible, so no confirm() (plan Task 3).
+  async function setCore(row: BrowserFact, core: boolean) {
+    factStatus[row.id] = 'saving';
+    factMsg[row.id] = core ? 'Setting core…' : 'Unsetting core…';
+    factsPanelMsg = null;
+    try {
+      await apiSend(`/facts/${row.id}/core`, { core }, 'POST');
       clearFactRow(row.id);
       await loadFacts();
     } catch (e) {
@@ -247,6 +271,7 @@
           { key: 'content_display',    label: 'Content' },
           { key: 'confidence_display', label: 'Confidence' },
           { key: 'active_display',     label: 'Active' },
+          { key: 'core_display',       label: 'Core' },
         ]}
         rows={factRows}
         rowKey={(r: BrowserFact) => r.id}
@@ -280,6 +305,13 @@
                 disabled={factStatus[row.id] === 'saving' || !(factDrafts[row.id] ?? '').trim()}
               >
                 {factStatus[row.id] === 'saving' ? 'Saving…' : 'Save'}
+              </button>
+              <button
+                class="btn btn-sm"
+                onclick={() => setCore(row, !isCore(row))}
+                disabled={factStatus[row.id] === 'saving'}
+              >
+                {isCore(row) ? 'Unset core' : 'Set core'}
               </button>
               <button
                 class="btn btn-sm btn-danger"
