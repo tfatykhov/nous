@@ -259,6 +259,24 @@ class Settings(BaseSettings):
         default=14, ge=0,
         description="Untagged tier-1 facts learned within this many days join the core as probation (0 disables probation).",
     )
+    # Session Profile intent leg (Task 2, land dark). A per-turn hybrid-search
+    # leg restricted to tier-1 categories, surfacing domain facts (trading,
+    # sailing, project conventions) only when the turn is about that domain —
+    # the ~327 tier-1 facts the always-on core never shows and Tier-3 search
+    # excludes. Rendered as its own `dynamic` section (never cached), so
+    # per-session variation is cache-free.
+    profile_intent_leg_enabled: bool = Field(
+        default=False,
+        description="Enable the Session Profile intent leg (tier-1 domain facts selected by turn intent). Land dark.",
+    )
+    profile_intent_leg_limit: int = Field(
+        default=5, ge=1,
+        description="Max facts fetched by the Session Profile intent leg.",
+    )
+    profile_intent_leg_budget: int = Field(
+        default=300, ge=0,
+        description="Token budget for the Session Profile intent leg section (line-aware truncation).",
+    )
     fact_pin_top_k: int = Field(
         default=0, ge=0,
         description=(

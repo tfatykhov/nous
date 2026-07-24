@@ -43,6 +43,7 @@ SECTION_TIERS: dict[str, str] = {
     "User Profile": "semi_stable",
     "Active Censors": "semi_stable",
     "Current Frame": "semi_stable",
+    "Session Profile": "dynamic",  # Task 2: per-turn intent leg, never cached.
 }
 # Everything else defaults to "dynamic" via ContextSection.tier default
 
@@ -661,7 +662,9 @@ class ContextEngine:
                 if censors:
                     _active_censor_names = [str(getattr(c, "id", "")) for c in censors]
                     censor_text = self._format_censors(censors)
-                    censor_text = self._truncate_to_budget(censor_text, budget.censors)
+                    # Line-aware: an enforcement rule must never be char-sliced
+                    # mid-sentence (a truncated censor renders a partial rule).
+                    censor_text = self._truncate_to_budget_lines(censor_text, budget.censors)
                     sections.append(
                         ContextSection(
                             priority=2,
@@ -848,6 +851,57 @@ class ContextEngine:
                     )
             except Exception as e:
                 logger.warning("Heart.search_facts failed during context build: %s", e)
+
+        # 6a. Session Profile intent leg (Task 2, land dark): intent-selected
+        # tier-1 domain facts (trading stances, sailing contacts, project
+        # conventions) — the tier-1 facts the always-on core never shows and
+        # Tier-3 search excludes. Own budget setting, independent of
+        # budget.user_profile. priority=6 TIES Relevant Facts above; sorted() is
+        # stable, so this renders immediately after (mirrors the priority-1
+        # Identity/User-Profile tie note at the top of build()).
+        if getattr(self._settings, "profile_intent_leg_enabled", False):
+            try:
+                # Mirror the Tier-3 fact leg EXACTLY: same query text (topic-
+                # prefixed _default_query unless a per-type query was supplied).
+                q_text = _query_texts.get("fact", _default_query)
+                leg_facts = await self._heart.search_facts(
+                    q_text,
+                    limit=self._settings.profile_intent_leg_limit,
+                    session=session,
+                    include_categories=TIER1_FACT_CATEGORIES,
+                )
+                if leg_facts:
+                    # Pipeline parity with the Tier-3 fact path: staleness then
+                    # the adaptive relevance floor (hybrid RRF always returns
+                    # something — without the floor, marginal facts inject on
+                    # every domain-ish turn).
+                    leg_facts = self._apply_staleness_penalty(leg_facts)
+                    leg_facts = self._apply_relevance_filter(leg_facts, "fact")
+                    # Double-injection guard: drop facts already rendered in the
+                    # User Profile section (Task 1's profile_fact_ids). The
+                    # recalled_ids["fact"] set holds only non-tier-1 facts
+                    # (category-disjoint from this leg), so excluding it would be
+                    # a documented no-op — profile_fact_ids is the real guard.
+                    leg_facts = [
+                        f for f in leg_facts
+                        if str(getattr(f, "id", "")) not in profile_fact_ids
+                    ]
+                if leg_facts:
+                    leg_text = self._format_facts(leg_facts)
+                    leg_text = self._truncate_to_budget_lines(
+                        leg_text, self._settings.profile_intent_leg_budget
+                    )
+                    sections.append(
+                        ContextSection(
+                            priority=6,
+                            label="Session Profile",
+                            content=leg_text,
+                            token_estimate=self._estimate_tokens(leg_text),
+                            tier=SECTION_TIERS.get("Session Profile", "dynamic"),
+                        )
+                    )
+            except Exception as e:
+                logger.warning("Session Profile intent leg failed during context build: %s", e)
 
         # 6b. Recall backstop (2026-07-13 plan): empty final fact list => tell the
         # agent to recall before answering. Fires on search failure too (the

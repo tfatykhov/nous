@@ -1001,3 +1001,172 @@ class TestProfileCore:
             assert "play the cello" not in profile.content
         finally:
             await heart.close()
+
+
+def _session_profile_section(result):
+    return next((s for s in result.sections if s.label == "Session Profile"), None)
+
+
+class TestSessionProfileLeg:
+    """Task 2: intent-selected tier-1 domain facts, rendered as a dynamic
+    section. postgres_only — the leg exercises hybrid FTS+vector search; the
+    unique-token FTS leg drives deterministic membership (rank is probabilistic
+    under the orthogonal mock-vector leg, so assertions are membership-only)."""
+
+    @pytest.mark.postgres_only
+    @pytest.mark.asyncio
+    async def test_leg_surfaces_domain_fact_and_excludes_core(self, db, mock_embeddings, settings):
+        """A non-core domain fact matching the turn appears in Session Profile;
+        a core-tagged fact (already in User Profile) never repeats there."""
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={
+                "profile_core_enabled": True,
+                "profile_core_probation_days": 0,
+                "profile_intent_leg_enabled": True,
+            },
+        )
+        try:
+            async with db.session() as session:
+                r_core = await heart.learn(
+                    FactInput(content="Tim prefers Celsius uniqtokencore for all temperatures", category="preference", subject="leg-core"),
+                    session=session,
+                )
+                await heart.learn(
+                    FactInput(content="Tim's trading rule zqxjflktoken sell underwater positions promptly", category="rule", subject="leg-domain"),
+                    session=session,
+                )
+                await session.commit()
+            await _tag_fact(db, r_core.id)
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-leg-pos",
+                input_text="what about zqxjflktoken", frame=_frame(),
+            )
+            sp = _session_profile_section(result)
+            assert sp is not None
+            assert "zqxjflktoken" in sp.content  # domain fact surfaced
+            assert "uniqtokencore" not in sp.content  # core fact not double-injected
+            # core fact still lives in User Profile
+            profile = _profile_section(result)
+            assert profile is not None and "uniqtokencore" in profile.content
+        finally:
+            await heart.close()
+
+    @pytest.mark.postgres_only
+    @pytest.mark.asyncio
+    async def test_leg_absent_domain_fact_for_unrelated_input(self, db, mock_embeddings, settings):
+        """Unrelated input: the domain fact is not FTS-matched and is outranked
+        out of the fetch by FTS-matching decoys, so it does not surface.
+
+        A runtime vector_weight=0.0 override isolates the deterministic FTS leg
+        (mock vectors are orthogonal-but-arbitrary, so at the default 0.7 vector
+        weight the domain fact's hash-seeded vector rank is unpredictable — the
+        plan's stated approach is to let the keyword leg drive the match). The
+        weight is resolved module-globally via RuntimeConfig, so a settings
+        override would be inert; set the runtime override and clear it after."""
+        from nous.runtime_config import RuntimeConfig
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={
+                "profile_core_enabled": True,
+                "profile_core_probation_days": 0,
+                "profile_intent_leg_enabled": True,
+            },
+        )
+        RuntimeConfig.get().set_vector_weight(0.0)
+        try:
+            async with db.session() as session:
+                r_core = await heart.learn(
+                    FactInput(content="Tim prefers Celsius uniqtokencore for all temperatures", category="preference", subject="negleg-core"),
+                    session=session,
+                )
+                await heart.learn(
+                    FactInput(content="Tim's trading rule zqxjflktoken sell underwater positions promptly", category="rule", subject="negleg-domain"),
+                    session=session,
+                )
+                for i in range(6):
+                    await heart.learn(
+                        FactInput(content=f"Sailing note wntokendecoy marina slip number {i} details", category="person", subject=f"negleg-decoy-{i}"),
+                        session=session,
+                    )
+                await session.commit()
+            # Tag the core fact so the User Profile is a small curated set — the
+            # decoys/domain stay OUT of profile_fact_ids and remain leg-eligible.
+            await _tag_fact(db, r_core.id)
+            # Query = the decoys' shared token + stopwords only. plainto_tsquery
+            # ANDs its lexemes, so a non-stopword extra word (e.g. "tell") would
+            # require that word in the fact too and match nothing; "what about"
+            # are stopwords, leaving just "wntokendecoy".
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-leg-neg",
+                input_text="what about wntokendecoy", frame=_frame(),
+            )
+            sp = _session_profile_section(result)
+            assert sp is not None  # decoys populate the section
+            assert "zqxjflktoken" not in sp.content  # domain fact NOT surfaced
+        finally:
+            RuntimeConfig.get().clear_vector_weight()
+            await heart.close()
+
+    @pytest.mark.postgres_only
+    @pytest.mark.asyncio
+    async def test_leg_absent_when_flag_off(self, db, mock_embeddings, settings):
+        """Flag off (default): no Session Profile section at all."""
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+        )
+        try:
+            async with db.session() as session:
+                await heart.learn(
+                    FactInput(content="Tim's trading rule zqxjflktoken sell underwater positions promptly", category="rule", subject="offleg-domain"),
+                    session=session,
+                )
+                await session.commit()
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-leg-off",
+                input_text="what about zqxjflktoken", frame=_frame(),
+            )
+            assert _session_profile_section(result) is None
+            assert "## Session Profile" not in result.system_prompt
+        finally:
+            await heart.close()
+
+
+class TestCensorLineAwareTruncation:
+    @pytest.mark.asyncio
+    async def test_censor_section_drops_whole_lines(self, db, mock_embeddings, settings):
+        """The Active Censors section uses line-aware truncation: an over-budget
+        censor list drops whole rules, never char-slicing a rule mid-sentence."""
+        from nous.heart import CensorInput
+        engine, heart, s = await _fresh_engine(
+            db, mock_embeddings, settings, identity_prompt="",
+            settings_update={"context_budget_overrides": {"censors": 60}},
+        )
+        try:
+            async with db.session() as session:
+                for i in range(4):
+                    await heart.add_censor(
+                        CensorInput(
+                            trigger_pattern=f"pattern number {i} triggering phrase here",
+                            reason=f"reason number {i} explaining the enforcement rule in detail",
+                            action="steer",
+                        ),
+                        session=session,
+                    )
+                await session.commit()
+            result = await engine.build(
+                agent_id=s.agent_id, session_id="s-censor",
+                input_text="hello", frame=_frame(),
+            )
+            censor_sec = next((sec for sec in result.sections if sec.label == "Active Censors"), None)
+            assert censor_sec is not None
+            full = engine._format_censors(await heart.list_censors())
+            full_lines = set(full.split("\n"))
+            rendered_lines = [ln for ln in censor_sec.content.split("\n") if ln]
+            assert rendered_lines, "expected at least one rendered censor line"
+            for ln in rendered_lines:
+                assert ln in full_lines  # every rendered line is a whole formatted rule
+            assert not censor_sec.content.endswith("...")  # no char-slice signature
+            assert len(censor_sec.content) < len(full)  # actually truncated
+        finally:
+            await heart.close()

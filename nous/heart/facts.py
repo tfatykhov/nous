@@ -3163,6 +3163,7 @@ class FactManager:
         session: AsyncSession | None = None,
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
         date_window: "DateWindow | None" = None,
+        include_categories: list[str] | None = None,
     ) -> list[FactSummary]:
         """Hybrid search over facts.
 
@@ -3172,11 +3173,14 @@ class FactManager:
                 Defaults to None (single-query path; backwards compatible).
             date_window: F075 L3 — when set, fuses the date-window retrieval
                 leg into the results via _rrf_merge_n.
+            include_categories: restrict to these categories (plain IN). Symmetric
+                to ``exclude_categories``; used by the Session Profile intent leg
+                to search only tier-1 categories. Default None → no restriction.
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window)
-        return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window)
+                return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window, include_categories)
+        return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window, include_categories)
 
     async def _search(
         self,
@@ -3188,6 +3192,7 @@ class FactManager:
         session: AsyncSession,
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
         date_window: "DateWindow | None" = None,
+        include_categories: list[str] | None = None,
     ) -> list[FactSummary]:
         # Generate query embedding
         embedding = None
@@ -3208,6 +3213,15 @@ class FactManager:
             extra_where += f" AND (t.category IS NULL OR t.category NOT IN ({placeholders}))"
             for i, cat in enumerate(exclude_categories):
                 extra_params[f"exc_{i}"] = cat
+        if include_categories:
+            # Session Profile leg: restrict to these categories. Plain IN (no
+            # NULL guard) — a NULL-category row is correctly excluded from an
+            # include-list, unlike exclude's NULL-safe form. Added to extra_where
+            # so it reaches BOTH the vector and FTS legs (shared filter_clauses).
+            placeholders = ", ".join(f":inc_{i}" for i in range(len(include_categories)))
+            extra_where += f" AND t.category IN ({placeholders})"
+            for i, cat in enumerate(include_categories):
+                extra_params[f"inc_{i}"] = cat
 
         # Note: hybrid_search always applies active=true filter.
         # For active_only=False, we need a different approach.
