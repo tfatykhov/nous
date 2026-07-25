@@ -252,6 +252,11 @@ class TestTemporalContextTier:
         s.anti_hallucination_prompt = False
         s.identity_prompt = ""
         s.context_window = 0
+        # PR #574 (profile core/intent split) reads these on the Tier-1
+        # path; a bare MagicMock is truthy and its attrs are MagicMocks,
+        # which blow up the `> 0` budget/probation comparisons.
+        s.profile_core_enabled = False
+        s.profile_intent_leg_enabled = False
         return s
 
     @pytest.fixture
@@ -267,6 +272,11 @@ class TestTemporalContextTier:
         s.anti_hallucination_prompt = False
         s.identity_prompt = ""
         s.context_window = 0
+        # PR #574 (profile core/intent split) reads these on the Tier-1
+        # path; a bare MagicMock is truthy and its attrs are MagicMocks,
+        # which blow up the `> 0` budget/probation comparisons.
+        s.profile_core_enabled = False
+        s.profile_intent_leg_enabled = False
         return s
 
     @pytest.fixture
@@ -611,6 +621,11 @@ class TestBudgetBoost:
         s.anti_hallucination_prompt = False
         s.identity_prompt = ""
         s.context_window = 0
+        # PR #574 (profile core/intent split) reads these on the Tier-1
+        # path; a bare MagicMock is truthy and its attrs are MagicMocks,
+        # which blow up the `> 0` budget/probation comparisons.
+        s.profile_core_enabled = False
+        s.profile_intent_leg_enabled = False
         return s
 
     @pytest.fixture
