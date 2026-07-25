@@ -16,6 +16,8 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import sys
+import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -3238,14 +3240,50 @@ def register_subtask_tools(
 # Programmatic tool calling (012.3)
 # ---------------------------------------------------------------------------
 
-SAFE_BUILTINS = {
-    "len", "list", "dict", "set", "str", "int", "float", "bool",
-    "print", "range", "enumerate", "zip", "sorted", "filter",
-    "map", "max", "min", "sum", "any", "all", "isinstance",
-    "repr", "round", "abs", "type", "tuple",
-}
-
 _MAX_WRITES = 5
+
+# Seconds the awaiting coroutine waits past the script deadline before giving
+# up on the worker thread. The in-thread trace hook normally raises at the
+# deadline, so this grace only matters when the thread is stuck below Python
+# level (a blocking C call), which no in-process mechanism can interrupt.
+_TIMEOUT_GRACE = 2.0
+
+# Trace-hook check interval — number of traced events between deadline checks.
+# Keeps the per-line overhead down without letting an overrun go unnoticed.
+_DEADLINE_CHECK_EVERY = 64
+
+_active_runs = 0
+_active_runs_lock = threading.Lock()
+
+
+class ScriptDeadlineExceeded(BaseException):
+    """Raised inside the run_python worker thread when its deadline passes.
+
+    Derives from BaseException, not Exception, so ordinary agent code using
+    `try/except Exception` cannot swallow its own timeout.
+    """
+
+
+def run_python_active_runs() -> int:
+    """Number of run_python executions currently occupying a worker thread."""
+    with _active_runs_lock:
+        return _active_runs
+
+
+def _acquire_run_slot(max_concurrent: int) -> bool:
+    """Take a concurrency slot if one is free."""
+    global _active_runs
+    with _active_runs_lock:
+        if _active_runs >= max_concurrent:
+            return False
+        _active_runs += 1
+        return True
+
+
+def _release_run_slot() -> None:
+    global _active_runs
+    with _active_runs_lock:
+        _active_runs -= 1
 
 
 def create_programmatic_tools(
@@ -3344,10 +3382,11 @@ def create_programmatic_tools(
         def _print(*args: object) -> None:
             output_buf.write(" ".join(str(a) for a in args) + "\n")
 
-        safe_builtins = {k: getattr(builtins, k) for k in SAFE_BUILTINS if hasattr(builtins, k)}
-
         namespace: dict[str, Any] = {
-            "__builtins__": safe_builtins,
+            # Full builtins: the allowlist that used to live here bought no
+            # security (the same agent holds an unrestricted `bash` tool) and
+            # broke harmless code — `import`, `except Exception`, class bodies.
+            "__builtins__": builtins,
             # Nous memory functions
             "recall_deep": _recall_deep,
             "recall_recent": _recall_recent,
@@ -3355,7 +3394,7 @@ def create_programmatic_tools(
             "learn_fact": _learn_fact,
             "print": _print,
             "result": None,
-            # Safe stdlib modules (pre-injected — import statement is disabled)
+            # Pre-injected for convenience — `import` also works.
             "json": json,
             "re": re,
             "math": math,
@@ -3366,16 +3405,60 @@ def create_programmatic_tools(
             "statistics": statistics,
         }
 
-        def _run() -> None:
-            exec(compile(code, "<nous_script>", "exec"), namespace)
+        # Deadline enforcement inside the worker thread. asyncio.wait_for only
+        # cancels the *await* — the thread keeps running — so a pure-Python
+        # spin loop (`while True: pass`) would otherwise hold a thread (and the
+        # GIL) inside the API process forever. A trace hook fires on every line
+        # of the executing script and raises once the deadline passes.
+        countdown = [_DEADLINE_CHECK_EVERY]
 
-        logger.info("run_python | %d chars\n%s", len(code), code)
+        def _tracer(frame, event, arg):  # noqa: ANN001, ANN202 - CPython trace signature
+            countdown[0] -= 1
+            if countdown[0] <= 0:
+                countdown[0] = _DEADLINE_CHECK_EVERY
+                if time.monotonic() >= deadline:
+                    raise ScriptDeadlineExceeded(f"execution timed out ({timeout}s)")
+            return _tracer
+
+        def _run() -> None:
+            try:
+                sys.settrace(_tracer)
+                exec(compile(code, "<nous_script>", "exec"), namespace)
+            finally:
+                sys.settrace(None)
+                _release_run_slot()
+
+        max_concurrent = settings.programmatic_tools_max_concurrent
+        if not _acquire_run_slot(max_concurrent):
+            logger.warning(
+                "run_python rejected: %d/%d concurrent executions in flight",
+                run_python_active_runs(), max_concurrent,
+            )
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        f"Error: too many concurrent run_python executions "
+                        f"({max_concurrent} max) — retry shortly"
+                    ),
+                }],
+                "is_error": True,
+            }
+
+        logger.info(
+            "run_python | %d chars | %d/%d slots in use\n%s",
+            len(code), run_python_active_runs(), max_concurrent, code,
+        )
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
             # await run_in_executor releases the event loop so DB coroutines
             # scheduled via run_coroutine_threadsafe can actually execute.
-            await asyncio.wait_for(loop.run_in_executor(executor, _run), timeout=timeout)
-        except asyncio.TimeoutError:
+            # The grace covers the trace hook's own check interval; the hook,
+            # not this wait_for, is what actually stops the script.
+            await asyncio.wait_for(
+                loop.run_in_executor(executor, _run), timeout=timeout + _TIMEOUT_GRACE
+            )
+        except (asyncio.TimeoutError, ScriptDeadlineExceeded):
             # is_error per MCP (#179): lets downstream consumers (runner
             # tool_result block, compaction bulk-failure detection)
             # distinguish a real execution failure from a successful run
@@ -3403,14 +3486,19 @@ def create_programmatic_tools(
 _RUN_PYTHON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Execute Python code with Nous memory functions and safe stdlib in scope. "
+        "Execute Python code with Nous memory functions in scope. "
+        "Full Python: import, try/except, class and function definitions, open() all work. "
         "Memory functions: recall_deep(query, limit=5), recall_recent(hours=24, limit=5), "
         "list_tasks(status=None), learn_fact(content, category, subject, confidence). "
-        "Stdlib available: json, re, math, datetime, collections, itertools, functools, statistics. "
+        "Pre-imported for convenience (no import needed): json, re, math, datetime, "
+        "collections, itertools, functools, statistics — anything else, just import it. "
         "Use this to batch multiple memory lookups, filter results, and return only what's needed — "
         "reducing token usage compared to separate tool calls. "
         "Set result = <value> to return structured data. Use print() to emit text output. "
-        "Max runtime is configurable (default 10s). Max 5 learn_fact calls per execution."
+        "Runs in-process on a worker thread with a wall-clock deadline (default 10s): "
+        "Python-level code is interrupted when it expires and the call returns a timeout error, "
+        "so keep work short and shell out to `bash` for anything long-running. "
+        "Max 5 learn_fact calls per execution."
     ),
     "properties": {
         "code": {
