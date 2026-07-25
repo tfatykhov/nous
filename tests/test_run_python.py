@@ -7,11 +7,14 @@ memory operations, filter results, and return shaped data — reducing
 token consumption compared to separate tool calls.
 """
 
-import pytest
+import asyncio
+import threading
+import time
 from unittest.mock import AsyncMock, MagicMock
 
-from nous.config import Settings
+import pytest
 
+from nous.config import Settings
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -115,6 +118,16 @@ class TestRunPythonConfig:
         s = Settings(programmatic_tools_enabled=False, programmatic_tools_timeout=30)
         assert s.programmatic_tools_enabled is False
         assert s.programmatic_tools_timeout == 30
+
+    def test_default_max_concurrent(self):
+        """programmatic_tools_max_concurrent defaults to 4."""
+        s = Settings()
+        assert s.programmatic_tools_max_concurrent == 4
+
+    def test_max_concurrent_must_be_positive(self):
+        """A cap below 1 would disable the tool outright — reject it."""
+        with pytest.raises(ValueError):
+            Settings(programmatic_tools_max_concurrent=0)
 
 
 # ---------------------------------------------------------------------------
@@ -247,54 +260,74 @@ class TestRunPythonSafeBuiltins:
 
 
 # ---------------------------------------------------------------------------
-# Blocked builtins tests
+# Full-builtins tests (the SAFE_BUILTINS allowlist was removed)
 # ---------------------------------------------------------------------------
 
 
-class TestRunPythonBlockedBuiltins:
-    """Test that dangerous builtins are blocked."""
+class TestRunPythonFullBuiltins:
+    """Full builtins are exposed — the allowlist bought no security.
+
+    The same agent holds an unrestricted `bash` tool in the same tool belt, so
+    everything the allowlist blocked was one heredoc away. It only cost
+    usability (no `import`, no `except Exception`, no class bodies).
+    """
 
     @pytest.mark.asyncio
-    async def test_dunder_import_blocked(self, run_python_tool):
-        """__import__ is not available."""
-        result = await run_python_tool(code='__import__("os")')
-        assert "Error" in result["content"][0]["text"]
+    async def test_import_works(self, run_python_tool):
+        """import statement works."""
+        result = await run_python_tool(
+            code='import base64\nresult = base64.b64encode(b"hi").decode()'
+        )
+        assert result["content"][0]["text"] == "aGk="
 
     @pytest.mark.asyncio
-    async def test_open_blocked(self, run_python_tool):
-        """open() is not available."""
-        result = await run_python_tool(code='open("/etc/passwd")')
-        assert "Error" in result["content"][0]["text"]
+    async def test_import_os_works(self, run_python_tool):
+        """import os works (parity with the bash tool the agent already has)."""
+        result = await run_python_tool(code="import os\nresult = type(os.sep).__name__")
+        assert result["content"][0]["text"] == "str"
 
     @pytest.mark.asyncio
-    async def test_eval_blocked(self, run_python_tool):
-        """eval() is not available."""
-        result = await run_python_tool(code='eval("1+1")')
-        assert "Error" in result["content"][0]["text"]
+    async def test_try_except_exception(self, run_python_tool):
+        """try/except Exception works — used to NameError on Exception."""
+        result = await run_python_tool(
+            code="try:\n    1 / 0\nexcept Exception as e:\n    result = type(e).__name__"
+        )
+        assert result["content"][0]["text"] == "ZeroDivisionError"
 
     @pytest.mark.asyncio
-    async def test_exec_blocked(self, run_python_tool):
-        """exec() is not available (inside exec'd code)."""
-        result = await run_python_tool(code='exec("x=1")')
-        assert "Error" in result["content"][0]["text"]
+    async def test_class_definition(self, run_python_tool):
+        """Class definitions work — used to fail on missing __build_class__."""
+        code = (
+            "class Point:\n"
+            "    def __init__(self, x):\n"
+            "        self.x = x\n"
+            "\n"
+            "result = Point(7).x"
+        )
+        result = await run_python_tool(code=code)
+        assert result["content"][0]["text"] == "7"
 
     @pytest.mark.asyncio
-    async def test_import_statement_blocked(self, run_python_tool):
-        """import statement is blocked (no __import__ in builtins)."""
-        result = await run_python_tool(code="import os")
-        assert "Error" in result["content"][0]["text"]
+    async def test_getattr_and_dir(self, run_python_tool):
+        """Reflection builtins are available."""
+        result = await run_python_tool(
+            code='result = getattr("abc", "upper")()'
+        )
+        assert result["content"][0]["text"] == "ABC"
 
     @pytest.mark.asyncio
-    async def test_os_not_in_namespace(self, run_python_tool):
-        """os module is not injected into the namespace."""
-        result = await run_python_tool(code='os.system("echo hi")')
-        assert "Error" in result["content"][0]["text"]
-
-    @pytest.mark.asyncio
-    async def test_subprocess_not_in_namespace(self, run_python_tool):
-        """subprocess module is not injected."""
-        result = await run_python_tool(code='subprocess.run(["echo"])')
-        assert "Error" in result["content"][0]["text"]
+    async def test_open_available(self, run_python_tool):
+        """open() is available (errors come from the OS, not a sandbox)."""
+        result = await run_python_tool(
+            code=(
+                "import tempfile, os\n"
+                "path = os.path.join(tempfile.gettempdir(), 'nous_run_python_probe.txt')\n"
+                "open(path, 'w').write('ok')\n"
+                "result = open(path).read()\n"
+                "os.remove(path)"
+            )
+        )
+        assert result["content"][0]["text"] == "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -456,8 +489,25 @@ class TestRunPythonWriteCap:
 # ---------------------------------------------------------------------------
 
 
+async def _wait_for_idle(timeout: float = 3.0) -> int:
+    """Poll until no run_python execution occupies a worker thread."""
+    from nous.api.tools import run_python_active_runs
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if run_python_active_runs() == 0:
+            break
+        await asyncio.sleep(0.02)
+    return run_python_active_runs()
+
+
 class TestRunPythonTimeout:
-    """Test timeout enforcement."""
+    """Test timeout enforcement.
+
+    The deadline is enforced by a sys.settrace hook running inside the worker
+    thread, so Python-level runaway code is actually interrupted — not merely
+    abandoned by the awaiting coroutine.
+    """
 
     @pytest.mark.asyncio
     async def test_timeout_triggers(self):
@@ -476,6 +526,105 @@ class TestRunPythonTimeout:
         text = result["content"][0]["text"]
         assert "Error" in text
         assert "timed out" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_builtinless_spin_loop_is_stopped(self):
+        """`while True: pass` uses zero builtins — it must still be killed.
+
+        Asserts on the observable: the call returns a timeout error, no live
+        thread is left behind, and total wall time stays near the deadline.
+        """
+        from nous.api.tools import create_programmatic_tools, run_python_active_runs
+
+        assert await _wait_for_idle() == 0, "test started with a run in flight"
+        baseline_threads = threading.active_count()
+
+        tools = create_programmatic_tools(
+            AsyncMock(),
+            AsyncMock(),
+            Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=1),
+        )
+        started = time.monotonic()
+        result = await tools["run_python"](code="while True: pass")
+        elapsed = time.monotonic() - started
+
+        assert result["is_error"] is True
+        assert "timed out" in result["content"][0]["text"].lower()
+        # The trace hook, not the outer wait_for, ended the run.
+        assert elapsed < 1 + 2.0, f"run outlived its deadline ({elapsed:.1f}s)"
+        assert run_python_active_runs() == 0
+        # Worker thread is gone (executor teardown is async — allow a moment).
+        deadline = time.monotonic() + 3.0
+        while threading.active_count() > baseline_threads and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        assert threading.active_count() <= baseline_threads
+
+    @pytest.mark.asyncio
+    async def test_timeout_not_swallowed_by_except_exception(self):
+        """A script catching Exception cannot swallow its own deadline."""
+        from nous.api.tools import create_programmatic_tools
+
+        tools = create_programmatic_tools(
+            AsyncMock(),
+            AsyncMock(),
+            Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=1),
+        )
+        code = "try:\n    while True:\n        pass\nexcept Exception:\n    result = 'swallowed'"
+        result = await tools["run_python"](code=code)
+        assert result["is_error"] is True
+        assert "timed out" in result["content"][0]["text"].lower()
+        assert await _wait_for_idle() == 0
+
+
+# ---------------------------------------------------------------------------
+# Concurrency cap tests
+# ---------------------------------------------------------------------------
+
+
+class TestRunPythonConcurrencyCap:
+    """Test the max-concurrent-executions cap."""
+
+    @pytest.mark.asyncio
+    async def test_rejects_when_saturated(self):
+        """A run beyond the cap is rejected instead of stacking threads."""
+        from nous.api.tools import create_programmatic_tools, run_python_active_runs
+
+        assert await _wait_for_idle() == 0, "test started with a run in flight"
+
+        tools = create_programmatic_tools(
+            AsyncMock(),
+            AsyncMock(),
+            Settings(
+                programmatic_tools_enabled=True,
+                programmatic_tools_timeout=5,
+                programmatic_tools_max_concurrent=1,
+            ),
+        )
+        # time.sleep releases the GIL, so the event loop stays responsive.
+        occupied = asyncio.create_task(
+            tools["run_python"](code="import time\ntime.sleep(1)\nresult = 'done'")
+        )
+        for _ in range(100):
+            await asyncio.sleep(0.02)
+            if run_python_active_runs() == 1:
+                break
+        assert run_python_active_runs() == 1
+
+        rejected = await tools["run_python"](code="result = 1")
+        assert rejected["is_error"] is True
+        assert "concurrent" in rejected["content"][0]["text"].lower()
+
+        assert (await occupied)["content"][0]["text"] == "done"
+        assert await _wait_for_idle() == 0
+
+    @pytest.mark.asyncio
+    async def test_slot_released_after_run(self, run_python_tool):
+        """A completed run frees its slot."""
+        from nous.api.tools import run_python_active_runs
+
+        await run_python_tool(code="result = 1")
+        assert await _wait_for_idle() == 0
+        assert run_python_active_runs() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -591,3 +740,61 @@ class TestRunPythonFrameAccess:
         from nous.api.runner import FRAME_TOOLS
 
         assert "run_python" not in FRAME_TOOLS["initiation"]
+
+
+# ---------------------------------------------------------------------------
+# P1 bug fix tests (settrace bypass + BaseException handling)
+# ---------------------------------------------------------------------------
+
+
+class TestP1Fixes:
+    """Tests for P1 bugs fixed post-PR-575 initial review."""
+
+    async def test_settrace_bypass_blocked(self, run_python_tool):
+        """Script calling sys.settrace(None) then spinning must still timeout.
+
+        P1 Fix 1: Without the shim, settrace(None) uninstalls the deadline
+        hook and the thread spins forever, holding its concurrency slot.
+        """
+        code = """
+import sys
+sys.settrace(None)  # Attempt to bypass deadline tracer
+while True:
+    pass  # Infinite spin
+"""
+        result = await run_python_tool(code)
+        # Must return timeout error, not hang
+        assert result["is_error"] is True
+        assert "timed out" in result["content"][0]["text"]
+
+        # Slot must be released after timeout
+        from nous.api.tools import run_python_active_runs
+        await asyncio.sleep(0.5)  # Grace for thread cleanup
+        assert run_python_active_runs() == 0
+
+    async def test_system_exit_is_error(self, run_python_tool):
+        """Script calling sys.exit() must return is_error, not crash.
+
+        P1 Fix 2: SystemExit is a BaseException, so it escapes `except Exception`.
+        Without the BaseException catch, it would propagate through
+        ToolDispatcher.dispatch and crash the API process.
+        """
+        code = """
+import sys
+sys.exit(1)
+"""
+        result = await run_python_tool(code)
+        assert result["is_error"] is True
+        assert "SystemExit" in result["content"][0]["text"]
+
+    async def test_keyboard_interrupt_is_error(self, run_python_tool):
+        """Script raising KeyboardInterrupt must return is_error, not crash.
+
+        P1 Fix 2: KeyboardInterrupt is also a BaseException.
+        """
+        code = """
+raise KeyboardInterrupt("user interrupted")
+"""
+        result = await run_python_tool(code)
+        assert result["is_error"] is True
+        assert "KeyboardInterrupt" in result["content"][0]["text"]

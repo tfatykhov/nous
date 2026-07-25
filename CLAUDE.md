@@ -363,7 +363,8 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_INLINE_SUBTASK_TIMEOUT` | `90` | Default timeout for inline (await_result) subtasks |
 | `NOUS_FRAME_DEFAULT_MODELS` | `{}` | JSON map of frame type to default model (falls back to `NOUS_BACKGROUND_MODEL`) |
 | `NOUS_PROGRAMMATIC_TOOLS_ENABLED` | `true` | Enable run_python tool for client-side code execution |
-| `NOUS_PROGRAMMATIC_TOOLS_TIMEOUT` | `10` | Timeout in seconds for run_python code execution |
+| `NOUS_PROGRAMMATIC_TOOLS_TIMEOUT` | `10` | Timeout in seconds for run_python code execution. Enforced in-thread by a `sys.settrace` deadline hook, so Python-level runaway code (`while True: pass`) is actually interrupted; a blocking C-level call still cannot be interrupted and holds its slot until it returns. |
+| `NOUS_PROGRAMMATIC_TOOLS_MAX_CONCURRENT` | `4` | Max concurrent run_python executions. Excess calls are rejected with an error instead of stacking threads inside the API process. |
 | `NOUS_CONTEXT_WINDOW` | auto | Override model context window size in tokens (0 = auto-detect from model name) |
 | `NOUS_ANTI_HALLUCINATION_PROMPT` | `true` | Inject "don't guess, re-fetch" safety prompt into system context |
 | `NOUS_TOOL_PRUNING_ENABLED` | `true` | Enable 4-tier tool result pruning pipeline |

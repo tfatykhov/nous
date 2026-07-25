@@ -975,6 +975,15 @@ class Settings(BaseSettings):
     # 012.3: Programmatic tool calling
     programmatic_tools_enabled: bool = True
     programmatic_tools_timeout: int = 10
+    programmatic_tools_max_concurrent: int = Field(
+        4,
+        ge=1,
+        description=(
+            "Max concurrent run_python executions. Each run occupies a thread in "
+            "the API process; a run that ignores its deadline (blocking C call) "
+            "keeps its slot until it returns, bounding the blast radius."
+        ),
+    )
 
     # 012.2: Subtask execution guardrails (configurable constants)
     subtask_tool_call_limit: int = 20
