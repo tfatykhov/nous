@@ -3420,11 +3420,32 @@ def create_programmatic_tools(
                     raise ScriptDeadlineExceeded(f"execution timed out ({timeout}s)")
             return _tracer
 
+        # P1 Fix 1: Block sys.settrace bypass (slot leak). Monkey-patch
+        # sys.settrace and sys.setprofile to reinstall our tracer and
+        # then silently ignore the script's call.
+        _original_settrace = sys.settrace
+        _original_setprofile = sys.setprofile
+
+        def _settrace_shim(func):
+            # Reinstall our deadline tracer after the script's call
+            _original_settrace(_tracer)
+
+        def _setprofile_shim(func):
+            # No-op for setprofile, but keep tracer alive
+            pass
+
         def _run() -> None:
             try:
+                # Install our tracer
                 sys.settrace(_tracer)
+                # Replace sys.settrace/setprofile with shims in this thread
+                sys.settrace = _settrace_shim
+                sys.setprofile = _setprofile_shim
                 exec(compile(code, "<nous_script>", "exec"), namespace)
             finally:
+                # Restore original functions
+                sys.settrace = _original_settrace
+                sys.setprofile = _original_setprofile
                 sys.settrace(None)
                 _release_run_slot()
 
@@ -3471,6 +3492,20 @@ def create_programmatic_tools(
             return {
                 "content": [{"type": "text", "text": f"Error: {type(e).__name__}: {e}"}],
                 "is_error": True,
+            }
+        except BaseException as exc:
+            # P1 Fix 2: Translate SystemExit/KeyboardInterrupt to is_error.
+            # ScriptDeadlineExceeded is a BaseException so `except Exception`
+            # can't swallow it. But SystemExit/KeyboardInterrupt are also
+            # BaseException subclasses and would escape past the Exception
+            # catch, propagate through ToolDispatcher.dispatch, and crash
+            # the API process. Catch and translate to is_error.
+            return {
+                "is_error": True,
+                "content": [{
+                    "type": "text",
+                    "text": f"Error: script raised {type(exc).__name__}: {exc}"
+                }],
             }
         finally:
             executor.shutdown(wait=False, cancel_futures=True)

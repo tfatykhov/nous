@@ -740,3 +740,61 @@ class TestRunPythonFrameAccess:
         from nous.api.runner import FRAME_TOOLS
 
         assert "run_python" not in FRAME_TOOLS["initiation"]
+
+
+# ---------------------------------------------------------------------------
+# P1 bug fix tests (settrace bypass + BaseException handling)
+# ---------------------------------------------------------------------------
+
+
+class TestP1Fixes:
+    """Tests for P1 bugs fixed post-PR-575 initial review."""
+
+    async def test_settrace_bypass_blocked(self, run_python_tool):
+        """Script calling sys.settrace(None) then spinning must still timeout.
+
+        P1 Fix 1: Without the shim, settrace(None) uninstalls the deadline
+        hook and the thread spins forever, holding its concurrency slot.
+        """
+        code = """
+import sys
+sys.settrace(None)  # Attempt to bypass deadline tracer
+while True:
+    pass  # Infinite spin
+"""
+        result = await run_python_tool(code)
+        # Must return timeout error, not hang
+        assert result["is_error"] is True
+        assert "timed out" in result["content"][0]["text"]
+
+        # Slot must be released after timeout
+        from nous.api.tools import run_python_active_runs
+        await asyncio.sleep(0.5)  # Grace for thread cleanup
+        assert run_python_active_runs() == 0
+
+    async def test_system_exit_is_error(self, run_python_tool):
+        """Script calling sys.exit() must return is_error, not crash.
+
+        P1 Fix 2: SystemExit is a BaseException, so it escapes `except Exception`.
+        Without the BaseException catch, it would propagate through
+        ToolDispatcher.dispatch and crash the API process.
+        """
+        code = """
+import sys
+sys.exit(1)
+"""
+        result = await run_python_tool(code)
+        assert result["is_error"] is True
+        assert "SystemExit" in result["content"][0]["text"]
+
+    async def test_keyboard_interrupt_is_error(self, run_python_tool):
+        """Script raising KeyboardInterrupt must return is_error, not crash.
+
+        P1 Fix 2: KeyboardInterrupt is also a BaseException.
+        """
+        code = """
+raise KeyboardInterrupt("user interrupted")
+"""
+        result = await run_python_tool(code)
+        assert result["is_error"] is True
+        assert "KeyboardInterrupt" in result["content"][0]["text"]
