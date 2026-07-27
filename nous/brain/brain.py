@@ -1412,7 +1412,7 @@ class Brain:
             # would return an empty graph leg while valid lower-weight
             # neighbors sat just outside the window. Only outcomes actually
             # demoted (factor < 1.0) filter; 1.0 is a legal identity value.
-            if neighbor_type == "decision":
+            if neighbor_type == "decision" and not relation:
                 _demoted_outcomes = [
                     o for o, f in (
                         getattr(self.settings, "decision_outcome_score_factors", {}) or {}
@@ -1497,7 +1497,14 @@ class Brain:
         for r in rows:
             ids_by_type[r.neighbor_type].append(r.neighbor_id)
 
-        descriptions = await self._resolve_node_descriptions(session, ids_by_type)
+        # codex #577 r4: an explicit `relation=` is documented as an override
+        # of retrieval exclusions (see the RETRIEVAL_EXCLUDED_RELATIONS branch
+        # above). neighbors(relation="supersedes") is literally asking for the
+        # superseded endpoint — filtering it would make that query return
+        # nothing. Mirrors _query's explicit-`outcome=`-wins rule.
+        descriptions = await self._resolve_node_descriptions(
+            session, ids_by_type, apply_outcome_filter=not relation,
+        )
 
         # Build results
         # Node types where the content column is declared NOT NULL in models.py
@@ -1555,6 +1562,7 @@ class Brain:
         self,
         session: AsyncSession,
         ids_by_type: dict[str, list[UUID]],
+        apply_outcome_filter: bool = True,
     ) -> dict[UUID, tuple[str, datetime | None]]:
         """Resolve real content + created_at for graph node ids, batched per type.
 
@@ -1605,7 +1613,7 @@ class Brain:
                 o for o, f in (
                     getattr(self.settings, "decision_outcome_score_factors", {}) or {}
                 ).items() if f < 1.0
-            ]
+            ] if apply_outcome_filter else []
             if demoted_outcomes:
                 dec_stmt = dec_stmt.where(
                     func.coalesce(Decision.outcome, "pending").notin_(demoted_outcomes)

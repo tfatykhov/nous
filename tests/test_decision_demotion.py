@@ -334,3 +334,54 @@ def test_batch_resolve_keeps_valid_items_when_one_lacks_lineage():
         ReviewInput(**bad)
     # and a superseded item WITH lineage is fine alongside it
     assert ReviewInput(outcome="superseded", superseded_by=_uuid.uuid4()) is not None
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_explicit_relation_overrides_outcome_filter(db, settings):
+    """codex #577 r4: `_neighbors` documents an explicit `relation=` as an
+    override of retrieval exclusions. neighbors(relation="supersedes") is
+    literally asking for the superseded endpoint — the outcome filter must not
+    strip it, mirroring _query's explicit-`outcome=`-wins rule."""
+    import uuid as _uuid
+
+    from sqlalchemy import text as sqltext
+
+    from nous.brain.brain import Brain
+    from nous.brain.schemas import ReasonInput, RecordInput
+
+    agent_id = f"test-relov-{_uuid.uuid4().hex[:8]}"
+    async with db.session() as s:
+        await s.execute(
+            sqltext("INSERT INTO nous_system.agents (id, name, config) VALUES (:i, 'x', '{}'::jsonb) ON CONFLICT (id) DO NOTHING"),
+            {"i": agent_id},
+        )
+        await s.commit()
+    st = settings.model_copy(update={
+        "agent_id": agent_id,
+        "decision_outcome_score_factors": {"superseded": 0.3, "noise": 0.1},
+    })
+    brain = Brain(database=db, settings=st)
+    try:
+        def _rec(desc):
+            return RecordInput(description=desc, confidence=0.9, category="process",
+                               stakes="medium", reasons=[ReasonInput(type="analysis", text="t")])
+        cur = await brain.record(_rec("Current approach for the relation override probe"))
+        old = await brain.record(_rec("Older approach for the relation override probe"))
+        await brain.review(old.id, outcome="superseded", superseded_by=cur.id)
+        async with db.session() as s:
+            await s.execute(sqltext(
+                "INSERT INTO brain.graph_edges (agent_id, source_id, source_type, target_id, target_type, relation, weight) "
+                "VALUES (:a, :src, 'decision', :tgt, 'decision', 'supersedes', 1.0)"),
+                {"a": agent_id, "src": str(cur.id), "tgt": str(old.id)})
+            await s.commit()
+
+        explicit = await brain.neighbors(cur.id, "decision", relation="supersedes")
+        assert any(str(n.id) == str(old.id) for n in explicit), (
+            "explicit relation= must surface the superseded endpoint"
+        )
+        # unfiltered fan-out still hides it
+        unfiltered = await brain.neighbors(cur.id, "decision")
+        assert not any(str(n.id) == str(old.id) for n in unfiltered)
+    finally:
+        await brain.close()
