@@ -385,3 +385,58 @@ async def test_explicit_relation_overrides_outcome_filter(db, settings):
         assert not any(str(n.id) == str(old.id) for n in unfiltered)
     finally:
         await brain.close()
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_untyped_fanout_filters_decisions_but_keeps_other_types(db, settings):
+    """codex #577 r5: Stage 3's one-hop calls neighbors() with NO neighbor_type,
+    which skipped the typed pushdown — the filter then ran only in the resolver,
+    after the cap. The predicate must apply to the untyped fan-out too, and must
+    be type-aware so non-decision neighbors are unaffected."""
+    import uuid as _uuid
+
+    from sqlalchemy import text as sqltext
+
+    from nous.brain.brain import Brain
+    from nous.brain.schemas import ReasonInput, RecordInput
+
+    agent_id = f"test-untyped-{_uuid.uuid4().hex[:8]}"
+    async with db.session() as s:
+        await s.execute(
+            sqltext("INSERT INTO nous_system.agents (id, name, config) VALUES (:i, 'x', '{}'::jsonb) ON CONFLICT (id) DO NOTHING"),
+            {"i": agent_id},
+        )
+        await s.commit()
+    st = settings.model_copy(update={
+        "agent_id": agent_id,
+        "decision_outcome_score_factors": {"superseded": 0.3, "noise": 0.1},
+    })
+    brain = Brain(database=db, settings=st)
+    try:
+        def _rec(desc):
+            return RecordInput(description=desc, confidence=0.9, category="process",
+                               stakes="medium", reasons=[ReasonInput(type="analysis", text="t")])
+        hub = await brain.record(_rec("Hub decision for the untyped fan-out probe"))
+        good = await brain.record(_rec("Undemoted neighbor for the untyped fan-out probe"))
+        bad = await brain.record(_rec("Noise neighbor for the untyped fan-out probe"))
+        await brain.review(bad.id, outcome="noise")
+        fact_id = _uuid.uuid4()
+        async with db.session() as s:
+            await s.execute(sqltext(
+                "INSERT INTO heart.facts (id, agent_id, content, category, confidence, active) "
+                "VALUES (:i, :a, 'A fact neighbor for the untyped fan-out probe', 'technical', 1.0, true)"),
+                {"i": str(fact_id), "a": agent_id})
+            for tgt, ttype in ((good.id, "decision"), (bad.id, "decision"), (fact_id, "fact")):
+                await s.execute(sqltext(
+                    "INSERT INTO brain.graph_edges (agent_id, source_id, source_type, target_id, target_type, relation, weight) "
+                    "VALUES (:a, :src, 'decision', :tgt, :tt, 'related_to', 1.0)"),
+                    {"a": agent_id, "src": str(hub.id), "tgt": str(tgt), "tt": ttype})
+            await s.commit()
+
+        got = {str(n.id) for n in await brain.neighbors(hub.id, "decision")}
+        assert str(good.id) in got, "undemoted decision neighbor must survive"
+        assert str(bad.id) not in got, "noise decision neighbor must be filtered"
+        assert str(fact_id) in got, "non-decision neighbor must be unaffected by the predicate"
+    finally:
+        await brain.close()
