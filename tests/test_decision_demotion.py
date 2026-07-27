@@ -295,3 +295,21 @@ def test_graph_exclusion_ignores_identity_factors():
     demoted_outcomes = [o for o, f in factors.items() if f < 1.0]
     assert demoted_outcomes == ["noise"]
     assert "superseded" not in demoted_outcomes
+
+
+def test_rrf_merge_return_limit_can_cover_full_candidate_set():
+    """codex #577 r3: a FIXED expansion (e.g. 3x) still starves when more than
+    that many demoted rows outrank the first undemoted one — the caller must be
+    able to re-rank the complete fetched set. Scores stay identical either way.
+    """
+    import uuid as _uuid
+
+    from nous.heart.search import _rrf_merge
+
+    vec = [(_uuid.uuid4(), 0.9 - i * 0.02) for i in range(12)]
+    kw = [(vec[0][0], 0.5)]
+    full = _rrf_merge(vec, kw, k=60, vector_weight=0.7, limit=1,
+                      return_limit=len(vec) + len(kw))
+    narrow = _rrf_merge(vec, kw, k=60, vector_weight=0.7, limit=1)
+    assert len(full) == 12          # everything fetched is re-rankable
+    assert narrow == full[:1]       # penalty_rank unchanged -> identical scores

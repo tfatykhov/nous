@@ -823,16 +823,21 @@ class Brain:
             k_result = await session.execute(keyword_sql, params)
             keyword_results = [(row.id, float(row.score)) for row in k_result.all()]
 
-            # codex #577 r1: when demotion is active we must consider a WIDER
-            # candidate set than `limit` — otherwise a superseded row occupies
-            # a top-`limit` slot, gets demoted, and the better undemoted row it
-            # displaced was never fetched at all. `return_limit` widens the
-            # returned set WITHOUT touching `limit`, which defines
-            # `penalty_rank = limit + 1` (inflating it would silently rescore
-            # every single-list doc). Truncated back to `limit` after demotion.
+            # codex #577 r1/r3: when demotion is active we must re-rank the
+            # COMPLETE fetched candidate set — otherwise a demoted row occupies
+            # a top-`limit` slot and the better undemoted row it displaced was
+            # never considered. A fixed 3x window still starves when more than
+            # 3x demoted rows outrank the first undemoted one, so return
+            # everything the SQL legs fetched (bounded by `limit_expanded`) and
+            # truncate after the re-rank. `return_limit` widens the RETURN only:
+            # `limit` still defines `penalty_rank = limit + 1`, and inflating
+            # that would silently rescore every single-list doc (the #574 trap).
             merged = _rrf_merge(
                 vector_results, keyword_results, rrf_k, vw, limit,
-                return_limit=(limit * 3) if _demotion_active else None,
+                return_limit=(
+                    len(vector_results) + len(keyword_results)
+                    if _demotion_active else None
+                ),
             )
         else:
             # Keyword-only fallback (P2-14: weight=1.0)
