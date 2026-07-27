@@ -462,8 +462,15 @@ def _format_pipeline_text(
                 # F079 P1: include the abstract pattern when present (B-pull-thin).
                 pattern = dec.metadata.get("pattern")
                 pattern_str = f" | pattern: {pattern}" if pattern else ""
+                # 2026-07-27: render the outcome so recall_deep matches the
+                # pre-turn section (context.py _format_decisions already emits
+                # "[outcome] desc"). Without this a superseded/failed decision
+                # reached the LLM through this tool with NO status at all —
+                # the metadata key alone had no consumer (branch-review P1-1).
+                outcome = dec.metadata.get("outcome")
+                outcome_str = f"[{outcome}] " if outcome else ""
                 results_text.append(
-                    f"{i}. {dec.description} | {category} | {stakes} | "
+                    f"{i}. {outcome_str}{dec.description} | {category} | {stakes} | "
                     f"confidence: {confidence:.2f}{pattern_str} "
                     f"(id: {dec.id}{score_str})"
                 )

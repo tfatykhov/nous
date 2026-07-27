@@ -212,3 +212,34 @@ def test_decisions_to_pipeline_carries_outcome(outcome):
     results = _decisions_to_pipeline([_summary(outcome)])
 
     assert results[0].metadata["outcome"] == outcome
+
+
+def test_recall_deep_renders_decision_outcome():
+    """branch-review P1-1: the metadata['outcome'] key added for recall_deep had
+    NO consumer — the rendered line showed no status, so a superseded decision
+    reached the LLM unlabeled (the pre-turn path already renders '[outcome]').
+    Pin the rendered prefix in both directions."""
+    import uuid as _uuid
+
+    from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
+    from nous.api.tools import _format_pipeline_text
+
+    def _dec(desc, outcome):
+        return PipelineResult(
+            id=_uuid.uuid4(),
+            type="decision",
+            description=desc,
+            score=0.5,
+            source="brain",
+            metadata={"category": "process", "stakes": "medium",
+                      "confidence": 0.9, "raw_score": 0.5, "outcome": outcome},
+        )
+
+    out = _format_pipeline_text([_dec("Recommended Portugal", "superseded")],
+                                PipelineStats(), ["decision"])
+    assert "[superseded] Recommended Portugal" in out
+
+    out_none = _format_pipeline_text([_dec("Recommended Portugal", None)],
+                                     PipelineStats(), ["decision"])
+    assert "[superseded]" not in out_none
+    assert "Recommended Portugal" in out_none
