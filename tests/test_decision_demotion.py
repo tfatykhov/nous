@@ -9,10 +9,14 @@ Measured prod evidence being encoded here (2026-07-27 probe of
 rows ranked #1/#2 at .931/.908 above the current one at #3 (.887).
 """
 
+import uuid
+from datetime import UTC, datetime
+
 import pytest
 from pydantic import ValidationError
 
 from nous.brain.brain import apply_outcome_demotion
+from nous.brain.schemas import DecisionSummary
 from nous.config import Settings
 
 
@@ -179,3 +183,32 @@ def test_settings_accepts_boundary_one():
     assert Settings(
         decision_outcome_score_factors={"superseded": 1.0}
     ).decision_outcome_score_factors == {"superseded": 1.0}
+
+
+# ---------------------------------------------------------------------------
+# recall_deep outcome visibility (Task 2)
+# ---------------------------------------------------------------------------
+
+
+def _summary(outcome: str) -> DecisionSummary:
+    return DecisionSummary(
+        id=uuid.uuid4(),
+        description="a decision",
+        confidence=0.8,
+        category="process",
+        stakes="medium",
+        outcome=outcome,
+        score=0.5,
+        created_at=datetime(2026, 7, 27, tzinfo=UTC),
+    )
+
+
+@pytest.mark.parametrize("outcome", ["superseded", "noise", "failure", "pending"])
+def test_decisions_to_pipeline_carries_outcome(outcome):
+    """recall_deep rendered decisions with NO outcome at all, so a superseded
+    decision reached the LLM unlabeled (correctness-P2-3)."""
+    from nous.api.retrieval_pipeline import _decisions_to_pipeline
+
+    results = _decisions_to_pipeline([_summary(outcome)])
+
+    assert results[0].metadata["outcome"] == outcome

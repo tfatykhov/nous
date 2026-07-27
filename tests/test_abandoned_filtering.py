@@ -215,6 +215,67 @@ async def test_explicit_outcome_request_is_not_demoted(brain, session):
     assert demoted_score == pytest.approx(explicit_score * factor)
 
 
+@pytest.mark.postgres_only
+async def test_graph_resolver_filters_demoted_outcomes(brain, settings, db, session):
+    """Graph re-entry is a FILTER, not a demotion.
+
+    Superseded/noise decisions re-enter through ``_resolve_node_descriptions``
+    (Stage 3+4), which returns ``(description, created_at)`` — there is no
+    score to demote — so the demotion set is excluded outright there.
+    """
+    stale = Decision(
+        agent_id=brain.agent_id,
+        description="Superseded graph-path decision",
+        confidence=0.8,
+        category="process",
+        stakes="medium",
+        outcome="superseded",
+    )
+    noisy = Decision(
+        agent_id=brain.agent_id,
+        description="Noise graph-path decision",
+        confidence=0.8,
+        category="process",
+        stakes="medium",
+        outcome="noise",
+    )
+    current = Decision(
+        agent_id=brain.agent_id,
+        description="Current graph-path decision",
+        confidence=0.8,
+        category="process",
+        stakes="medium",
+        outcome="success",
+    )
+    pending = Decision(
+        agent_id=brain.agent_id,
+        description="Unreviewed graph-path decision",
+        confidence=0.8,
+        category="process",
+        stakes="medium",
+        outcome=None,
+    )
+    session.add_all([stale, noisy, current, pending])
+    await session.flush()
+
+    ids = {"decision": [stale.id, noisy.id, current.id, pending.id]}
+
+    resolved = await brain._resolve_node_descriptions(session, ids)
+    assert stale.id not in resolved
+    assert noisy.id not in resolved
+    assert current.id in resolved
+    # A NULL outcome is 'pending' — not in the demotion set, so it survives.
+    assert pending.id in resolved
+
+    # Same kill switch as the query path: `{}` restores today's behavior.
+    brain_off = Brain(
+        database=db,
+        settings=settings.model_copy(update={"decision_outcome_score_factors": {}}),
+    )
+    resolved_off = await brain_off._resolve_node_descriptions(session, ids)
+    assert {stale.id, noisy.id, current.id, pending.id} <= set(resolved_off)
+
+
 # ---------------------------------------------------------------------------
 # Fix 1b: Calibration excludes abandoned from Brier score
 # ---------------------------------------------------------------------------

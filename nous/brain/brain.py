@@ -1534,8 +1534,17 @@ class Brain:
         # decisions (outcome='failure' AND confidence=0.0 — codex P2 round 8,
         # PR #555) so graph traversal cannot reintroduce noise decisions
         # that normal brain search hides.
+        #
+        # Demoted outcomes (2026-07-27) are FILTERED here rather than demoted.
+        # The asymmetry with _query is deliberate: this resolver returns
+        # (description, created_at) tuples — there is no score to multiply, and
+        # plumbing `outcome` through NeighborResult to every graph consumer is
+        # disproportionate. Gated on the same setting, so `{}` restores today's
+        # behavior on BOTH paths at once. NULL outcome normalizes to 'pending'
+        # exactly as _query does (COALESCE keeps the predicate NULL-safe —
+        # a bare NOT IN would silently drop every unreviewed decision).
         if ids_by_type.get("decision"):
-            dec_result = await session.execute(
+            dec_stmt = (
                 select(Decision.id, Decision.description, Decision.created_at)
                 .where(Decision.id.in_(ids_by_type["decision"]))
                 .where(Decision.agent_id == self.agent_id)
@@ -1543,6 +1552,14 @@ class Brain:
                     ~((Decision.outcome == "failure") & (Decision.confidence == 0.0))
                 )
             )
+            demoted_outcomes = list(
+                getattr(self.settings, "decision_outcome_score_factors", {}) or {}
+            )
+            if demoted_outcomes:
+                dec_stmt = dec_stmt.where(
+                    func.coalesce(Decision.outcome, "pending").notin_(demoted_outcomes)
+                )
+            dec_result = await session.execute(dec_stmt)
             for d in dec_result.all():
                 descriptions[d.id] = (d.description, d.created_at)
 
