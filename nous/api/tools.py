@@ -1538,10 +1538,25 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             outcome: success, partial, failure, noise, or superseded.
                 noise/superseded are excluded from calibration.
             resolution_note: Evidence/why — the resolution trail.
-            superseded_by: UUID of the replacing decision (outcome=superseded).
+            superseded_by: UUID of the replacing decision. Required when
+                outcome=superseded.
         """
         if _is_background:
             return {"is_error": True, "content": [{"type": "text", "text": _BG_BLOCK_MSG}]}
+        # A supersession without a successor is a lineage dead end: retrieval
+        # can label the row `[superseded]` but cannot point at what replaced
+        # it. Validated here, not as a JSON-schema conditional — the dispatcher
+        # only enforces `required` keys flatly.
+        if outcome == "superseded" and not superseded_by:
+            return {
+                "is_error": True,
+                "content": [{"type": "text", "text": (
+                    "Error: outcome='superseded' requires superseded_by — the UUID of the "
+                    "decision that replaces this one. Record the replacement decision first, "
+                    "then resolve this one with its ID. If nothing replaced it, use a "
+                    "different outcome (e.g. 'noise' or 'failure')."
+                )}],
+            }
         try:
             detail = await brain.review(
                 UUID(decision_id),
@@ -1706,6 +1721,8 @@ _RESOLVE_DECISION_SCHEMA: dict[str, Any] = {
         "Persist an outcome on an existing decision, closing the calibration "
         "loop. Use 'noise' for sweep/tick artifacts and 'superseded' when a "
         "later decision replaced this one (both excluded from calibration). "
+        "'superseded' REQUIRES superseded_by — record the replacing decision "
+        "first, then pass its UUID; without it the call is rejected. "
         "Always include a resolution_note as the evidence trail."
     ),
     "properties": {
@@ -1716,7 +1733,13 @@ _RESOLVE_DECISION_SCHEMA: dict[str, Any] = {
             "enum": ["success", "partial", "failure", "noise", "superseded"],
         },
         "resolution_note": {"type": "string", "description": "Evidence / why — the resolution trail"},
-        "superseded_by": {"type": "string", "description": "UUID of the replacing decision (when outcome=superseded)"},
+        "superseded_by": {
+            "type": "string",
+            "description": (
+                "UUID of the decision that replaces this one. REQUIRED when "
+                "outcome=superseded (the call is rejected without it); ignored otherwise."
+            ),
+        },
     },
     "required": ["decision_id", "outcome"],
 }
