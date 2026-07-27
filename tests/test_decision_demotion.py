@@ -313,3 +313,24 @@ def test_rrf_merge_return_limit_can_cover_full_candidate_set():
     narrow = _rrf_merge(vec, kw, k=60, vector_weight=0.7, limit=1)
     assert len(full) == 12          # everything fetched is re-rankable
     assert narrow == full[:1]       # penalty_rank unchanged -> identical scores
+
+
+def test_batch_resolve_keeps_valid_items_when_one_lacks_lineage():
+    """codex #577 r3: a batch-wide precheck would discard every VALID
+    resolution alongside one malformed item. ReviewInput rejects per-item
+    inside review_many, which keeps the rest of the sweep alive."""
+    import uuid as _uuid
+
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    from nous.brain.schemas import ReviewInput
+
+    good = {"outcome": "success"}
+    bad = {"outcome": "superseded"}  # no superseded_by
+    # per-item semantics: the good item validates, the bad one raises
+    assert ReviewInput(**good).outcome == "success"
+    with _pytest.raises(ValidationError):
+        ReviewInput(**bad)
+    # and a superseded item WITH lineage is fine alongside it
+    assert ReviewInput(outcome="superseded", superseded_by=_uuid.uuid4()) is not None

@@ -1406,6 +1406,24 @@ class Brain:
                 _active_fact = select(Fact.id).where(Fact.active == True)  # noqa: E712
                 source_q = source_q.where(GraphEdge.target_id.in_(_active_fact))
                 target_q = target_q.where(GraphEdge.source_id.in_(_active_fact))
+            # codex #577 r3: same pushdown for demoted decision outcomes. The
+            # resolver filters them, but it runs AFTER this LIMIT — so a node
+            # with more than `limit*3` higher-weight superseded/noise neighbors
+            # would return an empty graph leg while valid lower-weight
+            # neighbors sat just outside the window. Only outcomes actually
+            # demoted (factor < 1.0) filter; 1.0 is a legal identity value.
+            if neighbor_type == "decision":
+                _demoted_outcomes = [
+                    o for o, f in (
+                        getattr(self.settings, "decision_outcome_score_factors", {}) or {}
+                    ).items() if f < 1.0
+                ]
+                if _demoted_outcomes:
+                    _ok_dec = select(Decision.id).where(
+                        func.coalesce(Decision.outcome, "pending").notin_(_demoted_outcomes)
+                    )
+                    source_q = source_q.where(GraphEdge.target_id.in_(_ok_dec))
+                    target_q = target_q.where(GraphEdge.source_id.in_(_ok_dec))
 
         # F080: deduplicate to ONE row per neighbor (the max-weight edge) and cap,
         # all in SQL via a window function, so the dedup happens BEFORE the cap

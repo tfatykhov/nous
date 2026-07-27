@@ -1592,24 +1592,12 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         if _is_background:
             return {"is_error": True, "content": [{"type": "text", "text": _BG_BLOCK_MSG}]}
         try:
-            # codex #577 r1: the batch sweep bypassed the single-resolve
-            # lineage requirement, so a sweep could still create the
-            # outcome='superseded' + superseded_by=NULL rows this work exists
-            # to prevent (9 of 24 such rows in prod). Same rule, same message.
-            missing_lineage = [
-                str(r.get("decision_id"))
-                for r in resolutions
-                if r.get("outcome") == "superseded" and not r.get("superseded_by")
-            ]
-            if missing_lineage:
-                return {
-                    "is_error": True,
-                    "content": [{"type": "text", "text": (
-                        "superseded_by is required when outcome='superseded' — "
-                        "pass the UUID of the decision that replaces each of: "
-                        + ", ".join(missing_lineage)
-                    )}],
-                }
+            # codex #577 r3: NO batch-wide lineage precheck here. ReviewInput's
+            # validator (shared by every entry point) rejects a missing-lineage
+            # item inside review_many, which reports it as a per-item failure
+            # and keeps the rest of the sweep alive — the documented contract.
+            # A precheck that aborted the whole batch would discard every valid
+            # resolution alongside the one malformed item.
             items = [
                 {
                     "decision_id": r.get("decision_id"),
