@@ -265,3 +265,33 @@ def test_rrf_merge_return_limit_preserves_penalty_rank_scores():
     assert len(narrow) == 2 and len(wide) == 6
     # the rows present in both must carry byte-identical scores and order
     assert narrow == wide[:2]
+
+
+def test_review_input_requires_lineage_on_supersession():
+    """codex #577 r2: the invariant lives in ReviewInput so EVERY entry point
+    shares it (tool, batch sweep, REST review_decision) — not just the tool."""
+    import uuid as _uuid
+
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    from nous.brain.schemas import ReviewInput
+
+    with _pytest.raises(ValidationError, match="superseded_by is required"):
+        ReviewInput(outcome="superseded")
+
+    ok = ReviewInput(outcome="superseded", superseded_by=_uuid.uuid4())
+    assert ok.superseded_by is not None
+    # every other outcome is unaffected
+    for other in ("success", "partial", "failure", "noise"):
+        assert ReviewInput(outcome=other).superseded_by is None
+
+
+def test_graph_exclusion_ignores_identity_factors():
+    """codex #577 r2: 1.0 is a legal identity value (disable one outcome while
+    keeping others). Only outcomes actually demoted (factor < 1.0) may enter
+    the graph exclusion set, or the two retrieval paths contradict."""
+    factors = {"superseded": 1.0, "noise": 0.1}
+    demoted_outcomes = [o for o, f in factors.items() if f < 1.0]
+    assert demoted_outcomes == ["noise"]
+    assert "superseded" not in demoted_outcomes

@@ -1573,9 +1573,16 @@ class Brain:
                     ~((Decision.outcome == "failure") & (Decision.confidence == 0.0))
                 )
             )
-            demoted_outcomes = list(
-                getattr(self.settings, "decision_outcome_score_factors", {}) or {}
-            )
+            # codex #577 r2: only outcomes actually DEMOTED (factor < 1.0)
+            # belong in the exclusion set. 1.0 is a legal identity value an
+            # operator uses to disable one outcome while keeping others — key
+            # presence alone would exclude it here while the query path left
+            # its score untouched, i.e. contradictory behavior across paths.
+            demoted_outcomes = [
+                o for o, f in (
+                    getattr(self.settings, "decision_outcome_score_factors", {}) or {}
+                ).items() if f < 1.0
+            ]
             if demoted_outcomes:
                 dec_stmt = dec_stmt.where(
                     func.coalesce(Decision.outcome, "pending").notin_(demoted_outcomes)

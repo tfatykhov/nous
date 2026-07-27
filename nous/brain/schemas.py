@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # Type aliases using Literal for compile-time validation
 CategoryType = Literal["architecture", "process", "tooling", "security", "integration"]
@@ -68,6 +68,24 @@ class ReviewInput(BaseModel):
     result: str | None = None
     reviewer: str | None = None
     superseded_by: UUID | None = None
+
+    @model_validator(mode="after")
+    def _require_lineage_on_supersession(self) -> "ReviewInput":
+        """A supersession without its successor is an orphan.
+
+        codex #577 r2: enforcing this in the tool wrapper alone left the REST
+        `review_decision` endpoint (which never even read `superseded_by`) and
+        any future caller free to mint `outcome='superseded'` +
+        `superseded_by=NULL` rows — 9 of 24 such rows in prod, and the reason
+        the reported "superseded decisions outrank the current one" bug could
+        not be fixed by lineage. Every entry point shares this choke point.
+        """
+        if self.outcome == "superseded" and self.superseded_by is None:
+            raise ValueError(
+                "superseded_by is required when outcome='superseded' — pass the "
+                "UUID of the decision that replaces this one"
+            )
+        return self
 
 
 class BridgeInfo(BaseModel):
