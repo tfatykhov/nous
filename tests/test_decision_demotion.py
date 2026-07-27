@@ -244,6 +244,18 @@ def test_recall_deep_renders_decision_outcome():
     assert "[superseded]" not in out_none
     assert "Recommended Portugal" in out_none
 
+    # "pending" is the default state and carries no information — suppressed,
+    # which also keeps the F051 byte-identity snapshot intact.
+    out_pending = _format_pipeline_text([_dec("Recommended Portugal", "pending")],
+                                        PipelineStats(), ["decision"])
+    assert "[pending]" not in out_pending
+    assert "Recommended Portugal" in out_pending
+
+    # an informative outcome still renders
+    out_fail = _format_pipeline_text([_dec("Recommended Portugal", "failure")],
+                                     PipelineStats(), ["decision"])
+    assert "[failure] Recommended Portugal" in out_fail
+
 
 def test_rrf_merge_return_limit_preserves_penalty_rank_scores():
     """codex #577 r1: widening the candidate set must NOT change scores.

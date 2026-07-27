@@ -468,7 +468,14 @@ def _format_pipeline_text(
                 # reached the LLM through this tool with NO status at all —
                 # the metadata key alone had no consumer (branch-review P1-1).
                 outcome = dec.metadata.get("outcome")
-                outcome_str = f"[{outcome}] " if outcome else ""
+                # "pending" is the default (not-yet-reviewed) state and carries
+                # no information, so it is suppressed here — every outcome the
+                # reader acts on (superseded / noise / failure / success /
+                # partial) still renders. This deliberately differs from the
+                # pre-turn `_format_decisions`, which prefixes unconditionally;
+                # suppressing the no-op label also keeps the F051 byte-identity
+                # snapshot (whose fixtures are all pending) intact.
+                outcome_str = f"[{outcome}] " if outcome and outcome != "pending" else ""
                 results_text.append(
                     f"{i}. {outcome_str}{dec.description} | {category} | {stakes} | "
                     f"confidence: {confidence:.2f}{pattern_str} "
