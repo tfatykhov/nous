@@ -90,7 +90,8 @@ class DecisionSummary(BaseModel):
 
     id: UUID
     description: str
-    confidence: float
+    confidence: float  # F058-calibrated
+    confidence_raw: float | None = None  # As the agent stated it; None pre-F058
     category: CategoryType
     stakes: StakesType
     outcome: OutcomeType
