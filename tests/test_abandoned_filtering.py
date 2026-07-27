@@ -124,6 +124,98 @@ async def test_query_returns_abandoned_when_outcome_explicitly_requested(brain, 
 
 
 # ---------------------------------------------------------------------------
+# Outcome demotion e2e (2026-07-27 decision-retrieval-quality plan)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_query_demotes_superseded_below_current(brain, settings, db, session):
+    """A higher-scoring superseded decision sinks below a lower-scoring success.
+
+    Reproduces the reported symptom (superseded vacation recommendations
+    rendered above the current one) end-to-end through Brain._query's
+    keyword path, and pins that the kill switch (`{}`) preserves the old
+    order.
+    """
+    query_text = "Patagonia kayaking expedition"
+
+    stale = Decision(
+        agent_id=brain.agent_id,
+        # Scores just above the current row (measured keyword-only:
+        # .143 vs .091), mirroring the small prod gap of .931 vs .887.
+        description=(
+            "Recommend the Patagonia kayaking expedition for the "
+            "Patagonia kayaking trip"
+        ),
+        confidence=0.8,
+        category="process",
+        stakes="medium",
+        outcome="superseded",
+    )
+    current = Decision(
+        agent_id=brain.agent_id,
+        description="Book the Patagonia kayaking expedition for September",
+        confidence=0.8,
+        category="process",
+        stakes="medium",
+        outcome="success",
+    )
+    session.add_all([stale, current])
+    await session.flush()
+
+    # Kill switch: `{}` preserves today's behavior — the superseded row wins.
+    brain_off = Brain(
+        database=db,
+        settings=settings.model_copy(update={"decision_outcome_score_factors": {}}),
+    )
+    off = await brain_off.query(query_text, session=session)
+    off_ids = [r.id for r in off]
+    assert stale.id in off_ids and current.id in off_ids
+    assert off_ids.index(stale.id) < off_ids.index(current.id), (
+        "premise broken: the superseded row must outrank the current one "
+        "before demotion, otherwise this test proves nothing"
+    )
+    stale_raw = next(r.score for r in off if r.id == stale.id)
+
+    # Factors on (the shipped default): demoted AND re-sorted, never dropped.
+    on = await brain.query(query_text, session=session)
+    on_ids = [r.id for r in on]
+    assert stale.id in on_ids, "demotion must not drop the row"
+    assert on_ids.index(current.id) < on_ids.index(stale.id)
+
+    stale_demoted = next(r.score for r in on if r.id == stale.id)
+    factor = brain.settings.decision_outcome_score_factors["superseded"]
+    assert stale_demoted == pytest.approx(stale_raw * factor)
+
+
+@pytest.mark.postgres_only
+async def test_explicit_outcome_request_is_not_demoted(brain, session):
+    """An explicit `outcome=` wins — same rule as the abandoned suppression."""
+    query_text = "Patagonia kayaking expedition explicit outcome"
+
+    stale = Decision(
+        agent_id=brain.agent_id,
+        description="Superseded Patagonia kayaking expedition explicit outcome plan",
+        confidence=0.8,
+        category="process",
+        stakes="medium",
+        outcome="superseded",
+    )
+    session.add(stale)
+    await session.flush()
+
+    demoted = await brain.query(query_text, session=session)
+    demoted_score = next(r.score for r in demoted if r.id == stale.id)
+
+    explicit = await brain.query(query_text, outcome="superseded", session=session)
+    explicit_score = next(r.score for r in explicit if r.id == stale.id)
+
+    factor = brain.settings.decision_outcome_score_factors["superseded"]
+    assert explicit_score > demoted_score
+    assert demoted_score == pytest.approx(explicit_score * factor)
+
+
+# ---------------------------------------------------------------------------
 # Fix 1b: Calibration excludes abandoned from Brier score
 # ---------------------------------------------------------------------------
 

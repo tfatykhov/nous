@@ -63,6 +63,51 @@ _NOISE_KEYWORDS = frozenset({
 })
 
 
+def apply_outcome_demotion(
+    scored: list[tuple[object, str | None, float | None]],
+    factors: dict[str, float],
+) -> list[tuple[object, float | None]]:
+    """Multiply each score by its outcome's factor, then stable-sort desc.
+
+    Returns (item, new_score) pairs. Empty ``factors`` is an exact no-op:
+    no multiplication AND no re-sort, so merged order is preserved
+    byte-identically (the kill switch).
+
+    Multiplicative because _query returns TWO score spaces (normalized RRF,
+    and raw ts_rank_cd on the keyword-only fallback) — a scale-free operator
+    is correct in both. None scores pass through untouched and sort last.
+
+    THE RE-SORT IS THE FEATURE: ``_query`` builds its summaries preserving
+    search order and nothing downstream re-sorts (``_apply_staleness_penalty``
+    returns input order; ``_enforce_diversity`` / ``_apply_relevance_filter`` /
+    ``_format_decisions`` all iterate in order). A multiplier without the
+    re-sort would be a no-op on the pre-turn path — and worse than nothing,
+    because a low score injected mid-list desynchronizes
+    ``_apply_relevance_filter``'s monotonic ``prev_score`` walk.
+
+    Module level (not a method) so it is unit-testable without a database:
+    ``Brain._query`` needs Postgres FTS and cannot run on the sqlite backend
+    the test suite defaults to.
+    """
+    if not factors:
+        return [(item, score) for item, _, score in scored]
+
+    demoted: list[tuple[object, float | None]] = []
+    for item, outcome, score in scored:
+        # The column is nullable — a NULL outcome means "pending".
+        factor = factors.get(outcome or "pending")
+        if factor is not None and score is not None:
+            score = score * factor
+        demoted.append((item, score))
+
+    # Stable sort, descending, None last. sorted() is stable, so equal scores
+    # (including ties created by the multiplication) keep their merged order.
+    return sorted(
+        demoted,
+        key=lambda pair: (pair[1] is None, -pair[1] if pair[1] is not None else 0.0),
+    )
+
+
 class Brain:
     """Decision intelligence organ for Nous agents."""
 
@@ -805,11 +850,32 @@ class Brain:
             tags_by_id[tag_row.decision_id].append(tag_row.tag)
 
         # Build results preserving search order
+        ordered = [
+            (d, d.outcome, scores_by_id.get(d.id))
+            for d in (decisions.get(did) for did in decision_ids)
+            if d is not None
+        ]
+
+        # Outcome demotion + re-sort (2026-07-27). Superseded/noise decisions
+        # were outranking the current one in "## Related Decisions". Skipped
+        # when the caller asked for a specific outcome — mirrors the abandoned
+        # suppression `else` branch above: an explicit request wins.
+        factors = getattr(self.settings, "decision_outcome_score_factors", {}) or {}
+        if factors and not outcome:
+            n_demoted = sum(
+                1 for _, o, s in ordered if s is not None and (o or "pending") in factors
+            )
+            demoted = apply_outcome_demotion(ordered, factors)
+            if n_demoted:
+                logger.debug(
+                    "brain._query: demoted %d/%d decisions by outcome (factors=%s)",
+                    n_demoted, len(ordered), factors,
+                )
+        else:
+            demoted = [(d, s) for d, _, s in ordered]
+
         summaries = []
-        for did in decision_ids:
-            d = decisions.get(did)
-            if d is None:
-                continue
+        for d, score in demoted:
             summaries.append(
                 DecisionSummary(
                     id=d.id,
@@ -820,7 +886,7 @@ class Brain:
                     outcome=d.outcome or "pending",
                     pattern=d.pattern,
                     tags=tags_by_id.get(d.id, []),
-                    score=scores_by_id.get(d.id),
+                    score=score,
                     superseded_by=d.superseded_by,
                     created_at=d.created_at,
                 )
@@ -1948,6 +2014,9 @@ class Brain:
             id=decision.id,
             description=decision.description,
             confidence=decision.confidence,
+            # F058: the auto-reviewer thresholds on the agent's own claim, not
+            # the calibrated value (see ErrorSignal).
+            confidence_raw=decision.confidence_raw,
             category=decision.category,
             stakes=decision.stakes,
             outcome=decision.outcome or "pending",
