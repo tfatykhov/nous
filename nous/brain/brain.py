@@ -767,6 +767,13 @@ class Brain:
                     AND db.{bridge_side} ILIKE '%' || :query_text || '%'
             """
 
+        # Outcome demotion (2026-07-27) is active only when factors are
+        # configured AND the caller did not ask for a specific outcome. Resolved
+        # here because it widens the candidate fetch (codex #577 r1) — see the
+        # _rrf_merge return_limit and the keyword-only LIMIT below.
+        _factors = getattr(self.settings, "decision_outcome_score_factors", {}) or {}
+        _demotion_active = bool(_factors) and not outcome
+
         params: dict = {
             "agent_id": self.agent_id,
             "query_text": query_text,
@@ -816,7 +823,17 @@ class Brain:
             k_result = await session.execute(keyword_sql, params)
             keyword_results = [(row.id, float(row.score)) for row in k_result.all()]
 
-            merged = _rrf_merge(vector_results, keyword_results, rrf_k, vw, limit)
+            # codex #577 r1: when demotion is active we must consider a WIDER
+            # candidate set than `limit` — otherwise a superseded row occupies
+            # a top-`limit` slot, gets demoted, and the better undemoted row it
+            # displaced was never fetched at all. `return_limit` widens the
+            # returned set WITHOUT touching `limit`, which defines
+            # `penalty_rank = limit + 1` (inflating it would silently rescore
+            # every single-list doc). Truncated back to `limit` after demotion.
+            merged = _rrf_merge(
+                vector_results, keyword_results, rrf_k, vw, limit,
+                return_limit=(limit * 3) if _demotion_active else None,
+            )
         else:
             # Keyword-only fallback (P2-14: weight=1.0)
             sql = text(f"""
@@ -828,7 +845,7 @@ class Brain:
                 WHERE d.search_tsv @@ plainto_tsquery('english', :query_text)
                     {filter_clauses}
                 ORDER BY score DESC
-                LIMIT :limit
+                LIMIT {':limit_expanded' if _demotion_active else ':limit'}
             """)
             result = await session.execute(sql, params)
             merged = [(row.id, float(row.score)) for row in result.all()]
@@ -860,12 +877,16 @@ class Brain:
         # were outranking the current one in "## Related Decisions". Skipped
         # when the caller asked for a specific outcome — mirrors the abandoned
         # suppression `else` branch above: an explicit request wins.
-        factors = getattr(self.settings, "decision_outcome_score_factors", {}) or {}
-        if factors and not outcome:
+        factors = _factors
+        if _demotion_active:
             n_demoted = sum(
                 1 for _, o, s in ordered if s is not None and (o or "pending") in factors
             )
             demoted = apply_outcome_demotion(ordered, factors)
+            # codex #577 r1: the candidate set was widened to limit*3 above so
+            # demotion can promote a row that would otherwise never have been
+            # fetched — cut back to the caller's limit AFTER re-ranking.
+            demoted = demoted[:limit]
             if n_demoted:
                 logger.debug(
                     "brain._query: demoted %d/%d decisions by outcome (factors=%s)",

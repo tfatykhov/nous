@@ -1592,6 +1592,24 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         if _is_background:
             return {"is_error": True, "content": [{"type": "text", "text": _BG_BLOCK_MSG}]}
         try:
+            # codex #577 r1: the batch sweep bypassed the single-resolve
+            # lineage requirement, so a sweep could still create the
+            # outcome='superseded' + superseded_by=NULL rows this work exists
+            # to prevent (9 of 24 such rows in prod). Same rule, same message.
+            missing_lineage = [
+                str(r.get("decision_id"))
+                for r in resolutions
+                if r.get("outcome") == "superseded" and not r.get("superseded_by")
+            ]
+            if missing_lineage:
+                return {
+                    "is_error": True,
+                    "content": [{"type": "text", "text": (
+                        "superseded_by is required when outcome='superseded' — "
+                        "pass the UUID of the decision that replaces each of: "
+                        + ", ".join(missing_lineage)
+                    )}],
+                }
             items = [
                 {
                     "decision_id": r.get("decision_id"),

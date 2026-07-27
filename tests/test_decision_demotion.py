@@ -243,3 +243,25 @@ def test_recall_deep_renders_decision_outcome():
                                      PipelineStats(), ["decision"])
     assert "[superseded]" not in out_none
     assert "Recommended Portugal" in out_none
+
+
+def test_rrf_merge_return_limit_preserves_penalty_rank_scores():
+    """codex #577 r1: widening the candidate set must NOT change scores.
+
+    `_rrf_merge`'s `limit` doubles as `penalty_rank = limit + 1`, so inflating
+    it would silently rescore every single-list doc. `return_limit` widens the
+    RETURNED set only — the scores of the rows both calls share are identical.
+    """
+    import uuid as _uuid
+
+    from nous.heart.search import _rrf_merge
+
+    vec = [(_uuid.uuid4(), 0.9 - i * 0.05) for i in range(6)]
+    kw = [(vec[0][0], 0.5), (vec[3][0], 0.4)]  # partial overlap -> penalty ranks matter
+
+    narrow = _rrf_merge(vec, kw, k=60, vector_weight=0.7, limit=2)
+    wide = _rrf_merge(vec, kw, k=60, vector_weight=0.7, limit=2, return_limit=6)
+
+    assert len(narrow) == 2 and len(wide) == 6
+    # the rows present in both must carry byte-identical scores and order
+    assert narrow == wide[:2]
