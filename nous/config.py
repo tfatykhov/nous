@@ -66,6 +66,51 @@ class Settings(BaseSettings):
     # derived empirically; set 1.0 to disable scaling (legacy behavior).
     confidence_calibration_factor: float = 0.7627
 
+    # Outcome-based retrieval demotion (2026-07-27). Superseded and noise
+    # decisions were outranking the current one in the "## Related Decisions"
+    # prompt section (measured: two superseded vacation rows at .931/.908
+    # above the current one at .887). Brain._query multiplies each hit's
+    # score by its outcome's factor and stable-re-sorts. Demote rather than
+    # exclude: 9 of 24 superseded rows have no linked successor, so exclusion
+    # can empty the section where demotion still shows a labeled row.
+    # `{}` = today's behavior byte-identically (kill switch).
+    # JSON env like NOUS_CONTEXT_BUDGET_OVERRIDES; NoDecode for the same
+    # empty-string tolerance (ST-1).
+    decision_outcome_score_factors: Annotated[dict[str, float], NoDecode] = Field(
+        default_factory=lambda: {"superseded": 0.3, "noise": 0.1}
+    )
+
+    @field_validator("decision_outcome_score_factors", mode="before")
+    @classmethod
+    def _parse_decision_outcome_score_factors(cls, v: object) -> object:
+        """Decode the JSON env string ourselves so an empty value is tolerated."""
+        if v is None:
+            return {}
+        if isinstance(v, str):
+            if not v.strip():
+                return {}
+            return json.loads(v)
+        return v
+
+    @field_validator("decision_outcome_score_factors", mode="after")
+    @classmethod
+    def _validate_decision_outcome_score_factors(
+        cls, v: dict[str, float]
+    ) -> dict[str, float]:
+        """Every factor must be in (0, 1] — a demotion, never a promotion.
+
+        A typo of `3` for `0.3` would PROMOTE exactly the rows this feature
+        exists to sink, and `0` would silently make demotion an exclusion
+        (rejected by design: exclusion can render an empty section).
+        """
+        for key, val in v.items():
+            if not (0.0 < val <= 1.0):
+                raise ValueError(
+                    f"decision_outcome_score_factors[{key!r}]={val} must be "
+                    "in (0, 1] — factors demote, they never promote"
+                )
+        return v
+
     # F022 live-linker content guard (post-F058 audit, edge precision
     # report 2026-04-30): empty/short source or target content drove ~30%
     # of NO/WEAK verdicts on `informed_by` and `evidence_for`. Mirrors

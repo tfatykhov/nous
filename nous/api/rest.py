@@ -1038,9 +1038,23 @@ def create_app(
         outcome = body.get("outcome")
         result_text = body.get("result")
         reviewer = body.get("reviewer", "external")
+        # codex #577 r3: this endpoint never read superseded_by, so external
+        # supersessions landed with NULL lineage. Now that ReviewInput enforces
+        # the invariant, NOT forwarding it would reject every REST supersession
+        # outright — parse and pass it through.
+        superseded_by_raw = body.get("superseded_by")
 
         if not outcome:
             return JSONResponse({"error": "outcome is required"}, status_code=400)
+
+        superseded_by: UUID | None = None
+        if superseded_by_raw:
+            try:
+                superseded_by = UUID(str(superseded_by_raw))
+            except ValueError:
+                return JSONResponse(
+                    {"error": "superseded_by must be a UUID"}, status_code=400
+                )
 
         try:
             detail = await brain.review(
@@ -1048,10 +1062,13 @@ def create_app(
                 outcome=outcome,
                 result=result_text,
                 reviewer=reviewer,
+                superseded_by=superseded_by,
             )
             return JSONResponse(detail.model_dump(mode="json"))
         except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=404)
+            # A missing-lineage rejection is a client error, not a 404.
+            status = 400 if "superseded_by is required" in str(e) else 404
+            return JSONResponse({"error": str(e)}, status_code=status)
 
     async def list_unreviewed(request: Request) -> JSONResponse:
         """GET /decisions/unreviewed — unreviewed decisions for external agents."""

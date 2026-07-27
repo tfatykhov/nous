@@ -200,6 +200,34 @@ class TestResolveDecision:
         assert did in text
 
     @pytest.mark.asyncio
+    async def test_superseded_without_superseded_by_is_rejected(self, tools, brain):
+        """outcome='superseded' with no superseded_by is refused, naming the requirement.
+
+        Lineage gap prevention: 9 of 24 prod superseded rows carry no successor,
+        so retrieval cannot tell what replaced them.
+        """
+        did = await self._make_decision(tools, brain)
+        result = await tools["resolve_decision"](
+            decision_id=did, outcome="superseded", resolution_note="replaced it",
+        )
+        assert result.get("is_error") is True
+        assert "superseded_by" in result["content"][0]["text"]
+        # Outcome unchanged — nothing was persisted
+        detail = await brain.get(uuid.UUID(did))
+        assert detail.outcome == "pending"
+
+    @pytest.mark.asyncio
+    async def test_other_outcomes_do_not_require_superseded_by(self, tools, brain):
+        """Non-supersession outcomes are unaffected by the new requirement."""
+        did = await self._make_decision(tools, brain)
+        result = await tools["resolve_decision"](
+            decision_id=did, outcome="success", resolution_note="shipped",
+        )
+        assert result.get("is_error") is not True
+        detail = await brain.get(uuid.UUID(did))
+        assert detail.outcome == "success"
+
+    @pytest.mark.asyncio
     async def test_superseded_by_roundtrip_via_tool(self, tools, brain):
         """resolve_decision with outcome=superseded preserves superseded_by on the summary."""
         old_id = await self._make_decision(tools, brain)

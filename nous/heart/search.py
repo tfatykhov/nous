@@ -140,6 +140,7 @@ def _rrf_merge(
     k: int,
     vector_weight: float,
     limit: int,
+    return_limit: int | None = None,
 ) -> list[tuple[UUID, float]]:
     """Merge two ranked lists using Reciprocal Rank Fusion.
 
@@ -147,6 +148,14 @@ def _rrf_merge(
                    + keyword_weight / (k + keyword_rank)
 
     Docs appearing in only one list get a penalty rank of limit + 1.
+
+    ``return_limit`` (default = ``limit``) decouples HOW MANY rows come back
+    from the ``limit`` that defines ``penalty_rank``. A caller that needs a
+    wider candidate set for post-merge re-ranking (e.g. outcome demotion in
+    ``Brain._query``) must use this instead of inflating ``limit`` — a bigger
+    ``limit`` changes ``penalty_rank`` and therefore silently changes the
+    score of every single-list document (codex #577 r1 / the same trap flagged
+    on #574).
     """
     keyword_weight = 1.0 - vector_weight
     penalty_rank = limit + 1
@@ -175,7 +184,7 @@ def _rrf_merge(
     if max_score > 0 and scored:
         scored = [(doc_id, score / max_score) for doc_id, score in scored]
 
-    return scored[:limit]
+    return scored[: (return_limit if return_limit is not None else limit)]
 
 
 async def hybrid_search(

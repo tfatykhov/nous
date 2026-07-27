@@ -462,8 +462,22 @@ def _format_pipeline_text(
                 # F079 P1: include the abstract pattern when present (B-pull-thin).
                 pattern = dec.metadata.get("pattern")
                 pattern_str = f" | pattern: {pattern}" if pattern else ""
+                # 2026-07-27: render the outcome so recall_deep matches the
+                # pre-turn section (context.py _format_decisions already emits
+                # "[outcome] desc"). Without this a superseded/failed decision
+                # reached the LLM through this tool with NO status at all —
+                # the metadata key alone had no consumer (branch-review P1-1).
+                outcome = dec.metadata.get("outcome")
+                # "pending" is the default (not-yet-reviewed) state and carries
+                # no information, so it is suppressed here — every outcome the
+                # reader acts on (superseded / noise / failure / success /
+                # partial) still renders. This deliberately differs from the
+                # pre-turn `_format_decisions`, which prefixes unconditionally;
+                # suppressing the no-op label also keeps the F051 byte-identity
+                # snapshot (whose fixtures are all pending) intact.
+                outcome_str = f"[{outcome}] " if outcome and outcome != "pending" else ""
                 results_text.append(
-                    f"{i}. {dec.description} | {category} | {stakes} | "
+                    f"{i}. {outcome_str}{dec.description} | {category} | {stakes} | "
                     f"confidence: {confidence:.2f}{pattern_str} "
                     f"(id: {dec.id}{score_str})"
                 )
@@ -1538,10 +1552,25 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             outcome: success, partial, failure, noise, or superseded.
                 noise/superseded are excluded from calibration.
             resolution_note: Evidence/why — the resolution trail.
-            superseded_by: UUID of the replacing decision (outcome=superseded).
+            superseded_by: UUID of the replacing decision. Required when
+                outcome=superseded.
         """
         if _is_background:
             return {"is_error": True, "content": [{"type": "text", "text": _BG_BLOCK_MSG}]}
+        # A supersession without a successor is a lineage dead end: retrieval
+        # can label the row `[superseded]` but cannot point at what replaced
+        # it. Validated here, not as a JSON-schema conditional — the dispatcher
+        # only enforces `required` keys flatly.
+        if outcome == "superseded" and not superseded_by:
+            return {
+                "is_error": True,
+                "content": [{"type": "text", "text": (
+                    "Error: outcome='superseded' requires superseded_by — the UUID of the "
+                    "decision that replaces this one. Record the replacement decision first, "
+                    "then resolve this one with its ID. If nothing replaced it, use a "
+                    "different outcome (e.g. 'noise' or 'failure')."
+                )}],
+            }
         try:
             detail = await brain.review(
                 UUID(decision_id),
@@ -1570,6 +1599,12 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         if _is_background:
             return {"is_error": True, "content": [{"type": "text", "text": _BG_BLOCK_MSG}]}
         try:
+            # codex #577 r3: NO batch-wide lineage precheck here. ReviewInput's
+            # validator (shared by every entry point) rejects a missing-lineage
+            # item inside review_many, which reports it as a per-item failure
+            # and keeps the rest of the sweep alive — the documented contract.
+            # A precheck that aborted the whole batch would discard every valid
+            # resolution alongside the one malformed item.
             items = [
                 {
                     "decision_id": r.get("decision_id"),
@@ -1706,6 +1741,8 @@ _RESOLVE_DECISION_SCHEMA: dict[str, Any] = {
         "Persist an outcome on an existing decision, closing the calibration "
         "loop. Use 'noise' for sweep/tick artifacts and 'superseded' when a "
         "later decision replaced this one (both excluded from calibration). "
+        "'superseded' REQUIRES superseded_by — record the replacing decision "
+        "first, then pass its UUID; without it the call is rejected. "
         "Always include a resolution_note as the evidence trail."
     ),
     "properties": {
@@ -1716,7 +1753,13 @@ _RESOLVE_DECISION_SCHEMA: dict[str, Any] = {
             "enum": ["success", "partial", "failure", "noise", "superseded"],
         },
         "resolution_note": {"type": "string", "description": "Evidence / why — the resolution trail"},
-        "superseded_by": {"type": "string", "description": "UUID of the replacing decision (when outcome=superseded)"},
+        "superseded_by": {
+            "type": "string",
+            "description": (
+                "UUID of the decision that replaces this one. REQUIRED when "
+                "outcome=superseded (the call is rejected without it); ignored otherwise."
+            ),
+        },
     },
     "required": ["decision_id", "outcome"],
 }

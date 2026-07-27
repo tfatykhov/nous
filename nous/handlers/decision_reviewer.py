@@ -56,15 +56,30 @@ class ErrorSignal:
     ("fix the login error") was auto-labelled `failure`. The description is
     the intended action, not the outcome, so that branch corrupted Brain
     calibration and has been removed. Only the low-confidence prior remains.
-    (Caveat: deriving an outcome label from the same confidence value F058 is
-    trying to calibrate is weakly circular — flagged as a follow-up.)
+
+    2026-07-27: that remaining prior was measuring the wrong number. F058
+    applies temperature scaling (`NOUS_CONFIDENCE_CALIBRATION_FACTOR`,
+    default 0.7627) at write time, so `confidence` is the *calibrated* value
+    and the 0.4 test silently became "raw < 0.5245". 37 prod decisions were
+    auto-failed purely by that scaling — including one recorded at an
+    honest 0.5. The threshold is a statement about what the author claimed,
+    so it compares `confidence_raw` (the agent's own claim, preserved by
+    F058) and falls back to `confidence` only for pre-F058 rows, where the
+    stored value *is* the raw one. That also unwinds the circularity flagged
+    here previously: the label no longer derives from the very number F058
+    is trying to calibrate.
     """
 
     async def check(self, decision: DecisionSummary) -> ReviewResult | None:
-        if decision.confidence is not None and decision.confidence < 0.4:
+        # Pre-F058 rows have confidence_raw IS NULL — there the stored
+        # `confidence` IS the raw claim, so the fallback is exact.
+        stated = decision.confidence_raw
+        if stated is None:
+            stated = decision.confidence
+        if stated is not None and stated < 0.4:
             return ReviewResult(
                 result="failure",
-                explanation=f"Low confidence ({decision.confidence:.2f}) indicates uncertain/failed decision",
+                explanation=f"Low confidence ({stated:.2f}) indicates uncertain/failed decision",
                 confidence=0.9,
                 signal_type="error",
             )

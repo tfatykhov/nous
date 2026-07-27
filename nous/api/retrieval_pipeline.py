@@ -1990,6 +1990,12 @@ def _decisions_to_pipeline(
                 # F079 P1: surface the abstract pattern so recall_deep delivers it
                 # (it's on DecisionSummary but was previously dropped by the formatter).
                 "pattern": d.pattern,
+                # 2026-07-27: recall_deep rendered decisions with no outcome at
+                # all, so a superseded/failed decision reached the LLM unlabeled
+                # (the pre-turn "## Related Decisions" section has always shown
+                # it). Demotion sinks those rows; this labels the ones that
+                # still surface.
+                "outcome": d.outcome,
             },
         )
         for d in decisions

@@ -63,6 +63,51 @@ _NOISE_KEYWORDS = frozenset({
 })
 
 
+def apply_outcome_demotion(
+    scored: list[tuple[object, str | None, float | None]],
+    factors: dict[str, float],
+) -> list[tuple[object, float | None]]:
+    """Multiply each score by its outcome's factor, then stable-sort desc.
+
+    Returns (item, new_score) pairs. Empty ``factors`` is an exact no-op:
+    no multiplication AND no re-sort, so merged order is preserved
+    byte-identically (the kill switch).
+
+    Multiplicative because _query returns TWO score spaces (normalized RRF,
+    and raw ts_rank_cd on the keyword-only fallback) — a scale-free operator
+    is correct in both. None scores pass through untouched and sort last.
+
+    THE RE-SORT IS THE FEATURE: ``_query`` builds its summaries preserving
+    search order and nothing downstream re-sorts (``_apply_staleness_penalty``
+    returns input order; ``_enforce_diversity`` / ``_apply_relevance_filter`` /
+    ``_format_decisions`` all iterate in order). A multiplier without the
+    re-sort would be a no-op on the pre-turn path — and worse than nothing,
+    because a low score injected mid-list desynchronizes
+    ``_apply_relevance_filter``'s monotonic ``prev_score`` walk.
+
+    Module level (not a method) so it is unit-testable without a database:
+    ``Brain._query`` needs Postgres FTS and cannot run on the sqlite backend
+    the test suite defaults to.
+    """
+    if not factors:
+        return [(item, score) for item, _, score in scored]
+
+    demoted: list[tuple[object, float | None]] = []
+    for item, outcome, score in scored:
+        # The column is nullable — a NULL outcome means "pending".
+        factor = factors.get(outcome or "pending")
+        if factor is not None and score is not None:
+            score = score * factor
+        demoted.append((item, score))
+
+    # Stable sort, descending, None last. sorted() is stable, so equal scores
+    # (including ties created by the multiplication) keep their merged order.
+    return sorted(
+        demoted,
+        key=lambda pair: (pair[1] is None, -pair[1] if pair[1] is not None else 0.0),
+    )
+
+
 class Brain:
     """Decision intelligence organ for Nous agents."""
 
@@ -722,6 +767,13 @@ class Brain:
                     AND db.{bridge_side} ILIKE '%' || :query_text || '%'
             """
 
+        # Outcome demotion (2026-07-27) is active only when factors are
+        # configured AND the caller did not ask for a specific outcome. Resolved
+        # here because it widens the candidate fetch (codex #577 r1) — see the
+        # _rrf_merge return_limit and the keyword-only LIMIT below.
+        _factors = getattr(self.settings, "decision_outcome_score_factors", {}) or {}
+        _demotion_active = bool(_factors) and not outcome
+
         params: dict = {
             "agent_id": self.agent_id,
             "query_text": query_text,
@@ -771,7 +823,22 @@ class Brain:
             k_result = await session.execute(keyword_sql, params)
             keyword_results = [(row.id, float(row.score)) for row in k_result.all()]
 
-            merged = _rrf_merge(vector_results, keyword_results, rrf_k, vw, limit)
+            # codex #577 r1/r3: when demotion is active we must re-rank the
+            # COMPLETE fetched candidate set — otherwise a demoted row occupies
+            # a top-`limit` slot and the better undemoted row it displaced was
+            # never considered. A fixed 3x window still starves when more than
+            # 3x demoted rows outrank the first undemoted one, so return
+            # everything the SQL legs fetched (bounded by `limit_expanded`) and
+            # truncate after the re-rank. `return_limit` widens the RETURN only:
+            # `limit` still defines `penalty_rank = limit + 1`, and inflating
+            # that would silently rescore every single-list doc (the #574 trap).
+            merged = _rrf_merge(
+                vector_results, keyword_results, rrf_k, vw, limit,
+                return_limit=(
+                    len(vector_results) + len(keyword_results)
+                    if _demotion_active else None
+                ),
+            )
         else:
             # Keyword-only fallback (P2-14: weight=1.0)
             sql = text(f"""
@@ -783,7 +850,7 @@ class Brain:
                 WHERE d.search_tsv @@ plainto_tsquery('english', :query_text)
                     {filter_clauses}
                 ORDER BY score DESC
-                LIMIT :limit
+                LIMIT {':limit_expanded' if _demotion_active else ':limit'}
             """)
             result = await session.execute(sql, params)
             merged = [(row.id, float(row.score)) for row in result.all()]
@@ -805,11 +872,36 @@ class Brain:
             tags_by_id[tag_row.decision_id].append(tag_row.tag)
 
         # Build results preserving search order
+        ordered = [
+            (d, d.outcome, scores_by_id.get(d.id))
+            for d in (decisions.get(did) for did in decision_ids)
+            if d is not None
+        ]
+
+        # Outcome demotion + re-sort (2026-07-27). Superseded/noise decisions
+        # were outranking the current one in "## Related Decisions". Skipped
+        # when the caller asked for a specific outcome — mirrors the abandoned
+        # suppression `else` branch above: an explicit request wins.
+        factors = _factors
+        if _demotion_active:
+            n_demoted = sum(
+                1 for _, o, s in ordered if s is not None and (o or "pending") in factors
+            )
+            demoted = apply_outcome_demotion(ordered, factors)
+            # codex #577 r1: the candidate set was widened to limit*3 above so
+            # demotion can promote a row that would otherwise never have been
+            # fetched — cut back to the caller's limit AFTER re-ranking.
+            demoted = demoted[:limit]
+            if n_demoted:
+                logger.debug(
+                    "brain._query: demoted %d/%d decisions by outcome (factors=%s)",
+                    n_demoted, len(ordered), factors,
+                )
+        else:
+            demoted = [(d, s) for d, _, s in ordered]
+
         summaries = []
-        for did in decision_ids:
-            d = decisions.get(did)
-            if d is None:
-                continue
+        for d, score in demoted:
             summaries.append(
                 DecisionSummary(
                     id=d.id,
@@ -820,7 +912,7 @@ class Brain:
                     outcome=d.outcome or "pending",
                     pattern=d.pattern,
                     tags=tags_by_id.get(d.id, []),
-                    score=scores_by_id.get(d.id),
+                    score=score,
                     superseded_by=d.superseded_by,
                     created_at=d.created_at,
                 )
@@ -1315,6 +1407,35 @@ class Brain:
                 source_q = source_q.where(GraphEdge.target_id.in_(_active_fact))
                 target_q = target_q.where(GraphEdge.source_id.in_(_active_fact))
 
+        # codex #577 r3/r5: pushdown for demoted decision outcomes, applied
+        # OUTSIDE the neighbor_type block — Stage 3's one-hop call passes no
+        # neighbor_type, and the resolver's filter runs AFTER this LIMIT, so a
+        # node with more higher-weight superseded/noise decision neighbors than
+        # the cap returned an empty graph leg while valid lower-weight neighbors
+        # sat just outside the window. The predicate is type-aware: only edges
+        # POINTING AT a demoted decision are excluded, so non-decision neighbors
+        # are unaffected in the untyped fan-out. Only outcomes actually demoted
+        # (factor < 1.0) filter — 1.0 is a legal identity value — and an explicit
+        # `relation=` overrides (documented contract, see above).
+        if neighbor_type in (None, "decision") and not relation:
+            _demoted_outcomes = [
+                o for o, f in (
+                    getattr(self.settings, "decision_outcome_score_factors", {}) or {}
+                ).items() if f < 1.0
+            ]
+            if _demoted_outcomes:
+                _ok_dec = select(Decision.id).where(
+                    func.coalesce(Decision.outcome, "pending").notin_(_demoted_outcomes)
+                )
+                source_q = source_q.where(
+                    or_(GraphEdge.target_type != "decision",
+                        GraphEdge.target_id.in_(_ok_dec))
+                )
+                target_q = target_q.where(
+                    or_(GraphEdge.source_type != "decision",
+                        GraphEdge.source_id.in_(_ok_dec))
+                )
+
         # F080: deduplicate to ONE row per neighbor (the max-weight edge) and cap,
         # all in SQL via a window function, so the dedup happens BEFORE the cap
         # (codex P1) — a node linked via multiple edges (informed_by from the graph
@@ -1387,7 +1508,14 @@ class Brain:
         for r in rows:
             ids_by_type[r.neighbor_type].append(r.neighbor_id)
 
-        descriptions = await self._resolve_node_descriptions(session, ids_by_type)
+        # codex #577 r4: an explicit `relation=` is documented as an override
+        # of retrieval exclusions (see the RETRIEVAL_EXCLUDED_RELATIONS branch
+        # above). neighbors(relation="supersedes") is literally asking for the
+        # superseded endpoint — filtering it would make that query return
+        # nothing. Mirrors _query's explicit-`outcome=`-wins rule.
+        descriptions = await self._resolve_node_descriptions(
+            session, ids_by_type, apply_outcome_filter=not relation,
+        )
 
         # Build results
         # Node types where the content column is declared NOT NULL in models.py
@@ -1445,6 +1573,7 @@ class Brain:
         self,
         session: AsyncSession,
         ids_by_type: dict[str, list[UUID]],
+        apply_outcome_filter: bool = True,
     ) -> dict[UUID, tuple[str, datetime | None]]:
         """Resolve real content + created_at for graph node ids, batched per type.
 
@@ -1468,8 +1597,17 @@ class Brain:
         # decisions (outcome='failure' AND confidence=0.0 — codex P2 round 8,
         # PR #555) so graph traversal cannot reintroduce noise decisions
         # that normal brain search hides.
+        #
+        # Demoted outcomes (2026-07-27) are FILTERED here rather than demoted.
+        # The asymmetry with _query is deliberate: this resolver returns
+        # (description, created_at) tuples — there is no score to multiply, and
+        # plumbing `outcome` through NeighborResult to every graph consumer is
+        # disproportionate. Gated on the same setting, so `{}` restores today's
+        # behavior on BOTH paths at once. NULL outcome normalizes to 'pending'
+        # exactly as _query does (COALESCE keeps the predicate NULL-safe —
+        # a bare NOT IN would silently drop every unreviewed decision).
         if ids_by_type.get("decision"):
-            dec_result = await session.execute(
+            dec_stmt = (
                 select(Decision.id, Decision.description, Decision.created_at)
                 .where(Decision.id.in_(ids_by_type["decision"]))
                 .where(Decision.agent_id == self.agent_id)
@@ -1477,6 +1615,21 @@ class Brain:
                     ~((Decision.outcome == "failure") & (Decision.confidence == 0.0))
                 )
             )
+            # codex #577 r2: only outcomes actually DEMOTED (factor < 1.0)
+            # belong in the exclusion set. 1.0 is a legal identity value an
+            # operator uses to disable one outcome while keeping others — key
+            # presence alone would exclude it here while the query path left
+            # its score untouched, i.e. contradictory behavior across paths.
+            demoted_outcomes = [
+                o for o, f in (
+                    getattr(self.settings, "decision_outcome_score_factors", {}) or {}
+                ).items() if f < 1.0
+            ] if apply_outcome_filter else []
+            if demoted_outcomes:
+                dec_stmt = dec_stmt.where(
+                    func.coalesce(Decision.outcome, "pending").notin_(demoted_outcomes)
+                )
+            dec_result = await session.execute(dec_stmt)
             for d in dec_result.all():
                 descriptions[d.id] = (d.description, d.created_at)
 
@@ -1948,6 +2101,9 @@ class Brain:
             id=decision.id,
             description=decision.description,
             confidence=decision.confidence,
+            # F058: the auto-reviewer thresholds on the agent's own claim, not
+            # the calibrated value (see ErrorSignal).
+            confidence_raw=decision.confidence_raw,
             category=decision.category,
             stakes=decision.stakes,
             outcome=decision.outcome or "pending",

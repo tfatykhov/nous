@@ -215,6 +215,7 @@ _NOW = datetime.now(timezone.utc)
 def _make_decision(
     *,
     confidence: float = 0.8,
+    confidence_raw: float | None = None,
     description: str = "Use Postgres for storage",
     outcome: str = "pending",
     reviewed_at=None,
@@ -225,6 +226,7 @@ def _make_decision(
         id=id or uuid4(),
         description=description,
         confidence=confidence,
+        confidence_raw=confidence_raw,
         category="architecture",
         stakes="medium",
         outcome=outcome,
@@ -270,6 +272,69 @@ class TestErrorSignal:
             _make_decision(confidence=0.8, description="Use Postgres for storage")
         )
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_f058_calibrated_dip_below_threshold_does_not_fail(self):
+        """An author-stated 0.5 must NOT be auto-failed just because F058 scaled it.
+
+        The measured prod case: recorded at raw 0.5, stored calibrated as
+        0.38 (x0.7627), auto-failed. The 0.4 threshold is a claim about what
+        the author asserted, so it must be compared against the raw value.
+        """
+        signal = ErrorSignal()
+        result = await signal.check(_make_decision(confidence=0.38, confidence_raw=0.5))
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_genuinely_low_raw_confidence_still_fails(self):
+        """A raw confidence under 0.4 is still auto-failed, and reports the raw value."""
+        signal = ErrorSignal()
+        result = await signal.check(_make_decision(confidence=0.229, confidence_raw=0.3))
+        assert result is not None
+        assert result.result == "failure"
+        assert "0.30" in result.explanation
+
+    @pytest.mark.asyncio
+    async def test_legacy_row_without_raw_uses_calibrated(self):
+        """Pre-F058 rows have confidence_raw IS NULL — behaviour is unchanged."""
+        signal = ErrorSignal()
+        failed = await signal.check(_make_decision(confidence=0.3, confidence_raw=None))
+        assert failed is not None
+        assert failed.result == "failure"
+        assert "0.30" in failed.explanation
+        assert await signal.check(_make_decision(confidence=0.8, confidence_raw=None)) is None
+
+
+class TestConfidenceRawPropagation:
+    """The raw confidence must survive the ORM -> DecisionSummary hop.
+
+    ErrorSignal only ever sees a DecisionSummary, so if the summary drops
+    confidence_raw the F058 fix above is silently inert in production.
+    """
+
+    def test_decision_to_summary_propagates_confidence_raw(self):
+        """Brain._decision_to_summary feeds both reviewer paths."""
+        from nous.brain.brain import Brain
+
+        d = Decision(
+            agent_id="test",
+            description="Recorded with a humble 0.5",
+            confidence=0.38,
+            confidence_raw=0.5,
+            category="architecture",
+            stakes="medium",
+        )
+        d.id = uuid4()
+        d.created_at = _NOW
+        # _decision_to_summary uses no instance state — call it unbound so the
+        # assertion needs no database.
+        summary = Brain._decision_to_summary(None, d)
+        assert summary.confidence_raw == 0.5
+        assert summary.confidence == 0.38
+
+    def test_summary_confidence_raw_defaults_to_none(self):
+        """Legacy/partial constructions must not be forced to supply it."""
+        assert _make_decision(confidence=0.8).confidence_raw is None
 
 
 # ---------------------------------------------------------------------------
