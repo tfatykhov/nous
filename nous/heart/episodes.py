@@ -20,7 +20,7 @@ from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.schemas import EpisodeDetail, EpisodeInput, EpisodeSummary
 from nous.heart.search import hybrid_search, hybrid_search_multi
 from nous.storage.database import Database
-from nous.storage.models import Episode, EpisodeDecision, EpisodeProcedure, Event
+from nous.storage.models import Episode, EpisodeDecision, Event
 
 logger = logging.getLogger(__name__)
 
@@ -289,40 +289,6 @@ class EpisodeManager:
         session: AsyncSession,
     ) -> None:
         link = EpisodeDecision(episode_id=episode_id, decision_id=decision_id)
-        session.add(link)
-        await session.flush()
-
-    # ------------------------------------------------------------------
-    # link_procedure()
-    # ------------------------------------------------------------------
-
-    async def link_procedure(
-        self,
-        episode_id: UUID,
-        procedure_id: UUID,
-        effectiveness: str | None = None,
-        session: AsyncSession | None = None,
-    ) -> None:
-        """Insert into heart.episode_procedures with optional effectiveness."""
-        if session is None:
-            async with self.db.session() as session:
-                await self._link_procedure(episode_id, procedure_id, effectiveness, session)
-                await session.commit()
-                return
-        await self._link_procedure(episode_id, procedure_id, effectiveness, session)
-
-    async def _link_procedure(
-        self,
-        episode_id: UUID,
-        procedure_id: UUID,
-        effectiveness: str | None,
-        session: AsyncSession,
-    ) -> None:
-        link = EpisodeProcedure(
-            episode_id=episode_id,
-            procedure_id=procedure_id,
-            effectiveness=effectiveness,
-        )
         session.add(link)
         await session.flush()
 

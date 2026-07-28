@@ -1186,28 +1186,12 @@ class Brain:
         return report
 
     # ------------------------------------------------------------------
-    # get_episode_for_decision()
+    # get_episode_for_decision() — REMOVED
     # ------------------------------------------------------------------
-
-    async def get_episode_for_decision(
-        self, decision_id: UUID, session: AsyncSession | None = None,
-    ):
-        """Get the episode linked to a decision via episode_decisions table."""
-        if session is None:
-            async with self.db.session() as session:
-                return await self._get_episode_for_decision(decision_id, session)
-        return await self._get_episode_for_decision(decision_id, session)
-
-    async def _get_episode_for_decision(self, decision_id: UUID, session: AsyncSession):
-        from nous.storage.models import EpisodeDecision, Episode
-        stmt = (
-            select(Episode)
-            .join(EpisodeDecision, Episode.id == EpisodeDecision.episode_id)
-            .where(EpisodeDecision.decision_id == decision_id)
-            .limit(1)
-        )
-        result = await session.execute(stmt)
-        return result.scalar_one_or_none()
+    # Removed 2026-07-28 with EpisodeSignal, its only non-test caller. It
+    # resolved decision -> *which* episode via heart.episode_decisions, a
+    # direction nothing else consumes (and one that is genuinely ambiguous:
+    # 15 prod decisions matched more than one episode).
 
     # ------------------------------------------------------------------
     # get_calibration()

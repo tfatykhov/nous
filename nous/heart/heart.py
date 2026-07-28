@@ -231,16 +231,6 @@ class Heart:
         """Link a decision to an episode."""
         await self.episodes.link_decision(episode_id, decision_id, session)
 
-    async def link_procedure_to_episode(
-        self,
-        episode_id: UUID,
-        procedure_id: UUID,
-        effectiveness: str | None = None,
-        session: AsyncSession | None = None,
-    ) -> None:
-        """Link a procedure to an episode."""
-        await self.episodes.link_procedure(episode_id, procedure_id, effectiveness, session)
-
     async def deactivate_episode(self, episode_id: UUID, session: AsyncSession | None = None) -> None:
         """Soft-delete a trivial episode."""
         await self.episodes.deactivate(episode_id, session=session)

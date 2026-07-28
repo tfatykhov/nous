@@ -12,7 +12,6 @@ from nous.storage.models import (
     DecisionTag,
     Episode,
     EpisodeDecision,
-    EpisodeProcedure,
     Event,
     Fact,
     Frame,
@@ -41,7 +40,6 @@ __all__ = [
     "EpisodeDecision",
     "Fact",
     "Procedure",
-    "EpisodeProcedure",
     "Censor",
     "WorkingMemory",
 ]

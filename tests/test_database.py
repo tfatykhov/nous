@@ -70,7 +70,7 @@ async def test_all_tables_exist(db):
         ("heart", "facts"),
         ("heart", "fact_entity_keys"),  # F085
         ("heart", "procedures"),
-        ("heart", "episode_procedures"),
+        # heart.episode_procedures dropped by migration 067 (never wired)
         ("heart", "censors"),
         ("heart", "working_memory"),
         ("heart", "query_expansions"),

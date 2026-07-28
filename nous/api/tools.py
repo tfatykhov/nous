@@ -107,6 +107,15 @@ class ToolDispatcher:
                 # F069: inject session_id so the tool can resolve the
                 # active episode when the caller omits episode_id.
                 args = {**args, "_session_id": session_id}
+            if session_id is not None and name == "record_decision":
+                # 2026-07-28: RecordInput.session_id has existed since the
+                # Brain module shipped, but this tool never passed it — so
+                # every tool-recorded decision stored session_id NULL (287 of
+                # 1005 prod rows had it, all from the deliberation path).
+                # That NULL is what left episode<->decision association with
+                # no substrate. Consumers: Brain.get_session_decisions and
+                # the optional filter in Brain._query.
+                args = {**args, "_session_id": session_id}
             if session_id is not None and name == "recall_deep":
                 # F051.4 / F055: inject session_id into recall_deep so
                 # F055's Cross-Turn Residual Activation can read it via
@@ -773,6 +782,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         pattern: str | None = None,
         tags: list[str] | None = None,
         reasons: list[dict[str, str]] | None = None,
+        _session_id: str | None = None,
     ) -> dict[str, Any]:
         """Record a decision to the Brain.
 
@@ -816,6 +826,13 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 pattern=pattern,
                 tags=tags or [],
                 reasons=reason_inputs,
+                # Flag-gated: see Settings.decision_session_id_enabled. Off by
+                # default, so this stays NULL exactly as it is in prod today.
+                session_id=(
+                    _session_id
+                    if settings.decision_session_id_enabled
+                    else None
+                ),
             )
 
             # Record to Brain

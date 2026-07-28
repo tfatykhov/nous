@@ -13,7 +13,7 @@ from nous.heart import (
     EpisodeInput,
     EpisodeSummary,
 )
-from nous.storage.models import EpisodeDecision, EpisodeProcedure
+from nous.storage.models import EpisodeDecision
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -140,34 +140,13 @@ async def test_link_decision(heart, db, settings, session):
 
 
 # ---------------------------------------------------------------------------
-# 5. test_link_procedure_with_effectiveness
+# 5. test_link_procedure_with_effectiveness — REMOVED 2026-07-28
 # ---------------------------------------------------------------------------
-
-
-async def test_link_procedure_with_effectiveness(heart, session):
-    """episode_procedures row created with effectiveness."""
-    from nous.heart import ProcedureInput
-
-    episode = await heart.start_episode(_episode_input(), session=session)
-    procedure = await heart.store_procedure(
-        ProcedureInput(
-            name="Test Procedure",
-            domain="testing",
-            core_patterns=["test pattern"],
-        ),
-        session=session,
-    )
-
-    await heart.link_procedure_to_episode(episode.id, procedure.id, effectiveness="helped", session=session)
-
-    result = await session.execute(
-        select(EpisodeProcedure).where(
-            EpisodeProcedure.episode_id == episode.id,
-            EpisodeProcedure.procedure_id == procedure.id,
-        )
-    )
-    link = result.scalar_one()
-    assert link.effectiveness == "helped"
+# heart.episode_procedures was dropped by migration 067: zero rows and zero
+# readers in prod, and the effectiveness concept it modelled ships instead as a
+# Laplace-smoothed float over procedures.success_count/failure_count
+# (heart/procedures.py:958). This test covered the only caller of the deleted
+# writer, which was itself only ever called from tests.
 
 
 # ---------------------------------------------------------------------------

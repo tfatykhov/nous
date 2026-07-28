@@ -87,39 +87,21 @@ class ErrorSignal:
 
 
 # ---------------------------------------------------------------------------
-# EpisodeSignal
+# EpisodeSignal (removed)
 # ---------------------------------------------------------------------------
-
-_EPISODE_OUTCOME_MAP = {
-    "success": "success",
-    "partial": "partial",
-    "failure": "failure",
-    "abandoned": "failure",
-}
+# _EPISODE_OUTCOME_MAP was removed with EpisodeSignal, its only consumer.
 
 
-class EpisodeSignal:
-    """Map linked episode outcome to decision outcome."""
-
-    def __init__(self, brain):
-        self._brain = brain
-
-    async def check(self, decision: DecisionSummary) -> ReviewResult | None:
-        try:
-            episode = await self._brain.get_episode_for_decision(decision.id)
-        except Exception:
-            return None
-        if episode is None:
-            return None
-        mapped = _EPISODE_OUTCOME_MAP.get(episode.outcome)
-        if mapped is None:
-            return None
-        return ReviewResult(
-            result=mapped,
-            explanation=f"Linked episode outcome: {episode.outcome}",
-            confidence=0.8,
-            signal_type="episode",
-        )
+# EpisodeSignal was removed 2026-07-28. Audit HD-4 (2026-06-09) had already
+# unwired it (see the comment in DecisionReviewer.__init__): it mapped the
+# hardcoded-"success" episode outcome (layer.py:1882) onto every decision made
+# during a session — a category error that fed Brain calibration false labels.
+# Prod bore this out: 711 success / 96 NULL / 10 abandoned / zero failure
+# episodes, so rewiring it would have relabelled essentially every linked
+# decision `success @ 0.8`, recreating the machine-artifact corruption that
+# PR #577 had to reverse across 138 rows. Deleting rather than leaving it
+# dormant removes the standing temptation to "just wire it back up".
+# Its only support, Brain.get_episode_for_decision, is removed with it.
 
 
 # ---------------------------------------------------------------------------

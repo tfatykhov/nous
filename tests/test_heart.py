@@ -98,9 +98,8 @@ async def test_full_episode_lifecycle(heart, db, settings, session):
 
     await heart.link_decision_to_episode(episode.id, decision.id, session=session)
 
-    # Create and link a procedure
+    # Create a procedure (link_procedure_to_episode removed with migration 067)
     procedure = await heart.store_procedure(_procedure_input(), session=session)
-    await heart.link_procedure_to_episode(episode.id, procedure.id, effectiveness="helped", session=session)
 
     # End episode
     ended = await heart.end_episode(

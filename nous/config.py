@@ -771,6 +771,19 @@ class Settings(BaseSettings):
     sleep_enabled: bool = True
     decision_review_enabled: bool = True
     decision_sweep_interval: int = Field(default=3600, description="Seconds between periodic decision review sweeps (default: 1 hour)")
+    decision_session_id_enabled: bool = Field(
+        default=False,
+        description=(
+            "2026-07-28: populate brain.decisions.session_id from the record_decision "
+            "tool path (RecordInput.session_id has always existed; the tool never passed "
+            "it, so 718 of 1005 prod rows are NULL). Default OFF because turning it on "
+            "changes a WRITE path: session-scoped decisions enter "
+            "DeliberationProtocol._is_duplicate's pool (deliberation.py:245-260) for the "
+            "first time, where a match silently drops the deliberation decision at DEBUG "
+            "level (deliberation.py:106-110). With this off, every session_id-keyed join "
+            "stays as empty as it is today."
+        ),
+    )
     temporal_context_enabled: bool = True  # 008.6
     github_token: str = Field(
         default="",
