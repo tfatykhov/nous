@@ -63,9 +63,10 @@ async def test_all_tables_exist(db):
         ("brain", "graph_hub_snapshots"),  # F065
         ("brain", "guardrails"),
         ("brain", "calibration_snapshots"),
-        # heart (12)
+        # heart (11)
         ("heart", "episodes"),
-        ("heart", "episode_decisions"),
+        # heart.episode_decisions dropped by migration 068 (no runtime writer;
+        # episode <-> decision now derived from the shared session_id)
         ("heart", "episode_chunks"),  # F067
         ("heart", "facts"),
         ("heart", "fact_entity_keys"),  # F085

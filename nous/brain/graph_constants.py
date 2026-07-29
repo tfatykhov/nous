@@ -1,4 +1,10 @@
-"""Canonical graph-edge exclusion sets for graph consumers.
+"""Canonical shared predicates for graph and episode consumers.
+
+Three groups live here: the graph-edge exclusion sets (below), the episode
+liveness predicates, and the episode<->decision correlation window. Each was
+added because the same rule had drifted across independent call sites.
+
+--- graph-edge exclusion sets ---
 
 The 2026-06-13 audit (Theme 6) found the relation-exclusion logic had drifted
 across the graph consumers — each excluded a different subset, so every new edge
@@ -84,3 +90,87 @@ def episode_live_sql(col_prefix: str = "") -> str:
         f"(({p}active = true OR {p}ended_at IS NOT NULL) "
         f"AND {p}outcome IS DISTINCT FROM 'abandoned')"
     )
+
+
+# --- episode <-> decision correlation (2026-07-28) ---
+# Replaces the `heart.episode_decisions` join table (dropped in migration
+# 068), which had a full write API but no runtime writer — every reader saw
+# an empty table. Episode and decision are correlated instead through the
+# session they share: `heart.episodes.session_id` and
+# `brain.decisions.session_id`.
+#
+# Measured on all 87 matchable prod decisions (2026-07-28): 87 pairs,
+# 87/87 covered, 0 ambiguous. Two terms are load-bearing and were each
+# falsified by a prod measurement:
+#
+#   - The `agent_id` equality. `session_id` is NOT agent-namespaced
+#     (`heartbeat-<hex>` / `subtask-<hex>` are generated identically for
+#     every agent), so without it a same-named session on another agent
+#     materialises a cross-agent pair.
+#   - The 60s grace on the lower bound. `pre_turn` records a deliberation
+#     decision at step 4 and creates the episode at step 5, so a decision
+#     can predate its own episode by up to 2.2s (median 0.4s). A strict
+#     `>= started_at` window loses 35 of the 87.
+#
+# A plain equality join with no time window is also wrong: it is a
+# cross-product over multi-episode sessions (148 pairs, 15 ambiguous).
+#
+# Open episodes are additionally bounded by the next episode's start in the
+# same session, so a session that is reused after a stuck-open episode does
+# not vacuum up every later decision. Verified a no-op on prod today (still
+# 87 pairs) — it is hardening for the 8 currently-open session-bearing
+# episodes. Consecutive episodes overlap by the grace interval, so a
+# decision in that seam can match both; readers want episode -> decision
+# SET membership, for which that is benign.
+
+EPISODE_DECISION_GRACE_SECONDS = 60
+
+
+def episode_decision_bounds_sql(*, agent_param: str = "agent_id") -> str:
+    """Bare SELECT over ``heart.episodes`` adding the decision-window
+    columns. Wrap in parentheses as a derived table; never used alone."""
+    return f"""
+        SELECT id, agent_id, session_id, started_at, ended_at, active, outcome,
+               started_at - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds'
+                   AS decision_window_start,
+               LEAST(
+                   COALESCE(ended_at, now()),
+                   COALESCE(
+                       LEAD(started_at) OVER (
+                           PARTITION BY agent_id, session_id ORDER BY started_at
+                       ),
+                       'infinity'::timestamptz
+                   )
+               ) AS decision_window_end
+        FROM heart.episodes
+        WHERE session_id IS NOT NULL AND agent_id = :{agent_param}
+    """
+
+
+def episode_decision_join_sql(ep_prefix: str = "e.", dec_prefix: str = "d.") -> str:
+    """ON-clause joining ``brain.decisions`` to the derived table produced by
+    :func:`episode_decision_bounds_sql`."""
+    e, d = ep_prefix, dec_prefix
+    return (
+        f"{d}session_id = {e}session_id "
+        f"AND {d}agent_id = {e}agent_id "
+        f"AND {d}created_at >= {e}decision_window_start "
+        f"AND {d}created_at <= {e}decision_window_end"
+    )
+
+
+def episode_decisions_query(
+    columns: str,
+    *,
+    agent_param: str = "agent_id",
+    episode_param: str = "episode_id",
+) -> str:
+    """Full SELECT of ``columns`` from the decisions of ONE episode, oldest
+    first. ``columns`` may reference ``d.`` (decision) and ``e.`` (episode)."""
+    return f"""
+        SELECT {columns}
+        FROM ({episode_decision_bounds_sql(agent_param=agent_param)}) e
+        JOIN brain.decisions d ON {episode_decision_join_sql()}
+        WHERE e.id = :{episode_param}
+        ORDER BY d.created_at
+    """

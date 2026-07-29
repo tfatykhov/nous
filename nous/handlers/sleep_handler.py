@@ -2227,8 +2227,8 @@ class SleepHandler:
         Approach: find active episodes with no incident graph edges,
         started >= ``episode_relink_min_age_hours`` ago (skip recent —
         the live linker handles those). For each, look up linkable
-        anchors (facts via source_episode_id, decisions via
-        episode_decisions). If anchors exist, call
+        anchors (facts via source_episode_id, decisions via the shared
+        session_id window). If anchors exist, call
         ``graph_linker.link_episode_deterministic``. Bounded by
         ``episode_relink_max_per_cycle`` to keep the cycle short.
 
@@ -2260,6 +2260,12 @@ class SleepHandler:
                 )
 
             from sqlalchemy import text as sql_text
+
+            from nous.brain.graph_constants import (
+                episode_decision_bounds_sql,
+                episode_decision_join_sql,
+                episode_decisions_query,
+            )
             relinked = 0
             edges_created = 0
             errors = 0
@@ -2267,11 +2273,11 @@ class SleepHandler:
                 # Find active orphan episodes older than min_age_hours.
                 # An "orphan" here = no incident graph_edges row at all.
                 # Only surface episodes that have at least one linkable
-                # anchor (active fact via source_episode_id, or
-                # episode_decisions row). Legacy pre-F022 episodes have
+                # anchor (active fact via source_episode_id, or a decision
+                # from the same session). Legacy pre-F022 episodes have
                 # neither and would just be skipped inside the loop —
                 # filtering at SQL keeps the LIMIT meaningful.
-                rows = await session.execute(sql_text("""
+                rows = await session.execute(sql_text(f"""
                     SELECT e.id
                     FROM heart.episodes e
                     WHERE e.agent_id = :agent_id
@@ -2290,9 +2296,16 @@ class SleepHandler:
                             AND f.source_episode_id = e.id
                             AND f.active = true
                         )
-                        OR EXISTS (
-                          SELECT 1 FROM heart.episode_decisions ed
-                          WHERE ed.episode_id = e.id
+                        -- Uncorrelated IN, not a correlated EXISTS: the
+                        -- window function inside the bounds subquery makes a
+                        -- correlated SubPlan re-plan per scanned episode
+                        -- (EXPLAIN ANALYZE on prod: 1796ms vs 28ms). This
+                        -- form is hashed once.
+                        OR e.id IN (
+                          SELECT eb.id
+                          FROM ({episode_decision_bounds_sql()}) eb
+                          JOIN brain.decisions d
+                            ON {episode_decision_join_sql("eb.")}
                         )
                       )
                     ORDER BY e.started_at ASC
@@ -2313,10 +2326,10 @@ class SleepHandler:
                         "WHERE agent_id=:aid AND source_episode_id=:eid AND active=true"
                     ), {"aid": agent_id, "eid": ep_id})
                     fact_ids = [r[0] for r in f_rows.all()]
-                    d_rows = await session.execute(sql_text(
-                        "SELECT decision_id FROM heart.episode_decisions "
-                        "WHERE episode_id=:eid"
-                    ), {"eid": ep_id})
+                    d_rows = await session.execute(
+                        sql_text(episode_decisions_query("d.id")),
+                        {"agent_id": agent_id, "episode_id": ep_id},
+                    )
                     decision_ids = [r[0] for r in d_rows.all()]
 
                     if not fact_ids and not decision_ids:

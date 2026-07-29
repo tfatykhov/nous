@@ -134,7 +134,7 @@ def _make_episode_detail(
         surprise_level=None,
         lessons_learned=lessons or ["Always use async context managers"],
         tags=[],
-        decision_ids=[],
+        session_id=None,
         active=False,
         created_at=_RECENT,
     )

@@ -21,7 +21,7 @@ episode↔episode edges for the historical population.
       GraphDensifier.restore_episode_anchor_edges():
         * chunk   → episode  part_of         (weight 1.0, deterministic)
         * fact    → episode  extracted_from  (active facts, weight 1.0)
-        * episode → decision discussed_in    (episode_decisions join table)
+        * episode → decision discussed_in    (shared session_id window)
 
 Run AFTER deploying the prune fix, or the next sleep cycle re-deletes
 everything this restores. Pin NOUS_SPREADING_ACTIVATION_ENABLED=false

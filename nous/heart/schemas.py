@@ -69,7 +69,10 @@ class EpisodeDetail(BaseModel):
     surprise_level: float | None
     lessons_learned: list[str]
     tags: list[str]
-    decision_ids: list[UUID]  # From episode_decisions join
+    # 2026-07-28: replaces decision_ids. heart.episode_decisions was dropped
+    # (migration 068) — decisions are correlated to an episode through the
+    # session they share (brain.graph_constants.episode_decisions_query).
+    session_id: str | None
     active: bool = True
     structured_summary: dict | None = None
     user_id: str | None = None

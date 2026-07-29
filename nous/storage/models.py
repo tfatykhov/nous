@@ -475,9 +475,6 @@ class Episode(Base):
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
-    episode_decisions: Mapped[list["EpisodeDecision"]] = relationship(
-        back_populates="episode", cascade="all, delete-orphan"
-    )
     episode_chunks: Mapped[list["EpisodeChunk"]] = relationship(
         back_populates="episode", cascade="all, delete-orphan"
     )
@@ -523,24 +520,9 @@ class EpisodeChunk(Base):
     episode: Mapped["Episode"] = relationship(back_populates="episode_chunks")
 
 
-class EpisodeDecision(Base):
-    __tablename__ = "episode_decisions"
-    __table_args__ = {"schema": "heart"}
-
-    episode_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("heart.episodes.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    decision_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("brain.decisions.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-
-    # Relationships
-    episode: Mapped["Episode"] = relationship(back_populates="episode_decisions")
-    decision: Mapped["Decision"] = relationship()
+# heart.episode_decisions was dropped by migration 068. It had a full write
+# API and no runtime writer; episode <-> decision is now derived from the
+# session both rows carry (nous/brain/graph_constants.py).
 
 
 class Fact(Base):

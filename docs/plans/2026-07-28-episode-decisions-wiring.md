@@ -145,6 +145,61 @@ that **no** unreviewed NULL-session decision trips.
 
 ---
 
+## 6b. The join rule — SETTLED empirically (2026-07-28)
+
+```sql
+e.session_id  = d.session_id
+AND e.agent_id    = d.agent_id
+AND d.created_at >= e.started_at - interval '60 seconds'
+AND d.created_at <= COALESCE(e.ended_at, now())
+```
+
+Measured against all 87 matchable prod decisions:
+
+| Rule | Pairs | Covered | Lost | Ambiguous |
+|---|---|---|---|---|
+| R1 naive equality | 148 | 87/87 | 0 | **15** |
+| R2 strict window (no grace) | 52 | 52/87 | **35** | 0 |
+| **R3 window + 60s grace** | **87** | **87/87** | **0** | **0** |
+
+R3 is an exact 1:1 function. On the two sessions that broke R1:
+`claude-code-f044-codesign` 48 pairs → **8 pairs for 8 decisions**;
+`claude-snn-smoketest-consult-2026-07-06` 28 → **7 for 7**.
+
+**Why the grace period is the whole trick.** Calibrated on single-episode sessions where
+assignment is unambiguous: of 72 pairs, 44 fall inside the window, **28 fall before episode
+start**, 0 after. The lead is **median 0.4s, p90 1.3s, max 2.2s** — precisely the `pre_turn`
+step-4-before-step-5 ordering from §3/A3, and sub-second. R2 was the right shape missing a grace
+period two orders of magnitude larger than the effect. **60s and 5min give identical results**, so
+the constant is not load-bearing — no magic tuning.
+
+**Latent hazard (not live).** `COALESCE(e.ended_at, now())` lets an *open* episode's window swallow
+a decision belonging to a later episode in the same session. 8 open episodes carry a `session_id`
+but **none are in a reused session**, so it cannot fire on current data. Hardening: bound an open
+episode by `LEAD(started_at) OVER (PARTITION BY session_id ORDER BY started_at)`.
+
+**Agent scoping is load-bearing, not decorative.** `session_id` is NOT agent-namespaced —
+`heartbeat-<hex>` / `subtask-<hex>` are generated identically per agent — so `e.agent_id = d.agent_id`
+must be written explicitly. This is the PR #557 hazard reappearing in a new form, NOT dissolving
+(correcting §4.1).
+
+## 6c. Expected outcome, stated honestly
+
+**Certain:** ~200 lines of dead code and two permanently-empty tables removed; `decisions.session_id`
+populated as designed; 87 correct episode↔decision associations instead of 3; `EpisodeSignal`
+deleted so it cannot be "helpfully" rewired.
+
+**Unmeasured:** `discussed_in` edges are *consumed* by Stage 2 of `run_recall_pipeline` (verified),
+but that they *improve* answers is a hypothesis, not a result. Per F044, edge existence is the lever
+where weight is not — plausible, unproven. Needs an eval-DB A/B before the flag is flipped.
+
+**Hard limit:** the 718 historical decisions with NULL `session_id` can **never** be linked — there
+is no backfill. This fixes the forward flow only. Heartbeat sessions (114 of 287 session-bearing
+decisions) never create episodes and correctly never link.
+
+**Does not revert:** writing `discussed_in` permanently de-orphans those decisions, excluding them
+from `backfill_orphan_decisions` thereafter (`graph_densifier.py:648-652`).
+
 ## 7. What v1 got wrong (kept deliberately)
 
 1. **"Four live readers waiting for rows."** The most important one was *deliberately decommissioned*
@@ -155,6 +210,20 @@ that **no** unreviewed NULL-session decision trips.
    decommissioned `EpisodeSignal`; both live readers want episode→decisions-in-session, a set, which
    is unambiguous.
 3. **O4 was already answered** in a comment nine lines above the code v1 cited.
+
+### 7.1 And what v2 got wrong (risk review, all three upheld)
+
+1. **"The 15-ambiguous objection dissolves."** It did not — it **moved**, from decision→episode to
+   episode→decision, and became the join fan-out measured in §6b (R1: 15 ambiguous). Only the
+   60s-grace window actually removes it.
+2. **"The PR #557 `agent_id` hazard dissolves."** It does not; it becomes an explicit predicate that
+   must be written, because `session_id` is not agent-namespaced. See §6b.
+3. **"Steps 1–3 are additive — revert and `session_id` simply stops being set."** Wrong: values
+   already written **persist in the column**, so reverting 1–3 alone leaves readers 6–8 joining on
+   them. Only reverting the whole PR is clean.
+
+Plus one of my own, withdrawn in §1.1: the claim that 718 decisions were "invisible to session-end
+review". `sweep()` is not session-scoped, so they were already being reviewed.
 
 ---
 

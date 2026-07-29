@@ -641,8 +641,7 @@ class Brain:
             {"did": decision_id},
         )
         # Delete the decision — CASCADE handles brain.thoughts, decision_tags,
-        # decision_reasons, decision_bridge, episode_decisions (NOT
-        # graph_edges — see above)
+        # decision_reasons, decision_bridge (NOT graph_edges — see above)
         await session.execute(
             text("DELETE FROM brain.decisions WHERE id = :did"),
             {"did": decision_id},

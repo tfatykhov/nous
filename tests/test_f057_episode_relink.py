@@ -7,9 +7,9 @@ The phase backfills F022 episode-graph edges that the live linker
 missed (most commonly: stuck-open sessions that never received
 ``episode_ended``). It queries active orphan episodes older than
 ``episode_relink_min_age_hours`` that have at least one linkable
-anchor (active fact via ``source_episode_id`` or row in
-``heart.episode_decisions``), then calls
-``graph_linker.link_episode_deterministic`` on each.
+anchor (active fact via ``source_episode_id`` or a decision recorded in
+the same session — ``heart.episode_decisions`` was dropped by migration
+068), then calls ``graph_linker.link_episode_deterministic`` on each.
 
 Skip rules for the integration test:
   - ``@pytest.mark.integration``  → only with ``--integration`` flag
@@ -49,12 +49,12 @@ def _make_handler(
     a CM whose execute() responds to F055's specific SQL pattern.
 
     We dispatch on SQL string content:
-      - ``WHERE e.agent_id`` (the candidate query) → returns
+      - ``FROM heart.episodes e`` (the candidate query) → returns
         ``[(ep_id,) ...]`` from candidate_eps
-      - ``f.source_episode_id`` (fact anchors) → returns the configured
+      - ``FROM heart.facts`` (fact anchors) → returns the configured
         fact_ids for that episode
-      - ``ed.episode_id`` (decision anchors) → returns configured
-        decision_ids
+      - ``JOIN brain.decisions`` (decision anchors, the session_id window
+        from graph_constants) → returns configured decision_ids
     """
     from nous.handlers.sleep_handler import SleepHandler
 
@@ -91,16 +91,21 @@ def _make_handler(
         if raise_on_session:
             raise RuntimeError("session boom")
         sql_str = str(sql)
-        # Dispatch on FROM clause to avoid the candidate query's nested
-        # EXISTS clauses leaking into anchor-query routing.
-        if "FROM heart.episodes" in sql_str:
+        # Dispatch on a marker UNIQUE to each query. Both anchor queries now
+        # nest heart.episodes (the decision one joins the session_id window
+        # from graph_constants), and the candidate query nests both anchors'
+        # tables in EXISTS clauses — so only these three markers discriminate:
+        #   brain.graph_edges → candidate query only (its NOT EXISTS)
+        #   heart.facts       → fact-anchor query (candidate already matched)
+        #   brain.decisions   → decision-anchor query
+        if "brain.graph_edges" in sql_str:
             return make_result([(eid,) for eid in candidate_eps])
         if "FROM heart.facts" in sql_str:
             ep_id = (params or {}).get("eid")
             ids = fact_anchors_per_ep.get(ep_id, [])
             return make_result([(fid,) for fid in ids])
-        if "FROM heart.episode_decisions" in sql_str:
-            ep_id = (params or {}).get("eid")
+        if "brain.decisions" in sql_str:
+            ep_id = (params or {}).get("episode_id")
             ids = decision_anchors_per_ep.get(ep_id, [])
             return make_result([(did,) for did in ids])
         return make_result([])
