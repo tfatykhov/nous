@@ -212,3 +212,81 @@ async def test_open_episode_stops_at_the_next_episode_in_the_session(db):
                 "DELETE FROM nous_system.agents WHERE id = :a"
             ), {"a": agent})
             await cs.commit()
+
+
+@pytest.mark.postgres_only
+async def test_grace_band_belongs_to_successor_not_stuck_open_predecessor(db):
+    """Adjacent windows must be mutually exclusive (codex P2).
+
+    The successor's window opens at its own started_at MINUS the grace. If the
+    predecessor is bounded at the raw LEAD(started_at), that whole grace band
+    is claimed by BOTH episodes -- and a decision landing there gets attached
+    to a stale still-open predecessor as well, producing a false discussed_in
+    edge. The band belongs to the successor: a decision recorded just before
+    episode B starts is B's own pre-episode deliberation decision (pre_turn
+    step 4 precedes step 5), never stuck-open A's.
+    """
+    agent = f"edw-band-{uuid4().hex[:8]}"
+    session_id = f"edw-band-session-{uuid4().hex[:8]}"
+    first_start = datetime.now(UTC) - timedelta(hours=3)
+    second_start = first_start + timedelta(hours=1)
+    ep_open = uuid4()
+    ep_next = uuid4()
+    in_band = uuid4()
+
+    # Squarely inside the contested band: after (second_start - grace),
+    # before second_start. The predecessor is left open (ended_at NULL) so
+    # only the LEAD term can bound it -- this is exactly the case the LEAD
+    # bound exists to handle.
+    band_ts = second_start - timedelta(seconds=EPISODE_DECISION_GRACE_SECONDS / 2)
+
+    try:
+        async with db.session() as fs:
+            await fs.execute(text(
+                "INSERT INTO nous_system.agents (id, name) "
+                "VALUES (:aid, 'x') ON CONFLICT (id) DO NOTHING"
+            ), {"aid": agent})
+            for eid, st in ((ep_open, first_start), (ep_next, second_start)):
+                await fs.execute(text(
+                    "INSERT INTO heart.episodes "
+                    "(id, agent_id, summary, started_at, ended_at, active, "
+                    " session_id, tags) "
+                    "VALUES (:id, :aid, 'band fixture', :st, NULL, true, "
+                    "        :sid, '{}')"
+                ), {"id": eid, "aid": agent, "st": st, "sid": session_id})
+            await fs.execute(text(
+                "INSERT INTO brain.decisions "
+                "(id, agent_id, description, confidence, category, stakes, "
+                " session_id, created_at) "
+                "VALUES (:id, :aid, 'band decision', 0.5, 'process', 'low', "
+                "        :sid, :ts)"
+            ), {"id": in_band, "aid": agent, "sid": session_id, "ts": band_ts})
+            await fs.commit()
+
+        async with db.session() as vs:
+            pred = [r[0] for r in (await vs.execute(
+                text(episode_decisions_query("d.id")),
+                {"agent_id": agent, "episode_id": ep_open},
+            )).all()]
+            succ = [r[0] for r in (await vs.execute(
+                text(episode_decisions_query("d.id")),
+                {"agent_id": agent, "episode_id": ep_next},
+            )).all()]
+
+        assert succ == [in_band], succ
+        assert pred == [], (
+            "stuck-open predecessor also claimed the grace-band decision -- "
+            "adjacent windows overlap"
+        )
+    finally:
+        async with db.session() as cs:
+            await cs.execute(text(
+                "DELETE FROM brain.decisions WHERE agent_id = :a"
+            ), {"a": agent})
+            await cs.execute(text(
+                "DELETE FROM heart.episodes WHERE agent_id = :a"
+            ), {"a": agent})
+            await cs.execute(text(
+                "DELETE FROM nous_system.agents WHERE id = :a"
+            ), {"a": agent})
+            await cs.commit()

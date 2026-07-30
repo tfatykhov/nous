@@ -33,6 +33,21 @@ from nous.heart.heart import Heart
 
 logger = logging.getLogger(__name__)
 
+
+def _neutralize(value: object) -> str:
+    """Strip delimiter syntax from text interpolated into a delimited block.
+
+    A wrapper like ``<decisions>...</decisions>`` only hardens the block if the
+    delimited text cannot close it. Decision descriptions carry user input
+    verbatim (deliberation builds them from the turn), so a description
+    containing the closing tag would end the wrapper early and put the
+    remainder back in instruction position.
+
+    Angle brackets are replaced rather than dropped so the text stays readable
+    to the summarizer and the substitution is visible if it ever fires.
+    """
+    return str(value or "").replace("<", "‹").replace(">", "›")
+
 _SUMMARY_PROMPT = """You are summarizing a conversation episode for an AI agent's long-term memory.
 
 Context:
@@ -950,14 +965,21 @@ class EpisodeSummarizer:
 
             lines = ["Decisions made during this episode:"]
             lines += [
-                f"- [{d.category}/{d.stakes}] {d.description} "
-                f"(confidence: {d.confidence})"
+                f"- [{_neutralize(d.category)}/{_neutralize(d.stakes)}] "
+                f"{_neutralize(d.description)} (confidence: {d.confidence})"
                 for d in decisions
             ]
             # S2 hardening: this block lands OUTSIDE the <transcript> wrapper,
             # in instruction position, and is not echo-screened. Delimit it so
             # a decision description cannot read as a directive. Empty stays
             # empty — the prompt is unchanged when there are no decisions.
+            #
+            # Codex P2: the delimiter alone is not hardening if the delimited
+            # text can close it. Deliberation descriptions carry user input
+            # verbatim, so a description containing the closing tag would end
+            # the wrapper early and return the remainder to instruction
+            # position — defeating the very guard this block adds. Every
+            # interpolated field is neutralized above.
             return "<decisions>\n" + "\n".join(lines) + "\n</decisions>"
         except Exception:
             logger.debug("Failed to build decision context for episode %s", episode_id)

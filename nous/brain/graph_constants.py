@@ -136,9 +136,22 @@ def episode_decision_bounds_sql(*, agent_param: str = "agent_id") -> str:
                LEAST(
                    COALESCE(ended_at, now()),
                    COALESCE(
+                       -- Codex P2: the successor's window opens at its own
+                       -- started_at MINUS the grace, so bounding this episode
+                       -- at the raw LEAD(started_at) left the whole grace band
+                       -- claimed by BOTH episodes. A decision landing there
+                       -- matched two episodes and could be attached to a
+                       -- stale still-open predecessor, producing a false
+                       -- discussed_in edge. Subtract the same grace so
+                       -- adjacent windows tile, and step back one microsecond
+                       -- (timestamptz resolution) so the shared instant falls
+                       -- to the SUCCESSOR -- a decision recorded in the grace
+                       -- band before episode B starts is B's own pre-episode
+                       -- deliberation decision, never stuck-open A's.
                        LEAD(started_at) OVER (
                            PARTITION BY agent_id, session_id ORDER BY started_at
-                       ),
+                       ) - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds'
+                         - interval '1 microsecond',
                        'infinity'::timestamptz
                    )
                ) AS decision_window_end
