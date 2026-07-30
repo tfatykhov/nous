@@ -377,3 +377,86 @@ async def test_closed_predecessor_keeps_its_final_minute(db):
                 "DELETE FROM nous_system.agents WHERE id = :a"
             ), {"a": agent})
             await cs.commit()
+
+
+@pytest.mark.postgres_only
+async def test_open_predecessor_window_never_inverts(db):
+    """An open episode must not end before it began (codex r3).
+
+    r2's COALESCE(ended_at, ...) protected CLOSED predecessors only. An episode
+    with ended_at IS NULL still took the LEAD branch, so when its successor
+    started within the grace, LEAD(started_at) - grace landed BEFORE the
+    predecessor's own started_at: the window inverted, the predecessor matched
+    nothing, and the successor's grace band claimed decisions made during the
+    predecessor's actual lifetime.
+    """
+    agent = f"edw-inv-{uuid4().hex[:8]}"
+    session_id = f"edw-inv-session-{uuid4().hex[:8]}"
+    first_start = datetime.now(UTC) - timedelta(hours=3)
+    # Successor starts well inside the grace of the still-open predecessor.
+    second_start = first_start + timedelta(seconds=20)
+    ep_open = uuid4()
+    ep_next = uuid4()
+    during_first = uuid4()
+
+    # Recorded AFTER the predecessor began, while it was genuinely running.
+    ts = first_start + timedelta(seconds=5)
+
+    try:
+        async with db.session() as fs:
+            await fs.execute(text(
+                "INSERT INTO nous_system.agents (id, name) "
+                "VALUES (:aid, 'x') ON CONFLICT (id) DO NOTHING"
+            ), {"aid": agent})
+            for eid, st in ((ep_open, first_start), (ep_next, second_start)):
+                await fs.execute(text(
+                    "INSERT INTO heart.episodes "
+                    "(id, agent_id, summary, started_at, ended_at, active, "
+                    " session_id, tags) "
+                    "VALUES (:id, :aid, 'invert fixture', :st, NULL, true, "
+                    "        :sid, '{}')"
+                ), {"id": eid, "aid": agent, "st": st, "sid": session_id})
+            await fs.execute(text(
+                "INSERT INTO brain.decisions "
+                "(id, agent_id, description, confidence, category, stakes, "
+                " session_id, created_at) "
+                "VALUES (:id, :aid, 'during first', 0.5, 'process', 'low', "
+                "        :sid, :ts)"
+            ), {"id": during_first, "aid": agent, "sid": session_id, "ts": ts})
+            await fs.commit()
+
+        async with db.session() as vs:
+            bounds = (await vs.execute(text(f"""
+                SELECT id, decision_window_start, decision_window_end
+                FROM ({episode_decision_bounds_sql()}) e
+                WHERE session_id = :sid
+            """), {"agent_id": agent, "sid": session_id})).all()
+            pred = [r[0] for r in (await vs.execute(
+                text(episode_decisions_query("d.id")),
+                {"agent_id": agent, "episode_id": ep_open},
+            )).all()]
+            succ = [r[0] for r in (await vs.execute(
+                text(episode_decisions_query("d.id")),
+                {"agent_id": agent, "episode_id": ep_next},
+            )).all()]
+
+        for row in bounds:
+            assert row[1] <= row[2], (
+                f"inverted window for {row[0]}: {row[1]} > {row[2]}"
+            )
+        assert pred == [during_first], (
+            "open predecessor lost a decision made during its own lifetime"
+        )
+        assert succ == [], succ
+    finally:
+        async with db.session() as cs:
+            await cs.execute(text(
+                "DELETE FROM brain.decisions WHERE agent_id = :a"
+            ), {"a": agent})
+            await cs.execute(text(
+                "DELETE FROM heart.episodes WHERE agent_id = :a"
+            ), {"a": agent})
+            await cs.execute(text(
+                "DELETE FROM nous_system.agents WHERE id = :a"
+            ), {"a": agent})
+            await cs.commit()

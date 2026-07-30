@@ -140,12 +140,41 @@ def episode_decision_bounds_sql(*, agent_param: str = "agent_id") -> str:
                -- real end. (Postgres GREATEST/LEAST ignore NULLs, so a first
                -- episode -- or one whose predecessor never closed -- simply
                -- keeps the plain grace.)
-               GREATEST(
-                   started_at - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds',
-                   LAG(ended_at) OVER (
+               CASE
+                   -- Predecessor closed: it is authoritative to its ended_at
+                   -- (codex r2), so take the grace but never reach past that.
+                   WHEN LAG(ended_at) OVER (
                        PARTITION BY agent_id, session_id ORDER BY started_at
-                   ) + interval '1 microsecond'
-               ) AS decision_window_start,
+                   ) IS NOT NULL
+                   THEN GREATEST(
+                       started_at - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds',
+                       LAG(ended_at) OVER (
+                           PARTITION BY agent_id, session_id ORDER BY started_at
+                       ) + interval '1 microsecond'
+                   )
+                   -- Predecessor still open. The grace may only reach back
+                   -- into time the predecessor had not yet begun. If it does
+                   -- not fit, this episode gets NO grace rather than a clamped
+                   -- one -- otherwise the predecessor keeps none of its own
+                   -- lifetime and this episode claims decisions made while the
+                   -- predecessor was genuinely running (codex r3).
+                   WHEN LAG(started_at) OVER (
+                       PARTITION BY agent_id, session_id ORDER BY started_at
+                   ) IS NOT NULL
+                   THEN CASE
+                       WHEN started_at
+                            - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds'
+                            >= LAG(started_at) OVER (
+                                PARTITION BY agent_id, session_id ORDER BY started_at
+                            )
+                       THEN started_at
+                            - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds'
+                       ELSE started_at
+                   END
+                   -- First episode of the session: plain grace.
+                   ELSE started_at
+                        - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds'
+               END AS decision_window_start,
                -- Upper bound. A CLOSED episode is authoritative: ended_at is
                -- when it actually stopped, so never truncate it (codex r2 --
                -- the r1 form applied the LEAD bound to closed predecessors
@@ -157,14 +186,26 @@ def episode_decision_bounds_sql(*, agent_param: str = "agent_id") -> str:
                -- in that band is the successor's own pre-episode deliberation
                -- decision. The microsecond step makes the two windows tile
                -- exactly rather than share their boundary instant.
+               -- Mirror image of the lower bound, so consecutive windows meet
+               -- at exactly one boundary: no overlap (r1), no truncation of a
+               -- closed episode (r2), no inversion (r3).
                COALESCE(
                    ended_at,
                    LEAST(
                        now(),
-                       LEAD(started_at) OVER (
-                           PARTITION BY agent_id, session_id ORDER BY started_at
-                       ) - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds'
-                         - interval '1 microsecond'
+                       CASE
+                           WHEN LEAD(started_at) OVER (
+                               PARTITION BY agent_id, session_id ORDER BY started_at
+                           ) - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds'
+                               >= started_at
+                           THEN LEAD(started_at) OVER (
+                               PARTITION BY agent_id, session_id ORDER BY started_at
+                           ) - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds'
+                             - interval '1 microsecond'
+                           ELSE LEAD(started_at) OVER (
+                               PARTITION BY agent_id, session_id ORDER BY started_at
+                           ) - interval '1 microsecond'
+                       END
                    )
                ) AS decision_window_end
         FROM heart.episodes
