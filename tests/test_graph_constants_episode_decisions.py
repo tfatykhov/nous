@@ -290,3 +290,90 @@ async def test_grace_band_belongs_to_successor_not_stuck_open_predecessor(db):
                 "DELETE FROM nous_system.agents WHERE id = :a"
             ), {"a": agent})
             await cs.commit()
+
+
+@pytest.mark.postgres_only
+async def test_closed_predecessor_keeps_its_final_minute(db):
+    """A CLOSED episode is authoritative to its own ended_at (codex r2).
+
+    The r1 exclusivity fix bounded every predecessor at
+    LEAD(started_at) - grace, including normally-closed ones. When a session id
+    is reused less than the grace after a clean close, that truncated the
+    predecessor before its own ended_at and handed its final minute of
+    decisions to the successor; when two episodes started less than the grace
+    apart, the predecessor's window could even end before its own started_at.
+    ended_at wins over grace -- exclusivity is enforced on the successor's
+    LOWER bound instead.
+    """
+    agent = f"edw-closed-{uuid4().hex[:8]}"
+    session_id = f"edw-closed-session-{uuid4().hex[:8]}"
+    first_start = datetime.now(UTC) - timedelta(hours=3)
+    # Closed cleanly, then the session id is reused 20s later -- well inside
+    # the 60s grace, which is what makes this the contested case.
+    first_end = first_start + timedelta(minutes=30)
+    second_start = first_end + timedelta(seconds=20)
+    ep_closed = uuid4()
+    ep_next = uuid4()
+    final_minute = uuid4()
+
+    # During the predecessor's real lifetime, but inside the successor's
+    # naive grace band. It belongs to the predecessor.
+    ts = first_end - timedelta(seconds=5)
+
+    try:
+        async with db.session() as fs:
+            await fs.execute(text(
+                "INSERT INTO nous_system.agents (id, name) "
+                "VALUES (:aid, 'x') ON CONFLICT (id) DO NOTHING"
+            ), {"aid": agent})
+            await fs.execute(text(
+                "INSERT INTO heart.episodes "
+                "(id, agent_id, summary, started_at, ended_at, active, "
+                " session_id, tags) "
+                "VALUES (:id, :aid, 'closed fixture', :st, :en, false, "
+                "        :sid, '{}')"
+            ), {"id": ep_closed, "aid": agent, "st": first_start,
+                "en": first_end, "sid": session_id})
+            await fs.execute(text(
+                "INSERT INTO heart.episodes "
+                "(id, agent_id, summary, started_at, ended_at, active, "
+                " session_id, tags) "
+                "VALUES (:id, :aid, 'successor fixture', :st, NULL, true, "
+                "        :sid, '{}')"
+            ), {"id": ep_next, "aid": agent, "st": second_start,
+                "sid": session_id})
+            await fs.execute(text(
+                "INSERT INTO brain.decisions "
+                "(id, agent_id, description, confidence, category, stakes, "
+                " session_id, created_at) "
+                "VALUES (:id, :aid, 'final minute', 0.5, 'process', 'low', "
+                "        :sid, :ts)"
+            ), {"id": final_minute, "aid": agent, "sid": session_id, "ts": ts})
+            await fs.commit()
+
+        async with db.session() as vs:
+            pred = [r[0] for r in (await vs.execute(
+                text(episode_decisions_query("d.id")),
+                {"agent_id": agent, "episode_id": ep_closed},
+            )).all()]
+            succ = [r[0] for r in (await vs.execute(
+                text(episode_decisions_query("d.id")),
+                {"agent_id": agent, "episode_id": ep_next},
+            )).all()]
+
+        assert pred == [final_minute], (
+            "closed predecessor lost a decision made before its own ended_at"
+        )
+        assert succ == [], succ
+    finally:
+        async with db.session() as cs:
+            await cs.execute(text(
+                "DELETE FROM brain.decisions WHERE agent_id = :a"
+            ), {"a": agent})
+            await cs.execute(text(
+                "DELETE FROM heart.episodes WHERE agent_id = :a"
+            ), {"a": agent})
+            await cs.execute(text(
+                "DELETE FROM nous_system.agents WHERE id = :a"
+            ), {"a": agent})
+            await cs.commit()

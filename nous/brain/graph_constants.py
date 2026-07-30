@@ -131,28 +131,40 @@ def episode_decision_bounds_sql(*, agent_param: str = "agent_id") -> str:
     columns. Wrap in parentheses as a derived table; never used alone."""
     return f"""
         SELECT id, agent_id, session_id, started_at, ended_at, active, outcome,
-               started_at - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds'
-                   AS decision_window_start,
-               LEAST(
-                   COALESCE(ended_at, now()),
-                   COALESCE(
-                       -- Codex P2: the successor's window opens at its own
-                       -- started_at MINUS the grace, so bounding this episode
-                       -- at the raw LEAD(started_at) left the whole grace band
-                       -- claimed by BOTH episodes. A decision landing there
-                       -- matched two episodes and could be attached to a
-                       -- stale still-open predecessor, producing a false
-                       -- discussed_in edge. Subtract the same grace so
-                       -- adjacent windows tile, and step back one microsecond
-                       -- (timestamptz resolution) so the shared instant falls
-                       -- to the SUCCESSOR -- a decision recorded in the grace
-                       -- band before episode B starts is B's own pre-episode
-                       -- deliberation decision, never stuck-open A's.
+               -- Lower bound. The grace catches a deliberation decision
+               -- recorded at pre_turn step 4, before this episode is created
+               -- at step 5. But it must never reach back into a predecessor
+               -- that was still running: a decision made while the previous
+               -- episode was genuinely open belongs to THAT episode, not to
+               -- this one's grace band. Clamp to just after the predecessor's
+               -- real end. (Postgres GREATEST/LEAST ignore NULLs, so a first
+               -- episode -- or one whose predecessor never closed -- simply
+               -- keeps the plain grace.)
+               GREATEST(
+                   started_at - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds',
+                   LAG(ended_at) OVER (
+                       PARTITION BY agent_id, session_id ORDER BY started_at
+                   ) + interval '1 microsecond'
+               ) AS decision_window_start,
+               -- Upper bound. A CLOSED episode is authoritative: ended_at is
+               -- when it actually stopped, so never truncate it (codex r2 --
+               -- the r1 form applied the LEAD bound to closed predecessors
+               -- too, so a session reused <60s after a normal close lost its
+               -- final minute of decisions to the successor, and two episodes
+               -- starting <60s apart produced a window ending before its own
+               -- start). Only a STUCK-OPEN episode needs bounding, and it
+               -- cedes the grace band to its successor (codex r1): a decision
+               -- in that band is the successor's own pre-episode deliberation
+               -- decision. The microsecond step makes the two windows tile
+               -- exactly rather than share their boundary instant.
+               COALESCE(
+                   ended_at,
+                   LEAST(
+                       now(),
                        LEAD(started_at) OVER (
                            PARTITION BY agent_id, session_id ORDER BY started_at
                        ) - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds'
-                         - interval '1 microsecond',
-                       'infinity'::timestamptz
+                         - interval '1 microsecond'
                    )
                ) AS decision_window_end
         FROM heart.episodes
