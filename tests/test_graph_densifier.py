@@ -267,22 +267,33 @@ async def _insert_lifecycle_episode(
     session: AsyncSession, agent_id: str, summary: str,
     *, active: bool, ended_at, outcome: str | None,
     embedding: list[float] | None = None,
+    session_id: str | None = None,
+    started_at=None,
 ) -> str:
     """2026-07-12 F053 helper: insert an episode with explicit lifecycle
-    state (active/ended_at/outcome) and optional embedding."""
+    state (active/ended_at/outcome) and optional embedding.
+
+    ``session_id``/``started_at`` (2026-07-28) let a caller pin the
+    episode→decision correlation window that replaced heart.episode_decisions;
+    ``started_at`` defaults to NOW() as before.
+    """
     ep_id = uuid4()
     emb_sql = "CAST(:emb AS vector)" if embedding is not None else "NULL"
+    started_sql = ":st" if started_at is not None else "NOW()"
     params = {
         "id": ep_id, "agent_id": agent_id, "summary": summary,
-        "act": active, "en": ended_at, "oc": outcome,
+        "act": active, "en": ended_at, "oc": outcome, "sid": session_id,
     }
+    if started_at is not None:
+        params["st"] = started_at
     if embedding is not None:
         params["emb"] = "[" + ",".join(str(float(v)) for v in embedding) + "]"
     await session.execute(text(f"""
         INSERT INTO heart.episodes
             (id, agent_id, summary, active, started_at, ended_at, outcome,
-             embedding)
-        VALUES (:id, :agent_id, :summary, :act, NOW(), :en, :oc, {emb_sql})
+             embedding, session_id)
+        VALUES (:id, :agent_id, :summary, :act, {started_sql}, :en, :oc,
+                {emb_sql}, :sid)
     """), params)
     return ep_id
 
@@ -1940,7 +1951,7 @@ async def test_restore_is_complete_scoped_idempotent_and_prune_safe(
 
     Agent A fixture:
       - LIVE closed episode: 2 chunks, 1 active fact, 1 inactive fact,
-        1 linked decision (episode_decisions row), 1 fact with NULL
+        1 decision recorded inside its session window, 1 fact with NULL
         source_episode_id (must contribute nothing).
       - DEAD (trivial) episode: 1 chunk, 1 active fact (all skipped).
     Agent B fixture: identical minimal live shape (1 chunk) — must be
@@ -1960,9 +1971,20 @@ async def test_restore_is_complete_scoped_idempotent_and_prune_safe(
     from nous.handlers.sleep_handler import SleepHandler
     from nous.heart import Heart
 
+    # The discussed_in leg is gated by the episode<->decision rollout flag
+    # (codex r4), which defaults off. This test asserts the leg's output, so it
+    # states the premise explicitly rather than inheriting a default.
+    settings.decision_session_id_enabled = True
+
     agent_a = f"f053-ra-{uuid4().hex[:8]}"
     agent_b = f"f053-rb-{uuid4().hex[:8]}"
     now = datetime.now(UTC)
+    started = now - timedelta(hours=1)
+    in_window = now - timedelta(minutes=30)
+    # session_id is NOT agent-namespaced in prod (heartbeat-<hex> /
+    # subtask-<hex> are generated identically per agent), so agent A and
+    # agent B deliberately share one here.
+    shared_session = f"f053-session-{uuid4().hex[:8]}"
     decision_id = uuid4()
 
     async with db.session() as fs:
@@ -1976,7 +1998,7 @@ async def test_restore_is_complete_scoped_idempotent_and_prune_safe(
     async with db.session() as fs:
         ep_live = await _insert_lifecycle_episode(
             fs, agent_a, "live closed episode", active=False, ended_at=now,
-            outcome="success",
+            outcome="success", session_id=shared_session, started_at=started,
         )
         ep_dead = await _insert_lifecycle_episode(
             fs, agent_a, "trivial discard", active=False, ended_at=None,
@@ -1984,7 +2006,7 @@ async def test_restore_is_complete_scoped_idempotent_and_prune_safe(
         )
         ep_b = await _insert_lifecycle_episode(
             fs, agent_b, "agent B closed episode", active=False, ended_at=now,
-            outcome="success",
+            outcome="success", session_id=shared_session, started_at=started,
         )
         chunk_l1 = await _insert_chunk(fs, agent_a, ep_live, 0, "chunk one", None)
         chunk_l2 = await _insert_chunk(fs, agent_a, ep_live, 1, "chunk two", None)
@@ -2006,27 +2028,42 @@ async def test_restore_is_complete_scoped_idempotent_and_prune_safe(
         await _fact(agent_a, None, True)       # NULL FK — contributes nothing
         await fs.execute(text(
             "INSERT INTO brain.decisions "
-            "(id, agent_id, description, confidence, category, stakes) "
+            "(id, agent_id, description, confidence, category, stakes, "
+            " session_id, created_at) "
             "VALUES (:id, :aid, 'restore decision fixture', 0.8, "
-            "        'process', 'low')"
-        ), {"id": decision_id, "aid": agent_a})
-        await fs.execute(text(
-            "INSERT INTO heart.episode_decisions "
-            "(episode_id, decision_id) VALUES (:eid, :did)"
-        ), {"eid": ep_live, "did": decision_id})
-        # Codex PR #557 P2: episode_decisions has no agent_id — a row from
-        # agent A's episode to a decision owned by agent B must be SKIPPED,
-        # not materialized as a cross-agent discussed_in edge.
+            "        'process', 'low', :sid, :ts)"
+        ), {
+            "id": decision_id, "aid": agent_a, "sid": shared_session,
+            "ts": in_window,
+        })
+        # Codex PR #557 P2, restated for the session_id join: session_id is
+        # NOT agent-namespaced, so a decision owned by agent B in the SAME
+        # session must be SKIPPED, not materialized as a cross-agent
+        # discussed_in edge. Only `d.agent_id = ep.agent_id` prevents that.
         cross_agent_decision = uuid4()
         await fs.execute(text(
             "INSERT INTO brain.decisions "
-            "(id, agent_id, description, confidence, category, stakes) "
-            "VALUES (:id, :aid, 'agent B decision', 0.8, 'process', 'low')"
-        ), {"id": cross_agent_decision, "aid": agent_b})
+            "(id, agent_id, description, confidence, category, stakes, "
+            " session_id, created_at) "
+            "VALUES (:id, :aid, 'agent B decision', 0.8, 'process', 'low', "
+            "        :sid, :ts)"
+        ), {
+            "id": cross_agent_decision, "aid": agent_b,
+            "sid": shared_session, "ts": in_window,
+        })
+        # Same session + same agent, but recorded AFTER the episode closed —
+        # outside the window, so it must not produce an edge either.
+        out_of_window_decision = uuid4()
         await fs.execute(text(
-            "INSERT INTO heart.episode_decisions "
-            "(episode_id, decision_id) VALUES (:eid, :did)"
-        ), {"eid": ep_live, "did": cross_agent_decision})
+            "INSERT INTO brain.decisions "
+            "(id, agent_id, description, confidence, category, stakes, "
+            " session_id, created_at) "
+            "VALUES (:id, :aid, 'after the episode closed', 0.8, 'process', "
+            "        'low', :sid, :ts)"
+        ), {
+            "id": out_of_window_decision, "aid": agent_a,
+            "sid": shared_session, "ts": now + timedelta(hours=1),
+        })
         await fs.commit()
 
     linker = GraphLinker(db, mock_embeddings, settings, agent_a)
@@ -2094,3 +2131,74 @@ async def test_restore_is_complete_scoped_idempotent_and_prune_safe(
         "prune deleted restored edges — dead/live predicates drifted"
     )
     await heart.close()
+
+
+@pytest.mark.postgres_only
+async def test_discussed_in_leg_is_gated_by_the_rollout_flag(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """With the flag off, the restore emits no episode->decision edges.
+
+    Codex r4: DeliberationProtocol.start sets session_id unconditionally, so
+    without this gate the densifier would emit discussed_in edges for the 87
+    existing matchable prod decisions while the flag still claimed the
+    correlation was dark. These edges also do not revert with the commit --
+    they permanently de-orphan their decisions out of backfill_orphan_decisions.
+    """
+    settings.decision_session_id_enabled = False
+    agent = f"f053-gate-{uuid4().hex[:8]}"
+    session_id = f"f053-gate-session-{uuid4().hex[:8]}"
+    now = datetime.now(UTC)
+    started = now - timedelta(hours=1)
+    ep = uuid4()
+    dec = uuid4()
+
+    try:
+        async with db.session() as s:
+            await s.execute(text(
+                "INSERT INTO nous_system.agents (id, name) "
+                "VALUES (:aid, 'x') ON CONFLICT (id) DO NOTHING"
+            ), {"aid": agent})
+            await s.execute(text(
+                "INSERT INTO heart.episodes "
+                "(id, agent_id, summary, started_at, ended_at, active, "
+                " session_id, tags) "
+                "VALUES (:id, :aid, 'gate fixture', :st, :en, true, :sid, '{}')"
+            ), {"id": ep, "aid": agent, "st": started,
+                "en": started + timedelta(minutes=30), "sid": session_id})
+            await s.execute(text(
+                "INSERT INTO brain.decisions "
+                "(id, agent_id, description, confidence, category, stakes, "
+                " session_id, created_at) "
+                "VALUES (:id, :aid, 'gated', 0.5, 'process', 'low', :sid, :ts)"
+            ), {"id": dec, "aid": agent, "sid": session_id,
+                "ts": started + timedelta(minutes=5)})
+            await s.commit()
+
+        linker = GraphLinker(db, mock_embeddings, settings, agent)
+        densifier = GraphDensifier(db, linker, mock_embeddings, settings, agent)
+        counts = await densifier.restore_episode_anchor_edges(
+            dry_run=True,
+        )
+        assert counts.get("discussed_in", 0) == 0, counts
+
+        settings.decision_session_id_enabled = True
+        counts_on = await densifier.restore_episode_anchor_edges(
+            dry_run=True,
+        )
+        assert counts_on.get("discussed_in", 0) == 1, counts_on
+    finally:
+        async with db.session() as cs:
+            await cs.execute(text(
+                "DELETE FROM brain.graph_edges WHERE agent_id = :a"
+            ), {"a": agent})
+            await cs.execute(text(
+                "DELETE FROM brain.decisions WHERE agent_id = :a"
+            ), {"a": agent})
+            await cs.execute(text(
+                "DELETE FROM heart.episodes WHERE agent_id = :a"
+            ), {"a": agent})
+            await cs.execute(text(
+                "DELETE FROM nous_system.agents WHERE id = :a"
+            ), {"a": agent})
+            await cs.commit()

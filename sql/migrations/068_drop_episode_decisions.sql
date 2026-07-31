@@ -1,0 +1,23 @@
+-- 068: Drop heart.episode_decisions (superseded by the session_id join)
+--
+-- Defined in init.sql as episode <-> decision links. The write API existed
+-- (EpisodeDecision model, EpisodeManager.link_decision,
+-- Heart.link_decision_to_episode) but no runtime path ever called it: the only
+-- callers were tests. Zero rows in prod, so all four readers -- the graph
+-- densifier's discussed_in restore, the sleep handler's F057 relink anchors,
+-- EpisodeDetail.decision_ids, and the episode summarizer's decision context --
+-- were reading an empty table and silently getting nothing.
+--
+-- Replaced by correlating the two rows through the session they share:
+-- heart.episodes.session_id = brain.decisions.session_id, same agent_id,
+-- decision created inside the episode's window with a 60s grace on the lower
+-- bound (pre_turn records a deliberation decision before it creates the
+-- episode). Single definition in nous/brain/graph_constants.py:
+-- episode_decision_bounds_sql / episode_decision_join_sql /
+-- episode_decisions_query.
+--
+-- Measured on all 87 matchable prod decisions (2026-07-28): 87 pairs,
+-- 87/87 covered, 0 lost, 0 ambiguous. The join derives historical links live,
+-- so no backfill is needed and nothing is lost by dropping the table.
+
+DROP TABLE IF EXISTS heart.episode_decisions;

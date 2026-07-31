@@ -26,7 +26,6 @@ from nous.config import Settings
 from nous.handlers.decision_reviewer import (
     CONFIDENCE_THRESHOLD,
     DecisionReviewer,
-    EpisodeSignal,
     ErrorSignal,
     FileExistsSignal,
     GitHubSignal,
@@ -338,50 +337,12 @@ class TestConfidenceRawPropagation:
 
 
 # ---------------------------------------------------------------------------
-# Task 11: EpisodeSignal
+# Task 11: EpisodeSignal — REMOVED 2026-07-28
 # ---------------------------------------------------------------------------
-
-
-class TestEpisodeSignal:
-    """Verify EpisodeSignal maps episode outcome to decision outcome."""
-
-    @pytest.mark.asyncio
-    async def test_resolved_episode_returns_success(self):
-        """Episode with outcome='success' should map to decision success."""
-        brain = AsyncMock()
-        episode = MagicMock()
-        episode.outcome = "success"
-        brain.get_episode_for_decision = AsyncMock(return_value=episode)
-
-        signal = EpisodeSignal(brain)
-        result = await signal.check(_make_decision())
-        assert result is not None
-        assert result.result == "success"
-        assert result.signal_type == "episode"
-
-    @pytest.mark.asyncio
-    async def test_unresolved_episode_returns_failure(self):
-        """Episode with outcome='failure' should map to decision failure."""
-        brain = AsyncMock()
-        episode = MagicMock()
-        episode.outcome = "failure"
-        brain.get_episode_for_decision = AsyncMock(return_value=episode)
-
-        signal = EpisodeSignal(brain)
-        result = await signal.check(_make_decision())
-        assert result is not None
-        assert result.result == "failure"
-        assert result.signal_type == "episode"
-
-    @pytest.mark.asyncio
-    async def test_no_linked_episode_returns_none(self):
-        """No linked episode should return None."""
-        brain = AsyncMock()
-        brain.get_episode_for_decision = AsyncMock(return_value=None)
-
-        signal = EpisodeSignal(brain)
-        result = await signal.check(_make_decision())
-        assert result is None
+# TestEpisodeSignal was deleted with the class it covered. EpisodeSignal had
+# been unwired since audit HD-4 (2026-06-09) for mapping the hardcoded-"success"
+# episode outcome onto every decision in a session; these tests only ever
+# asserted that broken mapping against mocks.
 
 
 # ---------------------------------------------------------------------------
@@ -605,12 +566,15 @@ class TestMainWiring:
 
         assert DecisionReviewer is not None
 
-    def test_brain_has_get_episode_for_decision(self):
-        """Brain should have get_episode_for_decision method."""
+    def test_brain_no_longer_has_get_episode_for_decision(self):
+        """get_episode_for_decision was removed with EpisodeSignal (2026-07-28).
+
+        Inverted rather than deleted: this pins the removal so the method
+        cannot be reintroduced without a deliberate test change.
+        """
         from nous.brain.brain import Brain
 
-        assert hasattr(Brain, "get_episode_for_decision")
-        assert callable(getattr(Brain, "get_episode_for_decision"))
+        assert not hasattr(Brain, "get_episode_for_decision")
 
 
 # ---------------------------------------------------------------------------

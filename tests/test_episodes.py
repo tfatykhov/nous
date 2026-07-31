@@ -6,14 +6,11 @@ Heart methods receive the test session via the session parameter (P1-1).
 
 from sqlalchemy import select
 
-from nous.brain.brain import Brain
-from nous.brain.schemas import ReasonInput, RecordInput
 from nous.heart import (
     EpisodeDetail,
     EpisodeInput,
     EpisodeSummary,
 )
-from nous.storage.models import EpisodeDecision, EpisodeProcedure
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -100,74 +97,38 @@ async def test_end_episode_calculates_duration(heart, session):
 
 
 # ---------------------------------------------------------------------------
-# 4. test_link_decision
+# 4. test_decision_link_writer_is_gone
 # ---------------------------------------------------------------------------
 
 
-async def test_link_decision(heart, db, settings, session):
-    """episode_decisions row created when linking a decision."""
-    # Create an episode
-    inp = _episode_input()
-    episode = await heart.start_episode(inp, session=session)
+async def test_decision_link_writer_is_gone(heart, db, settings, session):
+    """The heart.episode_decisions write API was deleted with migration 068.
 
-    # Create a brain decision to link
-    brain = Brain(database=db, settings=settings)
-    decision = await brain.record(
-        RecordInput(
-            description="Test decision for linking",
-            confidence=0.8,
-            category="architecture",
-            stakes="low",
-            reasons=[ReasonInput(type="analysis", text="Test")],
-        ),
-        session=session,
+    Inverted from the old test_link_decision: the writer had no runtime caller
+    (only this test), so every reader saw an empty table. Episode <-> decision
+    is now derived from the session both rows carry, exposed on EpisodeDetail
+    as session_id.
+    """
+    assert not hasattr(heart, "link_decision_to_episode")
+    assert not hasattr(heart.episodes, "link_decision")
+    assert not hasattr(heart.episodes, "_link_decision")
+
+    episode = await heart.start_episode(
+        _episode_input(session_id="ep-detail-session"), session=session,
     )
-    await brain.close()
-
-    # Link the decision to the episode
-    await heart.link_decision_to_episode(episode.id, decision.id, session=session)
-
-    # Verify the link exists
-    result = await session.execute(
-        select(EpisodeDecision).where(
-            EpisodeDecision.episode_id == episode.id,
-            EpisodeDecision.decision_id == decision.id,
-        )
-    )
-    link = result.scalar_one()
-    assert link.episode_id == episode.id
-    assert link.decision_id == decision.id
+    detail = await heart.get_episode(episode.id, session=session)
+    assert detail.session_id == "ep-detail-session"
+    assert not hasattr(detail, "decision_ids")
 
 
 # ---------------------------------------------------------------------------
-# 5. test_link_procedure_with_effectiveness
+# 5. test_link_procedure_with_effectiveness — REMOVED 2026-07-28
 # ---------------------------------------------------------------------------
-
-
-async def test_link_procedure_with_effectiveness(heart, session):
-    """episode_procedures row created with effectiveness."""
-    from nous.heart import ProcedureInput
-
-    episode = await heart.start_episode(_episode_input(), session=session)
-    procedure = await heart.store_procedure(
-        ProcedureInput(
-            name="Test Procedure",
-            domain="testing",
-            core_patterns=["test pattern"],
-        ),
-        session=session,
-    )
-
-    await heart.link_procedure_to_episode(episode.id, procedure.id, effectiveness="helped", session=session)
-
-    result = await session.execute(
-        select(EpisodeProcedure).where(
-            EpisodeProcedure.episode_id == episode.id,
-            EpisodeProcedure.procedure_id == procedure.id,
-        )
-    )
-    link = result.scalar_one()
-    assert link.effectiveness == "helped"
+# heart.episode_procedures was dropped by migration 067: zero rows and zero
+# readers in prod, and the effectiveness concept it modelled ships instead as a
+# Laplace-smoothed float over procedures.success_count/failure_count
+# (heart/procedures.py:958). This test covered the only caller of the deleted
+# writer, which was itself only ever called from tests.
 
 
 # ---------------------------------------------------------------------------

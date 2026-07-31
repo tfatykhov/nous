@@ -27,3 +27,6 @@ reports/beam/
 # F074: HuggingFace cache (~/.cache/nous-eval/beam) is outside repo
 scripts/diag/_proc_*.json
 .prod_snapshot/
+
+# Prod DB backups (pg_dump artifacts, never commit)
+backups/

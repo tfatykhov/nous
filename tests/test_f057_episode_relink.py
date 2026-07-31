@@ -7,9 +7,9 @@ The phase backfills F022 episode-graph edges that the live linker
 missed (most commonly: stuck-open sessions that never received
 ``episode_ended``). It queries active orphan episodes older than
 ``episode_relink_min_age_hours`` that have at least one linkable
-anchor (active fact via ``source_episode_id`` or row in
-``heart.episode_decisions``), then calls
-``graph_linker.link_episode_deterministic`` on each.
+anchor (active fact via ``source_episode_id`` or a decision recorded in
+the same session — ``heart.episode_decisions`` was dropped by migration
+068), then calls ``graph_linker.link_episode_deterministic`` on each.
 
 Skip rules for the integration test:
   - ``@pytest.mark.integration``  → only with ``--integration`` flag
@@ -44,17 +44,18 @@ def _make_handler(
     decision_anchors_per_ep: dict | None = None,
     raise_on_link: bool = False,
     raise_on_session: bool = False,
+    decision_session_id_enabled: bool = True,
 ):
     """Construct a SleepHandler with mocked Heart.db.session() returning
     a CM whose execute() responds to F055's specific SQL pattern.
 
     We dispatch on SQL string content:
-      - ``WHERE e.agent_id`` (the candidate query) → returns
+      - ``FROM heart.episodes e`` (the candidate query) → returns
         ``[(ep_id,) ...]`` from candidate_eps
-      - ``f.source_episode_id`` (fact anchors) → returns the configured
+      - ``FROM heart.facts`` (fact anchors) → returns the configured
         fact_ids for that episode
-      - ``ed.episode_id`` (decision anchors) → returns configured
-        decision_ids
+      - ``JOIN brain.decisions`` (decision anchors, the session_id window
+        from graph_constants) → returns configured decision_ids
     """
     from nous.handlers.sleep_handler import SleepHandler
 
@@ -71,6 +72,13 @@ def _make_handler(
     )
     object.__setattr__(
         settings, "episode_relink_max_per_cycle", episode_relink_max_per_cycle
+    )
+    # The decision-anchor half of this phase is gated by the episode<->decision
+    # rollout flag (codex r4/r5), which defaults OFF. These tests assert that
+    # half's behavior, so the factory opts in by default and exposes the knob
+    # for the test that pins the gate itself.
+    object.__setattr__(
+        settings, "decision_session_id_enabled", decision_session_id_enabled
     )
     bus = MagicMock(spec=EventBus)
     bus.on = MagicMock()
@@ -91,16 +99,21 @@ def _make_handler(
         if raise_on_session:
             raise RuntimeError("session boom")
         sql_str = str(sql)
-        # Dispatch on FROM clause to avoid the candidate query's nested
-        # EXISTS clauses leaking into anchor-query routing.
-        if "FROM heart.episodes" in sql_str:
+        # Dispatch on a marker UNIQUE to each query. Both anchor queries now
+        # nest heart.episodes (the decision one joins the session_id window
+        # from graph_constants), and the candidate query nests both anchors'
+        # tables in EXISTS clauses — so only these three markers discriminate:
+        #   brain.graph_edges → candidate query only (its NOT EXISTS)
+        #   heart.facts       → fact-anchor query (candidate already matched)
+        #   brain.decisions   → decision-anchor query
+        if "brain.graph_edges" in sql_str:
             return make_result([(eid,) for eid in candidate_eps])
         if "FROM heart.facts" in sql_str:
             ep_id = (params or {}).get("eid")
             ids = fact_anchors_per_ep.get(ep_id, [])
             return make_result([(fid,) for fid in ids])
-        if "FROM heart.episode_decisions" in sql_str:
-            ep_id = (params or {}).get("eid")
+        if "brain.decisions" in sql_str:
+            ep_id = (params or {}).get("episode_id")
             ids = decision_anchors_per_ep.get(ep_id, [])
             return make_result([(did,) for did in ids])
         return make_result([])
@@ -349,3 +362,29 @@ class TestF057Integration:
                     "DELETE FROM nous_system.agents WHERE id=:aid"
                 ), {"aid": agent_id})
                 await cs.commit()
+
+
+    @pytest.mark.asyncio
+    async def test_decision_anchors_are_gated_by_the_rollout_flag(self):
+        """Codex r5: gating the candidate query alone was not enough.
+
+        An orphan episode still enters the loop via its FACT anchor, and the
+        per-episode decision lookup then pulled existing session-tagged
+        deliberation decisions and persisted discussed_in edges for them -- so
+        this phase kept re-enabling the supposedly dark correlation for every
+        fact-bearing episode.
+        """
+        ep1, ep2 = uuid4(), uuid4()
+        f1a, f1b, d2 = uuid4(), uuid4(), uuid4()
+        handler, _ = _make_handler(
+            candidate_eps=[ep1, ep2],
+            fact_anchors_per_ep={ep1: [f1a, f1b]},
+            decision_anchors_per_ep={ep2: [d2]},
+            decision_session_id_enabled=False,
+        )
+        sleep_stats: dict = {}
+        assert await handler._phase_relink_open_episodes(sleep_stats) is True
+        # ep1 still relinks on its 2 fact edges; ep2 was decision-only, so with
+        # the flag off it has no anchor at all and is skipped.
+        assert sleep_stats["episodes_relinked"] == 1
+        assert sleep_stats["episode_relink_edges"] == 2

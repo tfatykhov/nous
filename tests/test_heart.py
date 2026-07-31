@@ -77,12 +77,17 @@ def _censor_input(**overrides) -> CensorInput:
 
 
 async def test_full_episode_lifecycle(heart, db, settings, session):
-    """start -> link decision -> link procedure -> end with outcome."""
+    """start -> record a decision in the same session -> end with outcome."""
     # Start episode
-    episode = await heart.start_episode(_episode_input(), session=session)
+    episode = await heart.start_episode(
+        _episode_input(session_id="heart-lifecycle-session"), session=session,
+    )
     assert episode.ended_at is None
+    # The correlation key: link_decision_to_episode was removed with migration
+    # 068 — episode and decision are matched on the session they share.
+    assert episode.session_id == "heart-lifecycle-session"
 
-    # Create and link a decision
+    # Record a decision in that same session
     brain = Brain(database=db, settings=settings)
     decision = await brain.record(
         RecordInput(
@@ -91,16 +96,15 @@ async def test_full_episode_lifecycle(heart, db, settings, session):
             category="architecture",
             stakes="low",
             reasons=[ReasonInput(type="analysis", text="Test")],
+            session_id="heart-lifecycle-session",
         ),
         session=session,
     )
     await brain.close()
+    assert decision.id is not None
 
-    await heart.link_decision_to_episode(episode.id, decision.id, session=session)
-
-    # Create and link a procedure
+    # Create a procedure (link_procedure_to_episode removed with migration 067)
     procedure = await heart.store_procedure(_procedure_input(), session=session)
-    await heart.link_procedure_to_episode(episode.id, procedure.id, effectiveness="helped", session=session)
 
     # End episode
     ended = await heart.end_episode(

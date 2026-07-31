@@ -12,7 +12,6 @@ from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from nous.utils import text_overlap
 
@@ -20,7 +19,7 @@ from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.schemas import EpisodeDetail, EpisodeInput, EpisodeSummary
 from nous.heart.search import hybrid_search, hybrid_search_multi
 from nous.storage.database import Database
-from nous.storage.models import Episode, EpisodeDecision, EpisodeProcedure, Event
+from nous.storage.models import Episode, Event
 
 logger = logging.getLogger(__name__)
 
@@ -265,73 +264,11 @@ class EpisodeManager:
         return self._to_detail(episode)
 
     # ------------------------------------------------------------------
-    # link_decision()
-    # ------------------------------------------------------------------
-
-    async def link_decision(
-        self,
-        episode_id: UUID,
-        decision_id: UUID,
-        session: AsyncSession | None = None,
-    ) -> None:
-        """Insert into heart.episode_decisions."""
-        if session is None:
-            async with self.db.session() as session:
-                await self._link_decision(episode_id, decision_id, session)
-                await session.commit()
-                return
-        await self._link_decision(episode_id, decision_id, session)
-
-    async def _link_decision(
-        self,
-        episode_id: UUID,
-        decision_id: UUID,
-        session: AsyncSession,
-    ) -> None:
-        link = EpisodeDecision(episode_id=episode_id, decision_id=decision_id)
-        session.add(link)
-        await session.flush()
-
-    # ------------------------------------------------------------------
-    # link_procedure()
-    # ------------------------------------------------------------------
-
-    async def link_procedure(
-        self,
-        episode_id: UUID,
-        procedure_id: UUID,
-        effectiveness: str | None = None,
-        session: AsyncSession | None = None,
-    ) -> None:
-        """Insert into heart.episode_procedures with optional effectiveness."""
-        if session is None:
-            async with self.db.session() as session:
-                await self._link_procedure(episode_id, procedure_id, effectiveness, session)
-                await session.commit()
-                return
-        await self._link_procedure(episode_id, procedure_id, effectiveness, session)
-
-    async def _link_procedure(
-        self,
-        episode_id: UUID,
-        procedure_id: UUID,
-        effectiveness: str | None,
-        session: AsyncSession,
-    ) -> None:
-        link = EpisodeProcedure(
-            episode_id=episode_id,
-            procedure_id=procedure_id,
-            effectiveness=effectiveness,
-        )
-        session.add(link)
-        await session.flush()
-
-    # ------------------------------------------------------------------
     # get()
     # ------------------------------------------------------------------
 
     async def get(self, episode_id: UUID, session: AsyncSession | None = None) -> EpisodeDetail | None:
-        """Fetch episode with linked decision_ids."""
+        """Fetch a single episode by id."""
         if session is None:
             async with self.db.session() as session:
                 return await self._get(episode_id, session)
@@ -655,10 +592,9 @@ class EpisodeManager:
     # ------------------------------------------------------------------
 
     async def _get_episode_orm(self, episode_id: UUID, session: AsyncSession) -> Episode | None:
-        """Fetch Episode ORM with eager-loaded relationships, scoped by agent_id."""
+        """Fetch Episode ORM, scoped by agent_id."""
         result = await session.execute(
             select(Episode)
-            .options(selectinload(Episode.episode_decisions))
             .where(Episode.id == episode_id)
             .where(Episode.agent_id == self.agent_id)
         )
@@ -666,7 +602,6 @@ class EpisodeManager:
 
     def _to_detail(self, episode: Episode) -> EpisodeDetail:
         """Convert ORM Episode to EpisodeDetail DTO."""
-        decision_ids = [ed.decision_id for ed in (episode.episode_decisions or [])]
         return EpisodeDetail(
             id=episode.id,
             agent_id=episode.agent_id,
@@ -683,7 +618,7 @@ class EpisodeManager:
             surprise_level=episode.surprise_level,
             lessons_learned=episode.lessons_learned or [],
             tags=episode.tags or [],
-            decision_ids=decision_ids,
+            session_id=episode.session_id,
             active=episode.active,
             # Legacy bad-row guard (see list_recent): a non-dict structured_summary
             # would fail EpisodeDetail validation.

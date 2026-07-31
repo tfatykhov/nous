@@ -9,7 +9,6 @@ from nous.storage.models import (
     DecisionReason,
     DecisionTag,
     Episode,
-    EpisodeDecision,
     Fact,
     Guardrail,
 )
@@ -156,39 +155,44 @@ async def test_guardrail_jsonb(session):
     assert guardrail.severity == "block"
 
 
-async def test_cross_schema_relationship(session):
-    """EpisodeDecision links heart.episode + brain.decision across schemas."""
+async def test_cross_schema_correlation(session):
+    """heart.episode + brain.decision correlate across schemas on session_id.
+
+    Inverted from test_cross_schema_relationship: the EpisodeDecision join
+    model was deleted with migration 068 (full write API, no runtime writer).
+    Both rows carry the session, which is what the readers now join on.
+    """
+    import nous.storage.models as models
+
+    assert not hasattr(models, "EpisodeDecision")
+    assert not hasattr(Episode, "episode_decisions")
+
+    session_id = "cross-schema-session"
     decision = Decision(
         agent_id="test-agent",
         description="Cross-schema test decision",
         confidence=0.7,
         category="process",
         stakes="low",
+        session_id=session_id,
     )
     episode = Episode(
         agent_id="test-agent",
         summary="Cross-schema test episode",
+        session_id=session_id,
     )
     session.add_all([decision, episode])
     await session.commit()
 
-    link = EpisodeDecision(
-        episode_id=episode.id,
-        decision_id=decision.id,
-    )
-    session.add(link)
-    await session.commit()
-
-    # Query the link back
-    result = await session.execute(
-        select(EpisodeDecision).where(
-            EpisodeDecision.episode_id == episode.id,
-            EpisodeDecision.decision_id == decision.id,
+    loaded = (await session.execute(
+        select(Decision.id)
+        .join(Episode, Episode.session_id == Decision.session_id)
+        .where(
+            Episode.id == episode.id,
+            Decision.agent_id == Episode.agent_id,
         )
-    )
-    loaded = result.scalar_one()
-    assert loaded.episode_id == episode.id
-    assert loaded.decision_id == decision.id
+    )).scalars().all()
+    assert loaded == [decision.id]
 
 
 async def test_check_constraints(session):

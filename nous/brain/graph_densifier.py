@@ -16,7 +16,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain._entity_config import _ENTITY_CONFIG
-from nous.brain.graph_constants import autobehavior_exclusion_sql, episode_live_sql
+from nous.brain.graph_constants import (
+    autobehavior_exclusion_sql,
+    episode_decision_bounds_sql,
+    episode_decision_join_sql,
+    episode_live_sql,
+)
 from nous.brain.backfill_rerank import (
     ce_rerank_backfill_candidates,
     fetch_candidate_content,
@@ -640,9 +645,14 @@ class GraphDensifier:
             mirrors backfill_orphan_chunks step 1: weight 1.0, structural)
           - fact    → episode  ``extracted_from`` (facts.source_episode_id,
             active facts only; mirrors GraphLinker.link_episode_deterministic)
-          - episode → decision ``discussed_in``   (heart.episode_decisions;
-            mirrors GraphLinker.link_episode_deterministic — F053 destroyed
-            these too, and no other mechanism rebuilds them)
+          - episode → decision ``discussed_in``   (shared session_id, see
+            graph_constants.episode_decision_bounds_sql; mirrors
+            GraphLinker.link_episode_deterministic, which F053 destroyed
+            these too). The one other live producer,
+            ``handlers/decision_graph_linker.py:165``, writes ``discussed_in``
+            by COSINE on the decision-record path — it rarely clears
+            ``graph_threshold_fact_episode`` (3 prod edges, all ``inferred``),
+            so it does not restore the deterministic class this rebuilds.
 
         Cosine-inferred classes (episode↔episode related_to, episode→fact)
         are NOT restored here — they heal via
@@ -656,6 +666,15 @@ class GraphDensifier:
         ``dry_run``).
         """
         live = episode_live_sql("ep.")
+        # Codex r4: the episode<->decision correlation is gated by the rollout
+        # flag on BOTH sides. DeliberationProtocol.start sets session_id
+        # unconditionally, so without this the discussed_in leg would emit
+        # edges for the 87 existing matchable decisions while the flag still
+        # claimed the behavior was dark. These edges do not revert with a
+        # git revert either -- they permanently de-orphan their decisions.
+        _correlate = getattr(
+            self._settings, "decision_session_id_enabled", False
+        )
         # ep.agent_id scoping is defense-in-depth (FKs cannot cross agents),
         # per the repo rule: agent-scope every side of every new query.
         selects = {
@@ -678,20 +697,22 @@ class GraphDensifier:
                 WHERE f.agent_id = :agent_id AND f.active = TRUE AND {live}
             """,
             "discussed_in": f"""
-                SELECT ed.episode_id AS source_id, ed.decision_id AS target_id,
+                SELECT ep.id AS source_id, d.id AS target_id,
                        'episode' AS source_type, 'decision' AS target_type,
                        ep.agent_id, 'discussed_in' AS relation
-                FROM heart.episode_decisions ed
-                JOIN heart.episodes ep
-                  ON ep.id = ed.episode_id AND ep.agent_id = :agent_id
-                -- Codex PR #557 P2: episode_decisions has NO agent_id column,
-                -- so the decision side must be verified explicitly or a
-                -- cross-agent join-table row materializes a cross-agent edge.
-                JOIN brain.decisions d
-                  ON d.id = ed.decision_id AND d.agent_id = :agent_id
+                FROM ({episode_decision_bounds_sql()}) ep
+                -- Codex PR #557 P2 still applies to the session_id join that
+                -- replaced episode_decisions: session_id is NOT agent-
+                -- namespaced (heartbeat-<hex> / subtask-<hex> are generated
+                -- identically per agent), so `d.agent_id = ep.agent_id`
+                -- inside the ON clause is what keeps a same-named session on
+                -- another agent from materializing a cross-agent edge.
+                JOIN brain.decisions d ON {episode_decision_join_sql("ep.")}
                 WHERE {live}
             """,
         }
+        if not _correlate:
+            selects.pop("discussed_in", None)
         results: dict[str, int] = {}
         async with self.db.session() as session:
             for relation, select_sql in selects.items():

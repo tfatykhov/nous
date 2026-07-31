@@ -475,12 +475,6 @@ class Episode(Base):
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
-    episode_decisions: Mapped[list["EpisodeDecision"]] = relationship(
-        back_populates="episode", cascade="all, delete-orphan"
-    )
-    episode_procedures: Mapped[list["EpisodeProcedure"]] = relationship(
-        back_populates="episode", cascade="all, delete-orphan"
-    )
     episode_chunks: Mapped[list["EpisodeChunk"]] = relationship(
         back_populates="episode", cascade="all, delete-orphan"
     )
@@ -526,24 +520,9 @@ class EpisodeChunk(Base):
     episode: Mapped["Episode"] = relationship(back_populates="episode_chunks")
 
 
-class EpisodeDecision(Base):
-    __tablename__ = "episode_decisions"
-    __table_args__ = {"schema": "heart"}
-
-    episode_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("heart.episodes.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    decision_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("brain.decisions.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-
-    # Relationships
-    episode: Mapped["Episode"] = relationship(back_populates="episode_decisions")
-    decision: Mapped["Decision"] = relationship()
+# heart.episode_decisions was dropped by migration 068. It had a full write
+# API and no runtime writer; episode <-> decision is now derived from the
+# session both rows carry (nous/brain/graph_constants.py).
 
 
 class Fact(Base):
@@ -674,39 +653,9 @@ class Procedure(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
-    episode_procedures: Mapped[list["EpisodeProcedure"]] = relationship(
-        back_populates="procedure", cascade="all, delete-orphan"
-    )
     task_affinities: Mapped[list["ProcedureTaskAffinity"]] = relationship(
         back_populates="procedure", cascade="all, delete-orphan"
     )
-
-
-class EpisodeProcedure(Base):
-    __tablename__ = "episode_procedures"
-    __table_args__ = (
-        CheckConstraint(
-            "effectiveness IN ('helped', 'neutral', 'hindered')",
-            name="ck_ep_proc_effectiveness",
-        ),
-        {"schema": "heart"},
-    )
-
-    episode_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("heart.episodes.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    procedure_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("heart.procedures.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    effectiveness: Mapped[str | None] = mapped_column(String(20))
-
-    # Relationships
-    episode: Mapped["Episode"] = relationship(back_populates="episode_procedures")
-    procedure: Mapped["Procedure"] = relationship(back_populates="episode_procedures")
 
 
 class ProcedureTaskAffinity(Base):

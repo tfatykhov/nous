@@ -1,4 +1,10 @@
-"""Canonical graph-edge exclusion sets for graph consumers.
+"""Canonical shared predicates for graph and episode consumers.
+
+Three groups live here: the graph-edge exclusion sets (below), the episode
+liveness predicates, and the episode<->decision correlation window. Each was
+added because the same rule had drifted across independent call sites.
+
+--- graph-edge exclusion sets ---
 
 The 2026-06-13 audit (Theme 6) found the relation-exclusion logic had drifted
 across the graph consumers — each excluded a different subset, so every new edge
@@ -84,3 +90,164 @@ def episode_live_sql(col_prefix: str = "") -> str:
         f"(({p}active = true OR {p}ended_at IS NOT NULL) "
         f"AND {p}outcome IS DISTINCT FROM 'abandoned')"
     )
+
+
+# --- episode <-> decision correlation (2026-07-28) ---
+# Replaces the `heart.episode_decisions` join table (dropped in migration
+# 068), which had a full write API but no runtime writer — every reader saw
+# an empty table. Episode and decision are correlated instead through the
+# session they share: `heart.episodes.session_id` and
+# `brain.decisions.session_id`.
+#
+# Measured on all 87 matchable prod decisions (2026-07-28): 87 pairs,
+# 87/87 covered, 0 ambiguous. Two terms are load-bearing and were each
+# falsified by a prod measurement:
+#
+#   - The `agent_id` equality. `session_id` is NOT agent-namespaced
+#     (`heartbeat-<hex>` / `subtask-<hex>` are generated identically for
+#     every agent), so without it a same-named session on another agent
+#     materialises a cross-agent pair.
+#   - The 60s grace on the lower bound. `pre_turn` records a deliberation
+#     decision at step 4 and creates the episode at step 5, so a decision
+#     can predate its own episode by up to 2.2s (median 0.4s). A strict
+#     `>= started_at` window loses 35 of the 87.
+#
+# A plain equality join with no time window is also wrong: it is a
+# cross-product over multi-episode sessions (148 pairs, 15 ambiguous).
+#
+# Open episodes are additionally bounded by the next episode's start in the
+# same session, so a session that is reused after a stuck-open episode does
+# not vacuum up every later decision. Verified a no-op on prod today (still
+# 87 pairs) — it is hardening for the 8 currently-open session-bearing
+# episodes. Consecutive episodes overlap by the grace interval, so a
+# decision in that seam can match both; readers want episode -> decision
+# SET membership, for which that is benign.
+
+EPISODE_DECISION_GRACE_SECONDS = 60
+
+
+def episode_decision_bounds_sql(*, agent_param: str = "agent_id") -> str:
+    """Bare SELECT over ``heart.episodes`` adding the decision-window
+    columns. Wrap in parentheses as a derived table; never used alone."""
+    return f"""
+        SELECT id, agent_id, session_id, started_at, ended_at, active, outcome,
+               -- Lower bound. The grace catches a deliberation decision
+               -- recorded at pre_turn step 4, before this episode is created
+               -- at step 5. But it must never reach back into a predecessor
+               -- that was still running: a decision made while the previous
+               -- episode was genuinely open belongs to THAT episode, not to
+               -- this one's grace band. Clamp to just after the predecessor's
+               -- real end. (Postgres GREATEST/LEAST ignore NULLs, so a first
+               -- episode -- or one whose predecessor never closed -- simply
+               -- keeps the plain grace.)
+               CASE
+                   -- Predecessor closed: it is authoritative to its ended_at
+                   -- (codex r2), so take the grace but never reach past that.
+                   WHEN LAG(ended_at) OVER (
+                       PARTITION BY agent_id, session_id ORDER BY started_at
+                   ) IS NOT NULL
+                   THEN GREATEST(
+                       started_at - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds',
+                       LAG(ended_at) OVER (
+                           PARTITION BY agent_id, session_id ORDER BY started_at
+                       ) + interval '1 microsecond'
+                   )
+                   -- Predecessor still open. The grace may only reach back
+                   -- into time the predecessor had not yet begun. If it does
+                   -- not fit, this episode gets NO grace rather than a clamped
+                   -- one -- otherwise the predecessor keeps none of its own
+                   -- lifetime and this episode claims decisions made while the
+                   -- predecessor was genuinely running (codex r3).
+                   WHEN LAG(started_at) OVER (
+                       PARTITION BY agent_id, session_id ORDER BY started_at
+                   ) IS NOT NULL
+                   THEN CASE
+                       WHEN started_at
+                            - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds'
+                            >= LAG(started_at) OVER (
+                                PARTITION BY agent_id, session_id ORDER BY started_at
+                            )
+                       THEN started_at
+                            - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds'
+                       ELSE started_at
+                   END
+                   -- First episode of the session: plain grace.
+                   ELSE started_at
+                        - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds'
+               END AS decision_window_start,
+               -- Upper bound. A CLOSED episode is authoritative: ended_at is
+               -- when it actually stopped, so never truncate it (codex r2 --
+               -- the r1 form applied the LEAD bound to closed predecessors
+               -- too, so a session reused <60s after a normal close lost its
+               -- final minute of decisions to the successor, and two episodes
+               -- starting <60s apart produced a window ending before its own
+               -- start). Only a STUCK-OPEN episode needs bounding, and it
+               -- cedes the grace band to its successor (codex r1): a decision
+               -- in that band is the successor's own pre-episode deliberation
+               -- decision. The microsecond step makes the two windows tile
+               -- exactly rather than share their boundary instant.
+               -- Mirror image of the lower bound, so consecutive windows meet
+               -- at exactly one boundary: no overlap (r1), no truncation of a
+               -- closed episode (r2), no inversion (r3).
+               COALESCE(
+                   ended_at,
+                   LEAST(
+                       now(),
+                       CASE
+                           WHEN LEAD(started_at) OVER (
+                               PARTITION BY agent_id, session_id ORDER BY started_at
+                           ) - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds'
+                               >= started_at
+                           THEN LEAD(started_at) OVER (
+                               PARTITION BY agent_id, session_id ORDER BY started_at
+                           ) - interval '{EPISODE_DECISION_GRACE_SECONDS} seconds'
+                             - interval '1 microsecond'
+                           ELSE LEAD(started_at) OVER (
+                               PARTITION BY agent_id, session_id ORDER BY started_at
+                           ) - interval '1 microsecond'
+                       END
+                   )
+               ) AS decision_window_end
+        FROM heart.episodes
+        WHERE session_id IS NOT NULL AND agent_id = :{agent_param}
+          -- Codex r4: the open/closed split above keys on ended_at, but
+          -- EpisodeManager._deactivate soft-deletes a trivial episode by
+          -- flipping active=false and LEAVING ended_at NULL. Such a row read
+          -- as "still open", so a session id reused shortly after one
+          -- suppressed the live successor's grace and handed its pre-episode
+          -- deliberation decision to the dead predecessor. Dead episodes are
+          -- not participants: excluding them here also keeps them out of the
+          -- LAG/LEAD ordering, so a live successor's grace is measured
+          -- against the previous LIVE episode. Reuses the canonical liveness
+          -- predicate rather than restating the rule.
+          AND {episode_live_sql()}
+    """
+
+
+def episode_decision_join_sql(ep_prefix: str = "e.", dec_prefix: str = "d.") -> str:
+    """ON-clause joining ``brain.decisions`` to the derived table produced by
+    :func:`episode_decision_bounds_sql`."""
+    e, d = ep_prefix, dec_prefix
+    return (
+        f"{d}session_id = {e}session_id "
+        f"AND {d}agent_id = {e}agent_id "
+        f"AND {d}created_at >= {e}decision_window_start "
+        f"AND {d}created_at <= {e}decision_window_end"
+    )
+
+
+def episode_decisions_query(
+    columns: str,
+    *,
+    agent_param: str = "agent_id",
+    episode_param: str = "episode_id",
+) -> str:
+    """Full SELECT of ``columns`` from the decisions of ONE episode, oldest
+    first. ``columns`` may reference ``d.`` (decision) and ``e.`` (episode)."""
+    return f"""
+        SELECT {columns}
+        FROM ({episode_decision_bounds_sql(agent_param=agent_param)}) e
+        JOIN brain.decisions d ON {episode_decision_join_sql()}
+        WHERE e.id = :{episode_param}
+        ORDER BY d.created_at
+    """
