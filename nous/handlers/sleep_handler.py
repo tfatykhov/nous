@@ -2339,11 +2339,24 @@ class SleepHandler:
                         "WHERE agent_id=:aid AND source_episode_id=:eid AND active=true"
                     ), {"aid": agent_id, "eid": ep_id})
                     fact_ids = [r[0] for r in f_rows.all()]
-                    d_rows = await session.execute(
-                        sql_text(episode_decisions_query("d.id")),
-                        {"agent_id": agent_id, "episode_id": ep_id},
-                    )
-                    decision_ids = [r[0] for r in d_rows.all()]
+                    # Codex r5: gating the candidate-selection clause above was
+                    # not enough. An orphan episode still enters this loop via
+                    # its FACT anchor, and this per-episode lookup then pulled
+                    # the existing session-tagged deliberation decisions and
+                    # link_episode_deterministic persisted discussed_in edges
+                    # for them -- so the F057 phase kept re-enabling the
+                    # supposedly dark correlation for every fact-bearing
+                    # episode. Both the candidate query and this lookup have to
+                    # be gated for the flag to mean anything here.
+                    decision_ids = []
+                    if getattr(
+                        self._settings, "decision_session_id_enabled", False
+                    ):
+                        d_rows = await session.execute(
+                            sql_text(episode_decisions_query("d.id")),
+                            {"agent_id": agent_id, "episode_id": ep_id},
+                        )
+                        decision_ids = [r[0] for r in d_rows.all()]
 
                     if not fact_ids and not decision_ids:
                         continue  # no anchors — this episode needs semantic backfill, not deterministic

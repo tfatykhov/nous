@@ -1971,6 +1971,11 @@ async def test_restore_is_complete_scoped_idempotent_and_prune_safe(
     from nous.handlers.sleep_handler import SleepHandler
     from nous.heart import Heart
 
+    # The discussed_in leg is gated by the episode<->decision rollout flag
+    # (codex r4), which defaults off. This test asserts the leg's output, so it
+    # states the premise explicitly rather than inheriting a default.
+    settings.decision_session_id_enabled = True
+
     agent_a = f"f053-ra-{uuid4().hex[:8]}"
     agent_b = f"f053-rb-{uuid4().hex[:8]}"
     now = datetime.now(UTC)
@@ -2126,3 +2131,74 @@ async def test_restore_is_complete_scoped_idempotent_and_prune_safe(
         "prune deleted restored edges — dead/live predicates drifted"
     )
     await heart.close()
+
+
+@pytest.mark.postgres_only
+async def test_discussed_in_leg_is_gated_by_the_rollout_flag(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """With the flag off, the restore emits no episode->decision edges.
+
+    Codex r4: DeliberationProtocol.start sets session_id unconditionally, so
+    without this gate the densifier would emit discussed_in edges for the 87
+    existing matchable prod decisions while the flag still claimed the
+    correlation was dark. These edges also do not revert with the commit --
+    they permanently de-orphan their decisions out of backfill_orphan_decisions.
+    """
+    settings.decision_session_id_enabled = False
+    agent = f"f053-gate-{uuid4().hex[:8]}"
+    session_id = f"f053-gate-session-{uuid4().hex[:8]}"
+    now = datetime.now(UTC)
+    started = now - timedelta(hours=1)
+    ep = uuid4()
+    dec = uuid4()
+
+    try:
+        async with db.session() as s:
+            await s.execute(text(
+                "INSERT INTO nous_system.agents (id, name) "
+                "VALUES (:aid, 'x') ON CONFLICT (id) DO NOTHING"
+            ), {"aid": agent})
+            await s.execute(text(
+                "INSERT INTO heart.episodes "
+                "(id, agent_id, summary, started_at, ended_at, active, "
+                " session_id, tags) "
+                "VALUES (:id, :aid, 'gate fixture', :st, :en, true, :sid, '{}')"
+            ), {"id": ep, "aid": agent, "st": started,
+                "en": started + timedelta(minutes=30), "sid": session_id})
+            await s.execute(text(
+                "INSERT INTO brain.decisions "
+                "(id, agent_id, description, confidence, category, stakes, "
+                " session_id, created_at) "
+                "VALUES (:id, :aid, 'gated', 0.5, 'process', 'low', :sid, :ts)"
+            ), {"id": dec, "aid": agent, "sid": session_id,
+                "ts": started + timedelta(minutes=5)})
+            await s.commit()
+
+        linker = GraphLinker(db, mock_embeddings, settings, agent)
+        densifier = GraphDensifier(db, linker, mock_embeddings, settings, agent)
+        counts = await densifier.restore_episode_anchor_edges(
+            dry_run=True,
+        )
+        assert counts.get("discussed_in", 0) == 0, counts
+
+        settings.decision_session_id_enabled = True
+        counts_on = await densifier.restore_episode_anchor_edges(
+            dry_run=True,
+        )
+        assert counts_on.get("discussed_in", 0) == 1, counts_on
+    finally:
+        async with db.session() as cs:
+            await cs.execute(text(
+                "DELETE FROM brain.graph_edges WHERE agent_id = :a"
+            ), {"a": agent})
+            await cs.execute(text(
+                "DELETE FROM brain.decisions WHERE agent_id = :a"
+            ), {"a": agent})
+            await cs.execute(text(
+                "DELETE FROM heart.episodes WHERE agent_id = :a"
+            ), {"a": agent})
+            await cs.execute(text(
+                "DELETE FROM nous_system.agents WHERE id = :a"
+            ), {"a": agent})
+            await cs.commit()

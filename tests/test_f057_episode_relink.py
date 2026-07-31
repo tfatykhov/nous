@@ -44,6 +44,7 @@ def _make_handler(
     decision_anchors_per_ep: dict | None = None,
     raise_on_link: bool = False,
     raise_on_session: bool = False,
+    decision_session_id_enabled: bool = True,
 ):
     """Construct a SleepHandler with mocked Heart.db.session() returning
     a CM whose execute() responds to F055's specific SQL pattern.
@@ -71,6 +72,13 @@ def _make_handler(
     )
     object.__setattr__(
         settings, "episode_relink_max_per_cycle", episode_relink_max_per_cycle
+    )
+    # The decision-anchor half of this phase is gated by the episode<->decision
+    # rollout flag (codex r4/r5), which defaults OFF. These tests assert that
+    # half's behavior, so the factory opts in by default and exposes the knob
+    # for the test that pins the gate itself.
+    object.__setattr__(
+        settings, "decision_session_id_enabled", decision_session_id_enabled
     )
     bus = MagicMock(spec=EventBus)
     bus.on = MagicMock()
@@ -354,3 +362,29 @@ class TestF057Integration:
                     "DELETE FROM nous_system.agents WHERE id=:aid"
                 ), {"aid": agent_id})
                 await cs.commit()
+
+
+    @pytest.mark.asyncio
+    async def test_decision_anchors_are_gated_by_the_rollout_flag(self):
+        """Codex r5: gating the candidate query alone was not enough.
+
+        An orphan episode still enters the loop via its FACT anchor, and the
+        per-episode decision lookup then pulled existing session-tagged
+        deliberation decisions and persisted discussed_in edges for them -- so
+        this phase kept re-enabling the supposedly dark correlation for every
+        fact-bearing episode.
+        """
+        ep1, ep2 = uuid4(), uuid4()
+        f1a, f1b, d2 = uuid4(), uuid4(), uuid4()
+        handler, _ = _make_handler(
+            candidate_eps=[ep1, ep2],
+            fact_anchors_per_ep={ep1: [f1a, f1b]},
+            decision_anchors_per_ep={ep2: [d2]},
+            decision_session_id_enabled=False,
+        )
+        sleep_stats: dict = {}
+        assert await handler._phase_relink_open_episodes(sleep_stats) is True
+        # ep1 still relinks on its 2 fact edges; ep2 was decision-only, so with
+        # the flag off it has no anchor at all and is skipped.
+        assert sleep_stats["episodes_relinked"] == 1
+        assert sleep_stats["episode_relink_edges"] == 2
