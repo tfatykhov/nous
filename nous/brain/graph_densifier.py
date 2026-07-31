@@ -666,6 +666,15 @@ class GraphDensifier:
         ``dry_run``).
         """
         live = episode_live_sql("ep.")
+        # Codex r4: the episode<->decision correlation is gated by the rollout
+        # flag on BOTH sides. DeliberationProtocol.start sets session_id
+        # unconditionally, so without this the discussed_in leg would emit
+        # edges for the 87 existing matchable decisions while the flag still
+        # claimed the behavior was dark. These edges do not revert with a
+        # git revert either -- they permanently de-orphan their decisions.
+        _correlate = getattr(
+            self._settings, "decision_session_id_enabled", False
+        )
         # ep.agent_id scoping is defense-in-depth (FKs cannot cross agents),
         # per the repo rule: agent-scope every side of every new query.
         selects = {
@@ -702,6 +711,8 @@ class GraphDensifier:
                 WHERE {live}
             """,
         }
+        if not _correlate:
+            selects.pop("discussed_in", None)
         results: dict[str, int] = {}
         async with self.db.session() as session:
             for relation, select_sql in selects.items():

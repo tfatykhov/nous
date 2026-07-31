@@ -560,6 +560,34 @@ class TestEpisodeSummarizer:
         assert result.endswith("</decisions>")
 
     @pytest.mark.asyncio
+    async def test_decision_context_is_gated_by_the_rollout_flag(self):
+        """Codex r4: the flag must gate the READ side too.
+
+        It was written to gate only the record_decision WRITE path, but
+        DeliberationProtocol.start sets session_id unconditionally -- all 287
+        populated prod rows come from there. So with the flag off the readers
+        would still correlate 87 existing decisions into summaries and
+        discussed_in edges, while the setting claimed the behavior was dark.
+        """
+        row = SimpleNamespace(
+            description="Use PostgreSQL for storage",
+            category="architecture",
+            stakes="high",
+            confidence=0.9,
+        )
+        heart = self._heart_with_decision_rows([row])
+        summarizer, _, _, _llm = self._make_summarizer(heart=heart, brain=AsyncMock())
+        # Default is off; be explicit so the test states its own premise.
+        summarizer._settings.decision_session_id_enabled = False
+
+        assert await summarizer._build_decision_context(str(uuid4())) == ""
+
+        summarizer._settings.decision_session_id_enabled = True
+        assert "Use PostgreSQL for storage" in (
+            await summarizer._build_decision_context(str(uuid4()))
+        )
+
+    @pytest.mark.asyncio
     async def test_build_decision_context_cannot_close_its_own_wrapper(self):
         """Codex P2: the delimiter is not hardening if the delimited text can
         close it. Deliberation descriptions carry user input verbatim, so a

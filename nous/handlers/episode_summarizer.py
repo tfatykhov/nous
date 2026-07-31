@@ -925,6 +925,17 @@ class EpisodeSummarizer:
         join table that migration 068 dropped. Both sides of the window live in
         ``graph_constants`` so the four readers cannot drift apart.
         """
+        # Codex r4: the rollout flag must gate the READ side too. It was
+        # written to gate only the record_decision write path, but
+        # DeliberationProtocol.start sets session_id unconditionally
+        # (deliberation.py:113-126) -- every one of the 287 populated prod
+        # rows comes from there. So with the flag off the readers would still
+        # correlate 87 existing decisions and emit summaries and
+        # discussed_in edges, which is precisely the behavior this flag
+        # exists to hold dark until the retrieval effect is measured.
+        if not getattr(self._settings, "decision_session_id_enabled", False):
+            return []
+
         from sqlalchemy import text as sa_text
 
         from nous.brain.graph_constants import episode_decisions_query
@@ -938,6 +949,11 @@ class EpisodeSummarizer:
     async def _build_decision_context(self, episode_id: str) -> str:
         """008.4: Fetch decisions made during this episode for richer summarization."""
         if not self._brain:
+            return ""
+        # Codex r4: read side gated with the write side — see
+        # _decision_ids_for_episode. Empty keeps the summarizer prompt
+        # byte-identical to pre-PR.
+        if not getattr(self._settings, "decision_session_id_enabled", False):
             return ""
 
         try:

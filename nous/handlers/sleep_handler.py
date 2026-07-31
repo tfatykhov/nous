@@ -2277,6 +2277,24 @@ class SleepHandler:
                 # from the same session). Legacy pre-F022 episodes have
                 # neither and would just be skipped inside the loop —
                 # filtering at SQL keeps the LIMIT meaningful.
+                #
+                # Codex r4: the decision anchor is gated with the rest of the
+                # episode<->decision correlation. DeliberationProtocol.start
+                # sets session_id unconditionally, so leaving this ungated
+                # would surface (and then anchor) episodes on decision
+                # correlation while the flag still claimed it was dark.
+                _decision_anchor_clause = (
+                    f"""OR e.id IN (
+                          SELECT eb.id
+                          FROM ({episode_decision_bounds_sql()}) eb
+                          JOIN brain.decisions d
+                            ON {episode_decision_join_sql("eb.")}
+                        )"""
+                    if getattr(
+                        self._settings, "decision_session_id_enabled", False
+                    )
+                    else ""
+                )
                 rows = await session.execute(sql_text(f"""
                     SELECT e.id
                     FROM heart.episodes e
@@ -2301,12 +2319,7 @@ class SleepHandler:
                         -- correlated SubPlan re-plan per scanned episode
                         -- (EXPLAIN ANALYZE on prod: 1796ms vs 28ms). This
                         -- form is hashed once.
-                        OR e.id IN (
-                          SELECT eb.id
-                          FROM ({episode_decision_bounds_sql()}) eb
-                          JOIN brain.decisions d
-                            ON {episode_decision_join_sql("eb.")}
-                        )
+                        {_decision_anchor_clause}
                       )
                     ORDER BY e.started_at ASC
                     LIMIT :lim

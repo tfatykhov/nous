@@ -210,6 +210,17 @@ def episode_decision_bounds_sql(*, agent_param: str = "agent_id") -> str:
                ) AS decision_window_end
         FROM heart.episodes
         WHERE session_id IS NOT NULL AND agent_id = :{agent_param}
+          -- Codex r4: the open/closed split above keys on ended_at, but
+          -- EpisodeManager._deactivate soft-deletes a trivial episode by
+          -- flipping active=false and LEAVING ended_at NULL. Such a row read
+          -- as "still open", so a session id reused shortly after one
+          -- suppressed the live successor's grace and handed its pre-episode
+          -- deliberation decision to the dead predecessor. Dead episodes are
+          -- not participants: excluding them here also keeps them out of the
+          -- LAG/LEAD ordering, so a live successor's grace is measured
+          -- against the previous LIVE episode. Reuses the canonical liveness
+          -- predicate rather than restating the rule.
+          AND {episode_live_sql()}
     """
 
 

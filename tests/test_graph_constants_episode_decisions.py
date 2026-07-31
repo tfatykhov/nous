@@ -460,3 +460,84 @@ async def test_open_predecessor_window_never_inverts(db):
                 "DELETE FROM nous_system.agents WHERE id = :a"
             ), {"a": agent})
             await cs.commit()
+
+
+@pytest.mark.postgres_only
+async def test_deactivated_predecessor_does_not_suppress_successor_grace(db):
+    """A soft-deleted trivial episode is not a participant (codex r4).
+
+    The open/closed split keys on ended_at, but EpisodeManager._deactivate
+    marks a trivial episode active=false and LEAVES ended_at NULL. Such a row
+    read as "still open", so a session id reused shortly after one suppressed
+    the live successor's grace and handed its pre-episode deliberation decision
+    to the dead predecessor -- the live episode's summary and discussed_in edge
+    then missed it entirely.
+    """
+    agent = f"edw-dead-{uuid4().hex[:8]}"
+    session_id = f"edw-dead-session-{uuid4().hex[:8]}"
+    dead_start = datetime.now(UTC) - timedelta(hours=3)
+    # Reused well inside the grace, which is what made the dead row bite.
+    live_start = dead_start + timedelta(seconds=20)
+    ep_dead = uuid4()
+    ep_live = uuid4()
+    pre_episode = uuid4()
+
+    # The successor's own pre-episode deliberation decision (pre_turn step 4
+    # precedes step 5), inside its grace band.
+    ts = live_start - timedelta(seconds=1)
+
+    try:
+        async with db.session() as fs:
+            await fs.execute(text(
+                "INSERT INTO nous_system.agents (id, name) "
+                "VALUES (:aid, 'x') ON CONFLICT (id) DO NOTHING"
+            ), {"aid": agent})
+            # Soft-deleted exactly as _deactivate leaves it.
+            await fs.execute(text(
+                "INSERT INTO heart.episodes "
+                "(id, agent_id, summary, started_at, ended_at, active, "
+                " session_id, tags) "
+                "VALUES (:id, :aid, 'trivial', :st, NULL, false, :sid, '{}')"
+            ), {"id": ep_dead, "aid": agent, "st": dead_start, "sid": session_id})
+            await fs.execute(text(
+                "INSERT INTO heart.episodes "
+                "(id, agent_id, summary, started_at, ended_at, active, "
+                " session_id, tags) "
+                "VALUES (:id, :aid, 'live', :st, NULL, true, :sid, '{}')"
+            ), {"id": ep_live, "aid": agent, "st": live_start, "sid": session_id})
+            await fs.execute(text(
+                "INSERT INTO brain.decisions "
+                "(id, agent_id, description, confidence, category, stakes, "
+                " session_id, created_at) "
+                "VALUES (:id, :aid, 'pre-episode', 0.5, 'process', 'low', "
+                "        :sid, :ts)"
+            ), {"id": pre_episode, "aid": agent, "sid": session_id, "ts": ts})
+            await fs.commit()
+
+        async with db.session() as vs:
+            live = [r[0] for r in (await vs.execute(
+                text(episode_decisions_query("d.id")),
+                {"agent_id": agent, "episode_id": ep_live},
+            )).all()]
+            dead = [r[0] for r in (await vs.execute(
+                text(episode_decisions_query("d.id")),
+                {"agent_id": agent, "episode_id": ep_dead},
+            )).all()]
+
+        assert live == [pre_episode], (
+            "live successor lost its own pre-episode decision to a "
+            "soft-deleted predecessor"
+        )
+        assert dead == [], "a soft-deleted episode must not claim decisions"
+    finally:
+        async with db.session() as cs:
+            await cs.execute(text(
+                "DELETE FROM brain.decisions WHERE agent_id = :a"
+            ), {"a": agent})
+            await cs.execute(text(
+                "DELETE FROM heart.episodes WHERE agent_id = :a"
+            ), {"a": agent})
+            await cs.execute(text(
+                "DELETE FROM nous_system.agents WHERE id = :a"
+            ), {"a": agent})
+            await cs.commit()
