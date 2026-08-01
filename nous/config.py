@@ -1720,6 +1720,21 @@ class Settings(BaseSettings):
             "keyed_fact_leg_k / exemplar_top_k work the same way."
         ),
     )
+    chunk_rrf_penalty_limit: int | None = Field(
+        default=None,
+        description=(
+            "Pins the RRF missing-leg penalty base for the F067 chunk leg, "
+            "decoupling it from episode_chunk_recall_limit. _rrf_merge scores "
+            "a document absent from one leg at penalty_rank = limit + 1, so "
+            "the row-count knob was also a scoring knob: raising it 20 -> 30 "
+            "at NOUS_RRF_K=30 drops every single-leg chunk by ~0.029 and "
+            "DEMOTED chunks (measured: -0.83 chunks in top-10 per query over "
+            "60 queries; 0/60 of the newly admitted chunks reached top-10). "
+            "Set to 20 to reproduce pre-#579 chunk scoring, or 10 to put "
+            "chunks on the same penalty base as the heart legs (which run at "
+            "limit=10). None = coupled to the row limit, as before."
+        ),
+    )
     chunk_hybrid_search_enabled: bool = Field(
         default=False,
         description=(

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 
 from nous.config import Settings
+from nous.heart.search import _rrf_merge
 from nous.runtime_config import RuntimeConfig
 
 
@@ -160,3 +162,156 @@ class TestRRFMerge:
         result = _rrf_merge(vector, keyword, k=60, vector_weight=0.7, limit=10)
         for _, score in result:
             assert 0.0 <= score <= 1.0, f"Score {score} out of [0,1] range"
+
+
+class TestPenaltyRankDecoupling:
+    """``_rrf_merge`` scores a doc missing from one leg at ``limit + 1``, so a
+    row-count limit is also a scoring input. ``hybrid_search`` passed its own
+    ``limit`` straight through, which made ``episode_chunk_recall_limit`` a
+    scoring knob: raising it 20 -> 30 at NOUS_RRF_K=30 dropped every
+    single-leg chunk by ~0.029 and DEMOTED chunks (measured over 60 queries:
+    -0.83 chunks in top-10, 0/60 of the newly admitted chunks reaching
+    top-10). ``penalty_limit`` pins the penalty base so the two are separable.
+    """
+
+    @staticmethod
+    def _vector_only_candidates(n=40):
+        """n vector hits, zero keyword hits -> every doc takes penalty_rank."""
+        return [(uuid4(), 0.9) for _ in range(n)], []
+
+    @pytest.mark.parametrize("limit", [10, 20, 30, 50])
+    def test_score_is_invariant_across_limits_when_penalty_pinned(self, limit):
+        """THE regression test. With the penalty base pinned, a document's
+        score does not move when the row allotment changes."""
+        vector, keyword = self._vector_only_candidates()
+        target = vector[0][0]
+
+        merged = _rrf_merge(
+            vector, keyword, 30, 0.7, 10, return_limit=limit,
+        )
+
+        score = dict(merged)[target]
+        assert score == pytest.approx(0.9195, abs=1e-4), (
+            "pinning the penalty base must hold the score steady regardless "
+            f"of how many rows are returned (limit={limit})"
+        )
+
+    def test_score_varies_with_limit_when_not_pinned(self):
+        """Negative case — pins the CURRENT coupled behaviour so it cannot be
+        silently reintroduced, and proves the parametrized test above is
+        actually exercising ``penalty_limit`` rather than passing trivially."""
+        vector, keyword = self._vector_only_candidates()
+        target = vector[0][0]
+
+        scores = {
+            limit: dict(_rrf_merge(vector, keyword, 30, 0.7, limit))[target]
+            for limit in (10, 20, 30, 50)
+        }
+
+        assert len(set(scores.values())) == 4, (
+            "unpinned, each limit must yield a DIFFERENT score — that "
+            f"coupling is the defect being fixed; got {scores}"
+        )
+        # Monotonically decreasing: a bigger limit means a worse penalty rank.
+        assert scores[10] > scores[20] > scores[30] > scores[50]
+        # The specific prod-shaped delta that produced the measured regression.
+        assert scores[20] - scores[30] == pytest.approx(0.029, abs=5e-4)
+
+    def test_return_limit_still_controls_row_count(self):
+        """Pinning the penalty base must not shrink the result set."""
+        vector, keyword = self._vector_only_candidates(n=40)
+
+        assert len(_rrf_merge(vector, keyword, 30, 0.7, 10, return_limit=30)) == 30
+        assert len(_rrf_merge(vector, keyword, 30, 0.7, 10)) == 10
+
+    @pytest.mark.asyncio
+    async def test_hybrid_search_penalty_limit_defaults_to_coupled(self):
+        """``penalty_limit=None`` must leave the other five hybrid_search call
+        sites byte-identical — the merge is called with the row limit only."""
+        import nous.heart.search as search_mod
+
+        captured: dict = {}
+
+        def _spy(vector, keyword, k, vw, limit, return_limit=None):
+            captured["limit"] = limit
+            captured["return_limit"] = return_limit
+            return []
+
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=MagicMock(all=lambda: []))
+
+        with patch.object(search_mod, "_rrf_merge", _spy):
+            await search_mod.hybrid_search(
+                session, "heart.episode_chunks", [0.1, 0.2], "q", "a",
+                limit=30, active_filter=False,
+            )
+
+        assert captured["limit"] == 30
+        assert captured["return_limit"] is None
+
+    @pytest.mark.asyncio
+    async def test_hybrid_search_penalty_limit_pins_merge_base(self):
+        """With ``penalty_limit`` set, the merge gets the pinned base as its
+        penalty ``limit`` and the row count moves to ``return_limit``."""
+        import nous.heart.search as search_mod
+
+        captured: dict = {}
+
+        def _spy(vector, keyword, k, vw, limit, return_limit=None):
+            captured["limit"] = limit
+            captured["return_limit"] = return_limit
+            return []
+
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=MagicMock(all=lambda: []))
+
+        with patch.object(search_mod, "_rrf_merge", _spy):
+            await search_mod.hybrid_search(
+                session, "heart.episode_chunks", [0.1, 0.2], "q", "a",
+                limit=30, active_filter=False, penalty_limit=10,
+            )
+
+        assert captured["limit"] == 10, "penalty base must be the pinned value"
+        assert captured["return_limit"] == 30, "row count must survive pinning"
+
+    @pytest.mark.asyncio
+    async def test_chunk_leg_threads_setting_through(self):
+        """Wiring test: the F067 chunk leg must actually pass
+        ``chunk_rrf_penalty_limit`` down to hybrid_search. Without this the
+        setting exists but does nothing — the failure mode that produced the
+        original inert-knob bug in the first place."""
+        import contextlib
+        from types import SimpleNamespace
+
+        import nous.heart.search as search_mod
+        from nous.api.retrieval_pipeline import _search_episode_chunks
+
+        captured: dict = {}
+
+        async def _spy(*args, **kwargs):
+            captured.update(kwargs)
+            return []
+
+        @contextlib.asynccontextmanager
+        async def _session():
+            yield MagicMock(execute=AsyncMock())
+
+        heart = SimpleNamespace(
+            db=SimpleNamespace(session=_session),
+            _embeddings=SimpleNamespace(embed=AsyncMock(return_value=[0.1, 0.2])),
+            agent_id="a",
+        )
+
+        with patch.object(search_mod, "hybrid_search", _spy):
+            await _search_episode_chunks(
+                heart=heart, query="q", agent_id="a", limit=30,
+                settings=SimpleNamespace(
+                    chunk_hybrid_search_enabled=True,
+                    chunk_rrf_penalty_limit=10,
+                ),
+            )
+
+        assert captured.get("penalty_limit") == 10, (
+            "chunk leg must thread the setting through, else the knob is inert"
+        )
+        assert captured.get("limit") == 30, "row allotment must be unaffected"

@@ -198,6 +198,7 @@ async def hybrid_search(
     limit: int = 10,
     vector_weight: float | None = None,
     active_filter: bool = True,
+    penalty_limit: int | None = None,
     require_keyword_hit: bool = False,
 ) -> list[tuple[UUID, float]]:
     """Hybrid vector + keyword search over a Heart table using RRF.
@@ -231,6 +232,14 @@ async def hybrid_search(
         active_filter: Whether to include ``AND t.active = true`` in the WHERE
             clause.  Set to ``False`` for tables without an ``active`` column
             (e.g. ``brain.decisions``).  Default ``True``.
+        penalty_limit: Decouples the RRF missing-leg penalty from ``limit``.
+            ``_rrf_merge`` scores a document absent from one leg at
+            ``penalty_rank = limit + 1``, so by default RAISING ``limit`` to
+            fetch more rows also DEPRESSES every single-leg document's score —
+            the trap ``_rrf_merge``'s own docstring documents. Pass a fixed
+            value here to hold scores stable while ``limit`` varies, so a
+            row-count knob stops doubling as a scoring knob. ``None``
+            (default) preserves the coupled behaviour exactly.
 
     Returns:
         List of (id, rrf_score) ordered by score DESC.
@@ -306,7 +315,18 @@ async def hybrid_search(
         if require_keyword_hit
         else limit
     )
-    merged = _rrf_merge(vector_results, keyword_results, rrf_k, vector_weight, merge_limit)
+    # penalty_limit (when set) feeds _rrf_merge's ``limit`` — which is ONLY
+    # used to derive penalty_rank — while the row count moves to
+    # ``return_limit``. Note merge_limit is deliberately inflated above under
+    # require_keyword_hit, so this must not simply swap both: the row count
+    # keeps its inflated value, only the penalty base is pinned.
+    if penalty_limit is not None:
+        merged = _rrf_merge(
+            vector_results, keyword_results, rrf_k, vector_weight,
+            penalty_limit, return_limit=merge_limit,
+        )
+    else:
+        merged = _rrf_merge(vector_results, keyword_results, rrf_k, vector_weight, merge_limit)
     if require_keyword_hit:
         # Codex #574 r3: _rrf_merge's missing-leg penalty rank (limit+1) is
         # nearly free at typical k (a vector-only rank-0 hit normalizes to
