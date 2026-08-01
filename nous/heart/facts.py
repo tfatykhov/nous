@@ -3165,6 +3165,7 @@ class FactManager:
         date_window: "DateWindow | None" = None,
         include_categories: list[str] | None = None,
         require_keyword_hit: bool = False,
+        penalty_limit: int | None = None,
     ) -> list[FactSummary]:
         """Hybrid search over facts.
 
@@ -3184,8 +3185,8 @@ class FactManager:
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window, include_categories, require_keyword_hit)
-        return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window, include_categories, require_keyword_hit)
+                return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window, include_categories, require_keyword_hit, penalty_limit)
+        return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window, include_categories, require_keyword_hit, penalty_limit)
 
     async def _search(
         self,
@@ -3199,6 +3200,7 @@ class FactManager:
         date_window: "DateWindow | None" = None,
         include_categories: list[str] | None = None,
         require_keyword_hit: bool = False,
+        penalty_limit: int | None = None,
     ) -> list[FactSummary]:
         # Generate query embedding
         embedding = None
@@ -3240,6 +3242,16 @@ class FactManager:
             # so for inactive facts we do a simpler query.
             return await self._search_all(query, embedding, limit, category, session)
 
+        # Codex r2 (#581): the F075 date fusion below treats the primary leg
+        # as a ranked list, so the primary must be retained at a FIXED depth
+        # or a fact at primary rank 10 reads as "missing" when limit=2 and
+        # as rank 10 when limit=20 — a missing->better-rank transition the
+        # cap cannot cover (it only clamps ranks ABOVE the penalty).
+        # penalty_limit + 1, not penalty_limit: the boundary rank drifts at
+        # exactly penalty_limit.
+        primary_limit = (
+            max(penalty_limit + 1, limit) if penalty_limit is not None else limit
+        )
         if variant_pairs and len(variant_pairs) > 1 and not require_keyword_hit:
             results = await hybrid_search_multi(
                 session=session,
@@ -3248,7 +3260,8 @@ class FactManager:
                 agent_id=self.agent_id,
                 extra_where=extra_where,
                 extra_params=extra_params,
-                limit=limit,
+                limit=primary_limit,
+                penalty_limit=penalty_limit,
             )
         else:
             results = await hybrid_search(
@@ -3259,8 +3272,9 @@ class FactManager:
                 agent_id=self.agent_id,
                 extra_where=extra_where,
                 extra_params=extra_params,
-                limit=limit,
+                limit=primary_limit,
                 require_keyword_hit=require_keyword_hit,
+                penalty_limit=penalty_limit,
             )
 
         # F075 L3: fuse the date-window leg (position-based RRF). Present only when
@@ -3271,7 +3285,20 @@ class FactManager:
             k_leg = self._settings.date_leg_k if self._settings else 15
             date_leg = await self._date_window_leg(session, embedding, date_window, k_leg)
             if date_leg:
-                results = _rrf_merge_n([results, date_leg], _resolve_rrf_k(), limit)
+                # Codex P2 (#581): the date-window fusion is a THIRD merge on
+                # this path and was the only one left unpinned, so temporal
+                # fact queries kept rescoring with the caller's limit.
+                if penalty_limit is not None:
+                    results = _rrf_merge_n(
+                        [results, date_leg], _resolve_rrf_k(), penalty_limit,
+                        return_limit=limit, cap_ranks_at_penalty=True,
+                    )
+                else:
+                    results = _rrf_merge_n([results, date_leg], _resolve_rrf_k(), limit)
+
+        # The over-fetch above is an input to the fusion only; the caller
+        # still gets `limit`. No-op when unpinned (primary_limit == limit).
+        results = results[:limit]
 
         if not results:
             return []

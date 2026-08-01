@@ -141,6 +141,7 @@ def _rrf_merge(
     vector_weight: float,
     limit: int,
     return_limit: int | None = None,
+    cap_ranks_at_penalty: bool = False,
 ) -> list[tuple[UUID, float]]:
     """Merge two ranked lists using Reciprocal Rank Fusion.
 
@@ -156,6 +157,17 @@ def _rrf_merge(
     ``limit`` changes ``penalty_rank`` and therefore silently changes the
     score of every single-list document (codex #577 r1 / the same trap flagged
     on #574).
+
+    ``cap_ranks_at_penalty`` clamps OBSERVED ranks to ``penalty_rank`` as well.
+    Pinning the penalty base alone is not sufficient: the legs over-fetch, so a
+    document absent from a list at one row count can APPEAR deep in that list
+    at a larger one, and past ``penalty_rank`` an observed rank contributes
+    LESS than the missing-leg penalty — presence scores worse than absence
+    (crossover exactly at ``rank == penalty_rank``). Capping makes "deep in the
+    list" and "absent" score identically, which is what makes the pin actually
+    hold as the row count moves. Default ``False`` because unpinned callers
+    routinely see ranks past ``limit + 1`` (legs fetch ``limit * 3``), and
+    clamping those would change today's behaviour.
     """
     keyword_weight = 1.0 - vector_weight
     penalty_rank = limit + 1
@@ -172,6 +184,9 @@ def _rrf_merge(
     for doc_id in all_ids:
         v_rank = vector_ranks.get(doc_id, penalty_rank)
         k_rank = keyword_ranks.get(doc_id, penalty_rank)
+        if cap_ranks_at_penalty:
+            v_rank = min(v_rank, penalty_rank)
+            k_rank = min(k_rank, penalty_rank)
         score = vector_weight / (k + v_rank) + keyword_weight / (k + k_rank)
         scored.append((doc_id, score))
 
@@ -343,6 +358,7 @@ async def hybrid_search(
         merged = _rrf_merge(
             vector_results, keyword_results, rrf_k, vector_weight,
             penalty_limit, return_limit=merge_limit,
+            cap_ranks_at_penalty=True,
         )
     else:
         merged = _rrf_merge(vector_results, keyword_results, rrf_k, vector_weight, merge_limit)
@@ -370,6 +386,8 @@ def _rrf_merge_n(
     ranked_lists: list[list[tuple[UUID, float]]],
     k: int,
     limit: int,
+    return_limit: int | None = None,
+    cap_ranks_at_penalty: bool = False,
 ) -> list[tuple[UUID, float]]:
     """Equal-weight Reciprocal Rank Fusion across N ranked lists.
 
@@ -383,6 +401,13 @@ def _rrf_merge_n(
     regardless of N, and we divide by ``1/k`` so the returned scores live
     in the same ``[0, 1]`` range every downstream consumer (frame boost,
     MMR, CE rerank, F017 relevance floor) already expects.
+
+    ``return_limit`` (default = ``limit``) decouples HOW MANY rows come back
+    from the ``limit`` that defines ``penalty_rank`` — the same escape hatch
+    ``_rrf_merge`` carries, and for the same reason: a bigger ``limit`` moves
+    ``penalty_rank`` and therefore silently rescores every doc missing from
+    any list. Needed here too because ``Heart.recall`` derives its limit as
+    ``limit * 2`` from an LLM-controlled parameter.
 
     Note: the single-query fast-path in ``hybrid_search_multi`` short-circuits
     before reaching this function; it is only invoked when ``len(ranked_lists) >= 2``.
@@ -410,6 +435,11 @@ def _rrf_merge_n(
         score = 0.0
         for rm in rank_maps:
             r = rm.get(doc_id, penalty_rank)
+            # See _rrf_merge: past penalty_rank an observed rank contributes
+            # LESS than being absent, so a doc surfacing deep in a variant as
+            # the row count grows would still be rescored despite the pin.
+            if cap_ranks_at_penalty:
+                r = min(r, penalty_rank)
             score += per_list_weight / (k + r)
         scored.append((doc_id, score))
 
@@ -422,7 +452,7 @@ def _rrf_merge_n(
     if max_score > 0 and scored:
         scored = [(doc_id, score / max_score) for doc_id, score in scored]
 
-    return scored[:limit]
+    return scored[: (return_limit if return_limit is not None else limit)]
 
 
 async def hybrid_search_multi(
@@ -435,6 +465,7 @@ async def hybrid_search_multi(
     limit: int = 10,
     vector_weight: float | None = None,
     active_filter: bool = True,
+    penalty_limit: int | None = None,
 ) -> list[tuple[UUID, float]]:
     """Multi-query hybrid search over a Heart table (F050).
 
@@ -461,6 +492,12 @@ async def hybrid_search_multi(
         limit: Maximum number of results to return.
         vector_weight: Weight for vector score within each per-variant call.
         active_filter: Whether to include ``AND t.active = true``.
+        penalty_limit: Pins the RRF missing-leg penalty base, decoupling it
+            from ``limit``. Threaded to BOTH layers, because expansion stacks
+            two of them: each per-variant ``hybrid_search`` runs its own
+            vector/keyword ``_rrf_merge``, and the cross-variant fusion runs
+            ``_rrf_merge_n``. Pinning only one would leave the other coupled.
+            ``None`` (default) preserves today's behaviour exactly.
 
     Returns:
         List of ``(id, rrf_score)`` ordered by score DESC, length ``<= limit``.
@@ -489,9 +526,24 @@ async def hybrid_search_multi(
             limit=limit,
             vector_weight=vector_weight,
             active_filter=active_filter,
+            penalty_limit=penalty_limit,
         )
 
     rrf_k = _resolve_rrf_k()
+
+    # Codex r2 (#581): the cap handles ranks that grow PAST the pin, but not
+    # the mirror case — a doc absent because the per-variant list was
+    # truncated to a small `limit`, then present at a GOOD rank once `limit`
+    # grows. At pin=20 a doc at true rank 20 is "missing" (penalty 21) when
+    # the variant returns 20 rows, and rank 20 when it returns more; 20 < 21
+    # so the cap does not touch it and the score still moves.
+    #
+    # Fix: give every variant a FIXED depth and truncate only after fusion.
+    # The depth must be penalty_limit + 1, not penalty_limit — at exactly
+    # penalty_limit the boundary rank itself still drifts (verified).
+    per_variant_limit = (
+        max(penalty_limit + 1, limit) if penalty_limit is not None else limit
+    )
 
     ranked_lists: list[list[tuple[UUID, float]]] = []
     for query_text_i, embedding_i in queries:
@@ -503,12 +555,21 @@ async def hybrid_search_multi(
             agent_id=agent_id,
             extra_where=extra_where,
             extra_params=extra_params,
-            limit=limit,
+            limit=per_variant_limit,
             vector_weight=vector_weight,
             active_filter=active_filter,
+            penalty_limit=penalty_limit,
         )
         ranked_lists.append(per_variant)
 
+    # Second penalty layer: pin the cross-variant fusion's base too, keeping
+    # the row count on return_limit. Pinning only the per-variant merges above
+    # would leave this one still tracking `limit`.
+    if penalty_limit is not None:
+        return _rrf_merge_n(
+            ranked_lists, rrf_k, penalty_limit, return_limit=limit,
+            cap_ranks_at_penalty=True,
+        )
     return _rrf_merge_n(ranked_lists, rrf_k, limit)
 
 

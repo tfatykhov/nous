@@ -423,6 +423,7 @@ class EpisodeManager:
         limit: int = 10,
         session: AsyncSession | None = None,
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
+        penalty_limit: int | None = None,
     ) -> list[EpisodeSummary]:
         """Hybrid search over episodes using search.py helper.
 
@@ -430,11 +431,16 @@ class EpisodeManager:
             variant_pairs: F050 — when set with len > 1, routes through
                 hybrid_search_multi for RRF fusion across query variants.
                 Defaults to None (single-query path; backwards compatible).
+            penalty_limit: Pins the RRF missing-leg penalty base so it stops
+                tracking ``limit``. ``Heart.recall`` derives ``limit`` as
+                ``limit * 2`` from an LLM-controlled parameter, so without
+                this the penalty base — and every single-leg score — moves
+                with whatever the model happened to request.
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._search(query, limit, session, variant_pairs)
-        return await self._search(query, limit, session, variant_pairs)
+                return await self._search(query, limit, session, variant_pairs, penalty_limit)
+        return await self._search(query, limit, session, variant_pairs, penalty_limit)
 
     async def _search(
         self,
@@ -442,6 +448,7 @@ class EpisodeManager:
         limit: int,
         session: AsyncSession,
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
+        penalty_limit: int | None = None,
     ) -> list[EpisodeSummary]:
         # Generate query embedding
         embedding = None
@@ -477,6 +484,7 @@ class EpisodeManager:
                 limit=limit,
                 active_filter=False,
                 extra_where=_episode_where,
+                penalty_limit=penalty_limit,
             )
         else:
             results = await hybrid_search(
@@ -488,6 +496,7 @@ class EpisodeManager:
                 limit=limit,
                 active_filter=False,
                 extra_where=_episode_where,
+                penalty_limit=penalty_limit,
             )
 
         if not results:

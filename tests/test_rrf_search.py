@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 
 from nous.config import Settings
-from nous.heart.search import _rrf_merge
+from nous.heart.search import _rrf_merge, _rrf_merge_n
 from nous.runtime_config import RuntimeConfig
 
 
@@ -226,9 +226,10 @@ class TestPenaltyRankDecoupling:
 
         captured: dict = {}
 
-        def _spy(vector, keyword, k, vw, limit, return_limit=None):
+        def _spy(vector, keyword, k, vw, limit, return_limit=None, **kw):
             captured["limit"] = limit
             captured["return_limit"] = return_limit
+            captured["cap"] = kw.get("cap_ranks_at_penalty", False)
             return []
 
         session = MagicMock()
@@ -241,6 +242,7 @@ class TestPenaltyRankDecoupling:
 
         assert captured["limit"] == 30
         assert captured["return_limit"] is None
+        assert captured["cap"] is False, "unpinned must NOT cap (byte-identical)"
 
     @pytest.mark.asyncio
     async def test_hybrid_search_penalty_limit_pins_merge_base(self):
@@ -250,9 +252,10 @@ class TestPenaltyRankDecoupling:
 
         captured: dict = {}
 
-        def _spy(vector, keyword, k, vw, limit, return_limit=None):
+        def _spy(vector, keyword, k, vw, limit, return_limit=None, **kw):
             captured["limit"] = limit
             captured["return_limit"] = return_limit
+            captured["cap"] = kw.get("cap_ranks_at_penalty", False)
             return []
 
         session = MagicMock()
@@ -265,6 +268,7 @@ class TestPenaltyRankDecoupling:
 
         assert captured["limit"] == 10, "penalty base must be the pinned value"
         assert captured["return_limit"] == 30, "row count must survive pinning"
+        assert captured["cap"] is True, "pinned mode must also cap observed ranks"
 
     @pytest.mark.asyncio
     async def test_chunk_leg_threads_setting_through(self):
@@ -394,3 +398,386 @@ class TestPenaltyRankDecoupling:
             )
 
         assert seen[0] == 50, f"window must cover the requested rows, got {seen[0]}"
+
+
+class TestHeartLegPenaltyPinning:
+    """F1 (R2 follow-ups): the same coupling #580 fixed for chunks is live on
+    the HEART legs, and larger. ``Heart.recall`` sets ``fetch_limit = limit*2``
+    (heart.py) and hands it to episodes/facts/procedures, which pass it to
+    ``hybrid_search`` where ``penalty_rank = limit + 1``. ``recall_deep``'s
+    ``limit`` is LLM-controlled over 1..50, so the heart legs' penalty base
+    swings between 3 and 101 — every single-leg fact/episode/procedure is
+    rescored by a parameter meant to control row count only.
+
+    Query expansion (ON in prod) stacks TWO penalty layers: a per-variant
+    ``_rrf_merge`` inside each ``hybrid_search``, then a cross-variant
+    ``_rrf_merge_n``. Both must be pinned or the setting only half-works.
+    """
+
+    @staticmethod
+    def _lists(n=40):
+        ids = [uuid4() for _ in range(n)]
+        # Two lists that agree on the head but diverge in the tail, so the
+        # tail docs take the penalty rank in one list.
+        return ids, [[(i, 0.9) for i in ids[:20]], [(i, 0.8) for i in ids[10:30]]]
+
+    @pytest.mark.parametrize("limit", [10, 20, 30, 50])
+    def test_merge_n_score_invariant_when_penalty_pinned(self, limit):
+        ids, lists = self._lists()
+        target = ids[0]  # present in list 0, absent from list 1 -> takes penalty
+        merged = _rrf_merge_n(lists, 30, 20, return_limit=limit)
+        assert dict(merged)[target] == pytest.approx(
+            dict(_rrf_merge_n(lists, 30, 20, return_limit=10))[target], abs=1e-9
+        ), "pinned penalty base must hold the score steady across row counts"
+
+    def test_merge_n_score_varies_when_not_pinned(self):
+        """Negative case — pins today's coupling so it cannot silently return."""
+        ids, lists = self._lists()
+        target = ids[0]
+        scores = {lim: dict(_rrf_merge_n(lists, 30, lim))[target] for lim in (10, 20, 30, 50)}
+        assert len(set(scores.values())) == 4, scores
+        assert scores[10] > scores[20] > scores[30] > scores[50]
+
+    def test_merge_n_return_limit_controls_row_count(self):
+        _ids, lists = self._lists()
+        assert len(_rrf_merge_n(lists, 30, 20, return_limit=25)) == 25
+        assert len(_rrf_merge_n(lists, 30, 20)) == 20
+
+    @pytest.mark.asyncio
+    async def test_multi_pins_BOTH_layers(self):
+        """Expansion stacks two merges. Pinning only one leaves the other
+        coupled, so assert the per-variant calls AND the fusion both receive
+        the pinned base."""
+        import nous.heart.search as search_mod
+
+        per_variant_penalties = []
+        fusion = {}
+
+        async def _fake_hybrid(**kw):
+            per_variant_penalties.append(kw.get("penalty_limit"))
+            return [(uuid4(), 0.9)]
+
+        def _fake_merge_n(lists, k, limit, return_limit=None, **kw):
+            fusion["limit"] = limit
+            fusion["return_limit"] = return_limit
+            fusion["cap"] = kw.get("cap_ranks_at_penalty", False)
+            return []
+
+        with (
+            patch.object(search_mod, "hybrid_search", _fake_hybrid),
+            patch.object(search_mod, "_rrf_merge_n", _fake_merge_n),
+        ):
+            await search_mod.hybrid_search_multi(
+                MagicMock(), "heart.facts", [("a", [0.1]), ("b", [0.2])], "agent", limit=30, penalty_limit=20
+            )
+
+        assert per_variant_penalties == [20, 20], per_variant_penalties
+        assert fusion["limit"] == 20, "fusion penalty base must be pinned"
+        assert fusion["return_limit"] == 30, "row count must survive pinning"
+        assert fusion["cap"] is True, "fusion must cap observed ranks too"
+
+    @pytest.mark.asyncio
+    async def test_multi_unpinned_is_byte_identical(self):
+        """penalty_limit=None must leave the multi path exactly as it was."""
+        import nous.heart.search as search_mod
+
+        seen = []
+        fusion = {}
+
+        async def _fake_hybrid(**kw):
+            seen.append(kw.get("penalty_limit"))
+            return [(uuid4(), 0.9)]
+
+        def _fake_merge_n(lists, k, limit, return_limit=None, **kw):
+            fusion["limit"] = limit
+            fusion["return_limit"] = return_limit
+            fusion["cap"] = kw.get("cap_ranks_at_penalty", False)
+            return []
+
+        with (
+            patch.object(search_mod, "hybrid_search", _fake_hybrid),
+            patch.object(search_mod, "_rrf_merge_n", _fake_merge_n),
+        ):
+            await search_mod.hybrid_search_multi(
+                MagicMock(), "heart.facts", [("a", [0.1]), ("b", [0.2])], "agent", limit=30
+            )
+
+        assert seen == [None, None]
+        assert fusion["limit"] == 30
+        assert fusion["return_limit"] is None
+        assert fusion["cap"] is False
+
+    def test_config_bound_and_default(self):
+        import pydantic
+
+        assert Settings().heart_rrf_penalty_limit is None
+        assert Settings(heart_rrf_penalty_limit=20).heart_rrf_penalty_limit == 20
+        with pytest.raises(pydantic.ValidationError):
+            Settings(heart_rrf_penalty_limit=0)
+        with pytest.raises(pydantic.ValidationError):
+            Settings(heart_rrf_penalty_limit=-31)
+
+    @pytest.mark.asyncio
+    async def test_heart_recall_threads_setting_to_all_three_legs(self):
+        """Wiring test. A setting that exists but never reaches the leg is
+        exactly the inert-knob failure this whole line of work started from
+        (#579), so assert the value actually arrives at episodes, facts AND
+        procedures — and that fetch_limit stays limit*2 independently."""
+        from types import SimpleNamespace
+
+        from nous.heart.heart import Heart
+
+        heart = Heart.__new__(Heart)
+        heart.settings = SimpleNamespace(
+            query_expansion_enabled=False,
+            heart_rrf_penalty_limit=20,
+            cross_encoder_enabled=False,
+            mmr_enabled=False,
+        )
+        heart.agent_id = "nous-test"
+        heart._embeddings = None
+        heart._owns_embeddings = False
+        heart._bus = None
+        heart._query_expander = None
+        heart._residual_activator = None
+        for name in ("episodes", "facts", "procedures", "censors"):
+            mgr = MagicMock()
+            mgr.search = AsyncMock(return_value=[])
+            setattr(heart, name, mgr)
+
+        await heart._recall("a query", limit=10, types=None, session=AsyncMock())
+
+        for mgr in (heart.episodes.search, heart.facts.search, heart.procedures.search):
+            assert mgr.call_args is not None, "leg was not searched"
+            assert mgr.call_args.kwargs.get("penalty_limit") == 20, (
+                f"leg did not receive the pinned base: {mgr.call_args.kwargs}"
+            )
+        # Row count is still limit*2 — pinning the penalty must not shrink it.
+        assert heart.facts.search.call_args.args[1] == 20
+
+    @pytest.mark.asyncio
+    async def test_heart_recall_unset_setting_passes_none(self):
+        """Default must leave the legs byte-identical."""
+        from types import SimpleNamespace
+
+        from nous.heart.heart import Heart
+
+        heart = Heart.__new__(Heart)
+        heart.settings = SimpleNamespace(
+            query_expansion_enabled=False,
+            cross_encoder_enabled=False,
+            mmr_enabled=False,
+        )  # attribute absent entirely -> getattr default
+        heart.agent_id = "nous-test"
+        heart._embeddings = None
+        heart._owns_embeddings = False
+        heart._bus = None
+        heart._query_expander = None
+        heart._residual_activator = None
+        for name in ("episodes", "facts", "procedures", "censors"):
+            mgr = MagicMock()
+            mgr.search = AsyncMock(return_value=[])
+            setattr(heart, name, mgr)
+
+        await heart._recall("a query", limit=10, types=None, session=AsyncMock())
+
+        for mgr in (heart.episodes.search, heart.facts.search, heart.procedures.search):
+            assert mgr.call_args.kwargs.get("penalty_limit") is None
+
+    def test_rank_beyond_pin_scores_same_as_absent(self):
+        """Codex P1 (#581). Pinning the penalty base is not sufficient on its
+        own: the legs over-fetch, so a doc ABSENT from a list at one row count
+        can APPEAR deep in it at a larger one. Past penalty_rank an observed
+        rank contributes LESS than the missing-leg penalty, so the doc is
+        demoted for having been found — and the score moves with the row count
+        despite the pin. Capping makes deep-presence and absence identical."""
+        target = uuid4()
+        others = [uuid4() for _ in range(60)]
+
+        # Arm A: target absent from the keyword leg entirely.
+        absent = _rrf_merge(
+            [(target, 0.9)],
+            [(o, 0.5) for o in others],
+            30,
+            0.7,
+            20,
+            return_limit=100,
+            cap_ranks_at_penalty=True,
+        )
+        # Arm B: identical, except the target now surfaces at keyword rank 40.
+        deep = _rrf_merge(
+            [(target, 0.9)],
+            [(o, 0.5) for o in others[:40]] + [(target, 0.1)],
+            30,
+            0.7,
+            20,
+            return_limit=100,
+            cap_ranks_at_penalty=True,
+        )
+
+        assert dict(absent)[target] == pytest.approx(dict(deep)[target], abs=1e-9), (
+            "with the cap, a doc found beyond the pinned base must score exactly as if it were absent"
+        )
+
+    def test_rank_beyond_pin_is_a_DEMOTION_without_the_cap(self):
+        """The pathology itself — pins why the cap exists."""
+        target = uuid4()
+        others = [uuid4() for _ in range(60)]
+
+        absent = dict(
+            _rrf_merge(
+                [(target, 0.9)],
+                [(o, 0.5) for o in others],
+                30,
+                0.7,
+                20,
+                return_limit=100,
+            )
+        )[target]
+        deep = dict(
+            _rrf_merge(
+                [(target, 0.9)],
+                [(o, 0.5) for o in others[:40]] + [(target, 0.1)],
+                30,
+                0.7,
+                20,
+                return_limit=100,
+            )
+        )[target]
+
+        assert deep < absent, (
+            "uncapped, being FOUND at rank 40 scores worse than being absent "
+            f"({deep:.6f} < {absent:.6f}) — that is the defect"
+        )
+
+    @pytest.mark.parametrize("recall_limit", [1, 10, 20, 31, 40, 50])
+    def test_pin_holds_across_the_full_recall_deep_range(self, recall_limit):
+        """Codex P2 (#581, heart.py). recall_deep advertises limit 1..50, so
+        fetch_limit reaches 100 and the SQL window keeps widening past the
+        pinned base — surfacing docs at ever-deeper ranks. The cap is what
+        makes the pin hold across that whole range rather than only up to
+        penalty_limit * 3.
+
+        Simulates the widening window: as the row count grows, the keyword leg
+        returns more rows, so the target appears at a progressively deeper rank.
+        """
+        target = uuid4()
+        fetch = recall_limit * 2 * 3  # heart fetch_limit * the leg's 3x window
+        others = [uuid4() for _ in range(max(fetch, 1))]
+
+        # Target appears in the keyword leg only once the window is wide enough.
+        keyword = [(o, 0.5) for o in others[:fetch]]
+        if fetch > 40:
+            keyword = keyword[:40] + [(target, 0.1)] + keyword[40:]
+
+        scored = dict(
+            _rrf_merge(
+                [(target, 0.9)],
+                keyword,
+                30,
+                0.7,
+                20,
+                return_limit=10_000,
+                cap_ranks_at_penalty=True,
+            )
+        )
+
+        # Pinned base 20 -> penalty_rank 21 -> vector rank 0, keyword capped 21.
+        expected = (0.7 / 30 + 0.3 / 51) * 30
+        assert scored[target] == pytest.approx(expected, abs=1e-9), (
+            f"score moved at recall_deep limit={recall_limit} (fetch window "
+            f"{fetch}) — the pin does not hold across the advertised range"
+        )
+
+    @pytest.mark.asyncio
+    async def test_per_variant_depth_is_fixed_not_caller_limit(self):
+        """Codex r2 P1 (#581). The cap clamps ranks ABOVE the pin, but a doc
+        can be ABSENT at a small limit (list truncated) and then present at a
+        GOOD rank at a larger one — 20 < 21, so the cap never sees it. Every
+        variant must therefore be fetched at a fixed depth and truncated only
+        after fusion."""
+        import nous.heart.search as search_mod
+
+        depths = []
+
+        async def _fake_hybrid(**kw):
+            depths.append(kw["limit"])
+            return [(uuid4(), 0.9)]
+
+        for caller_limit in (2, 10, 20):
+            depths.clear()
+            with (
+                patch.object(search_mod, "hybrid_search", _fake_hybrid),
+                patch.object(search_mod, "_rrf_merge_n", lambda *a, **k: []),
+            ):
+                await search_mod.hybrid_search_multi(
+                    MagicMock(),
+                    "heart.facts",
+                    [("a", [0.1]), ("b", [0.2])],
+                    "agent",
+                    limit=caller_limit,
+                    penalty_limit=20,
+                )
+            assert depths == [21, 21], (
+                f"caller limit {caller_limit} leaked into the per-variant "
+                f"depth: {depths}; must be pinned at penalty_limit + 1"
+            )
+
+    @pytest.mark.asyncio
+    async def test_per_variant_depth_still_covers_a_large_caller_limit(self):
+        """Fixed depth must not STARVE a caller asking for more than the pin."""
+        import nous.heart.search as search_mod
+
+        depths = []
+
+        async def _fake_hybrid(**kw):
+            depths.append(kw["limit"])
+            return [(uuid4(), 0.9)]
+
+        with (
+            patch.object(search_mod, "hybrid_search", _fake_hybrid),
+            patch.object(search_mod, "_rrf_merge_n", lambda *a, **k: []),
+        ):
+            await search_mod.hybrid_search_multi(
+                MagicMock(), "heart.facts", [("a", [0.1]), ("b", [0.2])], "agent", limit=50, penalty_limit=20
+            )
+        assert depths == [50, 50], depths
+
+    @pytest.mark.asyncio
+    async def test_per_variant_depth_unpinned_tracks_limit(self):
+        """Unpinned must stay byte-identical: depth == caller limit."""
+        import nous.heart.search as search_mod
+
+        depths = []
+
+        async def _fake_hybrid(**kw):
+            depths.append(kw["limit"])
+            return [(uuid4(), 0.9)]
+
+        with (
+            patch.object(search_mod, "hybrid_search", _fake_hybrid),
+            patch.object(search_mod, "_rrf_merge_n", lambda *a, **k: []),
+        ):
+            await search_mod.hybrid_search_multi(
+                MagicMock(), "heart.facts", [("a", [0.1]), ("b", [0.2])], "agent", limit=7
+            )
+        assert depths == [7, 7], depths
+
+    def test_boundary_rank_is_stable_only_at_penalty_plus_one(self):
+        """Pins WHY the depth is penalty_limit + 1 rather than penalty_limit.
+
+        At depth == penalty_limit the boundary rank (== penalty_limit) is
+        absent, and becomes observable at any greater depth — the exact drift
+        the fixed depth exists to remove.
+        """
+        pin, penalty_rank = 20, 21
+
+        def observed(true_rank, depth):
+            r = true_rank if true_rank < depth else penalty_rank
+            return min(r, penalty_rank)
+
+        # depth == pin: the boundary rank drifts.
+        assert observed(20, pin) != observed(20, 50)
+        # depth == pin + 1: stable at the boundary and everywhere past it.
+        for true_rank in (19, 20, 21, 25, 40):
+            assert observed(true_rank, pin + 1) == observed(true_rank, 50), true_rank

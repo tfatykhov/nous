@@ -1720,6 +1720,26 @@ class Settings(BaseSettings):
             "keyed_fact_leg_k / exemplar_top_k work the same way."
         ),
     )
+    heart_rrf_penalty_limit: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Pins the RRF missing-leg penalty base for the HEART legs "
+            "(episodes / facts / procedures), the sibling of "
+            "chunk_rrf_penalty_limit. Heart.recall derives its per-type limit "
+            "as fetch_limit = limit * 2 (heart.py) and passes it straight to "
+            "hybrid_search, where penalty_rank = limit + 1. recall_deep's "
+            "`limit` is LLM-controlled over 1..50, so the heart legs' penalty "
+            "base swings between 3 and 101 depending on what the model asked "
+            "for — every single-leg fact/episode/procedure is rescored by a "
+            "parameter that is supposed to control row count only. Set to 20 "
+            "to pin it at the value recall_deep's default (limit=10 -> "
+            "fetch_limit 20) produces today. Threaded through BOTH merge "
+            "layers, since query expansion (ON in prod) stacks a per-variant "
+            "_rrf_merge under a cross-variant _rrf_merge_n. None = coupled, "
+            "as before. Validated ge=1: the value becomes a divisor term."
+        ),
+    )
     chunk_rrf_penalty_limit: int | None = Field(
         default=None,
         ge=1,
