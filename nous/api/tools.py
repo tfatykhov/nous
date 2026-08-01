@@ -966,8 +966,12 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
         Args:
             query: Search query string
-            limit: Per-leg result cap (each search leg is capped
-                individually; the combined list can exceed it — audit B7)
+            limit: Result cap for the CORE legs — Heart recall and Brain
+                decision query. The combined list can exceed it (audit B7),
+                and legs that own their own allotment setting ignore it
+                entirely: chunks use episode_chunk_recall_limit, keyed uses
+                keyed_fact_leg_k, exemplars use exemplar_top_k. Lowering this
+                does NOT proportionally shrink those legs.
             memory_types: Types to search (episode, fact, procedure, censor, decision)
                 If None or contains "all": with coherent ranking enabled
                 (F080, default ON) the default pool is knowledge-only —

@@ -1712,7 +1712,13 @@ class Settings(BaseSettings):
     )
     episode_chunk_recall_limit: int = Field(
         default=10,
-        description="F067 max chunks returned by the new chunk-recall leg before RRF merge.",
+        description=(
+            "F067 flat per-leg allotment: the number of chunks the chunk-recall "
+            "leg retrieves, independent of the caller's `limit`. Was previously "
+            "clamped by min(this, limit * 2), which made values above 2x the "
+            "caller's limit silently inert; that clamp is gone. Sibling legs "
+            "keyed_fact_leg_k / exemplar_top_k work the same way."
+        ),
     )
     chunk_hybrid_search_enabled: bool = Field(
         default=False,

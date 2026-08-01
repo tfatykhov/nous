@@ -702,9 +702,18 @@ async def _run_stages(
                 heart=heart,
                 query=query,
                 agent_id=heart.agent_id,
-                limit=min(
-                    settings.episode_chunk_recall_limit, limit * 2
-                ),
+                # FLAT allotment — deliberately NOT min(setting, limit * 2).
+                # That clamp made the setting inert above 2x the caller's
+                # limit: prod ran NOUS_EPISODE_CHUNK_RECALL_LIMIT=30 against
+                # recall_deep's default limit=10 and retrieved 20 the whole
+                # time it was set.
+                #
+                # Do not reintroduce a multiplier. Widening it only moves the
+                # failure — any K yielding the configured value at limit=10
+                # re-caps an operator who configures more than 10*K. A per-leg
+                # allotment and a per-call limit are different concepts;
+                # conflating them IS the bug.
+                limit=settings.episode_chunk_recall_limit,
                 settings=settings,
             )
         except Exception:
