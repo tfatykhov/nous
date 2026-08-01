@@ -50,13 +50,47 @@ The 20 → 30 delta is **−0.0290**, matching the ~0.03 uniform drop measured a
 queries. Prod's `NOUS_RRF_K=30` (not the 60 default) is what makes it this large; at k=60
 the same shift would be roughly half.
 
-**Two consequences, not one:**
+### 2.1 CORRECTION — the "standing handicap" claim is false
 
-1. **Raising the knob demotes chunks.** The measured regression above.
-2. **Chunks carry a standing handicap against facts.** Both are scored into the same merged
-   list, but the heart legs run at `limit=10` and the chunk leg at 30 — a constant ~0.07
-   penalty for a chunk in the *identical* retrieval situation. A concrete candidate cause
-   for chunks' median pipeline rank 18.0 vs facts' 7.0.
+The proposal (and this plan's first draft, and PR #580's first body) stated a second
+consequence: that chunks carry a *pre-existing* handicap because "the heart legs run at
+`limit=10` and the chunk leg at 30", worth ~0.07, offered as a candidate cause for chunks'
+median pipeline rank 18.0 vs facts' 7.0.
+
+**Traced, and it is wrong.** `Heart.recall` sets `fetch_limit = limit * 2`
+(`heart.py:967`) and `facts.py:3262` / `episodes.py:488` / `procedures.py:417` pass that
+value straight into `hybrid_search`. So at `recall_deep`'s default `limit=10` the heart legs
+are scored against penalty base **20, not 10**.
+
+Computed at k=30, `vector_weight=0.7`:
+
+| penalty base | score | who |
+|---|---|---|
+| 10 | 0.9195 | nobody |
+| **20** | **0.8765** | **heart legs — AND the chunk leg before #579** |
+| 30 | 0.8475 | chunk leg after #579 |
+
+```
+pre-#579  chunk vs heart : +0.0000   <- EXACT PARITY
+post-#579 chunk vs heart : -0.0289   <- the handicap, CREATED by #579
+penalty_limit=10 vs heart: +0.0430   <- over-correction into an ADVANTAGE
+```
+
+Three corrections follow:
+
+1. **There was no standing handicap.** Chunk and heart legs were at exact parity. #579
+   created the gap; it does not predate it.
+2. **The correct restoring value is 20, and 20 is also parity** — those are the same number,
+   not two different options as the sweep table originally implied.
+3. **`penalty_limit=10` is an over-correction**, giving chunks +0.043 *over* facts. It was
+   described as "heart-leg parity"; it is the opposite.
+
+And consequently: **chunks' median rank 18.0 vs facts' 7.0 is not explained by penalty
+base** — they were identical before #579. That gap has some other cause, and attributing it
+here was unfounded.
+
+**Remaining consequence — one, not two:** raising the knob demotes chunks (§1's measured
+regression), because it moves the chunk leg off the penalty base its neighbours use.
 
 ## 3. The fix
 
@@ -129,8 +163,12 @@ Sweep values for validation:
 | value | what it tests |
 |---|---|
 | unset | control — today's coupled behaviour |
-| `20` | reproduces pre-#579 chunk scoring, making a clean k-sweep possible for the first time |
-| `10` | puts chunks on the heart legs' penalty base — the standing-handicap hypothesis (§2.2) |
+| **`20`** | **the expected setting.** Restores pre-#579 chunk scoring AND puts chunks on the heart legs' penalty base — per §2.1 these are the same number. Makes a clean k-sweep possible for the first time: row count varies, scoring does not. |
+| `10` | deliberate chunk *advantage* (+0.043 over facts at k=30), NOT parity. Only worth running if 20 shows chunks under-surfacing for some reason other than the penalty base. |
+
+Per §2.1, `20` is not one option among several — it is the value that makes the chunk leg
+score like everything it is merged with. The interesting sweep after that is
+`episode_chunk_recall_limit` itself, which for the first time measures row count alone.
 
 ## 7. Out of scope (flagged, not fixed)
 
@@ -154,3 +192,14 @@ site was read; the callee was not.
 **A knob that feeds a ranking function is not a row count.** Before changing any retrieval
 limit, trace whether it reaches a scoring expression — if it does, a sweep of that knob
 measures two variables and neither cleanly.
+
+And a second lesson, from §2.1: the bug report arrived with a correct primary finding and an
+incorrect secondary one. The secondary claim ("chunks carry a standing handicap, heart legs
+run at `limit=10`") was plausible, mechanistically stated, and *repeated forward* into this
+plan, the config description, CLAUDE.md, and the PR body before anyone traced it. One
+`grep` for what `Heart.recall` actually passes down falsified it — heart legs run at
+`fetch_limit = limit * 2 = 20`, so chunk and fact were at exact parity before #579.
+
+Being right about the mechanism does not make the adjacent claim right. Trace each one
+separately, especially the ones that flatter the diagnosis by making the bug look older and
+bigger than it is.

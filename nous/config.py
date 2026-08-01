@@ -1730,9 +1730,12 @@ class Settings(BaseSettings):
             "at NOUS_RRF_K=30 drops every single-leg chunk by ~0.029 and "
             "DEMOTED chunks (measured: -0.83 chunks in top-10 per query over "
             "60 queries; 0/60 of the newly admitted chunks reached top-10). "
-            "Set to 20 to reproduce pre-#579 chunk scoring, or 10 to put "
-            "chunks on the same penalty base as the heart legs (which run at "
-            "limit=10). None = coupled to the row limit, as before."
+            "Set to 20 for PARITY with the heart legs: Heart.recall uses "
+            "fetch_limit = limit * 2 (heart.py), so at recall_deep's default "
+            "limit=10 facts/episodes/procedures are scored against penalty "
+            "base 20 — which is also what the chunk leg used before #579. "
+            "Values below 20 give chunks an ADVANTAGE over facts, not parity "
+            "(base 10 is +0.043 at k=30). None = coupled to the row limit."
         ),
     )
     chunk_hybrid_search_enabled: bool = Field(
