@@ -3242,6 +3242,16 @@ class FactManager:
             # so for inactive facts we do a simpler query.
             return await self._search_all(query, embedding, limit, category, session)
 
+        # Codex r2 (#581): the F075 date fusion below treats the primary leg
+        # as a ranked list, so the primary must be retained at a FIXED depth
+        # or a fact at primary rank 10 reads as "missing" when limit=2 and
+        # as rank 10 when limit=20 — a missing->better-rank transition the
+        # cap cannot cover (it only clamps ranks ABOVE the penalty).
+        # penalty_limit + 1, not penalty_limit: the boundary rank drifts at
+        # exactly penalty_limit.
+        primary_limit = (
+            max(penalty_limit + 1, limit) if penalty_limit is not None else limit
+        )
         if variant_pairs and len(variant_pairs) > 1 and not require_keyword_hit:
             results = await hybrid_search_multi(
                 session=session,
@@ -3250,7 +3260,7 @@ class FactManager:
                 agent_id=self.agent_id,
                 extra_where=extra_where,
                 extra_params=extra_params,
-                limit=limit,
+                limit=primary_limit,
                 penalty_limit=penalty_limit,
             )
         else:
@@ -3262,7 +3272,7 @@ class FactManager:
                 agent_id=self.agent_id,
                 extra_where=extra_where,
                 extra_params=extra_params,
-                limit=limit,
+                limit=primary_limit,
                 require_keyword_hit=require_keyword_hit,
                 penalty_limit=penalty_limit,
             )
@@ -3285,6 +3295,10 @@ class FactManager:
                     )
                 else:
                     results = _rrf_merge_n([results, date_leg], _resolve_rrf_k(), limit)
+
+        # The over-fetch above is an input to the fusion only; the caller
+        # still gets `limit`. No-op when unpinned (primary_limit == limit).
+        results = results[:limit]
 
         if not results:
             return []

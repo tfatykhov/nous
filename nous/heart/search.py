@@ -531,6 +531,20 @@ async def hybrid_search_multi(
 
     rrf_k = _resolve_rrf_k()
 
+    # Codex r2 (#581): the cap handles ranks that grow PAST the pin, but not
+    # the mirror case — a doc absent because the per-variant list was
+    # truncated to a small `limit`, then present at a GOOD rank once `limit`
+    # grows. At pin=20 a doc at true rank 20 is "missing" (penalty 21) when
+    # the variant returns 20 rows, and rank 20 when it returns more; 20 < 21
+    # so the cap does not touch it and the score still moves.
+    #
+    # Fix: give every variant a FIXED depth and truncate only after fusion.
+    # The depth must be penalty_limit + 1, not penalty_limit — at exactly
+    # penalty_limit the boundary rank itself still drifts (verified).
+    per_variant_limit = (
+        max(penalty_limit + 1, limit) if penalty_limit is not None else limit
+    )
+
     ranked_lists: list[list[tuple[UUID, float]]] = []
     for query_text_i, embedding_i in queries:
         per_variant = await hybrid_search(
@@ -541,7 +555,7 @@ async def hybrid_search_multi(
             agent_id=agent_id,
             extra_where=extra_where,
             extra_params=extra_params,
-            limit=limit,
+            limit=per_variant_limit,
             vector_weight=vector_weight,
             active_filter=active_filter,
             penalty_limit=penalty_limit,

@@ -688,3 +688,96 @@ class TestHeartLegPenaltyPinning:
             f"score moved at recall_deep limit={recall_limit} (fetch window "
             f"{fetch}) — the pin does not hold across the advertised range"
         )
+
+    @pytest.mark.asyncio
+    async def test_per_variant_depth_is_fixed_not_caller_limit(self):
+        """Codex r2 P1 (#581). The cap clamps ranks ABOVE the pin, but a doc
+        can be ABSENT at a small limit (list truncated) and then present at a
+        GOOD rank at a larger one — 20 < 21, so the cap never sees it. Every
+        variant must therefore be fetched at a fixed depth and truncated only
+        after fusion."""
+        import nous.heart.search as search_mod
+
+        depths = []
+
+        async def _fake_hybrid(**kw):
+            depths.append(kw["limit"])
+            return [(uuid4(), 0.9)]
+
+        for caller_limit in (2, 10, 20):
+            depths.clear()
+            with (
+                patch.object(search_mod, "hybrid_search", _fake_hybrid),
+                patch.object(search_mod, "_rrf_merge_n", lambda *a, **k: []),
+            ):
+                await search_mod.hybrid_search_multi(
+                    MagicMock(),
+                    "heart.facts",
+                    [("a", [0.1]), ("b", [0.2])],
+                    "agent",
+                    limit=caller_limit,
+                    penalty_limit=20,
+                )
+            assert depths == [21, 21], (
+                f"caller limit {caller_limit} leaked into the per-variant "
+                f"depth: {depths}; must be pinned at penalty_limit + 1"
+            )
+
+    @pytest.mark.asyncio
+    async def test_per_variant_depth_still_covers_a_large_caller_limit(self):
+        """Fixed depth must not STARVE a caller asking for more than the pin."""
+        import nous.heart.search as search_mod
+
+        depths = []
+
+        async def _fake_hybrid(**kw):
+            depths.append(kw["limit"])
+            return [(uuid4(), 0.9)]
+
+        with (
+            patch.object(search_mod, "hybrid_search", _fake_hybrid),
+            patch.object(search_mod, "_rrf_merge_n", lambda *a, **k: []),
+        ):
+            await search_mod.hybrid_search_multi(
+                MagicMock(), "heart.facts", [("a", [0.1]), ("b", [0.2])], "agent", limit=50, penalty_limit=20
+            )
+        assert depths == [50, 50], depths
+
+    @pytest.mark.asyncio
+    async def test_per_variant_depth_unpinned_tracks_limit(self):
+        """Unpinned must stay byte-identical: depth == caller limit."""
+        import nous.heart.search as search_mod
+
+        depths = []
+
+        async def _fake_hybrid(**kw):
+            depths.append(kw["limit"])
+            return [(uuid4(), 0.9)]
+
+        with (
+            patch.object(search_mod, "hybrid_search", _fake_hybrid),
+            patch.object(search_mod, "_rrf_merge_n", lambda *a, **k: []),
+        ):
+            await search_mod.hybrid_search_multi(
+                MagicMock(), "heart.facts", [("a", [0.1]), ("b", [0.2])], "agent", limit=7
+            )
+        assert depths == [7, 7], depths
+
+    def test_boundary_rank_is_stable_only_at_penalty_plus_one(self):
+        """Pins WHY the depth is penalty_limit + 1 rather than penalty_limit.
+
+        At depth == penalty_limit the boundary rank (== penalty_limit) is
+        absent, and becomes observable at any greater depth — the exact drift
+        the fixed depth exists to remove.
+        """
+        pin, penalty_rank = 20, 21
+
+        def observed(true_rank, depth):
+            r = true_rank if true_rank < depth else penalty_rank
+            return min(r, penalty_rank)
+
+        # depth == pin: the boundary rank drifts.
+        assert observed(20, pin) != observed(20, 50)
+        # depth == pin + 1: stable at the boundary and everywhere past it.
+        for true_rank in (19, 20, 21, 25, 40):
+            assert observed(true_rank, pin + 1) == observed(true_rank, 50), true_rank
