@@ -308,3 +308,28 @@ class TestPenaltyRankDecoupling:
 
         assert captured.get("penalty_limit") == 10, "chunk leg must thread the setting through, else the knob is inert"
         assert captured.get("limit") == 30, "row allotment must be unaffected"
+
+    def test_negative_penalty_limit_is_rejected_at_startup(self):
+        """Codex P2. ``penalty_limit`` becomes ``penalty_rank = limit + 1``,
+        which is a divisor term in ``1 / (k + penalty_rank)``. At prod's
+        NOUS_RRF_K=30 a value of -31 zeroes that denominator and takes the
+        whole chunk-recall stage down with ZeroDivisionError; other negatives
+        yield scores outside [0,1] or silently empty the result list via
+        ``scored[:limit]``. Must fail closed at config load."""
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            Settings(chunk_rrf_penalty_limit=-31)
+        with pytest.raises(pydantic.ValidationError):
+            Settings(chunk_rrf_penalty_limit=0)
+
+        assert Settings(chunk_rrf_penalty_limit=20).chunk_rrf_penalty_limit == 20
+        assert Settings().chunk_rrf_penalty_limit is None
+
+    def test_the_crash_that_bound_guards_against(self):
+        """Pins WHY the bound exists — if someone widens it back, this shows
+        the concrete failure rather than an abstract 'validation' rule."""
+        vector, keyword = self._vector_only_candidates(n=1)
+
+        with pytest.raises(ZeroDivisionError):
+            _rrf_merge(vector, keyword, 30, 0.7, -31)

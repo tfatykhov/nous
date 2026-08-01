@@ -1722,7 +1722,15 @@ class Settings(BaseSettings):
     )
     chunk_rrf_penalty_limit: int | None = Field(
         default=None,
+        ge=1,
         description=(
+            "Validated ge=1 (codex P2): the value becomes penalty_rank = this "
+            "+ 1, which is then a divisor term as 1/(k + penalty_rank). A "
+            "negative value equal to -(k+1) — e.g. -31 at prod's "
+            "NOUS_RRF_K=30 — makes that denominator zero and crashes the whole "
+            "chunk-recall stage with ZeroDivisionError; other negatives yield "
+            "scores outside [0,1] or silently truncate the result list via "
+            "scored[:limit]. Rejected at startup instead. "
             "Pins the RRF missing-leg penalty base for the F067 chunk leg, "
             "decoupling it from episode_chunk_recall_limit. _rrf_merge scores "
             "a document absent from one leg at penalty_rank = limit + 1, so "
