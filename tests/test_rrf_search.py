@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 
 from nous.config import Settings
-from nous.heart.search import _rrf_merge
+from nous.heart.search import _rrf_merge, _rrf_merge_n
 from nous.runtime_config import RuntimeConfig
 
 
@@ -394,3 +394,184 @@ class TestPenaltyRankDecoupling:
             )
 
         assert seen[0] == 50, f"window must cover the requested rows, got {seen[0]}"
+
+
+class TestHeartLegPenaltyPinning:
+    """F1 (R2 follow-ups): the same coupling #580 fixed for chunks is live on
+    the HEART legs, and larger. ``Heart.recall`` sets ``fetch_limit = limit*2``
+    (heart.py) and hands it to episodes/facts/procedures, which pass it to
+    ``hybrid_search`` where ``penalty_rank = limit + 1``. ``recall_deep``'s
+    ``limit`` is LLM-controlled over 1..50, so the heart legs' penalty base
+    swings between 3 and 101 — every single-leg fact/episode/procedure is
+    rescored by a parameter meant to control row count only.
+
+    Query expansion (ON in prod) stacks TWO penalty layers: a per-variant
+    ``_rrf_merge`` inside each ``hybrid_search``, then a cross-variant
+    ``_rrf_merge_n``. Both must be pinned or the setting only half-works.
+    """
+
+    @staticmethod
+    def _lists(n=40):
+        ids = [uuid4() for _ in range(n)]
+        # Two lists that agree on the head but diverge in the tail, so the
+        # tail docs take the penalty rank in one list.
+        return ids, [[(i, 0.9) for i in ids[:20]], [(i, 0.8) for i in ids[10:30]]]
+
+    @pytest.mark.parametrize("limit", [10, 20, 30, 50])
+    def test_merge_n_score_invariant_when_penalty_pinned(self, limit):
+        ids, lists = self._lists()
+        target = ids[0]  # present in list 0, absent from list 1 -> takes penalty
+        merged = _rrf_merge_n(lists, 30, 20, return_limit=limit)
+        assert dict(merged)[target] == pytest.approx(
+            dict(_rrf_merge_n(lists, 30, 20, return_limit=10))[target], abs=1e-9
+        ), "pinned penalty base must hold the score steady across row counts"
+
+    def test_merge_n_score_varies_when_not_pinned(self):
+        """Negative case — pins today's coupling so it cannot silently return."""
+        ids, lists = self._lists()
+        target = ids[0]
+        scores = {lim: dict(_rrf_merge_n(lists, 30, lim))[target] for lim in (10, 20, 30, 50)}
+        assert len(set(scores.values())) == 4, scores
+        assert scores[10] > scores[20] > scores[30] > scores[50]
+
+    def test_merge_n_return_limit_controls_row_count(self):
+        _ids, lists = self._lists()
+        assert len(_rrf_merge_n(lists, 30, 20, return_limit=25)) == 25
+        assert len(_rrf_merge_n(lists, 30, 20)) == 20
+
+    @pytest.mark.asyncio
+    async def test_multi_pins_BOTH_layers(self):
+        """Expansion stacks two merges. Pinning only one leaves the other
+        coupled, so assert the per-variant calls AND the fusion both receive
+        the pinned base."""
+        import nous.heart.search as search_mod
+
+        per_variant_penalties = []
+        fusion = {}
+
+        async def _fake_hybrid(**kw):
+            per_variant_penalties.append(kw.get("penalty_limit"))
+            return [(uuid4(), 0.9)]
+
+        def _fake_merge_n(lists, k, limit, return_limit=None):
+            fusion["limit"] = limit
+            fusion["return_limit"] = return_limit
+            return []
+
+        with (
+            patch.object(search_mod, "hybrid_search", _fake_hybrid),
+            patch.object(search_mod, "_rrf_merge_n", _fake_merge_n),
+        ):
+            await search_mod.hybrid_search_multi(
+                MagicMock(), "heart.facts", [("a", [0.1]), ("b", [0.2])], "agent", limit=30, penalty_limit=20
+            )
+
+        assert per_variant_penalties == [20, 20], per_variant_penalties
+        assert fusion["limit"] == 20, "fusion penalty base must be pinned"
+        assert fusion["return_limit"] == 30, "row count must survive pinning"
+
+    @pytest.mark.asyncio
+    async def test_multi_unpinned_is_byte_identical(self):
+        """penalty_limit=None must leave the multi path exactly as it was."""
+        import nous.heart.search as search_mod
+
+        seen = []
+        fusion = {}
+
+        async def _fake_hybrid(**kw):
+            seen.append(kw.get("penalty_limit"))
+            return [(uuid4(), 0.9)]
+
+        def _fake_merge_n(lists, k, limit, return_limit=None):
+            fusion["limit"] = limit
+            fusion["return_limit"] = return_limit
+            return []
+
+        with (
+            patch.object(search_mod, "hybrid_search", _fake_hybrid),
+            patch.object(search_mod, "_rrf_merge_n", _fake_merge_n),
+        ):
+            await search_mod.hybrid_search_multi(
+                MagicMock(), "heart.facts", [("a", [0.1]), ("b", [0.2])], "agent", limit=30
+            )
+
+        assert seen == [None, None]
+        assert fusion["limit"] == 30
+        assert fusion["return_limit"] is None
+
+    def test_config_bound_and_default(self):
+        import pydantic
+
+        assert Settings().heart_rrf_penalty_limit is None
+        assert Settings(heart_rrf_penalty_limit=20).heart_rrf_penalty_limit == 20
+        with pytest.raises(pydantic.ValidationError):
+            Settings(heart_rrf_penalty_limit=0)
+        with pytest.raises(pydantic.ValidationError):
+            Settings(heart_rrf_penalty_limit=-31)
+
+    @pytest.mark.asyncio
+    async def test_heart_recall_threads_setting_to_all_three_legs(self):
+        """Wiring test. A setting that exists but never reaches the leg is
+        exactly the inert-knob failure this whole line of work started from
+        (#579), so assert the value actually arrives at episodes, facts AND
+        procedures — and that fetch_limit stays limit*2 independently."""
+        from types import SimpleNamespace
+
+        from nous.heart.heart import Heart
+
+        heart = Heart.__new__(Heart)
+        heart.settings = SimpleNamespace(
+            query_expansion_enabled=False,
+            heart_rrf_penalty_limit=20,
+            cross_encoder_enabled=False,
+            mmr_enabled=False,
+        )
+        heart.agent_id = "nous-test"
+        heart._embeddings = None
+        heart._owns_embeddings = False
+        heart._bus = None
+        heart._query_expander = None
+        heart._residual_activator = None
+        for name in ("episodes", "facts", "procedures", "censors"):
+            mgr = MagicMock()
+            mgr.search = AsyncMock(return_value=[])
+            setattr(heart, name, mgr)
+
+        await heart._recall("a query", limit=10, types=None, session=AsyncMock())
+
+        for mgr in (heart.episodes.search, heart.facts.search, heart.procedures.search):
+            assert mgr.call_args is not None, "leg was not searched"
+            assert mgr.call_args.kwargs.get("penalty_limit") == 20, (
+                f"leg did not receive the pinned base: {mgr.call_args.kwargs}"
+            )
+        # Row count is still limit*2 — pinning the penalty must not shrink it.
+        assert heart.facts.search.call_args.args[1] == 20
+
+    @pytest.mark.asyncio
+    async def test_heart_recall_unset_setting_passes_none(self):
+        """Default must leave the legs byte-identical."""
+        from types import SimpleNamespace
+
+        from nous.heart.heart import Heart
+
+        heart = Heart.__new__(Heart)
+        heart.settings = SimpleNamespace(
+            query_expansion_enabled=False,
+            cross_encoder_enabled=False,
+            mmr_enabled=False,
+        )  # attribute absent entirely -> getattr default
+        heart.agent_id = "nous-test"
+        heart._embeddings = None
+        heart._owns_embeddings = False
+        heart._bus = None
+        heart._query_expander = None
+        heart._residual_activator = None
+        for name in ("episodes", "facts", "procedures", "censors"):
+            mgr = MagicMock()
+            mgr.search = AsyncMock(return_value=[])
+            setattr(heart, name, mgr)
+
+        await heart._recall("a query", limit=10, types=None, session=AsyncMock())
+
+        for mgr in (heart.episodes.search, heart.facts.search, heart.procedures.search):
+            assert mgr.call_args.kwargs.get("penalty_limit") is None

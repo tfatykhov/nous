@@ -370,6 +370,7 @@ def _rrf_merge_n(
     ranked_lists: list[list[tuple[UUID, float]]],
     k: int,
     limit: int,
+    return_limit: int | None = None,
 ) -> list[tuple[UUID, float]]:
     """Equal-weight Reciprocal Rank Fusion across N ranked lists.
 
@@ -383,6 +384,13 @@ def _rrf_merge_n(
     regardless of N, and we divide by ``1/k`` so the returned scores live
     in the same ``[0, 1]`` range every downstream consumer (frame boost,
     MMR, CE rerank, F017 relevance floor) already expects.
+
+    ``return_limit`` (default = ``limit``) decouples HOW MANY rows come back
+    from the ``limit`` that defines ``penalty_rank`` — the same escape hatch
+    ``_rrf_merge`` carries, and for the same reason: a bigger ``limit`` moves
+    ``penalty_rank`` and therefore silently rescores every doc missing from
+    any list. Needed here too because ``Heart.recall`` derives its limit as
+    ``limit * 2`` from an LLM-controlled parameter.
 
     Note: the single-query fast-path in ``hybrid_search_multi`` short-circuits
     before reaching this function; it is only invoked when ``len(ranked_lists) >= 2``.
@@ -422,7 +430,7 @@ def _rrf_merge_n(
     if max_score > 0 and scored:
         scored = [(doc_id, score / max_score) for doc_id, score in scored]
 
-    return scored[:limit]
+    return scored[: (return_limit if return_limit is not None else limit)]
 
 
 async def hybrid_search_multi(
@@ -435,6 +443,7 @@ async def hybrid_search_multi(
     limit: int = 10,
     vector_weight: float | None = None,
     active_filter: bool = True,
+    penalty_limit: int | None = None,
 ) -> list[tuple[UUID, float]]:
     """Multi-query hybrid search over a Heart table (F050).
 
@@ -461,6 +470,12 @@ async def hybrid_search_multi(
         limit: Maximum number of results to return.
         vector_weight: Weight for vector score within each per-variant call.
         active_filter: Whether to include ``AND t.active = true``.
+        penalty_limit: Pins the RRF missing-leg penalty base, decoupling it
+            from ``limit``. Threaded to BOTH layers, because expansion stacks
+            two of them: each per-variant ``hybrid_search`` runs its own
+            vector/keyword ``_rrf_merge``, and the cross-variant fusion runs
+            ``_rrf_merge_n``. Pinning only one would leave the other coupled.
+            ``None`` (default) preserves today's behaviour exactly.
 
     Returns:
         List of ``(id, rrf_score)`` ordered by score DESC, length ``<= limit``.
@@ -489,6 +504,7 @@ async def hybrid_search_multi(
             limit=limit,
             vector_weight=vector_weight,
             active_filter=active_filter,
+            penalty_limit=penalty_limit,
         )
 
     rrf_k = _resolve_rrf_k()
@@ -506,9 +522,15 @@ async def hybrid_search_multi(
             limit=limit,
             vector_weight=vector_weight,
             active_filter=active_filter,
+            penalty_limit=penalty_limit,
         )
         ranked_lists.append(per_variant)
 
+    # Second penalty layer: pin the cross-variant fusion's base too, keeping
+    # the row count on return_limit. Pinning only the per-variant merges above
+    # would leave this one still tracking `limit`.
+    if penalty_limit is not None:
+        return _rrf_merge_n(ranked_lists, rrf_k, penalty_limit, return_limit=limit)
     return _rrf_merge_n(ranked_lists, rrf_k, limit)
 
 

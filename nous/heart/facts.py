@@ -3165,6 +3165,7 @@ class FactManager:
         date_window: "DateWindow | None" = None,
         include_categories: list[str] | None = None,
         require_keyword_hit: bool = False,
+        penalty_limit: int | None = None,
     ) -> list[FactSummary]:
         """Hybrid search over facts.
 
@@ -3184,8 +3185,8 @@ class FactManager:
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window, include_categories, require_keyword_hit)
-        return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window, include_categories, require_keyword_hit)
+                return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window, include_categories, require_keyword_hit, penalty_limit)
+        return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window, include_categories, require_keyword_hit, penalty_limit)
 
     async def _search(
         self,
@@ -3199,6 +3200,7 @@ class FactManager:
         date_window: "DateWindow | None" = None,
         include_categories: list[str] | None = None,
         require_keyword_hit: bool = False,
+        penalty_limit: int | None = None,
     ) -> list[FactSummary]:
         # Generate query embedding
         embedding = None
@@ -3249,6 +3251,7 @@ class FactManager:
                 extra_where=extra_where,
                 extra_params=extra_params,
                 limit=limit,
+                penalty_limit=penalty_limit,
             )
         else:
             results = await hybrid_search(
@@ -3261,6 +3264,7 @@ class FactManager:
                 extra_params=extra_params,
                 limit=limit,
                 require_keyword_hit=require_keyword_hit,
+                penalty_limit=penalty_limit,
             )
 
         # F075 L3: fuse the date-window leg (position-based RRF). Present only when

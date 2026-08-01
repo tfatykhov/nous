@@ -356,6 +356,7 @@ class ProcedureManager:
         frame_type: str | None = None,
         session: AsyncSession | None = None,
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
+        penalty_limit: int | None = None,
     ) -> list[ProcedureSummary]:
         """Hybrid search over procedures. Optional domain filter.
 
@@ -370,8 +371,8 @@ class ProcedureManager:
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._search(query, limit, domain, frame_type, session, variant_pairs)
-        return await self._search(query, limit, domain, frame_type, session, variant_pairs)
+                return await self._search(query, limit, domain, frame_type, session, variant_pairs, penalty_limit)
+        return await self._search(query, limit, domain, frame_type, session, variant_pairs, penalty_limit)
 
     async def _search(
         self,
@@ -381,6 +382,7 @@ class ProcedureManager:
         frame_type: str | None,
         session: AsyncSession,
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
+        penalty_limit: int | None = None,
     ) -> list[ProcedureSummary]:
         embedding = None
         if self.embeddings:
@@ -404,6 +406,7 @@ class ProcedureManager:
                 extra_where=extra_where,
                 extra_params=extra_params,
                 limit=limit,
+                penalty_limit=penalty_limit,
             )
         else:
             results = await hybrid_search(
@@ -415,6 +418,7 @@ class ProcedureManager:
                 extra_where=extra_where,
                 extra_params=extra_params,
                 limit=limit,
+                penalty_limit=penalty_limit,
             )
 
         if not results:

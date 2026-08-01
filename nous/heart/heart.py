@@ -965,6 +965,14 @@ class Heart:
     ) -> list[RecallResult]:
         search_types = types or ["episode", "fact", "procedure", "censor"]
         fetch_limit = limit * 2  # Fetch more for merging
+        # fetch_limit is a ROW COUNT, but it also lands in _rrf_merge's
+        # `limit`, which sets penalty_rank = limit + 1. Since `limit` here
+        # comes from recall_deep (LLM-controlled, 1..50), the penalty base
+        # swings 3..101 and rescores every single-leg result. Pin it when the
+        # operator has configured a base. None = today's coupled behaviour.
+        heart_penalty_limit = getattr(
+            self.settings, "heart_rrf_penalty_limit", None,
+        )
 
         # Execute searches sequentially — AsyncSession is not safe for
         # concurrent use, so asyncio.gather would risk InvalidRequestError.
@@ -1016,15 +1024,18 @@ class Heart:
                 if memory_type == "episode":
                     result = await self.episodes.search(
                         query, fetch_limit, session, variant_pairs=variant_pairs,
+                        penalty_limit=heart_penalty_limit,
                     )
                 elif memory_type == "fact":
                     result = await self.facts.search(
                         query, fetch_limit, session=session,
                         variant_pairs=variant_pairs, date_window=date_window,
+                        penalty_limit=heart_penalty_limit,
                     )
                 elif memory_type == "procedure":
                     result = await self.procedures.search(
                         query, fetch_limit, session=session, variant_pairs=variant_pairs,
+                        penalty_limit=heart_penalty_limit,
                     )
                 else:
                     # P1-5: Use read-only search, not check.
