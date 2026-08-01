@@ -1727,3 +1727,99 @@ class TestExemplarUniversalReplaceAtMerge:
 
         assert not any(r.id == stray_id for r in results)  # stray stripped entirely
         assert any(r.id == fresh_id and r.metadata.get("retrieval_leg") == "exemplar" for r in results)
+
+
+class TestChunkLegAllotment:
+    """The F067 chunk leg's allotment is ``episode_chunk_recall_limit``, flat.
+
+    It used to be ``min(episode_chunk_recall_limit, limit * 2)``, which made the
+    setting silently inert above ``2 x`` the caller's limit: prod ran with
+    ``NOUS_EPISODE_CHUNK_RECALL_LIMIT=30`` and ``recall_deep``'s default
+    ``limit=10`` and therefore retrieved 20 chunks, not 30, for as long as the
+    knob had been set. Nothing tested this expression, so the drift was silent.
+
+    These tests assert on the ``limit`` the pipeline hands the leg -- the leg
+    itself is mocked, because what is under test is the allotment arithmetic,
+    not the search.
+
+    The ``caller_limit=1`` case pins a DELIBERATE tradeoff, not an oversight:
+    flat means the leg ignores ``limit`` entirely, so a caller asking for a
+    narrow search still gets the full allotment. That was chosen over widening
+    the multiplier (``limit * 3``) because any multiplier large enough to honor
+    the configured value at the standard ``limit=10`` silently re-caps an
+    operator who configures more -- the same defect with a new constant. The
+    sibling legs that own a setting (``keyed_fact_leg_k``, ``exemplar_top_k``)
+    already ignore ``limit`` this way. If the low-``limit`` cost ever proves
+    real, the retreat is ``min(setting, limit * 3)``, chosen deliberately --
+    NOT a restoration of ``limit * 2``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_setting_is_honored_above_twice_the_caller_limit(self):
+        """The exact prod configuration: knob 30, caller 10. Must be 30."""
+        heart = _make_heart(recall_results=_make_recall_results())
+        brain = _make_brain(
+            neighbors_by_node={}, contradictions=[], decision_results=[],
+        )
+        settings = _make_settings(
+            episode_chunks_enabled=True, episode_chunk_recall_limit=30,
+        )
+
+        leg = AsyncMock(return_value=[])
+        with patch("nous.api.retrieval_pipeline._search_episode_chunks", new=leg):
+            await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+
+        assert leg.await_args.kwargs["limit"] == 30, (
+            "chunk leg must receive the configured allotment; the old "
+            "min(setting, limit * 2) capped this at 20"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("caller_limit", [1, 5, 10, 25, 50])
+    async def test_allotment_is_independent_of_caller_limit(self, caller_limit):
+        """Flat contract: the leg limit is the setting for ANY caller limit.
+
+        Parametrized across the full ``recall_deep`` schema range (1..50) so a
+        reintroduced coupling fails loudly rather than only at prod's numbers.
+        """
+        heart = _make_heart(recall_results=_make_recall_results())
+        brain = _make_brain(
+            neighbors_by_node={}, contradictions=[], decision_results=[],
+        )
+        settings = _make_settings(
+            episode_chunks_enabled=True, episode_chunk_recall_limit=30,
+        )
+
+        leg = AsyncMock(return_value=[])
+        with patch("nous.api.retrieval_pipeline._search_episode_chunks", new=leg):
+            await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=caller_limit,
+            )
+
+        assert leg.await_args.kwargs["limit"] == 30
+
+    @pytest.mark.asyncio
+    async def test_stock_default_allotment_unchanged(self):
+        """Regression guard: on the stock default (10) the fix is a no-op.
+
+        ``min(10, limit * 2)`` was already 10 for any ``limit >= 5``, so a
+        default deployment sees no behavior change from dropping the coupling.
+        """
+        heart = _make_heart(recall_results=_make_recall_results())
+        brain = _make_brain(
+            neighbors_by_node={}, contradictions=[], decision_results=[],
+        )
+        settings = _make_settings(episode_chunks_enabled=True)  # limit defaults to 10
+
+        leg = AsyncMock(return_value=[])
+        with patch("nous.api.retrieval_pipeline._search_episode_chunks", new=leg):
+            await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+
+        assert leg.await_args.kwargs["limit"] == 10
