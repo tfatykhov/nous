@@ -1843,6 +1843,13 @@ async def _search_episode_chunks(
                 agent_id,
                 limit=limit,
                 active_filter=False,  # chunks have no active column
+                # Hold the RRF missing-leg penalty base steady while the row
+                # allotment varies. Without this, episode_chunk_recall_limit
+                # is a scoring knob as well as a row count, and raising it
+                # DEMOTES chunks (PR #579: 20 -> 30 cost -0.83 chunks in
+                # top-10 per query, with 0/60 of the added chunks reaching
+                # top-10). None = previous coupled behaviour.
+                penalty_limit=getattr(settings, "chunk_rrf_penalty_limit", None),
             )
             if not ranked:
                 return []

@@ -1720,6 +1720,32 @@ class Settings(BaseSettings):
             "keyed_fact_leg_k / exemplar_top_k work the same way."
         ),
     )
+    chunk_rrf_penalty_limit: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Validated ge=1 (codex P2): the value becomes penalty_rank = this "
+            "+ 1, which is then a divisor term as 1/(k + penalty_rank). A "
+            "negative value equal to -(k+1) — e.g. -31 at prod's "
+            "NOUS_RRF_K=30 — makes that denominator zero and crashes the whole "
+            "chunk-recall stage with ZeroDivisionError; other negatives yield "
+            "scores outside [0,1] or silently truncate the result list via "
+            "scored[:limit]. Rejected at startup instead. "
+            "Pins the RRF missing-leg penalty base for the F067 chunk leg, "
+            "decoupling it from episode_chunk_recall_limit. _rrf_merge scores "
+            "a document absent from one leg at penalty_rank = limit + 1, so "
+            "the row-count knob was also a scoring knob: raising it 20 -> 30 "
+            "at NOUS_RRF_K=30 drops every single-leg chunk by ~0.029 and "
+            "DEMOTED chunks (measured: -0.83 chunks in top-10 per query over "
+            "60 queries; 0/60 of the newly admitted chunks reached top-10). "
+            "Set to 20 for PARITY with the heart legs: Heart.recall uses "
+            "fetch_limit = limit * 2 (heart.py), so at recall_deep's default "
+            "limit=10 facts/episodes/procedures are scored against penalty "
+            "base 20 — which is also what the chunk leg used before #579. "
+            "Values below 20 give chunks an ADVANTAGE over facts, not parity "
+            "(base 10 is +0.043 at k=30). None = coupled to the row limit."
+        ),
+    )
     chunk_hybrid_search_enabled: bool = Field(
         default=False,
         description=(

@@ -198,6 +198,7 @@ async def hybrid_search(
     limit: int = 10,
     vector_weight: float | None = None,
     active_filter: bool = True,
+    penalty_limit: int | None = None,
     require_keyword_hit: bool = False,
 ) -> list[tuple[UUID, float]]:
     """Hybrid vector + keyword search over a Heart table using RRF.
@@ -231,6 +232,19 @@ async def hybrid_search(
         active_filter: Whether to include ``AND t.active = true`` in the WHERE
             clause.  Set to ``False`` for tables without an ``active`` column
             (e.g. ``brain.decisions``).  Default ``True``.
+        penalty_limit: Decouples the RRF missing-leg penalty from ``limit``.
+            ``_rrf_merge`` scores a document absent from one leg at
+            ``penalty_rank = limit + 1``, so by default RAISING ``limit`` to
+            fetch more rows also DEPRESSES every single-leg document's score —
+            the trap ``_rrf_merge``'s own docstring documents. Pass a fixed
+            value here to hold scores stable while ``limit`` varies, so a
+            row-count knob stops doubling as a scoring knob. It also pins the
+            per-leg SQL fetch window (``limit * 3``), because widening that
+            window changes which documents are present in each leg and a
+            document appearing beyond the penalty rank scores WORSE than one
+            absent from the leg entirely. Score invariance therefore holds
+            while ``limit <= penalty_limit * 3``. ``None`` (default)
+            preserves the coupled behaviour exactly.
 
     Returns:
         List of (id, rrf_score) ordered by score DESC.
@@ -239,11 +253,25 @@ async def hybrid_search(
         vector_weight = _resolve_vector_weight()
     rrf_k = _resolve_rrf_k()
 
+    # Codex r2: pinning penalty_rank alone does NOT decouple scoring from the
+    # allotment, because the SQL legs fetch limit * 3 — so raising `limit`
+    # widens the candidate SET too. A document absent from the keyword leg at
+    # limit=20 can surface at keyword rank 70 at limit=30, and that is WORSE
+    # than being absent: at k=30 with a pinned penalty_rank of 21 the keyword
+    # term falls 0.005882 -> 0.003000. (Crossover is exactly at
+    # rank == penalty_rank — beyond it, presence scores below absence.)
+    #
+    # So base the fetch window on the pinned value when one is given. The
+    # max() keeps the window from starving the requested row count when
+    # `limit` exceeds it; invariance therefore holds while
+    # limit <= penalty_limit * 3, which covers the intended use
+    # (penalty_limit=20, limit sweeping 10..60).
+    fetch_base = penalty_limit if penalty_limit is not None else limit
     params: dict = {
         "agent_id": agent_id,
         "query_text": query_text,
         "limit": limit,
-        "limit_expanded": limit * 3,
+        "limit_expanded": max(fetch_base * 3, limit),
     }
     if extra_params:
         params.update(extra_params)
@@ -306,7 +334,18 @@ async def hybrid_search(
         if require_keyword_hit
         else limit
     )
-    merged = _rrf_merge(vector_results, keyword_results, rrf_k, vector_weight, merge_limit)
+    # penalty_limit (when set) feeds _rrf_merge's ``limit`` — which is ONLY
+    # used to derive penalty_rank — while the row count moves to
+    # ``return_limit``. Note merge_limit is deliberately inflated above under
+    # require_keyword_hit, so this must not simply swap both: the row count
+    # keeps its inflated value, only the penalty base is pinned.
+    if penalty_limit is not None:
+        merged = _rrf_merge(
+            vector_results, keyword_results, rrf_k, vector_weight,
+            penalty_limit, return_limit=merge_limit,
+        )
+    else:
+        merged = _rrf_merge(vector_results, keyword_results, rrf_k, vector_weight, merge_limit)
     if require_keyword_hit:
         # Codex #574 r3: _rrf_merge's missing-leg penalty rank (limit+1) is
         # nearly free at typical k (a vector-only rank-0 hit normalizes to
