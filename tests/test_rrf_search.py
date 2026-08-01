@@ -186,9 +186,7 @@ class TestPenaltyRankDecoupling:
         vector, keyword = self._vector_only_candidates()
         target = vector[0][0]
 
-        merged = _rrf_merge(
-            vector, keyword, 30, 0.7, 10, return_limit=limit,
-        )
+        merged = _rrf_merge(vector, keyword, 30, 0.7, 10, return_limit=limit)
 
         score = dict(merged)[target]
         assert score == pytest.approx(0.9195, abs=1e-4), (
@@ -203,14 +201,10 @@ class TestPenaltyRankDecoupling:
         vector, keyword = self._vector_only_candidates()
         target = vector[0][0]
 
-        scores = {
-            limit: dict(_rrf_merge(vector, keyword, 30, 0.7, limit))[target]
-            for limit in (10, 20, 30, 50)
-        }
+        scores = {limit: dict(_rrf_merge(vector, keyword, 30, 0.7, limit))[target] for limit in (10, 20, 30, 50)}
 
         assert len(set(scores.values())) == 4, (
-            "unpinned, each limit must yield a DIFFERENT score — that "
-            f"coupling is the defect being fixed; got {scores}"
+            f"unpinned, each limit must yield a DIFFERENT score — that coupling is the defect being fixed; got {scores}"
         )
         # Monotonically decreasing: a bigger limit means a worse penalty rank.
         assert scores[10] > scores[20] > scores[30] > scores[50]
@@ -242,8 +236,7 @@ class TestPenaltyRankDecoupling:
 
         with patch.object(search_mod, "_rrf_merge", _spy):
             await search_mod.hybrid_search(
-                session, "heart.episode_chunks", [0.1, 0.2], "q", "a",
-                limit=30, active_filter=False,
+                session, "heart.episode_chunks", [0.1, 0.2], "q", "a", limit=30, active_filter=False
             )
 
         assert captured["limit"] == 30
@@ -267,8 +260,7 @@ class TestPenaltyRankDecoupling:
 
         with patch.object(search_mod, "_rrf_merge", _spy):
             await search_mod.hybrid_search(
-                session, "heart.episode_chunks", [0.1, 0.2], "q", "a",
-                limit=30, active_filter=False, penalty_limit=10,
+                session, "heart.episode_chunks", [0.1, 0.2], "q", "a", limit=30, active_filter=False, penalty_limit=10
             )
 
         assert captured["limit"] == 10, "penalty base must be the pinned value"
@@ -304,14 +296,15 @@ class TestPenaltyRankDecoupling:
 
         with patch.object(search_mod, "hybrid_search", _spy):
             await _search_episode_chunks(
-                heart=heart, query="q", agent_id="a", limit=30,
+                heart=heart,
+                query="q",
+                agent_id="a",
+                limit=30,
                 settings=SimpleNamespace(
                     chunk_hybrid_search_enabled=True,
                     chunk_rrf_penalty_limit=10,
                 ),
             )
 
-        assert captured.get("penalty_limit") == 10, (
-            "chunk leg must thread the setting through, else the knob is inert"
-        )
+        assert captured.get("penalty_limit") == 10, "chunk leg must thread the setting through, else the knob is inert"
         assert captured.get("limit") == 30, "row allotment must be unaffected"
