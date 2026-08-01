@@ -3275,7 +3275,16 @@ class FactManager:
             k_leg = self._settings.date_leg_k if self._settings else 15
             date_leg = await self._date_window_leg(session, embedding, date_window, k_leg)
             if date_leg:
-                results = _rrf_merge_n([results, date_leg], _resolve_rrf_k(), limit)
+                # Codex P2 (#581): the date-window fusion is a THIRD merge on
+                # this path and was the only one left unpinned, so temporal
+                # fact queries kept rescoring with the caller's limit.
+                if penalty_limit is not None:
+                    results = _rrf_merge_n(
+                        [results, date_leg], _resolve_rrf_k(), penalty_limit,
+                        return_limit=limit, cap_ranks_at_penalty=True,
+                    )
+                else:
+                    results = _rrf_merge_n([results, date_leg], _resolve_rrf_k(), limit)
 
         if not results:
             return []

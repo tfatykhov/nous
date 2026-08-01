@@ -226,9 +226,10 @@ class TestPenaltyRankDecoupling:
 
         captured: dict = {}
 
-        def _spy(vector, keyword, k, vw, limit, return_limit=None):
+        def _spy(vector, keyword, k, vw, limit, return_limit=None, **kw):
             captured["limit"] = limit
             captured["return_limit"] = return_limit
+            captured["cap"] = kw.get("cap_ranks_at_penalty", False)
             return []
 
         session = MagicMock()
@@ -241,6 +242,7 @@ class TestPenaltyRankDecoupling:
 
         assert captured["limit"] == 30
         assert captured["return_limit"] is None
+        assert captured["cap"] is False, "unpinned must NOT cap (byte-identical)"
 
     @pytest.mark.asyncio
     async def test_hybrid_search_penalty_limit_pins_merge_base(self):
@@ -250,9 +252,10 @@ class TestPenaltyRankDecoupling:
 
         captured: dict = {}
 
-        def _spy(vector, keyword, k, vw, limit, return_limit=None):
+        def _spy(vector, keyword, k, vw, limit, return_limit=None, **kw):
             captured["limit"] = limit
             captured["return_limit"] = return_limit
+            captured["cap"] = kw.get("cap_ranks_at_penalty", False)
             return []
 
         session = MagicMock()
@@ -265,6 +268,7 @@ class TestPenaltyRankDecoupling:
 
         assert captured["limit"] == 10, "penalty base must be the pinned value"
         assert captured["return_limit"] == 30, "row count must survive pinning"
+        assert captured["cap"] is True, "pinned mode must also cap observed ranks"
 
     @pytest.mark.asyncio
     async def test_chunk_leg_threads_setting_through(self):
@@ -453,9 +457,10 @@ class TestHeartLegPenaltyPinning:
             per_variant_penalties.append(kw.get("penalty_limit"))
             return [(uuid4(), 0.9)]
 
-        def _fake_merge_n(lists, k, limit, return_limit=None):
+        def _fake_merge_n(lists, k, limit, return_limit=None, **kw):
             fusion["limit"] = limit
             fusion["return_limit"] = return_limit
+            fusion["cap"] = kw.get("cap_ranks_at_penalty", False)
             return []
 
         with (
@@ -469,6 +474,7 @@ class TestHeartLegPenaltyPinning:
         assert per_variant_penalties == [20, 20], per_variant_penalties
         assert fusion["limit"] == 20, "fusion penalty base must be pinned"
         assert fusion["return_limit"] == 30, "row count must survive pinning"
+        assert fusion["cap"] is True, "fusion must cap observed ranks too"
 
     @pytest.mark.asyncio
     async def test_multi_unpinned_is_byte_identical(self):
@@ -482,9 +488,10 @@ class TestHeartLegPenaltyPinning:
             seen.append(kw.get("penalty_limit"))
             return [(uuid4(), 0.9)]
 
-        def _fake_merge_n(lists, k, limit, return_limit=None):
+        def _fake_merge_n(lists, k, limit, return_limit=None, **kw):
             fusion["limit"] = limit
             fusion["return_limit"] = return_limit
+            fusion["cap"] = kw.get("cap_ranks_at_penalty", False)
             return []
 
         with (
@@ -498,6 +505,7 @@ class TestHeartLegPenaltyPinning:
         assert seen == [None, None]
         assert fusion["limit"] == 30
         assert fusion["return_limit"] is None
+        assert fusion["cap"] is False
 
     def test_config_bound_and_default(self):
         import pydantic
@@ -575,3 +583,108 @@ class TestHeartLegPenaltyPinning:
 
         for mgr in (heart.episodes.search, heart.facts.search, heart.procedures.search):
             assert mgr.call_args.kwargs.get("penalty_limit") is None
+
+    def test_rank_beyond_pin_scores_same_as_absent(self):
+        """Codex P1 (#581). Pinning the penalty base is not sufficient on its
+        own: the legs over-fetch, so a doc ABSENT from a list at one row count
+        can APPEAR deep in it at a larger one. Past penalty_rank an observed
+        rank contributes LESS than the missing-leg penalty, so the doc is
+        demoted for having been found — and the score moves with the row count
+        despite the pin. Capping makes deep-presence and absence identical."""
+        target = uuid4()
+        others = [uuid4() for _ in range(60)]
+
+        # Arm A: target absent from the keyword leg entirely.
+        absent = _rrf_merge(
+            [(target, 0.9)],
+            [(o, 0.5) for o in others],
+            30,
+            0.7,
+            20,
+            return_limit=100,
+            cap_ranks_at_penalty=True,
+        )
+        # Arm B: identical, except the target now surfaces at keyword rank 40.
+        deep = _rrf_merge(
+            [(target, 0.9)],
+            [(o, 0.5) for o in others[:40]] + [(target, 0.1)],
+            30,
+            0.7,
+            20,
+            return_limit=100,
+            cap_ranks_at_penalty=True,
+        )
+
+        assert dict(absent)[target] == pytest.approx(dict(deep)[target], abs=1e-9), (
+            "with the cap, a doc found beyond the pinned base must score exactly as if it were absent"
+        )
+
+    def test_rank_beyond_pin_is_a_DEMOTION_without_the_cap(self):
+        """The pathology itself — pins why the cap exists."""
+        target = uuid4()
+        others = [uuid4() for _ in range(60)]
+
+        absent = dict(
+            _rrf_merge(
+                [(target, 0.9)],
+                [(o, 0.5) for o in others],
+                30,
+                0.7,
+                20,
+                return_limit=100,
+            )
+        )[target]
+        deep = dict(
+            _rrf_merge(
+                [(target, 0.9)],
+                [(o, 0.5) for o in others[:40]] + [(target, 0.1)],
+                30,
+                0.7,
+                20,
+                return_limit=100,
+            )
+        )[target]
+
+        assert deep < absent, (
+            "uncapped, being FOUND at rank 40 scores worse than being absent "
+            f"({deep:.6f} < {absent:.6f}) — that is the defect"
+        )
+
+    @pytest.mark.parametrize("recall_limit", [1, 10, 20, 31, 40, 50])
+    def test_pin_holds_across_the_full_recall_deep_range(self, recall_limit):
+        """Codex P2 (#581, heart.py). recall_deep advertises limit 1..50, so
+        fetch_limit reaches 100 and the SQL window keeps widening past the
+        pinned base — surfacing docs at ever-deeper ranks. The cap is what
+        makes the pin hold across that whole range rather than only up to
+        penalty_limit * 3.
+
+        Simulates the widening window: as the row count grows, the keyword leg
+        returns more rows, so the target appears at a progressively deeper rank.
+        """
+        target = uuid4()
+        fetch = recall_limit * 2 * 3  # heart fetch_limit * the leg's 3x window
+        others = [uuid4() for _ in range(max(fetch, 1))]
+
+        # Target appears in the keyword leg only once the window is wide enough.
+        keyword = [(o, 0.5) for o in others[:fetch]]
+        if fetch > 40:
+            keyword = keyword[:40] + [(target, 0.1)] + keyword[40:]
+
+        scored = dict(
+            _rrf_merge(
+                [(target, 0.9)],
+                keyword,
+                30,
+                0.7,
+                20,
+                return_limit=10_000,
+                cap_ranks_at_penalty=True,
+            )
+        )
+
+        # Pinned base 20 -> penalty_rank 21 -> vector rank 0, keyword capped 21.
+        expected = (0.7 / 30 + 0.3 / 51) * 30
+        assert scored[target] == pytest.approx(expected, abs=1e-9), (
+            f"score moved at recall_deep limit={recall_limit} (fetch window "
+            f"{fetch}) — the pin does not hold across the advertised range"
+        )

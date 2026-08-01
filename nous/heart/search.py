@@ -141,6 +141,7 @@ def _rrf_merge(
     vector_weight: float,
     limit: int,
     return_limit: int | None = None,
+    cap_ranks_at_penalty: bool = False,
 ) -> list[tuple[UUID, float]]:
     """Merge two ranked lists using Reciprocal Rank Fusion.
 
@@ -156,6 +157,17 @@ def _rrf_merge(
     ``limit`` changes ``penalty_rank`` and therefore silently changes the
     score of every single-list document (codex #577 r1 / the same trap flagged
     on #574).
+
+    ``cap_ranks_at_penalty`` clamps OBSERVED ranks to ``penalty_rank`` as well.
+    Pinning the penalty base alone is not sufficient: the legs over-fetch, so a
+    document absent from a list at one row count can APPEAR deep in that list
+    at a larger one, and past ``penalty_rank`` an observed rank contributes
+    LESS than the missing-leg penalty — presence scores worse than absence
+    (crossover exactly at ``rank == penalty_rank``). Capping makes "deep in the
+    list" and "absent" score identically, which is what makes the pin actually
+    hold as the row count moves. Default ``False`` because unpinned callers
+    routinely see ranks past ``limit + 1`` (legs fetch ``limit * 3``), and
+    clamping those would change today's behaviour.
     """
     keyword_weight = 1.0 - vector_weight
     penalty_rank = limit + 1
@@ -172,6 +184,9 @@ def _rrf_merge(
     for doc_id in all_ids:
         v_rank = vector_ranks.get(doc_id, penalty_rank)
         k_rank = keyword_ranks.get(doc_id, penalty_rank)
+        if cap_ranks_at_penalty:
+            v_rank = min(v_rank, penalty_rank)
+            k_rank = min(k_rank, penalty_rank)
         score = vector_weight / (k + v_rank) + keyword_weight / (k + k_rank)
         scored.append((doc_id, score))
 
@@ -343,6 +358,7 @@ async def hybrid_search(
         merged = _rrf_merge(
             vector_results, keyword_results, rrf_k, vector_weight,
             penalty_limit, return_limit=merge_limit,
+            cap_ranks_at_penalty=True,
         )
     else:
         merged = _rrf_merge(vector_results, keyword_results, rrf_k, vector_weight, merge_limit)
@@ -371,6 +387,7 @@ def _rrf_merge_n(
     k: int,
     limit: int,
     return_limit: int | None = None,
+    cap_ranks_at_penalty: bool = False,
 ) -> list[tuple[UUID, float]]:
     """Equal-weight Reciprocal Rank Fusion across N ranked lists.
 
@@ -418,6 +435,11 @@ def _rrf_merge_n(
         score = 0.0
         for rm in rank_maps:
             r = rm.get(doc_id, penalty_rank)
+            # See _rrf_merge: past penalty_rank an observed rank contributes
+            # LESS than being absent, so a doc surfacing deep in a variant as
+            # the row count grows would still be rescored despite the pin.
+            if cap_ranks_at_penalty:
+                r = min(r, penalty_rank)
             score += per_list_weight / (k + r)
         scored.append((doc_id, score))
 
@@ -530,7 +552,10 @@ async def hybrid_search_multi(
     # the row count on return_limit. Pinning only the per-variant merges above
     # would leave this one still tracking `limit`.
     if penalty_limit is not None:
-        return _rrf_merge_n(ranked_lists, rrf_k, penalty_limit, return_limit=limit)
+        return _rrf_merge_n(
+            ranked_lists, rrf_k, penalty_limit, return_limit=limit,
+            cap_ranks_at_penalty=True,
+        )
     return _rrf_merge_n(ranked_lists, rrf_k, limit)
 
 
