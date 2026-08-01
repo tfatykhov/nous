@@ -238,8 +238,13 @@ async def hybrid_search(
             fetch more rows also DEPRESSES every single-leg document's score —
             the trap ``_rrf_merge``'s own docstring documents. Pass a fixed
             value here to hold scores stable while ``limit`` varies, so a
-            row-count knob stops doubling as a scoring knob. ``None``
-            (default) preserves the coupled behaviour exactly.
+            row-count knob stops doubling as a scoring knob. It also pins the
+            per-leg SQL fetch window (``limit * 3``), because widening that
+            window changes which documents are present in each leg and a
+            document appearing beyond the penalty rank scores WORSE than one
+            absent from the leg entirely. Score invariance therefore holds
+            while ``limit <= penalty_limit * 3``. ``None`` (default)
+            preserves the coupled behaviour exactly.
 
     Returns:
         List of (id, rrf_score) ordered by score DESC.
@@ -248,11 +253,25 @@ async def hybrid_search(
         vector_weight = _resolve_vector_weight()
     rrf_k = _resolve_rrf_k()
 
+    # Codex r2: pinning penalty_rank alone does NOT decouple scoring from the
+    # allotment, because the SQL legs fetch limit * 3 — so raising `limit`
+    # widens the candidate SET too. A document absent from the keyword leg at
+    # limit=20 can surface at keyword rank 70 at limit=30, and that is WORSE
+    # than being absent: at k=30 with a pinned penalty_rank of 21 the keyword
+    # term falls 0.005882 -> 0.003000. (Crossover is exactly at
+    # rank == penalty_rank — beyond it, presence scores below absence.)
+    #
+    # So base the fetch window on the pinned value when one is given. The
+    # max() keeps the window from starving the requested row count when
+    # `limit` exceeds it; invariance therefore holds while
+    # limit <= penalty_limit * 3, which covers the intended use
+    # (penalty_limit=20, limit sweeping 10..60).
+    fetch_base = penalty_limit if penalty_limit is not None else limit
     params: dict = {
         "agent_id": agent_id,
         "query_text": query_text,
         "limit": limit,
-        "limit_expanded": limit * 3,
+        "limit_expanded": max(fetch_base * 3, limit),
     }
     if extra_params:
         params.update(extra_params)

@@ -333,3 +333,64 @@ class TestPenaltyRankDecoupling:
 
         with pytest.raises(ZeroDivisionError):
             _rrf_merge(vector, keyword, 30, 0.7, -31)
+
+    @pytest.mark.asyncio
+    async def test_penalty_limit_also_pins_the_sql_fetch_window(self):
+        """Codex r2. Pinning penalty_rank alone is not enough: the SQL legs
+        fetch ``limit * 3``, so raising ``limit`` widens the candidate SET and
+        a document surfacing beyond the penalty rank scores WORSE than one
+        absent from the leg. The fetch window must be pinned too, else the
+        setting only partially decouples scoring from the allotment."""
+        import nous.heart.search as search_mod
+
+        async def _capture(limit, penalty_limit):
+            seen = []
+
+            class _Sess:
+                async def execute(self, sql, params):
+                    seen.append(params["limit_expanded"])
+                    return MagicMock(all=lambda: [])
+
+            with patch.object(search_mod, "_rrf_merge", lambda *a, **k: []):
+                await search_mod.hybrid_search(
+                    _Sess(),
+                    "heart.episode_chunks",
+                    [0.1, 0.2],
+                    "q",
+                    "a",
+                    limit=limit,
+                    active_filter=False,
+                    penalty_limit=penalty_limit,
+                )
+            return seen
+
+        pinned = {lim: await _capture(lim, 20) for lim in (10, 20, 30, 50)}
+        assert len({tuple(v) for v in pinned.values()}) == 1, (
+            f"pinned, the fetch window must not move with limit; got {pinned}"
+        )
+        assert all(v[0] == 60 for v in pinned.values()), pinned
+
+        # Unpinned: the window still tracks limit (today's behaviour, and the
+        # reason the candidate set moved in the first place).
+        unpinned = {lim: (await _capture(lim, None))[0] for lim in (10, 20, 30)}
+        assert unpinned == {10: 30, 20: 60, 30: 90}, unpinned
+
+    @pytest.mark.asyncio
+    async def test_pinned_window_never_starves_the_row_count(self):
+        """The max() guard: a small penalty base must not shrink the fetch
+        window below the rows the caller asked for."""
+        import nous.heart.search as search_mod
+
+        seen = []
+
+        class _Sess:
+            async def execute(self, sql, params):
+                seen.append(params["limit_expanded"])
+                return MagicMock(all=lambda: [])
+
+        with patch.object(search_mod, "_rrf_merge", lambda *a, **k: []):
+            await search_mod.hybrid_search(
+                _Sess(), "heart.episode_chunks", [0.1, 0.2], "q", "a", limit=50, active_filter=False, penalty_limit=10
+            )
+
+        assert seen[0] == 50, f"window must cover the requested rows, got {seen[0]}"
