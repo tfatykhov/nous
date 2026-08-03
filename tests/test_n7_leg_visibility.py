@@ -91,9 +91,43 @@ class TestPipelineReportsAttemptedLegs:
 
         src = inspect.getsource(retrieval_pipeline)
         idx = src.index("if not use_spreading:")
-        window = src[idx: idx + 700]
+        # Window must reach past the explanatory comment block to the marks.
+        window = src[idx: idx + 1400]
         assert 'attempted_legs.add("brain_graph")' in window
         assert 'attempted_legs.add("heart_graph_memory")' in window
+
+    def test_markers_require_seeds_not_just_block_entry(self):
+        """Entering a stage's `if` is not the same as doing its work.
+
+        Each of these blocks is reachable in a configuration where its work
+        loop iterates an empty seed list and issues no neighbour query.
+        Marking at block entry would report the leg as attempted-and-silent
+        on exactly those runs — the false attribution this whole mechanism
+        exists to prevent.
+        """
+        import inspect
+
+        from nous.api import retrieval_pipeline
+
+        src = inspect.getsource(retrieval_pipeline)
+
+        # Stage 2: chunk-only retrieval enters the block with no heart seed.
+        i = src.index('attempted_legs.add("heart_graph")')
+        assert 'any(hr.type in ("fact", "episode")' in src[i - 400: i], (
+            "heart_graph must be gated on a fact/episode seed existing"
+        )
+
+        # Stage 2b: procedure/censor scope yields no Path-A seeds.
+        j = src.index('attempted_legs.add("heart_graph_memory")')
+        assert "if mem_seeds:" in src[j - 200: j], (
+            "heart_graph_memory must be gated on non-empty mem_seeds"
+        )
+
+        # Stage 4 fallback: fact-only retrieval reaches it with no decisions.
+        k = src.index('attempted_legs.add("brain_graph")')
+        assert "d.score is not None" in src[k - 400: k], (
+            "the fallback must be gated on an expandable decision"
+        )
 
     def test_spreading_marked_inside_its_own_branch(self):
         """Marked under `if use_spreading`, NOT alongside the fallback.

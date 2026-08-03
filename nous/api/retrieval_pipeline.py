@@ -1001,8 +1001,15 @@ async def _run_stages(
         and settings.graph_recall_enabled
         and settings.cross_type_linking_enabled
     ):
-        # Stage 2 entered: heart->decision cross-type expansion.
-        acc.attempted_legs.add("heart_graph")
+        # Stage 2 attempted only when a seed will actually enter the loop
+        # below. The outer block also fires on chunk-only retrieval (via
+        # acc.chunk_results, for Stage 2b's benefit), where this loop makes
+        # no neighbour query at all — marking there would report
+        # heart_graph as attempted-and-silent on every chunk-only qrel,
+        # which is the false attribution this instrumentation exists to
+        # prevent.
+        if any(hr.type in ("fact", "episode") for hr in acc.heart_results[:3]):
+            acc.attempted_legs.add("heart_graph")
         seen_graph: dict[UUID, "NeighborResult"] = {}
         for hr in acc.heart_results[:3]:
             if hr.type in ("fact", "episode"):
@@ -1070,8 +1077,6 @@ async def _run_stages(
         # Flag-gated so prod retrieval shape is unchanged by default.
         # ------------------------------------------------------------------
         if settings.heart_graph_all_types_enabled:
-            # Stage 2b entered (Path A): heart->any-type neighbours.
-            acc.attempted_legs.add("heart_graph_memory")
             mem_limit = max(1, int(settings.heart_graph_neighbors_per_seed))
             seen_mem: dict[UUID, "NeighborResult"] = {}
             heart_ids: set[UUID] = {hr.id for hr in acc.heart_results}
@@ -1098,6 +1103,13 @@ async def _run_stages(
                  float(item[2]) if len(item) > 2 and item[2] is not None else None)
                 for item in acc.chunk_results[:3]
             )
+            # Stage 2b (Path A) attempted only once usable seeds exist. An
+            # explicit procedure/censor scope reaches here with a non-empty
+            # acc.heart_results but produces NO seeds — Path A accepts only
+            # fact/episode rows and chunks — so no brain.neighbors call is
+            # made and the leg must not be reported as attempted-and-silent.
+            if mem_seeds:
+                acc.attempted_legs.add("heart_graph_memory")
             # Per-type fan-out — one ``LIMIT`` window per neighbor type so
             # chunks don't crowd facts/episodes (or vice versa) out of a
             # single small union limit. Order is irrelevant; the global
@@ -1339,12 +1351,26 @@ async def _run_stages(
                 use_spreading = False
 
         if not use_spreading:
-            # Fall back to 1-hop expansion
-            # Fallback taken (NOT taken when spreading succeeded) — a runtime
-            # branch no config flag can predict. It emits decision rows tagged
-            # brain_graph AND non-decision neighbours tagged heart_graph_memory.
-            acc.attempted_legs.add("brain_graph")
-            acc.attempted_legs.add("heart_graph_memory")
+            # Fall back to 1-hop expansion.
+            #
+            # Marked only when a decision will actually be expanded. This
+            # branch is reachable via heart_fact_seeds alone (fact-only
+            # retrieval with spreading off), where decision_results is empty
+            # and the loop below issues no neighbour query — reporting the
+            # legs there would claim the fallback ran when it did not. The
+            # `score is None` skip inside the loop is mirrored here for the
+            # same reason.
+            #
+            # When it DOES run it emits decision rows tagged brain_graph AND
+            # non-decision neighbours tagged heart_graph_memory; which of the
+            # two branches executes is a runtime decision no config flag can
+            # predict.
+            if any(
+                d.score is not None
+                for d in decision_results[: settings.graph_recall_max_expand]
+            ):
+                acc.attempted_legs.add("brain_graph")
+                acc.attempted_legs.add("heart_graph_memory")
             seen_hop: dict[UUID, "NeighborResult"] = {}
             for dec in decision_results[: settings.graph_recall_max_expand]:
                 if dec.score is None:
