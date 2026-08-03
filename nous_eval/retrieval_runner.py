@@ -660,15 +660,28 @@ def _expected_legs(settings: Settings) -> list[str]:
             legs.append("keyed_r2")
     if getattr(settings, "exemplar_mode_enabled", False):
         legs.append("exemplar")
-    if getattr(settings, "heart_graph_all_types_enabled", False):
-        legs.append("heart_graph_memory")
-    if getattr(settings, "graph_recall_enabled", False):
+
+    # Every graph-derived leg is NESTED under the graph master switch in the
+    # pipeline, so the sub-flags alone do not mean "attempted". Listing one
+    # anyway would label a deliberately disabled arm as enabled-but-silent
+    # and imply it failed to emit — the opposite of the honest reporting
+    # this seed exists for. Mirrors retrieval_pipeline.py:980-982 (Stage 2b)
+    # and :1173 (spreading).
+    graph_on = bool(getattr(settings, "graph_recall_enabled", False))
+    if graph_on:
         legs.extend(("heart_graph", "brain_graph"))
-    # spreading_activation_enabled is "auto" | "true" | "false" (str), and
-    # "auto" resolves at runtime against graph density — so treat anything
-    # other than an explicit "false" as attempted.
-    if str(getattr(settings, "spreading_activation_enabled", "false")).lower() != "false":
-        legs.append("spreading_activation")
+        if getattr(settings, "heart_graph_all_types_enabled", False) and getattr(
+            settings, "cross_type_linking_enabled", False
+        ):
+            legs.append("heart_graph_memory")
+        # spreading_activation_enabled is "auto" | "true" | "false" (str);
+        # "auto" resolves at runtime against graph density, so anything
+        # other than an explicit "false" counts as attempted.
+        mode = str(
+            getattr(settings, "spreading_activation_enabled", "false")
+        ).lower()
+        if mode != "false":
+            legs.append("spreading_activation")
     return legs
 
 

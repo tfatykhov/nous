@@ -1051,11 +1051,121 @@ class TestCodexR5SilentLegsReported:
         from nous.config import Settings
         from nous_eval.retrieval_runner import _expected_legs
 
-        s = Settings().model_copy(update={"spreading_activation_enabled": "auto"})
+        s = Settings().model_copy(update={
+            "graph_recall_enabled": True,
+            "spreading_activation_enabled": "auto",
+        })
         assert "spreading_activation" in _expected_legs(s)
 
         s_off = s.model_copy(update={"spreading_activation_enabled": "false"})
         assert "spreading_activation" not in _expected_legs(s_off)
+
+
+# ---------------------------------------------------------------------------
+# Codex round 6 — the gate must agree with the prose; respect leg nesting
+# ---------------------------------------------------------------------------
+
+
+class TestCodexR6GateRejectsPartialRuns:
+    """The banner said 'invalid'; the gate returned success. Fixed."""
+
+    def _sources(self, name="hand"):
+        src = MagicMock()
+        src.gate_eligible_effective = True
+        src.available = True
+        src.spec.name = name
+        return [src]
+
+    def _pair(self, base_qrels, exp_qrels):
+        return [
+            _run_result(base_qrels, name="baseline"),
+            _run_result(exp_qrels, name="f050_on"),
+        ]
+
+    def test_stage_error_fails_the_gate(self):
+        from nous_eval.report import decide_gate_f050
+
+        ids = [uuid4() for _ in range(5)]
+        clean = _qrel_result(ids, [ids[0]])
+        broken = replace(clean, stage_errors={"heart_recall_fact": 1})
+
+        d = decide_gate_f050(
+            self._pair([clean], [broken]), self._sources(),
+        )
+        assert d.passed is False
+        assert "partial retrieval" in d.reason.lower(), (
+            "a crashed leg must not yield a passing merge signal while the "
+            "report calls the same metrics invalid"
+        )
+
+    def test_partial_in_baseline_also_fails(self):
+        from nous_eval.report import decide_gate_f050
+
+        ids = [uuid4() for _ in range(5)]
+        clean = _qrel_result(ids, [ids[0]])
+        broken = replace(clean, stage_errors={"heart_recall_fact": 1})
+
+        d = decide_gate_f050(self._pair([broken], [clean]), self._sources())
+        assert d.passed is False
+        assert "baseline" in d.reason
+
+    def test_clean_run_still_evaluated_normally(self):
+        """The new rule must not short-circuit healthy runs."""
+        from nous_eval.report import decide_gate_f050
+
+        ids = [uuid4() for _ in range(5)]
+        clean = _qrel_result(ids, [ids[0]])
+
+        d = decide_gate_f050(self._pair([clean], [clean]), self._sources())
+        # Identical arms => zero delta => fails on Rule 1, NOT Rule 0.
+        assert "partial retrieval" not in d.reason.lower()
+
+
+class TestCodexR6GraphLegNesting:
+    """Sub-flags don't mean 'attempted' when nested under a master switch."""
+
+    def test_spreading_not_expected_when_graph_off(self):
+        from nous.config import Settings
+        from nous_eval.retrieval_runner import _expected_legs
+
+        s = Settings().model_copy(update={
+            "graph_recall_enabled": False,
+            "spreading_activation_enabled": "auto",
+        })
+        assert "spreading_activation" not in _expected_legs(s), (
+            "the spreading stage is nested under graph_recall_enabled "
+            "(retrieval_pipeline.py:1173) — listing it would label a "
+            "deliberately disabled arm as enabled-but-silent"
+        )
+
+    def test_heart_graph_memory_requires_full_chain(self):
+        from nous.config import Settings
+        from nous_eval.retrieval_runner import _expected_legs
+
+        base = Settings().model_copy(update={
+            "graph_recall_enabled": False,
+            "heart_graph_all_types_enabled": True,
+            "cross_type_linking_enabled": True,
+        })
+        assert "heart_graph_memory" not in _expected_legs(base)
+
+        on = base.model_copy(update={"graph_recall_enabled": True})
+        assert "heart_graph_memory" in _expected_legs(on)
+
+        no_cross = on.model_copy(update={"cross_type_linking_enabled": False})
+        assert "heart_graph_memory" not in _expected_legs(no_cross)
+
+    def test_graph_off_yields_no_graph_legs(self):
+        from nous.config import Settings
+        from nous_eval.retrieval_runner import _expected_legs
+
+        s = Settings().model_copy(update={"graph_recall_enabled": False})
+        legs = _expected_legs(s)
+        for graph_leg in (
+            "heart_graph", "brain_graph", "heart_graph_memory",
+            "spreading_activation",
+        ):
+            assert graph_leg not in legs
 
 
 # ---------------------------------------------------------------------------

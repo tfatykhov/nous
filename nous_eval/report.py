@@ -75,8 +75,12 @@ def decide_gate_f050(
 ) -> GateDecision:
     """Evaluate F050's enable-gate against a baseline / experimental run pair.
 
-    Three rules, all must pass:
+    Four rules, all must pass:
 
+    0. **No partial retrievals** on gate-eligible qrels in either config
+       (N1). A stage failure invalidates the comparison, and the gate must
+       say so too — otherwise a crashed leg yields a passing merge signal
+       under a report that calls its own metrics invalid.
     1. **Aggregate MRR delta >= threshold** (default +7%) over the union of
        gate-eligible sources.
     2. **No single gate-eligible source regresses by more than
@@ -121,6 +125,34 @@ def decide_gate_f050(
             reason="no gate-eligible sources available",
         )
     gate_source_names = {s.spec.name for s in gate_sources}
+
+    # --- Rule 0: no partial retrievals (N1/codex-R6) ---
+    # A stage failure makes the comparison meaningless, and the markdown
+    # already says so. Without this the gate would still compute a normal
+    # delta and return SUCCESS, so a crashed fact leg could produce a
+    # passing automated merge signal while the report it accompanies
+    # declares the metrics invalid. The gate is the machine-readable
+    # output CI acts on — it must agree with the prose.
+    partial: dict[str, int] = {}
+    for run in (base, exp):
+        n_partial = sum(
+            1
+            for q in filter_by_sources(run.per_qrel, gate_source_names)
+            if q.stage_errors
+        )
+        if n_partial:
+            partial[run.config.name] = n_partial
+    if partial:
+        detail = ", ".join(f"{k}={v}" for k, v in sorted(partial.items()))
+        return GateDecision(
+            feature="F050",
+            passed=False,
+            reason=(
+                "partial retrieval on gate-eligible qrels "
+                f"({detail}) — a stage failed, so the comparison is invalid"
+            ),
+            n_gate_eligible_sources=len(gate_sources),
+        )
 
     # --- Rule 1: aggregate ---
     base_filtered = filter_by_sources(base.per_qrel, gate_source_names)
