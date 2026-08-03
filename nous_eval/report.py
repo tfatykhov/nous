@@ -401,7 +401,9 @@ def _leg_visibility_table(run_results: list["RunResult"], top_k: int = 10) -> st
     """
     lines = []
     for r in run_results:
-        vis = leg_visibility(r.per_qrel, cutoff=top_k)
+        vis = leg_visibility(
+            r.per_qrel, cutoff=top_k, expected_legs=r.expected_legs,
+        )
         if not vis:
             continue
         lines.append(f"\n**{r.config.name}**\n")
@@ -413,11 +415,15 @@ def _leg_visibility_table(run_results: list["RunResult"], top_k: int = 10) -> st
         lines.append("|---|---:|---:|---:|---:|---:|---:|---:|:---:|")
         for v in vis:
             mark = "yes" if v.visible else "**NO**"
+            # A leg that emitted nothing has no ranks — print em-dashes
+            # rather than 0.0/0, which would imply a rank that never existed.
+            med = f"{v.median_rank:.1f}" if v.n_rows else "—"
+            best = f"{v.best_rank}" if v.n_rows else "—"
+            leg_label = v.leg if v.n_rows else f"{v.leg} *(silent)*"
             lines.append(
-                f"| {v.leg} | {v.n_rows} | {v.n_qrels_present} | "
+                f"| {leg_label} | {v.n_rows} | {v.n_qrels_present} | "
                 f"{v.n_qrels_within_cutoff} | {v.n_qrels_evaluated} | "
-                f"{v.participation_rate:.2f} | "
-                f"{v.median_rank:.1f} | {v.best_rank} | {mark} |"
+                f"{v.participation_rate:.2f} | {med} | {best} | {mark} |"
             )
     if not lines:
         return ""
@@ -430,7 +436,11 @@ def _leg_visibility_table(run_results: list["RunResult"], top_k: int = 10) -> st
         "from a leg with participation at or near **0.00** as "
         "**inconclusive**, not negative: the measurement never reached it. "
         "(median/best rank are diagnostics — a leg's own long tail can drag "
-        "its median below the cutline while its head scores every qrel.)\n"
+        "its median below the cutline while its head scores every qrel.) "
+        "Legs marked ***(silent)*** were ENABLED but emitted zero rows on "
+        "every qrel: they are listed explicitly because an absent row would "
+        "otherwise read as 'nothing to report' exactly when the arm "
+        "contributed nothing at all.\n"
         + "\n".join(lines)
     )
 
@@ -535,7 +545,10 @@ def render_json(
                         "cutoff": v.cutoff,
                         "visible": v.visible,
                     }
-                    for v in leg_visibility(r.per_qrel, cutoff=top_k)
+                    for v in leg_visibility(
+                        r.per_qrel, cutoff=top_k,
+                        expected_legs=r.expected_legs,
+                    )
                 ],
                 "per_qrel": [
                     {

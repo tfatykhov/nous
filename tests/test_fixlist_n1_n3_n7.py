@@ -975,6 +975,90 @@ class TestCodexR4DeltaLabels:
 
 
 # ---------------------------------------------------------------------------
+# Codex round 5 — a leg that emits nothing must still be reported
+# ---------------------------------------------------------------------------
+
+
+class TestCodexR5SilentLegsReported:
+    """Absence must be stated, not implied by an omitted row."""
+
+    def test_zero_emission_leg_appears_with_zero_participation(self):
+        from nous_eval.metrics import leg_visibility
+
+        qs = [_qrel_result([uuid4()], [], ["heart_primary"]) for _ in range(5)]
+        vis = {
+            v.leg: v
+            for v in leg_visibility(qs, expected_legs=["heart_primary", "keyed"])
+        }
+
+        assert "keyed" in vis, (
+            "an enabled leg that emitted nothing is the MOST extreme "
+            "unobserved case — omitting its row hides the warning exactly "
+            "when it matters most"
+        )
+        assert vis["keyed"].n_rows == 0
+        assert vis["keyed"].participation_rate == 0.0
+        assert vis["keyed"].visible is False
+
+    def test_silent_leg_does_not_crash_on_empty_ranks(self):
+        from nous_eval.metrics import leg_visibility
+
+        vis = {
+            v.leg: v
+            for v in leg_visibility([], expected_legs=["keyed"])
+        }
+        assert vis["keyed"].median_rank == 0.0
+        assert vis["keyed"].best_rank == 0
+        assert vis["keyed"].n_qrels_evaluated == 0
+
+    def test_markdown_flags_silent_legs(self):
+        from nous_eval.report import render_markdown
+
+        rr = replace(
+            _run_result([_qrel_result([uuid4()], [], ["heart_primary"])]),
+            expected_legs=["heart_primary", "exemplar"],
+        )
+        md = render_markdown([rr], [])
+        assert "exemplar *(silent)*" in md
+        assert "emitted zero rows" in md
+
+    def test_expected_legs_derived_from_flags(self):
+        from nous.config import Settings
+        from nous_eval.retrieval_runner import _expected_legs
+
+        off = Settings().model_copy(update={
+            "episode_chunks_enabled": False,
+            "keyed_fact_leg_enabled": False,
+            "exemplar_mode_enabled": False,
+            "heart_graph_all_types_enabled": False,
+            "graph_recall_enabled": False,
+            "spreading_activation_enabled": "false",
+        })
+        assert _expected_legs(off) == ["heart_primary"]
+
+        on = off.model_copy(update={
+            "keyed_fact_leg_enabled": True,
+            "keyed_fact_leg_rounds": 2,
+            "exemplar_mode_enabled": True,
+            "episode_chunks_enabled": True,
+        })
+        legs = _expected_legs(on)
+        for expected in ("chunk", "keyed", "keyed_r2", "exemplar"):
+            assert expected in legs
+
+    def test_spreading_auto_counts_as_attempted(self):
+        """'auto' resolves at runtime — treat it as attempted, not off."""
+        from nous.config import Settings
+        from nous_eval.retrieval_runner import _expected_legs
+
+        s = Settings().model_copy(update={"spreading_activation_enabled": "auto"})
+        assert "spreading_activation" in _expected_legs(s)
+
+        s_off = s.model_copy(update={"spreading_activation_enabled": "false"})
+        assert "spreading_activation" not in _expected_legs(s_off)
+
+
+# ---------------------------------------------------------------------------
 # N8 — the bands are a deliberate choice, not a unit mismatch
 # ---------------------------------------------------------------------------
 

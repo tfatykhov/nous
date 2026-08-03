@@ -142,6 +142,11 @@ class RunResult:
     per_qrel: list[QrelResult]
     duration_seconds: float
     pipeline_stats_summary: dict[str, int] = field(default_factory=dict)
+    # N7/codex-R5: legs this config had ENABLED, derived from the settings
+    # actually used for the run. A leg that emits zero rows never appears in
+    # any QrelResult.retrieved_legs, so without this the visibility report
+    # would omit a fully-silent leg instead of showing it at 0.00.
+    expected_legs: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +242,7 @@ async def run_matrix(
                         per_qrel=per_qrel,
                         duration_seconds=duration,
                         pipeline_stats_summary=stats_totals,
+                        expected_legs=_expected_legs(eval_scoped),
                     )
                 )
                 logger.info(
@@ -635,6 +641,35 @@ async def _run_one(
             },
         },
     )
+
+
+def _expected_legs(settings: Settings) -> list[str]:
+    """N7/codex-R5: legs enabled for this run, whether or not they emit.
+
+    Derived from the master flags rather than from observed rows, because
+    the whole point is to name legs that produced NOTHING. ``heart_primary``
+    is unconditional. Flags are read defensively so a Settings object
+    missing a newer field degrades to "not enabled" instead of raising.
+    """
+    legs = ["heart_primary"]
+    if getattr(settings, "episode_chunks_enabled", False):
+        legs.append("chunk")
+    if getattr(settings, "keyed_fact_leg_enabled", False):
+        legs.append("keyed")
+        if int(getattr(settings, "keyed_fact_leg_rounds", 1) or 1) >= 2:
+            legs.append("keyed_r2")
+    if getattr(settings, "exemplar_mode_enabled", False):
+        legs.append("exemplar")
+    if getattr(settings, "heart_graph_all_types_enabled", False):
+        legs.append("heart_graph_memory")
+    if getattr(settings, "graph_recall_enabled", False):
+        legs.extend(("heart_graph", "brain_graph"))
+    # spreading_activation_enabled is "auto" | "true" | "false" (str), and
+    # "auto" resolves at runtime against graph density — so treat anything
+    # other than an explicit "false" as attempted.
+    if str(getattr(settings, "spreading_activation_enabled", "false")).lower() != "false":
+        legs.append("spreading_activation")
+    return legs
 
 
 # Keys that live in ``PipelineStats.n_stage_errors`` but are NOT failures.

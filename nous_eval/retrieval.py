@@ -1082,7 +1082,10 @@ def _metrics_compact(run: "RunResult", top_k: int = 10) -> dict:
                 "cutoff": v.cutoff,
                 "visible": v.visible,
             }
-            for v in leg_visibility(run.per_qrel, cutoff=top_k)
+            for v in leg_visibility(
+                run.per_qrel, cutoff=top_k,
+                expected_legs=run.expected_legs,
+            )
         ],
         # N1: non-empty means these numbers came from a PARTIAL retrieval.
         "n_qrels_partial": sum(1 for q in run.per_qrel if q.stage_errors),

@@ -16,6 +16,7 @@ explicitly, so callers can branch on it if they need to.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from statistics import mean, median
 
@@ -341,6 +342,7 @@ class LegVisibility:
 def leg_visibility(
     per_qrel: list[QrelResult],
     cutoff: int = 10,
+    expected_legs: "Iterable[str] | None" = None,
 ) -> list[LegVisibility]:
     """Report each leg's rank distribution against the scoring cutline.
 
@@ -360,6 +362,16 @@ def leg_visibility(
     when any of its rows lands at rank <= cutoff — and then aggregated into
     ``participation_rate``. Pooling every row and taking one median would
     let a leg's own tail hide its head (see ``LegVisibility``).
+
+    ``expected_legs`` is the set of legs the run had ENABLED. It must be
+    supplied by the caller from config, because a leg that emitted zero
+    rows on every qrel appears nowhere in ``retrieved_legs`` and would
+    otherwise be omitted from this report entirely — silently, and
+    precisely in the most extreme case of an unobserved arm. An operator
+    reading a null for the keyed leg would see no keyed row here and have
+    nothing to tell them the null was uninformative. Legs named here but
+    never seen are emitted with ``n_rows=0`` and ``participation_rate=0.0``
+    so absence is stated rather than implied.
 
     Callers that treat this as a gate should fail when a run reports a null
     for a leg whose ``participation_rate`` is 0 (or near it) — that
@@ -384,6 +396,10 @@ def leg_visibility(
             if best <= cutoff:
                 within[leg] = within.get(leg, 0) + 1
 
+    # Seed enabled-but-silent legs so zero emission is REPORTED, not omitted.
+    for leg in expected_legs or ():
+        ranks_by_leg.setdefault(leg, [])
+
     out = []
     for leg, ranks in ranks_by_leg.items():
         n_present = present.get(leg, 0)
@@ -398,8 +414,10 @@ def leg_visibility(
                 n_qrels_present=n_present,
                 n_qrels_within_cutoff=n_within,
                 participation_rate=rate,
-                median_rank=float(median(ranks)),
-                best_rank=min(ranks),
+                # A silent leg has no ranks; report sentinels rather than
+                # raising on median([]) / min([]).
+                median_rank=float(median(ranks)) if ranks else 0.0,
+                best_rank=min(ranks) if ranks else 0,
                 cutoff=cutoff,
                 visible=n_within > 0,
             )
