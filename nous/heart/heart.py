@@ -877,6 +877,7 @@ class Heart:
         residual_activations: dict[UUID, float] | None = None,
         apply_mmr: bool | None = None,
         date_window: "DateWindow | None" = None,
+        stage_errors: dict[str, int] | None = None,
     ) -> list[RecallResult]:
         """Search across ALL memory types, return ranked results.
 
@@ -900,6 +901,16 @@ class Heart:
             bypass ``mmr_skip_after_ce``. For diversity-hungry consumers
             (context packing) where coverage beats top-1 ranking.
           - ``False`` — force MMR off. For pure relevance scoring.
+
+        ``stage_errors`` is an optional caller-supplied counter dict. When
+        provided, a failed per-type sub-search increments
+        ``stage_errors["heart_recall_<type>"]`` so the caller can tell
+        "this leg found nothing" apart from "this leg crashed" — previously
+        the failure was logged and dropped, leaving the return value
+        indistinguishable between the two. Mirrors the accumulator pattern
+        in ``retrieval_pipeline`` (``acc.stage_errors`` →
+        ``PipelineStats.n_stage_errors``). Fail-open behaviour is unchanged:
+        recall still returns whatever the surviving legs produced.
         """
         if session is None:
             async with self.db.session() as session:
@@ -908,6 +919,7 @@ class Heart:
                     owns_session=True,
                     apply_mmr=apply_mmr,
                     date_window=date_window,
+                    stage_errors=stage_errors,
                 )
         # Caller-provided session: caller owns transaction recovery. We do
         # NOT rollback after a sub-search failure (would silently discard
@@ -917,6 +929,7 @@ class Heart:
             owns_session=False,
             apply_mmr=apply_mmr,
             date_window=date_window,
+            stage_errors=stage_errors,
         )
 
     def set_residual_activator(self, activator: "ResidualActivator | None") -> None:
@@ -962,6 +975,7 @@ class Heart:
         owns_session: bool = True,
         apply_mmr: bool | None = None,
         date_window: "DateWindow | None" = None,
+        stage_errors: dict[str, int] | None = None,
     ) -> list[RecallResult]:
         search_types = types or ["episode", "fact", "procedure", "censor"]
         fetch_limit = limit * 2  # Fetch more for merging
@@ -1079,6 +1093,14 @@ class Heart:
                     memory_type,
                     raw_results,
                 )
+                # Report the failure to the caller. Without this, a crashed
+                # leg is indistinguishable from an empty one in the return
+                # value — a store two migrations behind raises
+                # UndefinedColumnError on the fact leg and recall still
+                # returns plausible episode/chunk results with no signal.
+                if stage_errors is not None:
+                    key = f"heart_recall_{memory_type}"
+                    stage_errors[key] = stage_errors.get(key, 0) + 1
                 continue
 
             for item in raw_results:

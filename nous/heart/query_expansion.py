@@ -230,16 +230,29 @@ class QueryExpander:
             final = self._fuse([query, *cleaned])
             elapsed_ms = (time.monotonic() - t_start) * 1000.0
 
-            # Tier 7: cache put (best-effort)
-            await self._cache_put(h, query, final)
+            # Tier 7: cache put (best-effort) — only on a REAL expansion.
+            # ``_call_haiku`` returns ``[]`` on API / auth / timeout failure,
+            # after which ``final == [query]``. Caching that degenerate
+            # fail-open result would pin the no-op for the whole cache TTL,
+            # disabling expansion for this query hash long after the
+            # underlying fault is fixed.
+            #
+            # The gate is ``len(final) > 1``, NOT ``len(cleaned) > 0``:
+            # ``_fuse`` dedupes case-insensitively on ``c.lower().strip()``,
+            # so Haiku echoing the query back (or returning only case/space
+            # variants of it) yields a non-empty ``cleaned`` that collapses
+            # to ``[query]``. Gating on ``cleaned`` would still cache the
+            # no-op — the exact failure this guard exists to prevent.
+            expanded = len(final) > 1
+            if expanded:
+                await self._cache_put(h, query, final)
             # Codex round-1 P2 (PR #454): only log a successful Haiku
-            # expansion if Haiku actually returned variants. ``_call_haiku``
-            # returns ``[]`` on API / auth / timeout failures, after which
-            # ``final == [query]`` (fail-open to baseline). Logging
-            # "F050: expansion success" in that mode would mislead operators
-            # into thinking expansion is healthy when it's silently
-            # fail-opening on every call.
-            if len(cleaned) > 0:
+            # expansion if Haiku actually produced one. Same predicate as
+            # the cache write above, and for the same reason: reporting
+            # "expansion success" for a result that fused back down to the
+            # bare query would tell operators the feature is healthy while
+            # it silently fail-opens on every call.
+            if expanded:
                 self._maybe_log_success(
                     source="haiku", n_variants=len(final), elapsed_ms=elapsed_ms,
                 )

@@ -104,6 +104,18 @@ class QrelResult:
     can compute P@K / R@K / nDCG without going back to the original Qrel.
     Defaults to ``[]`` for callers that construct QrelResult by hand in
     tests where only rank-based metrics are exercised.
+
+    N7: ``retrieved_ids`` is the FULL served list, not a top-K slice — the
+    pipeline returns every row it will hand the model (median ~77), and
+    ``recall_deep`` does not truncate. Only ``rank_of_first_gold`` /
+    ``n_gold_in_top_k`` are top-K scoped.
+
+    ``retrieved_legs`` labels each served row with the leg that produced it,
+    aligned 1:1 with ``retrieved_ids``. It is raw provenance only — the
+    visibility VERDICT built on top of it is deferred to a follow-up PR
+    (see the note in ``nous_eval.metrics``), because deriving it correctly
+    requires the pipeline to report which legs it attempted rather than the
+    harness re-deriving pipeline control flow from config flags.
     """
 
     qrel_index: int
@@ -116,6 +128,15 @@ class QrelResult:
     n_gold_total: int
     error: str | None = None
     gold_ids: list[UUID] = field(default_factory=list)
+    retrieved_legs: list[str] = field(default_factory=list)
+    # N1/codex-P1: per-stage failure counts from PipelineStats.n_stage_errors,
+    # including Heart's per-leg failures ("heart_recall_fact" etc). A non-empty
+    # dict means this qrel's metrics are based on a PARTIAL retrieval — the
+    # numbers still look plausible, which is exactly the schema-lag scenario
+    # the N1 instrumentation exists to expose. Kept per-qrel (rather than
+    # setting ``error``) so the run is not silently dropped from aggregates:
+    # the failure is reported, not hidden and not zero-scored.
+    stage_errors: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -205,8 +226,15 @@ async def run_matrix(
                     )
                     per_qrel.append(qr)
                     for k, v in ran_flags.items():
-                        if v:
-                            stats_totals[k] = stats_totals.get(k, 0) + 1
+                        # bool is a subclass of int — check it FIRST, or the
+                        # stage flags would be summed as 1/0 instead of
+                        # counted as occurrences. Booleans count qrels;
+                        # integer stage-error counters accumulate.
+                        if isinstance(v, bool):
+                            if v:
+                                stats_totals[k] = stats_totals.get(k, 0) + 1
+                        else:
+                            stats_totals[k] = stats_totals.get(k, 0) + int(v)
                 duration = time.monotonic() - t0
                 results.append(
                     RunResult(
@@ -559,6 +587,7 @@ async def _run_one(
 
     retrieved_ids = [r.id for r in pipeline_results]
     retrieved_types = [r.type for r in pipeline_results]
+    retrieved_legs = [_leg_of(r) for r in pipeline_results]
     rank, n_in_top = _score_rank(retrieved_ids, qrel.gold_ids, top_k)
 
     logger.debug(
@@ -577,17 +606,90 @@ async def _run_one(
             gold_ids=list(qrel.gold_ids),
             retrieved_ids=retrieved_ids,
             retrieved_types=retrieved_types,
+            retrieved_legs=retrieved_legs,
             rank_of_first_gold=rank,
             n_gold_in_top_k=n_in_top,
             n_gold_total=len(qrel.gold_ids),
             error=None,
+            # Real failures only — non-error diagnostics are excluded so
+            # ``_stage_error_summary`` never calls a healthy run partial.
+            stage_errors={
+                k: v for k, v in stats.n_stage_errors.items()
+                if k not in _NON_ERROR_STAGE_COUNTERS
+            },
         ),
         {
             "graph_expansion_used": stats.graph_expansion_used,
             "spreading_activation_used": stats.spreading_activation_used,
             "contradiction_checks_ran": stats.contradiction_checks_ran,
+            # N1/codex-P1: integer counters, summed (not counted) by the
+            # caller. Without these, run_matrix discarded every stage failure
+            # and the report showed plausible metrics with no sign that a leg
+            # had crashed.
+            **{
+                f"stage_error_{k}": v
+                for k, v in stats.n_stage_errors.items()
+                if k not in _NON_ERROR_STAGE_COUNTERS
+            },
+            # Non-failure diagnostics live in the same dict upstream but must
+            # NOT reach the partial-run banner (see _NON_ERROR_STAGE_COUNTERS).
+            **{
+                f"stage_info_{k}": v
+                for k, v in stats.n_stage_errors.items()
+                if k in _NON_ERROR_STAGE_COUNTERS
+            },
         },
     )
+
+
+# Keys that live in ``PipelineStats.n_stage_errors`` but are NOT failures.
+# ``heart_graph_memory_duplicates`` is deliberate corroboration telemetry —
+# retrieval_pipeline.py:1131-1140 counts it to distinguish "graph found
+# nothing new" from "graph corroborated a direct hit", and its own comment
+# calls the latter "signal, not noise". Treating it as an error would mark
+# every healthy graph-enabled eval as a partial run and declare its metrics
+# invalid for comparison, which is worse than no banner at all: a warning
+# that fires on success trains operators to ignore it.
+_NON_ERROR_STAGE_COUNTERS: frozenset[str] = frozenset({
+    "heart_graph_memory_duplicates",
+})
+
+
+def _leg_of(r) -> str:
+    """N7: label a PipelineResult with the leg that produced it.
+
+    Reads the provenance markers the pipeline already sets — no new
+    instrumentation. ``metadata["retrieval_leg"]`` covers the F085 keyed
+    rounds and the F086 exemplar leg; ``source`` covers spreading activation
+    and the brain decision leg; ``metadata["stage_origin"]`` covers the
+    remaining graph stages; ``type == "chunk"`` identifies the F067 chunk
+    leg. Rows with no marker are plain heart hits ("heart_primary").
+
+    ORDER IS LOAD-BEARING. ``_graph_expanded_to_pipeline`` sets BOTH
+    ``source="spreading_activation"`` AND a ``stage_origin`` of
+    ``brain_graph``/``heart_graph_memory`` on every spreading row
+    (``retrieval_pipeline.py:2057-2077``). Checking ``stage_origin`` first
+    means the label ``spreading_activation`` is never emitted and those rows
+    are silently folded into a graph leg's statistics — which would leave
+    N7 unable to say whether the spreading arm reached the scoring window,
+    for one of the very legs this report exists to measure. So the
+    spreading check runs BEFORE ``stage_origin``.
+    """
+    meta = getattr(r, "metadata", None) or {}
+    leg = meta.get("retrieval_leg")
+    if leg:
+        return str(leg)
+    source = getattr(r, "source", "heart")
+    if source == "spreading_activation":
+        return "spreading_activation"
+    origin = meta.get("stage_origin")
+    if origin:
+        return str(origin)
+    if source and source != "heart":
+        return str(source)
+    if getattr(r, "type", None) == "chunk":
+        return "chunk"
+    return "heart_primary"
 
 
 def _score_rank(

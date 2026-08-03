@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from nous_eval.metrics import (
+    RECALL_CURVE_KS,
     MetricsResult,
     compute_delta,
     compute_metrics,
@@ -73,8 +74,12 @@ def decide_gate_f050(
 ) -> GateDecision:
     """Evaluate F050's enable-gate against a baseline / experimental run pair.
 
-    Three rules, all must pass:
+    Four rules, all must pass:
 
+    0. **No partial retrievals** on gate-eligible qrels in either config
+       (N1). A stage failure invalidates the comparison, and the gate must
+       say so too — otherwise a crashed leg yields a passing merge signal
+       under a report that calls its own metrics invalid.
     1. **Aggregate MRR delta >= threshold** (default +7%) over the union of
        gate-eligible sources.
     2. **No single gate-eligible source regresses by more than
@@ -119,6 +124,34 @@ def decide_gate_f050(
             reason="no gate-eligible sources available",
         )
     gate_source_names = {s.spec.name for s in gate_sources}
+
+    # --- Rule 0: no partial retrievals (N1/codex-R6) ---
+    # A stage failure makes the comparison meaningless, and the markdown
+    # already says so. Without this the gate would still compute a normal
+    # delta and return SUCCESS, so a crashed fact leg could produce a
+    # passing automated merge signal while the report it accompanies
+    # declares the metrics invalid. The gate is the machine-readable
+    # output CI acts on — it must agree with the prose.
+    partial: dict[str, int] = {}
+    for run in (base, exp):
+        n_partial = sum(
+            1
+            for q in filter_by_sources(run.per_qrel, gate_source_names)
+            if q.stage_errors
+        )
+        if n_partial:
+            partial[run.config.name] = n_partial
+    if partial:
+        detail = ", ".join(f"{k}={v}" for k, v in sorted(partial.items()))
+        return GateDecision(
+            feature="F050",
+            passed=False,
+            reason=(
+                "partial retrieval on gate-eligible qrels "
+                f"({detail}) — a stage failed, so the comparison is invalid"
+            ),
+            n_gate_eligible_sources=len(gate_sources),
+        )
 
     # --- Rule 1: aggregate ---
     base_filtered = filter_by_sources(base.per_qrel, gate_source_names)
@@ -209,11 +242,18 @@ def render_markdown(
     gate_decision: GateDecision | None = None,
     notes: str = "",
     config_names_requested: list[str] | None = None,
+    top_k: int = 10,
 ) -> str:
     """Render the markdown report.
 
     Layout follows F051 spec §8: header, gate aggregate table, per-source
     breakdown, per-reasoning-type directional table.
+
+    ``top_k`` is the depth the matrix actually scored at (``EvalSettings.top_k``,
+    overridable via ``--top-k``). It is the cutline the N7 leg-visibility table
+    judges against — defaulting it to 10 when the run scored at 20 would report
+    a leg with median rank 15 as invisible even though the experiment measured
+    it, turning a real null into a false "inconclusive".
     """
     ts = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
     lines: list[str] = []
@@ -245,19 +285,37 @@ def render_markdown(
         lines.append(f"- `{s.spec.name}` [{gate_tag}] — {avail}")
     lines.append("")
 
+    # N1/codex-R2: partial-run banner FIRST — an operator must see that a
+    # leg crashed before reading any metric computed over the wreckage.
+    _partial = _stage_error_summary(run_results)
+    if _partial:
+        lines.append(_partial)
+
     # Per-config aggregate metrics
-    lines.append("## Aggregate metrics (all qrels)")
-    lines.append(_metrics_table([r for r in run_results]))
+    lines.append(f"## Aggregate metrics (all qrels, scored at k={top_k})")
+    lines.append(_metrics_table([r for r in run_results], top_k))
     lines.append("")
 
     # Pairwise delta if exactly two configs
     if len(run_results) == 2:
         base, exp = run_results[0], run_results[1]
-        base_m = compute_metrics(base.per_qrel)
-        exp_m = compute_metrics(exp.per_qrel)
+        base_m = compute_metrics(base.per_qrel, top_k=top_k)
+        exp_m = compute_metrics(exp.per_qrel, top_k=top_k)
         lines.append(f"## Delta: {base.config.name} → {exp.config.name}")
-        lines.append(_delta_table(base_m, exp_m))
+        lines.append(_delta_table(base_m, exp_m, top_k))
         lines.append("")
+
+    # N7: recall across k — how much a fixed cutoff cannot see.
+    lines.append("## Recall over k (N7)")
+    lines.append(
+        "_Production does not truncate — `recall_deep` hands the model the "
+        "whole returned block (median ~77 rows). Any single fixed-k row "
+        "below describes a window prod never applies; read the curve to see "
+        "how much that cutoff misses._"
+    )
+    lines.append("")
+    lines.append(_recall_curve_table(run_results, top_k))
+    lines.append("")
 
     # Gate decision
     if gate_decision is not None:
@@ -273,15 +331,28 @@ def render_markdown(
     return "\n".join(lines) + "\n"
 
 
-def _metrics_table(run_results: list["RunResult"]) -> str:
-    """Build a markdown table with metrics for each config."""
+def _metrics_table(run_results: list["RunResult"], top_k: int = 10) -> str:
+    """Build a markdown table with metrics for each config.
+
+    This table is fixed-k by construction; the companion "Recall over k"
+    table is what shows how much that cutoff misses of the block prod
+    actually serves (N7).
+
+    ``top_k`` must be the depth the matrix scored at: ``MetricsResult``'s
+    ``p_at_10`` / ``r_at_10`` / ``ndcg_at_10`` fields are named for the
+    default but actually hold whatever depth ``compute_metrics`` was given.
+    Passing the default while the run scored at 30 would print numbers
+    computed at 10 under a report that elsewhere declares ``top_k: 30`` —
+    so the columns are labelled at the real depth too.
+    """
     header = (
-        "| config | n_qrels | n_errored | MRR | P@1 | P@10 | R@10 | nDCG@10 |\n"
+        f"| config | n_qrels | n_errored | MRR | P@1 | P@{top_k} | R@{top_k} "
+        f"| nDCG@{top_k} |\n"
         "|---|---:|---:|---:|---:|---:|---:|---:|"
     )
     rows = []
     for r in run_results:
-        m = compute_metrics(r.per_qrel)
+        m = compute_metrics(r.per_qrel, top_k=top_k)
         rows.append(
             f"| {r.config.name} | {m.n_qrels} | {m.n_errored} | "
             f"{m.mrr:.3f} | {m.p_at_1:.3f} | {m.p_at_10:.3f} | "
@@ -290,8 +361,76 @@ def _metrics_table(run_results: list["RunResult"]) -> str:
     return header + "\n" + "\n".join(rows)
 
 
-def _delta_table(base: MetricsResult, exp: MetricsResult) -> str:
-    """Build a metric-by-metric delta table."""
+def _stage_error_summary(run_results: list["RunResult"]) -> str:
+    """N1/codex-R2: surface partial runs in the OPERATOR-facing markdown.
+
+    The counters reached ``pipeline_stats_summary`` and the JSON, but the
+    markdown is the report an operator actually reads — and without this a
+    crashed Heart leg still rendered an apparently healthy metrics table.
+    That is the original N1 observability failure surviving on its most
+    important consumer.
+    """
+    lines: list[str] = []
+    for r in run_results:
+        stage_keys = {
+            k: v for k, v in (r.pipeline_stats_summary or {}).items()
+            if k.startswith("stage_error_") and v
+        }
+        n_qrels_affected = sum(1 for q in r.per_qrel if q.stage_errors)
+        if not stage_keys and not n_qrels_affected:
+            continue
+        detail = ", ".join(
+            f"`{k.removeprefix('stage_error_')}`={v}"
+            for k, v in sorted(stage_keys.items())
+        )
+        lines.append(
+            f"- **{r.config.name}** — {n_qrels_affected} qrel(s) retrieved "
+            f"PARTIALLY: {detail or 'see per-qrel stage_errors'}"
+        )
+    if not lines:
+        return ""
+    return (
+        "\n## ⚠ Partial retrieval detected\n\n"
+        "One or more retrieval legs FAILED during this run. The metrics "
+        "below are computed over incomplete results and will look "
+        "plausible anyway — treat them as **invalid for comparison** until "
+        "the cause is fixed (a store behind the ORM's migration watermark "
+        "is the usual cause).\n\n" + "\n".join(lines) + "\n"
+    )
+
+
+def _recall_curve_table(run_results: list["RunResult"], top_k: int = 10) -> str:
+    """N7: recall over k, so the fixed-k cutoff's blind spot is visible."""
+    ks = sorted(RECALL_CURVE_KS)
+    header = (
+        "| config | " + " | ".join(f"R@{k}" for k in ks) + " |\n"
+        "|---|" + "---:|" * len(ks)
+    )
+    rows = []
+    for r in run_results:
+        # The curve itself is depth-independent (it evaluates every k in
+        # RECALL_CURVE_KS), so the default here changes nothing about the
+        # numbers — but pass it anyway so no future edit reintroduces a
+        # silent depth mismatch between this table and its neighbours.
+        m = compute_metrics(r.per_qrel, top_k=top_k)
+        cells = " | ".join(f"{m.recall_curve.get(k, 0.0):.3f}" for k in ks)
+        rows.append(f"| {r.config.name} | {cells} |")
+    return header + "\n" + "\n".join(rows)
+
+
+def _delta_table(
+    base: MetricsResult, exp: MetricsResult, top_k: int = 10
+) -> str:
+    """Build a metric-by-metric delta table.
+
+    ``MetricsResult`` field names carry the historical ``_at_10`` suffix but
+    hold whatever depth ``compute_metrics`` was given, so the *labels* are
+    rewritten at ``top_k``. Without this a k=30 report describes @30 deltas
+    as @10 — the aggregate headers were parameterized earlier while these
+    rows were not.
+    """
+    label_at_k = {"p_at_10": f"p_at_{top_k}", "r_at_10": f"r_at_{top_k}",
+                  "ndcg_at_10": f"ndcg_at_{top_k}"}
     rows = ["| metric | baseline | experimental | Δ | Δ% |", "|---|---:|---:|---:|---:|"]
     for metric in (
         "mrr",
@@ -305,7 +444,8 @@ def _delta_table(base: MetricsResult, exp: MetricsResult) -> str:
     ):
         d = compute_delta(base, exp, metric)
         rows.append(
-            f"| {metric} | {d.baseline_mean:.3f} | {d.experimental_mean:.3f} | "
+            f"| {label_at_k.get(metric, metric)} | {d.baseline_mean:.3f} | "
+            f"{d.experimental_mean:.3f} | "
             f"{d.absolute:+.3f} | {d.relative_pct:+.1f}% |"
         )
     return "\n".join(rows)
@@ -323,11 +463,16 @@ def render_json(
     fixture_version: str = "",
     gate_decision: GateDecision | None = None,
     notes: str = "",
+    top_k: int = 10,
 ) -> str:
     """Render the full per-qrel per-config grid as a JSON string.
 
     This is the structure persisted to ``nous_system.eval_runs.metrics``
     for historical regression analysis.
+
+    ``top_k`` is recorded so the artifact self-describes the depth it was
+    scored at — a later consumer cannot judge a null without knowing which
+    legs were reachable at that depth (N7).
     """
     payload: dict = {
         "version": 1,
@@ -335,6 +480,7 @@ def render_json(
         "git_sha": git_sha,
         "fixture_version": fixture_version,
         "notes": notes,
+        "top_k": top_k,
         "sources": [
             {
                 "name": s.spec.name,
@@ -352,7 +498,9 @@ def render_json(
                 "description": r.config.description,
                 "duration_seconds": r.duration_seconds,
                 "pipeline_stats_summary": r.pipeline_stats_summary,
-                "metrics": _metrics_to_dict(compute_metrics(r.per_qrel)),
+                "metrics": _metrics_to_dict(
+                    compute_metrics(r.per_qrel, top_k=top_k)
+                ),
                 "per_qrel": [
                     {
                         "index": q.qrel_index,
@@ -361,10 +509,16 @@ def render_json(
                         "gold_ids": [str(g) for g in q.gold_ids],
                         "retrieved_ids": [str(rid) for rid in q.retrieved_ids],
                         "retrieved_types": q.retrieved_types,
+                        # N7/codex-P2: aligned 1:1 with retrieved_ids, so a
+                        # consumer can recompute leg visibility at any depth.
+                        "retrieved_legs": q.retrieved_legs,
                         "rank_of_first_gold": q.rank_of_first_gold,
                         "n_gold_in_top_k": q.n_gold_in_top_k,
                         "n_gold_total": q.n_gold_total,
                         "error": q.error,
+                        # N1/codex-P1: non-empty means these metrics are based
+                        # on a PARTIAL retrieval (e.g. the fact leg crashed).
+                        "stage_errors": q.stage_errors,
                     }
                     for q in r.per_qrel
                 ],
@@ -384,7 +538,7 @@ def render_json(
     return json.dumps(payload, indent=2, default=str)
 
 
-def _metrics_to_dict(m: MetricsResult) -> dict[str, float | int]:
+def _metrics_to_dict(m: MetricsResult) -> dict:
     return {
         "mrr": m.mrr,
         "p_at_1": m.p_at_1,
@@ -396,6 +550,9 @@ def _metrics_to_dict(m: MetricsResult) -> dict[str, float | int]:
         "ndcg_at_10": m.ndcg_at_10,
         "n_qrels": m.n_qrels,
         "n_errored": m.n_errored,
+        # N7: the untruncated view. Keys are stringified because JSON object
+        # keys must be strings — consumers cast back to int.
+        "recall_curve": {str(k): v for k, v in sorted(m.recall_curve.items())},
     }
 
 

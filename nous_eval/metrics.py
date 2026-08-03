@@ -16,10 +16,17 @@ explicitly, so callers can branch on it if they need to.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from statistics import mean
 
 from nous_eval.retrieval_runner import QrelResult
+
+# N7: k values reported so a run shows where its
+# fixed-k cutoff stops seeing things rather than reporting one depth as if
+# it were the whole picture. These are REPORTING points; the depth a run is
+# actually scored at is the harness's ``top_k``, not the shallowest entry
+# here.
+RECALL_CURVE_KS: tuple[int, ...] = (3, 5, 10, 20, 40, 60)
 
 
 @dataclass(frozen=True)
@@ -29,6 +36,22 @@ class MetricsResult:
     ``n_errored`` is the count of qrels that raised inside the pipeline and
     were excluded from metric aggregates. A non-zero value is a red flag —
     the report surfaces it prominently.
+
+    N7: ``recall_curve`` exists because production does NOT truncate —
+    ``recall_deep`` hands the model the whole returned block (median ~77
+    rows), so a fixed top-K metric measures a window prod never applies.
+    Reading recall across k shows how much of that block a given cutoff was
+    blind to. Like every other metric here it is computed over
+    ``retrieved_ids`` (the pipeline's output), which keeps it on the same
+    basis as ``r_at_10`` / ``ndcg_at_10`` rather than quietly using a
+    different denominator.
+
+    A true ``recall@served`` — scored over the rows the formatter actually
+    RENDERS, i.e. what the model receives — is deliberately NOT here. Two
+    attempts at deriving that in the harness both overstated it, because
+    doing so means re-implementing the formatter's section-eligibility
+    rules in a second place. It lands in the follow-up (PR #583) alongside
+    the leg-visibility work, once the formatter reports the IDs it rendered.
     """
 
     mrr: float
@@ -41,6 +64,8 @@ class MetricsResult:
     ndcg_at_10: float
     n_qrels: int
     n_errored: int = 0
+    # N7: recall across k — shows where a fixed-k cutoff stops seeing things.
+    recall_curve: dict[int, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -205,6 +230,11 @@ def compute_metrics(
         r10s.append(_recall_from_counts(q, top_k))
         ndcgs.append(_ndcg_from_counts(q, top_k))
 
+    curve = {
+        k: mean([_recall_from_counts(q, k) for q in valid])
+        for k in RECALL_CURVE_KS
+    }
+
     return MetricsResult(
         mrr=mean(rrs),
         p_at_1=mean(p1s),
@@ -216,6 +246,7 @@ def compute_metrics(
         ndcg_at_10=mean(ndcgs),
         n_qrels=len(valid),
         n_errored=n_errored,
+        recall_curve=curve,
     )
 
 
@@ -252,6 +283,7 @@ def compute_delta(
         relative_pct=relative_pct,
         n_pairs=n_pairs,
     )
+
 
 
 # ---------------------------------------------------------------------------
