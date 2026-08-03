@@ -1073,6 +1073,9 @@ def _metrics_compact(run: "RunResult", top_k: int = 10) -> dict:
             {
                 "leg": v.leg,
                 "n_rows": v.n_rows,
+                "n_qrels_present": v.n_qrels_present,
+                "n_qrels_within_cutoff": v.n_qrels_within_cutoff,
+                "participation_rate": v.participation_rate,
                 "median_rank": v.median_rank,
                 "best_rank": v.best_rank,
                 "cutoff": v.cutoff,

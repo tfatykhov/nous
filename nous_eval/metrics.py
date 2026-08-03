@@ -297,16 +297,31 @@ def compute_delta(
 
 @dataclass(frozen=True)
 class LegVisibility:
-    """Where one retrieval leg's rows land relative to the eval's cutline.
+    """Whether the scoring window actually observed one retrieval leg.
 
-    ``visible`` is False when the leg's median rank sits deeper than
-    ``cutoff`` — meaning no harness slicing at that depth can observe the
-    leg at all. A null result for an invisible leg is INCONCLUSIVE, not
-    negative: the measurement never reached it.
+    The load-bearing field is ``participation_rate``: the fraction of qrels
+    where this leg placed AT LEAST ONE row within ``cutoff``. That is the
+    question an operator needs answered — "could this leg have influenced
+    the top-k metric?" — and it is not what a pooled median measures.
+
+    A leg emitting ranks 1 and 20-30 on every qrel has a median far below
+    the cutline yet participates in every single top-10 score; legs with
+    large allotments (chunks, exemplars) are especially prone to this. The
+    earlier median-of-all-rows test would have branded such a leg invisible
+    and told operators to discount a perfectly valid null.
+
+    ``visible`` is therefore True when the leg reached the window on at
+    least one qrel. Read it together with ``participation_rate`` — a leg at
+    0.03 was technically observed but a null for it is still largely
+    uninformative. ``median_rank`` / ``best_rank`` are retained as
+    diagnostics only.
     """
 
     leg: str
     n_rows: int
+    n_qrels_present: int
+    n_qrels_within_cutoff: int
+    participation_rate: float
     median_rank: float
     best_rank: int
     cutoff: int
@@ -329,31 +344,54 @@ def leg_visibility(
     Ranks are 1-based positions in the served block. Legs are labelled by
     ``QrelResult.retrieved_legs`` (populated by the runner from the
     pipeline's own provenance markers). Returns one row per observed leg,
-    deepest median first, so the least-visible legs read at the top.
+    lowest participation first, so the least-observed legs read at the top.
 
-    Callers that treat this as a gate should fail when any row has
-    ``visible=False`` while the run reports a null for that leg — that
+    Visibility is computed PER QREL — a leg counts as observed on a qrel
+    when any of its rows lands at rank <= cutoff — and then aggregated into
+    ``participation_rate``. Pooling every row and taking one median would
+    let a leg's own tail hide its head (see ``LegVisibility``).
+
+    Callers that treat this as a gate should fail when a run reports a null
+    for a leg whose ``participation_rate`` is 0 (or near it) — that
     combination is the specific error N7 exists to prevent.
     """
     ranks_by_leg: dict[str, list[int]] = {}
+    present: dict[str, int] = {}
+    within: dict[str, int] = {}
+
     for q in per_qrel:
         if q.error is not None:
             continue
+        best_in_qrel: dict[str, int] = {}
         for pos, leg in enumerate(q.retrieved_legs, start=1):
             ranks_by_leg.setdefault(leg, []).append(pos)
+            if leg not in best_in_qrel or pos < best_in_qrel[leg]:
+                best_in_qrel[leg] = pos
+        for leg, best in best_in_qrel.items():
+            present[leg] = present.get(leg, 0) + 1
+            if best <= cutoff:
+                within[leg] = within.get(leg, 0) + 1
 
-    out = [
-        LegVisibility(
-            leg=leg,
-            n_rows=len(ranks),
-            median_rank=float(median(ranks)),
-            best_rank=min(ranks),
-            cutoff=cutoff,
-            visible=float(median(ranks)) <= cutoff,
+    out = []
+    for leg, ranks in ranks_by_leg.items():
+        n_present = present.get(leg, 0)
+        n_within = within.get(leg, 0)
+        rate = (n_within / n_present) if n_present else 0.0
+        out.append(
+            LegVisibility(
+                leg=leg,
+                n_rows=len(ranks),
+                n_qrels_present=n_present,
+                n_qrels_within_cutoff=n_within,
+                participation_rate=rate,
+                median_rank=float(median(ranks)),
+                best_rank=min(ranks),
+                cutoff=cutoff,
+                visible=n_within > 0,
+            )
         )
-        for leg, ranks in ranks_by_leg.items()
-    ]
-    out.sort(key=lambda v: v.median_rank, reverse=True)
+    # Least-observed first; median as a stable tiebreak (deepest first).
+    out.sort(key=lambda v: (v.participation_rate, -v.median_rank))
     return out
 
 

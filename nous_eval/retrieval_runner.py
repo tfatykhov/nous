@@ -606,7 +606,12 @@ async def _run_one(
             n_gold_in_top_k=n_in_top,
             n_gold_total=len(qrel.gold_ids),
             error=None,
-            stage_errors=dict(stats.n_stage_errors),
+            # Real failures only — non-error diagnostics are excluded so
+            # ``_stage_error_summary`` never calls a healthy run partial.
+            stage_errors={
+                k: v for k, v in stats.n_stage_errors.items()
+                if k not in _NON_ERROR_STAGE_COUNTERS
+            },
         ),
         {
             "graph_expansion_used": stats.graph_expansion_used,
@@ -619,9 +624,30 @@ async def _run_one(
             **{
                 f"stage_error_{k}": v
                 for k, v in stats.n_stage_errors.items()
+                if k not in _NON_ERROR_STAGE_COUNTERS
+            },
+            # Non-failure diagnostics live in the same dict upstream but must
+            # NOT reach the partial-run banner (see _NON_ERROR_STAGE_COUNTERS).
+            **{
+                f"stage_info_{k}": v
+                for k, v in stats.n_stage_errors.items()
+                if k in _NON_ERROR_STAGE_COUNTERS
             },
         },
     )
+
+
+# Keys that live in ``PipelineStats.n_stage_errors`` but are NOT failures.
+# ``heart_graph_memory_duplicates`` is deliberate corroboration telemetry —
+# retrieval_pipeline.py:1131-1140 counts it to distinguish "graph found
+# nothing new" from "graph corroborated a direct hit", and its own comment
+# calls the latter "signal, not noise". Treating it as an error would mark
+# every healthy graph-enabled eval as a partial run and declare its metrics
+# invalid for comparison, which is worse than no banner at all: a warning
+# that fires on success trains operators to ignore it.
+_NON_ERROR_STAGE_COUNTERS: frozenset[str] = frozenset({
+    "heart_graph_memory_duplicates",
+})
 
 
 def _leg_of(r) -> str:

@@ -421,8 +421,10 @@ class TestN7LegVisibility:
         vis = {v.leg: v for v in leg_visibility([_qrel_result(ids, [], legs)])}
 
         assert vis["keyed"].visible is False
+        assert vis["keyed"].participation_rate == 0.0
         assert vis["keyed"].best_rank == 11
         assert vis["heart_primary"].visible is True
+        assert vis["heart_primary"].participation_rate == 1.0
 
     def test_cutoff_is_caller_supplied(self):
         """A harness scoring deeper sees legs a shallow one cannot."""
@@ -435,14 +437,15 @@ class TestN7LegVisibility:
         assert {v.leg: v.visible for v in leg_visibility([q], cutoff=10)}["keyed"] is False
         assert {v.leg: v.visible for v in leg_visibility([q], cutoff=30)}["keyed"] is True
 
-    def test_deepest_leg_reported_first(self):
+    def test_least_observed_leg_reported_first(self):
         from nous_eval.metrics import leg_visibility
 
-        legs = ["heart_primary"] * 5 + ["exemplar"] * 5
+        # exemplar sits at ranks 11-20, outside the default cutoff of 10.
+        legs = ["heart_primary"] * 10 + ["exemplar"] * 10
         ids = [uuid4() for _ in legs]
         out = leg_visibility([_qrel_result(ids, [], legs)])
 
-        assert out[0].leg == "exemplar", "least-visible legs read at the top"
+        assert out[0].leg == "exemplar", "least-observed legs read at the top"
 
     def test_cutoff_defaults_to_the_harness_scoring_window(self):
         """Default must match run_matrix's top_k — the depth nulls are
@@ -555,8 +558,8 @@ class TestCodexP1CutoffThreading:
         at_10 = render_markdown([rr], [], top_k=10)
         at_30 = render_markdown([rr], [], top_k=30)
 
-        assert "visible@10" in at_10
-        assert "visible@30" in at_30, (
+        assert "observed@10" in at_10
+        assert "observed@30" in at_30, (
             "a run scored at k=30 must judge legs at 30 — judging at the "
             "default 10 turns a measured null into a false 'inconclusive'"
         )
@@ -749,6 +752,135 @@ class TestCodexR2OperatorSurface:
 
         md = render_markdown([_run_result([_qrel_result([uuid4()], [])])], [])
         assert "Partial retrieval detected" not in md
+
+
+# ---------------------------------------------------------------------------
+# Codex round 3 — false alarms, wrong statistic, incomplete guard
+# ---------------------------------------------------------------------------
+
+
+class TestCodexR3NoFalsePartialAlarms:
+    """A warning that fires on success trains operators to ignore it."""
+
+    def test_duplicate_telemetry_is_not_an_error(self):
+        """heart_graph_memory_duplicates is corroboration signal, not failure."""
+        from nous_eval.retrieval_runner import _NON_ERROR_STAGE_COUNTERS
+
+        assert "heart_graph_memory_duplicates" in _NON_ERROR_STAGE_COUNTERS
+
+    def test_duplicates_alone_render_no_partial_banner(self):
+        from nous_eval.report import render_markdown
+
+        # A healthy graph run: duplicates recorded, no real failure.
+        rr = replace(
+            _run_result([_qrel_result([uuid4()], [])]),
+            pipeline_stats_summary={"stage_info_heart_graph_memory_duplicates": 7},
+        )
+        md = render_markdown([rr], [])
+        assert "Partial retrieval detected" not in md, (
+            "graph corroboration must never be reported as a crashed run"
+        )
+
+    def test_real_error_still_banners_alongside_duplicates(self):
+        from nous_eval.report import render_markdown
+
+        q = replace(
+            _qrel_result([uuid4()], []), stage_errors={"heart_recall_fact": 1}
+        )
+        rr = replace(
+            _run_result([q]),
+            pipeline_stats_summary={
+                "stage_info_heart_graph_memory_duplicates": 7,
+                "stage_error_heart_recall_fact": 1,
+            },
+        )
+        md = render_markdown([rr], [])
+        assert "Partial retrieval detected" in md
+        assert "heart_recall_fact" in md
+        assert "duplicates" not in md.split("## Aggregate")[0]
+
+
+class TestCodexR3ParticipationNotMedian:
+    """A leg's own tail must not hide its head."""
+
+    def test_leg_with_scoring_head_and_long_tail_is_visible(self):
+        from nous_eval.metrics import leg_visibility
+
+        # chunk places rank 1 on every qrel, then a long tail at 20-30.
+        legs = ["chunk"] + ["heart_primary"] * 18 + ["chunk"] * 11
+        ids = [uuid4() for _ in legs]
+        vis = {v.leg: v for v in leg_visibility([_qrel_result(ids, [], legs)])}
+
+        assert vis["chunk"].median_rank > 10, "pooled median IS below the cutline"
+        assert vis["chunk"].visible is True, (
+            "but its rank-1 row scores on every qrel — median-of-all-rows "
+            "would wrongly tell operators to discount this leg's null"
+        )
+        assert vis["chunk"].participation_rate == 1.0
+
+    def test_participation_rate_is_per_qrel(self):
+        from nous_eval.metrics import leg_visibility
+
+        # keyed reaches the window on 1 of 2 qrels.
+        hit = ["keyed"] + ["heart_primary"] * 19
+        miss = ["heart_primary"] * 19 + ["keyed"]
+        qs = [
+            _qrel_result([uuid4() for _ in hit], [], hit),
+            _qrel_result([uuid4() for _ in miss], [], miss),
+        ]
+        vis = {v.leg: v for v in leg_visibility(qs)}
+
+        assert vis["keyed"].n_qrels_present == 2
+        assert vis["keyed"].n_qrels_within_cutoff == 1
+        assert vis["keyed"].participation_rate == 0.5
+
+    def test_report_surfaces_participation(self):
+        from nous_eval.report import render_markdown
+
+        legs = ["heart_primary"] * 10 + ["keyed"] * 10
+        ids = [uuid4() for _ in legs]
+        md = render_markdown([_run_result([_qrel_result(ids, [], legs)])], [])
+        assert "participation" in md
+
+
+class TestCodexR3ExpansionGuardComplete:
+    """cleaned non-empty does not mean the fusion produced a variant."""
+
+    @pytest.mark.asyncio
+    async def test_echoed_query_is_not_cached(self, monkeypatch):
+        from nous.heart.query_expansion import QueryExpander
+
+        settings = MagicMock()
+        settings.query_expansion_enabled = True
+        settings.query_expansion_timeout_seconds = 2.0
+        settings.query_expansion_max_variants = 3
+        settings.query_expansion_min_words = 3
+        settings.query_expansion_max_per_hour = 500
+        settings.query_expansion_cache_ttl_days = 30
+
+        exp = QueryExpander(
+            llm=MagicMock(), settings=settings, db=None,
+            model="claude-haiku-4-5-20251001", budget_check=None,
+        )
+        puts: list = []
+        monkeypatch.setattr(
+            exp, "_cache_put", AsyncMock(side_effect=lambda *a, **k: puts.append(a))
+        )
+        monkeypatch.setattr(exp, "_cache_get", AsyncMock(return_value=None))
+        # Haiku echoes the query back with different case — cleaned is
+        # NON-empty, but _fuse dedupes on lower().strip() so final == [query].
+        monkeypatch.setattr(
+            exp, "_call_haiku",
+            AsyncMock(return_value=["How Do I Configure The Retrieval Pipeline"]),
+        )
+
+        out = await exp.expand("how do i configure the retrieval pipeline", "a")
+
+        assert out == ["how do i configure the retrieval pipeline"]
+        assert puts == [], (
+            "a case-only echo fuses back to the bare query — caching it "
+            "pins the no-op for the whole TTL, the exact failure N2 fixes"
+        )
 
 
 # ---------------------------------------------------------------------------

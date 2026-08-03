@@ -405,21 +405,29 @@ def _leg_visibility_table(run_results: list["RunResult"], top_k: int = 10) -> st
         if not vis:
             continue
         lines.append(f"\n**{r.config.name}**\n")
-        lines.append("| leg | rows | median rank | best rank | visible@%d |" % vis[0].cutoff)
-        lines.append("|---|---:|---:|---:|:---:|")
+        lines.append(
+            "| leg | rows | qrels w/ row | qrels within k | participation "
+            "| median rank | best rank | observed@%d |" % vis[0].cutoff
+        )
+        lines.append("|---|---:|---:|---:|---:|---:|---:|:---:|")
         for v in vis:
             mark = "yes" if v.visible else "**NO**"
             lines.append(
-                f"| {v.leg} | {v.n_rows} | {v.median_rank:.1f} | "
-                f"{v.best_rank} | {mark} |"
+                f"| {v.leg} | {v.n_rows} | {v.n_qrels_present} | "
+                f"{v.n_qrels_within_cutoff} | {v.participation_rate:.2f} | "
+                f"{v.median_rank:.1f} | {v.best_rank} | {mark} |"
             )
     if not lines:
         return ""
     return (
         "\n### Leg visibility (N7)\n\n"
-        "A leg whose median rank sits below the scoring cutline is "
-        "unobservable at that depth — treat any null for it as "
-        "**inconclusive**, not negative.\n" + "\n".join(lines)
+        "**participation** is the fraction of qrels where the leg placed at "
+        "least one row inside the scoring window — i.e. how often it could "
+        "have influenced the top-k metric at all. Treat a null from a leg "
+        "with participation at or near **0.00** as **inconclusive**, not "
+        "negative: the measurement never reached it. (median/best rank are "
+        "diagnostics — a leg's own long tail can drag its median below the "
+        "cutline while its head scores on every qrel.)\n" + "\n".join(lines)
     )
 
 
@@ -502,6 +510,9 @@ def render_json(
                     {
                         "leg": v.leg,
                         "n_rows": v.n_rows,
+                        "n_qrels_present": v.n_qrels_present,
+                        "n_qrels_within_cutoff": v.n_qrels_within_cutoff,
+                        "participation_rate": v.participation_rate,
                         "median_rank": v.median_rank,
                         "best_rank": v.best_rank,
                         "cutoff": v.cutoff,
