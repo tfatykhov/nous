@@ -113,6 +113,31 @@ def _hits_at_k(q: QrelResult, k: int) -> int:
     return 1
 
 
+def _served(q: QrelResult) -> list:
+    """Rows the model actually receives for this qrel.
+
+    ``served_ids`` is populated by the runner only when the formatter would
+    render fewer rows than the pipeline returned (a type-scoped qrel whose
+    graph/spreading rows land in the dropped Brain section). Empty means
+    "no narrowing applied", so fall back to the full retrieved list rather
+    than reporting zero.
+    """
+    return q.served_ids if q.served_ids else q.retrieved_ids
+
+
+def _recall_at_served(q: QrelResult) -> float:
+    """R@served — recall over the rows the model receives, no truncation."""
+    if q.n_gold_total <= 0:
+        return 0.0
+    gold_set = set(q.gold_ids)
+    if not gold_set:
+        # No gold plumbed (hand-built QrelResult): fall back to the rank
+        # bound, which cannot over-state.
+        return 1.0 if q.rank_of_first_gold else 0.0
+    hits = sum(1 for rid in _served(q) if rid in gold_set)
+    return hits / float(q.n_gold_total)
+
+
 def _precision_from_counts(q: QrelResult, k: int) -> float:
     """P@K = |top-K ∩ gold| / K. Uses exact set intersection at rank K."""
     if k <= 0:
@@ -214,9 +239,11 @@ def compute_metrics(
     # scoring time. This keeps metrics decoupled from whether the caller
     # also propagates gold_ids onto QrelResult (which test fixtures don't
     # always do).
-    # N7: recall over the full served block. ``retrieved_ids`` is already the
-    # untruncated served list, so this needs no re-run — it is the same data
-    # scored without the artificial window.
+    # N7: recall over the full served block — the rows the model actually
+    # RECEIVES, which is ``served_ids`` when the runner narrowed it (a
+    # type-scoped qrel whose graph rows the formatter drops) and
+    # ``retrieved_ids`` otherwise. Needs no re-run: it is the same data
+    # scored without the artificial top-K window.
     served_recalls: list[float] = []
     served_lengths: list[float] = []
 
@@ -229,9 +256,8 @@ def compute_metrics(
         r5s.append(_recall_from_counts(q, 5))
         r10s.append(_recall_from_counts(q, top_k))
         ndcgs.append(_ndcg_from_counts(q, top_k))
-        served = len(q.retrieved_ids)
-        served_lengths.append(float(served))
-        served_recalls.append(_recall_from_counts(q, served))
+        served_lengths.append(float(len(_served(q))))
+        served_recalls.append(_recall_at_served(q))
 
     curve = {
         k: mean([_recall_from_counts(q, k) for q in valid])

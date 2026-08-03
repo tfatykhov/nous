@@ -326,7 +326,7 @@ class TestN3DeterministicEdgeFilter:
 # ---------------------------------------------------------------------------
 
 
-def _qrel_result(retrieved, gold, legs=None, error=None):
+def _qrel_result(retrieved, gold, legs=None, error=None, served=None):
     from nous_eval.retrieval_runner import QrelResult
 
     return QrelResult(
@@ -336,6 +336,7 @@ def _qrel_result(retrieved, gold, legs=None, error=None):
         retrieved_ids=list(retrieved),
         retrieved_types=["fact"] * len(retrieved),
         retrieved_legs=list(legs or []),
+        served_ids=list(served or []),
         rank_of_first_gold=None,
         n_gold_in_top_k=0,
         n_gold_total=len(gold),
@@ -865,6 +866,90 @@ class TestCodexR6GateRejectsPartialRuns:
         d = decide_gate_f050(self._pair([clean], [clean]), self._sources())
         # Identical arms => zero delta => fails on Rule 1, NOT Rule 0.
         assert "partial retrieval" not in d.reason.lower()
+
+
+# ---------------------------------------------------------------------------
+# Codex round 9 — @served must mean "what the model received"
+# ---------------------------------------------------------------------------
+
+
+class TestCodexR9ServedMeansRendered:
+    """Rows the formatter drops must not inflate the served metrics."""
+
+    def test_dropped_brain_rows_excluded_from_served(self):
+        from nous_eval.metrics import compute_metrics
+
+        ids = [uuid4() for _ in range(10)]
+        # Formatter renders only the first 6; the rest are Brain-section
+        # rows dropped for this type-scoped qrel. Gold sits in the dropped
+        # tail — the model never received it.
+        q = _qrel_result(ids, [ids[8]], served=ids[:6])
+        m = compute_metrics([q], top_k=10)
+
+        assert m.mean_served == 6.0, "must count rendered rows, not returned"
+        assert m.r_at_served == 0.0, (
+            "R@served must not credit a gold the model never saw — counting "
+            "every retrieved_id would report 1.000 here"
+        )
+
+    def test_gold_inside_rendered_set_still_counts(self):
+        from nous_eval.metrics import compute_metrics
+
+        ids = [uuid4() for _ in range(10)]
+        q = _qrel_result(ids, [ids[2]], served=ids[:6])
+        assert compute_metrics([q], top_k=10).r_at_served == 1.0
+
+    def test_unset_served_ids_falls_back_to_retrieved(self):
+        """search_all qrels apply no narrowing — behaviour unchanged."""
+        from nous_eval.metrics import compute_metrics
+
+        ids = [uuid4() for _ in range(10)]
+        q = _qrel_result(ids, [ids[8]])
+        m = compute_metrics([q], top_k=10)
+        assert m.mean_served == 10.0
+        assert m.r_at_served == 1.0
+
+    def test_runner_keeps_all_rows_for_search_all(self):
+        from nous.api.retrieval_pipeline import PipelineResult
+        from nous_eval.retrieval_runner import _served_ids
+
+        rows = [
+            PipelineResult(id=uuid4(), type="fact", description="x", score=0.5),
+            PipelineResult(
+                id=uuid4(), type="decision", description="d", score=0.4,
+                source="brain",
+            ),
+        ]
+        assert len(_served_ids(rows, None)) == 2
+        assert len(_served_ids(rows, ["all"])) == 2
+        assert len(_served_ids(rows, ["fact", "decision"])) == 2
+
+    def test_runner_drops_brain_rows_for_type_scoped_qrel(self):
+        from nous.api.retrieval_pipeline import PipelineResult
+        from nous_eval.retrieval_runner import _served_ids
+
+        keep = PipelineResult(id=uuid4(), type="fact", description="x", score=0.5)
+        brain = PipelineResult(
+            id=uuid4(), type="decision", description="d", score=0.4,
+            source="brain",
+        )
+        spread = PipelineResult(
+            id=uuid4(), type="decision", description="s", score=0.3,
+            source="spreading_activation",
+            metadata={"stage_origin": "brain_graph"},
+        )
+        # A spreading row routed to the HEART section is still rendered.
+        heart_spread = PipelineResult(
+            id=uuid4(), type="fact", description="h", score=0.3,
+            source="spreading_activation",
+            metadata={"stage_origin": "heart_graph_memory"},
+        )
+
+        out = _served_ids([keep, brain, spread, heart_spread], ["fact"])
+        assert out == [keep.id, heart_spread.id], (
+            "only the Brain-section rows are dropped (tools.py:445); "
+            "heart-routed graph rows still reach the model"
+        )
 
 
 # ---------------------------------------------------------------------------
