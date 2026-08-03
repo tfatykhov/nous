@@ -669,11 +669,16 @@ def _expected_legs(settings: Settings) -> list[str]:
     # and :1173 (spreading).
     graph_on = bool(getattr(settings, "graph_recall_enabled", False))
     if graph_on:
-        legs.extend(("heart_graph", "brain_graph"))
-        if getattr(settings, "heart_graph_all_types_enabled", False) and getattr(
-            settings, "cross_type_linking_enabled", False
-        ):
-            legs.append("heart_graph_memory")
+        # brain_graph (Stage 4, :1173) needs only the master switch.
+        legs.append("brain_graph")
+        # heart_graph (Stage 2) and heart_graph_memory (Stage 2b) share the
+        # SAME guard at :968-982, which also requires cross-type linking —
+        # so they are not interchangeable with brain_graph here.
+        cross_on = bool(getattr(settings, "cross_type_linking_enabled", False))
+        if cross_on:
+            legs.append("heart_graph")
+            if getattr(settings, "heart_graph_all_types_enabled", False):
+                legs.append("heart_graph_memory")
         # spreading_activation_enabled is "auto" | "true" | "false" (str);
         # "auto" resolves at runtime against graph density, so anything
         # other than an explicit "false" counts as attempted.

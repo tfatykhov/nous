@@ -1155,6 +1155,25 @@ class TestCodexR6GraphLegNesting:
         no_cross = on.model_copy(update={"cross_type_linking_enabled": False})
         assert "heart_graph_memory" not in _expected_legs(no_cross)
 
+    def test_heart_graph_requires_cross_type_linking(self):
+        """Stage 2 shares Stage 2b's guard — both need cross-type linking."""
+        from nous.config import Settings
+        from nous_eval.retrieval_runner import _expected_legs
+
+        s = Settings().model_copy(update={
+            "graph_recall_enabled": True,
+            "cross_type_linking_enabled": False,
+        })
+        legs = _expected_legs(s)
+        assert "heart_graph" not in legs, (
+            "Stage 2 cannot run without cross_type_linking_enabled "
+            "(retrieval_pipeline.py:968-982)"
+        )
+        assert "brain_graph" in legs, (
+            "but Stage 4 needs only the master switch — the two legs have "
+            "different guards and must not be lumped together"
+        )
+
     def test_graph_off_yields_no_graph_legs(self):
         from nous.config import Settings
         from nous_eval.retrieval_runner import _expected_legs
