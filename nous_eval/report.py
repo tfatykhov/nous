@@ -305,12 +305,13 @@ def render_markdown(
         lines.append(_delta_table(base_m, exp_m, top_k))
         lines.append("")
 
-    # N7: recall over k + which legs the scoring depth cannot see.
+    # N7: recall across k — how much a fixed cutoff cannot see.
     lines.append("## Recall over k (N7)")
     lines.append(
         "_Production does not truncate — `recall_deep` hands the model the "
-        "whole served block. A fixed-k row describes a window prod never "
-        "applies._"
+        "whole returned block (median ~77 rows). Any single fixed-k row "
+        "below describes a window prod never applies; read the curve to see "
+        "how much that cutoff misses._"
     )
     lines.append("")
     lines.append(_recall_curve_table(run_results, top_k))
@@ -333,9 +334,9 @@ def render_markdown(
 def _metrics_table(run_results: list["RunResult"], top_k: int = 10) -> str:
     """Build a markdown table with metrics for each config.
 
-    N7: ``R@served`` and ``served`` are reported alongside the fixed-k
-    columns because production does not truncate — a top-K-only table
-    describes a window ``recall_deep`` never applies.
+    This table is fixed-k by construction; the companion "Recall over k"
+    table is what shows how much that cutoff misses of the block prod
+    actually serves (N7).
 
     ``top_k`` must be the depth the matrix scored at: ``MetricsResult``'s
     ``p_at_10`` / ``r_at_10`` / ``ndcg_at_10`` fields are named for the
@@ -346,8 +347,8 @@ def _metrics_table(run_results: list["RunResult"], top_k: int = 10) -> str:
     """
     header = (
         f"| config | n_qrels | n_errored | MRR | P@1 | P@{top_k} | R@{top_k} "
-        f"| R@served | served | nDCG@{top_k} |\n"
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+        f"| nDCG@{top_k} |\n"
+        "|---|---:|---:|---:|---:|---:|---:|---:|"
     )
     rows = []
     for r in run_results:
@@ -355,8 +356,7 @@ def _metrics_table(run_results: list["RunResult"], top_k: int = 10) -> str:
         rows.append(
             f"| {r.config.name} | {m.n_qrels} | {m.n_errored} | "
             f"{m.mrr:.3f} | {m.p_at_1:.3f} | {m.p_at_10:.3f} | "
-            f"{m.r_at_10:.3f} | {m.r_at_served:.3f} | {m.mean_served:.1f} | "
-            f"{m.ndcg_at_10:.3f} |"
+            f"{m.r_at_10:.3f} | {m.ndcg_at_10:.3f} |"
         )
     return header + "\n" + "\n".join(rows)
 
@@ -403,8 +403,8 @@ def _recall_curve_table(run_results: list["RunResult"], top_k: int = 10) -> str:
     """N7: recall over k, so the fixed-k cutoff's blind spot is visible."""
     ks = sorted(RECALL_CURVE_KS)
     header = (
-        "| config | " + " | ".join(f"R@{k}" for k in ks) + " | R@served |\n"
-        "|---|" + "---:|" * (len(ks) + 1)
+        "| config | " + " | ".join(f"R@{k}" for k in ks) + " |\n"
+        "|---|" + "---:|" * len(ks)
     )
     rows = []
     for r in run_results:
@@ -414,7 +414,7 @@ def _recall_curve_table(run_results: list["RunResult"], top_k: int = 10) -> str:
         # silent depth mismatch between this table and its neighbours.
         m = compute_metrics(r.per_qrel, top_k=top_k)
         cells = " | ".join(f"{m.recall_curve.get(k, 0.0):.3f}" for k in ks)
-        rows.append(f"| {r.config.name} | {cells} | {m.r_at_served:.3f} |")
+        rows.append(f"| {r.config.name} | {cells} |")
     return header + "\n" + "\n".join(rows)
 
 
@@ -552,8 +552,6 @@ def _metrics_to_dict(m: MetricsResult) -> dict:
         "n_errored": m.n_errored,
         # N7: the untruncated view. Keys are stringified because JSON object
         # keys must be strings — consumers cast back to int.
-        "r_at_served": m.r_at_served,
-        "mean_served": m.mean_served,
         "recall_curve": {str(k): v for k, v in sorted(m.recall_curve.items())},
     }
 

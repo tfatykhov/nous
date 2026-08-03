@@ -22,11 +22,9 @@ from uuid import UUID, uuid4
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # N1 — Heart.recall reports per-leg failures
 # ---------------------------------------------------------------------------
-
 
 def _recall_settings() -> SimpleNamespace:
     """Minimal Settings stand-in for the fields ``_recall`` reads directly."""
@@ -38,7 +36,6 @@ def _recall_settings() -> SimpleNamespace:
         mmr_diversity_weight=0.7,
         cross_encoder_enabled=False,
     )
-
 
 class TestN1LegFailureReporting:
     """A caller must be able to tell a crashed leg from an empty one."""
@@ -118,11 +115,9 @@ class TestN1LegFailureReporting:
         )
         assert results == []
 
-
 # ---------------------------------------------------------------------------
 # N2 — failed expansions are not cached
 # ---------------------------------------------------------------------------
-
 
 class TestN2NoPoisonedCache:
     """One transient Haiku failure must not disable expansion permanently."""
@@ -196,11 +191,9 @@ class TestN2NoPoisonedCache:
         assert len(out) > 1
         assert len(puts) == 1, "a real expansion must still be cached"
 
-
 # ---------------------------------------------------------------------------
 # N3 — adjacency boost excludes deterministic edges when flagged
 # ---------------------------------------------------------------------------
-
 
 @dataclass(frozen=True)
 class _Row:
@@ -216,7 +209,6 @@ class _Row:
 
     def __len__(self):
         return 4
-
 
 def _brain_with_captured_sql(captured: list[str], rows: list) -> MagicMock:
     brain = MagicMock()
@@ -235,7 +227,6 @@ def _brain_with_captured_sql(captured: list[str], rows: list) -> MagicMock:
     ctx.__aexit__ = AsyncMock(return_value=False)
     brain.db.session = MagicMock(return_value=ctx)
     return brain
-
 
 class TestN3DeterministicEdgeFilter:
     """Match the clause the sibling reactivation query already carries."""
@@ -320,13 +311,11 @@ class TestN3DeterministicEdgeFilter:
             "land dark, per F084/F085/F086 convention"
         )
 
-
 # ---------------------------------------------------------------------------
 # N7 — recall@served, the k-curve, and leg visibility
 # ---------------------------------------------------------------------------
 
-
-def _qrel_result(retrieved, gold, legs=None, error=None, served=None):
+def _qrel_result(retrieved, gold, legs=None, error=None):
     from nous_eval.retrieval_runner import QrelResult
 
     return QrelResult(
@@ -336,14 +325,12 @@ def _qrel_result(retrieved, gold, legs=None, error=None, served=None):
         retrieved_ids=list(retrieved),
         retrieved_types=["fact"] * len(retrieved),
         retrieved_legs=list(legs or []),
-        served_ids=list(served or []),
         rank_of_first_gold=None,
         n_gold_in_top_k=0,
         n_gold_total=len(gold),
         gold_ids=list(gold),
         error=error,
     )
-
 
 def _run_result(per_qrel, name="baseline"):
     from nous_eval.retrieval_runner import RetrievalConfig, RunResult
@@ -354,24 +341,22 @@ def _run_result(per_qrel, name="baseline"):
         duration_seconds=1.0,
     )
 
-
 class TestN7ServedWindow:
-    """Production does not truncate — the metric must not either."""
+    """Production does not truncate — the metric must not report as if it did."""
 
-    def test_recall_at_served_sees_what_top_k_misses(self):
+    def test_curve_sees_what_a_fixed_top_k_misses(self):
         from nous_eval.metrics import compute_metrics
 
         ids = [uuid4() for _ in range(40)]
-        gold = [ids[35]]  # deep in the served block, far past k=10
+        gold = [ids[35]]  # deep in the returned block, far past k=10
         m = compute_metrics([_qrel_result(ids, gold)], top_k=10)
 
         assert m.r_at_10 == 0.0, "the gold is outside the fixed window"
-        assert m.r_at_served == 1.0, (
-            "N7: recall@served must find it — recall_deep hands the model "
-            "the whole block, so a top-10 metric measures a window prod "
-            "never applies"
+        assert m.recall_curve[40] == 1.0, (
+            "N7: the curve must find it — recall_deep hands the model the "
+            "whole returned block, so a top-10-only report measures a "
+            "window prod never applies"
         )
-        assert m.mean_served == 40.0
 
     def test_recall_curve_covers_the_reported_ks(self):
         from nous_eval.metrics import RECALL_CURVE_KS, compute_metrics
@@ -406,8 +391,6 @@ class TestN7ServedWindow:
 
         assert m.n_errored == 1
         assert m.n_qrels == 1
-        assert m.r_at_served == 1.0
-
 
 class TestN7LegLabelling:
     """The runner labels rows from the pipeline's own provenance markers."""
@@ -440,11 +423,9 @@ class TestN7LegLabelling:
         r = PipelineResult(id=uuid4(), type="chunk", description="x", score=0.5)
         assert _leg_of(r) == "chunk"
 
-
 # ---------------------------------------------------------------------------
 # Codex round 1 — the instrumentation must reach its consumers
 # ---------------------------------------------------------------------------
-
 
 class TestCodexP1StageErrorsReachTheReport:
     """N1's counters were computed, then discarded by the eval runner."""
@@ -487,7 +468,6 @@ class TestCodexP1StageErrorsReachTheReport:
             "heart_recall_fact": 1
         }, "a crashed leg must be visible in the persisted artifact"
 
-
 class TestCodexP1CutoffThreading:
     """The report must describe the depth it was actually scored at."""
 
@@ -510,7 +490,6 @@ class TestCodexP1CutoffThreading:
         )
         assert payload["top_k"] == 25, "the artifact must self-describe its depth"
 
-
 class TestCodexP2LegProvenanceSerialized:
     """Raw leg provenance must survive into the persisted artifact."""
 
@@ -528,11 +507,9 @@ class TestCodexP2LegProvenanceSerialized:
             "analysis is reconstructable at any depth"
         )
 
-
 # ---------------------------------------------------------------------------
 # Codex round 2 — provenance ordering, depth consistency, operator surface
 # ---------------------------------------------------------------------------
-
 
 class TestCodexR2SpreadingClassifiedFirst:
     """Spreading rows carry BOTH source and stage_origin — order decides."""
@@ -575,7 +552,6 @@ class TestCodexR2SpreadingClassifiedFirst:
             metadata={"stage_origin": "heart_graph_memory"},
         )
         assert _leg_of(r) == "heart_graph_memory"
-
 
 class TestCodexR2DepthConsistency:
     """A report must not declare one depth and compute at another."""
@@ -632,9 +608,8 @@ class TestCodexR2DepthConsistency:
             "so it needs its own copy of the depth"
         )
         assert "recall_curve" in payload
-        assert "r_at_served" in payload
-        assert "n_qrels_partial" in payload
 
+        assert "n_qrels_partial" in payload
 
 class TestCodexR2OperatorSurface:
     """The markdown is what an operator reads — partial runs must show there."""
@@ -679,11 +654,9 @@ class TestCodexR2OperatorSurface:
         md = render_markdown([_run_result([_qrel_result([uuid4()], [])])], [])
         assert "Partial retrieval detected" not in md
 
-
 # ---------------------------------------------------------------------------
 # Codex round 3 — false alarms, wrong statistic, incomplete guard
 # ---------------------------------------------------------------------------
-
 
 class TestCodexR3NoFalsePartialAlarms:
     """A warning that fires on success trains operators to ignore it."""
@@ -725,7 +698,6 @@ class TestCodexR3NoFalsePartialAlarms:
         assert "heart_recall_fact" in md
         assert "duplicates" not in md.split("## Aggregate")[0]
 
-
 class TestCodexR3ExpansionGuardComplete:
     """cleaned non-empty does not mean the fusion produced a variant."""
 
@@ -765,11 +737,9 @@ class TestCodexR3ExpansionGuardComplete:
             "pins the no-op for the whole TTL, the exact failure N2 fixes"
         )
 
-
 # ---------------------------------------------------------------------------
 # Codex round 4 — honest denominator, honest labels
 # ---------------------------------------------------------------------------
-
 
 class TestCodexR4DeltaLabels:
     """A k=30 report must not describe its deltas as @10."""
@@ -802,16 +772,13 @@ class TestCodexR4DeltaLabels:
         assert "| p_at_10 |" in md
         assert "| p_at_1 |" in md, "unrelated rows must keep their names"
 
-
 # ---------------------------------------------------------------------------
 # Codex round 5 — a leg that emits nothing must still be reported
 # ---------------------------------------------------------------------------
 
-
 # ---------------------------------------------------------------------------
 # Codex round 6 — the gate must agree with the prose; respect leg nesting
 # ---------------------------------------------------------------------------
-
 
 class TestCodexR6GateRejectsPartialRuns:
     """The banner said 'invalid'; the gate returned success. Fixed."""
@@ -867,95 +834,11 @@ class TestCodexR6GateRejectsPartialRuns:
         # Identical arms => zero delta => fails on Rule 1, NOT Rule 0.
         assert "partial retrieval" not in d.reason.lower()
 
-
 # ---------------------------------------------------------------------------
-# Codex round 9 — @served must mean "what the model received"
-# ---------------------------------------------------------------------------
-
-
-class TestCodexR9ServedMeansRendered:
-    """Rows the formatter drops must not inflate the served metrics."""
-
-    def test_dropped_brain_rows_excluded_from_served(self):
-        from nous_eval.metrics import compute_metrics
-
-        ids = [uuid4() for _ in range(10)]
-        # Formatter renders only the first 6; the rest are Brain-section
-        # rows dropped for this type-scoped qrel. Gold sits in the dropped
-        # tail — the model never received it.
-        q = _qrel_result(ids, [ids[8]], served=ids[:6])
-        m = compute_metrics([q], top_k=10)
-
-        assert m.mean_served == 6.0, "must count rendered rows, not returned"
-        assert m.r_at_served == 0.0, (
-            "R@served must not credit a gold the model never saw — counting "
-            "every retrieved_id would report 1.000 here"
-        )
-
-    def test_gold_inside_rendered_set_still_counts(self):
-        from nous_eval.metrics import compute_metrics
-
-        ids = [uuid4() for _ in range(10)]
-        q = _qrel_result(ids, [ids[2]], served=ids[:6])
-        assert compute_metrics([q], top_k=10).r_at_served == 1.0
-
-    def test_unset_served_ids_falls_back_to_retrieved(self):
-        """search_all qrels apply no narrowing — behaviour unchanged."""
-        from nous_eval.metrics import compute_metrics
-
-        ids = [uuid4() for _ in range(10)]
-        q = _qrel_result(ids, [ids[8]])
-        m = compute_metrics([q], top_k=10)
-        assert m.mean_served == 10.0
-        assert m.r_at_served == 1.0
-
-    def test_runner_keeps_all_rows_for_search_all(self):
-        from nous.api.retrieval_pipeline import PipelineResult
-        from nous_eval.retrieval_runner import _served_ids
-
-        rows = [
-            PipelineResult(id=uuid4(), type="fact", description="x", score=0.5),
-            PipelineResult(
-                id=uuid4(), type="decision", description="d", score=0.4,
-                source="brain",
-            ),
-        ]
-        assert len(_served_ids(rows, None)) == 2
-        assert len(_served_ids(rows, ["all"])) == 2
-        assert len(_served_ids(rows, ["fact", "decision"])) == 2
-
-    def test_runner_drops_brain_rows_for_type_scoped_qrel(self):
-        from nous.api.retrieval_pipeline import PipelineResult
-        from nous_eval.retrieval_runner import _served_ids
-
-        keep = PipelineResult(id=uuid4(), type="fact", description="x", score=0.5)
-        brain = PipelineResult(
-            id=uuid4(), type="decision", description="d", score=0.4,
-            source="brain",
-        )
-        spread = PipelineResult(
-            id=uuid4(), type="decision", description="s", score=0.3,
-            source="spreading_activation",
-            metadata={"stage_origin": "brain_graph"},
-        )
-        # A spreading row routed to the HEART section is still rendered.
-        heart_spread = PipelineResult(
-            id=uuid4(), type="fact", description="h", score=0.3,
-            source="spreading_activation",
-            metadata={"stage_origin": "heart_graph_memory"},
-        )
-
-        out = _served_ids([keep, brain, spread, heart_spread], ["fact"])
-        assert out == [keep.id, heart_spread.id], (
-            "only the Brain-section rows are dropped (tools.py:445); "
-            "heart-routed graph rows still reach the model"
-        )
-
 
 # ---------------------------------------------------------------------------
 # N8 — the bands are a deliberate choice, not a unit mismatch
 # ---------------------------------------------------------------------------
-
 
 class TestN8BandsDocumented:
     def test_band_constants_record_the_distribution(self):

@@ -129,13 +129,6 @@ class QrelResult:
     error: str | None = None
     gold_ids: list[UUID] = field(default_factory=list)
     retrieved_legs: list[str] = field(default_factory=list)
-    # N7/codex-R9: the subset of retrieved_ids the formatter actually RENDERS
-    # for this qrel's memory_types, i.e. what the model receives. For a
-    # type-scoped qrel (e.g. memory_types=["fact"]) graph/spreading can return
-    # decision rows that `_format_pipeline_text` drops, so counting every
-    # retrieved_id would overstate mean_served and could credit R@served with
-    # a gold the model never saw. Empty means "same as retrieved_ids".
-    served_ids: list[UUID] = field(default_factory=list)
     # N1/codex-P1: per-stage failure counts from PipelineStats.n_stage_errors,
     # including Heart's per-leg failures ("heart_recall_fact" etc). A non-empty
     # dict means this qrel's metrics are based on a PARTIAL retrieval — the
@@ -595,7 +588,6 @@ async def _run_one(
     retrieved_ids = [r.id for r in pipeline_results]
     retrieved_types = [r.type for r in pipeline_results]
     retrieved_legs = [_leg_of(r) for r in pipeline_results]
-    served_ids = _served_ids(pipeline_results, memory_types)
     rank, n_in_top = _score_rank(retrieved_ids, qrel.gold_ids, top_k)
 
     logger.debug(
@@ -615,7 +607,6 @@ async def _run_one(
             retrieved_ids=retrieved_ids,
             retrieved_types=retrieved_types,
             retrieved_legs=retrieved_legs,
-            served_ids=served_ids,
             rank_of_first_gold=rank,
             n_gold_in_top_k=n_in_top,
             n_gold_total=len(qrel.gold_ids),
@@ -662,39 +653,6 @@ async def _run_one(
 _NON_ERROR_STAGE_COUNTERS: frozenset[str] = frozenset({
     "heart_graph_memory_duplicates",
 })
-
-
-def _served_ids(pipeline_results: list, memory_types: list[str] | None) -> list:
-    """N7/codex-R9: the rows ``_format_pipeline_text`` will actually render.
-
-    ``run_recall_pipeline`` returns rows the formatter may then drop. The one
-    rule that bites the eval is the Brain-section gate at
-    ``nous/api/tools.py:445``: brain-sourced rows and brain-graph /
-    spreading rows tagged ``stage_origin="brain_graph"`` are emitted ONLY
-    when the call is ``search_all`` or explicitly includes ``"decision"``.
-    A ``memory_types=["fact"]`` qrel can still surface decisions via graph
-    expansion, and counting them would overstate ``mean_served`` and let
-    ``R@served`` credit a gold the model never received.
-
-    This mirrors ONE narrow condition rather than the whole formatter. The
-    proper fix — having the formatter report the IDs it rendered, so there
-    is a single source of truth — belongs with the same redesign as the
-    leg-visibility work (PR #583); keep the two in sync until then.
-    """
-    search_all = not memory_types or "all" in memory_types
-    if search_all or "decision" in (memory_types or []):
-        return [r.id for r in pipeline_results]
-    out = []
-    for r in pipeline_results:
-        source = getattr(r, "source", "heart")
-        meta = getattr(r, "metadata", None) or {}
-        is_brain_section = source == "brain" or (
-            source in ("graph_expanded", "spreading_activation")
-            and meta.get("stage_origin") == "brain_graph"
-        )
-        if not is_brain_section:
-            out.append(r.id)
-    return out
 
 
 def _leg_of(r) -> str:

@@ -1066,8 +1066,6 @@ def _metrics_compact(run: "RunResult", top_k: int = 10) -> dict:
         "n_errored": m.n_errored,
         # N7: the untruncated view + the depth these numbers mean.
         "top_k": top_k,
-        "r_at_served": m.r_at_served,
-        "mean_served": m.mean_served,
         "recall_curve": {str(k): v for k, v in sorted(m.recall_curve.items())},
         "n_qrels_partial": sum(1 for q in run.per_qrel if q.stage_errors),
     }

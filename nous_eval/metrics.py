@@ -21,7 +21,7 @@ from statistics import mean
 
 from nous_eval.retrieval_runner import QrelResult
 
-# N7: k values reported alongside recall@served, so a run shows where its
+# N7: k values reported so a run shows where its
 # fixed-k cutoff stops seeing things rather than reporting one depth as if
 # it were the whole picture. These are REPORTING points; the depth a run is
 # actually scored at is the harness's ``top_k``, not the shallowest entry
@@ -37,12 +37,21 @@ class MetricsResult:
     were excluded from metric aggregates. A non-zero value is a red flag —
     the report surfaces it prominently.
 
-    N7: ``r_at_served`` and ``recall_curve`` exist because production does
-    NOT truncate — ``recall_deep`` hands the model the whole served block
-    (median ~77 rows), so a fixed top-K metric measures a window prod never
-    applies. Reading the curve alongside ``r_at_served`` shows how much of
-    the served block a given cutoff was blind to. ``mean_served`` records
-    how many rows that block actually held.
+    N7: ``recall_curve`` exists because production does NOT truncate —
+    ``recall_deep`` hands the model the whole returned block (median ~77
+    rows), so a fixed top-K metric measures a window prod never applies.
+    Reading recall across k shows how much of that block a given cutoff was
+    blind to. Like every other metric here it is computed over
+    ``retrieved_ids`` (the pipeline's output), which keeps it on the same
+    basis as ``r_at_10`` / ``ndcg_at_10`` rather than quietly using a
+    different denominator.
+
+    A true ``recall@served`` — scored over the rows the formatter actually
+    RENDERS, i.e. what the model receives — is deliberately NOT here. Two
+    attempts at deriving that in the harness both overstated it, because
+    doing so means re-implementing the formatter's section-eligibility
+    rules in a second place. It lands in the follow-up (PR #583) alongside
+    the leg-visibility work, once the formatter reports the IDs it rendered.
     """
 
     mrr: float
@@ -55,10 +64,7 @@ class MetricsResult:
     ndcg_at_10: float
     n_qrels: int
     n_errored: int = 0
-    # N7: recall over the full served block, and the curve that shows where
-    # the fixed-k cutoff stops seeing things.
-    r_at_served: float = 0.0
-    mean_served: float = 0.0
+    # N7: recall across k — shows where a fixed-k cutoff stops seeing things.
     recall_curve: dict[int, float] = field(default_factory=dict)
 
 
@@ -111,31 +117,6 @@ def _hits_at_k(q: QrelResult, k: int) -> int:
     if rank is None or rank > k:
         return 0
     return 1
-
-
-def _served(q: QrelResult) -> list:
-    """Rows the model actually receives for this qrel.
-
-    ``served_ids`` is populated by the runner only when the formatter would
-    render fewer rows than the pipeline returned (a type-scoped qrel whose
-    graph/spreading rows land in the dropped Brain section). Empty means
-    "no narrowing applied", so fall back to the full retrieved list rather
-    than reporting zero.
-    """
-    return q.served_ids if q.served_ids else q.retrieved_ids
-
-
-def _recall_at_served(q: QrelResult) -> float:
-    """R@served — recall over the rows the model receives, no truncation."""
-    if q.n_gold_total <= 0:
-        return 0.0
-    gold_set = set(q.gold_ids)
-    if not gold_set:
-        # No gold plumbed (hand-built QrelResult): fall back to the rank
-        # bound, which cannot over-state.
-        return 1.0 if q.rank_of_first_gold else 0.0
-    hits = sum(1 for rid in _served(q) if rid in gold_set)
-    return hits / float(q.n_gold_total)
 
 
 def _precision_from_counts(q: QrelResult, k: int) -> float:
@@ -239,14 +220,6 @@ def compute_metrics(
     # scoring time. This keeps metrics decoupled from whether the caller
     # also propagates gold_ids onto QrelResult (which test fixtures don't
     # always do).
-    # N7: recall over the full served block — the rows the model actually
-    # RECEIVES, which is ``served_ids`` when the runner narrowed it (a
-    # type-scoped qrel whose graph rows the formatter drops) and
-    # ``retrieved_ids`` otherwise. Needs no re-run: it is the same data
-    # scored without the artificial top-K window.
-    served_recalls: list[float] = []
-    served_lengths: list[float] = []
-
     for q in valid:
         rrs.append(_reciprocal_rank(q))
         p1s.append(_precision_from_counts(q, 1))
@@ -256,8 +229,6 @@ def compute_metrics(
         r5s.append(_recall_from_counts(q, 5))
         r10s.append(_recall_from_counts(q, top_k))
         ndcgs.append(_ndcg_from_counts(q, top_k))
-        served_lengths.append(float(len(_served(q))))
-        served_recalls.append(_recall_at_served(q))
 
     curve = {
         k: mean([_recall_from_counts(q, k) for q in valid])
@@ -275,8 +246,6 @@ def compute_metrics(
         ndcg_at_10=mean(ndcgs),
         n_qrels=len(valid),
         n_errored=n_errored,
-        r_at_served=mean(served_recalls),
-        mean_served=mean(served_lengths),
         recall_curve=curve,
     )
 
