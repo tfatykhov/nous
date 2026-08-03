@@ -721,7 +721,6 @@ async def _run_stages(
         # (chunks_searched stays False) from "flag on but stage failed"
         # (chunks_searched True + n_stage_errors["chunk_recall"] non-zero).
         acc.chunks_searched = True
-        acc.attempted_legs.add("chunk")
         try:
             acc.chunk_results = await _search_episode_chunks(
                 heart=heart,
@@ -740,6 +739,9 @@ async def _run_stages(
                 # conflating them IS the bug.
                 limit=settings.episode_chunk_recall_limit,
                 settings=settings,
+                # The helper marks "chunk" only where it actually queries —
+                # the vector path returns early with no embedder/vector.
+                attempted=acc.attempted_legs,
             )
         except Exception:
             # Match the sibling stages' pattern (spreading_activation,
@@ -1255,9 +1257,6 @@ async def _run_stages(
                 )
 
         if use_spreading:
-            # Spreading branch taken. Its rows are labelled
-            # "spreading_activation" regardless of stage_origin.
-            acc.attempted_legs.add("spreading_activation")
             try:
                 from nous.brain.schemas import NeighborResult
                 from nous.brain.spreading_activation import (
@@ -1269,6 +1268,16 @@ async def _run_stages(
                         (d.id, "decision", d.score or 0.5)
                         for d in decision_results[: settings.graph_recall_max_expand]
                     ] + heart_fact_seeds
+                    # Spreading branch taken AND it has something to spread
+                    # from. ``spreading_activation_search`` returns
+                    # immediately on empty seeds without issuing its CTE
+                    # (spreading_activation.py:111-112) — reachable with
+                    # graph_recall_max_expand=0 and no heart fact seeds — so
+                    # marking at the branch would claim a query that never
+                    # ran. Rows from here are labelled "spreading_activation"
+                    # regardless of stage_origin.
+                    if seeds:
+                        acc.attempted_legs.add("spreading_activation")
                     # Heart-seeded spreading re-reaches existing heart/
                     # chunk candidates AND prior graph-stage outputs
                     # (Stage 2 decisions, Path A neighbors) constantly —
@@ -1894,8 +1903,17 @@ async def _search_episode_chunks(
     agent_id: str,
     limit: int,
     settings: "Settings | None" = None,
+    attempted: "set[str] | None" = None,
 ) -> list[tuple[UUID, str, float]]:
     """F067: search over heart.episode_chunks.
+
+    ``attempted`` is an optional sink the helper adds ``"chunk"`` to at each
+    point it is about to ISSUE a query. The caller cannot compute this: the
+    vector path returns early with no embedder or an empty query vector,
+    while the hybrid path still runs keyword-only in that case, so only this
+    function knows whether a retrieval actually happened. Marking at the
+    call site would report the leg as attempted-and-silent on a run where it
+    never queried at all.
 
     Default (``chunk_hybrid_search_enabled`` off): vector-only cosine search,
     byte-identical to the original F067 leg; returns ``[]`` when no embedder
@@ -1923,6 +1941,9 @@ async def _search_episode_chunks(
 
         query_vec = (await embedder.embed(query)) if embedder is not None else None
         query_vec = query_vec or None  # empty embed → keyword-only fallback
+        # Hybrid always queries (keyword-only when the vector is absent).
+        if attempted is not None:
+            attempted.add("chunk")
         async with heart.db.session() as s:
             ranked = await heart_search.hybrid_search(
                 s,
@@ -1959,6 +1980,10 @@ async def _search_episode_chunks(
     query_vec = await embedder.embed(query)
     if not query_vec:
         return []
+    # Vector path: both early returns above skip the query entirely, so
+    # the leg is only attempted from here.
+    if attempted is not None:
+        attempted.add("chunk")
     vec_lit = "[" + ",".join(f"{v:.6f}" for v in query_vec) + "]"
     async with heart.db.session() as s:
         # P1.1: include episode_id so the formatter can session-group chunks.

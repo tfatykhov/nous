@@ -69,7 +69,7 @@ class TestPipelineReportsAttemptedLegs:
 
         src = inspect.getsource(retrieval_pipeline)
         for leg in (
-            "heart_primary", "chunk", "keyed", "keyed_r2", "exemplar",
+            "heart_primary", "keyed", "keyed_r2", "exemplar",
             "brain", "heart_graph", "heart_graph_memory",
             "spreading_activation", "brain_graph",
         ):
@@ -77,6 +77,11 @@ class TestPipelineReportsAttemptedLegs:
                 f"{leg} can be produced but is never marked as attempted, so "
                 "a run where it emits nothing would drop out of the report"
             )
+        # chunk is marked INSIDE _search_episode_chunks via the `attempted`
+        # sink — the caller cannot know whether the vector path returned
+        # early on a missing embedder.
+        assert 'attempted.add("chunk")' in src
+        assert "attempted=acc.attempted_legs," in src
 
     def test_fallback_marks_both_labels_it_can_emit(self):
         """The 1-hop fallback yields brain_graph AND heart_graph_memory rows.
@@ -139,6 +144,31 @@ class TestPipelineReportsAttemptedLegs:
         e = src.index('attempted_legs.add("exemplar")')
         assert "if q_vec:" in src[e - 400: e], (
             "exemplar must be gated on has_exemplars() AND a query vector"
+        )
+
+        # Spreading: graph_recall_max_expand=0 with no heart fact seeds
+        # builds an empty seed list, and the CTE is never issued.
+        s = src.index('attempted_legs.add("spreading_activation")')
+        assert "if seeds:" in src[s - 200: s], (
+            "spreading must be gated on non-empty seeds"
+        )
+
+    def test_chunk_marked_only_where_it_queries(self):
+        """The vector path returns early with no embedder / empty vector."""
+        import inspect
+
+        from nous.api import retrieval_pipeline
+
+        src = inspect.getsource(retrieval_pipeline._search_episode_chunks)
+        # Both marks must sit AFTER the two early returns.
+        early = src.index("if not query_vec:")
+        marks = [
+            i for i in range(len(src))
+            if src.startswith('attempted.add("chunk")', i)
+        ]
+        assert len(marks) == 2, "one mark per query path (hybrid, vector)"
+        assert any(m > early for m in marks), (
+            "the vector-path mark must follow the empty-vector early return"
         )
 
     def test_spreading_marked_inside_its_own_branch(self):
