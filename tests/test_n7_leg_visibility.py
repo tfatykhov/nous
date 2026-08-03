@@ -129,6 +129,18 @@ class TestPipelineReportsAttemptedLegs:
             "the fallback must be gated on an expandable decision"
         )
 
+        # Keyed: a query with no entity candidates never reaches the fetch.
+        m = src.index('attempted_legs.add("keyed")')
+        assert "if candidates:" in src[m - 400: m], (
+            "keyed must be gated on extracted candidates"
+        )
+
+        # Exemplar: empty exemplar store, or no query vector, means no fetch.
+        e = src.index('attempted_legs.add("exemplar")')
+        assert "if q_vec:" in src[e - 400: e], (
+            "exemplar must be gated on has_exemplars() AND a query vector"
+        )
+
     def test_spreading_marked_inside_its_own_branch(self):
         """Marked under `if use_spreading`, NOT alongside the fallback.
 

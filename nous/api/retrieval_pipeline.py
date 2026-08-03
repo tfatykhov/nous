@@ -765,11 +765,15 @@ async def _run_stages(
     if getattr(settings, "keyed_fact_leg_enabled", False) and (
         search_all or "fact" in search_types
     ):
-        acc.attempted_legs.add("keyed")
         try:
             vocab = await heart.facts.entity_key_vocabulary()
             candidates = extract_entity_candidates(query, vocab=vocab)
             if candidates:
+                # Marked here, not at the block: a query yielding no entity
+                # candidates never reaches the fetch, and reporting it as a
+                # keyed leg that ran and found nothing is the same false
+                # attribution corrected for the graph seed loops.
+                acc.attempted_legs.add("keyed")
                 acc.keyed_leg_used = True
                 acc.keyed_results = await heart.facts.fetch_by_entity_keys(
                     candidates, limit=getattr(settings, "keyed_fact_leg_k", 8)
@@ -940,7 +944,6 @@ async def _run_stages(
         and (search_all or "fact" in search_types)
         and _is_classification_shaped(query, getattr(settings, "exemplar_max_query_words", 64))
     ):
-        acc.attempted_legs.add("exemplar")
         try:
             if await heart.facts.has_exemplars():
                 acc.exemplar_leg_used = True
@@ -950,6 +953,10 @@ async def _run_stages(
                 embedder = getattr(heart, "_embeddings", None)
                 q_vec = (await embedder.embed(query)) if embedder is not None else None
                 if q_vec:
+                    # Marked only once BOTH gates pass (a non-empty exemplar
+                    # store and a usable query vector); either failing means
+                    # no fetch is issued, so the leg was not attempted.
+                    acc.attempted_legs.add("exemplar")
                     # Codex r8: exclude the F071 already-in-context fact set from
                     # the fetch so ids the assembly-time F071 filter will drop do
                     # NOT spend the K budget (which would starve fresh
