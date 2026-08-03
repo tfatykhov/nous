@@ -211,11 +211,18 @@ def render_markdown(
     gate_decision: GateDecision | None = None,
     notes: str = "",
     config_names_requested: list[str] | None = None,
+    top_k: int = 10,
 ) -> str:
     """Render the markdown report.
 
     Layout follows F051 spec §8: header, gate aggregate table, per-source
     breakdown, per-reasoning-type directional table.
+
+    ``top_k`` is the depth the matrix actually scored at (``EvalSettings.top_k``,
+    overridable via ``--top-k``). It is the cutline the N7 leg-visibility table
+    judges against — defaulting it to 10 when the run scored at 20 would report
+    a leg with median rank 15 as invisible even though the experiment measured
+    it, turning a real null into a false "inconclusive".
     """
     ts = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
     lines: list[str] = []
@@ -271,7 +278,7 @@ def render_markdown(
     lines.append("")
     lines.append(_recall_curve_table(run_results))
     lines.append("")
-    _leg_table = _leg_visibility_table(run_results)
+    _leg_table = _leg_visibility_table(run_results, top_k)
     if _leg_table:
         lines.append(_leg_table)
         lines.append("")
@@ -329,15 +336,17 @@ def _recall_curve_table(run_results: list["RunResult"]) -> str:
     return header + "\n" + "\n".join(rows)
 
 
-def _leg_visibility_table(run_results: list["RunResult"]) -> str:
+def _leg_visibility_table(run_results: list["RunResult"], top_k: int = 10) -> str:
     """N7: which legs band below the scoring cutline.
 
     A leg marked NOT VISIBLE cannot be observed at the depth this run
     scores at, so a null for it is inconclusive rather than negative.
+    ``top_k`` MUST be the depth the matrix scored at, not a default —
+    the verdict inverts with it.
     """
     lines = []
     for r in run_results:
-        vis = leg_visibility(r.per_qrel)
+        vis = leg_visibility(r.per_qrel, cutoff=top_k)
         if not vis:
             continue
         lines.append(f"\n**{r.config.name}**\n")
@@ -392,11 +401,16 @@ def render_json(
     fixture_version: str = "",
     gate_decision: GateDecision | None = None,
     notes: str = "",
+    top_k: int = 10,
 ) -> str:
     """Render the full per-qrel per-config grid as a JSON string.
 
     This is the structure persisted to ``nous_system.eval_runs.metrics``
     for historical regression analysis.
+
+    ``top_k`` is recorded so the artifact self-describes the depth it was
+    scored at — a later consumer cannot judge a null without knowing which
+    legs were reachable at that depth (N7).
     """
     payload: dict = {
         "version": 1,
@@ -404,6 +418,7 @@ def render_json(
         "git_sha": git_sha,
         "fixture_version": fixture_version,
         "notes": notes,
+        "top_k": top_k,
         "sources": [
             {
                 "name": s.spec.name,
@@ -422,6 +437,21 @@ def render_json(
                 "duration_seconds": r.duration_seconds,
                 "pipeline_stats_summary": r.pipeline_stats_summary,
                 "metrics": _metrics_to_dict(compute_metrics(r.per_qrel)),
+                # N7/codex-P2: persist the visibility analysis. Without it the
+                # only copy lived in the ephemeral markdown, so historical
+                # eval_runs analysis could not tell whether a reported null
+                # came from a leg banded below the cutoff.
+                "leg_visibility": [
+                    {
+                        "leg": v.leg,
+                        "n_rows": v.n_rows,
+                        "median_rank": v.median_rank,
+                        "best_rank": v.best_rank,
+                        "cutoff": v.cutoff,
+                        "visible": v.visible,
+                    }
+                    for v in leg_visibility(r.per_qrel, cutoff=top_k)
+                ],
                 "per_qrel": [
                     {
                         "index": q.qrel_index,
@@ -430,10 +460,16 @@ def render_json(
                         "gold_ids": [str(g) for g in q.gold_ids],
                         "retrieved_ids": [str(rid) for rid in q.retrieved_ids],
                         "retrieved_types": q.retrieved_types,
+                        # N7/codex-P2: aligned 1:1 with retrieved_ids, so a
+                        # consumer can recompute leg visibility at any depth.
+                        "retrieved_legs": q.retrieved_legs,
                         "rank_of_first_gold": q.rank_of_first_gold,
                         "n_gold_in_top_k": q.n_gold_in_top_k,
                         "n_gold_total": q.n_gold_total,
                         "error": q.error,
+                        # N1/codex-P1: non-empty means these metrics are based
+                        # on a PARTIAL retrieval (e.g. the fact leg crashed).
+                        "stage_errors": q.stage_errors,
                     }
                     for q in r.per_qrel
                 ],

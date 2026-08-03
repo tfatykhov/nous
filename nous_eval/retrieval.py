@@ -943,6 +943,9 @@ async def _run_async(
         gate_decision=gate_decision,
         notes=args.notes,
         config_names_requested=[c.name for c in configs],
+        # N7: the depth the matrix actually scored at — the leg-visibility
+        # cutline must match it, or --top-k runs mislabel measured legs.
+        top_k=eval_settings.top_k,
     )
     js = render_json(
         run_results=run_results,
@@ -951,6 +954,7 @@ async def _run_async(
         fixture_version=fixture_version,
         gate_decision=gate_decision,
         notes=args.notes,
+        top_k=eval_settings.top_k,
     )
     md_path, json_path = write_reports(
         report_dir=eval_settings.report_dir,

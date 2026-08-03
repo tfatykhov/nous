@@ -14,7 +14,8 @@ against ``be6361e`` before implementation:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
@@ -343,6 +344,16 @@ def _qrel_result(retrieved, gold, legs=None, error=None):
     )
 
 
+def _run_result(per_qrel, name="baseline"):
+    from nous_eval.retrieval_runner import RetrievalConfig, RunResult
+
+    return RunResult(
+        config=RetrievalConfig(name=name),
+        per_qrel=list(per_qrel),
+        duration_seconds=1.0,
+    )
+
+
 class TestN7ServedWindow:
     """Production does not truncate — the metric must not either."""
 
@@ -482,6 +493,110 @@ class TestN7LegLabelling:
 
         r = PipelineResult(id=uuid4(), type="chunk", description="x", score=0.5)
         assert _leg_of(r) == "chunk"
+
+
+# ---------------------------------------------------------------------------
+# Codex round 1 — the instrumentation must reach its consumers
+# ---------------------------------------------------------------------------
+
+
+class TestCodexP1StageErrorsReachTheReport:
+    """N1's counters were computed, then discarded by the eval runner."""
+
+    def test_qrel_result_carries_stage_errors(self):
+        from nous_eval.retrieval_runner import QrelResult
+
+        q = _qrel_result([uuid4()], [])
+        assert q.stage_errors == {}, "defaults to empty, never None"
+
+    def test_run_matrix_sums_integer_counters_and_counts_booleans(self):
+        """bool is a subclass of int — the aggregation must not conflate them."""
+        stats_totals: dict[str, int] = {}
+        # Two qrels: booleans count occurrences, error counters accumulate.
+        for flags in (
+            {"graph_expansion_used": True, "stage_error_heart_recall_fact": 1},
+            {"graph_expansion_used": True, "stage_error_heart_recall_fact": 3},
+        ):
+            for k, v in flags.items():
+                if isinstance(v, bool):
+                    if v:
+                        stats_totals[k] = stats_totals.get(k, 0) + 1
+                else:
+                    stats_totals[k] = stats_totals.get(k, 0) + int(v)
+
+        assert stats_totals["graph_expansion_used"] == 2, "booleans count qrels"
+        assert stats_totals["stage_error_heart_recall_fact"] == 4, (
+            "integer counters sum; counting them as 1 each would understate "
+            "how much of the run was partial"
+        )
+
+    def test_stage_errors_serialized_per_qrel(self):
+        from nous_eval.report import render_json
+
+        q = _qrel_result([uuid4()], [])
+        q = replace(q, stage_errors={"heart_recall_fact": 1})
+        payload = json.loads(render_json([_run_result([q])], []))
+
+        assert payload["configs"][0]["per_qrel"][0]["stage_errors"] == {
+            "heart_recall_fact": 1
+        }, "a crashed leg must be visible in the persisted artifact"
+
+
+class TestCodexP1CutoffThreading:
+    """The visibility verdict inverts with the cutoff — it must be threaded."""
+
+    def test_report_uses_the_configured_top_k_not_the_default(self):
+        from nous_eval.report import render_markdown
+
+        legs = ["heart_primary"] * 10 + ["keyed"] * 10
+        ids = [uuid4() for _ in legs]
+        rr = _run_result([_qrel_result(ids, [], legs)])
+
+        at_10 = render_markdown([rr], [], top_k=10)
+        at_30 = render_markdown([rr], [], top_k=30)
+
+        assert "visible@10" in at_10
+        assert "visible@30" in at_30, (
+            "a run scored at k=30 must judge legs at 30 — judging at the "
+            "default 10 turns a measured null into a false 'inconclusive'"
+        )
+
+    def test_json_records_the_scoring_depth(self):
+        from nous_eval.report import render_json
+
+        payload = json.loads(
+            render_json([_run_result([_qrel_result([uuid4()], [])])], [], top_k=25)
+        )
+        assert payload["top_k"] == 25, "the artifact must self-describe its depth"
+
+
+class TestCodexP2LegProvenanceSerialized:
+    """The only copy of the analysis was the ephemeral markdown."""
+
+    def test_retrieved_legs_serialized_and_aligned(self):
+        from nous_eval.report import render_json
+
+        legs = ["heart_primary", "chunk", "keyed"]
+        ids = [uuid4() for _ in legs]
+        payload = json.loads(render_json([_run_result([_qrel_result(ids, [], legs)])], []))
+
+        pq = payload["configs"][0]["per_qrel"][0]
+        assert pq["retrieved_legs"] == legs
+        assert len(pq["retrieved_legs"]) == len(pq["retrieved_ids"]), (
+            "legs must stay 1:1 with ids so visibility is recomputable"
+        )
+
+    def test_leg_visibility_rows_serialized(self):
+        from nous_eval.report import render_json
+
+        legs = ["heart_primary"] * 10 + ["keyed"] * 10
+        ids = [uuid4() for _ in legs]
+        payload = json.loads(render_json([_run_result([_qrel_result(ids, [], legs)])], []))
+
+        vis = {v["leg"]: v for v in payload["configs"][0]["leg_visibility"]}
+        assert vis["keyed"]["visible"] is False
+        assert vis["heart_primary"]["visible"] is True
+        assert vis["keyed"]["cutoff"] == 10
 
 
 # ---------------------------------------------------------------------------

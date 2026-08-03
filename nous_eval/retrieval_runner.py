@@ -124,6 +124,14 @@ class QrelResult:
     error: str | None = None
     gold_ids: list[UUID] = field(default_factory=list)
     retrieved_legs: list[str] = field(default_factory=list)
+    # N1/codex-P1: per-stage failure counts from PipelineStats.n_stage_errors,
+    # including Heart's per-leg failures ("heart_recall_fact" etc). A non-empty
+    # dict means this qrel's metrics are based on a PARTIAL retrieval — the
+    # numbers still look plausible, which is exactly the schema-lag scenario
+    # the N1 instrumentation exists to expose. Kept per-qrel (rather than
+    # setting ``error``) so the run is not silently dropped from aggregates:
+    # the failure is reported, not hidden and not zero-scored.
+    stage_errors: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -213,8 +221,15 @@ async def run_matrix(
                     )
                     per_qrel.append(qr)
                     for k, v in ran_flags.items():
-                        if v:
-                            stats_totals[k] = stats_totals.get(k, 0) + 1
+                        # bool is a subclass of int — check it FIRST, or the
+                        # stage flags would be summed as 1/0 instead of
+                        # counted as occurrences. Booleans count qrels;
+                        # integer stage-error counters accumulate.
+                        if isinstance(v, bool):
+                            if v:
+                                stats_totals[k] = stats_totals.get(k, 0) + 1
+                        else:
+                            stats_totals[k] = stats_totals.get(k, 0) + int(v)
                 duration = time.monotonic() - t0
                 results.append(
                     RunResult(
@@ -591,11 +606,20 @@ async def _run_one(
             n_gold_in_top_k=n_in_top,
             n_gold_total=len(qrel.gold_ids),
             error=None,
+            stage_errors=dict(stats.n_stage_errors),
         ),
         {
             "graph_expansion_used": stats.graph_expansion_used,
             "spreading_activation_used": stats.spreading_activation_used,
             "contradiction_checks_ran": stats.contradiction_checks_ran,
+            # N1/codex-P1: integer counters, summed (not counted) by the
+            # caller. Without these, run_matrix discarded every stage failure
+            # and the report showed plausible metrics with no sign that a leg
+            # had crashed.
+            **{
+                f"stage_error_{k}": v
+                for k, v in stats.n_stage_errors.items()
+            },
         },
     )
 
