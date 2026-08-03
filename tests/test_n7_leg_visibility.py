@@ -1,0 +1,369 @@
+"""N7 follow-up — leg visibility from pipeline-reported attempted legs.
+
+The predecessor derived "which legs ran" from config flags inside the eval
+harness. That reproduced pipeline control flow in a second place and could
+not be correct: the one-hop graph fallback is SKIPPED when spreading
+activation succeeds, which is decided at runtime. Four review rounds each
+tightened the flag model and each time a producer or branch escaped it.
+
+Here the pipeline reports what it entered (``PipelineStats.attempted_legs``,
+marked at each stage's entry BEFORE its work) and the harness consumes that.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+from unittest.mock import MagicMock
+from uuid import uuid4
+
+import pytest
+
+
+def _qrel(retrieved, gold, legs=None, error=None, attempted=()):
+    from nous_eval.retrieval_runner import QrelResult
+
+    return QrelResult(
+        qrel_index=0,
+        qrel_query="q",
+        qrel_source="hand",
+        retrieved_ids=list(retrieved),
+        retrieved_types=["fact"] * len(retrieved),
+        retrieved_legs=list(legs or []),
+        attempted_legs=frozenset(attempted),
+        rank_of_first_gold=None,
+        n_gold_in_top_k=0,
+        n_gold_total=len(gold),
+        gold_ids=list(gold),
+        error=error,
+    )
+
+
+def _run(per_qrel, name="baseline", attempted=()):
+    from nous_eval.retrieval_runner import RetrievalConfig, RunResult
+
+    return RunResult(
+        config=RetrievalConfig(name=name),
+        per_qrel=list(per_qrel),
+        duration_seconds=1.0,
+        attempted_legs=list(attempted),
+    )
+
+
+# ---------------------------------------------------------------------------
+# The pipeline reports its own attempted legs
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineReportsAttemptedLegs:
+    def test_stats_exposes_attempted_legs(self):
+        from nous.api.retrieval_pipeline import PipelineStats
+
+        assert PipelineStats().attempted_legs == frozenset()
+
+    def test_every_leg_is_marked_at_a_stage_entry(self):
+        """Each label _leg_of can emit must have a producer-side mark."""
+        import inspect
+
+        from nous.api import retrieval_pipeline
+
+        src = inspect.getsource(retrieval_pipeline)
+        for leg in (
+            "heart_primary", "keyed", "keyed_r2", "exemplar",
+            "brain", "heart_graph", "heart_graph_memory",
+            "spreading_activation", "brain_graph",
+        ):
+            assert f'attempted_legs.add("{leg}")' in src, (
+                f"{leg} can be produced but is never marked as attempted, so "
+                "a run where it emits nothing would drop out of the report"
+            )
+        # chunk is marked INSIDE _search_episode_chunks via the `attempted`
+        # sink — the caller cannot know whether the vector path returned
+        # early on a missing embedder.
+        assert 'attempted.add("chunk")' in src
+        assert "attempted=acc.attempted_legs," in src
+
+    def test_fallback_marks_both_labels_it_can_emit(self):
+        """The 1-hop fallback yields brain_graph AND heart_graph_memory rows.
+
+        Codex round 8 found the flag-derived model missed this: Stage 4's
+        untyped neighbours include non-decision nodes, which
+        _graph_expanded_to_pipeline tags heart_graph_memory.
+        """
+        import inspect
+
+        from nous.api import retrieval_pipeline
+
+        src = inspect.getsource(retrieval_pipeline)
+        idx = src.index("if not use_spreading:")
+        # Window must reach past the explanatory comment block to the marks.
+        window = src[idx: idx + 1400]
+        assert 'attempted_legs.add("brain_graph")' in window
+        assert 'attempted_legs.add("heart_graph_memory")' in window
+
+    def test_markers_require_seeds_not_just_block_entry(self):
+        """Entering a stage's `if` is not the same as doing its work.
+
+        Each of these blocks is reachable in a configuration where its work
+        loop iterates an empty seed list and issues no neighbour query.
+        Marking at block entry would report the leg as attempted-and-silent
+        on exactly those runs — the false attribution this whole mechanism
+        exists to prevent.
+        """
+        import inspect
+
+        from nous.api import retrieval_pipeline
+
+        src = inspect.getsource(retrieval_pipeline)
+
+        # Stage 2: chunk-only retrieval enters the block with no heart seed.
+        i = src.index('attempted_legs.add("heart_graph")')
+        assert 'any(hr.type in ("fact", "episode")' in src[i - 400: i], (
+            "heart_graph must be gated on a fact/episode seed existing"
+        )
+
+        # Stage 2b: procedure/censor scope yields no Path-A seeds.
+        j = src.index('attempted_legs.add("heart_graph_memory")')
+        assert "if mem_seeds:" in src[j - 200: j], (
+            "heart_graph_memory must be gated on non-empty mem_seeds"
+        )
+
+        # Stage 4 fallback: fact-only retrieval reaches it with no decisions.
+        k = src.index('attempted_legs.add("brain_graph")')
+        assert "d.score is not None" in src[k - 400: k], (
+            "the fallback must be gated on an expandable decision"
+        )
+
+        # Keyed: a query with no entity candidates never reaches the fetch.
+        m = src.index('attempted_legs.add("keyed")')
+        assert "if candidates:" in src[m - 400: m], (
+            "keyed must be gated on extracted candidates"
+        )
+
+        # Exemplar: empty exemplar store, or no query vector, means no fetch.
+        e = src.index('attempted_legs.add("exemplar")')
+        assert "if q_vec:" in src[e - 400: e], (
+            "exemplar must be gated on has_exemplars() AND a query vector"
+        )
+
+        # Spreading: graph_recall_max_expand=0 with no heart fact seeds
+        # builds an empty seed list, and the CTE is never issued.
+        s = src.index('attempted_legs.add("spreading_activation")')
+        assert "if seeds:" in src[s - 200: s], (
+            "spreading must be gated on non-empty seeds"
+        )
+
+    def test_chunk_marked_only_where_it_queries(self):
+        """The vector path returns early with no embedder / empty vector."""
+        import inspect
+
+        from nous.api import retrieval_pipeline
+
+        src = inspect.getsource(retrieval_pipeline._search_episode_chunks)
+        # Both marks must sit AFTER the two early returns.
+        early = src.index("if not query_vec:")
+        marks = [
+            i for i in range(len(src))
+            if src.startswith('attempted.add("chunk")', i)
+        ]
+        assert len(marks) == 2, "one mark per query path (hybrid, vector)"
+        assert any(m > early for m in marks), (
+            "the vector-path mark must follow the empty-vector early return"
+        )
+
+    def test_spreading_marked_inside_its_own_branch(self):
+        """Marked under `if use_spreading`, NOT alongside the fallback.
+
+        These are mutually exclusive at runtime — the distinction the flag
+        model could not represent.
+        """
+        import inspect
+
+        from nous.api import retrieval_pipeline
+
+        src = inspect.getsource(retrieval_pipeline)
+        taken = src.index("if use_spreading:")
+        fallback = src.index("if not use_spreading:")
+        mark = src.index('attempted_legs.add("spreading_activation")')
+        assert taken < mark < fallback, (
+            "spreading must be marked in the branch that actually ran"
+        )
+
+
+# ---------------------------------------------------------------------------
+# leg_visibility consumes it
+# ---------------------------------------------------------------------------
+
+
+class TestVisibilityUsesAttemptedLegs:
+    def test_attempted_but_silent_leg_is_reported(self):
+        from nous_eval.metrics import leg_visibility
+
+        qs = [_qrel([uuid4()], [], ["heart_primary"]) for _ in range(5)]
+        vis = {
+            v.leg: v
+            for v in leg_visibility(qs, attempted_legs=["heart_primary", "keyed"])
+        }
+
+        assert "keyed" in vis, (
+            "a leg the pipeline ENTERED that emitted nothing is the most "
+            "extreme unobserved case — omitting its row hides the warning "
+            "exactly when it matters most"
+        )
+        assert vis["keyed"].n_rows == 0
+        assert vis["keyed"].participation_rate == 0.0
+        assert vis["keyed"].visible is False
+
+    def test_leg_never_attempted_is_not_invented(self):
+        """A disabled arm must NOT be reported as enabled-but-silent."""
+        from nous_eval.metrics import leg_visibility
+
+        qs = [_qrel([uuid4()], [], ["heart_primary"])]
+        legs = {v.leg for v in leg_visibility(qs, attempted_legs=["heart_primary"])}
+        assert "spreading_activation" not in legs
+
+    def test_silent_leg_does_not_crash_on_empty_ranks(self):
+        from nous_eval.metrics import leg_visibility
+
+        vis = {v.leg: v for v in leg_visibility([], attempted_legs=["keyed"])}
+        assert vis["keyed"].median_rank == 0.0
+        assert vis["keyed"].best_rank == 0
+        assert vis["keyed"].n_qrels_evaluated == 0
+
+    def test_head_and_tail_leg_is_visible(self):
+        """A leg's own tail must not hide its head (pooled-median trap)."""
+        from nous_eval.metrics import leg_visibility
+
+        legs = ["chunk"] + ["heart_primary"] * 18 + ["chunk"] * 11
+        ids = [uuid4() for _ in legs]
+        vis = {v.leg: v for v in leg_visibility([_qrel(ids, [], legs)])}
+
+        assert vis["chunk"].median_rank > 10
+        assert vis["chunk"].visible is True
+        assert vis["chunk"].participation_rate == 1.0
+
+    def test_sparse_leg_denominator_is_all_qrels(self):
+        """1-of-10 must read 0.10, not 1.00 (emission-conditioned trap)."""
+        from nous_eval.metrics import leg_visibility
+
+        qs = [
+            _qrel([uuid4()], [], ["keyed"]),
+            *[_qrel([uuid4()], [], ["heart_primary"]) for _ in range(9)],
+        ]
+        vis = {v.leg: v for v in leg_visibility(qs)}
+        assert vis["keyed"].n_qrels_evaluated == 10
+        assert vis["keyed"].participation_rate == pytest.approx(0.1)
+
+    def test_cutoff_inverts_the_verdict(self):
+        from nous_eval.metrics import leg_visibility
+
+        legs = ["heart_primary"] * 10 + ["keyed"] * 10
+        ids = [uuid4() for _ in legs]
+        q = _qrel(ids, [], legs)
+
+        at10 = {v.leg: v.visible for v in leg_visibility([q], cutoff=10)}
+        at30 = {v.leg: v.visible for v in leg_visibility([q], cutoff=30)}
+        assert at10["keyed"] is False
+        assert at30["keyed"] is True
+
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+
+
+class TestReporting:
+    def test_markdown_flags_silent_legs(self):
+        from nous_eval.report import render_markdown
+
+        rr = _run(
+            [_qrel([uuid4()], [], ["heart_primary"])],
+            attempted=["heart_primary", "exemplar"],
+        )
+        md = render_markdown([rr], [])
+        assert "exemplar *(silent)*" in md
+        assert "emitted zero rows" in md
+
+    def test_markdown_uses_configured_cutoff(self):
+        from nous_eval.report import render_markdown
+
+        rr = _run(
+            [_qrel([uuid4()], [], ["heart_primary"])], attempted=["heart_primary"]
+        )
+        assert "observed@30" in render_markdown([rr], [], top_k=30)
+
+    def test_json_persists_visibility_and_attempted(self):
+        from nous_eval.report import render_json
+
+        legs = ["heart_primary"] * 10 + ["keyed"] * 10
+        ids = [uuid4() for _ in legs]
+        rr = _run(
+            [_qrel(ids, [], legs)], attempted=["heart_primary", "keyed", "exemplar"]
+        )
+        cfg = json.loads(render_json([rr], []))["configs"][0]
+
+        assert cfg["attempted_legs"] == ["heart_primary", "keyed", "exemplar"]
+        vis = {v["leg"]: v for v in cfg["leg_visibility"]}
+        assert vis["keyed"]["visible"] is False
+        assert vis["exemplar"]["n_rows"] == 0, "silent leg persisted too"
+
+    def test_per_qrel_attempted_legs_serialized(self):
+        """The config-wide union cannot substitute for per-qrel detail."""
+        from nous_eval.report import render_json
+
+        qs = [
+            _qrel([uuid4()], [], ["heart_primary"], attempted=["spreading_activation"]),
+            _qrel([uuid4()], [], ["heart_primary"], attempted=["brain_graph"]),
+        ]
+        rr = _run(qs, attempted=["spreading_activation", "brain_graph"])
+        pq = json.loads(render_json([rr], []))["configs"][0]["per_qrel"]
+
+        assert pq[0]["attempted_legs"] == ["spreading_activation"]
+        assert pq[1]["attempted_legs"] == ["brain_graph"], (
+            "without this an archived consumer filtering to one source sees "
+            "the union and cannot tell a leg was never attempted there"
+        )
+
+    def test_filtered_subset_does_not_inherit_other_sources_legs(self):
+        """A source-filtered call must not seed another source's legs."""
+        from nous_eval.metrics import leg_visibility
+
+        spread_q = _qrel(
+            [uuid4()], [], ["heart_primary"], attempted=["spreading_activation"]
+        )
+        fallback_q = _qrel(
+            [uuid4()], [], ["heart_primary"], attempted=["brain_graph"]
+        )
+
+        # Derived from the qrels passed in, not a config-wide union.
+        only_fallback = {v.leg for v in leg_visibility([fallback_q])}
+        assert "brain_graph" in only_fallback
+        assert "spreading_activation" not in only_fallback, (
+            "spreading was never attempted for this subset — reporting it "
+            "as silent-but-attempted misattributes the runtime branch"
+        )
+
+        both = {v.leg for v in leg_visibility([spread_q, fallback_q])}
+        assert {"spreading_activation", "brain_graph"} <= both
+
+    def test_explicit_attempted_still_wins(self):
+        """Callers can widen beyond the given qrels when they mean to."""
+        from nous_eval.metrics import leg_visibility
+
+        q = _qrel([uuid4()], [], ["heart_primary"], attempted=["heart_primary"])
+        legs = {v.leg for v in leg_visibility([q], attempted_legs=["exemplar"])}
+        assert "exemplar" in legs
+
+    def test_eval_runs_payload_carries_it(self):
+        from nous_eval.retrieval import _metrics_compact
+
+        rr = _run(
+            [_qrel([uuid4()], [], ["heart_primary"])],
+            attempted=["heart_primary", "keyed"],
+        )
+        payload = _metrics_compact(rr, top_k=20)
+        assert payload["attempted_legs"] == ["heart_primary", "keyed"]
+        assert {v["leg"] for v in payload["leg_visibility"]} == {
+            "heart_primary", "keyed",
+        }
+        assert payload["leg_visibility"][0]["cutoff"] == 20

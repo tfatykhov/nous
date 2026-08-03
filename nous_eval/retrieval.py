@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 
 from nous.config import Settings
 from nous_eval.config import EvalSettings
-from nous_eval.metrics import compute_metrics
+from nous_eval.metrics import compute_metrics, leg_visibility
 from nous_eval.qrels_loader import QrelSource, load_qrels
 from nous_eval.report import (
     decide_gate_f050,
@@ -1068,6 +1068,27 @@ def _metrics_compact(run: "RunResult", top_k: int = 10) -> dict:
         "top_k": top_k,
         "recall_curve": {str(k): v for k, v in sorted(m.recall_curve.items())},
         "n_qrels_partial": sum(1 for q in run.per_qrel if q.stage_errors),
+        # N7 follow-up: this payload is built INDEPENDENTLY of the JSON
+        # report file, so it needs its own copy — the report file is not
+        # guaranteed to still exist when a regression analysis runs.
+        "attempted_legs": list(run.attempted_legs),
+        "leg_visibility": [
+            {
+                "leg": v.leg,
+                "n_rows": v.n_rows,
+                "n_qrels_evaluated": v.n_qrels_evaluated,
+                "n_qrels_present": v.n_qrels_present,
+                "n_qrels_within_cutoff": v.n_qrels_within_cutoff,
+                "participation_rate": v.participation_rate,
+                "median_rank": v.median_rank,
+                "best_rank": v.best_rank,
+                "cutoff": v.cutoff,
+                "visible": v.visible,
+            }
+            for v in leg_visibility(
+                run.per_qrel, cutoff=top_k, attempted_legs=run.attempted_legs,
+            )
+        ],
     }
 
 

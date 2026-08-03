@@ -16,8 +16,9 @@ explicitly, so callers can branch on it if they need to.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from statistics import mean
+from statistics import mean, median
 
 from nous_eval.retrieval_runner import QrelResult
 
@@ -47,11 +48,11 @@ class MetricsResult:
     different denominator.
 
     A true ``recall@served`` — scored over the rows the formatter actually
-    RENDERS, i.e. what the model receives — is deliberately NOT here. Two
-    attempts at deriving that in the harness both overstated it, because
-    doing so means re-implementing the formatter's section-eligibility
-    rules in a second place. It lands in the follow-up (PR #583) alongside
-    the leg-visibility work, once the formatter reports the IDs it rendered.
+    RENDERS — is still not here. Two attempts at deriving it in the harness
+    both overstated it, because doing so means re-implementing the
+    formatter's section-eligibility rules in a second place. Landing it
+    correctly needs the formatter to report the IDs it emitted, which is a
+    separate change from this one; see the note on ``leg_visibility``.
     """
 
     mrr: float
@@ -284,6 +285,142 @@ def compute_delta(
         n_pairs=n_pairs,
     )
 
+
+
+# ---------------------------------------------------------------------------
+# N7 follow-up: leg visibility
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LegVisibility:
+    """Whether the scoring window actually observed one retrieval leg.
+
+    The load-bearing field is ``participation_rate``: of ALL valid qrels in
+    the run, the fraction where this leg placed at least one row within
+    ``cutoff``. That answers the operator's real question — "how much of the
+    experiment could this leg have influenced?" — which neither a pooled
+    median nor an emission-conditioned ratio answers.
+
+    Two denominators were tried and rejected. A median over every row lets a
+    leg's own long tail hide its head: a leg emitting rank 1 plus a tail at
+    20-30 on every qrel scores on every query while its median sits below
+    the cutline. Dividing by the qrels where the leg happened to emit is the
+    opposite error: a leg reaching the cutoff on 1 qrel of 100 reads 1.00,
+    "fully observed", while touching 1% of the run. The denominator is
+    ``n_qrels_evaluated``; ``n_qrels_present`` is kept beside it so emission
+    coverage and in-window coverage stay separately legible.
+
+    ``visible`` is True when the leg reached the window on at least one
+    qrel. Read it WITH ``participation_rate`` — a leg at 0.03 was
+    technically observed but a null for it is still uninformative.
+    ``median_rank`` / ``best_rank`` are diagnostics only.
+    """
+
+    leg: str
+    n_rows: int
+    n_qrels_evaluated: int
+    n_qrels_present: int
+    n_qrels_within_cutoff: int
+    participation_rate: float
+    median_rank: float
+    best_rank: int
+    cutoff: int
+    visible: bool
+
+
+def leg_visibility(
+    per_qrel: list[QrelResult],
+    cutoff: int = 10,
+    attempted_legs: "Iterable[str] | None" = None,
+) -> list[LegVisibility]:
+    """Report which legs the scoring window actually observed.
+
+    ``cutoff`` must be the depth the run scored at (``EvalSettings.top_k``);
+    the verdict inverts with it, so a caller that lets it default while
+    scoring at 30 turns a measured leg into a false "inconclusive".
+
+    ``attempted_legs`` comes from ``PipelineStats.attempted_legs`` — the
+    PIPELINE's own report of which legs it entered. When omitted it is
+    derived from the union of ``QrelResult.attempted_legs`` over the qrels
+    ACTUALLY PASSED IN, which is what a filtered call needs: if spreading
+    ran for source A while source B took the one-hop fallback, a
+    config-wide union would seed ``spreading_activation`` into source B's
+    report and misreport it as silent-but-attempted. Pass an explicit set
+    only to widen beyond the given qrels. It matters for correctness, not
+    convenience: a leg that
+    emitted zero rows on every qrel appears nowhere in ``retrieved_legs``,
+    so without it the most extreme case of an unobserved arm is omitted from
+    this report entirely — silently, and precisely when the warning matters
+    most. Legs named here but never seen are emitted with ``n_rows=0`` and
+    ``participation_rate=0.0`` so absence is stated rather than implied.
+
+    An earlier version derived that set from config flags instead. That
+    cannot be correct: the one-hop fallback is skipped when spreading
+    activation succeeds, which is decided at runtime, so no combination of
+    flags predicts it. Deriving a producer's control flow inside a consumer
+    reproduced the pipeline's branching in a second place and was wrong a
+    different way each time it was patched.
+
+    Ranks are 1-based positions in the served block. Visibility is computed
+    PER QREL — a leg counts as observed on a qrel when any of its rows lands
+    at rank <= cutoff — then aggregated. Returns one row per leg, least
+    observed first.
+    """
+    ranks_by_leg: dict[str, list[int]] = {}
+    present: dict[str, int] = {}
+    within: dict[str, int] = {}
+    n_evaluated = 0
+
+    for q in per_qrel:
+        if q.error is not None:
+            continue
+        n_evaluated += 1
+        best_in_qrel: dict[str, int] = {}
+        for pos, leg in enumerate(q.retrieved_legs, start=1):
+            ranks_by_leg.setdefault(leg, []).append(pos)
+            if leg not in best_in_qrel or pos < best_in_qrel[leg]:
+                best_in_qrel[leg] = pos
+        for leg, best in best_in_qrel.items():
+            present[leg] = present.get(leg, 0) + 1
+            if best <= cutoff:
+                within[leg] = within.get(leg, 0) + 1
+
+    # Seed attempted-but-silent legs so zero emission is REPORTED, not
+    # omitted. Default to the union over the qrels PASSED IN so a
+    # source-filtered call never inherits a leg another source attempted.
+    if attempted_legs is None:
+        attempted_legs = {
+            leg
+            for q in per_qrel
+            if q.error is None
+            for leg in q.attempted_legs
+        }
+    for leg in attempted_legs:
+        ranks_by_leg.setdefault(leg, [])
+
+    out = []
+    for leg, ranks in ranks_by_leg.items():
+        n_within = within.get(leg, 0)
+        out.append(
+            LegVisibility(
+                leg=leg,
+                n_rows=len(ranks),
+                n_qrels_evaluated=n_evaluated,
+                n_qrels_present=present.get(leg, 0),
+                n_qrels_within_cutoff=n_within,
+                participation_rate=(n_within / n_evaluated) if n_evaluated else 0.0,
+                # A silent leg has no ranks; report sentinels rather than
+                # raising on median([]) / min([]).
+                median_rank=float(median(ranks)) if ranks else 0.0,
+                best_rank=min(ranks) if ranks else 0,
+                cutoff=cutoff,
+                visible=n_within > 0,
+            )
+        )
+    # Least-observed first; median as a stable tiebreak (deepest first).
+    out.sort(key=lambda v: (v.participation_rate, -v.median_rank))
+    return out
 
 
 # ---------------------------------------------------------------------------

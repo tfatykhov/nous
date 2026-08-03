@@ -170,6 +170,13 @@ class PipelineStats:
     # exclusion set was passed. Surfaced in recall_deep INFO log so the
     # duplication-tax measurement is grep-able from prod.
     excluded_in_context: int = 0
+    # N7 follow-up: legs this call ATTEMPTED, marked at each stage's entry
+    # before its work ran — so a leg that executed and produced nothing is
+    # still named. Lets a consumer distinguish "this leg was never run" from
+    # "it ran and returned nothing" — which no set of config flags can
+    # answer, since the one-hop fallback is skipped when spreading succeeds
+    # and that is decided at runtime.
+    attempted_legs: frozenset[str] = frozenset()
     # F080: True iff coherent ranking was active for this call (censors +
     # procedures excluded from the ranked pool). Observability only — not
     # formatted into recall_deep text, so it does not affect the snapshot.
@@ -315,6 +322,14 @@ class _PipelineAccumulator:
     # Per-stage error counter — incremented when a try/except around a stage
     # call catches an exception. Surfaced via PipelineStats.n_stage_errors.
     stage_errors: dict[str, int] = field(default_factory=dict)
+
+    # N7 follow-up: legs this call ATTEMPTED, marked at each stage's entry
+    # BEFORE its work runs — so a leg that ran and produced nothing is still
+    # named. Consumers (the eval harness) previously re-derived this from
+    # config flags, which cannot be correct: whether the one-hop fallback
+    # runs depends on whether spreading succeeded at RUNTIME, and no
+    # combination of flags predicts that. The producer reports it instead.
+    attempted_legs: set[str] = field(default_factory=set)
 
 
 # ---------------------------------------------------------------------------
@@ -607,6 +622,7 @@ async def run_recall_pipeline(
         n_stage_errors=dict(acc.stage_errors),
         contradiction_edges=list(acc.contradictions),
         excluded_in_context=excluded_in_context,  # F071
+        attempted_legs=frozenset(acc.attempted_legs),
         coherent_ranking_applied=acc.coherent_ranking_applied,  # F080: reflects the filter actually running (search_all only)
         keyed_leg_used=acc.keyed_leg_used,  # R3.3 (F085)
         n_keyed=len(keyed),
@@ -674,6 +690,7 @@ async def _run_stages(
 
         if heart_types:
             acc.searched_heart = True
+            acc.attempted_legs.add("heart_primary")
             acc.heart_types_searched = heart_types
             heart_results = await heart.recall(
                 query, limit=limit, types=heart_types,
@@ -722,6 +739,9 @@ async def _run_stages(
                 # conflating them IS the bug.
                 limit=settings.episode_chunk_recall_limit,
                 settings=settings,
+                # The helper marks "chunk" only where it actually queries —
+                # the vector path returns early with no embedder/vector.
+                attempted=acc.attempted_legs,
             )
         except Exception:
             # Match the sibling stages' pattern (spreading_activation,
@@ -751,6 +771,11 @@ async def _run_stages(
             vocab = await heart.facts.entity_key_vocabulary()
             candidates = extract_entity_candidates(query, vocab=vocab)
             if candidates:
+                # Marked here, not at the block: a query yielding no entity
+                # candidates never reaches the fetch, and reporting it as a
+                # keyed leg that ran and found nothing is the same false
+                # attribution corrected for the graph seed loops.
+                acc.attempted_legs.add("keyed")
                 acc.keyed_leg_used = True
                 acc.keyed_results = await heart.facts.fetch_by_entity_keys(
                     candidates, limit=getattr(settings, "keyed_fact_leg_k", 8)
@@ -768,6 +793,7 @@ async def _run_stages(
         # completion without raising.
         rounds = getattr(settings, "keyed_fact_leg_rounds", 1)
         if rounds >= 2 and acc.keyed_results:
+            acc.attempted_legs.add("keyed_r2")
             try:
                 acc.keyed_r2_ran = True
                 r1_ids = [row.id for row in acc.keyed_results]
@@ -929,6 +955,10 @@ async def _run_stages(
                 embedder = getattr(heart, "_embeddings", None)
                 q_vec = (await embedder.embed(query)) if embedder is not None else None
                 if q_vec:
+                    # Marked only once BOTH gates pass (a non-empty exemplar
+                    # store and a usable query vector); either failing means
+                    # no fetch is issued, so the leg was not attempted.
+                    acc.attempted_legs.add("exemplar")
                     # Codex r8: exclude the F071 already-in-context fact set from
                     # the fetch so ids the assembly-time F071 filter will drop do
                     # NOT spend the K budget (which would starve fresh
@@ -980,6 +1010,15 @@ async def _run_stages(
         and settings.graph_recall_enabled
         and settings.cross_type_linking_enabled
     ):
+        # Stage 2 attempted only when a seed will actually enter the loop
+        # below. The outer block also fires on chunk-only retrieval (via
+        # acc.chunk_results, for Stage 2b's benefit), where this loop makes
+        # no neighbour query at all — marking there would report
+        # heart_graph as attempted-and-silent on every chunk-only qrel,
+        # which is the false attribution this instrumentation exists to
+        # prevent.
+        if any(hr.type in ("fact", "episode") for hr in acc.heart_results[:3]):
+            acc.attempted_legs.add("heart_graph")
         seen_graph: dict[UUID, "NeighborResult"] = {}
         for hr in acc.heart_results[:3]:
             if hr.type in ("fact", "episode"):
@@ -1073,6 +1112,13 @@ async def _run_stages(
                  float(item[2]) if len(item) > 2 and item[2] is not None else None)
                 for item in acc.chunk_results[:3]
             )
+            # Stage 2b (Path A) attempted only once usable seeds exist. An
+            # explicit procedure/censor scope reaches here with a non-empty
+            # acc.heart_results but produces NO seeds — Path A accepts only
+            # fact/episode rows and chunks — so no brain.neighbors call is
+            # made and the leg must not be reported as attempted-and-silent.
+            if mem_seeds:
+                acc.attempted_legs.add("heart_graph_memory")
             # Per-type fan-out — one ``LIMIT`` window per neighbor type so
             # chunks don't crowd facts/episodes (or vice versa) out of a
             # single small union limit. Order is irrelevant; the global
@@ -1152,6 +1198,7 @@ async def _run_stages(
 
     if search_all or "decision" in search_types:
         acc.searched_decisions = True
+        acc.attempted_legs.add("brain")
         decision_results = await brain.query(query, limit=limit)
 
     # F022 extension (2026-07-11): heart FACT seeds for spreading. Top-3
@@ -1221,6 +1268,16 @@ async def _run_stages(
                         (d.id, "decision", d.score or 0.5)
                         for d in decision_results[: settings.graph_recall_max_expand]
                     ] + heart_fact_seeds
+                    # Spreading branch taken AND it has something to spread
+                    # from. ``spreading_activation_search`` returns
+                    # immediately on empty seeds without issuing its CTE
+                    # (spreading_activation.py:111-112) — reachable with
+                    # graph_recall_max_expand=0 and no heart fact seeds — so
+                    # marking at the branch would claim a query that never
+                    # ran. Rows from here are labelled "spreading_activation"
+                    # regardless of stage_origin.
+                    if seeds:
+                        acc.attempted_legs.add("spreading_activation")
                     # Heart-seeded spreading re-reaches existing heart/
                     # chunk candidates AND prior graph-stage outputs
                     # (Stage 2 decisions, Path A neighbors) constantly —
@@ -1310,7 +1367,26 @@ async def _run_stages(
                 use_spreading = False
 
         if not use_spreading:
-            # Fall back to 1-hop expansion
+            # Fall back to 1-hop expansion.
+            #
+            # Marked only when a decision will actually be expanded. This
+            # branch is reachable via heart_fact_seeds alone (fact-only
+            # retrieval with spreading off), where decision_results is empty
+            # and the loop below issues no neighbour query — reporting the
+            # legs there would claim the fallback ran when it did not. The
+            # `score is None` skip inside the loop is mirrored here for the
+            # same reason.
+            #
+            # When it DOES run it emits decision rows tagged brain_graph AND
+            # non-decision neighbours tagged heart_graph_memory; which of the
+            # two branches executes is a runtime decision no config flag can
+            # predict.
+            if any(
+                d.score is not None
+                for d in decision_results[: settings.graph_recall_max_expand]
+            ):
+                acc.attempted_legs.add("brain_graph")
+                acc.attempted_legs.add("heart_graph_memory")
             seen_hop: dict[UUID, "NeighborResult"] = {}
             for dec in decision_results[: settings.graph_recall_max_expand]:
                 if dec.score is None:
@@ -1827,8 +1903,17 @@ async def _search_episode_chunks(
     agent_id: str,
     limit: int,
     settings: "Settings | None" = None,
+    attempted: "set[str] | None" = None,
 ) -> list[tuple[UUID, str, float]]:
     """F067: search over heart.episode_chunks.
+
+    ``attempted`` is an optional sink the helper adds ``"chunk"`` to at each
+    point it is about to ISSUE a query. The caller cannot compute this: the
+    vector path returns early with no embedder or an empty query vector,
+    while the hybrid path still runs keyword-only in that case, so only this
+    function knows whether a retrieval actually happened. Marking at the
+    call site would report the leg as attempted-and-silent on a run where it
+    never queried at all.
 
     Default (``chunk_hybrid_search_enabled`` off): vector-only cosine search,
     byte-identical to the original F067 leg; returns ``[]`` when no embedder
@@ -1856,6 +1941,9 @@ async def _search_episode_chunks(
 
         query_vec = (await embedder.embed(query)) if embedder is not None else None
         query_vec = query_vec or None  # empty embed → keyword-only fallback
+        # Hybrid always queries (keyword-only when the vector is absent).
+        if attempted is not None:
+            attempted.add("chunk")
         async with heart.db.session() as s:
             ranked = await heart_search.hybrid_search(
                 s,
@@ -1892,6 +1980,10 @@ async def _search_episode_chunks(
     query_vec = await embedder.embed(query)
     if not query_vec:
         return []
+    # Vector path: both early returns above skip the query entirely, so
+    # the leg is only attempted from here.
+    if attempted is not None:
+        attempted.add("chunk")
     vec_lit = "[" + ",".join(f"{v:.6f}" for v in query_vec) + "]"
     async with heart.db.session() as s:
         # P1.1: include episode_id so the formatter can session-group chunks.
