@@ -170,6 +170,13 @@ class PipelineStats:
     # exclusion set was passed. Surfaced in recall_deep INFO log so the
     # duplication-tax measurement is grep-able from prod.
     excluded_in_context: int = 0
+    # N7 follow-up: legs this call ATTEMPTED, marked at each stage's entry
+    # before its work ran — so a leg that executed and produced nothing is
+    # still named. Lets a consumer distinguish "this leg was never run" from
+    # "it ran and returned nothing" — which no set of config flags can
+    # answer, since the one-hop fallback is skipped when spreading succeeds
+    # and that is decided at runtime.
+    attempted_legs: frozenset[str] = frozenset()
     # F080: True iff coherent ranking was active for this call (censors +
     # procedures excluded from the ranked pool). Observability only — not
     # formatted into recall_deep text, so it does not affect the snapshot.
@@ -315,6 +322,14 @@ class _PipelineAccumulator:
     # Per-stage error counter — incremented when a try/except around a stage
     # call catches an exception. Surfaced via PipelineStats.n_stage_errors.
     stage_errors: dict[str, int] = field(default_factory=dict)
+
+    # N7 follow-up: legs this call ATTEMPTED, marked at each stage's entry
+    # BEFORE its work runs — so a leg that ran and produced nothing is still
+    # named. Consumers (the eval harness) previously re-derived this from
+    # config flags, which cannot be correct: whether the one-hop fallback
+    # runs depends on whether spreading succeeded at RUNTIME, and no
+    # combination of flags predicts that. The producer reports it instead.
+    attempted_legs: set[str] = field(default_factory=set)
 
 
 # ---------------------------------------------------------------------------
@@ -607,6 +622,7 @@ async def run_recall_pipeline(
         n_stage_errors=dict(acc.stage_errors),
         contradiction_edges=list(acc.contradictions),
         excluded_in_context=excluded_in_context,  # F071
+        attempted_legs=frozenset(acc.attempted_legs),
         coherent_ranking_applied=acc.coherent_ranking_applied,  # F080: reflects the filter actually running (search_all only)
         keyed_leg_used=acc.keyed_leg_used,  # R3.3 (F085)
         n_keyed=len(keyed),
@@ -674,6 +690,7 @@ async def _run_stages(
 
         if heart_types:
             acc.searched_heart = True
+            acc.attempted_legs.add("heart_primary")
             acc.heart_types_searched = heart_types
             heart_results = await heart.recall(
                 query, limit=limit, types=heart_types,
@@ -704,6 +721,7 @@ async def _run_stages(
         # (chunks_searched stays False) from "flag on but stage failed"
         # (chunks_searched True + n_stage_errors["chunk_recall"] non-zero).
         acc.chunks_searched = True
+        acc.attempted_legs.add("chunk")
         try:
             acc.chunk_results = await _search_episode_chunks(
                 heart=heart,
@@ -747,6 +765,7 @@ async def _run_stages(
     if getattr(settings, "keyed_fact_leg_enabled", False) and (
         search_all or "fact" in search_types
     ):
+        acc.attempted_legs.add("keyed")
         try:
             vocab = await heart.facts.entity_key_vocabulary()
             candidates = extract_entity_candidates(query, vocab=vocab)
@@ -768,6 +787,7 @@ async def _run_stages(
         # completion without raising.
         rounds = getattr(settings, "keyed_fact_leg_rounds", 1)
         if rounds >= 2 and acc.keyed_results:
+            acc.attempted_legs.add("keyed_r2")
             try:
                 acc.keyed_r2_ran = True
                 r1_ids = [row.id for row in acc.keyed_results]
@@ -920,6 +940,7 @@ async def _run_stages(
         and (search_all or "fact" in search_types)
         and _is_classification_shaped(query, getattr(settings, "exemplar_max_query_words", 64))
     ):
+        acc.attempted_legs.add("exemplar")
         try:
             if await heart.facts.has_exemplars():
                 acc.exemplar_leg_used = True
@@ -980,6 +1001,8 @@ async def _run_stages(
         and settings.graph_recall_enabled
         and settings.cross_type_linking_enabled
     ):
+        # Stage 2 entered: heart->decision cross-type expansion.
+        acc.attempted_legs.add("heart_graph")
         seen_graph: dict[UUID, "NeighborResult"] = {}
         for hr in acc.heart_results[:3]:
             if hr.type in ("fact", "episode"):
@@ -1047,6 +1070,8 @@ async def _run_stages(
         # Flag-gated so prod retrieval shape is unchanged by default.
         # ------------------------------------------------------------------
         if settings.heart_graph_all_types_enabled:
+            # Stage 2b entered (Path A): heart->any-type neighbours.
+            acc.attempted_legs.add("heart_graph_memory")
             mem_limit = max(1, int(settings.heart_graph_neighbors_per_seed))
             seen_mem: dict[UUID, "NeighborResult"] = {}
             heart_ids: set[UUID] = {hr.id for hr in acc.heart_results}
@@ -1152,6 +1177,7 @@ async def _run_stages(
 
     if search_all or "decision" in search_types:
         acc.searched_decisions = True
+        acc.attempted_legs.add("brain")
         decision_results = await brain.query(query, limit=limit)
 
     # F022 extension (2026-07-11): heart FACT seeds for spreading. Top-3
@@ -1210,6 +1236,9 @@ async def _run_stages(
                 )
 
         if use_spreading:
+            # Spreading branch taken. Its rows are labelled
+            # "spreading_activation" regardless of stage_origin.
+            acc.attempted_legs.add("spreading_activation")
             try:
                 from nous.brain.schemas import NeighborResult
                 from nous.brain.spreading_activation import (
@@ -1311,6 +1340,11 @@ async def _run_stages(
 
         if not use_spreading:
             # Fall back to 1-hop expansion
+            # Fallback taken (NOT taken when spreading succeeded) — a runtime
+            # branch no config flag can predict. It emits decision rows tagged
+            # brain_graph AND non-decision neighbours tagged heart_graph_memory.
+            acc.attempted_legs.add("brain_graph")
+            acc.attempted_legs.add("heart_graph_memory")
             seen_hop: dict[UUID, "NeighborResult"] = {}
             for dec in decision_results[: settings.graph_recall_max_expand]:
                 if dec.score is None:

@@ -111,11 +111,11 @@ class QrelResult:
     ``n_gold_in_top_k`` are top-K scoped.
 
     ``retrieved_legs`` labels each served row with the leg that produced it,
-    aligned 1:1 with ``retrieved_ids``. It is raw provenance only — the
-    visibility VERDICT built on top of it is deferred to a follow-up PR
-    (see the note in ``nous_eval.metrics``), because deriving it correctly
-    requires the pipeline to report which legs it attempted rather than the
-    harness re-deriving pipeline control flow from config flags.
+    aligned 1:1 with ``retrieved_ids``; ``attempted_legs`` is the pipeline's
+    own report of which legs it ENTERED. Both are needed by
+    ``metrics.leg_visibility``: the first says where a leg's rows landed,
+    the second names legs that ran and emitted nothing — which appear in no
+    ``retrieved_legs`` list and would otherwise vanish from the report.
     """
 
     qrel_index: int
@@ -137,6 +137,10 @@ class QrelResult:
     # setting ``error``) so the run is not silently dropped from aggregates:
     # the failure is reported, not hidden and not zero-scored.
     stage_errors: dict[str, int] = field(default_factory=dict)
+    # N7 follow-up: PipelineStats.attempted_legs for this qrel — which legs
+    # the pipeline ENTERED, reported by the pipeline itself rather than
+    # inferred from config.
+    attempted_legs: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -147,6 +151,14 @@ class RunResult:
     per_qrel: list[QrelResult]
     duration_seconds: float
     pipeline_stats_summary: dict[str, int] = field(default_factory=dict)
+    # N7 follow-up: union of PipelineStats.attempted_legs across this
+    # config's qrels — the PIPELINE's own report of which legs it entered.
+    # Union rather than intersection because a leg attempted on any qrel was
+    # genuinely exercised by the run; the per-qrel detail lives in
+    # QrelResult.retrieved_legs. Needed because a leg that emits zero rows
+    # everywhere appears in no retrieved_legs list and would otherwise drop
+    # out of the visibility report entirely.
+    attempted_legs: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -220,11 +232,13 @@ async def run_matrix(
                     "spreading_activation_used": 0,
                     "contradiction_checks_ran": 0,
                 }
+                attempted: set[str] = set()
                 for idx, qrel in enumerate(qrels):
                     qr, ran_flags = await _run_one(
                         heart, brain, eval_scoped, qrel, idx, top_k
                     )
                     per_qrel.append(qr)
+                    attempted |= qr.attempted_legs
                     for k, v in ran_flags.items():
                         # bool is a subclass of int — check it FIRST, or the
                         # stage flags would be summed as 1/0 instead of
@@ -242,6 +256,7 @@ async def run_matrix(
                         per_qrel=per_qrel,
                         duration_seconds=duration,
                         pipeline_stats_summary=stats_totals,
+                        attempted_legs=sorted(attempted),
                     )
                 )
                 logger.info(
@@ -610,6 +625,7 @@ async def _run_one(
             rank_of_first_gold=rank,
             n_gold_in_top_k=n_in_top,
             n_gold_total=len(qrel.gold_ids),
+            attempted_legs=frozenset(getattr(stats, "attempted_legs", ()) or ()),
             error=None,
             # Real failures only — non-error diagnostics are excluded so
             # ``_stage_error_summary`` never calls a healthy run partial.
