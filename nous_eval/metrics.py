@@ -16,17 +16,16 @@ explicitly, so callers can branch on it if they need to.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
 from dataclasses import dataclass, field
-from statistics import mean, median
+from statistics import mean
 
 from nous_eval.retrieval_runner import QrelResult
 
 # N7: k values reported alongside recall@served, so a run shows where its
 # fixed-k cutoff stops seeing things rather than reporting one depth as if
 # it were the whole picture. These are REPORTING points; the depth a run is
-# actually scored at (and therefore the cutline ``leg_visibility`` judges
-# against) is the harness's ``top_k``, not the shallowest entry here.
+# actually scored at is the harness's ``top_k``, not the shallowest entry
+# here.
 RECALL_CURVE_KS: tuple[int, ...] = (3, 5, 10, 20, 40, 60)
 
 
@@ -41,9 +40,9 @@ class MetricsResult:
     N7: ``r_at_served`` and ``recall_curve`` exist because production does
     NOT truncate — ``recall_deep`` hands the model the whole served block
     (median ~77 rows), so a fixed top-K metric measures a window prod never
-    applies. Legs that band below the cutline are invisible to it, and a
-    null from such a leg is uninformative rather than negative.
-    ``mean_served`` records how many rows that block actually held.
+    applies. Reading the curve alongside ``r_at_served`` shows how much of
+    the served block a given cutoff was blind to. ``mean_served`` records
+    how many rows that block actually held.
     """
 
     mrr: float
@@ -290,141 +289,6 @@ def compute_delta(
         n_pairs=n_pairs,
     )
 
-
-# ---------------------------------------------------------------------------
-# N7: leg visibility
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class LegVisibility:
-    """Whether the scoring window actually observed one retrieval leg.
-
-    The load-bearing field is ``participation_rate``: of ALL valid qrels in
-    the run, the fraction where this leg placed at least one row within
-    ``cutoff``. That is the question an operator needs answered — "how much
-    of the experiment could this leg have influenced?" — and it is not what
-    a pooled median measures.
-
-    The denominator is ``n_qrels_evaluated``, NOT ``n_qrels_present``.
-    Dividing by the qrels where the leg happened to emit would condition
-    the rate on the leg having returned something at all: a leg that
-    reaches the cutoff on 1 qrel and emits nothing on the other 99 would
-    read 1.00 — "fully observed" — while touching 1% of the experiment.
-    ``n_qrels_present`` is kept beside it so emission coverage and
-    in-window coverage stay separately visible.
-
-    A leg emitting ranks 1 and 20-30 on every qrel has a median far below
-    the cutline yet participates in every single top-10 score; legs with
-    large allotments (chunks, exemplars) are especially prone to this. The
-    earlier median-of-all-rows test would have branded such a leg invisible
-    and told operators to discount a perfectly valid null.
-
-    ``visible`` is therefore True when the leg reached the window on at
-    least one qrel. Read it together with ``participation_rate`` — a leg at
-    0.03 was technically observed but a null for it is still largely
-    uninformative. ``median_rank`` / ``best_rank`` are retained as
-    diagnostics only.
-    """
-
-    leg: str
-    n_rows: int
-    n_qrels_evaluated: int
-    n_qrels_present: int
-    n_qrels_within_cutoff: int
-    participation_rate: float
-    median_rank: float
-    best_rank: int
-    cutoff: int
-    visible: bool
-
-
-def leg_visibility(
-    per_qrel: list[QrelResult],
-    cutoff: int = 10,
-    expected_legs: "Iterable[str] | None" = None,
-) -> list[LegVisibility]:
-    """Report each leg's rank distribution against the scoring cutline.
-
-    ``cutoff`` defaults to 10 — ``run_matrix``'s default ``top_k``, i.e. the
-    window this harness actually scores at. Callers running a different
-    ``top_k`` should pass it, since that is the depth their nulls are
-    conditioned on. (The shallower points in ``RECALL_CURVE_KS`` are
-    reporting detail; scoring at k=3 would mark nearly every leg invisible
-    and the check would stop discriminating.)
-
-    Ranks are 1-based positions in the served block. Legs are labelled by
-    ``QrelResult.retrieved_legs`` (populated by the runner from the
-    pipeline's own provenance markers). Returns one row per observed leg,
-    lowest participation first, so the least-observed legs read at the top.
-
-    Visibility is computed PER QREL — a leg counts as observed on a qrel
-    when any of its rows lands at rank <= cutoff — and then aggregated into
-    ``participation_rate``. Pooling every row and taking one median would
-    let a leg's own tail hide its head (see ``LegVisibility``).
-
-    ``expected_legs`` is the set of legs the run had ENABLED. It must be
-    supplied by the caller from config, because a leg that emitted zero
-    rows on every qrel appears nowhere in ``retrieved_legs`` and would
-    otherwise be omitted from this report entirely — silently, and
-    precisely in the most extreme case of an unobserved arm. An operator
-    reading a null for the keyed leg would see no keyed row here and have
-    nothing to tell them the null was uninformative. Legs named here but
-    never seen are emitted with ``n_rows=0`` and ``participation_rate=0.0``
-    so absence is stated rather than implied.
-
-    Callers that treat this as a gate should fail when a run reports a null
-    for a leg whose ``participation_rate`` is 0 (or near it) — that
-    combination is the specific error N7 exists to prevent.
-    """
-    ranks_by_leg: dict[str, list[int]] = {}
-    present: dict[str, int] = {}
-    within: dict[str, int] = {}
-    n_evaluated = 0
-
-    for q in per_qrel:
-        if q.error is not None:
-            continue
-        n_evaluated += 1
-        best_in_qrel: dict[str, int] = {}
-        for pos, leg in enumerate(q.retrieved_legs, start=1):
-            ranks_by_leg.setdefault(leg, []).append(pos)
-            if leg not in best_in_qrel or pos < best_in_qrel[leg]:
-                best_in_qrel[leg] = pos
-        for leg, best in best_in_qrel.items():
-            present[leg] = present.get(leg, 0) + 1
-            if best <= cutoff:
-                within[leg] = within.get(leg, 0) + 1
-
-    # Seed enabled-but-silent legs so zero emission is REPORTED, not omitted.
-    for leg in expected_legs or ():
-        ranks_by_leg.setdefault(leg, [])
-
-    out = []
-    for leg, ranks in ranks_by_leg.items():
-        n_present = present.get(leg, 0)
-        n_within = within.get(leg, 0)
-        # Denominator is every valid qrel — see the class docstring.
-        rate = (n_within / n_evaluated) if n_evaluated else 0.0
-        out.append(
-            LegVisibility(
-                leg=leg,
-                n_rows=len(ranks),
-                n_qrels_evaluated=n_evaluated,
-                n_qrels_present=n_present,
-                n_qrels_within_cutoff=n_within,
-                participation_rate=rate,
-                # A silent leg has no ranks; report sentinels rather than
-                # raising on median([]) / min([]).
-                median_rank=float(median(ranks)) if ranks else 0.0,
-                best_rank=min(ranks) if ranks else 0,
-                cutoff=cutoff,
-                visible=n_within > 0,
-            )
-        )
-    # Least-observed first; median as a stable tiebreak (deepest first).
-    out.sort(key=lambda v: (v.participation_rate, -v.median_rank))
-    return out
 
 
 # ---------------------------------------------------------------------------

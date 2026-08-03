@@ -408,64 +408,6 @@ class TestN7ServedWindow:
         assert m.r_at_served == 1.0
 
 
-class TestN7LegVisibility:
-    """A null from a leg below the cutline is inconclusive, not negative."""
-
-    def test_leg_banded_below_cutline_is_invisible(self):
-        from nous_eval.metrics import leg_visibility
-
-        # Primary heart hits occupy ranks 1-10; the keyed leg is banded
-        # below them at 11-20 — the shape the fix list measured.
-        legs = ["heart_primary"] * 10 + ["keyed"] * 10
-        ids = [uuid4() for _ in legs]
-        vis = {v.leg: v for v in leg_visibility([_qrel_result(ids, [], legs)])}
-
-        assert vis["keyed"].visible is False
-        assert vis["keyed"].participation_rate == 0.0
-        assert vis["keyed"].best_rank == 11
-        assert vis["heart_primary"].visible is True
-        assert vis["heart_primary"].participation_rate == 1.0
-
-    def test_cutoff_is_caller_supplied(self):
-        """A harness scoring deeper sees legs a shallow one cannot."""
-        from nous_eval.metrics import leg_visibility
-
-        legs = ["heart_primary"] * 10 + ["keyed"] * 10
-        ids = [uuid4() for _ in legs]
-        q = _qrel_result(ids, [], legs)
-
-        assert {v.leg: v.visible for v in leg_visibility([q], cutoff=10)}["keyed"] is False
-        assert {v.leg: v.visible for v in leg_visibility([q], cutoff=30)}["keyed"] is True
-
-    def test_least_observed_leg_reported_first(self):
-        from nous_eval.metrics import leg_visibility
-
-        # exemplar sits at ranks 11-20, outside the default cutoff of 10.
-        legs = ["heart_primary"] * 10 + ["exemplar"] * 10
-        ids = [uuid4() for _ in legs]
-        out = leg_visibility([_qrel_result(ids, [], legs)])
-
-        assert out[0].leg == "exemplar", "least-observed legs read at the top"
-
-    def test_cutoff_defaults_to_the_harness_scoring_window(self):
-        """Default must match run_matrix's top_k — the depth nulls are
-        conditioned on."""
-        import inspect
-
-        from nous_eval.metrics import leg_visibility
-        from nous_eval.retrieval_runner import run_matrix
-
-        out = leg_visibility([_qrel_result([uuid4()], [], ["heart_primary"])])
-        harness_top_k = inspect.signature(run_matrix).parameters["top_k"].default
-        assert out[0].cutoff == harness_top_k
-
-    def test_errored_qrels_contribute_no_ranks(self):
-        from nous_eval.metrics import leg_visibility
-
-        bad = _qrel_result([uuid4()], [], ["keyed"], error="boom")
-        assert leg_visibility([bad]) == []
-
-
 class TestN7LegLabelling:
     """The runner labels rows from the pipeline's own provenance markers."""
 
@@ -546,22 +488,17 @@ class TestCodexP1StageErrorsReachTheReport:
 
 
 class TestCodexP1CutoffThreading:
-    """The visibility verdict inverts with the cutoff — it must be threaded."""
+    """The report must describe the depth it was actually scored at."""
 
-    def test_report_uses_the_configured_top_k_not_the_default(self):
+    def test_report_headers_carry_the_configured_top_k(self):
         from nous_eval.report import render_markdown
 
-        legs = ["heart_primary"] * 10 + ["keyed"] * 10
-        ids = [uuid4() for _ in legs]
-        rr = _run_result([_qrel_result(ids, [], legs)])
+        rr = _run_result([_qrel_result([uuid4()], [])])
 
-        at_10 = render_markdown([rr], [], top_k=10)
-        at_30 = render_markdown([rr], [], top_k=30)
-
-        assert "observed@10" in at_10
-        assert "observed@30" in at_30, (
-            "a run scored at k=30 must judge legs at 30 — judging at the "
-            "default 10 turns a measured null into a false 'inconclusive'"
+        assert "scored at k=10" in render_markdown([rr], [], top_k=10)
+        assert "scored at k=30" in render_markdown([rr], [], top_k=30), (
+            "a run scored at k=30 must say so — inheriting the default 10 "
+            "makes the report contradict the run it describes"
         )
 
     def test_json_records_the_scoring_depth(self):
@@ -574,7 +511,7 @@ class TestCodexP1CutoffThreading:
 
 
 class TestCodexP2LegProvenanceSerialized:
-    """The only copy of the analysis was the ephemeral markdown."""
+    """Raw leg provenance must survive into the persisted artifact."""
 
     def test_retrieved_legs_serialized_and_aligned(self):
         from nous_eval.report import render_json
@@ -586,20 +523,9 @@ class TestCodexP2LegProvenanceSerialized:
         pq = payload["configs"][0]["per_qrel"][0]
         assert pq["retrieved_legs"] == legs
         assert len(pq["retrieved_legs"]) == len(pq["retrieved_ids"]), (
-            "legs must stay 1:1 with ids so visibility is recomputable"
+            "legs must stay 1:1 with ids so the follow-up's visibility "
+            "analysis is reconstructable at any depth"
         )
-
-    def test_leg_visibility_rows_serialized(self):
-        from nous_eval.report import render_json
-
-        legs = ["heart_primary"] * 10 + ["keyed"] * 10
-        ids = [uuid4() for _ in legs]
-        payload = json.loads(render_json([_run_result([_qrel_result(ids, [], legs)])], []))
-
-        vis = {v["leg"]: v for v in payload["configs"][0]["leg_visibility"]}
-        assert vis["keyed"]["visible"] is False
-        assert vis["heart_primary"]["visible"] is True
-        assert vis["keyed"]["cutoff"] == 10
 
 
 # ---------------------------------------------------------------------------
@@ -692,7 +618,7 @@ class TestCodexR2DepthConsistency:
             "computed at a depth it does not declare"
         )
 
-    def test_eval_runs_payload_records_depth_and_visibility(self):
+    def test_eval_runs_payload_records_depth_and_served_view(self):
         from nous_eval.retrieval import _metrics_compact
 
         legs = ["heart_primary"] * 10 + ["keyed"] * 10
@@ -700,14 +626,13 @@ class TestCodexR2DepthConsistency:
         rr = _run_result([_qrel_result(ids, [], legs)])
 
         payload = _metrics_compact(rr, top_k=20)
-        assert payload["top_k"] == 20
-        assert "leg_visibility" in payload
-        assert "recall_curve" in payload
-        vis = {v["leg"]: v for v in payload["leg_visibility"]}
-        assert vis["keyed"]["cutoff"] == 20, (
+        assert payload["top_k"] == 20, (
             "the persisted row is built independently of the JSON report, "
             "so it needs its own copy of the depth"
         )
+        assert "recall_curve" in payload
+        assert "r_at_served" in payload
+        assert "n_qrels_partial" in payload
 
 
 class TestCodexR2OperatorSurface:
@@ -800,49 +725,6 @@ class TestCodexR3NoFalsePartialAlarms:
         assert "duplicates" not in md.split("## Aggregate")[0]
 
 
-class TestCodexR3ParticipationNotMedian:
-    """A leg's own tail must not hide its head."""
-
-    def test_leg_with_scoring_head_and_long_tail_is_visible(self):
-        from nous_eval.metrics import leg_visibility
-
-        # chunk places rank 1 on every qrel, then a long tail at 20-30.
-        legs = ["chunk"] + ["heart_primary"] * 18 + ["chunk"] * 11
-        ids = [uuid4() for _ in legs]
-        vis = {v.leg: v for v in leg_visibility([_qrel_result(ids, [], legs)])}
-
-        assert vis["chunk"].median_rank > 10, "pooled median IS below the cutline"
-        assert vis["chunk"].visible is True, (
-            "but its rank-1 row scores on every qrel — median-of-all-rows "
-            "would wrongly tell operators to discount this leg's null"
-        )
-        assert vis["chunk"].participation_rate == 1.0
-
-    def test_participation_rate_is_per_qrel(self):
-        from nous_eval.metrics import leg_visibility
-
-        # keyed reaches the window on 1 of 2 qrels.
-        hit = ["keyed"] + ["heart_primary"] * 19
-        miss = ["heart_primary"] * 19 + ["keyed"]
-        qs = [
-            _qrel_result([uuid4() for _ in hit], [], hit),
-            _qrel_result([uuid4() for _ in miss], [], miss),
-        ]
-        vis = {v.leg: v for v in leg_visibility(qs)}
-
-        assert vis["keyed"].n_qrels_present == 2
-        assert vis["keyed"].n_qrels_within_cutoff == 1
-        assert vis["keyed"].participation_rate == 0.5
-
-    def test_report_surfaces_participation(self):
-        from nous_eval.report import render_markdown
-
-        legs = ["heart_primary"] * 10 + ["keyed"] * 10
-        ids = [uuid4() for _ in legs]
-        md = render_markdown([_run_result([_qrel_result(ids, [], legs)])], [])
-        assert "participation" in md
-
-
 class TestCodexR3ExpansionGuardComplete:
     """cleaned non-empty does not mean the fusion produced a variant."""
 
@@ -888,60 +770,6 @@ class TestCodexR3ExpansionGuardComplete:
 # ---------------------------------------------------------------------------
 
 
-class TestCodexR4ParticipationDenominator:
-    """The rate must not be conditioned on the leg having emitted."""
-
-    def test_sparse_leg_does_not_read_fully_observed(self):
-        from nous_eval.metrics import leg_visibility
-
-        # keyed emits on exactly 1 of 10 qrels, at rank 1 there.
-        qs = [
-            _qrel_result([uuid4()], [], ["keyed"]),
-            *[
-                _qrel_result([uuid4()], [], ["heart_primary"])
-                for _ in range(9)
-            ],
-        ]
-        vis = {v.leg: v for v in leg_visibility(qs)}
-
-        assert vis["keyed"].n_qrels_present == 1
-        assert vis["keyed"].n_qrels_within_cutoff == 1
-        assert vis["keyed"].n_qrels_evaluated == 10
-        assert vis["keyed"].participation_rate == pytest.approx(0.1), (
-            "dividing by n_present would read 1.00 — 'fully observed' — for "
-            "a leg touching 10% of the experiment"
-        )
-
-    def test_denominator_excludes_errored_qrels(self):
-        from nous_eval.metrics import leg_visibility
-
-        qs = [
-            _qrel_result([uuid4()], [], ["keyed"]),
-            _qrel_result([], [], [], error="boom"),
-        ]
-        vis = {v.leg: v for v in leg_visibility(qs)}
-        assert vis["keyed"].n_qrels_evaluated == 1
-        assert vis["keyed"].participation_rate == 1.0
-
-    def test_full_coverage_still_reads_one(self):
-        from nous_eval.metrics import leg_visibility
-
-        qs = [_qrel_result([uuid4()], [], ["keyed"]) for _ in range(5)]
-        vis = {v.leg: v for v in leg_visibility(qs)}
-        assert vis["keyed"].participation_rate == 1.0
-
-    def test_report_shows_the_full_denominator(self):
-        from nous_eval.report import render_markdown
-
-        qs = [
-            _qrel_result([uuid4()], [], ["keyed"]),
-            *[_qrel_result([uuid4()], [], ["heart_primary"]) for _ in range(9)],
-        ]
-        md = render_markdown([_run_result(qs)], [])
-        assert "of all qrels" in md
-        assert "ALL valid qrels" in md
-
-
 class TestCodexR4DeltaLabels:
     """A k=30 report must not describe its deltas as @10."""
 
@@ -977,88 +805,6 @@ class TestCodexR4DeltaLabels:
 # ---------------------------------------------------------------------------
 # Codex round 5 — a leg that emits nothing must still be reported
 # ---------------------------------------------------------------------------
-
-
-class TestCodexR5SilentLegsReported:
-    """Absence must be stated, not implied by an omitted row."""
-
-    def test_zero_emission_leg_appears_with_zero_participation(self):
-        from nous_eval.metrics import leg_visibility
-
-        qs = [_qrel_result([uuid4()], [], ["heart_primary"]) for _ in range(5)]
-        vis = {
-            v.leg: v
-            for v in leg_visibility(qs, expected_legs=["heart_primary", "keyed"])
-        }
-
-        assert "keyed" in vis, (
-            "an enabled leg that emitted nothing is the MOST extreme "
-            "unobserved case — omitting its row hides the warning exactly "
-            "when it matters most"
-        )
-        assert vis["keyed"].n_rows == 0
-        assert vis["keyed"].participation_rate == 0.0
-        assert vis["keyed"].visible is False
-
-    def test_silent_leg_does_not_crash_on_empty_ranks(self):
-        from nous_eval.metrics import leg_visibility
-
-        vis = {
-            v.leg: v
-            for v in leg_visibility([], expected_legs=["keyed"])
-        }
-        assert vis["keyed"].median_rank == 0.0
-        assert vis["keyed"].best_rank == 0
-        assert vis["keyed"].n_qrels_evaluated == 0
-
-    def test_markdown_flags_silent_legs(self):
-        from nous_eval.report import render_markdown
-
-        rr = replace(
-            _run_result([_qrel_result([uuid4()], [], ["heart_primary"])]),
-            expected_legs=["heart_primary", "exemplar"],
-        )
-        md = render_markdown([rr], [])
-        assert "exemplar *(silent)*" in md
-        assert "emitted zero rows" in md
-
-    def test_expected_legs_derived_from_flags(self):
-        from nous.config import Settings
-        from nous_eval.retrieval_runner import _expected_legs
-
-        off = Settings().model_copy(update={
-            "episode_chunks_enabled": False,
-            "keyed_fact_leg_enabled": False,
-            "exemplar_mode_enabled": False,
-            "heart_graph_all_types_enabled": False,
-            "graph_recall_enabled": False,
-            "spreading_activation_enabled": "false",
-        })
-        assert _expected_legs(off) == ["heart_primary"]
-
-        on = off.model_copy(update={
-            "keyed_fact_leg_enabled": True,
-            "keyed_fact_leg_rounds": 2,
-            "exemplar_mode_enabled": True,
-            "episode_chunks_enabled": True,
-        })
-        legs = _expected_legs(on)
-        for expected in ("chunk", "keyed", "keyed_r2", "exemplar"):
-            assert expected in legs
-
-    def test_spreading_auto_counts_as_attempted(self):
-        """'auto' resolves at runtime — treat it as attempted, not off."""
-        from nous.config import Settings
-        from nous_eval.retrieval_runner import _expected_legs
-
-        s = Settings().model_copy(update={
-            "graph_recall_enabled": True,
-            "spreading_activation_enabled": "auto",
-        })
-        assert "spreading_activation" in _expected_legs(s)
-
-        s_off = s.model_copy(update={"spreading_activation_enabled": "false"})
-        assert "spreading_activation" not in _expected_legs(s_off)
 
 
 # ---------------------------------------------------------------------------
@@ -1119,72 +865,6 @@ class TestCodexR6GateRejectsPartialRuns:
         d = decide_gate_f050(self._pair([clean], [clean]), self._sources())
         # Identical arms => zero delta => fails on Rule 1, NOT Rule 0.
         assert "partial retrieval" not in d.reason.lower()
-
-
-class TestCodexR6GraphLegNesting:
-    """Sub-flags don't mean 'attempted' when nested under a master switch."""
-
-    def test_spreading_not_expected_when_graph_off(self):
-        from nous.config import Settings
-        from nous_eval.retrieval_runner import _expected_legs
-
-        s = Settings().model_copy(update={
-            "graph_recall_enabled": False,
-            "spreading_activation_enabled": "auto",
-        })
-        assert "spreading_activation" not in _expected_legs(s), (
-            "the spreading stage is nested under graph_recall_enabled "
-            "(retrieval_pipeline.py:1173) — listing it would label a "
-            "deliberately disabled arm as enabled-but-silent"
-        )
-
-    def test_heart_graph_memory_requires_full_chain(self):
-        from nous.config import Settings
-        from nous_eval.retrieval_runner import _expected_legs
-
-        base = Settings().model_copy(update={
-            "graph_recall_enabled": False,
-            "heart_graph_all_types_enabled": True,
-            "cross_type_linking_enabled": True,
-        })
-        assert "heart_graph_memory" not in _expected_legs(base)
-
-        on = base.model_copy(update={"graph_recall_enabled": True})
-        assert "heart_graph_memory" in _expected_legs(on)
-
-        no_cross = on.model_copy(update={"cross_type_linking_enabled": False})
-        assert "heart_graph_memory" not in _expected_legs(no_cross)
-
-    def test_heart_graph_requires_cross_type_linking(self):
-        """Stage 2 shares Stage 2b's guard — both need cross-type linking."""
-        from nous.config import Settings
-        from nous_eval.retrieval_runner import _expected_legs
-
-        s = Settings().model_copy(update={
-            "graph_recall_enabled": True,
-            "cross_type_linking_enabled": False,
-        })
-        legs = _expected_legs(s)
-        assert "heart_graph" not in legs, (
-            "Stage 2 cannot run without cross_type_linking_enabled "
-            "(retrieval_pipeline.py:968-982)"
-        )
-        assert "brain_graph" in legs, (
-            "but Stage 4 needs only the master switch — the two legs have "
-            "different guards and must not be lumped together"
-        )
-
-    def test_graph_off_yields_no_graph_legs(self):
-        from nous.config import Settings
-        from nous_eval.retrieval_runner import _expected_legs
-
-        s = Settings().model_copy(update={"graph_recall_enabled": False})
-        legs = _expected_legs(s)
-        for graph_leg in (
-            "heart_graph", "brain_graph", "heart_graph_memory",
-            "spreading_activation",
-        ):
-            assert graph_leg not in legs
 
 
 # ---------------------------------------------------------------------------

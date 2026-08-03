@@ -108,9 +108,14 @@ class QrelResult:
     N7: ``retrieved_ids`` is the FULL served list, not a top-K slice — the
     pipeline returns every row it will hand the model (median ~77), and
     ``recall_deep`` does not truncate. Only ``rank_of_first_gold`` /
-    ``n_gold_in_top_k`` are top-K scoped. ``retrieved_legs`` labels each
-    row's originating leg so ``metrics.leg_visibility`` can tell which legs
-    band below the eval's cutline and are therefore unmeasurable at fixed k.
+    ``n_gold_in_top_k`` are top-K scoped.
+
+    ``retrieved_legs`` labels each served row with the leg that produced it,
+    aligned 1:1 with ``retrieved_ids``. It is raw provenance only — the
+    visibility VERDICT built on top of it is deferred to a follow-up PR
+    (see the note in ``nous_eval.metrics``), because deriving it correctly
+    requires the pipeline to report which legs it attempted rather than the
+    harness re-deriving pipeline control flow from config flags.
     """
 
     qrel_index: int
@@ -142,11 +147,6 @@ class RunResult:
     per_qrel: list[QrelResult]
     duration_seconds: float
     pipeline_stats_summary: dict[str, int] = field(default_factory=dict)
-    # N7/codex-R5: legs this config had ENABLED, derived from the settings
-    # actually used for the run. A leg that emits zero rows never appears in
-    # any QrelResult.retrieved_legs, so without this the visibility report
-    # would omit a fully-silent leg instead of showing it at 0.00.
-    expected_legs: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +242,6 @@ async def run_matrix(
                         per_qrel=per_qrel,
                         duration_seconds=duration,
                         pipeline_stats_summary=stats_totals,
-                        expected_legs=_expected_legs(eval_scoped),
                     )
                 )
                 logger.info(
@@ -641,53 +640,6 @@ async def _run_one(
             },
         },
     )
-
-
-def _expected_legs(settings: Settings) -> list[str]:
-    """N7/codex-R5: legs enabled for this run, whether or not they emit.
-
-    Derived from the master flags rather than from observed rows, because
-    the whole point is to name legs that produced NOTHING. ``heart_primary``
-    is unconditional. Flags are read defensively so a Settings object
-    missing a newer field degrades to "not enabled" instead of raising.
-    """
-    legs = ["heart_primary"]
-    if getattr(settings, "episode_chunks_enabled", False):
-        legs.append("chunk")
-    if getattr(settings, "keyed_fact_leg_enabled", False):
-        legs.append("keyed")
-        if int(getattr(settings, "keyed_fact_leg_rounds", 1) or 1) >= 2:
-            legs.append("keyed_r2")
-    if getattr(settings, "exemplar_mode_enabled", False):
-        legs.append("exemplar")
-
-    # Every graph-derived leg is NESTED under the graph master switch in the
-    # pipeline, so the sub-flags alone do not mean "attempted". Listing one
-    # anyway would label a deliberately disabled arm as enabled-but-silent
-    # and imply it failed to emit — the opposite of the honest reporting
-    # this seed exists for. Mirrors retrieval_pipeline.py:980-982 (Stage 2b)
-    # and :1173 (spreading).
-    graph_on = bool(getattr(settings, "graph_recall_enabled", False))
-    if graph_on:
-        # brain_graph (Stage 4, :1173) needs only the master switch.
-        legs.append("brain_graph")
-        # heart_graph (Stage 2) and heart_graph_memory (Stage 2b) share the
-        # SAME guard at :968-982, which also requires cross-type linking —
-        # so they are not interchangeable with brain_graph here.
-        cross_on = bool(getattr(settings, "cross_type_linking_enabled", False))
-        if cross_on:
-            legs.append("heart_graph")
-            if getattr(settings, "heart_graph_all_types_enabled", False):
-                legs.append("heart_graph_memory")
-        # spreading_activation_enabled is "auto" | "true" | "false" (str);
-        # "auto" resolves at runtime against graph density, so anything
-        # other than an explicit "false" counts as attempted.
-        mode = str(
-            getattr(settings, "spreading_activation_enabled", "false")
-        ).lower()
-        if mode != "false":
-            legs.append("spreading_activation")
-    return legs
 
 
 # Keys that live in ``PipelineStats.n_stage_errors`` but are NOT failures.

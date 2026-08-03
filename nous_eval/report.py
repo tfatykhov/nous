@@ -27,7 +27,6 @@ from nous_eval.metrics import (
     compute_delta,
     compute_metrics,
     filter_by_sources,
-    leg_visibility,
 )
 
 if TYPE_CHECKING:
@@ -316,10 +315,6 @@ def render_markdown(
     lines.append("")
     lines.append(_recall_curve_table(run_results, top_k))
     lines.append("")
-    _leg_table = _leg_visibility_table(run_results, top_k)
-    if _leg_table:
-        lines.append(_leg_table)
-        lines.append("")
 
     # Gate decision
     if gate_decision is not None:
@@ -423,60 +418,6 @@ def _recall_curve_table(run_results: list["RunResult"], top_k: int = 10) -> str:
     return header + "\n" + "\n".join(rows)
 
 
-def _leg_visibility_table(run_results: list["RunResult"], top_k: int = 10) -> str:
-    """N7: which legs band below the scoring cutline.
-
-    A leg marked NOT VISIBLE cannot be observed at the depth this run
-    scores at, so a null for it is inconclusive rather than negative.
-    ``top_k`` MUST be the depth the matrix scored at, not a default —
-    the verdict inverts with it.
-    """
-    lines = []
-    for r in run_results:
-        vis = leg_visibility(
-            r.per_qrel, cutoff=top_k, expected_legs=r.expected_legs,
-        )
-        if not vis:
-            continue
-        lines.append(f"\n**{r.config.name}**\n")
-        lines.append(
-            "| leg | rows | qrels w/ row | qrels within k | of all qrels "
-            "| participation | median rank | best rank | observed@%d |"
-            % vis[0].cutoff
-        )
-        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|:---:|")
-        for v in vis:
-            mark = "yes" if v.visible else "**NO**"
-            # A leg that emitted nothing has no ranks — print em-dashes
-            # rather than 0.0/0, which would imply a rank that never existed.
-            med = f"{v.median_rank:.1f}" if v.n_rows else "—"
-            best = f"{v.best_rank}" if v.n_rows else "—"
-            leg_label = v.leg if v.n_rows else f"{v.leg} *(silent)*"
-            lines.append(
-                f"| {leg_label} | {v.n_rows} | {v.n_qrels_present} | "
-                f"{v.n_qrels_within_cutoff} | {v.n_qrels_evaluated} | "
-                f"{v.participation_rate:.2f} | {med} | {best} | {mark} |"
-            )
-    if not lines:
-        return ""
-    return (
-        "\n### Leg visibility (N7)\n\n"
-        "**participation** is `qrels within k / ALL valid qrels` — how much "
-        "of the experiment this leg could have influenced. It is NOT "
-        "conditioned on the leg having emitted anything, so a leg that "
-        "returns rows on 1 qrel in 100 reads 0.01, not 1.00. Treat a null "
-        "from a leg with participation at or near **0.00** as "
-        "**inconclusive**, not negative: the measurement never reached it. "
-        "(median/best rank are diagnostics — a leg's own long tail can drag "
-        "its median below the cutline while its head scores every qrel.) "
-        "Legs marked ***(silent)*** were ENABLED but emitted zero rows on "
-        "every qrel: they are listed explicitly because an absent row would "
-        "otherwise read as 'nothing to report' exactly when the arm "
-        "contributed nothing at all.\n"
-        + "\n".join(lines)
-    )
-
-
 def _delta_table(
     base: MetricsResult, exp: MetricsResult, top_k: int = 10
 ) -> str:
@@ -560,28 +501,6 @@ def render_json(
                 "metrics": _metrics_to_dict(
                     compute_metrics(r.per_qrel, top_k=top_k)
                 ),
-                # N7/codex-P2: persist the visibility analysis. Without it the
-                # only copy lived in the ephemeral markdown, so historical
-                # eval_runs analysis could not tell whether a reported null
-                # came from a leg banded below the cutoff.
-                "leg_visibility": [
-                    {
-                        "leg": v.leg,
-                        "n_rows": v.n_rows,
-                        "n_qrels_evaluated": v.n_qrels_evaluated,
-                        "n_qrels_present": v.n_qrels_present,
-                        "n_qrels_within_cutoff": v.n_qrels_within_cutoff,
-                        "participation_rate": v.participation_rate,
-                        "median_rank": v.median_rank,
-                        "best_rank": v.best_rank,
-                        "cutoff": v.cutoff,
-                        "visible": v.visible,
-                    }
-                    for v in leg_visibility(
-                        r.per_qrel, cutoff=top_k,
-                        expected_legs=r.expected_legs,
-                    )
-                ],
                 "per_qrel": [
                     {
                         "index": q.qrel_index,

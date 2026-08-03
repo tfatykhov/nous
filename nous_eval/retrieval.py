@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 
 from nous.config import Settings
 from nous_eval.config import EvalSettings
-from nous_eval.metrics import compute_metrics, leg_visibility
+from nous_eval.metrics import compute_metrics
 from nous_eval.qrels_loader import QrelSource, load_qrels
 from nous_eval.report import (
     decide_gate_f050,
@@ -1069,25 +1069,6 @@ def _metrics_compact(run: "RunResult", top_k: int = 10) -> dict:
         "r_at_served": m.r_at_served,
         "mean_served": m.mean_served,
         "recall_curve": {str(k): v for k, v in sorted(m.recall_curve.items())},
-        "leg_visibility": [
-            {
-                "leg": v.leg,
-                "n_rows": v.n_rows,
-                "n_qrels_evaluated": v.n_qrels_evaluated,
-                "n_qrels_present": v.n_qrels_present,
-                "n_qrels_within_cutoff": v.n_qrels_within_cutoff,
-                "participation_rate": v.participation_rate,
-                "median_rank": v.median_rank,
-                "best_rank": v.best_rank,
-                "cutoff": v.cutoff,
-                "visible": v.visible,
-            }
-            for v in leg_visibility(
-                run.per_qrel, cutoff=top_k,
-                expected_legs=run.expected_legs,
-            )
-        ],
-        # N1: non-empty means these numbers came from a PARTIAL retrieval.
         "n_qrels_partial": sum(1 for q in run.per_qrel if q.stage_errors),
     }
 
