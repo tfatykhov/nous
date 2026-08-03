@@ -599,6 +599,14 @@ def render_json(
                         # N1/codex-P1: non-empty means these metrics are based
                         # on a PARTIAL retrieval (e.g. the fact leg crashed).
                         "stage_errors": q.stage_errors,
+                        # N7 follow-up: the PER-QREL attempted set. The
+                        # config-wide union above cannot substitute — if
+                        # spreading ran for one source and the one-hop
+                        # fallback for another, only this distinguishes
+                        # "never attempted here" from "attempted and silent",
+                        # so source/query-level visibility stays
+                        # reconstructable from the archived report alone.
+                        "attempted_legs": sorted(q.attempted_legs),
                     }
                     for q in r.per_qrel
                 ],

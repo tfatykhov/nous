@@ -341,8 +341,14 @@ def leg_visibility(
     scoring at 30 turns a measured leg into a false "inconclusive".
 
     ``attempted_legs`` comes from ``PipelineStats.attempted_legs`` — the
-    PIPELINE's own report of which legs it entered, unioned across qrels by
-    the runner. It is required for correctness, not convenience: a leg that
+    PIPELINE's own report of which legs it entered. When omitted it is
+    derived from the union of ``QrelResult.attempted_legs`` over the qrels
+    ACTUALLY PASSED IN, which is what a filtered call needs: if spreading
+    ran for source A while source B took the one-hop fallback, a
+    config-wide union would seed ``spreading_activation`` into source B's
+    report and misreport it as silent-but-attempted. Pass an explicit set
+    only to widen beyond the given qrels. It matters for correctness, not
+    convenience: a leg that
     emitted zero rows on every qrel appears nowhere in ``retrieved_legs``,
     so without it the most extreme case of an unobserved arm is omitted from
     this report entirely — silently, and precisely when the warning matters
@@ -380,8 +386,17 @@ def leg_visibility(
             if best <= cutoff:
                 within[leg] = within.get(leg, 0) + 1
 
-    # Seed attempted-but-silent legs so zero emission is REPORTED, not omitted.
-    for leg in attempted_legs or ():
+    # Seed attempted-but-silent legs so zero emission is REPORTED, not
+    # omitted. Default to the union over the qrels PASSED IN so a
+    # source-filtered call never inherits a leg another source attempted.
+    if attempted_legs is None:
+        attempted_legs = {
+            leg
+            for q in per_qrel
+            if q.error is None
+            for leg in q.attempted_legs
+        }
+    for leg in attempted_legs:
         ranks_by_leg.setdefault(leg, [])
 
     out = []

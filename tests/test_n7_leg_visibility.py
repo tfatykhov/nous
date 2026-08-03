@@ -231,6 +231,53 @@ class TestReporting:
         assert vis["keyed"]["visible"] is False
         assert vis["exemplar"]["n_rows"] == 0, "silent leg persisted too"
 
+    def test_per_qrel_attempted_legs_serialized(self):
+        """The config-wide union cannot substitute for per-qrel detail."""
+        from nous_eval.report import render_json
+
+        qs = [
+            _qrel([uuid4()], [], ["heart_primary"], attempted=["spreading_activation"]),
+            _qrel([uuid4()], [], ["heart_primary"], attempted=["brain_graph"]),
+        ]
+        rr = _run(qs, attempted=["spreading_activation", "brain_graph"])
+        pq = json.loads(render_json([rr], []))["configs"][0]["per_qrel"]
+
+        assert pq[0]["attempted_legs"] == ["spreading_activation"]
+        assert pq[1]["attempted_legs"] == ["brain_graph"], (
+            "without this an archived consumer filtering to one source sees "
+            "the union and cannot tell a leg was never attempted there"
+        )
+
+    def test_filtered_subset_does_not_inherit_other_sources_legs(self):
+        """A source-filtered call must not seed another source's legs."""
+        from nous_eval.metrics import leg_visibility
+
+        spread_q = _qrel(
+            [uuid4()], [], ["heart_primary"], attempted=["spreading_activation"]
+        )
+        fallback_q = _qrel(
+            [uuid4()], [], ["heart_primary"], attempted=["brain_graph"]
+        )
+
+        # Derived from the qrels passed in, not a config-wide union.
+        only_fallback = {v.leg for v in leg_visibility([fallback_q])}
+        assert "brain_graph" in only_fallback
+        assert "spreading_activation" not in only_fallback, (
+            "spreading was never attempted for this subset — reporting it "
+            "as silent-but-attempted misattributes the runtime branch"
+        )
+
+        both = {v.leg for v in leg_visibility([spread_q, fallback_q])}
+        assert {"spreading_activation", "brain_graph"} <= both
+
+    def test_explicit_attempted_still_wins(self):
+        """Callers can widen beyond the given qrels when they mean to."""
+        from nous_eval.metrics import leg_visibility
+
+        q = _qrel([uuid4()], [], ["heart_primary"], attempted=["heart_primary"])
+        legs = {v.leg for v in leg_visibility([q], attempted_legs=["exemplar"])}
+        assert "exemplar" in legs
+
     def test_eval_runs_payload_carries_it(self):
         from nous_eval.retrieval import _metrics_compact
 
