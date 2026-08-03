@@ -299,10 +299,19 @@ def compute_delta(
 class LegVisibility:
     """Whether the scoring window actually observed one retrieval leg.
 
-    The load-bearing field is ``participation_rate``: the fraction of qrels
-    where this leg placed AT LEAST ONE row within ``cutoff``. That is the
-    question an operator needs answered — "could this leg have influenced
-    the top-k metric?" — and it is not what a pooled median measures.
+    The load-bearing field is ``participation_rate``: of ALL valid qrels in
+    the run, the fraction where this leg placed at least one row within
+    ``cutoff``. That is the question an operator needs answered — "how much
+    of the experiment could this leg have influenced?" — and it is not what
+    a pooled median measures.
+
+    The denominator is ``n_qrels_evaluated``, NOT ``n_qrels_present``.
+    Dividing by the qrels where the leg happened to emit would condition
+    the rate on the leg having returned something at all: a leg that
+    reaches the cutoff on 1 qrel and emits nothing on the other 99 would
+    read 1.00 — "fully observed" — while touching 1% of the experiment.
+    ``n_qrels_present`` is kept beside it so emission coverage and
+    in-window coverage stay separately visible.
 
     A leg emitting ranks 1 and 20-30 on every qrel has a median far below
     the cutline yet participates in every single top-10 score; legs with
@@ -319,6 +328,7 @@ class LegVisibility:
 
     leg: str
     n_rows: int
+    n_qrels_evaluated: int
     n_qrels_present: int
     n_qrels_within_cutoff: int
     participation_rate: float
@@ -358,10 +368,12 @@ def leg_visibility(
     ranks_by_leg: dict[str, list[int]] = {}
     present: dict[str, int] = {}
     within: dict[str, int] = {}
+    n_evaluated = 0
 
     for q in per_qrel:
         if q.error is not None:
             continue
+        n_evaluated += 1
         best_in_qrel: dict[str, int] = {}
         for pos, leg in enumerate(q.retrieved_legs, start=1):
             ranks_by_leg.setdefault(leg, []).append(pos)
@@ -376,11 +388,13 @@ def leg_visibility(
     for leg, ranks in ranks_by_leg.items():
         n_present = present.get(leg, 0)
         n_within = within.get(leg, 0)
-        rate = (n_within / n_present) if n_present else 0.0
+        # Denominator is every valid qrel — see the class docstring.
+        rate = (n_within / n_evaluated) if n_evaluated else 0.0
         out.append(
             LegVisibility(
                 leg=leg,
                 n_rows=len(ranks),
+                n_qrels_evaluated=n_evaluated,
                 n_qrels_present=n_present,
                 n_qrels_within_cutoff=n_within,
                 participation_rate=rate,

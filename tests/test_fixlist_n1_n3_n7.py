@@ -884,6 +884,97 @@ class TestCodexR3ExpansionGuardComplete:
 
 
 # ---------------------------------------------------------------------------
+# Codex round 4 — honest denominator, honest labels
+# ---------------------------------------------------------------------------
+
+
+class TestCodexR4ParticipationDenominator:
+    """The rate must not be conditioned on the leg having emitted."""
+
+    def test_sparse_leg_does_not_read_fully_observed(self):
+        from nous_eval.metrics import leg_visibility
+
+        # keyed emits on exactly 1 of 10 qrels, at rank 1 there.
+        qs = [
+            _qrel_result([uuid4()], [], ["keyed"]),
+            *[
+                _qrel_result([uuid4()], [], ["heart_primary"])
+                for _ in range(9)
+            ],
+        ]
+        vis = {v.leg: v for v in leg_visibility(qs)}
+
+        assert vis["keyed"].n_qrels_present == 1
+        assert vis["keyed"].n_qrels_within_cutoff == 1
+        assert vis["keyed"].n_qrels_evaluated == 10
+        assert vis["keyed"].participation_rate == pytest.approx(0.1), (
+            "dividing by n_present would read 1.00 — 'fully observed' — for "
+            "a leg touching 10% of the experiment"
+        )
+
+    def test_denominator_excludes_errored_qrels(self):
+        from nous_eval.metrics import leg_visibility
+
+        qs = [
+            _qrel_result([uuid4()], [], ["keyed"]),
+            _qrel_result([], [], [], error="boom"),
+        ]
+        vis = {v.leg: v for v in leg_visibility(qs)}
+        assert vis["keyed"].n_qrels_evaluated == 1
+        assert vis["keyed"].participation_rate == 1.0
+
+    def test_full_coverage_still_reads_one(self):
+        from nous_eval.metrics import leg_visibility
+
+        qs = [_qrel_result([uuid4()], [], ["keyed"]) for _ in range(5)]
+        vis = {v.leg: v for v in leg_visibility(qs)}
+        assert vis["keyed"].participation_rate == 1.0
+
+    def test_report_shows_the_full_denominator(self):
+        from nous_eval.report import render_markdown
+
+        qs = [
+            _qrel_result([uuid4()], [], ["keyed"]),
+            *[_qrel_result([uuid4()], [], ["heart_primary"]) for _ in range(9)],
+        ]
+        md = render_markdown([_run_result(qs)], [])
+        assert "of all qrels" in md
+        assert "ALL valid qrels" in md
+
+
+class TestCodexR4DeltaLabels:
+    """A k=30 report must not describe its deltas as @10."""
+
+    def test_delta_rows_labelled_at_configured_depth(self):
+        from nous_eval.report import render_markdown
+
+        ids = [uuid4() for _ in range(40)]
+        rrs = [
+            _run_result([_qrel_result(ids, [ids[24]])], name="base"),
+            _run_result([_qrel_result(ids, [ids[24]])], name="exp"),
+        ]
+        md = render_markdown(rrs, [], top_k=30)
+
+        assert "| p_at_30 |" in md
+        assert "| r_at_30 |" in md
+        assert "| ndcg_at_30 |" in md
+        assert "| p_at_10 |" not in md
+
+    def test_depth_10_labels_unchanged(self):
+        """The default run must render exactly as before."""
+        from nous_eval.report import render_markdown
+
+        ids = [uuid4() for _ in range(20)]
+        rrs = [
+            _run_result([_qrel_result(ids, [ids[0]])], name="base"),
+            _run_result([_qrel_result(ids, [ids[0]])], name="exp"),
+        ]
+        md = render_markdown(rrs, [], top_k=10)
+        assert "| p_at_10 |" in md
+        assert "| p_at_1 |" in md, "unrelated rows must keep their names"
+
+
+# ---------------------------------------------------------------------------
 # N8 — the bands are a deliberate choice, not a unit mismatch
 # ---------------------------------------------------------------------------
 

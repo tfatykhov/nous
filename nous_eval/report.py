@@ -271,7 +271,7 @@ def render_markdown(
         base_m = compute_metrics(base.per_qrel, top_k=top_k)
         exp_m = compute_metrics(exp.per_qrel, top_k=top_k)
         lines.append(f"## Delta: {base.config.name} → {exp.config.name}")
-        lines.append(_delta_table(base_m, exp_m))
+        lines.append(_delta_table(base_m, exp_m, top_k))
         lines.append("")
 
     # N7: recall over k + which legs the scoring depth cannot see.
@@ -406,33 +406,48 @@ def _leg_visibility_table(run_results: list["RunResult"], top_k: int = 10) -> st
             continue
         lines.append(f"\n**{r.config.name}**\n")
         lines.append(
-            "| leg | rows | qrels w/ row | qrels within k | participation "
-            "| median rank | best rank | observed@%d |" % vis[0].cutoff
+            "| leg | rows | qrels w/ row | qrels within k | of all qrels "
+            "| participation | median rank | best rank | observed@%d |"
+            % vis[0].cutoff
         )
-        lines.append("|---|---:|---:|---:|---:|---:|---:|:---:|")
+        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|:---:|")
         for v in vis:
             mark = "yes" if v.visible else "**NO**"
             lines.append(
                 f"| {v.leg} | {v.n_rows} | {v.n_qrels_present} | "
-                f"{v.n_qrels_within_cutoff} | {v.participation_rate:.2f} | "
+                f"{v.n_qrels_within_cutoff} | {v.n_qrels_evaluated} | "
+                f"{v.participation_rate:.2f} | "
                 f"{v.median_rank:.1f} | {v.best_rank} | {mark} |"
             )
     if not lines:
         return ""
     return (
         "\n### Leg visibility (N7)\n\n"
-        "**participation** is the fraction of qrels where the leg placed at "
-        "least one row inside the scoring window — i.e. how often it could "
-        "have influenced the top-k metric at all. Treat a null from a leg "
-        "with participation at or near **0.00** as **inconclusive**, not "
-        "negative: the measurement never reached it. (median/best rank are "
-        "diagnostics — a leg's own long tail can drag its median below the "
-        "cutline while its head scores on every qrel.)\n" + "\n".join(lines)
+        "**participation** is `qrels within k / ALL valid qrels` — how much "
+        "of the experiment this leg could have influenced. It is NOT "
+        "conditioned on the leg having emitted anything, so a leg that "
+        "returns rows on 1 qrel in 100 reads 0.01, not 1.00. Treat a null "
+        "from a leg with participation at or near **0.00** as "
+        "**inconclusive**, not negative: the measurement never reached it. "
+        "(median/best rank are diagnostics — a leg's own long tail can drag "
+        "its median below the cutline while its head scores every qrel.)\n"
+        + "\n".join(lines)
     )
 
 
-def _delta_table(base: MetricsResult, exp: MetricsResult) -> str:
-    """Build a metric-by-metric delta table."""
+def _delta_table(
+    base: MetricsResult, exp: MetricsResult, top_k: int = 10
+) -> str:
+    """Build a metric-by-metric delta table.
+
+    ``MetricsResult`` field names carry the historical ``_at_10`` suffix but
+    hold whatever depth ``compute_metrics`` was given, so the *labels* are
+    rewritten at ``top_k``. Without this a k=30 report describes @30 deltas
+    as @10 — the aggregate headers were parameterized earlier while these
+    rows were not.
+    """
+    label_at_k = {"p_at_10": f"p_at_{top_k}", "r_at_10": f"r_at_{top_k}",
+                  "ndcg_at_10": f"ndcg_at_{top_k}"}
     rows = ["| metric | baseline | experimental | Δ | Δ% |", "|---|---:|---:|---:|---:|"]
     for metric in (
         "mrr",
@@ -446,7 +461,8 @@ def _delta_table(base: MetricsResult, exp: MetricsResult) -> str:
     ):
         d = compute_delta(base, exp, metric)
         rows.append(
-            f"| {metric} | {d.baseline_mean:.3f} | {d.experimental_mean:.3f} | "
+            f"| {label_at_k.get(metric, metric)} | {d.baseline_mean:.3f} | "
+            f"{d.experimental_mean:.3f} | "
             f"{d.absolute:+.3f} | {d.relative_pct:+.1f}% |"
         )
     return "\n".join(rows)
@@ -510,6 +526,7 @@ def render_json(
                     {
                         "leg": v.leg,
                         "n_rows": v.n_rows,
+                        "n_qrels_evaluated": v.n_qrels_evaluated,
                         "n_qrels_present": v.n_qrels_present,
                         "n_qrels_within_cutoff": v.n_qrels_within_cutoff,
                         "participation_rate": v.participation_rate,
