@@ -139,14 +139,36 @@ class IntentClassifier:
                     )
 
         # Topic keywords: capitalized words + long words + ALL-CAPS acronyms (F19)
+        #
+        # N10 (2026-08-02): dedup via ``dict.fromkeys``, NOT ``set``. These
+        # keywords are joined into ``query_text`` at plan_retrieval (:199-201)
+        # and become the embedded retrieval query for every memory type, so
+        # their ORDER is part of the query string. ``set`` iteration order for
+        # str depends on PYTHONHASHSEED, which CPython randomises per process:
+        # measured 5 distinct orderings of one sentence across 5 seeds. That
+        # made identical user input retrieve differently on different
+        # processes, made the ``[:10]`` cap drop a DIFFERENT keyword per run
+        # once a message yielded more than ten, and fragmented the F050
+        # expansion cache (keyed on a hash of this text).
+        #
+        # ``dict.fromkeys`` is order-preserving and deterministic, so it also
+        # restores source word order — which matters because embeddings are
+        # order-sensitive. Whether a keyword bag is the right query
+        # representation AT ALL is a separate open question; this is only the
+        # determinism fix.
         words = re.findall(
             r"\b[A-Z][a-z]+\b|\b\w{6,}\b|\b[A-Z]{2,}\b", input_text
         )
-        signals.topic_keywords = list(set(w.lower() for w in words))[:10]
+        signals.topic_keywords = list(dict.fromkeys(w.lower() for w in words))[:10]
 
         # Entity mentions (proper nouns -- capitalized words not at sentence start)
+        # Same N10 treatment. No retrieval consumer reads this today (only
+        # layer.py:670 copies it onto a rebuilt IntentSignals), so this is
+        # consistency rather than a measured fix — but leaving one of two
+        # adjacent dedups hash-order-dependent is how the next reader
+        # concludes the ordering is deliberate.
         entity_candidates = re.findall(r"(?<!^)(?<!\. )\b[A-Z][a-z]+\b", input_text)
-        signals.entity_mentions = list(set(entity_candidates))[:10]
+        signals.entity_mentions = list(dict.fromkeys(entity_candidates))[:10]
 
         return signals
 
