@@ -151,10 +151,12 @@ class PipelineStats:
     # Per-stage error counts surfaced to eval reports. Keys are pipeline
     # stage names: "heart_recall", "brain_query", "heart_graph_neighbors",
     # "decision_neighbors", "spreading_activation", "contradiction_query".
-    # Heart's INTERNAL per-sub-search exceptions (heart.py:807-812) are NOT
-    # included here — they are caught and logged at WARN inside Heart.recall
-    # before the pipeline sees results. Surfacing those would require Heart
-    # instrumentation; deferred to a follow-up.
+    # N1 (2026-08-02): Heart's INTERNAL per-sub-search exceptions are now
+    # included too, under "heart_recall_<type>" (e.g. "heart_recall_fact") —
+    # the pipeline passes ``acc.stage_errors`` into ``Heart.recall``, which
+    # increments a key per failed leg. Previously those were caught and
+    # logged at WARN inside Heart with nothing reaching the caller, so a
+    # crashed fact leg was indistinguishable from an empty one.
     n_stage_errors: dict[str, int] = field(default_factory=dict)
     # Raw contradiction edges (source_id, source_type, target_id, target_type).
     # Preserves byte-identical warning emission for the legacy formatter
@@ -678,6 +680,11 @@ async def _run_stages(
                 residual_activations=residual_activations,  # F055
                 apply_mmr=apply_mmr,  # F030.2
                 date_window=date_window,  # F075 L3
+                # N1: per-leg failures inside recall are fail-open and were
+                # previously invisible here. Passing the accumulator's dict
+                # surfaces them as n_stage_errors["heart_recall_<type>"],
+                # so a crashed fact leg no longer looks like an empty one.
+                stage_errors=acc.stage_errors,
             )
             acc.heart_results = list(heart_results or [])
 
@@ -1455,17 +1462,32 @@ async def _apply_graph_adjacency_boost(
         return results
 
     candidate_ids = [str(r.id) for r in results]
+    # N3: optionally exclude deterministic/structural edges, matching the
+    # clause `_record_recall_reactivation` already carries below. Measured
+    # on a 60-query prod clone: recall@10 +0.0900 (p=2.7e-5), MRR +0.0239,
+    # nDCG@10 +0.0709, all four strata directionally positive. The MECHANISM
+    # is unestablished — the "structural stars dominate the degree sum"
+    # account was tested and failed (degree concentration 0.511 vs 0.497).
+    # This comment states the measurement, not a cause.
+    deterministic_clause = (
+        "  AND extraction_method IS DISTINCT FROM 'deterministic' "
+        if getattr(
+            getattr(brain, "settings", None),
+            "graph_adjacency_boost_exclude_deterministic",
+            False,
+        )
+        else ""
+    )
     try:
         async with brain.db.session() as s:
             # Codex round-5 P2: exclude `contradicts` so mutually
             # inconsistent candidates don't reinforce each other.
-            # Aligns with the spreading-activation filter at
-            # spreading_activation.py:103.
             rows = (await s.execute(sa_text(
                 "SELECT source_id::text, target_id::text, weight, consolidation_state "
                 "FROM brain.graph_edges "
                 "WHERE agent_id = :a "
                 "  AND relation != 'contradicts' "
+                f"{deterministic_clause}"
                 "  AND source_id = ANY(CAST(:ids AS uuid[])) "
                 "  AND target_id = ANY(CAST(:ids AS uuid[]))"
             ), {"a": brain.agent_id, "ids": candidate_ids})).all()

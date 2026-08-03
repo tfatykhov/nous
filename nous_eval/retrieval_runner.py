@@ -104,6 +104,13 @@ class QrelResult:
     can compute P@K / R@K / nDCG without going back to the original Qrel.
     Defaults to ``[]`` for callers that construct QrelResult by hand in
     tests where only rank-based metrics are exercised.
+
+    N7: ``retrieved_ids`` is the FULL served list, not a top-K slice — the
+    pipeline returns every row it will hand the model (median ~77), and
+    ``recall_deep`` does not truncate. Only ``rank_of_first_gold`` /
+    ``n_gold_in_top_k`` are top-K scoped. ``retrieved_legs`` labels each
+    row's originating leg so ``metrics.leg_visibility`` can tell which legs
+    band below the eval's cutline and are therefore unmeasurable at fixed k.
     """
 
     qrel_index: int
@@ -116,6 +123,7 @@ class QrelResult:
     n_gold_total: int
     error: str | None = None
     gold_ids: list[UUID] = field(default_factory=list)
+    retrieved_legs: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -559,6 +567,7 @@ async def _run_one(
 
     retrieved_ids = [r.id for r in pipeline_results]
     retrieved_types = [r.type for r in pipeline_results]
+    retrieved_legs = [_leg_of(r) for r in pipeline_results]
     rank, n_in_top = _score_rank(retrieved_ids, qrel.gold_ids, top_k)
 
     logger.debug(
@@ -577,6 +586,7 @@ async def _run_one(
             gold_ids=list(qrel.gold_ids),
             retrieved_ids=retrieved_ids,
             retrieved_types=retrieved_types,
+            retrieved_legs=retrieved_legs,
             rank_of_first_gold=rank,
             n_gold_in_top_k=n_in_top,
             n_gold_total=len(qrel.gold_ids),
@@ -588,6 +598,31 @@ async def _run_one(
             "contradiction_checks_ran": stats.contradiction_checks_ran,
         },
     )
+
+
+def _leg_of(r) -> str:
+    """N7: label a PipelineResult with the leg that produced it.
+
+    Reads the provenance markers the pipeline already sets — no new
+    instrumentation. ``metadata["retrieval_leg"]`` covers the F085 keyed
+    rounds and the F086 exemplar leg; ``metadata["stage_origin"]`` covers
+    the graph stages; ``source`` covers spreading activation and the brain
+    decision leg; ``type == "chunk"`` identifies the F067 chunk leg. Rows
+    with no marker are plain heart hits ("heart_primary").
+    """
+    meta = getattr(r, "metadata", None) or {}
+    leg = meta.get("retrieval_leg")
+    if leg:
+        return str(leg)
+    origin = meta.get("stage_origin")
+    if origin:
+        return str(origin)
+    source = getattr(r, "source", "heart")
+    if source and source != "heart":
+        return str(source)
+    if getattr(r, "type", None) == "chunk":
+        return "chunk"
+    return "heart_primary"
 
 
 def _score_rank(

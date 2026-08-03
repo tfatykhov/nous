@@ -230,8 +230,16 @@ class QueryExpander:
             final = self._fuse([query, *cleaned])
             elapsed_ms = (time.monotonic() - t_start) * 1000.0
 
-            # Tier 7: cache put (best-effort)
-            await self._cache_put(h, query, final)
+            # Tier 7: cache put (best-effort) — only on a real expansion.
+            # ``_call_haiku`` returns ``[]`` on API / auth / timeout failure,
+            # after which ``final == [query]``. Caching that degenerate
+            # fail-open result would pin the no-op for the whole cache TTL,
+            # disabling expansion for this query hash long after the
+            # underlying fault is fixed. Same predicate as the success log
+            # below, which already guards against reporting a failed call
+            # as healthy.
+            if len(cleaned) > 0:
+                await self._cache_put(h, query, final)
             # Codex round-1 P2 (PR #454): only log a successful Haiku
             # expansion if Haiku actually returned variants. ``_call_haiku``
             # returns ``[]`` on API / auth / timeout failures, after which

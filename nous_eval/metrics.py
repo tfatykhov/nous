@@ -16,10 +16,17 @@ explicitly, so callers can branch on it if they need to.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from statistics import mean
+from dataclasses import dataclass, field
+from statistics import mean, median
 
 from nous_eval.retrieval_runner import QrelResult
+
+# N7: k values reported alongside recall@served, so a run shows where its
+# fixed-k cutoff stops seeing things rather than reporting one depth as if
+# it were the whole picture. These are REPORTING points; the depth a run is
+# actually scored at (and therefore the cutline ``leg_visibility`` judges
+# against) is the harness's ``top_k``, not the shallowest entry here.
+RECALL_CURVE_KS: tuple[int, ...] = (3, 5, 10, 20, 40, 60)
 
 
 @dataclass(frozen=True)
@@ -29,6 +36,13 @@ class MetricsResult:
     ``n_errored`` is the count of qrels that raised inside the pipeline and
     were excluded from metric aggregates. A non-zero value is a red flag —
     the report surfaces it prominently.
+
+    N7: ``r_at_served`` and ``recall_curve`` exist because production does
+    NOT truncate — ``recall_deep`` hands the model the whole served block
+    (median ~77 rows), so a fixed top-K metric measures a window prod never
+    applies. Legs that band below the cutline are invisible to it, and a
+    null from such a leg is uninformative rather than negative.
+    ``mean_served`` records how many rows that block actually held.
     """
 
     mrr: float
@@ -41,6 +55,11 @@ class MetricsResult:
     ndcg_at_10: float
     n_qrels: int
     n_errored: int = 0
+    # N7: recall over the full served block, and the curve that shows where
+    # the fixed-k cutoff stops seeing things.
+    r_at_served: float = 0.0
+    mean_served: float = 0.0
+    recall_curve: dict[int, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -195,6 +214,12 @@ def compute_metrics(
     # scoring time. This keeps metrics decoupled from whether the caller
     # also propagates gold_ids onto QrelResult (which test fixtures don't
     # always do).
+    # N7: recall over the full served block. ``retrieved_ids`` is already the
+    # untruncated served list, so this needs no re-run — it is the same data
+    # scored without the artificial window.
+    served_recalls: list[float] = []
+    served_lengths: list[float] = []
+
     for q in valid:
         rrs.append(_reciprocal_rank(q))
         p1s.append(_precision_from_counts(q, 1))
@@ -204,6 +229,14 @@ def compute_metrics(
         r5s.append(_recall_from_counts(q, 5))
         r10s.append(_recall_from_counts(q, top_k))
         ndcgs.append(_ndcg_from_counts(q, top_k))
+        served = len(q.retrieved_ids)
+        served_lengths.append(float(served))
+        served_recalls.append(_recall_from_counts(q, served))
+
+    curve = {
+        k: mean([_recall_from_counts(q, k) for q in valid])
+        for k in RECALL_CURVE_KS
+    }
 
     return MetricsResult(
         mrr=mean(rrs),
@@ -216,6 +249,9 @@ def compute_metrics(
         ndcg_at_10=mean(ndcgs),
         n_qrels=len(valid),
         n_errored=n_errored,
+        r_at_served=mean(served_recalls),
+        mean_served=mean(served_lengths),
+        recall_curve=curve,
     )
 
 
@@ -252,6 +288,73 @@ def compute_delta(
         relative_pct=relative_pct,
         n_pairs=n_pairs,
     )
+
+
+# ---------------------------------------------------------------------------
+# N7: leg visibility
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LegVisibility:
+    """Where one retrieval leg's rows land relative to the eval's cutline.
+
+    ``visible`` is False when the leg's median rank sits deeper than
+    ``cutoff`` — meaning no harness slicing at that depth can observe the
+    leg at all. A null result for an invisible leg is INCONCLUSIVE, not
+    negative: the measurement never reached it.
+    """
+
+    leg: str
+    n_rows: int
+    median_rank: float
+    best_rank: int
+    cutoff: int
+    visible: bool
+
+
+def leg_visibility(
+    per_qrel: list[QrelResult],
+    cutoff: int = 10,
+) -> list[LegVisibility]:
+    """Report each leg's rank distribution against the scoring cutline.
+
+    ``cutoff`` defaults to 10 — ``run_matrix``'s default ``top_k``, i.e. the
+    window this harness actually scores at. Callers running a different
+    ``top_k`` should pass it, since that is the depth their nulls are
+    conditioned on. (The shallower points in ``RECALL_CURVE_KS`` are
+    reporting detail; scoring at k=3 would mark nearly every leg invisible
+    and the check would stop discriminating.)
+
+    Ranks are 1-based positions in the served block. Legs are labelled by
+    ``QrelResult.retrieved_legs`` (populated by the runner from the
+    pipeline's own provenance markers). Returns one row per observed leg,
+    deepest median first, so the least-visible legs read at the top.
+
+    Callers that treat this as a gate should fail when any row has
+    ``visible=False`` while the run reports a null for that leg — that
+    combination is the specific error N7 exists to prevent.
+    """
+    ranks_by_leg: dict[str, list[int]] = {}
+    for q in per_qrel:
+        if q.error is not None:
+            continue
+        for pos, leg in enumerate(q.retrieved_legs, start=1):
+            ranks_by_leg.setdefault(leg, []).append(pos)
+
+    out = [
+        LegVisibility(
+            leg=leg,
+            n_rows=len(ranks),
+            median_rank=float(median(ranks)),
+            best_rank=min(ranks),
+            cutoff=cutoff,
+            visible=float(median(ranks)) <= cutoff,
+        )
+        for leg, ranks in ranks_by_leg.items()
+    ]
+    out.sort(key=lambda v: v.median_rank, reverse=True)
+    return out
 
 
 # ---------------------------------------------------------------------------

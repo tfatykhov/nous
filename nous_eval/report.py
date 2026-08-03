@@ -22,10 +22,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from nous_eval.metrics import (
+    RECALL_CURVE_KS,
     MetricsResult,
     compute_delta,
     compute_metrics,
     filter_by_sources,
+    leg_visibility,
 )
 
 if TYPE_CHECKING:
@@ -259,6 +261,21 @@ def render_markdown(
         lines.append(_delta_table(base_m, exp_m))
         lines.append("")
 
+    # N7: recall over k + which legs the scoring depth cannot see.
+    lines.append("## Recall over k (N7)")
+    lines.append(
+        "_Production does not truncate — `recall_deep` hands the model the "
+        "whole served block. A fixed-k row describes a window prod never "
+        "applies._"
+    )
+    lines.append("")
+    lines.append(_recall_curve_table(run_results))
+    lines.append("")
+    _leg_table = _leg_visibility_table(run_results)
+    if _leg_table:
+        lines.append(_leg_table)
+        lines.append("")
+
     # Gate decision
     if gate_decision is not None:
         verdict = "PASS" if gate_decision.passed else "FAIL"
@@ -274,10 +291,16 @@ def render_markdown(
 
 
 def _metrics_table(run_results: list["RunResult"]) -> str:
-    """Build a markdown table with metrics for each config."""
+    """Build a markdown table with metrics for each config.
+
+    N7: ``R@served`` and ``served`` are reported alongside the fixed-k
+    columns because production does not truncate — a top-K-only table
+    describes a window ``recall_deep`` never applies.
+    """
     header = (
-        "| config | n_qrels | n_errored | MRR | P@1 | P@10 | R@10 | nDCG@10 |\n"
-        "|---|---:|---:|---:|---:|---:|---:|---:|"
+        "| config | n_qrels | n_errored | MRR | P@1 | P@10 | R@10 "
+        "| R@served | served | nDCG@10 |\n"
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
     )
     rows = []
     for r in run_results:
@@ -285,9 +308,55 @@ def _metrics_table(run_results: list["RunResult"]) -> str:
         rows.append(
             f"| {r.config.name} | {m.n_qrels} | {m.n_errored} | "
             f"{m.mrr:.3f} | {m.p_at_1:.3f} | {m.p_at_10:.3f} | "
-            f"{m.r_at_10:.3f} | {m.ndcg_at_10:.3f} |"
+            f"{m.r_at_10:.3f} | {m.r_at_served:.3f} | {m.mean_served:.1f} | "
+            f"{m.ndcg_at_10:.3f} |"
         )
     return header + "\n" + "\n".join(rows)
+
+
+def _recall_curve_table(run_results: list["RunResult"]) -> str:
+    """N7: recall over k, so the fixed-k cutoff's blind spot is visible."""
+    ks = sorted(RECALL_CURVE_KS)
+    header = (
+        "| config | " + " | ".join(f"R@{k}" for k in ks) + " | R@served |\n"
+        "|---|" + "---:|" * (len(ks) + 1)
+    )
+    rows = []
+    for r in run_results:
+        m = compute_metrics(r.per_qrel)
+        cells = " | ".join(f"{m.recall_curve.get(k, 0.0):.3f}" for k in ks)
+        rows.append(f"| {r.config.name} | {cells} | {m.r_at_served:.3f} |")
+    return header + "\n" + "\n".join(rows)
+
+
+def _leg_visibility_table(run_results: list["RunResult"]) -> str:
+    """N7: which legs band below the scoring cutline.
+
+    A leg marked NOT VISIBLE cannot be observed at the depth this run
+    scores at, so a null for it is inconclusive rather than negative.
+    """
+    lines = []
+    for r in run_results:
+        vis = leg_visibility(r.per_qrel)
+        if not vis:
+            continue
+        lines.append(f"\n**{r.config.name}**\n")
+        lines.append("| leg | rows | median rank | best rank | visible@%d |" % vis[0].cutoff)
+        lines.append("|---|---:|---:|---:|:---:|")
+        for v in vis:
+            mark = "yes" if v.visible else "**NO**"
+            lines.append(
+                f"| {v.leg} | {v.n_rows} | {v.median_rank:.1f} | "
+                f"{v.best_rank} | {mark} |"
+            )
+    if not lines:
+        return ""
+    return (
+        "\n### Leg visibility (N7)\n\n"
+        "A leg whose median rank sits below the scoring cutline is "
+        "unobservable at that depth — treat any null for it as "
+        "**inconclusive**, not negative.\n" + "\n".join(lines)
+    )
 
 
 def _delta_table(base: MetricsResult, exp: MetricsResult) -> str:
@@ -384,7 +453,7 @@ def render_json(
     return json.dumps(payload, indent=2, default=str)
 
 
-def _metrics_to_dict(m: MetricsResult) -> dict[str, float | int]:
+def _metrics_to_dict(m: MetricsResult) -> dict:
     return {
         "mrr": m.mrr,
         "p_at_1": m.p_at_1,
@@ -396,6 +465,11 @@ def _metrics_to_dict(m: MetricsResult) -> dict[str, float | int]:
         "ndcg_at_10": m.ndcg_at_10,
         "n_qrels": m.n_qrels,
         "n_errored": m.n_errored,
+        # N7: the untruncated view. Keys are stringified because JSON object
+        # keys must be strings — consumers cast back to int.
+        "r_at_served": m.r_at_served,
+        "mean_served": m.mean_served,
+        "recall_curve": {str(k): v for k, v in sorted(m.recall_curve.items())},
     }
 
 

@@ -447,7 +447,20 @@ class Settings(BaseSettings):
     )
     keyed_fact_leg_score: float = Field(
         default=0.55, ge=0.0, le=1.0,
-        description="R3.3: score band ceiling for keyed hits (RRF [0,1] scale, below the direct-hit head).",
+        description=(
+            "R3.3: score band ceiling for keyed hits (RRF [0,1] scale, below "
+            "the direct-hit head). CALIBRATION NOTE (N8, 2026-08-02): 0.55 is "
+            "mid-range on the [0,1] SCALE but roughly the 10th percentile of "
+            "the observed DISTRIBUTION (n=2,834 primary rows: min 0.4700, "
+            "p10 0.5200, median 0.7824). Sorted insertion places a row where "
+            "its score puts it, so this band lands keyed hits near rank 41-53 "
+            "— below every fixed-k eval cutoff in use, which is why prior "
+            "nulls on this leg are unverified rather than settled (see N7). "
+            "This is now a DELIBERATE below-the-read-zone choice for a "
+            "land-dark leg, not a scale/distribution unit mismatch. Raise "
+            "toward the median (~0.78) only as an explicit ranking decision "
+            "backed by an A/B, not as a bug fix."
+        ),
     )
     keyed_fact_leg_rounds: int = Field(
         default=1, ge=1, le=2,
@@ -493,7 +506,16 @@ class Settings(BaseSettings):
     )
     exemplar_leg_score: float = Field(
         default=0.55, ge=0.0, le=1.0,
-        description="F086 score-band ceiling for exemplar hits (below the RRF direct-hit head; per-rank decay 0.005).",
+        description=(
+            "F086 score-band ceiling for exemplar hits (below the RRF "
+            "direct-hit head; per-rank decay 0.005). CALIBRATION NOTE (N8, "
+            "2026-08-02): this constant was copied from "
+            "keyed_fact_leg_score — see that field for the distribution "
+            "measurement. 0.55 is ~p10 of the observed RRF distribution, so "
+            "exemplar hits land below every fixed-k eval cutoff in use and "
+            "prior nulls on this leg are unverified. Deliberate for a "
+            "land-dark leg; changing it is a ranking decision needing an A/B."
+        ),
     )
     exemplar_min_similarity: float = Field(
         default=0.30, ge=0.0, le=1.0,
@@ -1902,6 +1924,26 @@ class Settings(BaseSettings):
     graph_adjacency_boost_alpha: float = Field(
         default=0.15,
         description="P2: max boost as a fraction of original score (default 0.15 = +15% for the most-connected candidate).",
+    )
+    graph_adjacency_boost_exclude_deterministic: bool = Field(
+        default=False,
+        description=(
+            "N3 (2026-08-02): exclude extraction_method='deterministic' edges "
+            "from the adjacency-boost degree sum, matching the clause its "
+            "sibling _record_recall_reactivation already carries. Measured on "
+            "a 60-query prod clone across 4 disjoint strata: recall@10 +0.0900 "
+            "(p=2.7e-5), MRR +0.0239 (p=3.3e-6), nDCG@10 +0.0709 (p=1.2e-6), "
+            "all strata directionally positive. Framed as removing a known "
+            "regression: the gain over disabling the boost ENTIRELY is not "
+            "established (off / filtered / matched-control are statistically "
+            "tied; only the current unfiltered boost is clearly worst). The "
+            "MECHANISM is NOT established — the intuitive 'structural stars "
+            "dominate the degree sum' account was tested and failed (degree "
+            "concentration 0.511 with vs 0.497 without). Default OFF pending "
+            "an A/B on a second corpus; watch degree-distribution drift when "
+            "flipping, since LTP reinforcement plus a degree-based boost is a "
+            "rich-get-richer loop no frozen-corpus eval can observe."
+        ),
     )
     # F075 — Temporal fact extraction
     # All flags default OFF for dark-launch consistency (F042/F047/F067/F071 pattern).
