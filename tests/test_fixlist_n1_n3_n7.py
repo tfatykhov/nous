@@ -600,6 +600,158 @@ class TestCodexP2LegProvenanceSerialized:
 
 
 # ---------------------------------------------------------------------------
+# Codex round 2 — provenance ordering, depth consistency, operator surface
+# ---------------------------------------------------------------------------
+
+
+class TestCodexR2SpreadingClassifiedFirst:
+    """Spreading rows carry BOTH source and stage_origin — order decides."""
+
+    def test_spreading_wins_over_stage_origin(self):
+        from nous.api.retrieval_pipeline import PipelineResult
+        from nous_eval.retrieval_runner import _leg_of
+
+        # Exactly what _graph_expanded_to_pipeline emits for a spreading hit.
+        r = PipelineResult(
+            id=uuid4(), type="fact", description="x", score=0.5,
+            source="spreading_activation",
+            metadata={"stage_origin": "heart_graph_memory"},
+        )
+        assert _leg_of(r) == "spreading_activation", (
+            "checking stage_origin first silently folds every spreading row "
+            "into a graph leg, so N7 could never report whether the "
+            "spreading arm reached the scoring window"
+        )
+
+    def test_decision_shaped_spreading_row_also_classified(self):
+        from nous.api.retrieval_pipeline import PipelineResult
+        from nous_eval.retrieval_runner import _leg_of
+
+        r = PipelineResult(
+            id=uuid4(), type="decision", description="x", score=0.5,
+            source="spreading_activation",
+            metadata={"stage_origin": "brain_graph"},
+        )
+        assert _leg_of(r) == "spreading_activation"
+
+    def test_non_spreading_graph_rows_keep_stage_origin(self):
+        """The reorder must not steal rows from the graph legs."""
+        from nous.api.retrieval_pipeline import PipelineResult
+        from nous_eval.retrieval_runner import _leg_of
+
+        r = PipelineResult(
+            id=uuid4(), type="fact", description="x", score=0.5,
+            source="graph_expanded",
+            metadata={"stage_origin": "heart_graph_memory"},
+        )
+        assert _leg_of(r) == "heart_graph_memory"
+
+
+class TestCodexR2DepthConsistency:
+    """A report must not declare one depth and compute at another."""
+
+    def test_markdown_columns_labelled_at_the_real_depth(self):
+        from nous_eval.report import render_markdown
+
+        rr = _run_result([_qrel_result([uuid4()], [])])
+        md = render_markdown([rr], [], top_k=30)
+
+        assert "P@30" in md and "R@30" in md and "nDCG@30" in md
+        assert "scored at k=30" in md
+        assert "| P@10 |" not in md, (
+            "declaring top_k=30 while printing k=10 columns makes the "
+            "report contradict the run it describes"
+        )
+
+    def test_markdown_metrics_actually_computed_at_top_k(self):
+        """Not just relabelled — the numbers must change with the depth."""
+        from nous_eval.metrics import compute_metrics
+
+        # Gold at rank 25: inside k=30, outside k=10.
+        ids = [uuid4() for _ in range(40)]
+        q = _qrel_result(ids, [ids[24]])
+
+        assert compute_metrics([q], top_k=10).r_at_10 == 0.0
+        assert compute_metrics([q], top_k=30).r_at_10 == 1.0
+
+        # And the rendered table must carry the depth-30 value, not the
+        # default-depth one.
+        from nous_eval.report import _metrics_table
+
+        def _r_at_k(top_k: int) -> str:
+            row = _metrics_table([_run_result([q])], top_k=top_k).splitlines()[-1]
+            # | config | n_qrels | n_errored | MRR | P@1 | P@k | R@k | ...
+            return row.split("|")[7].strip()
+
+        assert _r_at_k(30) == "1.000", "gold at rank 25 is inside k=30"
+        assert _r_at_k(10) == "0.000", (
+            "and outside k=10 — if this reads 1.000 the table is being "
+            "computed at a depth it does not declare"
+        )
+
+    def test_eval_runs_payload_records_depth_and_visibility(self):
+        from nous_eval.retrieval import _metrics_compact
+
+        legs = ["heart_primary"] * 10 + ["keyed"] * 10
+        ids = [uuid4() for _ in legs]
+        rr = _run_result([_qrel_result(ids, [], legs)])
+
+        payload = _metrics_compact(rr, top_k=20)
+        assert payload["top_k"] == 20
+        assert "leg_visibility" in payload
+        assert "recall_curve" in payload
+        vis = {v["leg"]: v for v in payload["leg_visibility"]}
+        assert vis["keyed"]["cutoff"] == 20, (
+            "the persisted row is built independently of the JSON report, "
+            "so it needs its own copy of the depth"
+        )
+
+
+class TestCodexR2OperatorSurface:
+    """The markdown is what an operator reads — partial runs must show there."""
+
+    def test_partial_run_banner_rendered(self):
+        from nous_eval.report import render_markdown
+
+        q = replace(
+            _qrel_result([uuid4()], []),
+            stage_errors={"heart_recall_fact": 1},
+        )
+        rr = _run_result([q])
+        rr = replace(
+            rr, pipeline_stats_summary={"stage_error_heart_recall_fact": 1}
+        )
+        md = render_markdown([rr], [])
+
+        assert "Partial retrieval detected" in md
+        assert "heart_recall_fact" in md
+        assert "invalid for comparison" in md
+
+    def test_banner_precedes_the_metrics_table(self):
+        """An operator must see the warning before the numbers."""
+        from nous_eval.report import render_markdown
+
+        q = replace(
+            _qrel_result([uuid4()], []),
+            stage_errors={"heart_recall_fact": 1},
+        )
+        rr = replace(
+            _run_result([q]),
+            pipeline_stats_summary={"stage_error_heart_recall_fact": 1},
+        )
+        md = render_markdown([rr], [])
+        assert md.index("Partial retrieval detected") < md.index(
+            "Aggregate metrics"
+        )
+
+    def test_healthy_run_renders_no_banner(self):
+        from nous_eval.report import render_markdown
+
+        md = render_markdown([_run_result([_qrel_result([uuid4()], [])])], [])
+        assert "Partial retrieval detected" not in md
+
+
+# ---------------------------------------------------------------------------
 # N8 — the bands are a deliberate choice, not a unit mismatch
 # ---------------------------------------------------------------------------
 

@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 
 from nous.config import Settings
 from nous_eval.config import EvalSettings
-from nous_eval.metrics import compute_metrics
+from nous_eval.metrics import compute_metrics, leg_visibility
 from nous_eval.qrels_loader import QrelSource, load_qrels
 from nous_eval.report import (
     decide_gate_f050,
@@ -986,7 +986,7 @@ async def _run_async(
             ],
             metrics_payload={
                 r.config.name: {
-                    "metrics": _metrics_compact(r),
+                    "metrics": _metrics_compact(r, eval_settings.top_k),
                     "duration_seconds": r.duration_seconds,
                     "pipeline_stats_summary": r.pipeline_stats_summary,
                 }
@@ -1039,8 +1039,20 @@ def _resolve_git_sha(eval_settings: EvalSettings) -> str:
         return "unknown"
 
 
-def _metrics_compact(run: "RunResult") -> dict:
-    m = compute_metrics(run.per_qrel)
+def _metrics_compact(run: "RunResult", top_k: int = 10) -> dict:
+    """Compact metrics for the persisted ``nous_system.eval_runs`` row.
+
+    N7/codex-R2: this payload is built INDEPENDENTLY of the JSON report
+    file, so it needs its own copy of the depth and the leg-visibility
+    rows. Without them, historical regression analysis cannot reconstruct
+    whether an old null came from a leg banded below the cutoff — the
+    report file is not guaranteed to still exist.
+
+    ``p_at_10``/``r_at_10``/``ndcg_at_10`` keep their historical key names
+    for schema continuity; ``top_k`` records the depth they were actually
+    computed at.
+    """
+    m = compute_metrics(run.per_qrel, top_k=top_k)
     return {
         "mrr": m.mrr,
         "p_at_1": m.p_at_1,
@@ -1052,6 +1064,24 @@ def _metrics_compact(run: "RunResult") -> dict:
         "ndcg_at_10": m.ndcg_at_10,
         "n_qrels": m.n_qrels,
         "n_errored": m.n_errored,
+        # N7: the untruncated view + the depth these numbers mean.
+        "top_k": top_k,
+        "r_at_served": m.r_at_served,
+        "mean_served": m.mean_served,
+        "recall_curve": {str(k): v for k, v in sorted(m.recall_curve.items())},
+        "leg_visibility": [
+            {
+                "leg": v.leg,
+                "n_rows": v.n_rows,
+                "median_rank": v.median_rank,
+                "best_rank": v.best_rank,
+                "cutoff": v.cutoff,
+                "visible": v.visible,
+            }
+            for v in leg_visibility(run.per_qrel, cutoff=top_k)
+        ],
+        # N1: non-empty means these numbers came from a PARTIAL retrieval.
+        "n_qrels_partial": sum(1 for q in run.per_qrel if q.stage_errors),
     }
 
 

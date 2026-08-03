@@ -629,19 +629,31 @@ def _leg_of(r) -> str:
 
     Reads the provenance markers the pipeline already sets — no new
     instrumentation. ``metadata["retrieval_leg"]`` covers the F085 keyed
-    rounds and the F086 exemplar leg; ``metadata["stage_origin"]`` covers
-    the graph stages; ``source`` covers spreading activation and the brain
-    decision leg; ``type == "chunk"`` identifies the F067 chunk leg. Rows
-    with no marker are plain heart hits ("heart_primary").
+    rounds and the F086 exemplar leg; ``source`` covers spreading activation
+    and the brain decision leg; ``metadata["stage_origin"]`` covers the
+    remaining graph stages; ``type == "chunk"`` identifies the F067 chunk
+    leg. Rows with no marker are plain heart hits ("heart_primary").
+
+    ORDER IS LOAD-BEARING. ``_graph_expanded_to_pipeline`` sets BOTH
+    ``source="spreading_activation"`` AND a ``stage_origin`` of
+    ``brain_graph``/``heart_graph_memory`` on every spreading row
+    (``retrieval_pipeline.py:2057-2077``). Checking ``stage_origin`` first
+    means the label ``spreading_activation`` is never emitted and those rows
+    are silently folded into a graph leg's statistics — which would leave
+    N7 unable to say whether the spreading arm reached the scoring window,
+    for one of the very legs this report exists to measure. So the
+    spreading check runs BEFORE ``stage_origin``.
     """
     meta = getattr(r, "metadata", None) or {}
     leg = meta.get("retrieval_leg")
     if leg:
         return str(leg)
+    source = getattr(r, "source", "heart")
+    if source == "spreading_activation":
+        return "spreading_activation"
     origin = meta.get("stage_origin")
     if origin:
         return str(origin)
-    source = getattr(r, "source", "heart")
     if source and source != "heart":
         return str(source)
     if getattr(r, "type", None) == "chunk":

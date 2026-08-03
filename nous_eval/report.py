@@ -254,16 +254,22 @@ def render_markdown(
         lines.append(f"- `{s.spec.name}` [{gate_tag}] — {avail}")
     lines.append("")
 
+    # N1/codex-R2: partial-run banner FIRST — an operator must see that a
+    # leg crashed before reading any metric computed over the wreckage.
+    _partial = _stage_error_summary(run_results)
+    if _partial:
+        lines.append(_partial)
+
     # Per-config aggregate metrics
-    lines.append("## Aggregate metrics (all qrels)")
-    lines.append(_metrics_table([r for r in run_results]))
+    lines.append(f"## Aggregate metrics (all qrels, scored at k={top_k})")
+    lines.append(_metrics_table([r for r in run_results], top_k))
     lines.append("")
 
     # Pairwise delta if exactly two configs
     if len(run_results) == 2:
         base, exp = run_results[0], run_results[1]
-        base_m = compute_metrics(base.per_qrel)
-        exp_m = compute_metrics(exp.per_qrel)
+        base_m = compute_metrics(base.per_qrel, top_k=top_k)
+        exp_m = compute_metrics(exp.per_qrel, top_k=top_k)
         lines.append(f"## Delta: {base.config.name} → {exp.config.name}")
         lines.append(_delta_table(base_m, exp_m))
         lines.append("")
@@ -276,7 +282,7 @@ def render_markdown(
         "applies._"
     )
     lines.append("")
-    lines.append(_recall_curve_table(run_results))
+    lines.append(_recall_curve_table(run_results, top_k))
     lines.append("")
     _leg_table = _leg_visibility_table(run_results, top_k)
     if _leg_table:
@@ -297,21 +303,28 @@ def render_markdown(
     return "\n".join(lines) + "\n"
 
 
-def _metrics_table(run_results: list["RunResult"]) -> str:
+def _metrics_table(run_results: list["RunResult"], top_k: int = 10) -> str:
     """Build a markdown table with metrics for each config.
 
     N7: ``R@served`` and ``served`` are reported alongside the fixed-k
     columns because production does not truncate — a top-K-only table
     describes a window ``recall_deep`` never applies.
+
+    ``top_k`` must be the depth the matrix scored at: ``MetricsResult``'s
+    ``p_at_10`` / ``r_at_10`` / ``ndcg_at_10`` fields are named for the
+    default but actually hold whatever depth ``compute_metrics`` was given.
+    Passing the default while the run scored at 30 would print numbers
+    computed at 10 under a report that elsewhere declares ``top_k: 30`` —
+    so the columns are labelled at the real depth too.
     """
     header = (
-        "| config | n_qrels | n_errored | MRR | P@1 | P@10 | R@10 "
-        "| R@served | served | nDCG@10 |\n"
+        f"| config | n_qrels | n_errored | MRR | P@1 | P@{top_k} | R@{top_k} "
+        f"| R@served | served | nDCG@{top_k} |\n"
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
     )
     rows = []
     for r in run_results:
-        m = compute_metrics(r.per_qrel)
+        m = compute_metrics(r.per_qrel, top_k=top_k)
         rows.append(
             f"| {r.config.name} | {m.n_qrels} | {m.n_errored} | "
             f"{m.mrr:.3f} | {m.p_at_1:.3f} | {m.p_at_10:.3f} | "
@@ -321,7 +334,45 @@ def _metrics_table(run_results: list["RunResult"]) -> str:
     return header + "\n" + "\n".join(rows)
 
 
-def _recall_curve_table(run_results: list["RunResult"]) -> str:
+def _stage_error_summary(run_results: list["RunResult"]) -> str:
+    """N1/codex-R2: surface partial runs in the OPERATOR-facing markdown.
+
+    The counters reached ``pipeline_stats_summary`` and the JSON, but the
+    markdown is the report an operator actually reads — and without this a
+    crashed Heart leg still rendered an apparently healthy metrics table.
+    That is the original N1 observability failure surviving on its most
+    important consumer.
+    """
+    lines: list[str] = []
+    for r in run_results:
+        stage_keys = {
+            k: v for k, v in (r.pipeline_stats_summary or {}).items()
+            if k.startswith("stage_error_") and v
+        }
+        n_qrels_affected = sum(1 for q in r.per_qrel if q.stage_errors)
+        if not stage_keys and not n_qrels_affected:
+            continue
+        detail = ", ".join(
+            f"`{k.removeprefix('stage_error_')}`={v}"
+            for k, v in sorted(stage_keys.items())
+        )
+        lines.append(
+            f"- **{r.config.name}** — {n_qrels_affected} qrel(s) retrieved "
+            f"PARTIALLY: {detail or 'see per-qrel stage_errors'}"
+        )
+    if not lines:
+        return ""
+    return (
+        "\n## ⚠ Partial retrieval detected\n\n"
+        "One or more retrieval legs FAILED during this run. The metrics "
+        "below are computed over incomplete results and will look "
+        "plausible anyway — treat them as **invalid for comparison** until "
+        "the cause is fixed (a store behind the ORM's migration watermark "
+        "is the usual cause).\n\n" + "\n".join(lines) + "\n"
+    )
+
+
+def _recall_curve_table(run_results: list["RunResult"], top_k: int = 10) -> str:
     """N7: recall over k, so the fixed-k cutoff's blind spot is visible."""
     ks = sorted(RECALL_CURVE_KS)
     header = (
@@ -330,7 +381,11 @@ def _recall_curve_table(run_results: list["RunResult"]) -> str:
     )
     rows = []
     for r in run_results:
-        m = compute_metrics(r.per_qrel)
+        # The curve itself is depth-independent (it evaluates every k in
+        # RECALL_CURVE_KS), so the default here changes nothing about the
+        # numbers — but pass it anyway so no future edit reintroduces a
+        # silent depth mismatch between this table and its neighbours.
+        m = compute_metrics(r.per_qrel, top_k=top_k)
         cells = " | ".join(f"{m.recall_curve.get(k, 0.0):.3f}" for k in ks)
         rows.append(f"| {r.config.name} | {cells} | {m.r_at_served:.3f} |")
     return header + "\n" + "\n".join(rows)
@@ -436,7 +491,9 @@ def render_json(
                 "description": r.config.description,
                 "duration_seconds": r.duration_seconds,
                 "pipeline_stats_summary": r.pipeline_stats_summary,
-                "metrics": _metrics_to_dict(compute_metrics(r.per_qrel)),
+                "metrics": _metrics_to_dict(
+                    compute_metrics(r.per_qrel, top_k=top_k)
+                ),
                 # N7/codex-P2: persist the visibility analysis. Without it the
                 # only copy lived in the ephemeral markdown, so historical
                 # eval_runs analysis could not tell whether a reported null
