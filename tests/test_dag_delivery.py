@@ -535,6 +535,44 @@ class TestDeliverySweep:
         assert (await store.get_dag(dag.id)).delivered_at is not None
 
     @pytest.mark.asyncio
+    async def test_reactivation_during_delivery_does_not_stamp_the_retry(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex P1 round 7: retry_node does NOT take the orchestrator lock,
+        so it can reactivate a DAG while deliver() awaits Telegram or a 120s
+        summary turn. A late blind write would stamp delivered_at on the
+        now-running DAG and exclude the RETRY's outcome from every sweep."""
+        dag = await _finished_dag(store, "raced-delivery")
+
+        reactivated = {"done": False}
+
+        async def _slow_deliver(d):
+            # Operator retries the DAG while this await is in flight.
+            if not reactivated["done"]:
+                await store.reactivate_for_retry(d.id)
+                reactivated["done"] = True
+            return SimpleNamespace(
+                delivered=True, legs=(), summary="ok", summary_authored=False,
+            )
+
+        delivery = AsyncMock()
+        delivery.deliver.side_effect = _slow_deliver
+        orch = self._orch(store, subtask_mgr, dynamic_loader, delivery)
+
+        await orch.tick()
+
+        fetched = await store.get_dag(dag.id)
+        # The fence rejected the stale write: the reactivated DAG is still
+        # running and still undelivered, so its retry will be announced.
+        assert fetched.status == "running"
+        assert fetched.delivered_at is None
+
+        # Prove it: once the retry terminalizes, the sweep sees it again.
+        await store.update_dag_status(dag.id, "completed", result_summary="v2")
+        pending = await store.get_undelivered_terminal_dags()
+        assert dag.id in {d.id for d in pending}
+
+    @pytest.mark.asyncio
     async def test_sweep_disabled_by_flag(
         self, store, subtask_mgr, dynamic_loader
     ):

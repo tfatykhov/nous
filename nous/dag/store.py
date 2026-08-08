@@ -18,6 +18,12 @@ logger = logging.getLogger(__name__)
 
 MAX_ACTIVE_DAGS = 5
 
+# The delivery sweep's domain. Every delivery write is fenced on this set plus
+# `delivered_at IS NULL`, because retry_node/cancel_dag do NOT take the
+# orchestrator lock and can reactivate a DAG while deliver() is awaiting
+# Telegram or a 120s summary turn (@codex P1 on fa988e7).
+_TERMINAL_DAG_STATUSES = ("completed", "failed", "partial", "cancelled")
+
 
 class DAGStore:
     """CRUD operations for DAG orchestration."""
@@ -448,11 +454,7 @@ class DAGStore:
                 select(ExecutionDAG)
                 .where(ExecutionDAG.agent_id == self._agent_id)
                 .where(ExecutionDAG.delivered_at.is_(None))
-                .where(
-                    ExecutionDAG.status.in_(
-                        ["completed", "failed", "partial", "cancelled"]
-                    )
-                )
+                .where(ExecutionDAG.status.in_(_TERMINAL_DAG_STATUSES))
                 .options(
                     selectinload(ExecutionDAG.nodes),
                     selectinload(ExecutionDAG.edges),
@@ -464,7 +466,7 @@ class DAGStore:
 
     async def mark_delivered(
         self, dag_id: UUID, error: str | None = None
-    ) -> None:
+    ) -> bool:
         """F087: record that a DAG's result left the box.
 
         ``error`` is set only on give-up (attempts exhausted): the DAG is
@@ -476,19 +478,30 @@ class DAGStore:
         Leaving it would produce a row that reports both a successful
         delivery and a delivery error, which contradicts this method's
         contract (error means gave-up) and misleads the dashboard.
+
+        @codex P1 on fa988e7: fenced on the DAG still being terminal AND still
+        undelivered. `retry_node` does not take the orchestrator lock, so it
+        can reactivate this DAG while `deliver()` is awaiting Telegram or a
+        120-second summary turn — and a late blind write would stamp
+        `delivered_at` on the now-running DAG, permanently excluding the
+        RETRY's outcome from every future sweep. Returns whether the write
+        applied so the caller can tell "delivered" from "superseded".
         """
         async with self._db.session() as session:
             values: dict = {
                 "delivered_at": datetime.now(UTC),
                 "delivery_error": error,
             }
-            await session.execute(
+            result = await session.execute(
                 update(ExecutionDAG)
                 .where(ExecutionDAG.id == dag_id)
                 .where(ExecutionDAG.agent_id == self._agent_id)
+                .where(ExecutionDAG.delivered_at.is_(None))
+                .where(ExecutionDAG.status.in_(_TERMINAL_DAG_STATUSES))
                 .values(**values)
             )
             await session.commit()
+            return result.rowcount > 0
 
     async def save_delivery_summary(self, dag_id: UUID, summary: str) -> None:
         """F087: cache an agent-authored summary for reuse across retries.
@@ -498,12 +511,19 @@ class DAGStore:
         `dag_delivery_max_attempts` turns and duplicate episodes for a single
         DAG. Written before the delivery outcome is recorded so a crash in
         between still leaves the expensive work banked.
+
+        Fenced like the other delivery writes (@codex P1 on fa988e7): a
+        summary authored for the PREVIOUS outcome must not attach itself to a
+        DAG that `retry_node` reactivated mid-delivery — the retry would then
+        be announced with prose describing the run before it.
         """
         async with self._db.session() as session:
             await session.execute(
                 update(ExecutionDAG)
                 .where(ExecutionDAG.id == dag_id)
                 .where(ExecutionDAG.agent_id == self._agent_id)
+                .where(ExecutionDAG.delivered_at.is_(None))
+                .where(ExecutionDAG.status.in_(_TERMINAL_DAG_STATUSES))
                 .values(delivery_summary=summary)
             )
             await session.commit()
@@ -546,12 +566,20 @@ class DAGStore:
             await session.commit()
 
     async def bump_delivery_attempt(self, dag_id: UUID, error: str) -> int:
-        """F087: record a failed delivery attempt. Returns the new count."""
+        """F087: record a failed delivery attempt. Returns the new count.
+
+        Fenced like the other delivery writes (@codex P1 on fa988e7) so a
+        failure belonging to the previous outcome cannot burn an attempt — or
+        park a stale error — on a DAG that was reactivated mid-delivery.
+        Returns 0 when the write did not apply.
+        """
         async with self._db.session() as session:
             result = await session.execute(
                 update(ExecutionDAG)
                 .where(ExecutionDAG.id == dag_id)
                 .where(ExecutionDAG.agent_id == self._agent_id)
+                .where(ExecutionDAG.delivered_at.is_(None))
+                .where(ExecutionDAG.status.in_(_TERMINAL_DAG_STATUSES))
                 .values(
                     delivery_attempts=ExecutionDAG.delivery_attempts + 1,
                     delivery_error=error[:2000],

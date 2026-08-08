@@ -47,6 +47,13 @@ _BUDGET_WARNING_RATIO = 0.80
 # "enforcement already curtailed work on this DAG" from "nothing to curtail".
 _BUDGET_CANCEL_ERROR = "Token budget exceeded"
 
+# Subtask states whose token counters will never change again, so a one-shot
+# claim over them is safe. 'cancelled' qualifies because SubtaskManager.cancel
+# makes the row terminal and the worker's eventual complete()/fail() is a
+# no-op against the terminal guard — the persisted counters are the last word,
+# even though a cancelled worker's final usage was never flushed.
+_SETTLED_SUBTASK_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
 # Completion check polling
 _CHECK_CMD_TIMEOUT = 10.0  # Hard timeout per check command invocation
 
@@ -255,13 +262,25 @@ class DAGOrchestrator:
                     )
 
             if outcome.delivered:
-                await self._store.mark_delivered(dag.id)
-                logger.info(
-                    "F087: delivered DAG %s (%s) via %s",
-                    str(dag.id)[:8],
-                    dag.status,
-                    ", ".join(leg.name for leg in outcome.legs if leg.ok) or "no legs",
-                )
+                if await self._store.mark_delivered(dag.id):
+                    logger.info(
+                        "F087: delivered DAG %s (%s) via %s",
+                        str(dag.id)[:8],
+                        dag.status,
+                        ", ".join(leg.name for leg in outcome.legs if leg.ok)
+                        or "no legs",
+                    )
+                else:
+                    # Fence rejected the write: retry_node reactivated this DAG
+                    # while deliver() was awaiting. The notification for the
+                    # PREVIOUS outcome already went out, which is correct; the
+                    # retry will be announced on its own when it terminalizes.
+                    logger.info(
+                        "F087: DAG %s was reactivated mid-delivery — the "
+                        "previous outcome was announced, the retry will be "
+                        "announced separately",
+                        str(dag.id)[:8],
+                    )
             else:
                 await self._record_delivery_failure(dag, outcome.failure_detail)
 
@@ -563,8 +582,23 @@ class DAGOrchestrator:
                 await self._count_node_tokens(
                     node, SimpleNamespace(tokens_in=0, tokens_out=0), dag
                 )
-            else:
+            elif subtask.status in _SETTLED_SUBTASK_STATUSES:
                 await self._count_node_tokens(node, subtask, dag)
+            else:
+                # @codex P2 on fa988e7: the node is terminal but its subtask
+                # is still pending/running — cancel_dag, failure propagation
+                # and the reaper all mark a node terminal while the worker may
+                # still be executing (SubtaskManager.cancel bounds the leak,
+                # it does not preempt). Claiming now would freeze the CURRENT
+                # counters as final and, because the claim is one-shot, no
+                # later value could ever replace them. Leave it retryable.
+                logger.debug(
+                    "F087: node %s is terminal but its subtask is %s — "
+                    "deferring the token claim until it settles",
+                    node.name, subtask.status,
+                )
+                complete = False
+                continue
             # _count_node_tokens swallows its own errors, so the flag it sets
             # is the only honest signal that the claim actually landed.
             if not node.tokens_counted:

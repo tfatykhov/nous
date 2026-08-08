@@ -667,6 +667,44 @@ class TestRetryResetsPerAttemptState:
         assert announced.tokens_consumed == 1000
 
     @pytest.mark.asyncio
+    async def test_claim_deferred_while_subtask_still_running(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex P2 round 7: cancel_dag, failure propagation and the reaper
+        all terminalize a node while its worker may still be executing. The
+        claim is one-shot, so freezing the current counters would make them
+        permanently final — no later value could replace them."""
+        dag = await store.create(_subtask_dag("live-subtask"))
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        node = dag.nodes[0]
+        # Node reaped/cancelled, but the worker is still going.
+        await store.update_node(
+            node.id, status="failed", subtask_id=uuid.uuid4(),
+            error="stalled", started_at=datetime.now(UTC),
+        )
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=uuid.uuid4(), status="running", result=None, error=None,
+            final_outcome=None, tokens_in=0, tokens_out=0,
+        )
+        orch = _orch(store, subtask_mgr, dynamic_loader)
+
+        await orch.tick()
+        assert (await store.get_dag(dag.id)).nodes[0].tokens_counted is False
+
+        # Worker settles with its real usage — now the claim lands.
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=uuid.uuid4(), status="failed", result=None, error="boom",
+            final_outcome=None, tokens_in=600, tokens_out=200,
+        )
+        await store.update_dag_status(dag.id, "running")
+        await orch.tick()
+
+        fetched = await store.get_dag(dag.id)
+        assert fetched.nodes[0].tokens_counted is True
+        assert fetched.tokens_consumed == 800
+
+    @pytest.mark.asyncio
     async def test_reconciliation_claims_zero_when_subtask_is_gone(
         self, store, subtask_mgr, dynamic_loader
     ):
