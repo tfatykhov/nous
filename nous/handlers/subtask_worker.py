@@ -324,7 +324,7 @@ class SubtaskWorkerPool:
         _dag_node_id = getattr(subtask, "dag_node_id", None)
 
         try:
-            response_text, _turn_ctx, _usage = await self._runner.run_turn(
+            response_text, _turn_ctx, usage = await self._runner.run_turn(
                 session_id=session_id,
                 user_message=subtask.task,
                 agent_id=self._settings.agent_id,
@@ -340,9 +340,20 @@ class SubtaskWorkerPool:
             # are never NULL between PR-1 ship and PR-2 hardened-executor ship.
             # F061 round 4 P2-F: attempts=1 because legacy path runs
             # exactly one run_turn invocation (no retry loop).
+            # F087 (@codex P2 on 2ccc026): persist the turn's token usage. It
+            # was received and discarded, so tokens_in/tokens_out stayed 0 on
+            # this path — and since subtask_hardening_enabled defaults FALSE,
+            # this is the DEFAULT path. F087's DAG roll-up reads exactly these
+            # columns, so without this the whole accounting feature records
+            # zero in the default configuration (and, because the claim is
+            # one-shot, freezes that zero permanently).
+            usage = usage or {}
             await self._heart.subtasks.complete(
                 subtask.id, response_text,
                 final_outcome="completed", attempts=1,
+                tokens_in=usage.get("input_tokens", 0),
+                tokens_out=usage.get("output_tokens", 0),
+                tool_calls_made=usage.get("tool_calls", 0),
             )
             await self._emit_event("subtask_completed", subtask, result=response_text)
             await self._notify_telegram(subtask, result=response_text)

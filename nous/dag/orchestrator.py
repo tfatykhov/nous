@@ -56,7 +56,7 @@ from uuid import UUID
 
 from nous.config import Settings
 from nous.dag._workspace import assert_inside_root, compute_workspace_path
-from nous.dag.store import DAGStore
+from nous.dag.store import _TERMINAL_DAG_STATUSES, DAGStore
 from nous.heart.subtasks import SubtaskQueueFull
 from nous.heartbeat.dynamic import DynamicCheckLimitReached
 from nous.storage.models import DAGNode, ExecutionDAG
@@ -404,8 +404,16 @@ class DAGOrchestrator:
         if dag is None:
             raise ValueError(f"DAG {dag_id} not found")
 
-        # Don't cancel already-terminal DAGs
-        if dag.status in ("completed", "failed", "cancelled"):
+        # Don't cancel already-terminal DAGs.
+        # @codex P2 on 2ccc026: 'partial' was missing here, and F087 makes that
+        # omission consequential. partial IS terminal — it is in the delivery
+        # sweep's domain — so cancelling one rewrote a terminal outcome without
+        # bumping delivery_generation or clearing delivery state. An in-flight
+        # delivery would then satisfy the generation fence and mark the newly
+        # cancelled outcome delivered using the PARTIAL notification; and if
+        # partial had already been delivered, the cancellation was never
+        # announced at all.
+        if dag.status in _TERMINAL_DAG_STATUSES:
             return
 
         for node in dag.nodes:
@@ -1196,6 +1204,26 @@ class DAGOrchestrator:
             elapsed = (now - started).total_seconds()
             if elapsed <= budget:
                 continue
+
+            # @codex P2 on 2ccc026: node.started_at is set at DISPATCH, but a
+            # subtask sits 'pending' until a worker dequeues it. With
+            # NOUS_SUBTASK_WORKERS=2 and a five-deep pending queue, a
+            # legitimate task can wait past timeout+grace without having run a
+            # single turn — and reaping it would cancel work that never
+            # started. Only the elapsed check reaches here, so this lookup
+            # costs nothing on the healthy path.
+            if node.node_type == "subtask" and node.subtask_id and self._subtask_mgr:
+                try:
+                    subtask = await self._subtask_mgr.get(node.subtask_id)
+                except Exception:
+                    subtask = None
+                if subtask is not None and subtask.status == "pending":
+                    logger.debug(
+                        "F087: node %s is past its wall-clock budget but its "
+                        "subtask is still queued — not reaping",
+                        node.name,
+                    )
+                    continue
 
             error_msg = (
                 f"exceeded wall-clock budget: running {elapsed:.0f}s "

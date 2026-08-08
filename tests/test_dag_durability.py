@@ -1069,3 +1069,51 @@ class TestClockWiring:
         assert orch.last_tick_at is None
         await orch.tick()
         assert orch.last_tick_at is not None
+
+
+class TestRoundElevenGuards:
+    """@codex round 11 — three gaps in areas the earlier rounds never reached."""
+
+    @pytest.mark.asyncio
+    async def test_reaper_spares_a_still_queued_subtask(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """node.started_at is set at DISPATCH; the subtask sits 'pending' until
+        a worker dequeues it. Reaping on elapsed-since-dispatch alone kills
+        work that never started."""
+        dag = await store.create(_subtask_dag("queued-not-reaped"))
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        node = await _running_node_started_at(
+            store, dag, datetime.now(UTC) - timedelta(seconds=5000)
+        )
+        # Way past timeout+grace, but the worker pool never picked it up.
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=node.subtask_id, status="pending", result=None, error=None,
+            final_outcome=None, tokens_in=0, tokens_out=0,
+        )
+
+        await _orch(store, subtask_mgr, dynamic_loader).tick()
+
+        assert (await store.get_dag(dag.id)).nodes[0].status == "running"
+        subtask_mgr.cancel.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancel_dag_is_a_noop_on_a_partial_dag(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """partial is terminal and lives in the delivery sweep's domain, so
+        cancelling it would rewrite a terminal outcome behind an in-flight
+        delivery's back."""
+        dag = await store.create(_subtask_dag("partial-cancel"))
+        await store.update_dag_status(
+            dag.id, "partial", result_summary="budget exceeded, partial"
+        )
+
+        await _orch(store, subtask_mgr, dynamic_loader).cancel_dag(
+            dag.id, reason="user asked"
+        )
+
+        fetched = await store.get_dag(dag.id)
+        assert fetched.status == "partial"
+        assert fetched.result_summary == "budget exceeded, partial"
