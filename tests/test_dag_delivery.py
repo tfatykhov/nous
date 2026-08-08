@@ -314,7 +314,7 @@ class TestDeliverySweep:
         dag = await _finished_dag(store)
         delivery = AsyncMock()
         delivery.deliver.return_value = SimpleNamespace(
-            delivered=True, legs=(), summary="ok"
+            delivered=True, legs=(), summary="ok", summary_authored=False
         )
         orch = self._orch(store, subtask_mgr, dynamic_loader, delivery)
 
@@ -331,7 +331,7 @@ class TestDeliverySweep:
         await _finished_dag(store)
         delivery = AsyncMock()
         delivery.deliver.return_value = SimpleNamespace(
-            delivered=True, legs=(), summary="ok"
+            delivered=True, legs=(), summary="ok", summary_authored=False
         )
         orch = self._orch(store, subtask_mgr, dynamic_loader, delivery)
 
@@ -363,7 +363,7 @@ class TestDeliverySweep:
         # A brand-new orchestrator picks it back up.
         live_delivery = AsyncMock()
         live_delivery.deliver.return_value = SimpleNamespace(
-            delivered=True, legs=(), summary="ok"
+            delivered=True, legs=(), summary="ok", summary_authored=False
         )
         live = self._orch(store, subtask_mgr, dynamic_loader, live_delivery)
         await live.tick()
@@ -382,6 +382,7 @@ class TestDeliverySweep:
             delivered=False,
             legs=(),
             summary="ok",
+            summary_authored=False,
             failure_detail="telegram: HTTP 500",
         )
         orch = self._orch(
@@ -401,6 +402,88 @@ class TestDeliverySweep:
         assert "gave up after 3 attempts" in fetched.delivery_error
         assert "HTTP 500" in fetched.delivery_error
         assert delivery.deliver.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_authored_summary_is_cached_and_reused_on_retry(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex P2: one Telegram outage must not buy five LLM turns.
+
+        The summary leg is expensive and writes an episode each time, so a
+        retry of the FAILED required channel has to reuse the text the first
+        attempt already paid for.
+        """
+        dag = await _finished_dag(store, "cached-summary")
+        runner = AsyncMock()
+        runner.run_turn.return_value = ("Authored once.", None, {})
+        http = _failing_http(503)  # Telegram down — forces retries
+
+        settings = _settings(
+            dag_delivery_agent_summary_enabled=True,
+            dag_delivery_max_attempts=3,
+        )
+        orch = self._orch(
+            store, subtask_mgr, dynamic_loader,
+            DAGResultDelivery(
+                settings, agent_id="a", runner=runner, http=http
+            ),
+            settings=settings,
+        )
+
+        for _ in range(3):
+            await orch.tick()
+
+        # Three delivery attempts, but only ONE LLM turn.
+        assert runner.run_turn.await_count == 1
+        assert http.post.await_count == 3
+        fetched = await store.get_dag(dag.id)
+        assert fetched.delivery_summary == "Authored once."
+        # And the cached text is what later attempts actually sent.
+        assert http.post.await_args.kwargs["json"]["text"] == "Authored once."
+
+    @pytest.mark.asyncio
+    async def test_successful_retry_clears_stale_delivery_error(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex P2: a row must never report success AND an error."""
+        dag = await _finished_dag(store, "clears-error")
+        delivery = AsyncMock()
+        delivery.deliver.return_value = SimpleNamespace(
+            delivered=False, legs=(), summary="ok",
+            summary_authored=False, failure_detail="telegram: HTTP 500",
+        )
+        orch = self._orch(store, subtask_mgr, dynamic_loader, delivery)
+
+        await orch.tick()
+        assert "HTTP 500" in (await store.get_dag(dag.id)).delivery_error
+
+        # Channel recovers.
+        delivery.deliver.return_value = SimpleNamespace(
+            delivered=True, legs=(), summary="ok", summary_authored=False,
+        )
+        await orch.tick()
+
+        fetched = await store.get_dag(dag.id)
+        assert fetched.delivered_at is not None
+        assert fetched.delivery_error is None
+
+    @pytest.mark.asyncio
+    async def test_cached_summary_skips_the_llm_entirely(self, store):
+        """A DAG that already has a cached summary must not call the runner."""
+        dag = await _finished_dag(store, "precached")
+        dag.delivery_summary = "Previously authored."
+        runner = AsyncMock()
+        http = _ok_http()
+
+        delivery = DAGResultDelivery(
+            _settings(dag_delivery_agent_summary_enabled=True),
+            agent_id="a", runner=runner, http=http,
+        )
+        outcome = await delivery.deliver(dag)
+
+        assert runner.run_turn.await_count == 0
+        assert outcome.summary == "Previously authored."
+        assert outcome.summary_authored is False  # nothing new to persist
 
     @pytest.mark.asyncio
     async def test_sweep_disabled_by_flag(
@@ -446,7 +529,7 @@ class TestDeliverySweep:
             await _finished_dag(store, f"batch-dag-{i}")
         delivery = AsyncMock()
         delivery.deliver.return_value = SimpleNamespace(
-            delivered=True, legs=(), summary="ok"
+            delivered=True, legs=(), summary="ok", summary_authored=False
         )
         orch = self._orch(
             store,

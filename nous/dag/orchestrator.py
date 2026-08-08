@@ -197,6 +197,21 @@ class DAGOrchestrator:
                 await self._record_delivery_failure(dag, f"delivery error: {exc}")
                 continue
 
+            # Bank an agent-authored summary BEFORE recording the outcome, so
+            # a crash in between still leaves the expensive LLM turn paid for
+            # exactly once (@codex P2 on da5dc06).
+            if outcome.summary_authored and outcome.summary:
+                try:
+                    await self._store.save_delivery_summary(
+                        dag.id, outcome.summary
+                    )
+                except Exception:
+                    logger.warning(
+                        "F087: could not cache delivery summary for DAG %s — "
+                        "a retry will regenerate it",
+                        str(dag.id)[:8], exc_info=True,
+                    )
+
             if outcome.delivered:
                 await self._store.mark_delivered(dag.id)
                 logger.info(
@@ -421,11 +436,13 @@ class DAGOrchestrator:
                 continue
 
             if node.node_type == "subtask" and node.subtask_id:
-                await self._sync_subtask_node(node)
+                await self._sync_subtask_node(node, dag)
             elif node.node_type == "check" and node.check_name:
                 await self._sync_check_node(node)
 
-    async def _sync_subtask_node(self, node: DAGNode) -> None:
+    async def _sync_subtask_node(
+        self, node: DAGNode, dag: ExecutionDAG | None = None
+    ) -> None:
         """Sync a subtask node's status from the subtask manager."""
         if not self._subtask_mgr:
             return
@@ -447,8 +464,11 @@ class DAGOrchestrator:
         # awaiting_check path (subtask done, node still polling a shell
         # command) is counted too — its tokens are already final. One call
         # site covers all four transitions below.
-        if subtask.status in ("completed", "failed"):
-            await self._count_node_tokens(node, subtask)
+        # ``dag`` is None only when a caller invokes this helper directly
+        # (tests); the tick path always threads it so the in-memory total
+        # stays consistent with the row for the budget check later this tick.
+        if subtask.status in ("completed", "failed") and dag is not None:
+            await self._count_node_tokens(node, subtask, dag)
 
         # F061: outcome-aware branch. Inverse check (any non-"completed"
         # outcome fails the DAG node) rather than a closed set of failure
@@ -510,7 +530,9 @@ class DAGOrchestrator:
             )
             node.status = "failed"
 
-    async def _count_node_tokens(self, node: DAGNode, subtask: object) -> None:
+    async def _count_node_tokens(
+        self, node: DAGNode, subtask: object, dag: ExecutionDAG
+    ) -> None:
         """F087: add a finished subtask's tokens to its DAG's running total.
 
         `DAGStore.update_dag_tokens` existed since F038 but had no production
@@ -518,9 +540,15 @@ class DAGOrchestrator:
         branch in `_advance_dag` could never fire. This is that missing call.
 
         `_sync_subtask_node` re-runs for the same node across ticks, so the
-        add is gated on `count_node_tokens` winning a false→true flip on
-        `tokens_counted`. The guard lives in the UPDATE's WHERE clause, not
-        in a read-then-write here, so two concurrent ticks cannot both add.
+        claim and the roll-up happen together in
+        `claim_and_add_node_tokens` — one transaction, so a crash between
+        them cannot leave a node marked counted with nothing added (@codex P2
+        on da5dc06).
+
+        The in-memory `dag.tokens_consumed` is refreshed too. `_advance_dag`
+        loaded `dag` BEFORE this sync ran, so without this the budget check
+        later in the very same tick would read a stale total and dispatch the
+        next wave despite the DAG having just gone over (@codex P2).
 
         Never raises: token accounting is bookkeeping, and losing a count
         must not knock a node out of its status sync.
@@ -529,13 +557,14 @@ class DAGOrchestrator:
             tokens = int(getattr(subtask, "tokens_in", 0) or 0) + int(
                 getattr(subtask, "tokens_out", 0) or 0
             )
-            if not await self._store.count_node_tokens(node.id):
+            claimed = await self._store.claim_and_add_node_tokens(
+                node.id, node.dag_id, tokens
+            )
+            if not claimed:
                 return  # already counted on an earlier tick
             node.tokens_counted = True
             node.tokens_used = tokens
-            await self._store.update_node(node.id, tokens_used=tokens)
-            if tokens:
-                await self._store.update_dag_tokens(node.dag_id, tokens)
+            dag.tokens_consumed = (dag.tokens_consumed or 0) + tokens
         except Exception:
             logger.exception(
                 "F087: token accounting failed for node %s", node.name

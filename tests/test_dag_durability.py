@@ -312,6 +312,79 @@ class TestTokenAccounting:
         assert (await store.get_dag(dag.id)).tokens_consumed == 100
 
     @pytest.mark.asyncio
+    async def test_claim_and_roll_up_are_one_transaction(self, store):
+        """@codex P2: a failed roll-up must not leave the node claimed.
+
+        If the claim committed separately, a crash between the two writes
+        would mark the node counted forever with nothing added, and every
+        later tick would short-circuit on the claim — silently under-counting
+        the DAG against its budget.
+        """
+        dag = await store.create(_subtask_dag("atomic-tokens"))
+        node = dag.nodes[0]
+
+        claimed = await store.claim_and_add_node_tokens(node.id, dag.id, 250)
+        assert claimed is True
+
+        fetched = await store.get_dag(dag.id)
+        assert fetched.tokens_consumed == 250
+        assert fetched.nodes[0].tokens_counted is True
+        assert fetched.nodes[0].tokens_used == 250
+
+        # Second claim loses and adds nothing.
+        assert await store.claim_and_add_node_tokens(node.id, dag.id, 999) is False
+        assert (await store.get_dag(dag.id)).tokens_consumed == 250
+
+    @pytest.mark.asyncio
+    async def test_in_memory_total_refreshed_for_same_tick_budget_check(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex P2: the budget check runs later in the SAME _advance_dag
+        against the `dag` object loaded before sync. If the roll-up only
+        touched the row, a DAG pushed over budget by a just-finished node
+        would still dispatch its successor wave this tick."""
+        request = DAGCreateRequest(
+            name="same-tick-budget",
+            token_budget=100,
+            nodes=[
+                DAGNodeSpec(
+                    name="first", type=DAGNodeType.subtask,
+                    instructions="one", timeout_seconds=120,
+                ),
+                DAGNodeSpec(
+                    name="second", type=DAGNodeType.subtask,
+                    instructions="two", timeout_seconds=120,
+                ),
+            ],
+            edges=[DAGEdgeSpec(from_node="first", to_node="second")],
+        )
+        dag = await store.create(request)
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        first = next(n for n in dag.nodes if n.name == "first")
+        await store.update_node(
+            first.id, status="running", subtask_id=uuid.uuid4(),
+            started_at=datetime.now(UTC),
+        )
+        # first finishes having blown the whole budget in one go
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=uuid.uuid4(), status="completed", result="done", error=None,
+            final_outcome="completed", tokens_in=400, tokens_out=100,
+        )
+
+        orch = _orch(
+            store, subtask_mgr, dynamic_loader,
+            _settings(dag_token_budget_enforcement_enabled=True),
+        )
+        await orch.tick()
+
+        fetched = await store.get_dag(dag.id)
+        second = next(n for n in fetched.nodes if n.name == "second")
+        # Successor must NOT have been dispatched on the same tick.
+        assert second.status == "cancelled"
+        assert fetched.tokens_consumed == 500
+
+    @pytest.mark.asyncio
     async def test_budget_not_enforced_while_flag_is_off(
         self, store, subtask_mgr, dynamic_loader
     ):

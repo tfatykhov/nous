@@ -10,10 +10,17 @@
 -- EventBus.emit drops on QueueFull and never blocks, so the bus can be a
 -- delivery leg but never the durability mechanism. Hence these columns.
 
+-- delivery_summary caches an AGENT-AUTHORED summary across retries. Without
+-- it, a required channel (Telegram) failing after the optional summary leg
+-- succeeded would re-run a full LLM turn on every sweep -- up to
+-- dag_delivery_max_attempts turns, plus a duplicate episode each time, for
+-- one transient outage. The deterministic template is cheap and is never
+-- cached here.
 ALTER TABLE nous_system.execution_dags
     ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS delivery_attempts INTEGER NOT NULL DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS delivery_error TEXT;
+    ADD COLUMN IF NOT EXISTS delivery_error TEXT,
+    ADD COLUMN IF NOT EXISTS delivery_summary TEXT;
 
 -- The sweep's exact predicate. Partial so it stays small: rows leave the
 -- index permanently once delivered_at is set.

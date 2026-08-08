@@ -1056,6 +1056,10 @@ class ExecutionDAG(Base):
         Integer, nullable=False, default=0, server_default="0"
     )
     delivery_error: Mapped[str | None] = mapped_column(Text)
+    # Caches an AGENT-AUTHORED summary so a retry of a failed required channel
+    # reuses it instead of paying for another LLM turn (and writing another
+    # episode). The deterministic template is cheap and never cached here.
+    delivery_summary: Mapped[str | None] = mapped_column(Text)
 
     nodes: Mapped[list["DAGNode"]] = relationship(
         "DAGNode",

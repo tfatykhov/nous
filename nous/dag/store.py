@@ -376,15 +376,24 @@ class DAGStore:
     # F087: durable result delivery
     # ------------------------------------------------------------------
 
-    async def count_node_tokens(self, node_id: UUID) -> bool:
-        """F087: claim a node's tokens for roll-up, exactly once.
+    async def claim_and_add_node_tokens(
+        self, node_id: UUID, dag_id: UUID, tokens: int
+    ) -> bool:
+        """F087: claim a node's tokens and roll them up, atomically.
 
-        Flips ``tokens_counted`` false → true and reports whether THIS call
-        won the flip. ``_sync_subtask_node`` re-runs for the same node across
-        ticks, so the caller must only add tokens to the DAG total when this
-        returns True.
+        Flips ``tokens_counted`` false → true, records ``tokens_used``, and
+        increments the DAG's ``tokens_consumed`` — all inside ONE transaction,
+        and reports whether THIS call won the claim.
 
-        The guard is the WHERE clause, not a read-then-write, so two
+        @codex P2 on da5dc06: an earlier version committed the claim in its
+        own transaction and only then added to the DAG total. A crash (or a
+        failure on either later write) between the two left the node
+        permanently marked counted with nothing ever added, and because the
+        claim short-circuits every subsequent tick, the DAG total stayed
+        silently low forever — which would in turn under-report against
+        ``token_budget``. Both writes now commit or neither does.
+
+        The claim is the WHERE clause rather than a read-then-write, so two
         concurrent ticks cannot both observe false and both add.
         """
         async with self._db.session() as session:
@@ -399,10 +408,22 @@ class DAGStore:
                         )
                     )
                 )
-                .values(tokens_counted=True)
+                .values(tokens_counted=True, tokens_used=tokens)
             )
+            if result.rowcount == 0:
+                # Already counted on an earlier tick — nothing to add, and
+                # nothing to commit.
+                await session.rollback()
+                return False
+            if tokens:
+                await session.execute(
+                    update(ExecutionDAG)
+                    .where(ExecutionDAG.id == dag_id)
+                    .where(ExecutionDAG.agent_id == self._agent_id)
+                    .values(tokens_consumed=ExecutionDAG.tokens_consumed + tokens)
+                )
             await session.commit()
-            return result.rowcount > 0
+            return True
 
     async def get_undelivered_terminal_dags(
         self, limit: int = 5
@@ -442,16 +463,41 @@ class DAGStore:
         ``error`` is set only on give-up (attempts exhausted): the DAG is
         still marked delivered so the sweep stops retrying, but the reason
         stays on the row instead of disappearing.
+
+        @codex P2 on da5dc06: a successful RETRY must also clear whatever
+        ``bump_delivery_attempt`` wrote on the earlier failed attempts.
+        Leaving it would produce a row that reports both a successful
+        delivery and a delivery error, which contradicts this method's
+        contract (error means gave-up) and misleads the dashboard.
         """
         async with self._db.session() as session:
-            values: dict = {"delivered_at": datetime.now(UTC)}
-            if error is not None:
-                values["delivery_error"] = error
+            values: dict = {
+                "delivered_at": datetime.now(UTC),
+                "delivery_error": error,
+            }
             await session.execute(
                 update(ExecutionDAG)
                 .where(ExecutionDAG.id == dag_id)
                 .where(ExecutionDAG.agent_id == self._agent_id)
                 .values(**values)
+            )
+            await session.commit()
+
+    async def save_delivery_summary(self, dag_id: UUID, summary: str) -> None:
+        """F087: cache an agent-authored summary for reuse across retries.
+
+        @codex P2 on da5dc06: with this absent, a Telegram outage after a
+        successful summary leg re-ran a full LLM turn on every sweep — up to
+        `dag_delivery_max_attempts` turns and duplicate episodes for a single
+        DAG. Written before the delivery outcome is recorded so a crash in
+        between still leaves the expensive work banked.
+        """
+        async with self._db.session() as session:
+            await session.execute(
+                update(ExecutionDAG)
+                .where(ExecutionDAG.id == dag_id)
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .values(delivery_summary=summary)
             )
             await session.commit()
 

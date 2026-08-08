@@ -69,6 +69,11 @@ class DeliveryOutcome:
     delivered: bool
     legs: tuple[LegResult, ...]
     summary: str
+    # True only when THIS attempt paid for an LLM turn to author `summary`.
+    # The orchestrator persists it so a retry of a failed required channel
+    # reuses the text instead of buying another turn. False for the
+    # deterministic template and for a summary read back from cache.
+    summary_authored: bool = False
 
     @property
     def failure_detail(self) -> str:
@@ -115,13 +120,25 @@ class DAGResultDelivery:
         rather than from an exception type.
         """
         legs: list[LegResult] = []
+        summary_authored = False
 
         summary = self.build_template(dag)
-        if self._settings.dag_delivery_agent_summary_enabled:
+        # @codex P2 on da5dc06: a summary authored on an earlier attempt is
+        # reused rather than regenerated. Otherwise one transient Telegram
+        # outage charges an LLM turn — and writes a duplicate episode — on
+        # every one of the up-to-five sweep retries.
+        cached = getattr(dag, "delivery_summary", None)
+        if cached:
+            summary = cached
+            legs.append(
+                LegResult("summary", ok=True, required=False, detail="cached")
+            )
+        elif self._settings.dag_delivery_agent_summary_enabled:
             leg, authored = await self._leg_agent_summary(dag, summary)
             legs.append(leg)
             if authored:
                 summary = authored
+                summary_authored = True
 
         if self._settings.dag_delivery_bus_enabled:
             legs.append(await self._leg_bus(dag, summary))
@@ -131,7 +148,10 @@ class DAGResultDelivery:
 
         delivered = all(leg.ok for leg in legs if leg.required)
         return DeliveryOutcome(
-            delivered=delivered, legs=tuple(legs), summary=summary
+            delivered=delivered,
+            legs=tuple(legs),
+            summary=summary,
+            summary_authored=summary_authored,
         )
 
     def build_template(self, dag: ExecutionDAG) -> str:
