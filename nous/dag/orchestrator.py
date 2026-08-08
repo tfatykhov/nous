@@ -19,6 +19,7 @@ from nous.heartbeat.dynamic import DynamicCheckLimitReached
 from nous.storage.models import DAGNode, ExecutionDAG
 
 if TYPE_CHECKING:
+    from nous.dag.delivery import DAGResultDelivery
     from nous.events import EventBus
     from nous.heart.subtasks import SubtaskManager
     from nous.heartbeat.dynamic import DynamicCheckLoader
@@ -72,6 +73,7 @@ class DAGOrchestrator:
         *,
         settings: Settings,
         llm_client: object | None = None,
+        delivery: DAGResultDelivery | None = None,
     ) -> None:
         self._store = store
         self._subtask_mgr = subtask_mgr
@@ -83,6 +85,16 @@ class DAGOrchestrator:
         # orchestrator falls back to fix_executor.choose_action (rule-based,
         # Phase 1 behavior).
         self._llm_client = llm_client
+        # F087: optional result-delivery collaborator. None disables the
+        # sweep entirely (the orchestrator still runs, DAGs still finish —
+        # they just aren't announced).
+        self._delivery = delivery
+        # F087: set True by whoever installs the tick. Explicit rather than
+        # inferred from last_tick_at, which would false-negative during the
+        # first tick interval. dag_create refuses when this is False so the
+        # agent never creates a DAG that can never advance.
+        self.clock_wired = False
+        self.last_tick_at: datetime | None = None
         self._lock = asyncio.Lock()
         # Audit DG-4 (review P2): in-memory per-node deferral counter so a node
         # that keeps hitting a saturated subtask/check pool can't bounce
@@ -129,13 +141,92 @@ class DAGOrchestrator:
         Protected by a lock to prevent concurrent tick races.
         """
         async with self._lock:
+            self.last_tick_at = datetime.now(UTC)
             dags = await self._store.get_active_dags()
             for dag in dags:
                 try:
                     await self._advance_dag(dag)
                 except Exception:
                     logger.exception("Error advancing DAG %s", dag.id)
+
+            # F087: drain terminal-but-undelivered DAGs. Deliberately outside
+            # the per-DAG loop above, which only sees pending/running rows —
+            # a DAG that reached terminal on an earlier tick (or before a
+            # restart) is picked up here and nowhere else.
+            try:
+                await self._deliver_terminal_dags()
+            except Exception:
+                logger.exception("F087: DAG delivery sweep failed")
+
             return len(dags)
+
+    # ------------------------------------------------------------------
+    # F087: durable result delivery
+    # ------------------------------------------------------------------
+
+    async def _deliver_terminal_dags(self) -> None:
+        """Deliver results for DAGs that finished but were never announced.
+
+        Reaching terminal and being delivered are separate transitions, so a
+        process that dies between them re-delivers here on the next tick.
+        That makes delivery at-least-once rather than best-effort.
+
+        Attempts are bounded: once a DAG has burned
+        ``dag_delivery_max_attempts``, it is marked delivered with
+        ``delivery_error`` set so the sweep stops retrying it forever, while
+        the failure stays visible on the row instead of vanishing.
+        """
+        if not self._settings.dag_result_delivery_enabled:
+            return
+        if self._delivery is None:
+            return
+
+        dags = await self._store.get_undelivered_terminal_dags(
+            limit=self._settings.dag_delivery_batch_size
+        )
+        for dag in dags:
+            try:
+                outcome = await self._delivery.deliver(dag)
+            except Exception as exc:
+                # deliver() is written not to raise, so reaching here means a
+                # genuine bug rather than a failed leg. Treat it as an
+                # attempt so a persistent crash still hits the cap.
+                logger.exception(
+                    "F087: delivery raised for DAG %s", str(dag.id)[:8]
+                )
+                await self._record_delivery_failure(dag, f"delivery error: {exc}")
+                continue
+
+            if outcome.delivered:
+                await self._store.mark_delivered(dag.id)
+                logger.info(
+                    "F087: delivered DAG %s (%s) via %s",
+                    str(dag.id)[:8],
+                    dag.status,
+                    ", ".join(leg.name for leg in outcome.legs if leg.ok) or "no legs",
+                )
+            else:
+                await self._record_delivery_failure(dag, outcome.failure_detail)
+
+    async def _record_delivery_failure(
+        self, dag: ExecutionDAG, detail: str
+    ) -> None:
+        """Bump the attempt counter, giving up loudly once the cap is hit."""
+        attempts = await self._store.bump_delivery_attempt(dag.id, detail)
+        cap = self._settings.dag_delivery_max_attempts
+        if attempts >= cap:
+            await self._store.mark_delivered(
+                dag.id, error=f"gave up after {attempts} attempts — {detail}",
+            )
+            logger.error(
+                "F087: giving up on delivering DAG %s after %d attempts — %s",
+                str(dag.id)[:8], attempts, detail,
+            )
+        else:
+            logger.warning(
+                "F087: delivery attempt %d/%d failed for DAG %s — %s",
+                attempts, cap, str(dag.id)[:8], detail,
+            )
 
     async def start_dag(self, dag_id: UUID) -> None:
         """Transition a pending DAG to running and launch wave-0 nodes."""
@@ -265,19 +356,38 @@ class DAGOrchestrator:
         # 1.5 Poll awaiting_check nodes
         await self._poll_awaiting_checks(dag)
 
+        # 1.6 F087: wall-clock backstop. Runs before stall detection because
+        # it is the coarser, unconditional bound — a node past its own
+        # timeout plus grace is failed regardless of whether activity pings
+        # were ever wired.
+        if self._settings.dag_node_reaper_enabled:
+            await self._reap_overrun_nodes(dag)
+
         # 1.7 F064.1: Stall detection. Runs after sync (so just-completed
         # nodes are no longer 'running') and before failure-propagation
         # (so a node marked stalled here cascades on the same tick).
         if self._settings.dag_stall_detection_enabled:
             await self._check_stalled_nodes(dag)
 
-        # 2. Check token budget
+        # 2. Check token budget.
+        # F087: tokens_consumed was structurally always 0 until the accounting
+        # wiring in _sync_subtask_node landed, so this branch had never once
+        # executed in production. Enforcement is therefore gated separately
+        # from accounting — flipping both at once would start cancelling DAGs
+        # for anyone who had set token_budget casually. The warning log runs
+        # either way so operators can size budgets before enabling the cancel.
         if dag.token_budget:
             ratio = dag.tokens_consumed / dag.token_budget
             if ratio >= 1.0:
-                logger.warning("DAG %s exceeded token budget", dag.id)
-                await self._handle_budget_exceeded(dag)
-                return
+                if self._settings.dag_token_budget_enforcement_enabled:
+                    logger.warning("DAG %s exceeded token budget", dag.id)
+                    await self._handle_budget_exceeded(dag)
+                    return
+                logger.warning(
+                    "DAG %s exceeded token budget (%d/%d) — enforcement "
+                    "disabled, letting it run",
+                    dag.id, dag.tokens_consumed, dag.token_budget,
+                )
             elif ratio >= _BUDGET_WARNING_RATIO:
                 logger.info(
                     "DAG %s at %.0f%% of token budget", dag.id, ratio * 100
@@ -331,6 +441,14 @@ class DAGOrchestrator:
             )
             node.status = "failed"
             return
+
+        # F087: roll the subtask's token usage into the DAG total. Keyed on
+        # the SUBTASK reaching terminal rather than the node, so the
+        # awaiting_check path (subtask done, node still polling a shell
+        # command) is counted too — its tokens are already final. One call
+        # site covers all four transitions below.
+        if subtask.status in ("completed", "failed"):
+            await self._count_node_tokens(node, subtask)
 
         # F061: outcome-aware branch. Inverse check (any non-"completed"
         # outcome fails the DAG node) rather than a closed set of failure
@@ -391,6 +509,37 @@ class DAGOrchestrator:
                 completed_at=datetime.now(UTC),
             )
             node.status = "failed"
+
+    async def _count_node_tokens(self, node: DAGNode, subtask: object) -> None:
+        """F087: add a finished subtask's tokens to its DAG's running total.
+
+        `DAGStore.update_dag_tokens` existed since F038 but had no production
+        caller, so `tokens_consumed` was structurally always 0 and the budget
+        branch in `_advance_dag` could never fire. This is that missing call.
+
+        `_sync_subtask_node` re-runs for the same node across ticks, so the
+        add is gated on `count_node_tokens` winning a false→true flip on
+        `tokens_counted`. The guard lives in the UPDATE's WHERE clause, not
+        in a read-then-write here, so two concurrent ticks cannot both add.
+
+        Never raises: token accounting is bookkeeping, and losing a count
+        must not knock a node out of its status sync.
+        """
+        try:
+            tokens = int(getattr(subtask, "tokens_in", 0) or 0) + int(
+                getattr(subtask, "tokens_out", 0) or 0
+            )
+            if not await self._store.count_node_tokens(node.id):
+                return  # already counted on an earlier tick
+            node.tokens_counted = True
+            node.tokens_used = tokens
+            await self._store.update_node(node.id, tokens_used=tokens)
+            if tokens:
+                await self._store.update_dag_tokens(node.dag_id, tokens)
+        except Exception:
+            logger.exception(
+                "F087: token accounting failed for node %s", node.name
+            )
 
     async def _sync_check_node(self, node: DAGNode) -> None:
         """Sync a check node's status from the check registry."""
@@ -664,6 +813,63 @@ class DAGOrchestrator:
         if per_node == 0:
             return None
         return min(per_node, self._settings.dag_node_max_stall_timeout)
+
+    async def _reap_overrun_nodes(self, dag: ExecutionDAG) -> None:
+        """F087: fail running nodes that blew past their wall-clock budget.
+
+        Timeout enforcement is otherwise delegated entirely to the underlying
+        primitive: `_launch_subtask_node` hands `_effective_timeout(node)` to
+        the subtask and the DAG node itself never checks elapsed time. That
+        holds while the subtask is alive, but a subtask orphaned by a crash
+        (`reclaim_stale` runs once at worker start and only touches rows
+        already past timeout) leaves the node 'running' forever — which keeps
+        its DAG 'running' forever and permanently consumes one of the
+        MAX_ACTIVE_DAGS slots. Five of those and dag_create is bricked.
+
+        The grace period exists so this never preempts the primitive's own,
+        richer error: the subtask executor gets `timeout` seconds to fail the
+        node itself, and only if it is still 'running' `grace` seconds later
+        do we conclude nobody is coming.
+
+        Mirrors F064.1's ordering: tear the primitive down BEFORE marking the
+        node failed, so a still-live subtask stops burning tokens and holding
+        a worker slot rather than running on untracked.
+        """
+        now = datetime.now(UTC)
+        grace = self._settings.dag_node_timeout_grace_seconds
+        for node in dag.nodes:
+            if node.status != "running":
+                continue
+            started = node.started_at
+            if started is None:
+                # Launched without a timestamp — wall-clock is unknowable, so
+                # leave it to stall detection rather than guess.
+                continue
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+            budget = self._effective_timeout(node) + grace
+            elapsed = (now - started).total_seconds()
+            if elapsed <= budget:
+                continue
+
+            error_msg = (
+                f"exceeded wall-clock budget: running {elapsed:.0f}s "
+                f"(timeout {self._effective_timeout(node)}s + grace {grace}s)"
+            )
+            logger.warning(
+                "F087: reaping node %s (dag %s) — %s",
+                node.name, dag.id, error_msg,
+            )
+            await self._cancel_node(node)
+            await self._store.update_node(
+                node.id,
+                status="failed",
+                error=error_msg,
+                completed_at=now,
+            )
+            node.status = "failed"
+            node.error = error_msg
+            node.completed_at = now
 
     async def _check_stalled_nodes(self, dag: ExecutionDAG) -> None:
         """F064.1: mark running nodes failed when no activity ping arrived in time.

@@ -371,3 +371,103 @@ class DAGStore:
                 .values(tokens_consumed=ExecutionDAG.tokens_consumed + tokens)
             )
             await session.commit()
+
+    # ------------------------------------------------------------------
+    # F087: durable result delivery
+    # ------------------------------------------------------------------
+
+    async def count_node_tokens(self, node_id: UUID) -> bool:
+        """F087: claim a node's tokens for roll-up, exactly once.
+
+        Flips ``tokens_counted`` false → true and reports whether THIS call
+        won the flip. ``_sync_subtask_node`` re-runs for the same node across
+        ticks, so the caller must only add tokens to the DAG total when this
+        returns True.
+
+        The guard is the WHERE clause, not a read-then-write, so two
+        concurrent ticks cannot both observe false and both add.
+        """
+        async with self._db.session() as session:
+            result = await session.execute(
+                update(DAGNode)
+                .where(DAGNode.id == node_id)
+                .where(DAGNode.tokens_counted.is_(False))
+                .where(
+                    DAGNode.dag_id.in_(
+                        select(ExecutionDAG.id).where(
+                            ExecutionDAG.agent_id == self._agent_id
+                        )
+                    )
+                )
+                .values(tokens_counted=True)
+            )
+            await session.commit()
+            return result.rowcount > 0
+
+    async def get_undelivered_terminal_dags(
+        self, limit: int = 5
+    ) -> list[ExecutionDAG]:
+        """F087: DAGs that reached a terminal status but were never delivered.
+
+        This is the sweep's work queue. Because it is a table rather than
+        in-memory state, a process that dies between marking a DAG terminal
+        and delivering its result picks the DAG back up on the next tick.
+
+        Oldest first so a backlog drains in the order the DAGs finished.
+        """
+        async with self._db.session() as session:
+            result = await session.execute(
+                select(ExecutionDAG)
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .where(ExecutionDAG.delivered_at.is_(None))
+                .where(
+                    ExecutionDAG.status.in_(
+                        ["completed", "failed", "partial", "cancelled"]
+                    )
+                )
+                .options(
+                    selectinload(ExecutionDAG.nodes),
+                    selectinload(ExecutionDAG.edges),
+                )
+                .order_by(ExecutionDAG.completed_at.asc().nulls_last())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
+
+    async def mark_delivered(
+        self, dag_id: UUID, error: str | None = None
+    ) -> None:
+        """F087: record that a DAG's result left the box.
+
+        ``error`` is set only on give-up (attempts exhausted): the DAG is
+        still marked delivered so the sweep stops retrying, but the reason
+        stays on the row instead of disappearing.
+        """
+        async with self._db.session() as session:
+            values: dict = {"delivered_at": datetime.now(UTC)}
+            if error is not None:
+                values["delivery_error"] = error
+            await session.execute(
+                update(ExecutionDAG)
+                .where(ExecutionDAG.id == dag_id)
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .values(**values)
+            )
+            await session.commit()
+
+    async def bump_delivery_attempt(self, dag_id: UUID, error: str) -> int:
+        """F087: record a failed delivery attempt. Returns the new count."""
+        async with self._db.session() as session:
+            result = await session.execute(
+                update(ExecutionDAG)
+                .where(ExecutionDAG.id == dag_id)
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .values(
+                    delivery_attempts=ExecutionDAG.delivery_attempts + 1,
+                    delivery_error=error[:2000],
+                )
+                .returning(ExecutionDAG.delivery_attempts)
+            )
+            await session.commit()
+            row = result.scalar_one_or_none()
+            return int(row) if row is not None else 0

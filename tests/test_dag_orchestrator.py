@@ -25,7 +25,7 @@ from nous.storage.models import DAGNode, ExecutionDAG
 async def store(db):
     """DAGStore instance with unique agent_id per test."""
     agent_id = f"test-dag-orch-{uuid.uuid4().hex[:8]}"
-    return DAGStore(db, agent_id, Settings())
+    return DAGStore(db, agent_id, Settings(_env_file=None))
 
 
 @pytest.fixture
@@ -54,7 +54,7 @@ def orchestrator(store, subtask_mgr, dynamic_loader):
         store=store,
         subtask_mgr=subtask_mgr,
         dynamic_loader=dynamic_loader,
-        settings=Settings(),
+        settings=Settings(_env_file=None),
     )
 
 
@@ -298,8 +298,18 @@ class TestDAGOrchestratorBudget:
     """Test token budget enforcement."""
 
     @pytest.mark.asyncio
-    async def test_budget_exceeded(self, store, orchestrator, subtask_mgr):
+    async def test_budget_exceeded(self, store, subtask_mgr, dynamic_loader):
         """Exceed budget — pending nodes cancelled, DAG marked partial or failed."""
+        # F087: enforcement is flag-gated. tokens_consumed was structurally 0
+        # until F087 wired the accounting, so this branch had never fired in
+        # prod; enabling accounting and enforcement together would have started
+        # cancelling DAGs for anyone who set token_budget casually.
+        orchestrator = DAGOrchestrator(
+            store=store,
+            subtask_mgr=subtask_mgr,
+            dynamic_loader=dynamic_loader,
+            settings=Settings(_env_file=None, dag_token_budget_enforcement_enabled=True),
+        )
         dag = await store.create(_budget_request())
         await orchestrator.start_dag(dag.id)
 
@@ -1619,7 +1629,7 @@ class TestDAGCompletionStatus:
             store=store,
             subtask_mgr=AsyncMock(),
             dynamic_loader=AsyncMock(),
-            settings=Settings(),
+            settings=Settings(_env_file=None),
         ), store
 
     def _node(self, status, name="n", node_type="subtask"):
@@ -1694,7 +1704,7 @@ class TestSubtaskNodeDeferral:
         subtask_mgr.create.side_effect = SubtaskQueueFull("pending subtask limit (5) reached")
         orch = DAGOrchestrator(
             store=store, subtask_mgr=subtask_mgr,
-            dynamic_loader=AsyncMock(), settings=Settings(),
+            dynamic_loader=AsyncMock(), settings=Settings(_env_file=None),
         )
         node = self._node()
         dag = SimpleNamespace(id=uuid.uuid4(), nodes=[node], edges=[])
@@ -1716,7 +1726,7 @@ class TestSubtaskNodeDeferral:
         subtask_mgr.create.side_effect = RuntimeError("boom")
         orch = DAGOrchestrator(
             store=store, subtask_mgr=subtask_mgr,
-            dynamic_loader=AsyncMock(), settings=Settings(),
+            dynamic_loader=AsyncMock(), settings=Settings(_env_file=None),
         )
         node = self._node()
         dag = SimpleNamespace(id=uuid.uuid4(), nodes=[node], edges=[])
@@ -1740,7 +1750,7 @@ class TestSubtaskNodeDeferral:
         loader.create_check.side_effect = DynamicCheckLimitReached("Maximum reached")
         orch = DAGOrchestrator(
             store=store, subtask_mgr=AsyncMock(),
-            dynamic_loader=loader, settings=Settings(),
+            dynamic_loader=loader, settings=Settings(_env_file=None),
         )
         node = SimpleNamespace(
             id=uuid.uuid4(), name="chk", status="ready", node_type="check",
@@ -1767,7 +1777,7 @@ class TestSubtaskNodeDeferral:
         subtask_mgr.create.side_effect = SubtaskQueueFull("full")
         orch = DAGOrchestrator(
             store=store, subtask_mgr=subtask_mgr,
-            dynamic_loader=AsyncMock(), settings=Settings(),
+            dynamic_loader=AsyncMock(), settings=Settings(_env_file=None),
         )
         node = SimpleNamespace(
             id=uuid.uuid4(), name="work", status="ready", node_type="subtask",

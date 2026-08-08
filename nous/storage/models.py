@@ -1046,6 +1046,16 @@ class ExecutionDAG(Base):
     # F064.2: per-DAG per-frame-type dispatch cap dict {frame_type: max}.
     # NULL means no per-DAG cap (env override or unlimited).
     max_concurrent_by_frame_type: Mapped[dict | None] = mapped_column(JSONB)
+    # F087: delivery bookkeeping. Reaching terminal and having the result
+    # delivered are separate transitions, so a crash between them re-delivers
+    # on the next tick rather than losing the notification. delivered_at is
+    # also set on give-up, with delivery_error naming the reason, so an
+    # undeliverable DAG stops looping but stays visible.
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivery_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    delivery_error: Mapped[str | None] = mapped_column(Text)
 
     nodes: Mapped[list["DAGNode"]] = relationship(
         "DAGNode",
@@ -1062,6 +1072,7 @@ class ExecutionDAG(Base):
         kwargs.setdefault("status", "pending")
         kwargs.setdefault("source", "conversation")
         kwargs.setdefault("tokens_consumed", 0)
+        kwargs.setdefault("delivery_attempts", 0)
         super().__init__(**kwargs)
 
 
@@ -1130,6 +1141,13 @@ class DAGNode(Base):
     tokens_used: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    # F087: set in the same UPDATE that marks the node terminal, so the
+    # re-entrant _sync_subtask_node cannot roll the same node's tokens into
+    # the DAG total twice. An explicit flag rather than `tokens_used != 0`
+    # because a node legitimately consuming zero tokens must still be counted.
+    tokens_counted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     injected_context: Mapped[str | None] = mapped_column(Text)
@@ -1159,6 +1177,7 @@ class DAGNode(Base):
         kwargs.setdefault("wave", 0)
         kwargs.setdefault("timeout_seconds", 120)
         kwargs.setdefault("tokens_used", 0)
+        kwargs.setdefault("tokens_counted", False)
         kwargs.setdefault("check_attempts", 0)
         super().__init__(**kwargs)
 

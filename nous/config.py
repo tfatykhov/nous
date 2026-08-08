@@ -1467,6 +1467,50 @@ class Settings(BaseSettings):
     # F038: DAG Orchestration
     dag_enabled: bool = True
 
+    # F087: durable DAG result delivery. Reaching a terminal status and having
+    # the result delivered are separate transitions persisted on
+    # execution_dags, so the sweep resumes after a crash or restart. The bus
+    # cannot carry this itself — EventBus.emit drops on QueueFull by design.
+    dag_result_delivery_enabled: bool = True
+    dag_delivery_bus_enabled: bool = True
+    dag_delivery_telegram_enabled: bool = True
+    # Costs an LLM turn per finished DAG — opt-in. On timeout or failure the
+    # delivery falls back to the deterministic template and still succeeds.
+    dag_delivery_agent_summary_enabled: bool = False
+    dag_delivery_agent_summary_timeout_seconds: float = Field(
+        120.0,
+        gt=0,
+        description="Bound on the agent-authored DAG summary turn before falling back to the template.",
+    )
+    dag_delivery_max_attempts: int = Field(
+        5,
+        ge=1,
+        description="Delivery attempts before a DAG is marked delivered with delivery_error set (stops looping, stays visible).",
+    )
+    dag_delivery_batch_size: int = Field(
+        5,
+        ge=1,
+        description="Max terminal-but-undelivered DAGs drained per tick.",
+    )
+
+    # F087: wall-clock backstop on running nodes. Defaults ON — a node whose
+    # underlying primitive is orphaned otherwise stays 'running' forever, which
+    # keeps its DAG 'running' forever and permanently consumes one of
+    # MAX_ACTIVE_DAGS. Only fires past the node's own timeout plus the grace
+    # below, i.e. in an already-broken state.
+    dag_node_reaper_enabled: bool = True
+    dag_node_timeout_grace_seconds: int = Field(
+        300,
+        ge=0,
+        description="Grace past a node's effective timeout before the reaper fails it, so the subtask executor gets first chance to report its own richer error.",
+    )
+
+    # F087: act on tokens_consumed, which only becomes non-zero once the
+    # accounting wiring lands. Dark by default because the budget branch has
+    # never executed in prod — flipping it silently would start cancelling
+    # DAGs for anyone who set token_budget casually.
+    dag_token_budget_enforcement_enabled: bool = False
+
     # F064.1: DAG node stall detection. Off by default — opt-in feature flag
     # for the stall-scan + activity-ping plumbing. When false, the orchestrator
     # never reads `last_activity_at` and never marks nodes failed for stall.

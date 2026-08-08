@@ -24,18 +24,24 @@ from nous.api.tools import ToolDispatcher, register_dag_tools
 async def dag_store(db):
     """DAGStore instance with unique agent_id."""
     agent_id = f"test-dag-tools-{uuid.uuid4().hex[:8]}"
-    return DAGStore(db, agent_id=agent_id, settings=Settings())
+    return DAGStore(db, agent_id=agent_id, settings=Settings(_env_file=None))
 
 
 @pytest_asyncio.fixture
 async def dag_orchestrator(dag_store):
     """DAGOrchestrator with mocked subtask_mgr and dynamic_loader."""
-    return DAGOrchestrator(
+    orchestrator = DAGOrchestrator(
         store=dag_store,
         subtask_mgr=AsyncMock(),
         dynamic_loader=AsyncMock(),
-        settings=Settings(),
+        settings=Settings(_env_file=None),
     )
+    # F087: clock_wired is False until whoever installs the tick declares it,
+    # and dag_create refuses while it is False. These tests exercise the tool
+    # surface, not the wiring, so they stand in for a wired deployment.
+    # tests/test_dag_wiring.py covers the unwired refusal directly.
+    orchestrator.clock_wired = True
+    return orchestrator
 
 
 @pytest.fixture

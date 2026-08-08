@@ -3715,6 +3715,16 @@ def register_dag_tools(
 
     async def dag_create(**kwargs: Any) -> dict:
         """Create a DAG with dependency-tracked nodes."""
+        # F087: refuse rather than create a DAG nothing will ever advance.
+        # The orchestrator's only clock is the heartbeat loop, so with the
+        # heartbeat disabled a created DAG launches wave-0 and then sits
+        # forever — previously with no error surfaced anywhere.
+        if not getattr(orchestrator, "clock_wired", True):
+            return {"content": [{"type": "text", "text": (
+                "Error: DAG execution is not wired — no heartbeat runner is "
+                "active, so a created DAG would never advance past its first "
+                "wave. Set NOUS_HEARTBEAT_ENABLED=true and restart."
+            )}]}
         try:
             # Parse nodes
             node_specs: list[DAGNodeSpec] = []
@@ -3808,9 +3818,20 @@ def register_dag_tools(
         try:
             if action == "list":
                 dags = await store.get_active_dags()
-                if not dags:
+                # F087: an unwired clock is the difference between "nothing is
+                # running" and "nothing can ever run" — say which.
+                if not getattr(orchestrator, "clock_wired", True):
+                    warning = (
+                        "WARNING: DAG execution is not wired (no heartbeat "
+                        "runner) — DAGs cannot advance."
+                    )
+                    if not dags:
+                        return {"content": [{"type": "text", "text": warning}]}
+                    lines = [warning, f"Active DAGs ({len(dags)}):"]
+                elif not dags:
                     return {"content": [{"type": "text", "text": "No active DAGs."}]}
-                lines = [f"Active DAGs ({len(dags)}):"]
+                else:
+                    lines = [f"Active DAGs ({len(dags)}):"]
                 for d in dags:
                     completed = sum(1 for n in d.nodes if n.status == "completed")
                     total = len(d.nodes)
