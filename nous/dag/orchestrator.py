@@ -42,6 +42,11 @@ _RESOLVED = frozenset({"completed", "skipped"})
 # Budget warning threshold (80%)
 _BUDGET_WARNING_RATIO = 0.80
 
+# Marker written to DAGNode.error when budget enforcement cancels a node.
+# Load-bearing: _handle_budget_exceeded reads it back on later ticks to tell
+# "enforcement already curtailed work on this DAG" from "nothing to curtail".
+_BUDGET_CANCEL_ERROR = "Token budget exceeded"
+
 # Completion check polling
 _CHECK_CMD_TIMEOUT = 10.0  # Hard timeout per check command invocation
 
@@ -195,12 +200,31 @@ class DAGOrchestrator:
             # the last point before the number is published, so reconcile here
             # too. Cheap: it no-ops once every node carries tokens_counted.
             try:
-                await self._reconcile_token_accounting(dag)
+                accounted = await self._reconcile_token_accounting(dag)
             except Exception:
                 logger.warning(
-                    "F087: pre-delivery token reconciliation failed for DAG "
-                    "%s — announcing with the total we have",
+                    "F087: pre-delivery token reconciliation raised for DAG %s",
                     str(dag.id)[:8], exc_info=True,
+                )
+                accounted = False
+
+            # @codex P2 on 2e27143: delivering leaves the DAG out of every
+            # future sweep, so a total published while still incomplete can
+            # never be corrected. Defer to give reconciliation another tick —
+            # but only while attempts remain, because an unannounced DAG is a
+            # worse outcome than a slightly low token count. The final attempt
+            # always publishes.
+            if not accounted:
+                cap = self._settings.dag_delivery_max_attempts
+                if dag.delivery_attempts + 1 < cap:
+                    await self._record_delivery_failure(
+                        dag, "token reconciliation incomplete — deferring"
+                    )
+                    continue
+                logger.warning(
+                    "F087: delivering DAG %s with an incomplete token total "
+                    "after %d attempts — the notification matters more",
+                    str(dag.id)[:8], dag.delivery_attempts,
                 )
 
             try:
@@ -493,7 +517,7 @@ class DAGOrchestrator:
             elif node.node_type == "check" and node.check_name:
                 await self._sync_check_node(node)
 
-    async def _reconcile_token_accounting(self, dag: ExecutionDAG) -> None:
+    async def _reconcile_token_accounting(self, dag: ExecutionDAG) -> bool:
         """F087: re-attempt token accounting for terminal, unaccounted nodes.
 
         @codex P2 on 9ca8fcd: `_count_node_tokens` deliberately swallows its
@@ -508,9 +532,16 @@ class DAGOrchestrator:
         claim is idempotent, so a node that already succeeded is skipped by
         the flag rather than re-added, and the sweep goes quiet once every
         node is accounted.
+
+        Returns True when every terminal node is accounted for. The delivery
+        sweep uses that to avoid publishing a total it knows is incomplete
+        (@codex P2 on 2e27143) — a delivered DAG leaves the sweep permanently,
+        so an announcement made over a half-counted total can never be
+        corrected.
         """
         if not self._subtask_mgr:
-            return
+            return True
+        complete = True
         for node in dag.nodes:
             if node.status not in _TERMINAL or node.tokens_counted:
                 continue
@@ -523,6 +554,7 @@ class DAGOrchestrator:
                     "F087: token reconciliation could not load subtask for "
                     "node %s; will retry next tick", node.name,
                 )
+                complete = False
                 continue
             if subtask is None:
                 # The subtask row is gone, so its usage is unknowable. Claim
@@ -531,8 +563,13 @@ class DAGOrchestrator:
                 await self._count_node_tokens(
                     node, SimpleNamespace(tokens_in=0, tokens_out=0), dag
                 )
-                continue
-            await self._count_node_tokens(node, subtask, dag)
+            else:
+                await self._count_node_tokens(node, subtask, dag)
+            # _count_node_tokens swallows its own errors, so the flag it sets
+            # is the only honest signal that the claim actually landed.
+            if not node.tokens_counted:
+                complete = False
+        return complete
 
     async def _sync_subtask_node(
         self, node: DAGNode, dag: ExecutionDAG | None = None
@@ -1825,14 +1862,28 @@ class DAGOrchestrator:
 
         `cancelled_any` had been computed and never read since F038 (a standing
         ruff F841); it is the signal this branch needed all along.
+
+        @codex P2 on 2e27143: "did enforcement curtail anything" is a property
+        of the DAG's HISTORY, not of this tick. An over-budget wave with both
+        running work and pending successors cancels the successors on tick 1
+        and returns to let the running nodes finish; on tick 2 there is nothing
+        left to cancel, so a tick-local `cancelled_any` would decline and let
+        the DAG be labelled 'cancelled' rather than 'partial' — even though
+        enforcement genuinely did curtail work. Nodes already cancelled with
+        the budget marker are therefore counted as prior curtailment.
         """
-        cancelled_any = False
+        cancelled_any = any(
+            node.status == "cancelled"
+            and (node.error or "").startswith(_BUDGET_CANCEL_ERROR)
+            for node in dag.nodes
+        )
         for node in dag.nodes:
             if node.status in ("pending", "ready", "awaiting_check"):
                 await self._store.update_node(
-                    node.id, status="cancelled", error="Token budget exceeded"
+                    node.id, status="cancelled", error=_BUDGET_CANCEL_ERROR
                 )
                 node.status = "cancelled"
+                node.error = _BUDGET_CANCEL_ERROR
                 cancelled_any = True
 
         # If there are still running nodes, let them finish

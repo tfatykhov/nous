@@ -486,6 +486,55 @@ class TestDeliverySweep:
         assert outcome.summary_authored is False  # nothing new to persist
 
     @pytest.mark.asyncio
+    async def test_incomplete_reconciliation_defers_then_publishes(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex P2 round 6: delivering removes the DAG from every future
+        sweep, so a total published while still incomplete can never be
+        corrected. Defer while attempts remain — but never trade away the
+        notification itself, so the final attempt publishes regardless.
+        """
+        dag = await store.create(
+            DAGCreateRequest(
+                name="incomplete-tokens",
+                nodes=[
+                    DAGNodeSpec(
+                        name="n", type=DAGNodeType.subtask,
+                        instructions="x", timeout_seconds=120,
+                    ),
+                ],
+            )
+        )
+        # Terminal + undelivered, with a node whose tokens never landed and
+        # whose subtask lookup keeps failing.
+        await store.update_node(
+            dag.nodes[0].id, status="completed", subtask_id=uuid.uuid4(),
+            tokens_counted=False,
+        )
+        await store.update_dag_status(dag.id, "completed", result_summary="done")
+        subtask_mgr.get.side_effect = RuntimeError("db unreachable")
+
+        delivery = AsyncMock()
+        delivery.deliver.return_value = SimpleNamespace(
+            delivered=True, legs=(), summary="ok", summary_authored=False,
+        )
+        settings = _settings(dag_delivery_max_attempts=3)
+        orch = self._orch(
+            store, subtask_mgr, dynamic_loader, delivery, settings=settings
+        )
+
+        # Attempts 1 and 2 defer rather than publish a total known to be wrong.
+        await orch.tick()
+        await orch.tick()
+        assert delivery.deliver.await_count == 0
+        assert (await store.get_dag(dag.id)).delivered_at is None
+
+        # Final attempt publishes anyway — an unannounced DAG is worse.
+        await orch.tick()
+        assert delivery.deliver.await_count == 1
+        assert (await store.get_dag(dag.id)).delivered_at is not None
+
+    @pytest.mark.asyncio
     async def test_sweep_disabled_by_flag(
         self, store, subtask_mgr, dynamic_loader
     ):

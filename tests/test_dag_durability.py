@@ -428,6 +428,61 @@ class TestTokenAccounting:
         assert fetched.nodes[0].status == "completed"
 
     @pytest.mark.asyncio
+    async def test_prior_curtailment_survives_across_ticks(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex P2 round 6: 'did enforcement curtail anything' is a property
+        of the DAG's history, not of this tick. A wave with running work AND
+        pending successors cancels the successors on tick 1 and returns; on
+        tick 2 nothing is left to cancel, and a tick-local flag would decline
+        and let the DAG be labelled 'cancelled' instead of 'partial'."""
+        request = DAGCreateRequest(
+            name="curtail-memory",
+            token_budget=100,
+            nodes=[
+                DAGNodeSpec(
+                    name="first", type=DAGNodeType.subtask,
+                    instructions="one", timeout_seconds=120,
+                ),
+                DAGNodeSpec(
+                    name="second", type=DAGNodeType.subtask,
+                    instructions="two", timeout_seconds=120,
+                ),
+            ],
+            edges=[DAGEdgeSpec(from_node="first", to_node="second")],
+        )
+        dag = await store.create(request)
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        first = next(n for n in dag.nodes if n.name == "first")
+        second = next(n for n in dag.nodes if n.name == "second")
+        # Tick-1 aftermath: successor already cancelled by enforcement, the
+        # running node has since finished.
+        await store.update_node(
+            second.id, status="cancelled", error="Token budget exceeded",
+        )
+        await store.update_node(
+            first.id, status="running", subtask_id=uuid.uuid4(),
+            started_at=datetime.now(UTC),
+        )
+        await store.update_dag_tokens(dag.id, 500)
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=uuid.uuid4(), status="completed", result="done", error=None,
+            final_outcome="completed", tokens_in=0, tokens_out=0,
+        )
+
+        orch = _orch(
+            store, subtask_mgr, dynamic_loader,
+            _settings(dag_token_budget_enforcement_enabled=True),
+        )
+        await orch.tick()
+
+        fetched = await store.get_dag(dag.id)
+        # Enforcement DID curtail work earlier, so 'partial', not 'cancelled'.
+        assert fetched.status == "partial"
+        assert "budget" in (fetched.result_summary or "").lower()
+
+    @pytest.mark.asyncio
     async def test_budget_not_enforced_while_flag_is_off(
         self, store, subtask_mgr, dynamic_loader
     ):
