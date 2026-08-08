@@ -261,7 +261,7 @@ class DAGResultDelivery:
                 ),
                 timeout=self._settings.dag_delivery_agent_summary_timeout_seconds,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "F087: agent summary timed out for DAG %s — using template",
                 str(dag.id)[:8],
