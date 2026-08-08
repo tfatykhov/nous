@@ -465,7 +465,7 @@ class DAGStore:
             return list(result.scalars().all())
 
     async def mark_delivered(
-        self, dag_id: UUID, error: str | None = None
+        self, dag_id: UUID, generation: int, error: str | None = None
     ) -> bool:
         """F087: record that a DAG's result left the box.
 
@@ -486,6 +486,14 @@ class DAGStore:
         `delivered_at` on the now-running DAG, permanently excluding the
         RETRY's outcome from every future sweep. Returns whether the write
         applied so the caller can tell "delivered" from "superseded".
+
+        @codex P1 on e94cd42: that predicate alone loses the FAST-retry race.
+        If the retried work terminalizes again before the original await
+        returns, the row is terminal and undelivered once more, so the stale
+        write succeeds and marks the NEW outcome delivered — which is exactly
+        the permanent-exclusion bug the fence was added to prevent, just one
+        step later. `generation` pins the write to the specific outcome the
+        caller actually delivered.
         """
         async with self._db.session() as session:
             values: dict = {
@@ -498,12 +506,15 @@ class DAGStore:
                 .where(ExecutionDAG.agent_id == self._agent_id)
                 .where(ExecutionDAG.delivered_at.is_(None))
                 .where(ExecutionDAG.status.in_(_TERMINAL_DAG_STATUSES))
+                .where(ExecutionDAG.delivery_generation == generation)
                 .values(**values)
             )
             await session.commit()
             return result.rowcount > 0
 
-    async def save_delivery_summary(self, dag_id: UUID, summary: str) -> None:
+    async def save_delivery_summary(
+        self, dag_id: UUID, generation: int, summary: str
+    ) -> None:
         """F087: cache an agent-authored summary for reuse across retries.
 
         @codex P2 on da5dc06: with this absent, a Telegram outage after a
@@ -524,6 +535,7 @@ class DAGStore:
                 .where(ExecutionDAG.agent_id == self._agent_id)
                 .where(ExecutionDAG.delivered_at.is_(None))
                 .where(ExecutionDAG.status.in_(_TERMINAL_DAG_STATUSES))
+                .where(ExecutionDAG.delivery_generation == generation)
                 .values(delivery_summary=summary)
             )
             await session.commit()
@@ -561,11 +573,16 @@ class DAGStore:
                     delivery_attempts=0,
                     delivery_error=None,
                     delivery_summary=None,
+                    # Invalidate any delivery still in flight for the previous
+                    # outcome (@codex P1 on e94cd42).
+                    delivery_generation=ExecutionDAG.delivery_generation + 1,
                 )
             )
             await session.commit()
 
-    async def bump_delivery_attempt(self, dag_id: UUID, error: str) -> int:
+    async def bump_delivery_attempt(
+        self, dag_id: UUID, generation: int, error: str
+    ) -> int:
         """F087: record a failed delivery attempt. Returns the new count.
 
         Fenced like the other delivery writes (@codex P1 on fa988e7) so a
@@ -580,6 +597,7 @@ class DAGStore:
                 .where(ExecutionDAG.agent_id == self._agent_id)
                 .where(ExecutionDAG.delivered_at.is_(None))
                 .where(ExecutionDAG.status.in_(_TERMINAL_DAG_STATUSES))
+                .where(ExecutionDAG.delivery_generation == generation)
                 .values(
                     delivery_attempts=ExecutionDAG.delivery_attempts + 1,
                     delivery_error=error[:2000],

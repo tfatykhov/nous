@@ -1060,6 +1060,13 @@ class ExecutionDAG(Base):
     # reuses it instead of paying for another LLM turn (and writing another
     # episode). The deterministic template is cheap and never cached here.
     delivery_summary: Mapped[str | None] = mapped_column(Text)
+    # Optimistic-concurrency token naming WHICH terminal outcome a delivery is
+    # for. Bumped by reactivate_for_retry; every delivery write is fenced on
+    # the value observed when the DAG was loaded, so a stale in-flight delivery
+    # cannot mark a newer outcome delivered.
+    delivery_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
     nodes: Mapped[list["DAGNode"]] = relationship(
         "DAGNode",
@@ -1077,6 +1084,7 @@ class ExecutionDAG(Base):
         kwargs.setdefault("source", "conversation")
         kwargs.setdefault("tokens_consumed", 0)
         kwargs.setdefault("delivery_attempts", 0)
+        kwargs.setdefault("delivery_generation", 0)
         super().__init__(**kwargs)
 
 

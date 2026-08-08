@@ -198,6 +198,13 @@ class DAGOrchestrator:
             limit=self._settings.dag_delivery_batch_size
         )
         for dag in dags:
+            # Pin the outcome we are about to deliver. Every delivery write is
+            # fenced on this, so if retry_node reactivates (and even re-
+            # completes) the DAG while we await Telegram or a summary turn,
+            # none of our writes can land on the newer outcome (@codex P1 on
+            # e94cd42).
+            generation = dag.delivery_generation
+
             # @codex P2 on a4e302b: _reconcile_token_accounting is reached only
             # via _advance_dag, and tick() runs that only for pending/running
             # DAGs. If accounting was unavailable on the completion tick,
@@ -225,7 +232,8 @@ class DAGOrchestrator:
                 cap = self._settings.dag_delivery_max_attempts
                 if dag.delivery_attempts + 1 < cap:
                     await self._record_delivery_failure(
-                        dag, "token reconciliation incomplete — deferring"
+                        dag, generation,
+                        "token reconciliation incomplete — deferring",
                     )
                     continue
                 logger.warning(
@@ -243,7 +251,9 @@ class DAGOrchestrator:
                 logger.exception(
                     "F087: delivery raised for DAG %s", str(dag.id)[:8]
                 )
-                await self._record_delivery_failure(dag, f"delivery error: {exc}")
+                await self._record_delivery_failure(
+                    dag, generation, f"delivery error: {exc}"
+                )
                 continue
 
             # Bank an agent-authored summary BEFORE recording the outcome, so
@@ -252,7 +262,7 @@ class DAGOrchestrator:
             if outcome.summary_authored and outcome.summary:
                 try:
                     await self._store.save_delivery_summary(
-                        dag.id, outcome.summary
+                        dag.id, generation, outcome.summary
                     )
                 except Exception:
                     logger.warning(
@@ -262,7 +272,7 @@ class DAGOrchestrator:
                     )
 
             if outcome.delivered:
-                if await self._store.mark_delivered(dag.id):
+                if await self._store.mark_delivered(dag.id, generation):
                     logger.info(
                         "F087: delivered DAG %s (%s) via %s",
                         str(dag.id)[:8],
@@ -282,17 +292,35 @@ class DAGOrchestrator:
                         str(dag.id)[:8],
                     )
             else:
-                await self._record_delivery_failure(dag, outcome.failure_detail)
+                await self._record_delivery_failure(
+                    dag, generation, outcome.failure_detail
+                )
 
     async def _record_delivery_failure(
-        self, dag: ExecutionDAG, detail: str
+        self, dag: ExecutionDAG, generation: int, detail: str
     ) -> None:
-        """Bump the attempt counter, giving up loudly once the cap is hit."""
-        attempts = await self._store.bump_delivery_attempt(dag.id, detail)
+        """Bump the attempt counter, giving up loudly once the cap is hit.
+
+        Fenced on `generation` like every other delivery write: a failure
+        belonging to a superseded outcome must not burn an attempt on, or
+        park a stale error against, the outcome that replaced it.
+        """
+        attempts = await self._store.bump_delivery_attempt(
+            dag.id, generation, detail
+        )
+        if attempts == 0:
+            # Fence rejected it — this delivery was superseded mid-flight.
+            logger.info(
+                "F087: discarding a delivery failure for superseded DAG %s "
+                "outcome (generation %d): %s",
+                str(dag.id)[:8], generation, detail,
+            )
+            return
         cap = self._settings.dag_delivery_max_attempts
         if attempts >= cap:
             await self._store.mark_delivered(
-                dag.id, error=f"gave up after {attempts} attempts — {detail}",
+                dag.id, generation,
+                error=f"gave up after {attempts} attempts — {detail}",
             )
             logger.error(
                 "F087: giving up on delivering DAG %s after %d attempts — %s",
@@ -373,6 +401,10 @@ class DAGOrchestrator:
                 "pending in a DAG that never advances. Cancellation is "
                 "deliberate; create a new DAG instead."
             )
+
+        # Bank the old attempt's tokens BEFORE clearing its claim and dropping
+        # subtask_id below — afterwards they are unrecoverable (@codex P2).
+        await self._account_before_retry(node, dag)
 
         await self._store.update_node(
             node.id,
@@ -535,6 +567,35 @@ class DAGOrchestrator:
                 await self._sync_subtask_node(node, dag)
             elif node.node_type == "check" and node.check_name:
                 await self._sync_check_node(node)
+
+    async def _account_before_retry(self, node: DAGNode, dag: ExecutionDAG) -> None:
+        """F087: bank the OLD attempt's tokens before its claim is reset.
+
+        @codex P2 on e94cd42: both retry paths clear `tokens_counted` and then
+        replace `subtask_id` with the retry's row (retry_node nulls it; the
+        fix-stage relaunch overwrites it). If the previous attempt was never
+        accounted — because its roll-up failed transiently, or because the
+        subtask had not settled yet — reconciliation afterwards can only ever
+        see the REPLACEMENT subtask, so the first attempt's tokens are lost
+        from both the node and the DAG total for good.
+
+        Best-effort by design: this runs on the operator's retry path, and a
+        bookkeeping failure must not block the retry itself.
+        """
+        if node.tokens_counted or not node.subtask_id or not self._subtask_mgr:
+            return
+        try:
+            subtask = await self._subtask_mgr.get(node.subtask_id)
+            if subtask is None:
+                return
+            if subtask.status in _SETTLED_SUBTASK_STATUSES:
+                await self._count_node_tokens(node, subtask, dag)
+        except Exception:
+            logger.warning(
+                "F087: could not bank tokens for the previous attempt of node "
+                "%s before retry — that attempt's usage is lost",
+                node.name, exc_info=True,
+            )
 
     async def _reconcile_token_accounting(self, dag: ExecutionDAG) -> bool:
         """F087: re-attempt token accounting for terminal, unaccounted nodes.
@@ -1548,6 +1609,9 @@ class DAGOrchestrator:
             )
 
             if outcome.action == "retry_as_is" or outcome.action == "retry_with_amended_prompt":
+                # Bank the old attempt's tokens before the reset below clears
+                # its claim and the relaunch overwrites subtask_id (@codex P2).
+                await self._account_before_retry(parent, dag)
                 # Re-enqueue parent for dispatch on next tick.
                 # tokens_counted=False for the same per-attempt reason as
                 # retry_node (@codex P2 on b3c78c3) — the fix-stage retry is

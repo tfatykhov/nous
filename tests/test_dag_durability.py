@@ -559,14 +559,49 @@ class TestRetryResetsPerAttemptState:
         assert final.nodes[0].tokens_used == 450
 
     @pytest.mark.asyncio
+    async def test_old_attempt_is_banked_before_its_claim_is_reset(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex P2 round 8: retry_node clears tokens_counted AND drops
+        subtask_id, so an attempt that was never accounted becomes invisible —
+        reconciliation afterwards can only see the replacement subtask."""
+        dag = await store.create(_subtask_dag("bank-before-retry"))
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        node = dag.nodes[0]
+        await store.update_node(
+            node.id, status="failed", subtask_id=uuid.uuid4(),
+            error="boom", tokens_counted=False,
+        )
+        # The first attempt really did burn tokens; nothing ever counted them.
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=uuid.uuid4(), status="failed", result=None, error="boom",
+            final_outcome=None, tokens_in=250, tokens_out=150,
+        )
+
+        await _orch(store, subtask_mgr, dynamic_loader).retry_node(
+            dag.id, "long-runner"
+        )
+
+        fetched = await store.get_dag(dag.id)
+        retried = fetched.nodes[0]
+        # Attempt 1's usage was banked before the reset...
+        assert fetched.tokens_consumed == 400
+        assert retried.tokens_used == 400
+        # ...and the node is still ready to count attempt 2 on top.
+        assert retried.tokens_counted is False
+        assert retried.status == "pending"
+        assert retried.subtask_id is None
+
+    @pytest.mark.asyncio
     async def test_retry_node_reopens_delivery(
         self, store, subtask_mgr, dynamic_loader
     ):
         """A reactivated DAG must be announced again when it re-finishes."""
         dag = await store.create(_subtask_dag("retry-delivery"))
         await store.update_dag_status(dag.id, "failed", result_summary="v1")
-        await store.mark_delivered(dag.id)
-        await store.save_delivery_summary(dag.id, "first outcome summary")
+        await store.mark_delivered(dag.id, dag.delivery_generation)
+        await store.save_delivery_summary(dag.id, dag.delivery_generation, "first outcome summary")
         await store.update_node(dag.nodes[0].id, status="failed", error="boom")
 
         assert (await store.get_dag(dag.id)).delivered_at is not None
@@ -734,8 +769,8 @@ class TestRetryResetsPerAttemptState:
         delivered_at — it finishes normally and is then never announced."""
         dag = await store.create(_subtask_dag("atomic-reactivate"))
         await store.update_dag_status(dag.id, "failed", result_summary="v1")
-        await store.mark_delivered(dag.id)
-        await store.save_delivery_summary(dag.id, "old summary")
+        await store.mark_delivered(dag.id, dag.delivery_generation)
+        await store.save_delivery_summary(dag.id, dag.delivery_generation, "old summary")
         await store.update_node(dag.nodes[0].id, status="failed", error="boom")
 
         await _orch(store, subtask_mgr, dynamic_loader).retry_node(

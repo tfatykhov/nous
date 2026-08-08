@@ -573,6 +573,66 @@ class TestDeliverySweep:
         assert dag.id in {d.id for d in pending}
 
     @pytest.mark.asyncio
+    async def test_fast_retry_regeneration_is_not_stamped_by_stale_delivery(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex P1 round 8: fencing on terminal+undelivered loses the FAST
+        retry race. If the retried work re-terminalizes before the original
+        await returns, the row is terminal and undelivered *again*, so the
+        stale write would mark the NEW outcome delivered — the same permanent
+        exclusion the fence was added to prevent, one step later."""
+        dag = await _finished_dag(store, "fast-retry")
+
+        raced = {"done": False}
+
+        async def _slow_deliver(d):
+            if not raced["done"]:
+                # Reactivate AND re-complete while this await is in flight.
+                await store.reactivate_for_retry(d.id)
+                await store.update_dag_status(
+                    d.id, "completed", result_summary="v2"
+                )
+                raced["done"] = True
+            return SimpleNamespace(
+                delivered=True, legs=(), summary="ok", summary_authored=False,
+            )
+
+        delivery = AsyncMock()
+        delivery.deliver.side_effect = _slow_deliver
+        orch = self._orch(store, subtask_mgr, dynamic_loader, delivery)
+
+        await orch.tick()
+
+        fetched = await store.get_dag(dag.id)
+        # Terminal and undelivered again — but a DIFFERENT generation, so the
+        # stale delivery could not claim it.
+        assert fetched.status == "completed"
+        assert fetched.delivered_at is None
+        assert fetched.delivery_generation == 1
+        # The new outcome is still queued for its own announcement.
+        pending = await store.get_undelivered_terminal_dags()
+        assert dag.id in {d.id for d in pending}
+
+    @pytest.mark.asyncio
+    async def test_superseded_failure_does_not_burn_the_new_outcomes_attempts(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """A failure belonging to a superseded outcome must not consume the
+        replacement outcome's retry budget or park a stale error on it."""
+        dag = await _finished_dag(store, "superseded-failure")
+        await store.reactivate_for_retry(dag.id)
+        await store.update_dag_status(dag.id, "completed", result_summary="v2")
+
+        orch = self._orch(store, subtask_mgr, dynamic_loader, AsyncMock())
+        # Generation 0 is stale; the row is now generation 1.
+        await orch._record_delivery_failure(dag, 0, "telegram: HTTP 500")
+
+        fetched = await store.get_dag(dag.id)
+        assert fetched.delivery_attempts == 0
+        assert fetched.delivery_error is None
+        assert fetched.delivered_at is None
+
+    @pytest.mark.asyncio
     async def test_sweep_disabled_by_flag(
         self, store, subtask_mgr, dynamic_loader
     ):

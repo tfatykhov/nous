@@ -20,7 +20,16 @@ ALTER TABLE nous_system.execution_dags
     ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS delivery_attempts INTEGER NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS delivery_error TEXT,
-    ADD COLUMN IF NOT EXISTS delivery_summary TEXT;
+    ADD COLUMN IF NOT EXISTS delivery_summary TEXT,
+    -- Optimistic-concurrency token identifying WHICH terminal outcome a
+    -- delivery is for. retry_node/cancel_dag do not take the orchestrator
+    -- lock, so a retry can reactivate AND re-complete a DAG while the previous
+    -- outcome's Telegram or 120s summary await is still in flight. Fencing on
+    -- "terminal and undelivered" alone is not enough there -- the row is
+    -- terminal and undelivered again, so the stale write would mark the NEW
+    -- outcome delivered. reactivate_for_retry bumps this, and every delivery
+    -- write is fenced on the generation observed when the DAG was loaded.
+    ADD COLUMN IF NOT EXISTS delivery_generation INTEGER NOT NULL DEFAULT 0;
 
 -- Backfill BEFORE the queue semantics take effect. delivered_at is nullable,
 -- so on an upgrade every historical terminal DAG would read as undelivered --
