@@ -594,6 +594,60 @@ class TestRetryResetsPerAttemptState:
         assert retried.subtask_id is None
 
     @pytest.mark.asyncio
+    async def test_downstream_unblocked_attempt_is_banked_too(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex P2 round 9: the THIRD reset site. retry_node also unblocks
+        reachable descendants and clears their claims — a cancel_cascade child
+        may have been running (and consuming) when it was cancelled."""
+        request = DAGCreateRequest(
+            name="downstream-bank",
+            nodes=[
+                DAGNodeSpec(
+                    name="parent", type=DAGNodeType.subtask,
+                    instructions="p", timeout_seconds=120,
+                ),
+                DAGNodeSpec(
+                    name="child", type=DAGNodeType.subtask,
+                    instructions="c", timeout_seconds=120,
+                ),
+            ],
+            edges=[
+                DAGEdgeSpec(
+                    from_node="parent", to_node="child",
+                    edge_type="cancel_cascade",
+                ),
+            ],
+        )
+        dag = await store.create(request)
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        parent = next(n for n in dag.nodes if n.name == "parent")
+        child = next(n for n in dag.nodes if n.name == "child")
+        await store.update_node(parent.id, status="failed", error="boom")
+        # Child was running and consuming when the cascade cancelled it.
+        await store.update_node(
+            child.id, status="cancelled", subtask_id=uuid.uuid4(),
+            error="Cancelled by predecessor failure", tokens_counted=False,
+        )
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=uuid.uuid4(), status="cancelled", result=None, error=None,
+            final_outcome="cancelled", tokens_in=90, tokens_out=10,
+        )
+
+        await _orch(store, subtask_mgr, dynamic_loader).retry_node(
+            dag.id, "parent"
+        )
+
+        fetched = await store.get_dag(dag.id)
+        refetched_child = next(n for n in fetched.nodes if n.name == "child")
+        # The child's cancelled attempt was banked before its claim reset.
+        assert fetched.tokens_consumed == 100
+        assert refetched_child.tokens_used == 100
+        assert refetched_child.tokens_counted is False
+        assert refetched_child.status == "pending"
+
+    @pytest.mark.asyncio
     async def test_retry_node_reopens_delivery(
         self, store, subtask_mgr, dynamic_loader
     ):

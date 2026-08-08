@@ -1,4 +1,38 @@
-"""F038: DAG Orchestrator — state machine that advances DAGs on each tick."""
+"""F038: DAG Orchestrator — state machine that advances DAGs on each tick.
+
+F087 invariants — three interacting lifetimes
+---------------------------------------------
+Most of the durability bugs found while building F087 came from confusing
+these. Written down because the set of mutation sites is not obvious from any
+single function, and each was discovered separately during review.
+
+1. **DAG outcome (generation).** `execution_dags.delivery_generation` names
+   WHICH terminal outcome a delivery is for. `retry_node` and `cancel_dag` do
+   NOT take `self._lock`, so a retry can reactivate — and even re-complete —
+   a DAG while `deliver()` is awaiting Telegram or a 120 s summary turn.
+   Every delivery write (`mark_delivered`, `save_delivery_summary`,
+   `bump_delivery_attempt`) is therefore fenced on the generation observed
+   when the sweep loaded the DAG. Fencing on "terminal and undelivered" alone
+   is NOT sufficient: a fast retry makes that predicate true again.
+
+2. **Node attempt (`tokens_counted`).** The token claim is one-shot and PER
+   ATTEMPT. Exactly three sites reset it, and each must call
+   `_account_before_retry` FIRST, because the relaunch replaces `subtask_id`
+   and an unbanked attempt then becomes unreachable forever:
+     - `retry_node` — the directly retried node
+     - `retry_node` — the selectively-unblocked downstream nodes
+     - `_try_fix_failed_nodes` — the fix-stage retry branch
+
+3. **Subtask settlement.** A node reaching a terminal status does NOT mean its
+   subtask has. `cancel_dag`, failure propagation and the reaper all
+   terminalize a node while the worker may still run (`SubtaskManager.cancel`
+   bounds the leak, it does not preempt). Claims are only finalized for
+   subtasks in `_SETTLED_SUBTASK_STATUSES`; anything else stays retryable.
+
+A recurring lesson across all three: two consecutive commits are a crash
+window. Prefer one transaction, or a sweep that can resume from the
+intermediate state.
+"""
 
 from __future__ import annotations
 
@@ -466,6 +500,10 @@ class DAGOrchestrator:
                 # tokens_counted reset for the same per-attempt reason as the
                 # retried node above — a cancel_cascade node may have been
                 # running (and consuming) when it was cancelled.
+                # @codex P2 on d8b68bf: and for the same reason, its old
+                # attempt must be banked FIRST. This is the third of the three
+                # reset sites; the previous commit covered only two.
+                await self._account_before_retry(n, dag)
                 await self._store.update_node(
                     n.id, status="pending", error=None, tokens_counted=False
                 )
