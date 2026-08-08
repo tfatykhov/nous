@@ -1205,25 +1205,50 @@ class DAGOrchestrator:
             if elapsed <= budget:
                 continue
 
-            # @codex P2 on 2ccc026: node.started_at is set at DISPATCH, but a
-            # subtask sits 'pending' until a worker dequeues it. With
-            # NOUS_SUBTASK_WORKERS=2 and a five-deep pending queue, a
-            # legitimate task can wait past timeout+grace without having run a
-            # single turn — and reaping it would cancel work that never
-            # started. Only the elapsed check reaches here, so this lookup
-            # costs nothing on the healthy path.
+            # node.started_at is set at DISPATCH, but a subtask sits 'pending'
+            # until a worker dequeues it. With NOUS_SUBTASK_WORKERS=2 and a
+            # five-deep pending queue, a legitimate task can wait past
+            # timeout+grace before running a single turn.
+            #
+            # The dispatch clock is therefore only an upper bound on real
+            # execution time — useful as a cheap pre-filter (subtask.started_at
+            # is always >= node.started_at, so a node inside budget by the
+            # dispatch clock is certainly inside it by the execution clock),
+            # but never as the decision.
+            #
+            # @codex P2 on 2ccc026 spared 'pending' subtasks; @codex P2 on
+            # 7cc6ae0 caught that this was a half-measure — the moment a worker
+            # dequeues a long-queued task its status flips to 'running' while
+            # node.started_at still holds the dispatch time, so the very next
+            # tick reaped work that had just begun. Measure from the execution
+            # clock instead of adding another status guard.
             if node.node_type == "subtask" and node.subtask_id and self._subtask_mgr:
                 try:
                     subtask = await self._subtask_mgr.get(node.subtask_id)
                 except Exception:
                     subtask = None
-                if subtask is not None and subtask.status == "pending":
-                    logger.debug(
-                        "F087: node %s is past its wall-clock budget but its "
-                        "subtask is still queued — not reaping",
-                        node.name,
-                    )
-                    continue
+                if subtask is not None:
+                    if subtask.status == "pending":
+                        logger.debug(
+                            "F087: node %s is past its dispatch-clock budget "
+                            "but its subtask is still queued — not reaping",
+                            node.name,
+                        )
+                        continue
+                    exec_started = getattr(subtask, "started_at", None)
+                    if exec_started is not None:
+                        if exec_started.tzinfo is None:
+                            exec_started = exec_started.replace(tzinfo=UTC)
+                        exec_elapsed = (now - exec_started).total_seconds()
+                        if exec_elapsed <= budget:
+                            logger.debug(
+                                "F087: node %s is past its dispatch-clock "
+                                "budget but has only been executing %.0fs — "
+                                "not reaping",
+                                node.name, exec_elapsed,
+                            )
+                            continue
+                        elapsed = exec_elapsed
 
             error_msg = (
                 f"exceeded wall-clock budget: running {elapsed:.0f}s "

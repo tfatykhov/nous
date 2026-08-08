@@ -1117,3 +1117,54 @@ class TestRoundElevenGuards:
         fetched = await store.get_dag(dag.id)
         assert fetched.status == "partial"
         assert fetched.result_summary == "budget exceeded, partial"
+
+    @pytest.mark.asyncio
+    async def test_reaper_measures_from_execution_not_dispatch(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex round 12: sparing 'pending' was a half-measure. The moment a
+        worker dequeues a long-queued task its status flips to 'running' while
+        node.started_at still holds the DISPATCH time, so the next tick reaped
+        work that had just begun."""
+        dag = await store.create(_subtask_dag("exec-clock"))
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        # Dispatched 5000s ago — far past timeout(120)+grace(300)...
+        node = await _running_node_started_at(
+            store, dag, datetime.now(UTC) - timedelta(seconds=5000)
+        )
+        # ...but it only got dequeued 10s ago and is genuinely executing.
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=node.subtask_id, status="running", result=None, error=None,
+            final_outcome=None, tokens_in=0, tokens_out=0,
+            started_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+
+        await _orch(store, subtask_mgr, dynamic_loader).tick()
+
+        assert (await store.get_dag(dag.id)).nodes[0].status == "running"
+        subtask_mgr.cancel.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_reaper_still_fires_on_the_execution_clock(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """The backstop must still work — a task genuinely executing past
+        timeout+grace is reaped regardless of when it was dispatched."""
+        dag = await store.create(_subtask_dag("exec-clock-fires"))
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        node = await _running_node_started_at(
+            store, dag, datetime.now(UTC) - timedelta(seconds=5000)
+        )
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=node.subtask_id, status="running", result=None, error=None,
+            final_outcome=None, tokens_in=0, tokens_out=0,
+            started_at=datetime.now(UTC) - timedelta(seconds=900),
+        )
+
+        await _orch(store, subtask_mgr, dynamic_loader).tick()
+
+        reaped = (await store.get_dag(dag.id)).nodes[0]
+        assert reaped.status == "failed"
+        assert "exceeded wall-clock budget" in reaped.error
