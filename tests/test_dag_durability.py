@@ -648,6 +648,79 @@ class TestRetryResetsPerAttemptState:
         assert refetched_child.status == "pending"
 
     @pytest.mark.asyncio
+    async def test_retry_refuses_when_banking_fails(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex P2 round 10: banking was best-effort while the reset was
+        unconditional, so a transient failure lost the attempt permanently.
+        Refusing is better — the operator can simply try again."""
+        dag = await store.create(_subtask_dag("banking-fails"))
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        node = dag.nodes[0]
+        await store.update_node(
+            node.id, status="failed", subtask_id=uuid.uuid4(),
+            error="boom", tokens_counted=False,
+        )
+        subtask_mgr.get.side_effect = RuntimeError("db unreachable")
+
+        orch = _orch(store, subtask_mgr, dynamic_loader)
+        with pytest.raises(ValueError, match="token usage"):
+            await orch.retry_node(dag.id, "long-runner")
+
+        # Nothing was reset — the old attempt is still reachable.
+        fetched = await store.get_dag(dag.id)
+        assert fetched.nodes[0].status == "failed"
+        assert fetched.nodes[0].subtask_id is not None
+
+    @pytest.mark.asyncio
+    async def test_fix_stage_defers_without_consuming_an_attempt(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """The deferral must be free — otherwise a transient DB blip would
+        silently burn the parent's only fix attempt."""
+        request = DAGCreateRequest(
+            name="fix-defer-free",
+            nodes=[
+                DAGNodeSpec(
+                    name="work", type=DAGNodeType.subtask,
+                    instructions="do it", timeout_seconds=120,
+                ),
+                DAGNodeSpec(
+                    name="fix-work", type=DAGNodeType.fix,
+                    instructions="recover", parent_node="work",
+                    fix_actions=["retry_as_is"],
+                ),
+            ],
+            edges=[
+                DAGEdgeSpec(
+                    from_node="work", to_node="fix-work",
+                    edge_type="on_failure",
+                ),
+            ],
+        )
+        dag = await store.create(request)
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        work = next(n for n in dag.nodes if n.name == "work")
+        await store.update_node(
+            work.id, status="failed", subtask_id=uuid.uuid4(),
+            error="subtask incomplete_no_terminal: ran out of turns",
+            tokens_counted=False,
+        )
+        subtask_mgr.get.side_effect = RuntimeError("db unreachable")
+
+        orch = _orch(store, subtask_mgr, dynamic_loader)
+        dag = await store.get_dag(dag.id)
+        await orch._try_fix_failed_nodes(dag)
+
+        fetched = await store.get_dag(dag.id)
+        fix_node = next(n for n in fetched.nodes if n.name == "fix-work")
+        parent = next(n for n in fetched.nodes if n.name == "work")
+        assert fix_node.fix_attempts_used == 0  # deferral was free
+        assert parent.status == "failed"        # nothing reset
+
+    @pytest.mark.asyncio
     async def test_retry_node_reopens_delivery(
         self, store, subtask_mgr, dynamic_loader
     ):

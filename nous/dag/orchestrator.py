@@ -23,6 +23,14 @@ single function, and each was discovered separately during review.
      - `retry_node` — the selectively-unblocked downstream nodes
      - `_try_fix_failed_nodes` — the fix-stage retry branch
 
+   When banking FAILS the response is per-path, because the cost of refusing
+   differs. The directly-retried node raises (the operator can just try
+   again). The fix stage defers before consuming an attempt (it re-fires on a
+   later tick). Downstream descendants proceed anyway with an ERROR log —
+   they have no automatic second chance, so refusing would strand a
+   recoverable node, trading a bookkeeping loss for an availability loss in a
+   change whose whole purpose is removing silent dead ends.
+
 3. **Subtask settlement.** A node reaching a terminal status does NOT mean its
    subtask has. `cancel_dag`, failure propagation and the reaper all
    terminalize a node while the worker may still run (`SubtaskManager.cancel`
@@ -438,7 +446,15 @@ class DAGOrchestrator:
 
         # Bank the old attempt's tokens BEFORE clearing its claim and dropping
         # subtask_id below — afterwards they are unrecoverable (@codex P2).
-        await self._account_before_retry(node, dag)
+        # Refuse the retry rather than lose them: this is an operator action,
+        # and the failures that reach here are transient, so "try again" is a
+        # far better outcome than a silently under-counted DAG.
+        if not await self._account_before_retry(node, dag):
+            raise ValueError(
+                f"Could not record the previous attempt's token usage for "
+                f"'{node_name}'. Retrying now would lose it — try again in a "
+                "moment."
+            )
 
         await self._store.update_node(
             node.id,
@@ -503,7 +519,20 @@ class DAGOrchestrator:
                 # @codex P2 on d8b68bf: and for the same reason, its old
                 # attempt must be banked FIRST. This is the third of the three
                 # reset sites; the previous commit covered only two.
-                await self._account_before_retry(n, dag)
+                if not await self._account_before_retry(n, dag):
+                    # Descendants differ from the directly-retried node: there
+                    # is no automatic second chance for them, so refusing here
+                    # would STRAND a recoverable node permanently — trading a
+                    # bookkeeping loss for an availability loss, in a change
+                    # whose whole purpose is removing silent dead ends.
+                    # Unblock anyway and make the loss loud instead of silent,
+                    # which is the substance of the @codex objection.
+                    logger.error(
+                        "F087: unblocking node %s WITHOUT banking its previous "
+                        "attempt's tokens — that usage is lost from the DAG "
+                        "total, but stranding the node would be worse",
+                        n.name,
+                    )
                 await self._store.update_node(
                     n.id, status="pending", error=None, tokens_counted=False
                 )
@@ -606,7 +635,7 @@ class DAGOrchestrator:
             elif node.node_type == "check" and node.check_name:
                 await self._sync_check_node(node)
 
-    async def _account_before_retry(self, node: DAGNode, dag: ExecutionDAG) -> None:
+    async def _account_before_retry(self, node: DAGNode, dag: ExecutionDAG) -> bool:
         """F087: bank the OLD attempt's tokens before its claim is reset.
 
         @codex P2 on e94cd42: both retry paths clear `tokens_counted` and then
@@ -617,23 +646,46 @@ class DAGOrchestrator:
         see the REPLACEMENT subtask, so the first attempt's tokens are lost
         from both the node and the DAG total for good.
 
-        Best-effort by design: this runs on the operator's retry path, and a
-        bookkeeping failure must not block the retry itself.
+        Returns whether it is SAFE to proceed with the reset.
+
+        @codex P2 on 954ecce: this was previously best-effort — it returned
+        without confirming, while callers cleared the claim and replaced
+        `subtask_id` regardless, so a transient lookup or claim failure lost
+        the attempt permanently. "Bookkeeping must not block the retry" was
+        the wrong trade: silent permanent loss is worse than a retry the
+        operator can simply issue again. Callers now refuse to reset on False.
+
+        A MISSING subtask row returns True: that usage is genuinely
+        unrecoverable rather than transiently unavailable, so blocking would
+        wedge the retry forever with nothing to gain.
         """
         if node.tokens_counted or not node.subtask_id or not self._subtask_mgr:
-            return
+            return True
         try:
             subtask = await self._subtask_mgr.get(node.subtask_id)
             if subtask is None:
-                return
-            if subtask.status in _SETTLED_SUBTASK_STATUSES:
-                await self._count_node_tokens(node, subtask, dag)
+                return True
+            if subtask.status not in _SETTLED_SUBTASK_STATUSES:
+                # Not settled yet — its counters could still change, so
+                # claiming now would freeze the wrong value (invariant 3).
+                # Blocking the reset keeps the attempt reachable.
+                logger.warning(
+                    "F087: refusing to reset node %s — its previous subtask is "
+                    "still %s, so that attempt's tokens are not final yet",
+                    node.name, subtask.status,
+                )
+                return False
+            await self._count_node_tokens(node, subtask, dag)
+            # _count_node_tokens swallows its errors, so the flag is the only
+            # honest confirmation that the claim actually landed.
+            return node.tokens_counted
         except Exception:
             logger.warning(
                 "F087: could not bank tokens for the previous attempt of node "
-                "%s before retry — that attempt's usage is lost",
+                "%s — refusing to reset so the attempt stays reachable",
                 node.name, exc_info=True,
             )
+            return False
 
     async def _reconcile_token_accounting(self, dag: ExecutionDAG) -> bool:
         """F087: re-attempt token accounting for terminal, unaccounted nodes.
@@ -1619,6 +1671,21 @@ class DAGOrchestrator:
                     )
                     continue
 
+            # F087 (@codex P2 on 954ecce): if this fix is going to re-enqueue
+            # the parent, its previous attempt's tokens must be banked first —
+            # the reset clears the claim and the relaunch overwrites
+            # subtask_id, after which that usage is unreachable. Checked BEFORE
+            # the attempt bump below so a deferral costs nothing: the parent
+            # stays 'failed' and the fix re-fires on a later tick.
+            if outcome.action in ("retry_as_is", "retry_with_amended_prompt"):
+                if not await self._account_before_retry(parent, dag):
+                    logger.warning(
+                        "F087: deferring fix retry for %s — could not bank the "
+                        "previous attempt's tokens (no attempt consumed)",
+                        parent.name,
+                    )
+                    continue
+
             logger.info(
                 "F066.1: fix '%s' chose '%s' for parent '%s' — %s",
                 fix_node.name, outcome.action, parent.name, outcome.rationale,
@@ -1647,10 +1714,9 @@ class DAGOrchestrator:
             )
 
             if outcome.action == "retry_as_is" or outcome.action == "retry_with_amended_prompt":
-                # Bank the old attempt's tokens before the reset below clears
-                # its claim and the relaunch overwrites subtask_id (@codex P2).
-                await self._account_before_retry(parent, dag)
                 # Re-enqueue parent for dispatch on next tick.
+                # (The previous attempt was already banked above, before the
+                # fix attempt was consumed.)
                 # tokens_counted=False for the same per-attempt reason as
                 # retry_node (@codex P2 on b3c78c3) — the fix-stage retry is
                 # the automatic sibling of that manual path and was losing the
