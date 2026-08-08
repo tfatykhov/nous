@@ -491,6 +491,90 @@ class TestRetryResetsPerAttemptState:
         assert dag.id in {d.id for d in pending}
 
     @pytest.mark.asyncio
+    async def test_transient_accounting_failure_is_reconciled_later(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex P2 round 3: _count_node_tokens swallows its errors so a
+        bookkeeping failure can't derail the status sync — but the node then
+        terminalizes, and later ticks only sync 'running' nodes. Without a
+        reconciliation sweep one transient DB blip stranded those tokens."""
+        dag = await store.create(_subtask_dag("reconcile-tokens"))
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        node = await _running_node_started_at(store, dag, datetime.now(UTC))
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=node.subtask_id, status="completed", result="ok", error=None,
+            final_outcome="completed", tokens_in=200, tokens_out=100,
+        )
+        orch = _orch(store, subtask_mgr, dynamic_loader)
+
+        # Tick 1: the roll-up blows up transiently. The node still terminalizes.
+        original = store.claim_and_add_node_tokens
+        store.claim_and_add_node_tokens = AsyncMock(
+            side_effect=RuntimeError("connection reset")
+        )
+        await orch.tick()
+
+        after_failure = await store.get_dag(dag.id)
+        assert after_failure.nodes[0].status == "completed"
+        assert after_failure.nodes[0].tokens_counted is False
+        assert after_failure.tokens_consumed == 0
+
+        # Tick 2: DB recovers — the sweep picks the stranded node back up.
+        store.claim_and_add_node_tokens = original
+        await store.update_dag_status(dag.id, "running")  # keep it sweep-visible
+        await orch.tick()
+
+        recovered = await store.get_dag(dag.id)
+        assert recovered.tokens_consumed == 300
+        assert recovered.nodes[0].tokens_counted is True
+
+    @pytest.mark.asyncio
+    async def test_reconciliation_claims_zero_when_subtask_is_gone(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """A deleted subtask's usage is unknowable — claim zero so the sweep
+        stops spinning every tick for the life of the DAG."""
+        dag = await store.create(_subtask_dag("gone-subtask"))
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        node = dag.nodes[0]
+        await store.update_node(
+            node.id, status="failed", subtask_id=uuid.uuid4(), error="boom",
+        )
+        subtask_mgr.get.return_value = None
+
+        await _orch(store, subtask_mgr, dynamic_loader).tick()
+
+        fetched = await store.get_dag(dag.id)
+        assert fetched.nodes[0].tokens_counted is True
+        assert fetched.tokens_consumed == 0
+
+    @pytest.mark.asyncio
+    async def test_reactivation_and_delivery_reset_are_one_transaction(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex P2 round 3: a crash between a committed 'running' and a
+        separate delivery reset leaves a LIVE DAG carrying a stale
+        delivered_at — it finishes normally and is then never announced."""
+        dag = await store.create(_subtask_dag("atomic-reactivate"))
+        await store.update_dag_status(dag.id, "failed", result_summary="v1")
+        await store.mark_delivered(dag.id)
+        await store.save_delivery_summary(dag.id, "old summary")
+        await store.update_node(dag.nodes[0].id, status="failed", error="boom")
+
+        await _orch(store, subtask_mgr, dynamic_loader).retry_node(
+            dag.id, "long-runner"
+        )
+
+        fetched = await store.get_dag(dag.id)
+        # Both halves landed — never one without the other.
+        assert fetched.status == "running"
+        assert fetched.delivered_at is None
+        assert fetched.delivery_summary is None
+        assert fetched.delivery_attempts == 0
+
+    @pytest.mark.asyncio
     async def test_retry_on_cancelled_dag_refuses_instead_of_dead_ending(
         self, store, subtask_mgr, dynamic_loader
     ):

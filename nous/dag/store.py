@@ -508,17 +508,26 @@ class DAGStore:
             )
             await session.commit()
 
-    async def reopen_delivery(self, dag_id: UUID) -> None:
-        """F087: clear delivery bookkeeping when a terminal DAG is reactivated.
+    async def reactivate_for_retry(self, dag_id: UUID) -> None:
+        """F087: put a terminal DAG back to 'running' AND clear its delivery
+        bookkeeping, in one transaction.
 
-        @codex P2 on b3c78c3: ``retry_node`` puts a failed/partial DAG back to
-        'running', but the delivery columns still described the PREVIOUS
-        outcome. ``delivered_at`` being set meant the sweep's
-        ``delivered_at IS NULL`` predicate excluded the DAG forever, so the
-        retry's result was never announced — and the stale attempt count,
-        error and cached summary would have been reused if it ever were.
+        @codex P2 on b3c78c3: ``retry_node`` left ``delivered_at`` set when it
+        reactivated a DAG, so the sweep's ``delivered_at IS NULL`` predicate
+        excluded the retry's outcome forever — and the stale attempt count,
+        error and cached summary all described the PREVIOUS outcome.
 
-        Every delivery column is per-outcome, so all four reset together.
+        @codex P2 on 9ca8fcd: doing that reset in its own commit after the
+        status update reintroduced the same two-phase-write hazard this PR
+        fixed for token accounting. A crash in between left a *running* DAG
+        carrying a stale ``delivered_at``, which is worse than either endpoint:
+        it finishes normally after restart and is then silently never
+        announced. Status and delivery state are one logical transition, so
+        they commit together.
+
+        Mirrors ``update_dag_status(dag_id, "running")`` for the status half,
+        including the ``started_at`` refresh, so reactivation semantics are
+        unchanged.
         """
         async with self._db.session() as session:
             await session.execute(
@@ -526,6 +535,8 @@ class DAGStore:
                 .where(ExecutionDAG.id == dag_id)
                 .where(ExecutionDAG.agent_id == self._agent_id)
                 .values(
+                    status="running",
+                    started_at=datetime.now(UTC),
                     delivered_at=None,
                     delivery_attempts=0,
                     delivery_error=None,

@@ -8,6 +8,7 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
@@ -377,15 +378,13 @@ class DAGOrchestrator:
                     n.id, status="pending", error=None, tokens_counted=False
                 )
 
-        # Reactivate DAG if it was marked failed
+        # Reactivate DAG if it was marked failed.
+        # Status and delivery state are ONE transition (@codex P2 on 9ca8fcd):
+        # a crash between a committed 'running' and a separate delivery reset
+        # leaves a live DAG carrying a stale delivered_at, which finishes
+        # normally and is then silently never announced.
         if dag.status in ("failed", "partial"):
-            await self._store.update_dag_status(dag_id, "running")
-            # @codex P2 on b3c78c3: a reactivated DAG whose FIRST outcome was
-            # already delivered would keep delivered_at set, so the sweep's
-            # `delivered_at IS NULL` predicate excludes it forever and the
-            # retry's outcome is never announced. Attempt count, last error
-            # and the cached summary all belong to the previous outcome too.
-            await self._store.reopen_delivery(dag_id)
+            await self._store.reactivate_for_retry(dag_id)
 
     # ------------------------------------------------------------------
     # Internal: DAG advancement
@@ -398,6 +397,11 @@ class DAGOrchestrator:
 
         # 1.5 Poll awaiting_check nodes
         await self._poll_awaiting_checks(dag)
+
+        # 1.55 F087: retry accounting for terminal nodes whose roll-up failed
+        # transiently. Must precede the budget check below so a recovered
+        # count is visible to enforcement on this very tick.
+        await self._reconcile_token_accounting(dag)
 
         # 1.6 F087: wall-clock backstop. Runs before stall detection because
         # it is the coarser, unconditional bound — a node past its own
@@ -467,6 +471,47 @@ class DAGOrchestrator:
                 await self._sync_subtask_node(node, dag)
             elif node.node_type == "check" and node.check_name:
                 await self._sync_check_node(node)
+
+    async def _reconcile_token_accounting(self, dag: ExecutionDAG) -> None:
+        """F087: re-attempt token accounting for terminal, unaccounted nodes.
+
+        @codex P2 on 9ca8fcd: `_count_node_tokens` deliberately swallows its
+        exceptions so a bookkeeping failure can't knock a node out of its
+        status sync — but `_sync_subtask_node` then terminalizes the node, and
+        later ticks only sync nodes still in 'running'. A single transient DB
+        error therefore stranded that node's tokens permanently, under-
+        reporting `tokens_consumed` and weakening budget enforcement.
+
+        This sweep closes that hole: any terminal subtask node that still
+        carries `tokens_counted=False` gets another attempt each tick. The
+        claim is idempotent, so a node that already succeeded is skipped by
+        the flag rather than re-added, and the sweep goes quiet once every
+        node is accounted.
+        """
+        if not self._subtask_mgr:
+            return
+        for node in dag.nodes:
+            if node.status not in _TERMINAL or node.tokens_counted:
+                continue
+            if node.node_type != "subtask" or not node.subtask_id:
+                continue  # gate/callback/fix nodes never consume tokens
+            try:
+                subtask = await self._subtask_mgr.get(node.subtask_id)
+            except Exception:
+                logger.debug(
+                    "F087: token reconciliation could not load subtask for "
+                    "node %s; will retry next tick", node.name,
+                )
+                continue
+            if subtask is None:
+                # The subtask row is gone, so its usage is unknowable. Claim
+                # with zero to stop retrying forever rather than leave the
+                # sweep spinning on every tick for the life of the DAG.
+                await self._count_node_tokens(
+                    node, SimpleNamespace(tokens_in=0, tokens_out=0), dag
+                )
+                continue
+            await self._count_node_tokens(node, subtask, dag)
 
     async def _sync_subtask_node(
         self, node: DAGNode, dag: ExecutionDAG | None = None
