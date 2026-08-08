@@ -299,6 +299,19 @@ class DAGOrchestrator:
             raise ValueError(f"Node '{node_name}' not found in DAG {dag_id}")
         if node.status != "failed":
             raise ValueError(f"Node '{node_name}' is {node.status}, expected failed")
+        # F087: only 'failed'/'partial' DAGs are reactivated below, and
+        # get_active_dags() serves only pending/running — so retrying a node
+        # in a CANCELLED DAG used to report success while leaving the node
+        # 'pending' in a DAG the tick loop never advances again. Refuse before
+        # mutating anything. Reactivating instead would also resurrect the
+        # downstream subtree via the selective-unblock loop, which is a
+        # bigger semantic change than "retry this one node" asks for.
+        if dag.status == "cancelled":
+            raise ValueError(
+                f"DAG {dag_id} is cancelled — retrying a node would leave it "
+                "pending in a DAG that never advances. Cancellation is "
+                "deliberate; create a new DAG instead."
+            )
 
         await self._store.update_node(
             node.id,

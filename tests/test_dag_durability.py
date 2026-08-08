@@ -491,6 +491,30 @@ class TestRetryResetsPerAttemptState:
         assert dag.id in {d.id for d in pending}
 
     @pytest.mark.asyncio
+    async def test_retry_on_cancelled_dag_refuses_instead_of_dead_ending(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """Pre-existing silent dead end, found while auditing the retry paths.
+
+        Only failed/partial DAGs get reactivated, and get_active_dags() serves
+        only pending/running — so this reported success, left the node
+        'pending', and the tick loop never touched the DAG again.
+        """
+        dag = await store.create(_subtask_dag("cancelled-retry"))
+        await store.update_dag_status(dag.id, "running")
+        await store.update_node(dag.nodes[0].id, status="failed", error="boom")
+        await store.update_dag_status(dag.id, "cancelled")
+
+        orch = _orch(store, subtask_mgr, dynamic_loader)
+        with pytest.raises(ValueError, match="cancelled"):
+            await orch.retry_node(dag.id, "long-runner")
+
+        # Refused BEFORE mutating — no half-reset node left behind.
+        fetched = await store.get_dag(dag.id)
+        assert fetched.nodes[0].status == "failed"
+        assert fetched.status == "cancelled"
+
+    @pytest.mark.asyncio
     async def test_fix_stage_retry_clears_token_claim(self, store):
         """The automatic sibling of retry_node had the identical bug."""
         request = DAGCreateRequest(
