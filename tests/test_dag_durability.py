@@ -385,6 +385,49 @@ class TestTokenAccounting:
         assert fetched.tokens_consumed == 500
 
     @pytest.mark.asyncio
+    async def test_over_budget_but_fully_completed_dag_stays_completed(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex P2 round 5, resolved at the root.
+
+        A DAG whose nodes all completed has no future work for enforcement to
+        stop, so the overage must not relabel it 'partial' — that would claim
+        work was skipped when none was. This also makes the final status
+        independent of WHEN accounting landed, which is the inconsistency
+        codex flagged: late reconciliation now yields the same status as
+        accounting that succeeded a tick earlier.
+        """
+        request = DAGCreateRequest(
+            name="over-budget-complete",
+            token_budget=100,
+            nodes=[
+                DAGNodeSpec(
+                    name="only", type=DAGNodeType.subtask,
+                    instructions="work", timeout_seconds=120,
+                ),
+            ],
+        )
+        dag = await store.create(request)
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        node = await _running_node_started_at(store, dag, datetime.now(UTC))
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=node.subtask_id, status="completed", result="done", error=None,
+            final_outcome="completed", tokens_in=400, tokens_out=100,
+        )
+
+        orch = _orch(
+            store, subtask_mgr, dynamic_loader,
+            _settings(dag_token_budget_enforcement_enabled=True),
+        )
+        await orch.tick()
+
+        fetched = await store.get_dag(dag.id)
+        assert fetched.tokens_consumed == 500  # overage is recorded
+        assert fetched.status == "completed"   # ...but nothing was curtailed
+        assert fetched.nodes[0].status == "completed"
+
+    @pytest.mark.asyncio
     async def test_budget_not_enforced_while_flag_is_off(
         self, store, subtask_mgr, dynamic_loader
     ):

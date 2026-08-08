@@ -445,8 +445,12 @@ class DAGOrchestrator:
             if ratio >= 1.0:
                 if self._settings.dag_token_budget_enforcement_enabled:
                     logger.warning("DAG %s exceeded token budget", dag.id)
-                    await self._handle_budget_exceeded(dag)
-                    return
+                    # Only stop advancing when enforcement actually took over.
+                    # If it declined (nothing left to curtail), fall through so
+                    # _check_dag_completion still finalizes the DAG — otherwise
+                    # it would sit 'running' forever.
+                    if await self._handle_budget_exceeded(dag):
+                        return
                 logger.warning(
                     "DAG %s exceeded token budget (%d/%d) — enforcement "
                     "disabled, letting it run",
@@ -1797,8 +1801,31 @@ class DAGOrchestrator:
                 dag.id, "failed", result_summary="All nodes blocked"
             )
 
-    async def _handle_budget_exceeded(self, dag: ExecutionDAG) -> None:
-        """Cancel pending/ready nodes when budget is exceeded."""
+    async def _handle_budget_exceeded(self, dag: ExecutionDAG) -> bool:
+        """Cancel pending/ready nodes when budget is exceeded.
+
+        Returns True when enforcement took over the DAG's fate (so the caller
+        should stop advancing it this tick), False when it declined because
+        there was nothing left to curtail (so normal completion must still
+        run — otherwise the DAG would sit 'running' forever, never reaching
+        _check_dag_completion).
+
+        F087 (@codex P2 on 1bfe1fa): when the overage curtailed NOTHING — no
+        node was cancellable and none is still running — this must not force a
+        terminal status of its own. Enforcement exists to stop future work, and
+        a DAG whose nodes all finished has no future work to stop; labelling it
+        'partial' would claim work was skipped when none was. Falling through
+        to _check_dag_completion instead also makes the DAG's final status
+        independent of WHEN token accounting landed, which is the actual
+        inconsistency codex identified: a transient accounting failure that
+        recovers in the pre-delivery sweep now yields exactly the same status
+        as accounting that succeeded a tick earlier. The overage is not lost —
+        it is logged, and the delivery template renders `Tokens: used/budget`
+        whenever a budget is set.
+
+        `cancelled_any` had been computed and never read since F038 (a standing
+        ruff F841); it is the signal this branch needed all along.
+        """
         cancelled_any = False
         for node in dag.nodes:
             if node.status in ("pending", "ready", "awaiting_check"):
@@ -1810,6 +1837,13 @@ class DAGOrchestrator:
 
         # If there are still running nodes, let them finish
         has_running = any(n.status == "running" for n in dag.nodes)
+        if not cancelled_any and not has_running:
+            logger.warning(
+                "DAG %s finished over budget (%s/%s) but nothing was left to "
+                "curtail — leaving the final status to normal completion",
+                dag.id, dag.tokens_consumed, dag.token_budget,
+            )
+            return False
         if not has_running:
             # Determine final status
             has_completed = any(n.status == "completed" for n in dag.nodes)
@@ -1823,3 +1857,4 @@ class DAGOrchestrator:
                     dag.id, "failed",
                     result_summary="Token budget exceeded before any nodes completed",
                 )
+        return True
