@@ -417,6 +417,131 @@ class TestTokenAccounting:
         assert refetched.status != "cancelled"
 
 
+class TestRetryResetsPerAttemptState:
+    """@codex P2 round 2: every path that re-runs a node must reset the
+    per-attempt bookkeeping, or the retry's cost and outcome go unrecorded."""
+
+    @pytest.mark.asyncio
+    async def test_retry_node_clears_token_claim_and_accumulates(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        dag = await store.create(_subtask_dag("retry-tokens"))
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        node = await _running_node_started_at(store, dag, datetime.now(UTC))
+
+        # Attempt 1 fails having burned 300 tokens.
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=node.subtask_id, status="failed", result=None, error="boom",
+            final_outcome=None, tokens_in=200, tokens_out=100,
+        )
+        orch = _orch(store, subtask_mgr, dynamic_loader)
+        await orch.tick()
+        assert (await store.get_dag(dag.id)).tokens_consumed == 300
+
+        # Operator retries the node.
+        await orch.retry_node(dag.id, "long-runner")
+        refetched = await store.get_dag(dag.id)
+        assert refetched.nodes[0].tokens_counted is False
+
+        # Attempt 2 succeeds having burned 150 more.
+        node2 = await _running_node_started_at(
+            store, refetched, datetime.now(UTC)
+        )
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=node2.subtask_id, status="completed", result="ok", error=None,
+            final_outcome="completed", tokens_in=100, tokens_out=50,
+        )
+        await orch.tick()
+
+        final = await store.get_dag(dag.id)
+        # Both attempts really were paid for.
+        assert final.tokens_consumed == 450
+        # And the node agrees with the DAG it rolls up into.
+        assert final.nodes[0].tokens_used == 450
+
+    @pytest.mark.asyncio
+    async def test_retry_node_reopens_delivery(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """A reactivated DAG must be announced again when it re-finishes."""
+        dag = await store.create(_subtask_dag("retry-delivery"))
+        await store.update_dag_status(dag.id, "failed", result_summary="v1")
+        await store.mark_delivered(dag.id)
+        await store.save_delivery_summary(dag.id, "first outcome summary")
+        await store.update_node(dag.nodes[0].id, status="failed", error="boom")
+
+        assert (await store.get_dag(dag.id)).delivered_at is not None
+
+        orch = _orch(store, subtask_mgr, dynamic_loader)
+        await orch.retry_node(dag.id, "long-runner")
+
+        reopened = await store.get_dag(dag.id)
+        assert reopened.status == "running"
+        assert reopened.delivered_at is None
+        assert reopened.delivery_attempts == 0
+        assert reopened.delivery_error is None
+        # The cached summary described the PREVIOUS outcome.
+        assert reopened.delivery_summary is None
+
+        # It is now visible to the sweep again.
+        pending = await store.get_undelivered_terminal_dags()
+        await store.update_dag_status(dag.id, "completed", result_summary="v2")
+        pending = await store.get_undelivered_terminal_dags()
+        assert dag.id in {d.id for d in pending}
+
+    @pytest.mark.asyncio
+    async def test_fix_stage_retry_clears_token_claim(self, store):
+        """The automatic sibling of retry_node had the identical bug."""
+        request = DAGCreateRequest(
+            name="fix-retry-tokens",
+            nodes=[
+                DAGNodeSpec(
+                    name="work", type=DAGNodeType.subtask,
+                    instructions="do it", timeout_seconds=120,
+                ),
+                DAGNodeSpec(
+                    name="fix-work", type=DAGNodeType.fix,
+                    instructions="recover", parent_node="work",
+                    fix_actions=["retry_as_is"],
+                ),
+            ],
+            edges=[
+                DAGEdgeSpec(
+                    from_node="work", to_node="fix-work",
+                    edge_type="on_failure",
+                ),
+            ],
+        )
+        dag = await store.create(request)
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        work = next(n for n in dag.nodes if n.name == "work")
+        await store.update_node(
+            work.id,
+            # choose_action keys retry_as_is off this exact token.
+            status="failed",
+            error="subtask incomplete_no_terminal: ran out of turns",
+            tokens_counted=True,
+        )
+
+        subtask_mgr = AsyncMock()
+        subtask_mgr.create.return_value = SimpleNamespace(
+            id=uuid.uuid4(), status="pending"
+        )
+        loader = AsyncMock()
+        loader._registry = MagicMock()
+        loader._registry.get_check.return_value = None
+        orch = _orch(store, subtask_mgr, loader)
+        dag = await store.get_dag(dag.id)
+        await orch._try_fix_failed_nodes(dag)
+
+        refetched = await store.get_dag(dag.id)
+        retried = next(n for n in refetched.nodes if n.name == "work")
+        assert retried.status == "pending"
+        assert retried.tokens_counted is False
+
+
 # ---------------------------------------------------------------------------
 # Fail-loud wiring
 # ---------------------------------------------------------------------------

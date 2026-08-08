@@ -408,7 +408,14 @@ class DAGStore:
                         )
                     )
                 )
-                .values(tokens_counted=True, tokens_used=tokens)
+                # tokens_used ACCUMULATES rather than overwrites: a retried
+                # node really did spend both attempts' tokens, and the DAG
+                # total below accumulates the same way. Overwriting would make
+                # the node disagree with the DAG it rolls up into.
+                .values(
+                    tokens_counted=True,
+                    tokens_used=DAGNode.tokens_used + tokens,
+                )
             )
             if result.rowcount == 0:
                 # Already counted on an earlier tick — nothing to add, and
@@ -498,6 +505,32 @@ class DAGStore:
                 .where(ExecutionDAG.id == dag_id)
                 .where(ExecutionDAG.agent_id == self._agent_id)
                 .values(delivery_summary=summary)
+            )
+            await session.commit()
+
+    async def reopen_delivery(self, dag_id: UUID) -> None:
+        """F087: clear delivery bookkeeping when a terminal DAG is reactivated.
+
+        @codex P2 on b3c78c3: ``retry_node`` puts a failed/partial DAG back to
+        'running', but the delivery columns still described the PREVIOUS
+        outcome. ``delivered_at`` being set meant the sweep's
+        ``delivered_at IS NULL`` predicate excluded the DAG forever, so the
+        retry's result was never announced — and the stale attempt count,
+        error and cached summary would have been reused if it ever were.
+
+        Every delivery column is per-outcome, so all four reset together.
+        """
+        async with self._db.session() as session:
+            await session.execute(
+                update(ExecutionDAG)
+                .where(ExecutionDAG.id == dag_id)
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .values(
+                    delivered_at=None,
+                    delivery_attempts=0,
+                    delivery_error=None,
+                    delivery_summary=None,
+                )
             )
             await session.commit()
 

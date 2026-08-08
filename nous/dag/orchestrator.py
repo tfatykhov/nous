@@ -312,6 +312,12 @@ class DAGOrchestrator:
             check_attempts=0,
             last_check_at=None,
             awaiting_check_at=None,
+            # @codex P2 on b3c78c3: the token claim is PER ATTEMPT. Leaving it
+            # set means the replacement subtask's terminal sync loses the
+            # claim race against its own predecessor and silently adds none of
+            # the retry's usage — permanently under-reporting tokens_consumed
+            # and letting later waves run past an enforced budget.
+            tokens_counted=False,
         )
 
         # Selectively unblock only nodes downstream of the retried node
@@ -351,13 +357,22 @@ class DAGOrchestrator:
             # Only unblock if no other failed predecessor exists
             other_failed_preds = dep_map[nid] & still_failed
             if not other_failed_preds:
+                # tokens_counted reset for the same per-attempt reason as the
+                # retried node above — a cancel_cascade node may have been
+                # running (and consuming) when it was cancelled.
                 await self._store.update_node(
-                    n.id, status="pending", error=None
+                    n.id, status="pending", error=None, tokens_counted=False
                 )
 
         # Reactivate DAG if it was marked failed
         if dag.status in ("failed", "partial"):
             await self._store.update_dag_status(dag_id, "running")
+            # @codex P2 on b3c78c3: a reactivated DAG whose FIRST outcome was
+            # already delivered would keep delivered_at set, so the sweep's
+            # `delivered_at IS NULL` predicate excludes it forever and the
+            # retry's outcome is never announced. Attempt count, last error
+            # and the cached summary all belong to the previous outcome too.
+            await self._store.reopen_delivery(dag_id)
 
     # ------------------------------------------------------------------
     # Internal: DAG advancement
@@ -1384,7 +1399,15 @@ class DAGOrchestrator:
 
             if outcome.action == "retry_as_is" or outcome.action == "retry_with_amended_prompt":
                 # Re-enqueue parent for dispatch on next tick.
-                update_kwargs: dict[str, Any] = {"status": "pending", "error": None}
+                # tokens_counted=False for the same per-attempt reason as
+                # retry_node (@codex P2 on b3c78c3) — the fix-stage retry is
+                # the automatic sibling of that manual path and was losing the
+                # retry's token usage identically.
+                update_kwargs: dict[str, object] = {
+                    "status": "pending",
+                    "error": None,
+                    "tokens_counted": False,
+                }
                 # F066.1 Phase 1.5: when LLM dispatch returns an amended
                 # prompt, replace the parent's instructions so the next
                 # dispatch sees the revised prompt. Phase 1 (rule-based)
