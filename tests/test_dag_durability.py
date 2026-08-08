@@ -530,6 +530,45 @@ class TestRetryResetsPerAttemptState:
         assert recovered.nodes[0].tokens_counted is True
 
     @pytest.mark.asyncio
+    async def test_terminal_dag_is_reconciled_before_its_outcome_is_announced(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex P2 round 4: _advance_dag only runs for pending/running DAGs,
+        so a DAG terminalized on the same tick its accounting failed never got
+        the promised retry. Reconcile at the last point before publishing."""
+        dag = await store.create(_subtask_dag("terminal-reconcile"))
+        node = dag.nodes[0]
+        # Terminal DAG, undelivered, with a node whose tokens never landed.
+        await store.update_node(
+            node.id, status="completed", subtask_id=uuid.uuid4(),
+            result="ok", tokens_counted=False,
+        )
+        await store.update_dag_status(dag.id, "completed", result_summary="done")
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=uuid.uuid4(), status="completed", result="ok", error=None,
+            final_outcome="completed", tokens_in=700, tokens_out=300,
+        )
+
+        delivery = AsyncMock()
+        delivery.deliver.return_value = SimpleNamespace(
+            delivered=True, legs=(), summary="ok", summary_authored=False,
+        )
+        orch = DAGOrchestrator(
+            store=store, subtask_mgr=subtask_mgr,
+            dynamic_loader=dynamic_loader, settings=_settings(),
+            delivery=delivery,
+        )
+        orch.clock_wired = True
+        await orch.tick()
+
+        fetched = await store.get_dag(dag.id)
+        assert fetched.tokens_consumed == 1000
+        assert fetched.nodes[0].tokens_counted is True
+        # And the DAG handed to deliver() already carried the corrected total.
+        announced = delivery.deliver.await_args.args[0]
+        assert announced.tokens_consumed == 1000
+
+    @pytest.mark.asyncio
     async def test_reconciliation_claims_zero_when_subtask_is_gone(
         self, store, subtask_mgr, dynamic_loader
     ):

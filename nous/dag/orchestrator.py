@@ -186,6 +186,23 @@ class DAGOrchestrator:
             limit=self._settings.dag_delivery_batch_size
         )
         for dag in dags:
+            # @codex P2 on a4e302b: _reconcile_token_accounting is reached only
+            # via _advance_dag, and tick() runs that only for pending/running
+            # DAGs. If accounting was unavailable on the completion tick,
+            # _check_dag_completion terminalized the DAG immediately after and
+            # the promised next-tick retry never ran — leaving the total, the
+            # budget verdict and the announced summary permanently low. This is
+            # the last point before the number is published, so reconcile here
+            # too. Cheap: it no-ops once every node carries tokens_counted.
+            try:
+                await self._reconcile_token_accounting(dag)
+            except Exception:
+                logger.warning(
+                    "F087: pre-delivery token reconciliation failed for DAG "
+                    "%s — announcing with the total we have",
+                    str(dag.id)[:8], exc_info=True,
+                )
+
             try:
                 outcome = await self._delivery.deliver(dag)
             except Exception as exc:
