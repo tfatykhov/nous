@@ -1654,6 +1654,95 @@ async def get_heartbeat_dashboard_data(
 # ── F038: DAG Orchestration Dashboard ──────────────────────────────────────
 
 
+def _shingle_overlap(a: str | None, b: str | None) -> float:
+    """Jaccard overlap over 6-word shingles. Zero when either side is short.
+
+    F090.4 needs a cheap, deterministic proxy for "these two siblings did
+    overlapping work". Six words is long enough that shared boilerplate
+    ("the build succeeded") does not by itself register, and an LLM judge is
+    deliberately avoided so the gate metric costs nothing to run.
+    """
+    def _sh(text: str | None) -> set[tuple[str, ...]]:
+        words = (text or "").lower().split()
+        if len(words) < 6:
+            return set()
+        return {tuple(words[i:i + 6]) for i in range(len(words) - 5)}
+
+    sa, sb = _sh(a), _sh(b)
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+
+# Two sibling results this similar are treated as overlapping work.
+_SIBLING_OVERLAP_THRESHOLD = 0.15
+
+
+async def get_dag_phase2_signals(
+    session: AsyncSession, agent_id: str
+) -> dict[str, Any]:
+    """F090.4: the evidence base for whether Phase 2 (worklog/blackboard) is
+    worth building.
+
+    Phase 2 exists because parallel siblings are mutually deaf —
+    _build_predecessor_context is the only inter-node channel and it reads
+    only terminated predecessors. `sibling_overlap_rate` measures whether that
+    deafness actually produces duplicated work; the callback/gate counters
+    say whether those node types run at all, without which the first number
+    describes a graph nobody uses.
+    """
+    rows = (await session.execute(
+        text("""
+            SELECT n.dag_id, n.wave, n.result
+            FROM nous_system.dag_nodes n
+            JOIN nous_system.execution_dags d ON d.id = n.dag_id
+            WHERE d.agent_id = :agent_id
+              AND n.status = 'completed'
+              AND n.result IS NOT NULL
+        """),
+        {"agent_id": agent_id},
+    )).all()
+
+    by_wave: dict[tuple[Any, int], list[str]] = {}
+    for dag_id, wave, result in rows:
+        by_wave.setdefault((dag_id, wave or 0), []).append(result)
+
+    pairs = 0
+    overlapping = 0
+    for results in by_wave.values():
+        for i in range(len(results)):
+            for j in range(i + 1, len(results)):
+                pairs += 1
+                if _shingle_overlap(results[i], results[j]) >= _SIBLING_OVERLAP_THRESHOLD:
+                    overlapping += 1
+
+    counts = (await session.execute(
+        text("""
+            SELECT n.node_type,
+                   count(*)                                    AS total,
+                   count(*) FILTER (WHERE n.subtask_id IS NOT NULL) AS executed
+            FROM nous_system.dag_nodes n
+            JOIN nous_system.execution_dags d ON d.id = n.dag_id
+            WHERE d.agent_id = :agent_id
+              AND n.node_type IN ('callback', 'gate')
+            GROUP BY n.node_type
+        """),
+        {"agent_id": agent_id},
+    )).all()
+    by_type = {r[0]: (r[1], r[2]) for r in counts}
+
+    return {
+        "sibling_pairs": pairs,
+        "overlapping_sibling_pairs": overlapping,
+        "sibling_overlap_rate": round(overlapping / pairs, 4) if pairs else 0.0,
+        "overlap_threshold": _SIBLING_OVERLAP_THRESHOLD,
+        "callback_nodes": by_type.get("callback", (0, 0))[0],
+        # subtask_id is non-NULL only when F090.1 actually executed it.
+        "callback_executed": by_type.get("callback", (0, 0))[1],
+        "gate_nodes": by_type.get("gate", (0, 0))[0],
+    }
+
+
 def _dag_iso(val: Any) -> str | None:
     """Convert a datetime or string to ISO string, or None."""
     if val is None:
@@ -1849,6 +1938,7 @@ async def get_dag_dashboard_data(session: AsyncSession, agent_id: str) -> dict[s
             "success_rate": round(success_rate, 3),
             "avg_completion_seconds": round(avg_seconds, 1),
         },
+        "phase2_signals": await get_dag_phase2_signals(session, agent_id),
     }
 
 
