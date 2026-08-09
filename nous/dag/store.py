@@ -6,7 +6,7 @@ import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, true as sa_true, update
 from sqlalchemy.orm import selectinload
 
 from nous.config import Settings
@@ -383,7 +383,11 @@ class DAGStore:
     # ------------------------------------------------------------------
 
     async def claim_and_add_node_tokens(
-        self, node_id: UUID, dag_id: UUID, tokens: int
+        self,
+        node_id: UUID,
+        dag_id: UUID,
+        tokens: int,
+        expected_subtask_id: UUID | None = None,
     ) -> bool:
         """F087: claim a node's tokens and roll them up, atomically.
 
@@ -401,12 +405,27 @@ class DAGStore:
 
         The claim is the WHERE clause rather than a read-then-write, so two
         concurrent ticks cannot both observe false and both add.
+
+        @codex P2 on ad857d0: `expected_subtask_id` pins the claim to the
+        ATTEMPT the caller actually read. Callers work from a `dag` snapshot,
+        and `retry_node` can concurrently bank the old attempt, reset
+        `tokens_counted`, and clear `subtask_id`. Without this clause a stale
+        caller would re-claim the freshly reset flag using the OLD subtask's
+        tokens — double-adding that attempt to the DAG total and leaving the
+        flag true so the replacement attempt could never be counted. Pass None
+        only when the caller has no attempt identity to pin (it then behaves
+        as before).
         """
         async with self._db.session() as session:
             result = await session.execute(
                 update(DAGNode)
                 .where(DAGNode.id == node_id)
                 .where(DAGNode.tokens_counted.is_(False))
+                .where(
+                    DAGNode.subtask_id == expected_subtask_id
+                    if expected_subtask_id is not None
+                    else sa_true()
+                )
                 .where(
                     DAGNode.dag_id.in_(
                         select(ExecutionDAG.id).where(

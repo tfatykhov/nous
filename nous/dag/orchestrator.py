@@ -163,6 +163,8 @@ class DAGOrchestrator:
         # serialize against each other on their own lock so a DAG cannot be
         # announced twice by overlapping sweeps.
         self._delivery_lock = asyncio.Lock()
+        # Strong reference to the detached sweep so it cannot be GC'd mid-flight.
+        self._delivery_task: asyncio.Task | None = None
         # Audit DG-4 (review P2): in-memory per-node deferral counter so a node
         # that keeps hitting a saturated subtask/check pool can't bounce
         # ready<->pending forever invisibly (a perpetually-pending node never
@@ -227,16 +229,40 @@ class DAGOrchestrator:
         # sweeps from overlapping each other without blocking anything else;
         # when one is still in flight the next tick simply skips it rather
         # than queueing ticks behind a two-minute summary turn.
+        # @codex P2 on ad857d0: releasing `_lock` was not enough. HeartbeatRunner
+        # ._loop does `await self.dag_orchestrator.tick()`, so awaiting the sweep
+        # HERE still stalls every later heartbeat phase — DAG advancement,
+        # reaping, dynamic check sync, digest, tuning — for as long as the
+        # external I/O takes. The sweep is detached instead: the tick returns as
+        # soon as the state machine is done, and delivery proceeds on its own
+        # task. `_delivery_lock` still prevents overlapping sweeps, so a DAG is
+        # never announced twice.
         if self._delivery_lock.locked():
             logger.debug("F087: delivery sweep already in flight — skipping")
         else:
-            async with self._delivery_lock:
-                try:
-                    await self._deliver_terminal_dags()
-                except Exception:
-                    logger.exception("F087: DAG delivery sweep failed")
+            # Keep a reference: a bare create_task can be garbage-collected
+            # mid-flight, which would silently drop the notification.
+            self._delivery_task = asyncio.create_task(self._run_delivery_sweep())
 
         return len(dags)
+
+    async def _run_delivery_sweep(self) -> None:
+        """Body of the detached sweep. Never raises into the task."""
+        async with self._delivery_lock:
+            try:
+                await self._deliver_terminal_dags()
+            except Exception:
+                logger.exception("F087: DAG delivery sweep failed")
+
+    async def wait_for_delivery(self) -> None:
+        """Await the in-flight detached sweep, if any.
+
+        For tests and orderly shutdown — the tick loop itself deliberately
+        never waits on this.
+        """
+        task = self._delivery_task
+        if task is not None and not task.done():
+            await task
 
     # ------------------------------------------------------------------
     # F087: durable result delivery
@@ -904,8 +930,13 @@ class DAGOrchestrator:
             tokens = int(getattr(subtask, "tokens_in", 0) or 0) + int(
                 getattr(subtask, "tokens_out", 0) or 0
             )
+            # Pin the claim to the attempt we actually read (@codex P2 on
+            # ad857d0): a concurrent retry_node may have already banked this
+            # attempt, reset the flag and swapped subtask_id, and re-claiming
+            # from our stale snapshot would double-add it.
             claimed = await self._store.claim_and_add_node_tokens(
-                node.id, node.dag_id, tokens
+                node.id, node.dag_id, tokens,
+                expected_subtask_id=node.subtask_id,
             )
             if not claimed:
                 return  # already counted on an earlier tick

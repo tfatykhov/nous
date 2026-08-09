@@ -830,6 +830,8 @@ class TestRetryResetsPerAttemptState:
         )
         orch.clock_wired = True
         await orch.tick()
+        # The sweep is detached from the tick, so drain it before asserting.
+        await orch.wait_for_delivery()
 
         fetched = await store.get_dag(dag.id)
         assert fetched.tokens_consumed == 1000

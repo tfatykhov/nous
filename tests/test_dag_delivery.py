@@ -319,6 +319,7 @@ class TestDeliverySweep:
         orch = self._orch(store, subtask_mgr, dynamic_loader, delivery)
 
         await orch.tick()
+        await orch.wait_for_delivery()
 
         fetched = await store.get_dag(dag.id)
         assert fetched.delivered_at is not None
@@ -336,7 +337,9 @@ class TestDeliverySweep:
         orch = self._orch(store, subtask_mgr, dynamic_loader, delivery)
 
         await orch.tick()
+        await orch.wait_for_delivery()
         await orch.tick()
+        await orch.wait_for_delivery()
 
         assert delivery.deliver.await_count == 1
 
@@ -357,6 +360,7 @@ class TestDeliverySweep:
         dead_delivery.deliver.side_effect = RuntimeError("process died")
         dead = self._orch(store, subtask_mgr, dynamic_loader, dead_delivery)
         await dead.tick()
+        await dead.wait_for_delivery()
 
         assert (await store.get_dag(dag.id)).delivered_at is None
 
@@ -367,6 +371,7 @@ class TestDeliverySweep:
         )
         live = self._orch(store, subtask_mgr, dynamic_loader, live_delivery)
         await live.tick()
+        await live.wait_for_delivery()
 
         assert (await store.get_dag(dag.id)).delivered_at is not None
 
@@ -395,6 +400,7 @@ class TestDeliverySweep:
 
         for _ in range(5):
             await orch.tick()
+            await orch.wait_for_delivery()
 
         fetched = await store.get_dag(dag.id)
         assert fetched.delivered_at is not None  # gave up, stopped looping
@@ -432,6 +438,7 @@ class TestDeliverySweep:
 
         for _ in range(3):
             await orch.tick()
+            await orch.wait_for_delivery()
 
         # Three delivery attempts, but only ONE LLM turn.
         assert runner.run_turn.await_count == 1
@@ -455,6 +462,7 @@ class TestDeliverySweep:
         orch = self._orch(store, subtask_mgr, dynamic_loader, delivery)
 
         await orch.tick()
+        await orch.wait_for_delivery()
         assert "HTTP 500" in (await store.get_dag(dag.id)).delivery_error
 
         # Channel recovers.
@@ -462,6 +470,7 @@ class TestDeliverySweep:
             delivered=True, legs=(), summary="ok", summary_authored=False,
         )
         await orch.tick()
+        await orch.wait_for_delivery()
 
         fetched = await store.get_dag(dag.id)
         assert fetched.delivered_at is not None
@@ -525,12 +534,15 @@ class TestDeliverySweep:
 
         # Attempts 1 and 2 defer rather than publish a total known to be wrong.
         await orch.tick()
+        await orch.wait_for_delivery()
         await orch.tick()
+        await orch.wait_for_delivery()
         assert delivery.deliver.await_count == 0
         assert (await store.get_dag(dag.id)).delivered_at is None
 
         # Final attempt publishes anyway — an unannounced DAG is worse.
         await orch.tick()
+        await orch.wait_for_delivery()
         assert delivery.deliver.await_count == 1
         assert (await store.get_dag(dag.id)).delivered_at is not None
 
@@ -560,6 +572,7 @@ class TestDeliverySweep:
         orch = self._orch(store, subtask_mgr, dynamic_loader, delivery)
 
         await orch.tick()
+        await orch.wait_for_delivery()
 
         fetched = await store.get_dag(dag.id)
         # The fence rejected the stale write: the reactivated DAG is still
@@ -602,6 +615,7 @@ class TestDeliverySweep:
         orch = self._orch(store, subtask_mgr, dynamic_loader, delivery)
 
         await orch.tick()
+        await orch.wait_for_delivery()
 
         fetched = await store.get_dag(dag.id)
         # Terminal and undelivered again — but a DIFFERENT generation, so the
@@ -647,6 +661,7 @@ class TestDeliverySweep:
         )
 
         await orch.tick()
+        await orch.wait_for_delivery()
 
         assert delivery.deliver.await_count == 0
         assert (await store.get_dag(dag.id)).delivered_at is None
@@ -665,6 +680,7 @@ class TestDeliverySweep:
         )
 
         await orch.tick()
+        await orch.wait_for_delivery()
 
         assert (await store.get_dag(dag.id)).delivered_at is None
 
@@ -687,6 +703,7 @@ class TestDeliverySweep:
         )
 
         await orch.tick()
+        await orch.wait_for_delivery()
 
         assert delivery.deliver.await_count == 2
 
@@ -731,6 +748,44 @@ class TestDeliveryDoesNotBlockTheStateMachine:
 
         released.set()
         await asyncio.wait_for(tick_task, timeout=5)
+
+    @pytest.mark.asyncio
+    async def test_tick_returns_without_waiting_for_delivery(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex P2 round 15: releasing the lock was not enough.
+        HeartbeatRunner._loop does `await dag_orchestrator.tick()`, so awaiting
+        the sweep inside tick() still stalled DAG advancement, reaping, dynamic
+        sync and every later heartbeat phase for the duration of the external
+        I/O. The tick must return as soon as the state machine is done."""
+        dag = await _finished_dag(store, "detached-sweep")
+        released = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def _slow_deliver(_d):
+            entered.set()
+            await released.wait()
+            return SimpleNamespace(
+                delivered=True, legs=(), summary="ok", summary_authored=False,
+            )
+
+        delivery = AsyncMock()
+        delivery.deliver.side_effect = _slow_deliver
+        orch = DAGOrchestrator(
+            store=store, subtask_mgr=subtask_mgr,
+            dynamic_loader=dynamic_loader, settings=_settings(),
+            delivery=delivery,
+        )
+        orch.clock_wired = True
+
+        # The tick itself must complete while delivery is still parked.
+        await asyncio.wait_for(orch.tick(), timeout=5)
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        assert not orch._delivery_task.done()
+
+        released.set()
+        await asyncio.wait_for(orch.wait_for_delivery(), timeout=5)
+        assert (await store.get_dag(dag.id)).delivered_at is not None
 
     @pytest.mark.asyncio
     async def test_overlapping_sweeps_do_not_double_announce(
