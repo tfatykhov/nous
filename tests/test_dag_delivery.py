@@ -748,6 +748,11 @@ class TestDeliveryDoesNotBlockTheStateMachine:
 
         released.set()
         await asyncio.wait_for(tick_task, timeout=5)
+        # @codex P2: tick_task has ALREADY completed by now — that is the
+        # property under test. Awaiting it therefore does not wait for the
+        # detached sweep's database writes, so the fixture could tear the DB
+        # down mid-mark_delivered. Drain explicitly.
+        await asyncio.wait_for(orch.wait_for_delivery(), timeout=5)
 
     @pytest.mark.asyncio
     async def test_tick_returns_without_waiting_for_delivery(
@@ -820,5 +825,8 @@ class TestDeliveryDoesNotBlockTheStateMachine:
 
         released.set()
         await asyncio.wait_for(first, timeout=5)
+        # Same reason as above: the tick no longer carries the sweep, so the
+        # sweep's writes must be drained before the fixture tears down.
+        await asyncio.wait_for(orch.wait_for_delivery(), timeout=5)
 
         assert delivery.deliver.await_count == 1
