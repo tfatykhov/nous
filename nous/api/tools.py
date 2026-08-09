@@ -3838,6 +3838,29 @@ def register_dag_tools(
                     lines.append(f"  {str(d.id)[:8]} | {d.name} | {d.status} | {completed}/{total} nodes done")
                 return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
+            if action == "recent":
+                # F090.3: `list` serves only pending/running. A finished DAG
+                # was reachable by `status` only if you already knew its id
+                # prefix — there was no way to DISCOVER one, which made the
+                # F087 delivery notification the sole record of an outcome.
+                dags = await store.get_recent_dags(limit=20)
+                finished = [d for d in dags
+                            if d.status not in ("pending", "running")]
+                if not finished:
+                    return {"content": [{"type": "text",
+                                         "text": "No finished DAGs."}]}
+                lines = [f"Recent finished DAGs ({len(finished)}):"]
+                for d in finished:
+                    done = sum(1 for n in d.nodes if n.status == "completed")
+                    when = d.completed_at.strftime("%Y-%m-%d %H:%M") if d.completed_at else "—"
+                    lines.append(
+                        f"  {str(d.id)[:8]} | {d.name} | {d.status} | "
+                        f"{done}/{len(d.nodes)} nodes | {when}"
+                    )
+                    if d.result_summary:
+                        lines.append(f"      {d.result_summary[:120]}")
+                return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+
             if not dag_id_str:
                 return {"content": [{"type": "text", "text": "Error: dag_id required for this action"}]}
 
@@ -3982,7 +4005,7 @@ def register_dag_tools(
             "cancelled DAG, since cancellation is deliberate."
         ),
         "properties": {
-            "action": {"type": "string", "enum": ["list", "status", "cancel", "retry_node"]},
+            "action": {"type": "string", "enum": ["list", "recent", "status", "cancel", "retry_node"]},
             "dag_id": {"type": "string"},
             "node_name": {"type": "string"},
         },
