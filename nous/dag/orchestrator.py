@@ -1349,7 +1349,22 @@ class DAGOrchestrator:
                 try:
                     settled = await self._subtask_mgr.get(node.subtask_id)
                 except Exception:
-                    settled = None
+                    # @codex P2 on e033668: converting this to `settled = None`
+                    # treated a FAILED READ as proof that the reaper won, and
+                    # overwrote the primitive's real terminal outcome with the
+                    # generic wall-clock error. Sibling of the pre-cancel
+                    # lookup fixed in the previous commit — same swallow, same
+                    # destructive fall-through, and I fixed only one of the two
+                    # while touching both. Defer instead: the subtask is
+                    # already cancelled, so the next tick either syncs its
+                    # persisted outcome or reaps it once the read succeeds.
+                    logger.warning(
+                        "F087: could not confirm node %s's outcome after "
+                        "cancelling — deferring rather than assuming the reap "
+                        "won",
+                        node.name, exc_info=True,
+                    )
+                    continue
                 if settled is not None and settled.status in ("completed", "failed"):
                     logger.info(
                         "F087: node %s reached '%s' on its own while being "

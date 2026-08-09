@@ -1283,3 +1283,42 @@ class TestRoundElevenGuards:
         # The primitive's own reason survives, not the generic timeout text.
         assert "401" in reaped.error
         assert "wall-clock" not in reaped.error
+
+    @pytest.mark.asyncio
+    async def test_reaper_defers_when_the_post_cancel_confirmation_fails(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex round 18: a FAILED confirmation read is not proof the reaper
+        won. Swallowing it to None overwrote the primitive's real terminal
+        outcome with the generic wall-clock error.
+
+        Deferring converges: the subtask is already cancelled, so a later tick
+        either syncs its persisted outcome or reaps once the read succeeds.
+        """
+        dag = await store.create(_subtask_dag("confirm-fails"))
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        node = await _running_node_started_at(
+            store, dag, datetime.now(UTC) - timedelta(seconds=5000)
+        )
+        long_ago = datetime.now(UTC) - timedelta(seconds=5000)
+        calls = {"n": 0}
+
+        async def _confirmation_blips(_sid):
+            calls["n"] += 1
+            if calls["n"] == 1:  # pre-cancel read succeeds
+                return SimpleNamespace(
+                    id=node.subtask_id, status="running", result=None,
+                    error=None, final_outcome=None, tokens_in=0, tokens_out=0,
+                    started_at=long_ago,
+                )
+            raise RuntimeError("db blip during confirmation")
+
+        subtask_mgr.get = AsyncMock(side_effect=_confirmation_blips)
+
+        await _orch(store, subtask_mgr, dynamic_loader).tick()
+
+        # Not overwritten with the generic error — left for the next tick.
+        still = (await store.get_dag(dag.id)).nodes[0]
+        assert still.status == "running"
+        assert still.error is None
