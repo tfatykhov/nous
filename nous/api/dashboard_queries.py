@@ -1654,27 +1654,52 @@ async def get_heartbeat_dashboard_data(
 # ── F038: DAG Orchestration Dashboard ──────────────────────────────────────
 
 
-def _shingle_overlap(a: str | None, b: str | None) -> float:
-    """Jaccard overlap over 6-word shingles. Zero when either side is short.
+def _shingle_set(text: str | None) -> set[tuple[str, ...]]:
+    """6-word shingle set for one piece of text. Empty when text has < 6 words."""
+    words = (text or "").lower().split()
+    if len(words) < 6:
+        return set()
+    return {tuple(words[i:i + 6]) for i in range(len(words) - 5)}
 
-    F090.4 needs a cheap, deterministic proxy for "these two siblings did
-    overlapping work". Six words is long enough that shared boilerplate
-    ("the build succeeded") does not by itself register, and an LLM judge is
-    deliberately avoided so the gate metric costs nothing to run.
-    """
-    def _sh(text: str | None) -> set[tuple[str, ...]]:
-        words = (text or "").lower().split()
-        if len(words) < 6:
-            return set()
-        return {tuple(words[i:i + 6]) for i in range(len(words) - 5)}
 
-    sa, sb = _sh(a), _sh(b)
+def _jaccard(sa: set[tuple[str, ...]], sb: set[tuple[str, ...]]) -> float:
+    """Jaccard similarity between two shingle sets. Zero when either is empty."""
     if not sa or not sb:
         return 0.0
     return len(sa & sb) / len(sa | sb)
 
 
-# Two sibling results this similar are treated as overlapping work.
+def _shingle_overlap(a: str | None, b: str | None) -> float:
+    """Jaccard overlap over 6-word shingles. Zero when either side is short.
+
+    F090.4 needs a cheap, deterministic proxy for "these two siblings did
+    overlapping work" — an LLM judge is deliberately avoided so the gate
+    metric costs nothing to run. This is a LOWER BOUND on duplication, not a
+    measurement of it: it only catches verbatim phrase reuse. Two results
+    describing the identical finding in independently-generated prose share
+    no fixed 6-word run and score ~0.0 — a low `sibling_overlap_rate` means
+    "no verbatim duplication was detected", not "siblings don't duplicate
+    work". See `get_dag_phase2_signals` for what that means for reading the
+    number.
+
+    Six words resists shared boilerplate only on LONG results — the fraction
+    a shared B-word run contributes to an N-word/N-word pair's score is
+    (B-5)/(2N-B-5), which washes out as N grows (B=20, N=200 -> 0.04) but is
+    NOT negligible on short results (B=7, N=10 -> 0.25, over the default
+    threshold). Every constant `result` string the orchestrator writes today
+    ("Check completed (self-disabled)", "Check completed (disabled itself)",
+    "Gate auto-passed (Phase 1)") is under 6 words and so yields zero
+    shingles — accidental, not by design; re-check this if the orchestrator
+    ever grows a longer canned string.
+    """
+    return _jaccard(_shingle_set(a), _shingle_set(b))
+
+
+# Uncalibrated: chosen as a plausible verbatim-overlap cutoff, not fit to
+# data. `overlap_threshold` rides along in the returned dict specifically so
+# a reader can recalibrate once real sibling_overlap_rate readings exist.
+# Datapoint: two 10-word results sharing only a verbatim 6-word prefix score
+# 0.111 and do NOT count as overlapping at this threshold.
 _SIBLING_OVERLAP_THRESHOLD = 0.15
 
 
@@ -1690,6 +1715,20 @@ async def get_dag_phase2_signals(
     deafness actually produces duplicated work; the callback/gate counters
     say whether those node types run at all, without which the first number
     describes a graph nobody uses.
+
+    `sibling_overlap_rate` is a FLOOR, not a measurement: `_shingle_overlap`
+    only catches verbatim 6-word reuse, and independently-generated LLM
+    prose describing the same finding routinely shares none. A low reading
+    means "no verbatim duplication detected", not "siblings don't duplicate
+    work" — it is NOT by itself grounds to cancel Phase 2.
+
+    Scans the agent's ENTIRE DAG history on every call, unlike the sibling
+    `nodes_completed_24h` stat — deliberately unbounded, because a go/no-go
+    read wants maximum evidence and the right moment to add a time window is
+    once a human has seen a first reading, not before. That makes this query
+    a latency and failure dependency of `GET /dashboard/dag`
+    (`dashboard_dag` wraps its whole handler in try/except -> 500) that will
+    grow with DAG volume.
     """
     rows = (await session.execute(
         text("""
@@ -1703,17 +1742,20 @@ async def get_dag_phase2_signals(
         {"agent_id": agent_id},
     )).all()
 
-    by_wave: dict[tuple[Any, int], list[str]] = {}
+    # Shingle set built once per NODE here, not once per PAIR inside the loop
+    # below — 50 nodes x 300 words measured 139ms rebuilding both sides per
+    # comparison vs 19ms hoisted (100 nodes: 566ms vs 71ms).
+    by_wave: dict[tuple[Any, int], list[set[tuple[str, ...]]]] = {}
     for dag_id, wave, result in rows:
-        by_wave.setdefault((dag_id, wave or 0), []).append(result)
+        by_wave.setdefault((dag_id, wave or 0), []).append(_shingle_set(result))
 
     pairs = 0
     overlapping = 0
-    for results in by_wave.values():
-        for i in range(len(results)):
-            for j in range(i + 1, len(results)):
+    for shingle_sets in by_wave.values():
+        for i in range(len(shingle_sets)):
+            for j in range(i + 1, len(shingle_sets)):
                 pairs += 1
-                if _shingle_overlap(results[i], results[j]) >= _SIBLING_OVERLAP_THRESHOLD:
+                if _jaccard(shingle_sets[i], shingle_sets[j]) >= _SIBLING_OVERLAP_THRESHOLD:
                     overlapping += 1
 
     counts = (await session.execute(
@@ -1734,6 +1776,8 @@ async def get_dag_phase2_signals(
     return {
         "sibling_pairs": pairs,
         "overlapping_sibling_pairs": overlapping,
+        # FLOOR, not a measurement — verbatim overlap only. See the
+        # docstring above before reading a low value as "no duplication".
         "sibling_overlap_rate": round(overlapping / pairs, 4) if pairs else 0.0,
         "overlap_threshold": _SIBLING_OVERLAP_THRESHOLD,
         "callback_nodes": by_type.get("callback", (0, 0))[0],

@@ -27,6 +27,12 @@ async def test_get_dag_dashboard_data_empty(db):
     assert data["stats"]["active_count"] == 0
     assert data["active_dags"] == []
     assert data["recent_dags"] == []
+    # F090.4: get_dag_dashboard_data must delegate to get_dag_phase2_signals
+    # and surface its result — this is the metric's only delivery surface.
+    assert "phase2_signals" in data
+    assert data["phase2_signals"]["sibling_pairs"] == 0
+    assert data["phase2_signals"]["callback_nodes"] == 0
+    assert data["phase2_signals"]["gate_nodes"] == 0
 
 
 @pytest.mark.asyncio

@@ -37,6 +37,18 @@ class TestShingleOverlap:
         b = "the build succeeded with zero errors but coverage dropped sharply"
         assert 0.0 < _shingle_overlap(a, b) < 1.0
 
+    def test_exactly_six_words_identical_is_total_overlap(self):
+        """Boundary case: a text of exactly 6 words forms exactly one shingle.
+
+        All four cases above use 10-word inputs, leaving the len==6 boundary
+        (range(len(words) - 5) with len==6 -> range(1), one shingle) unpinned
+        — an off-by-one in that range (e.g. -6 instead of -5) silently makes
+        exactly-6-word text produce zero shingles and score 0.0 instead of
+        1.0, and none of the other cases would catch it.
+        """
+        t = "alpha beta gamma delta epsilon zeta"
+        assert _shingle_overlap(t, t) == pytest.approx(1.0)
+
 
 class TestPhase2Signals:
     @pytest.mark.asyncio
