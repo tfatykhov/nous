@@ -166,7 +166,8 @@ class TestCallbackExecutes:
     async def test_flag_off_keeps_the_legacy_instant_completion(
         self, store, subtask_mgr, dynamic_loader
     ):
-        """Default is OFF: 83 existing DAGs must not start paying for LLM turns
+        """Default is OFF: this is a behaviour change to an existing node
+        type, so existing DAG shapes must not start paying for LLM turns
         the moment this deploys."""
         dag = await store.create(_callback_after_work())
         await store.update_dag_status(dag.id, "running")
@@ -187,11 +188,12 @@ class TestCallbackExecutes:
         assert handle.status == "completed"
         assert handle.subtask_id is None
         assert subtask_mgr.create.await_count == 0
-        # These two are the fields whose drift would actually change the 83
-        # existing DAG shapes on deploy: result feeds downstream
-        # _build_predecessor_context calls, and started_at/completed_at are
-        # what a dashboard or a wall-clock check would key off of. Byte-for-
-        # byte match to the pre-F090 stub, not just "some completion".
+        # These two are the fields whose drift would actually break the
+        # flag-OFF contract existing DAG shapes depend on: result feeds
+        # downstream _build_predecessor_context calls, and
+        # started_at/completed_at are what a dashboard or a wall-clock check
+        # would key off of. Byte-for-byte match to the pre-F090 stub, not
+        # just "some completion".
         assert handle.result == handle_instructions
         assert handle.started_at is not None
         assert handle.completed_at is not None

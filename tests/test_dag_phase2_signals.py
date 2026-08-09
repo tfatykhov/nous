@@ -214,25 +214,38 @@ class TestPhase2Signals:
         boilerplate, not duplicated work. The same pair WITH subtask_id set
         (F090.1 actually dispatched them) DOES contribute, proving the
         exclusion is scoped to `subtask_id IS NULL`, not to node_type alone.
+
+        A same-dag, same-wave gate node (completed, non-NULL result) is also
+        present throughout and must never become a sibling participant,
+        regardless of the callbacks' execution state — gates always auto-pass
+        with the same constant result string, so pairing them in would be
+        pure noise, never a signal of duplicated work.
         """
         agent_id = f"test-p2-{uuid.uuid4().hex[:8]}"
         store = DAGStore(db, agent_id=agent_id, settings=Settings(_env_file=None))
         text_a = "the build succeeded with zero errors and all tests passing"
         text_b = "the build succeeded with zero errors and all tests green"
+        gate_text = "database migration applied cleanly across every configured shard"
         req = DAGCreateRequest(
             name="unexecuted-callback-dag",
             nodes=[
                 DAGNodeSpec(name="a", type=DAGNodeType.subtask, instructions="A"),
                 DAGNodeSpec(name="cb1", type=DAGNodeType.callback, instructions="CB1"),
                 DAGNodeSpec(name="cb2", type=DAGNodeType.callback, instructions="CB2"),
+                DAGNodeSpec(name="gt", type=DAGNodeType.gate, instructions="GT"),
             ],
             edges=[
                 DAGEdgeSpec(from_node="a", to_node="cb1"),
                 DAGEdgeSpec(from_node="a", to_node="cb2"),
+                DAGEdgeSpec(from_node="a", to_node="gt"),
             ],
         )
         dag = await store.create(req)
         by_name = {n.name: n.id for n in dag.nodes}
+        # Gate: completed with a non-NULL result from the start, same dag +
+        # wave as the callback pair (wave 1, via the edges above) — the
+        # shape a filter-less query would happily pair.
+        await store.update_node(by_name["gt"], status="completed", result=gate_text)
         # Flag-OFF shape: completed with instructions-as-result, subtask_id
         # never set (mirrors orchestrator.py:2119-2126's instant-completion path).
         await store.update_node(by_name["cb1"], status="completed", result=text_a)
@@ -245,6 +258,9 @@ class TestPhase2Signals:
         assert out["overlapping_sibling_pairs"] == 0
 
         # Same pair, now genuinely executed (subtask_id stamped) — must count.
+        # The gate sits in the same (dag_id, wave) group as both but must
+        # still be excluded: sibling_pairs stays 1 (cb1-cb2 only), not 3
+        # (which pairing the gate in against cb1 and cb2 would produce).
         await store.update_node(by_name["cb1"], subtask_id=uuid.uuid4())
         await store.update_node(by_name["cb2"], subtask_id=uuid.uuid4())
 
