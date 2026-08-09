@@ -16,6 +16,46 @@
 - Verification gate is **CI on the head SHA**, not a local `-k` selection. A filtered local run must be checked with `pytest --collect-only -q <selection> | grep <file>` to confirm it includes the files touched.
 - Match the surrounding comment density in `nous/dag/` — cite the finding or reasoning that motivated a non-obvious branch.
 
+## Corrections applied during execution
+
+This section is added after the fact, without editing the plan body below —
+the text below is the historical record of what was specified, including
+what turned out to be wrong. Trust the shipped code and `CLAUDE.md` over the
+plan text where they disagree.
+
+- **The `tools` claim is false.** The plan states (e.g. around `:475`,
+  `:843`) that a callback "accepts the same `tools` / `frame_type` / `model`
+  / `timeout_seconds` as a subtask." `SubtaskManager.create` has no `tools`
+  parameter at all; `_launch_check_node` (`nous/dag/orchestrator.py`) is the
+  only site that forwards `node.tools`. `DAGNodeSpec.tools` is silently
+  dropped for both `subtask` and `callback` nodes, honored only for `check`.
+  The shipped code and docs say the correct thing; the plan text does not.
+
+- **The "103 callback nodes across 83 DAGs" statistic is pytest fixture
+  data, not production usage** (appears around `:239`, `:290`, `:361-362`,
+  `:417`, `:843`, `:851`). `nous-default` has 0 DAGs in the dev database;
+  every DAG there belongs to `test-*` / `agent-*` / `f066*` agents recreated
+  on every test run. The behavioural claim the statistic was cited to
+  support — that callback nodes were a no-op stub carrying their own
+  instruction text — is true and provable from the deleted
+  `elif node_type == "callback"` branch alone, and needs no statistic. The
+  flag defaults OFF because it is a behaviour change to an existing node
+  type, not because of a measured deploy-volume risk.
+
+- **Task 1's site-5 instruction was wrong.** The plan directed converting
+  all seven `node_type == "subtask"` gates to `_SUBTASK_BACKED` uniformly.
+  The seventh (`_dispatch_ready_nodes`, the F064.2 concurrency-cap gate) has
+  no `subtask_id` guard, so converting it cap-gated callbacks immediately
+  and broke `test_dag_concurrency_caps.py::TestDispatchGating::
+  test_check_nodes_bypass_frame_cap_enforcement`. Shipped code makes that
+  exemption conditional on `dag_callback_execution_enabled` instead.
+
+- **Task 5's specified test set was insufficient.**
+  `test_signals_shape_on_empty_db` passes against a function returning
+  hardcoded zeros. The shipped suite adds tests that discriminate (overlapping
+  vs. disjoint siblings, wave/dag isolation, callback-executed vs. unexecuted
+  callback exclusion, gate exclusion, agent scoping).
+
 ---
 
 ## File Structure
