@@ -1729,12 +1729,14 @@ async def get_dag_phase2_signals(
     a latency and failure dependency of `GET /dashboard/dag`
     (`dashboard_dag` wraps its whole handler in try/except -> 500) that will
     grow with DAG volume. Since the shingle-set hoist below, memory is the
-    stronger argument for that bound, not latency: holding every node's
-    shingle set resident at once scales at roughly 31x the stored result
-    text (measured: ~100 MB of shingle sets alongside ~3.2 MB of strings at
-    2000 nodes x 300 words, both alive at peak because `rows` stays in
-    scope) — tens of MB at today's scale, fine, but the dominant term if
-    this ever needs bounding.
+    stronger argument for that bound, not latency: every node's shingle set
+    is held resident at once, and a shingle stores word POINTERS, so the
+    cost tracks word COUNT, not byte count — ~170 bytes per word of result
+    text, measured ~100 MB at 2000 nodes x 300 words (alongside the result
+    strings, still alive at peak because `rows` stays in scope). Expressed
+    as a multiple of the stored text it swings ~4x-50x with average word
+    length, so plan with the per-word figure, not a ratio. Tens of MB at
+    today's scale, fine, but the dominant term if this ever needs bounding.
     """
     rows = (await session.execute(
         text("""
