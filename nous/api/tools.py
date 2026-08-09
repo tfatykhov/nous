@@ -3888,7 +3888,13 @@ def register_dag_tools(
 
     dispatcher.register("dag_create", dag_create, {
         "type": "object",
-        "description": "Create a DAG to orchestrate subtasks and checks with dependency tracking.",
+        "description": (
+            "Create a DAG to orchestrate subtasks and checks with dependency tracking. "
+            "You do NOT need to poll for the result: when the DAG reaches a terminal "
+            "state its outcome is delivered to you automatically (F087), so create it "
+            "and move on. Use dag_manage only when the user asks about progress "
+            "mid-flight, or to cancel or retry."
+        ),
         "properties": {
             "name": {"type": "string", "description": "DAG name"},
             "description": {"type": "string"},
@@ -3907,7 +3913,7 @@ def register_dag_tools(
                         "tools": {"type": "array", "items": {"type": "string"}},
                         "frame_type": {"type": "string"},
                         "model": {"type": "string"},
-                        "timeout_seconds": {"type": "integer", "minimum": 1, "description": "Execution timeout in seconds (default: NOUS_DAG_NODE_DEFAULT_TIMEOUT, ceiling: NOUS_DAG_NODE_MAX_TIMEOUT)"},
+                        "timeout_seconds": {"type": "integer", "minimum": 1, "description": "Execution timeout in seconds (default: NOUS_DAG_NODE_DEFAULT_TIMEOUT, ceiling: NOUS_DAG_NODE_MAX_TIMEOUT). F087: now a REAL bound — a node still executing past this plus NOUS_DAG_NODE_TIMEOUT_GRACE_SECONDS is cancelled and failed, so size it to the work rather than leaving the default on a long job."},
                         "stall_timeout_seconds": {"type": "integer", "minimum": 0, "description": "F064.1: max seconds without activity before failing this node. 0 = disabled for this node. Unset = inherit NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT."},
                         "completion_condition": {"type": "string"},
                         "completion_check": {"type": "string", "description": "Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running."},
@@ -3953,7 +3959,12 @@ def register_dag_tools(
 
     dispatcher.register("dag_manage", dag_manage, {
         "type": "object",
-        "description": "List, inspect, cancel, or retry nodes in DAGs.",
+        "description": (
+            "List, inspect, cancel, or retry nodes in DAGs. Not needed to collect "
+            "results — a finished DAG announces itself. 'retry_node' re-queues a "
+            "failed node (and any descendants it alone blocked); it is refused on a "
+            "cancelled DAG, since cancellation is deliberate."
+        ),
         "properties": {
             "action": {"type": "string", "enum": ["list", "status", "cancel", "retry_node"]},
             "dag_id": {"type": "string"},
