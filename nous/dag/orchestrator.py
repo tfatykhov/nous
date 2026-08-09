@@ -1708,19 +1708,28 @@ class DAGOrchestrator:
         )
         for node in ready_nodes:
             # @codex P2 on 48589fd: count source (heart.subtasks) only sees
-            # subtask nodes — check/gate/callback nodes don't create a
-            # subtask row, so counting them against the cap would over-
-            # restrict and not counting them at all would let them bypass
-            # the cap. The conservative choice is to only ENFORCE the cap
-            # for subtask nodes: check/gate/callback always launch (they
-            # have no resource cost the cap is meant to bound).
-            # Deliberately NOT _SUBTASK_BACKED: this gate runs at DISPATCH
-            # time, before a subtask exists, so it has no subtask_id guard to
-            # make the callback case a no-op. Folding callbacks in here would
-            # cap-gate them even while they still complete instantly. F090.1
-            # ties this to dag_callback_execution_enabled instead, once
-            # callbacks actually consume a worker.
-            if node.node_type != "subtask":
+            # rows for nodes that actually launched a subtask — check/gate
+            # nodes never create one, so counting them against the cap would
+            # over-restrict, and not counting them at all lets them bypass
+            # the cap for free, which is fine: they have no resource cost the
+            # cap is meant to bound. Those two stay unconditionally exempt.
+            #
+            # F090.1: callback nodes are subtask-backed (_SUBTASK_BACKED) but
+            # historically completed instantly with no worker cost, so they
+            # were exempt too — this gate runs at DISPATCH time, before a
+            # subtask row exists, so it used to hardcode the bare "subtask"
+            # literal rather than fold callbacks into _SUBTASK_BACKED (that
+            # would have cap-gated a node that still finished for free). Now
+            # that dag_callback_execution_enabled can route a callback
+            # through _launch_subtask_node — a real subtask row, a real
+            # worker, real tokens — the exemption narrows to "only while it
+            # still completes instantly." Once the flag is on, a callback
+            # competes for the same cap slot as a subtask node.
+            cap_exempt = node.node_type not in _SUBTASK_BACKED or (
+                node.node_type == "callback"
+                and not self._settings.dag_callback_execution_enabled
+            )
+            if cap_exempt:
                 await self._store.update_node(node.id, status="ready")
                 node.status = "ready"
                 try:
@@ -2098,6 +2107,25 @@ class DAGOrchestrator:
 
     async def _launch_subtask_node(self, node: DAGNode, dag: ExecutionDAG) -> None:
         """Launch a subtask for this node."""
+        # F090.1: a callback node executes only when the flag is on. With it
+        # off we reproduce the pre-F090 behaviour exactly — complete instantly,
+        # carrying the instruction text as the result — so existing DAG shapes
+        # keep their current cost and timing.
+        if (
+            node.node_type == "callback"
+            and not self._settings.dag_callback_execution_enabled
+        ):
+            now = datetime.now(UTC)
+            await self._store.update_node(
+                node.id,
+                status="completed",
+                result=node.instructions or "Callback completed",
+                started_at=now,
+                completed_at=now,
+            )
+            node.status = "completed"
+            return
+
         if not self._subtask_mgr:
             await self._store.update_node(
                 node.id,
