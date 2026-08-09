@@ -1280,7 +1280,20 @@ class DAGOrchestrator:
                 try:
                     subtask = await self._subtask_mgr.get(node.subtask_id)
                 except Exception:
-                    subtask = None
+                    # @codex P2 on ab0ff44: swallowing this to `None` fell
+                    # through and reaped on the DISPATCH clock — re-creating
+                    # the exact false positive the execution-clock check
+                    # exists to prevent, on nothing worse than a transient DB
+                    # blip. Reaping is destructive and this backstop is never
+                    # urgent to the second, so defer to the next tick instead
+                    # of deciding from a clock we know is wrong.
+                    logger.warning(
+                        "F087: could not read the execution clock for node %s "
+                        "— deferring the reap rather than deciding from the "
+                        "dispatch clock",
+                        node.name, exc_info=True,
+                    )
+                    continue
                 if subtask is not None:
                     if subtask.status == "pending":
                         logger.debug(
@@ -1322,16 +1335,27 @@ class DAGOrchestrator:
             # whole DAG on a technicality. Terminal nodes are no longer
             # re-synced, so this is the last chance to notice. Re-read and
             # hand it to the normal completion path instead.
+            #
+            # @codex P2 on ab0ff44: this must cover a concurrent FAILURE too,
+            # not just a completion. A subtask that goes running -> failed in
+            # the same window is equally terminal, cancel() equally declines to
+            # touch it, and falling through replaced its real error with the
+            # generic wall-clock message — losing the actual reason permanently,
+            # since terminal nodes are never re-synced. The distinction that
+            # matters is WHO ended it: a row that reached completed/failed on
+            # its own carries the truth, whereas 'cancelled' is the reaper's own
+            # doing and the wall-clock error is the honest description there.
             if node.node_type == "subtask" and node.subtask_id and self._subtask_mgr:
                 try:
                     settled = await self._subtask_mgr.get(node.subtask_id)
                 except Exception:
                     settled = None
-                if settled is not None and settled.status == "completed":
+                if settled is not None and settled.status in ("completed", "failed"):
                     logger.info(
-                        "F087: node %s completed while being reaped — keeping "
-                        "its result instead of failing it",
-                        node.name,
+                        "F087: node %s reached '%s' on its own while being "
+                        "reaped — keeping the primitive's own outcome instead "
+                        "of the wall-clock error",
+                        node.name, settled.status,
                     )
                     await self._sync_subtask_node(node, dag)
                     continue

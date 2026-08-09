@@ -1222,3 +1222,64 @@ class TestRoundElevenGuards:
         assert kept.status == "completed"
         assert kept.result == "the answer"
         assert fetched.status == "completed"
+
+    @pytest.mark.asyncio
+    async def test_reaper_defers_when_the_execution_clock_lookup_fails(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex round 17: swallowing the lookup error to None fell through
+        and reaped on the DISPATCH clock — re-creating the exact false positive
+        the execution-clock check exists to prevent, on a transient DB blip."""
+        dag = await store.create(_subtask_dag("lookup-fails"))
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        await _running_node_started_at(
+            store, dag, datetime.now(UTC) - timedelta(seconds=5000)
+        )
+        subtask_mgr.get.side_effect = RuntimeError("db blip")
+
+        await _orch(store, subtask_mgr, dynamic_loader).tick()
+
+        assert (await store.get_dag(dag.id)).nodes[0].status == "running"
+        subtask_mgr.cancel.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_reaper_keeps_a_real_failure_that_wins_the_race(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex round 17: the race guard covered only 'completed'. A subtask
+        going running -> failed in the same window is equally terminal, and
+        falling through replaced its real error with the generic wall-clock
+        message — lost permanently, since terminal nodes are never re-synced."""
+        dag = await store.create(_subtask_dag("raced-failure"))
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        node = await _running_node_started_at(
+            store, dag, datetime.now(UTC) - timedelta(seconds=5000)
+        )
+        long_ago = datetime.now(UTC) - timedelta(seconds=5000)
+        calls = {"n": 0}
+
+        async def _fails_during_cancel(_sid):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return SimpleNamespace(
+                    id=node.subtask_id, status="running", result=None,
+                    error=None, final_outcome=None, tokens_in=0, tokens_out=0,
+                    started_at=long_ago,
+                )
+            return SimpleNamespace(
+                id=node.subtask_id, status="failed", result=None,
+                error="upstream API returned 401", final_outcome=None,
+                tokens_in=40, tokens_out=10, started_at=long_ago,
+            )
+
+        subtask_mgr.get = AsyncMock(side_effect=_fails_during_cancel)
+
+        await _orch(store, subtask_mgr, dynamic_loader).tick()
+
+        reaped = (await store.get_dag(dag.id)).nodes[0]
+        assert reaped.status == "failed"
+        # The primitive's own reason survives, not the generic timeout text.
+        assert "401" in reaped.error
+        assert "wall-clock" not in reaped.error
