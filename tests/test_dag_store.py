@@ -20,12 +20,17 @@ from nous.dag.store import DAGStore, MAX_ACTIVE_DAGS
 async def store(db):
     """DAGStore instance with unique agent_id per test."""
     agent_id = f"test-dag-store-{uuid.uuid4().hex[:8]}"
-    return DAGStore(db, agent_id, Settings())
+    return DAGStore(db, agent_id, Settings(_env_file=None))
 
 
 # F046: hermetic Settings for timeout resolution tests — explicit values
 # so the tests don't care about ambient NOUS_DAG_NODE_* env.
+# F087: _env_file=None completes that intent. Pinning the timeouts was not
+# enough — a developer .env with NOUS_DAG_STALL_DETECTION_ENABLED=true still
+# leaked in and tripped store.create's stall-vs-timeout validator, failing
+# these tests on the author's machine but not in CI.
 _TEST_DAG_SETTINGS = Settings(
+    _env_file=None,
     dag_node_default_timeout=600,
     dag_node_max_timeout=7200,
 )
@@ -216,8 +221,8 @@ class TestDAGStoreIsolation:
     @pytest.mark.asyncio
     async def test_update_node_cross_agent_rejected(self, db):
         """update_node cannot modify nodes belonging to another agent's DAG."""
-        store_a = DAGStore(db, f"agent-a-{uuid.uuid4().hex[:8]}", Settings())
-        store_b = DAGStore(db, f"agent-b-{uuid.uuid4().hex[:8]}", Settings())
+        store_a = DAGStore(db, f"agent-a-{uuid.uuid4().hex[:8]}", Settings(_env_file=None))
+        store_b = DAGStore(db, f"agent-b-{uuid.uuid4().hex[:8]}", Settings(_env_file=None))
 
         dag = await store_a.create(_simple_request("isolation-test"))
         node_id = dag.nodes[0].id
@@ -233,8 +238,8 @@ class TestDAGStoreIsolation:
     @pytest.mark.asyncio
     async def test_get_dag_cross_agent_rejected(self, db):
         """get_dag returns None for another agent's DAG."""
-        store_a = DAGStore(db, f"agent-a-{uuid.uuid4().hex[:8]}", Settings())
-        store_b = DAGStore(db, f"agent-b-{uuid.uuid4().hex[:8]}", Settings())
+        store_a = DAGStore(db, f"agent-a-{uuid.uuid4().hex[:8]}", Settings(_env_file=None))
+        store_b = DAGStore(db, f"agent-b-{uuid.uuid4().hex[:8]}", Settings(_env_file=None))
 
         dag = await store_a.create(_simple_request("cross-agent-test"))
 

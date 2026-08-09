@@ -798,14 +798,25 @@ async def create_components(settings: Settings) -> dict:
         try:
             from nous.dag.store import DAGStore
             from nous.dag.orchestrator import DAGOrchestrator
+            from nous.dag.delivery import DAGResultDelivery
 
             dag_store = DAGStore(database, agent_id=settings.agent_id, settings=settings)
+            # F087: carries a finished DAG's outcome to the bus, an optional
+            # agent-authored summary, and Telegram. Without it a DAG that
+            # completes after hours of work is never announced at all.
+            dag_delivery = DAGResultDelivery(
+                settings,
+                agent_id=settings.agent_id,
+                bus=bus,
+                runner=runner,
+            )
             dag_orchestrator = DAGOrchestrator(
                 store=dag_store,
                 subtask_mgr=heart.subtasks,
                 dynamic_loader=dynamic_loader,
                 bus=bus,
                 settings=settings,
+                delivery=dag_delivery,
                 # Audit DG-5: pass the LLM client so F066.1 free-form fix
                 # dispatch actually runs when dag_fix_llm_dispatch_enabled=true
                 # (prod). Previously llm_client defaulted to None → the flag was
@@ -815,7 +826,21 @@ async def create_components(settings: Settings) -> dict:
 
             if heartbeat_runner is not None:
                 heartbeat_runner.dag_orchestrator = dag_orchestrator
+                # F087: the heartbeat loop is the orchestrator's only clock.
+                # dag_create checks this flag and refuses when it is False.
+                dag_orchestrator.clock_wired = True
                 logger.info("F038: DAG orchestrator wired to heartbeat runner")
+            else:
+                # F087: previously silent. Tools registered regardless of the
+                # tick being wired, so with the heartbeat disabled the agent
+                # could create DAGs that launch wave-0 and then never advance
+                # — no error anywhere. Fail loud instead.
+                logger.error(
+                    "F038/F087: DAG orchestration is enabled but no heartbeat "
+                    "runner exists, so nothing will ever advance a DAG. "
+                    "dag_create will refuse until NOUS_HEARTBEAT_ENABLED=true "
+                    "(or set NOUS_DAG_ENABLED=false to hide the tools)."
+                )
 
             from nous.api.tools import register_dag_tools
             register_dag_tools(dispatcher, dag_store, dag_orchestrator)
@@ -895,6 +920,23 @@ async def shutdown_components(components: dict) -> None:
     heartbeat_runner = components.get("heartbeat_runner")
     if heartbeat_runner:
         await heartbeat_runner.stop()
+
+    # F087: the delivery sweep is detached from tick() so it cannot stall the
+    # heartbeat loop, which means it can still be in flight here — holding a
+    # DB session and a half-finished notification. Drain it after the
+    # heartbeat has stopped launching new ones but BEFORE the pool closes,
+    # bounded so a hung Telegram call cannot block shutdown.
+    dag_orchestrator = components.get("dag_orchestrator")
+    if dag_orchestrator is not None:
+        try:
+            await asyncio.wait_for(dag_orchestrator.wait_for_delivery(), timeout=30)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "F087: in-flight DAG delivery did not finish within 30s — "
+                "abandoning it; the sweep will re-deliver after restart"
+            )
+        except Exception:
+            logger.warning("F087: error draining DAG delivery", exc_info=True)
 
     # OB-1: stop the context-log retention sweep
     retention_task = components.get("context_log_retention_task")

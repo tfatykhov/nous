@@ -1,4 +1,48 @@
-"""F038: DAG Orchestrator — state machine that advances DAGs on each tick."""
+"""F038: DAG Orchestrator — state machine that advances DAGs on each tick.
+
+F087 invariants — three interacting lifetimes
+---------------------------------------------
+Most of the durability bugs found while building F087 came from confusing
+these. Written down because the set of mutation sites is not obvious from any
+single function, and each was discovered separately during review.
+
+1. **DAG outcome (generation).** `execution_dags.delivery_generation` names
+   WHICH terminal outcome a delivery is for. `retry_node` and `cancel_dag` do
+   NOT take `self._lock`, so a retry can reactivate — and even re-complete —
+   a DAG while `deliver()` is awaiting Telegram or a 120 s summary turn.
+   Every delivery write (`mark_delivered`, `save_delivery_summary`,
+   `bump_delivery_attempt`) is therefore fenced on the generation observed
+   when the sweep loaded the DAG. Fencing on "terminal and undelivered" alone
+   is NOT sufficient: a fast retry makes that predicate true again.
+
+2. **Node attempt (`tokens_counted`).** The token claim is one-shot and PER
+   ATTEMPT. Exactly three sites reset it, and each must call
+   `_account_before_retry` FIRST, because the relaunch replaces `subtask_id`
+   and an unbanked attempt then becomes unreachable forever:
+     - `retry_node` — the directly retried node
+     - `retry_node` — the selectively-unblocked downstream nodes
+     - `_try_fix_failed_nodes` — the fix-stage retry branch
+
+   When banking FAILS, ONLY the operator-initiated `retry_node` refuses (it
+   raises, and the operator simply tries again). Every AUTOMATIC path —
+   downstream descendants and the fix stage — proceeds with an ERROR log.
+   Refusing on an automatic path trades a bookkeeping loss for a permanent
+   availability loss: a descendant would be stranded, and the fix stage would
+   defer every tick forever, leaving the parent 'failed' and the fix node
+   non-terminal so `_check_dag_completion` could never finalize the DAG. Both
+   are the exact failure class this change exists to remove, and both are
+   strictly worse than an under-counted token total.
+
+3. **Subtask settlement.** A node reaching a terminal status does NOT mean its
+   subtask has. `cancel_dag`, failure propagation and the reaper all
+   terminalize a node while the worker may still run (`SubtaskManager.cancel`
+   bounds the leak, it does not preempt). Claims are only finalized for
+   subtasks in `_SETTLED_SUBTASK_STATUSES`; anything else stays retryable.
+
+A recurring lesson across all three: two consecutive commits are a crash
+window. Prefer one transaction, or a sweep that can resume from the
+intermediate state.
+"""
 
 from __future__ import annotations
 
@@ -8,17 +52,19 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from nous.config import Settings
 from nous.dag._workspace import assert_inside_root, compute_workspace_path
-from nous.dag.store import DAGStore
+from nous.dag.store import _TERMINAL_DAG_STATUSES, DAGStore
 from nous.heart.subtasks import SubtaskQueueFull
 from nous.heartbeat.dynamic import DynamicCheckLimitReached
 from nous.storage.models import DAGNode, ExecutionDAG
 
 if TYPE_CHECKING:
+    from nous.dag.delivery import DAGResultDelivery
     from nous.events import EventBus
     from nous.heart.subtasks import SubtaskManager
     from nous.heartbeat.dynamic import DynamicCheckLoader
@@ -39,6 +85,24 @@ _RESOLVED = frozenset({"completed", "skipped"})
 
 # Budget warning threshold (80%)
 _BUDGET_WARNING_RATIO = 0.80
+
+# Marker written to DAGNode.error when budget enforcement cancels a node.
+# Load-bearing: _handle_budget_exceeded reads it back on later ticks to tell
+# "enforcement already curtailed work on this DAG" from "nothing to curtail".
+_BUDGET_CANCEL_ERROR = "Token budget exceeded"
+
+# Subtask states whose token counters will never change again, so a one-shot
+# claim over them is safe. 'cancelled' qualifies because SubtaskManager.cancel
+# makes the row terminal and the worker's eventual complete()/fail() is a
+# no-op against the terminal guard — the persisted counters are the last word,
+# even though a cancelled worker's final usage was never flushed.
+_SETTLED_SUBTASK_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+# How many consecutive ticks the reaper will defer when it cannot confirm that
+# cancellation took effect. Bounded so an orphaned row — whose worker died and
+# will therefore never settle — is still eventually reaped, rather than
+# re-creating the permanent 'running' wedge the reaper exists to prevent.
+_MAX_REAP_CANCEL_RETRIES = 5
 
 # Completion check polling
 _CHECK_CMD_TIMEOUT = 10.0  # Hard timeout per check command invocation
@@ -72,6 +136,7 @@ class DAGOrchestrator:
         *,
         settings: Settings,
         llm_client: object | None = None,
+        delivery: DAGResultDelivery | None = None,
     ) -> None:
         self._store = store
         self._subtask_mgr = subtask_mgr
@@ -83,7 +148,34 @@ class DAGOrchestrator:
         # orchestrator falls back to fix_executor.choose_action (rule-based,
         # Phase 1 behavior).
         self._llm_client = llm_client
+        # F087: optional result-delivery collaborator. None disables the
+        # sweep entirely (the orchestrator still runs, DAGs still finish —
+        # they just aren't announced).
+        self._delivery = delivery
+        # F087: set True by whoever installs the tick. Explicit rather than
+        # inferred from last_tick_at, which would false-negative during the
+        # first tick interval. dag_create refuses when this is False so the
+        # agent never creates a DAG that can never advance.
+        self.clock_wired = False
+        self.last_tick_at: datetime | None = None
         self._lock = asyncio.Lock()
+        # F087 (@codex P2 on 9c8cf74): the delivery sweep does slow EXTERNAL
+        # I/O — a Telegram round-trip, and up to
+        # dag_delivery_agent_summary_timeout_seconds per DAG for an authored
+        # summary, times dag_delivery_batch_size DAGs. It must not sit inside
+        # `_lock`, which exists to serialize fast state-machine work: holding
+        # that for minutes blocks start_dag(), so dag_create hangs after
+        # inserting its DAG, and stalls the whole tick loop. Deliveries still
+        # serialize against each other on their own lock so a DAG cannot be
+        # announced twice by overlapping sweeps.
+        self._delivery_lock = asyncio.Lock()
+        # Strong reference to the detached sweep so it cannot be GC'd mid-flight.
+        self._delivery_task: asyncio.Task | None = None
+        # Per-node count of reaps deferred because cancellation could not be
+        # confirmed. Bounded by _MAX_REAP_CANCEL_RETRIES; cleared whenever the
+        # node settles. In-memory only — a restart resets it, which is benign
+        # (the reap simply gets a fresh set of attempts).
+        self._reap_defer_counts: dict = {}
         # Audit DG-4 (review P2): in-memory per-node deferral counter so a node
         # that keeps hitting a saturated subtask/check pool can't bounce
         # ready<->pending forever invisibly (a perpetually-pending node never
@@ -129,13 +221,218 @@ class DAGOrchestrator:
         Protected by a lock to prevent concurrent tick races.
         """
         async with self._lock:
+            self.last_tick_at = datetime.now(UTC)
             dags = await self._store.get_active_dags()
             for dag in dags:
                 try:
                     await self._advance_dag(dag)
                 except Exception:
                     logger.exception("Error advancing DAG %s", dag.id)
-            return len(dags)
+
+        # F087: drain terminal-but-undelivered DAGs. Deliberately outside the
+        # per-DAG loop above, which only sees pending/running rows — a DAG that
+        # reached terminal on an earlier tick (or before a restart) is picked
+        # up here and nowhere else.
+        #
+        # Also deliberately OUTSIDE `_lock` (@codex P2 on 9c8cf74): this does
+        # slow external I/O, and holding the state-machine lock across it made
+        # dag_create hang and stalled the tick loop. `_delivery_lock` keeps
+        # sweeps from overlapping each other without blocking anything else;
+        # when one is still in flight the next tick simply skips it rather
+        # than queueing ticks behind a two-minute summary turn.
+        # @codex P2 on ad857d0: releasing `_lock` was not enough. HeartbeatRunner
+        # ._loop does `await self.dag_orchestrator.tick()`, so awaiting the sweep
+        # HERE still stalls every later heartbeat phase — DAG advancement,
+        # reaping, dynamic check sync, digest, tuning — for as long as the
+        # external I/O takes. The sweep is detached instead: the tick returns as
+        # soon as the state machine is done, and delivery proceeds on its own
+        # task. `_delivery_lock` still prevents overlapping sweeps, so a DAG is
+        # never announced twice.
+        if self._delivery_lock.locked():
+            logger.debug("F087: delivery sweep already in flight — skipping")
+        else:
+            # Keep a reference: a bare create_task can be garbage-collected
+            # mid-flight, which would silently drop the notification.
+            self._delivery_task = asyncio.create_task(self._run_delivery_sweep())
+
+        return len(dags)
+
+    async def _run_delivery_sweep(self) -> None:
+        """Body of the detached sweep. Never raises into the task."""
+        async with self._delivery_lock:
+            try:
+                await self._deliver_terminal_dags()
+            except Exception:
+                logger.exception("F087: DAG delivery sweep failed")
+
+    async def wait_for_delivery(self) -> None:
+        """Await the in-flight detached sweep, if any.
+
+        For tests and orderly shutdown — the tick loop itself deliberately
+        never waits on this.
+        """
+        task = self._delivery_task
+        if task is not None and not task.done():
+            await task
+
+    # ------------------------------------------------------------------
+    # F087: durable result delivery
+    # ------------------------------------------------------------------
+
+    async def _deliver_terminal_dags(self) -> None:
+        """Deliver results for DAGs that finished but were never announced.
+
+        Reaching terminal and being delivered are separate transitions, so a
+        process that dies between them re-delivers here on the next tick.
+        That makes delivery at-least-once rather than best-effort.
+
+        Attempts are bounded: once a DAG has burned
+        ``dag_delivery_max_attempts``, it is marked delivered with
+        ``delivery_error`` set so the sweep stops retrying it forever, while
+        the failure stays visible on the row instead of vanishing.
+        """
+        if not self._settings.dag_result_delivery_enabled:
+            return
+        if self._delivery is None:
+            return
+
+        dags = await self._store.get_undelivered_terminal_dags(
+            limit=self._settings.dag_delivery_batch_size
+        )
+        for dag in dags:
+            # Pin the outcome we are about to deliver. Every delivery write is
+            # fenced on this, so if retry_node reactivates (and even re-
+            # completes) the DAG while we await Telegram or a summary turn,
+            # none of our writes can land on the newer outcome (@codex P1 on
+            # e94cd42).
+            generation = dag.delivery_generation
+
+            # @codex P2 on a4e302b: _reconcile_token_accounting is reached only
+            # via _advance_dag, and tick() runs that only for pending/running
+            # DAGs. If accounting was unavailable on the completion tick,
+            # _check_dag_completion terminalized the DAG immediately after and
+            # the promised next-tick retry never ran — leaving the total, the
+            # budget verdict and the announced summary permanently low. This is
+            # the last point before the number is published, so reconcile here
+            # too. Cheap: it no-ops once every node carries tokens_counted.
+            try:
+                accounted = await self._reconcile_token_accounting(dag)
+            except Exception:
+                logger.warning(
+                    "F087: pre-delivery token reconciliation raised for DAG %s",
+                    str(dag.id)[:8], exc_info=True,
+                )
+                accounted = False
+
+            # @codex P2 on 2e27143: delivering leaves the DAG out of every
+            # future sweep, so a total published while still incomplete can
+            # never be corrected. Defer to give reconciliation another tick —
+            # but only while attempts remain, because an unannounced DAG is a
+            # worse outcome than a slightly low token count. The final attempt
+            # always publishes.
+            if not accounted:
+                cap = self._settings.dag_delivery_max_attempts
+                if dag.delivery_attempts + 1 < cap:
+                    await self._record_delivery_failure(
+                        dag, generation,
+                        "token reconciliation incomplete — deferring",
+                    )
+                    continue
+                logger.warning(
+                    "F087: delivering DAG %s with an incomplete token total "
+                    "after %d attempts — the notification matters more",
+                    str(dag.id)[:8], dag.delivery_attempts,
+                )
+
+            try:
+                outcome = await self._delivery.deliver(dag)
+            except Exception as exc:
+                # deliver() is written not to raise, so reaching here means a
+                # genuine bug rather than a failed leg. Treat it as an
+                # attempt so a persistent crash still hits the cap.
+                logger.exception(
+                    "F087: delivery raised for DAG %s", str(dag.id)[:8]
+                )
+                await self._record_delivery_failure(
+                    dag, generation, f"delivery error: {exc}"
+                )
+                continue
+
+            # Bank an agent-authored summary BEFORE recording the outcome, so
+            # a crash in between still leaves the expensive LLM turn paid for
+            # exactly once (@codex P2 on da5dc06).
+            if outcome.summary_authored and outcome.summary:
+                try:
+                    await self._store.save_delivery_summary(
+                        dag.id, generation, outcome.summary
+                    )
+                except Exception:
+                    logger.warning(
+                        "F087: could not cache delivery summary for DAG %s — "
+                        "a retry will regenerate it",
+                        str(dag.id)[:8], exc_info=True,
+                    )
+
+            if outcome.delivered:
+                if await self._store.mark_delivered(dag.id, generation):
+                    logger.info(
+                        "F087: delivered DAG %s (%s) via %s",
+                        str(dag.id)[:8],
+                        dag.status,
+                        ", ".join(leg.name for leg in outcome.legs if leg.ok)
+                        or "no legs",
+                    )
+                else:
+                    # Fence rejected the write: retry_node reactivated this DAG
+                    # while deliver() was awaiting. The notification for the
+                    # PREVIOUS outcome already went out, which is correct; the
+                    # retry will be announced on its own when it terminalizes.
+                    logger.info(
+                        "F087: DAG %s was reactivated mid-delivery — the "
+                        "previous outcome was announced, the retry will be "
+                        "announced separately",
+                        str(dag.id)[:8],
+                    )
+            else:
+                await self._record_delivery_failure(
+                    dag, generation, outcome.failure_detail
+                )
+
+    async def _record_delivery_failure(
+        self, dag: ExecutionDAG, generation: int, detail: str
+    ) -> None:
+        """Bump the attempt counter, giving up loudly once the cap is hit.
+
+        Fenced on `generation` like every other delivery write: a failure
+        belonging to a superseded outcome must not burn an attempt on, or
+        park a stale error against, the outcome that replaced it.
+        """
+        attempts = await self._store.bump_delivery_attempt(
+            dag.id, generation, detail
+        )
+        if attempts == 0:
+            # Fence rejected it — this delivery was superseded mid-flight.
+            logger.info(
+                "F087: discarding a delivery failure for superseded DAG %s "
+                "outcome (generation %d): %s",
+                str(dag.id)[:8], generation, detail,
+            )
+            return
+        cap = self._settings.dag_delivery_max_attempts
+        if attempts >= cap:
+            await self._store.mark_delivered(
+                dag.id, generation,
+                error=f"gave up after {attempts} attempts — {detail}",
+            )
+            logger.error(
+                "F087: giving up on delivering DAG %s after %d attempts — %s",
+                str(dag.id)[:8], attempts, detail,
+            )
+        else:
+            logger.warning(
+                "F087: delivery attempt %d/%d failed for DAG %s — %s",
+                attempts, cap, str(dag.id)[:8], detail,
+            )
 
     async def start_dag(self, dag_id: UUID) -> None:
         """Transition a pending DAG to running and launch wave-0 nodes."""
@@ -167,8 +464,16 @@ class DAGOrchestrator:
         if dag is None:
             raise ValueError(f"DAG {dag_id} not found")
 
-        # Don't cancel already-terminal DAGs
-        if dag.status in ("completed", "failed", "cancelled"):
+        # Don't cancel already-terminal DAGs.
+        # @codex P2 on 2ccc026: 'partial' was missing here, and F087 makes that
+        # omission consequential. partial IS terminal — it is in the delivery
+        # sweep's domain — so cancelling one rewrote a terminal outcome without
+        # bumping delivery_generation or clearing delivery state. An in-flight
+        # delivery would then satisfy the generation fence and mark the newly
+        # cancelled outcome delivered using the PARTIAL notification; and if
+        # partial had already been delivered, the cancellation was never
+        # announced at all.
+        if dag.status in _TERMINAL_DAG_STATUSES:
             return
 
         for node in dag.nodes:
@@ -193,20 +498,66 @@ class DAGOrchestrator:
             raise ValueError(f"Node '{node_name}' not found in DAG {dag_id}")
         if node.status != "failed":
             raise ValueError(f"Node '{node_name}' is {node.status}, expected failed")
+        # F087: only 'failed'/'partial' DAGs are reactivated below, and
+        # get_active_dags() serves only pending/running — so retrying a node
+        # in a CANCELLED DAG used to report success while leaving the node
+        # 'pending' in a DAG the tick loop never advances again. Refuse before
+        # mutating anything. Reactivating instead would also resurrect the
+        # downstream subtree via the selective-unblock loop, which is a
+        # bigger semantic change than "retry this one node" asks for.
+        if dag.status == "cancelled":
+            raise ValueError(
+                f"DAG {dag_id} is cancelled — retrying a node would leave it "
+                "pending in a DAG that never advances. Cancellation is "
+                "deliberate; create a new DAG instead."
+            )
 
-        await self._store.update_node(
-            node.id,
-            status="pending",  # was "ready" — _find_ready_nodes only checks "pending"
-            error=None,
-            result=None,
-            subtask_id=None,
-            check_name=None,
-            started_at=None,
-            completed_at=None,
-            check_attempts=0,
-            last_check_at=None,
-            awaiting_check_at=None,
-        )
+        # Bank the old attempt's tokens BEFORE clearing its claim and dropping
+        # subtask_id below — afterwards they are unrecoverable (@codex P2).
+        # Refuse the retry rather than lose them: this is an operator action,
+        # and the failures that reach here are transient, so "try again" is a
+        # far better outcome than a silently under-counted DAG.
+        if not await self._account_before_retry(node, dag):
+            raise ValueError(
+                f"Could not record the previous attempt's token usage for "
+                f"'{node_name}'. Retrying now would lose it — try again in a "
+                "moment."
+            )
+
+        # @codex P2 on a616310: EVERY mutation below is collected and applied
+        # in one transaction at the end. My previous attempt merely reordered
+        # reactivation to the front, and codex was right that this only moved
+        # the window: reactivation-last let the detached sweep announce an
+        # outcome built from half-reset nodes, while reactivation-first let an
+        # ordinary tick load a *running* DAG whose nodes were all still
+        # terminal, re-finalize it via _check_dag_completion, and strand a
+        # pending node inside a terminal DAG. The invalid state is the split
+        # itself, so no ordering fixes it — only atomicity does.
+        node_updates: list[tuple[UUID, dict]] = [
+            (
+                node.id,
+                {
+                    # was "ready" — _find_ready_nodes only checks "pending"
+                    "status": "pending",
+                    "error": None,
+                    "result": None,
+                    "subtask_id": None,
+                    "check_name": None,
+                    "started_at": None,
+                    "completed_at": None,
+                    "check_attempts": 0,
+                    "last_check_at": None,
+                    "awaiting_check_at": None,
+                    # @codex P2 on b3c78c3: the token claim is PER ATTEMPT.
+                    # Leaving it set means the replacement subtask's terminal
+                    # sync loses the claim race against its own predecessor and
+                    # silently adds none of the retry's usage — permanently
+                    # under-reporting tokens_consumed and letting later waves
+                    # run past an enforced budget.
+                    "tokens_counted": False,
+                },
+            )
+        ]
 
         # Selectively unblock only nodes downstream of the retried node
         # that have no other failed predecessors
@@ -245,13 +596,39 @@ class DAGOrchestrator:
             # Only unblock if no other failed predecessor exists
             other_failed_preds = dep_map[nid] & still_failed
             if not other_failed_preds:
-                await self._store.update_node(
-                    n.id, status="pending", error=None
+                # tokens_counted reset for the same per-attempt reason as the
+                # retried node above — a cancel_cascade node may have been
+                # running (and consuming) when it was cancelled.
+                # @codex P2 on d8b68bf: and for the same reason, its old
+                # attempt must be banked FIRST. This is the third of the three
+                # reset sites; the previous commit covered only two.
+                if not await self._account_before_retry(n, dag):
+                    # Descendants differ from the directly-retried node: there
+                    # is no automatic second chance for them, so refusing here
+                    # would STRAND a recoverable node permanently — trading a
+                    # bookkeeping loss for an availability loss, in a change
+                    # whose whole purpose is removing silent dead ends.
+                    # Unblock anyway and make the loss loud instead of silent,
+                    # which is the substance of the @codex objection.
+                    logger.error(
+                        "F087: unblocking node %s WITHOUT banking its previous "
+                        "attempt's tokens — that usage is lost from the DAG "
+                        "total, but stranding the node would be worse",
+                        n.name,
+                    )
+                node_updates.append(
+                    (n.id, {"status": "pending", "error": None,
+                            "tokens_counted": False})
                 )
 
-        # Reactivate DAG if it was marked failed
-        if dag.status in ("failed", "partial"):
-            await self._store.update_dag_status(dag_id, "running")
+        # One transaction: every node reset plus the status/generation/delivery
+        # transition. No observer — tick loop or detached sweep — can see a DAG
+        # whose status and node set disagree.
+        await self._store.apply_retry(
+            dag_id,
+            node_updates,
+            reactivate=dag.status in ("failed", "partial"),
+        )
 
     # ------------------------------------------------------------------
     # Internal: DAG advancement
@@ -265,19 +642,47 @@ class DAGOrchestrator:
         # 1.5 Poll awaiting_check nodes
         await self._poll_awaiting_checks(dag)
 
+        # 1.55 F087: retry accounting for terminal nodes whose roll-up failed
+        # transiently. Must precede the budget check below so a recovered
+        # count is visible to enforcement on this very tick.
+        await self._reconcile_token_accounting(dag)
+
+        # 1.6 F087: wall-clock backstop. Runs before stall detection because
+        # it is the coarser, unconditional bound — a node past its own
+        # timeout plus grace is failed regardless of whether activity pings
+        # were ever wired.
+        if self._settings.dag_node_reaper_enabled:
+            await self._reap_overrun_nodes(dag)
+
         # 1.7 F064.1: Stall detection. Runs after sync (so just-completed
         # nodes are no longer 'running') and before failure-propagation
         # (so a node marked stalled here cascades on the same tick).
         if self._settings.dag_stall_detection_enabled:
             await self._check_stalled_nodes(dag)
 
-        # 2. Check token budget
+        # 2. Check token budget.
+        # F087: tokens_consumed was structurally always 0 until the accounting
+        # wiring in _sync_subtask_node landed, so this branch had never once
+        # executed in production. Enforcement is therefore gated separately
+        # from accounting — flipping both at once would start cancelling DAGs
+        # for anyone who had set token_budget casually. The warning log runs
+        # either way so operators can size budgets before enabling the cancel.
         if dag.token_budget:
             ratio = dag.tokens_consumed / dag.token_budget
             if ratio >= 1.0:
-                logger.warning("DAG %s exceeded token budget", dag.id)
-                await self._handle_budget_exceeded(dag)
-                return
+                if self._settings.dag_token_budget_enforcement_enabled:
+                    logger.warning("DAG %s exceeded token budget", dag.id)
+                    # Only stop advancing when enforcement actually took over.
+                    # If it declined (nothing left to curtail), fall through so
+                    # _check_dag_completion still finalizes the DAG — otherwise
+                    # it would sit 'running' forever.
+                    if await self._handle_budget_exceeded(dag):
+                        return
+                logger.warning(
+                    "DAG %s exceeded token budget (%d/%d) — enforcement "
+                    "disabled, letting it run",
+                    dag.id, dag.tokens_consumed, dag.token_budget,
+                )
             elif ratio >= _BUDGET_WARNING_RATIO:
                 logger.info(
                     "DAG %s at %.0f%% of token budget", dag.id, ratio * 100
@@ -311,11 +716,134 @@ class DAGOrchestrator:
                 continue
 
             if node.node_type == "subtask" and node.subtask_id:
-                await self._sync_subtask_node(node)
+                await self._sync_subtask_node(node, dag)
             elif node.node_type == "check" and node.check_name:
                 await self._sync_check_node(node)
 
-    async def _sync_subtask_node(self, node: DAGNode) -> None:
+    async def _account_before_retry(self, node: DAGNode, dag: ExecutionDAG) -> bool:
+        """F087: bank the OLD attempt's tokens before its claim is reset.
+
+        @codex P2 on e94cd42: both retry paths clear `tokens_counted` and then
+        replace `subtask_id` with the retry's row (retry_node nulls it; the
+        fix-stage relaunch overwrites it). If the previous attempt was never
+        accounted — because its roll-up failed transiently, or because the
+        subtask had not settled yet — reconciliation afterwards can only ever
+        see the REPLACEMENT subtask, so the first attempt's tokens are lost
+        from both the node and the DAG total for good.
+
+        Returns whether it is SAFE to proceed with the reset.
+
+        @codex P2 on 954ecce: this was previously best-effort — it returned
+        without confirming, while callers cleared the claim and replaced
+        `subtask_id` regardless, so a transient lookup or claim failure lost
+        the attempt permanently. "Bookkeeping must not block the retry" was
+        the wrong trade: silent permanent loss is worse than a retry the
+        operator can simply issue again. Callers now refuse to reset on False.
+
+        A MISSING subtask row returns True: that usage is genuinely
+        unrecoverable rather than transiently unavailable, so blocking would
+        wedge the retry forever with nothing to gain.
+        """
+        if node.tokens_counted or not node.subtask_id or not self._subtask_mgr:
+            return True
+        try:
+            subtask = await self._subtask_mgr.get(node.subtask_id)
+            if subtask is None:
+                return True
+            if subtask.status not in _SETTLED_SUBTASK_STATUSES:
+                # Not settled yet — its counters could still change, so
+                # claiming now would freeze the wrong value (invariant 3).
+                # Blocking the reset keeps the attempt reachable.
+                logger.warning(
+                    "F087: refusing to reset node %s — its previous subtask is "
+                    "still %s, so that attempt's tokens are not final yet",
+                    node.name, subtask.status,
+                )
+                return False
+            await self._count_node_tokens(node, subtask, dag)
+            # _count_node_tokens swallows its errors, so the flag is the only
+            # honest confirmation that the claim actually landed.
+            return node.tokens_counted
+        except Exception:
+            logger.warning(
+                "F087: could not bank tokens for the previous attempt of node "
+                "%s — refusing to reset so the attempt stays reachable",
+                node.name, exc_info=True,
+            )
+            return False
+
+    async def _reconcile_token_accounting(self, dag: ExecutionDAG) -> bool:
+        """F087: re-attempt token accounting for terminal, unaccounted nodes.
+
+        @codex P2 on 9ca8fcd: `_count_node_tokens` deliberately swallows its
+        exceptions so a bookkeeping failure can't knock a node out of its
+        status sync — but `_sync_subtask_node` then terminalizes the node, and
+        later ticks only sync nodes still in 'running'. A single transient DB
+        error therefore stranded that node's tokens permanently, under-
+        reporting `tokens_consumed` and weakening budget enforcement.
+
+        This sweep closes that hole: any terminal subtask node that still
+        carries `tokens_counted=False` gets another attempt each tick. The
+        claim is idempotent, so a node that already succeeded is skipped by
+        the flag rather than re-added, and the sweep goes quiet once every
+        node is accounted.
+
+        Returns True when every terminal node is accounted for. The delivery
+        sweep uses that to avoid publishing a total it knows is incomplete
+        (@codex P2 on 2e27143) — a delivered DAG leaves the sweep permanently,
+        so an announcement made over a half-counted total can never be
+        corrected.
+        """
+        if not self._subtask_mgr:
+            return True
+        complete = True
+        for node in dag.nodes:
+            if node.status not in _TERMINAL or node.tokens_counted:
+                continue
+            if node.node_type != "subtask" or not node.subtask_id:
+                continue  # gate/callback/fix nodes never consume tokens
+            try:
+                subtask = await self._subtask_mgr.get(node.subtask_id)
+            except Exception:
+                logger.debug(
+                    "F087: token reconciliation could not load subtask for "
+                    "node %s; will retry next tick", node.name,
+                )
+                complete = False
+                continue
+            if subtask is None:
+                # The subtask row is gone, so its usage is unknowable. Claim
+                # with zero to stop retrying forever rather than leave the
+                # sweep spinning on every tick for the life of the DAG.
+                await self._count_node_tokens(
+                    node, SimpleNamespace(tokens_in=0, tokens_out=0), dag
+                )
+            elif subtask.status in _SETTLED_SUBTASK_STATUSES:
+                await self._count_node_tokens(node, subtask, dag)
+            else:
+                # @codex P2 on fa988e7: the node is terminal but its subtask
+                # is still pending/running — cancel_dag, failure propagation
+                # and the reaper all mark a node terminal while the worker may
+                # still be executing (SubtaskManager.cancel bounds the leak,
+                # it does not preempt). Claiming now would freeze the CURRENT
+                # counters as final and, because the claim is one-shot, no
+                # later value could ever replace them. Leave it retryable.
+                logger.debug(
+                    "F087: node %s is terminal but its subtask is %s — "
+                    "deferring the token claim until it settles",
+                    node.name, subtask.status,
+                )
+                complete = False
+                continue
+            # _count_node_tokens swallows its own errors, so the flag it sets
+            # is the only honest signal that the claim actually landed.
+            if not node.tokens_counted:
+                complete = False
+        return complete
+
+    async def _sync_subtask_node(
+        self, node: DAGNode, dag: ExecutionDAG | None = None
+    ) -> None:
         """Sync a subtask node's status from the subtask manager."""
         if not self._subtask_mgr:
             return
@@ -331,6 +859,17 @@ class DAGOrchestrator:
             )
             node.status = "failed"
             return
+
+        # F087: roll the subtask's token usage into the DAG total. Keyed on
+        # the SUBTASK reaching terminal rather than the node, so the
+        # awaiting_check path (subtask done, node still polling a shell
+        # command) is counted too — its tokens are already final. One call
+        # site covers all four transitions below.
+        # ``dag`` is None only when a caller invokes this helper directly
+        # (tests); the tick path always threads it so the in-memory total
+        # stays consistent with the row for the budget check later this tick.
+        if subtask.status in ("completed", "failed") and dag is not None:
+            await self._count_node_tokens(node, subtask, dag)
 
         # F061: outcome-aware branch. Inverse check (any non-"completed"
         # outcome fails the DAG node) rather than a closed set of failure
@@ -391,6 +930,51 @@ class DAGOrchestrator:
                 completed_at=datetime.now(UTC),
             )
             node.status = "failed"
+
+    async def _count_node_tokens(
+        self, node: DAGNode, subtask: object, dag: ExecutionDAG
+    ) -> None:
+        """F087: add a finished subtask's tokens to its DAG's running total.
+
+        `DAGStore.update_dag_tokens` existed since F038 but had no production
+        caller, so `tokens_consumed` was structurally always 0 and the budget
+        branch in `_advance_dag` could never fire. This is that missing call.
+
+        `_sync_subtask_node` re-runs for the same node across ticks, so the
+        claim and the roll-up happen together in
+        `claim_and_add_node_tokens` — one transaction, so a crash between
+        them cannot leave a node marked counted with nothing added (@codex P2
+        on da5dc06).
+
+        The in-memory `dag.tokens_consumed` is refreshed too. `_advance_dag`
+        loaded `dag` BEFORE this sync ran, so without this the budget check
+        later in the very same tick would read a stale total and dispatch the
+        next wave despite the DAG having just gone over (@codex P2).
+
+        Never raises: token accounting is bookkeeping, and losing a count
+        must not knock a node out of its status sync.
+        """
+        try:
+            tokens = int(getattr(subtask, "tokens_in", 0) or 0) + int(
+                getattr(subtask, "tokens_out", 0) or 0
+            )
+            # Pin the claim to the attempt we actually read (@codex P2 on
+            # ad857d0): a concurrent retry_node may have already banked this
+            # attempt, reset the flag and swapped subtask_id, and re-claiming
+            # from our stale snapshot would double-add it.
+            claimed = await self._store.claim_and_add_node_tokens(
+                node.id, node.dag_id, tokens,
+                expected_subtask_id=node.subtask_id,
+            )
+            if not claimed:
+                return  # already counted on an earlier tick
+            node.tokens_counted = True
+            node.tokens_used = tokens
+            dag.tokens_consumed = (dag.tokens_consumed or 0) + tokens
+        except Exception:
+            logger.exception(
+                "F087: token accounting failed for node %s", node.name
+            )
 
     async def _sync_check_node(self, node: DAGNode) -> None:
         """Sync a check node's status from the check registry."""
@@ -664,6 +1248,241 @@ class DAGOrchestrator:
         if per_node == 0:
             return None
         return min(per_node, self._settings.dag_node_max_stall_timeout)
+
+    async def _reap_overrun_nodes(self, dag: ExecutionDAG) -> None:
+        """F087: fail running nodes that blew past their wall-clock budget.
+
+        Timeout enforcement is otherwise delegated entirely to the underlying
+        primitive: `_launch_subtask_node` hands `_effective_timeout(node)` to
+        the subtask and the DAG node itself never checks elapsed time. That
+        holds while the subtask is alive, but a subtask orphaned by a crash
+        (`reclaim_stale` runs once at worker start and only touches rows
+        already past timeout) leaves the node 'running' forever — which keeps
+        its DAG 'running' forever and permanently consumes one of the
+        MAX_ACTIVE_DAGS slots. Five of those and dag_create is bricked.
+
+        The grace period exists so this never preempts the primitive's own,
+        richer error: the subtask executor gets `timeout` seconds to fail the
+        node itself, and only if it is still 'running' `grace` seconds later
+        do we conclude nobody is coming.
+
+        Mirrors F064.1's ordering: tear the primitive down BEFORE marking the
+        node failed, so a still-live subtask stops burning tokens and holding
+        a worker slot rather than running on untracked.
+        """
+        now = datetime.now(UTC)
+        grace = self._settings.dag_node_timeout_grace_seconds
+        for node in dag.nodes:
+            if node.status != "running":
+                # @codex P2 on a616310: clear the cancel-confirmation counter
+                # for any node that is no longer running. Without this, a node
+                # that settled normally (via _sync_subtask_node) after a failed
+                # cancellation kept its count, and a LATER retry — which reuses
+                # the same node id — inherited it, hitting the cap early and
+                # abandoning a live replacement worker. Covers both settling
+                # and being reset to 'pending' by a retry, since the reaper
+                # runs before dispatch in the tick.
+                self._reap_defer_counts.pop(node.id, None)
+                continue
+            started = node.started_at
+            if started is None:
+                # Launched without a timestamp — wall-clock is unknowable, so
+                # leave it to stall detection rather than guess.
+                continue
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+            budget = self._effective_timeout(node) + grace
+            elapsed = (now - started).total_seconds()
+            if elapsed <= budget:
+                continue
+
+            # node.started_at is set at DISPATCH, but a subtask sits 'pending'
+            # until a worker dequeues it. With NOUS_SUBTASK_WORKERS=2 and a
+            # five-deep pending queue, a legitimate task can wait past
+            # timeout+grace before running a single turn.
+            #
+            # The dispatch clock is therefore only an upper bound on real
+            # execution time — useful as a cheap pre-filter (subtask.started_at
+            # is always >= node.started_at, so a node inside budget by the
+            # dispatch clock is certainly inside it by the execution clock),
+            # but never as the decision.
+            #
+            # @codex P2 on 2ccc026 spared 'pending' subtasks; @codex P2 on
+            # 7cc6ae0 caught that this was a half-measure — the moment a worker
+            # dequeues a long-queued task its status flips to 'running' while
+            # node.started_at still holds the dispatch time, so the very next
+            # tick reaped work that had just begun. Measure from the execution
+            # clock instead of adding another status guard.
+            if node.node_type == "subtask" and node.subtask_id and self._subtask_mgr:
+                try:
+                    subtask = await self._subtask_mgr.get(node.subtask_id)
+                except Exception:
+                    # @codex P2 on ab0ff44: swallowing this to `None` fell
+                    # through and reaped on the DISPATCH clock — re-creating
+                    # the exact false positive the execution-clock check
+                    # exists to prevent, on nothing worse than a transient DB
+                    # blip. Reaping is destructive and this backstop is never
+                    # urgent to the second, so defer to the next tick instead
+                    # of deciding from a clock we know is wrong.
+                    logger.warning(
+                        "F087: could not read the execution clock for node %s "
+                        "— deferring the reap rather than deciding from the "
+                        "dispatch clock",
+                        node.name, exc_info=True,
+                    )
+                    continue
+                if subtask is not None:
+                    if subtask.status == "pending":
+                        logger.debug(
+                            "F087: node %s is past its dispatch-clock budget "
+                            "but its subtask is still queued — not reaping",
+                            node.name,
+                        )
+                        continue
+                    exec_started = getattr(subtask, "started_at", None)
+                    if exec_started is not None:
+                        if exec_started.tzinfo is None:
+                            exec_started = exec_started.replace(tzinfo=UTC)
+                        exec_elapsed = (now - exec_started).total_seconds()
+                        if exec_elapsed <= budget:
+                            logger.debug(
+                                "F087: node %s is past its dispatch-clock "
+                                "budget but has only been executing %.0fs — "
+                                "not reaping",
+                                node.name, exec_elapsed,
+                            )
+                            continue
+                        elapsed = exec_elapsed
+
+            error_msg = (
+                f"exceeded wall-clock budget: running {elapsed:.0f}s "
+                f"(timeout {self._effective_timeout(node)}s + grace {grace}s)"
+            )
+            logger.warning(
+                "F087: reaping node %s (dag %s) — %s",
+                node.name, dag.id, error_msg,
+            )
+            await self._cancel_node(node)
+
+            # @codex P2 on ac9da7f: the subtask can complete between the status
+            # read above and this cancel. SubtaskManager.cancel refuses to
+            # touch an already-terminal row, so in that window the work
+            # actually SUCCEEDED and its result is persisted — overwriting the
+            # node as failed would discard a real result and could fail the
+            # whole DAG on a technicality. Terminal nodes are no longer
+            # re-synced, so this is the last chance to notice. Re-read and
+            # hand it to the normal completion path instead.
+            #
+            # @codex P2 on ab0ff44: this must cover a concurrent FAILURE too,
+            # not just a completion. A subtask that goes running -> failed in
+            # the same window is equally terminal, cancel() equally declines to
+            # touch it, and falling through replaced its real error with the
+            # generic wall-clock message — losing the actual reason permanently,
+            # since terminal nodes are never re-synced. The distinction that
+            # matters is WHO ended it: a row that reached completed/failed on
+            # its own carries the truth, whereas 'cancelled' is the reaper's own
+            # doing and the wall-clock error is the honest description there.
+            if node.node_type == "subtask" and node.subtask_id and self._subtask_mgr:
+                try:
+                    settled = await self._subtask_mgr.get(node.subtask_id)
+                except Exception:
+                    # @codex P2 on e033668: converting this to `settled = None`
+                    # treated a FAILED READ as proof that the reaper won, and
+                    # overwrote the primitive's real terminal outcome with the
+                    # generic wall-clock error. Sibling of the pre-cancel
+                    # lookup fixed in the previous commit — same swallow, same
+                    # destructive fall-through, and I fixed only one of the two
+                    # while touching both. Defer instead: the subtask is
+                    # already cancelled, so the next tick either syncs its
+                    # persisted outcome or reaps it once the read succeeds.
+                    logger.warning(
+                        "F087: could not confirm node %s's outcome after "
+                        "cancelling — deferring rather than assuming the reap "
+                        "won",
+                        node.name, exc_info=True,
+                    )
+                    continue
+                if settled is not None and settled.status in ("completed", "failed"):
+                    logger.info(
+                        "F087: node %s reached '%s' on its own while being "
+                        "reaped — keeping the primitive's own outcome instead "
+                        "of the wall-clock error",
+                        node.name, settled.status,
+                    )
+                    self._reap_defer_counts.pop(node.id, None)
+                    await self._sync_subtask_node(node, dag)
+                    continue
+
+                # @codex P2 on f409568: `_cancel_node` swallows its errors, so
+                # a confirmation read of 'running'/'pending' means cancellation
+                # did NOT take. Marking the node failed here would abandon a
+                # worker that is still executing, and terminal nodes are never
+                # re-synced, so its eventual result would be discarded.
+                #
+                # Bounded, because unbounded deferral would re-create the wedge
+                # the reaper exists to prevent: an orphaned row whose worker
+                # died stays 'running' forever and would never be reaped. After
+                # the cap we fail it anyway, saying so explicitly rather than
+                # claiming a clean timeout.
+                if settled is not None and settled.status in ("running", "pending"):
+                    tries = self._reap_defer_counts.get(node.id, 0) + 1
+                    self._reap_defer_counts[node.id] = tries
+                    if tries < _MAX_REAP_CANCEL_RETRIES:
+                        logger.warning(
+                            "F087: cancellation of node %s did not take (still "
+                            "%s) — deferring the reap (%d/%d) rather than "
+                            "abandoning a live worker",
+                            node.name, settled.status, tries,
+                            _MAX_REAP_CANCEL_RETRIES,
+                        )
+                        continue
+                    self._reap_defer_counts.pop(node.id, None)
+                    error_msg = (
+                        f"{error_msg}; cancellation could not be confirmed "
+                        f"after {tries} attempts (subtask still "
+                        f"'{settled.status}' — it may still be running)"
+                    )
+                else:
+                    self._reap_defer_counts.pop(node.id, None)
+
+            # @codex P2 on a616310: the confirmation above was subtask-only.
+            # For a check node, `_cancel_node` calls manage_check(disable) and
+            # swallows any error — so a transient failure left the dynamic
+            # check enabled and registered while the DAG node was marked
+            # failed, and terminal nodes are never re-synced, so the check kept
+            # running indefinitely. Same bounded deferral, same reasoning.
+            elif node.node_type == "check" and node.check_name and self._dynamic_loader:
+                registry = getattr(self._dynamic_loader, "_registry", None)
+                still = registry.get_check(node.check_name) if registry else None
+                if still is not None and getattr(still, "active", False):
+                    tries = self._reap_defer_counts.get(node.id, 0) + 1
+                    self._reap_defer_counts[node.id] = tries
+                    if tries < _MAX_REAP_CANCEL_RETRIES:
+                        logger.warning(
+                            "F087: check '%s' for node %s is still active after "
+                            "disable — deferring the reap (%d/%d) rather than "
+                            "leaving it running untracked",
+                            node.check_name, node.name, tries,
+                            _MAX_REAP_CANCEL_RETRIES,
+                        )
+                        continue
+                    self._reap_defer_counts.pop(node.id, None)
+                    error_msg = (
+                        f"{error_msg}; the dynamic check could not be disabled "
+                        f"after {tries} attempts (it may still be running)"
+                    )
+                else:
+                    self._reap_defer_counts.pop(node.id, None)
+
+            await self._store.update_node(
+                node.id,
+                status="failed",
+                error=error_msg,
+                completed_at=now,
+            )
+            node.status = "failed"
+            node.error = error_msg
+            node.completed_at = now
 
     async def _check_stalled_nodes(self, dag: ExecutionDAG) -> None:
         """F064.1: mark running nodes failed when no activity ping arrived in time.
@@ -1120,6 +1939,30 @@ class DAGOrchestrator:
                     )
                     continue
 
+            # F087 (@codex P2 on 954ecce): if this fix is going to re-enqueue
+            # the parent, bank its previous attempt's tokens first — the reset
+            # clears the claim and the relaunch overwrites subtask_id, after
+            # which that usage is unreachable.
+            #
+            # This path PROCEEDS on failure (ERROR log), unlike retry_node.
+            # An earlier version deferred instead, and CI caught the
+            # consequence: the fix stage is automatic and re-fires every tick,
+            # so a subtask that never settles deferred forever — the parent
+            # stayed 'failed', the fix node never reached terminal, and
+            # _check_dag_completion could never finalize the DAG. That is a
+            # permanent wedge, which is strictly worse than an under-counted
+            # token total, and it is the very failure class this change exists
+            # to remove. Only the operator-initiated retry_node refuses;
+            # automatic paths always make progress.
+            if outcome.action in ("retry_as_is", "retry_with_amended_prompt"):
+                if not await self._account_before_retry(parent, dag):
+                    logger.error(
+                        "F087: retrying %s WITHOUT banking its previous "
+                        "attempt's tokens — that usage is lost from the DAG "
+                        "total, but wedging the DAG would be worse",
+                        parent.name,
+                    )
+
             logger.info(
                 "F066.1: fix '%s' chose '%s' for parent '%s' — %s",
                 fix_node.name, outcome.action, parent.name, outcome.rationale,
@@ -1149,7 +1992,17 @@ class DAGOrchestrator:
 
             if outcome.action == "retry_as_is" or outcome.action == "retry_with_amended_prompt":
                 # Re-enqueue parent for dispatch on next tick.
-                update_kwargs: dict[str, Any] = {"status": "pending", "error": None}
+                # (The previous attempt was already banked above, before the
+                # fix attempt was consumed.)
+                # tokens_counted=False for the same per-attempt reason as
+                # retry_node (@codex P2 on b3c78c3) — the fix-stage retry is
+                # the automatic sibling of that manual path and was losing the
+                # retry's token usage identically.
+                update_kwargs: dict[str, object] = {
+                    "status": "pending",
+                    "error": None,
+                    "tokens_counted": False,
+                }
                 # F066.1 Phase 1.5: when LLM dispatch returns an amended
                 # prompt, replace the parent's instructions so the next
                 # dispatch sees the revised prompt. Phase 1 (rule-based)
@@ -1464,19 +2317,63 @@ class DAGOrchestrator:
                 dag.id, "failed", result_summary="All nodes blocked"
             )
 
-    async def _handle_budget_exceeded(self, dag: ExecutionDAG) -> None:
-        """Cancel pending/ready nodes when budget is exceeded."""
-        cancelled_any = False
+    async def _handle_budget_exceeded(self, dag: ExecutionDAG) -> bool:
+        """Cancel pending/ready nodes when budget is exceeded.
+
+        Returns True when enforcement took over the DAG's fate (so the caller
+        should stop advancing it this tick), False when it declined because
+        there was nothing left to curtail (so normal completion must still
+        run — otherwise the DAG would sit 'running' forever, never reaching
+        _check_dag_completion).
+
+        F087 (@codex P2 on 1bfe1fa): when the overage curtailed NOTHING — no
+        node was cancellable and none is still running — this must not force a
+        terminal status of its own. Enforcement exists to stop future work, and
+        a DAG whose nodes all finished has no future work to stop; labelling it
+        'partial' would claim work was skipped when none was. Falling through
+        to _check_dag_completion instead also makes the DAG's final status
+        independent of WHEN token accounting landed, which is the actual
+        inconsistency codex identified: a transient accounting failure that
+        recovers in the pre-delivery sweep now yields exactly the same status
+        as accounting that succeeded a tick earlier. The overage is not lost —
+        it is logged, and the delivery template renders `Tokens: used/budget`
+        whenever a budget is set.
+
+        `cancelled_any` had been computed and never read since F038 (a standing
+        ruff F841); it is the signal this branch needed all along.
+
+        @codex P2 on 2e27143: "did enforcement curtail anything" is a property
+        of the DAG's HISTORY, not of this tick. An over-budget wave with both
+        running work and pending successors cancels the successors on tick 1
+        and returns to let the running nodes finish; on tick 2 there is nothing
+        left to cancel, so a tick-local `cancelled_any` would decline and let
+        the DAG be labelled 'cancelled' rather than 'partial' — even though
+        enforcement genuinely did curtail work. Nodes already cancelled with
+        the budget marker are therefore counted as prior curtailment.
+        """
+        cancelled_any = any(
+            node.status == "cancelled"
+            and (node.error or "").startswith(_BUDGET_CANCEL_ERROR)
+            for node in dag.nodes
+        )
         for node in dag.nodes:
             if node.status in ("pending", "ready", "awaiting_check"):
                 await self._store.update_node(
-                    node.id, status="cancelled", error="Token budget exceeded"
+                    node.id, status="cancelled", error=_BUDGET_CANCEL_ERROR
                 )
                 node.status = "cancelled"
+                node.error = _BUDGET_CANCEL_ERROR
                 cancelled_any = True
 
         # If there are still running nodes, let them finish
         has_running = any(n.status == "running" for n in dag.nodes)
+        if not cancelled_any and not has_running:
+            logger.warning(
+                "DAG %s finished over budget (%s/%s) but nothing was left to "
+                "curtail — leaving the final status to normal completion",
+                dag.id, dag.tokens_consumed, dag.token_budget,
+            )
+            return False
         if not has_running:
             # Determine final status
             has_completed = any(n.status == "completed" for n in dag.nodes)
@@ -1490,3 +2387,4 @@ class DAGOrchestrator:
                     dag.id, "failed",
                     result_summary="Token budget exceeded before any nodes completed",
                 )
+        return True

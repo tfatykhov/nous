@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import func, select, update
+from sqlalchemy import true as sa_true
 from sqlalchemy.orm import selectinload
 
 from nous.config import Settings
@@ -17,6 +18,12 @@ from nous.storage.models import DAGEdge, DAGNode, ExecutionDAG, Subtask
 logger = logging.getLogger(__name__)
 
 MAX_ACTIVE_DAGS = 5
+
+# The delivery sweep's domain. Every delivery write is fenced on this set plus
+# `delivered_at IS NULL`, because retry_node/cancel_dag do NOT take the
+# orchestrator lock and can reactivate a DAG while deliver() is awaiting
+# Telegram or a 120s summary turn (@codex P1 on fa988e7).
+_TERMINAL_DAG_STATUSES = ("completed", "failed", "partial", "cancelled")
 
 
 class DAGStore:
@@ -371,3 +378,305 @@ class DAGStore:
                 .values(tokens_consumed=ExecutionDAG.tokens_consumed + tokens)
             )
             await session.commit()
+
+    # ------------------------------------------------------------------
+    # F087: durable result delivery
+    # ------------------------------------------------------------------
+
+    async def claim_and_add_node_tokens(
+        self,
+        node_id: UUID,
+        dag_id: UUID,
+        tokens: int,
+        expected_subtask_id: UUID | None = None,
+    ) -> bool:
+        """F087: claim a node's tokens and roll them up, atomically.
+
+        Flips ``tokens_counted`` false → true, records ``tokens_used``, and
+        increments the DAG's ``tokens_consumed`` — all inside ONE transaction,
+        and reports whether THIS call won the claim.
+
+        @codex P2 on da5dc06: an earlier version committed the claim in its
+        own transaction and only then added to the DAG total. A crash (or a
+        failure on either later write) between the two left the node
+        permanently marked counted with nothing ever added, and because the
+        claim short-circuits every subsequent tick, the DAG total stayed
+        silently low forever — which would in turn under-report against
+        ``token_budget``. Both writes now commit or neither does.
+
+        The claim is the WHERE clause rather than a read-then-write, so two
+        concurrent ticks cannot both observe false and both add.
+
+        @codex P2 on ad857d0: `expected_subtask_id` pins the claim to the
+        ATTEMPT the caller actually read. Callers work from a `dag` snapshot,
+        and `retry_node` can concurrently bank the old attempt, reset
+        `tokens_counted`, and clear `subtask_id`. Without this clause a stale
+        caller would re-claim the freshly reset flag using the OLD subtask's
+        tokens — double-adding that attempt to the DAG total and leaving the
+        flag true so the replacement attempt could never be counted. Pass None
+        only when the caller has no attempt identity to pin (it then behaves
+        as before).
+        """
+        async with self._db.session() as session:
+            result = await session.execute(
+                update(DAGNode)
+                .where(DAGNode.id == node_id)
+                .where(DAGNode.tokens_counted.is_(False))
+                .where(
+                    DAGNode.subtask_id == expected_subtask_id
+                    if expected_subtask_id is not None
+                    else sa_true()
+                )
+                .where(
+                    DAGNode.dag_id.in_(
+                        select(ExecutionDAG.id).where(
+                            ExecutionDAG.agent_id == self._agent_id
+                        )
+                    )
+                )
+                # tokens_used ACCUMULATES rather than overwrites: a retried
+                # node really did spend both attempts' tokens, and the DAG
+                # total below accumulates the same way. Overwriting would make
+                # the node disagree with the DAG it rolls up into.
+                .values(
+                    tokens_counted=True,
+                    tokens_used=DAGNode.tokens_used + tokens,
+                )
+            )
+            if result.rowcount == 0:
+                # Already counted on an earlier tick — nothing to add, and
+                # nothing to commit.
+                await session.rollback()
+                return False
+            if tokens:
+                await session.execute(
+                    update(ExecutionDAG)
+                    .where(ExecutionDAG.id == dag_id)
+                    .where(ExecutionDAG.agent_id == self._agent_id)
+                    .values(tokens_consumed=ExecutionDAG.tokens_consumed + tokens)
+                )
+            await session.commit()
+            return True
+
+    async def get_undelivered_terminal_dags(
+        self, limit: int = 5
+    ) -> list[ExecutionDAG]:
+        """F087: DAGs that reached a terminal status but were never delivered.
+
+        This is the sweep's work queue. Because it is a table rather than
+        in-memory state, a process that dies between marking a DAG terminal
+        and delivering its result picks the DAG back up on the next tick.
+
+        Oldest first so a backlog drains in the order the DAGs finished.
+        """
+        async with self._db.session() as session:
+            result = await session.execute(
+                select(ExecutionDAG)
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .where(ExecutionDAG.delivered_at.is_(None))
+                .where(ExecutionDAG.status.in_(_TERMINAL_DAG_STATUSES))
+                .options(
+                    selectinload(ExecutionDAG.nodes),
+                    selectinload(ExecutionDAG.edges),
+                )
+                .order_by(ExecutionDAG.completed_at.asc().nulls_last())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
+
+    async def mark_delivered(
+        self, dag_id: UUID, generation: int, error: str | None = None
+    ) -> bool:
+        """F087: record that a DAG's result left the box.
+
+        ``error`` is set only on give-up (attempts exhausted): the DAG is
+        still marked delivered so the sweep stops retrying, but the reason
+        stays on the row instead of disappearing.
+
+        @codex P2 on da5dc06: a successful RETRY must also clear whatever
+        ``bump_delivery_attempt`` wrote on the earlier failed attempts.
+        Leaving it would produce a row that reports both a successful
+        delivery and a delivery error, which contradicts this method's
+        contract (error means gave-up) and misleads the dashboard.
+
+        @codex P1 on fa988e7: fenced on the DAG still being terminal AND still
+        undelivered. `retry_node` does not take the orchestrator lock, so it
+        can reactivate this DAG while `deliver()` is awaiting Telegram or a
+        120-second summary turn — and a late blind write would stamp
+        `delivered_at` on the now-running DAG, permanently excluding the
+        RETRY's outcome from every future sweep. Returns whether the write
+        applied so the caller can tell "delivered" from "superseded".
+
+        @codex P1 on e94cd42: that predicate alone loses the FAST-retry race.
+        If the retried work terminalizes again before the original await
+        returns, the row is terminal and undelivered once more, so the stale
+        write succeeds and marks the NEW outcome delivered — which is exactly
+        the permanent-exclusion bug the fence was added to prevent, just one
+        step later. `generation` pins the write to the specific outcome the
+        caller actually delivered.
+        """
+        async with self._db.session() as session:
+            values: dict = {
+                "delivered_at": datetime.now(UTC),
+                "delivery_error": error,
+            }
+            result = await session.execute(
+                update(ExecutionDAG)
+                .where(ExecutionDAG.id == dag_id)
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .where(ExecutionDAG.delivered_at.is_(None))
+                .where(ExecutionDAG.status.in_(_TERMINAL_DAG_STATUSES))
+                .where(ExecutionDAG.delivery_generation == generation)
+                .values(**values)
+            )
+            await session.commit()
+            return result.rowcount > 0
+
+    async def save_delivery_summary(
+        self, dag_id: UUID, generation: int, summary: str
+    ) -> None:
+        """F087: cache an agent-authored summary for reuse across retries.
+
+        @codex P2 on da5dc06: with this absent, a Telegram outage after a
+        successful summary leg re-ran a full LLM turn on every sweep — up to
+        `dag_delivery_max_attempts` turns and duplicate episodes for a single
+        DAG. Written before the delivery outcome is recorded so a crash in
+        between still leaves the expensive work banked.
+
+        Fenced like the other delivery writes (@codex P1 on fa988e7): a
+        summary authored for the PREVIOUS outcome must not attach itself to a
+        DAG that `retry_node` reactivated mid-delivery — the retry would then
+        be announced with prose describing the run before it.
+        """
+        async with self._db.session() as session:
+            await session.execute(
+                update(ExecutionDAG)
+                .where(ExecutionDAG.id == dag_id)
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .where(ExecutionDAG.delivered_at.is_(None))
+                .where(ExecutionDAG.status.in_(_TERMINAL_DAG_STATUSES))
+                .where(ExecutionDAG.delivery_generation == generation)
+                .values(delivery_summary=summary)
+            )
+            await session.commit()
+
+    async def apply_retry(
+        self,
+        dag_id: UUID,
+        node_updates: list[tuple[UUID, dict]],
+        reactivate: bool,
+    ) -> None:
+        """F087: apply every retry mutation AND the reactivation atomically.
+
+        @codex P2 on a616310. Doing these as separate commits leaves an
+        invalid state visible to the ordinary tick loop no matter which order
+        they run in, which is why the previous reorder did not fix it:
+
+        - resets first, reactivation last → the detached delivery sweep can
+          select a still-terminal DAG on the OLD generation (so the fence
+          cannot reject it) and announce an outcome built from half-reset
+          nodes.
+        - reactivation first, resets after → a tick loads a *running* DAG
+          whose nodes are all still terminal, `_check_dag_completion` marks it
+          failed again immediately, and the retry then strands a pending node
+          inside a terminal DAG.
+
+        There is no safe ordering because the invalid state is the split
+        itself. One transaction removes the window rather than moving it: no
+        observer ever sees a DAG whose status and node set disagree.
+        """
+        async with self._db.session() as session:
+            scoped = select(ExecutionDAG.id).where(
+                ExecutionDAG.agent_id == self._agent_id
+            )
+            for node_id, values in node_updates:
+                await session.execute(
+                    update(DAGNode)
+                    .where(DAGNode.id == node_id)
+                    .where(DAGNode.dag_id.in_(scoped))
+                    .values(**values)
+                )
+            if reactivate:
+                await session.execute(
+                    update(ExecutionDAG)
+                    .where(ExecutionDAG.id == dag_id)
+                    .where(ExecutionDAG.agent_id == self._agent_id)
+                    .values(
+                        status="running",
+                        started_at=datetime.now(UTC),
+                        delivered_at=None,
+                        delivery_attempts=0,
+                        delivery_error=None,
+                        delivery_summary=None,
+                        delivery_generation=ExecutionDAG.delivery_generation + 1,
+                    )
+                )
+            await session.commit()
+
+    async def reactivate_for_retry(self, dag_id: UUID) -> None:
+        """F087: put a terminal DAG back to 'running' AND clear its delivery
+        bookkeeping, in one transaction.
+
+        @codex P2 on b3c78c3: ``retry_node`` left ``delivered_at`` set when it
+        reactivated a DAG, so the sweep's ``delivered_at IS NULL`` predicate
+        excluded the retry's outcome forever — and the stale attempt count,
+        error and cached summary all described the PREVIOUS outcome.
+
+        @codex P2 on 9ca8fcd: doing that reset in its own commit after the
+        status update reintroduced the same two-phase-write hazard this PR
+        fixed for token accounting. A crash in between left a *running* DAG
+        carrying a stale ``delivered_at``, which is worse than either endpoint:
+        it finishes normally after restart and is then silently never
+        announced. Status and delivery state are one logical transition, so
+        they commit together.
+
+        Mirrors ``update_dag_status(dag_id, "running")`` for the status half,
+        including the ``started_at`` refresh, so reactivation semantics are
+        unchanged.
+        """
+        async with self._db.session() as session:
+            await session.execute(
+                update(ExecutionDAG)
+                .where(ExecutionDAG.id == dag_id)
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .values(
+                    status="running",
+                    started_at=datetime.now(UTC),
+                    delivered_at=None,
+                    delivery_attempts=0,
+                    delivery_error=None,
+                    delivery_summary=None,
+                    # Invalidate any delivery still in flight for the previous
+                    # outcome (@codex P1 on e94cd42).
+                    delivery_generation=ExecutionDAG.delivery_generation + 1,
+                )
+            )
+            await session.commit()
+
+    async def bump_delivery_attempt(
+        self, dag_id: UUID, generation: int, error: str
+    ) -> int:
+        """F087: record a failed delivery attempt. Returns the new count.
+
+        Fenced like the other delivery writes (@codex P1 on fa988e7) so a
+        failure belonging to the previous outcome cannot burn an attempt — or
+        park a stale error — on a DAG that was reactivated mid-delivery.
+        Returns 0 when the write did not apply.
+        """
+        async with self._db.session() as session:
+            result = await session.execute(
+                update(ExecutionDAG)
+                .where(ExecutionDAG.id == dag_id)
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .where(ExecutionDAG.delivered_at.is_(None))
+                .where(ExecutionDAG.status.in_(_TERMINAL_DAG_STATUSES))
+                .where(ExecutionDAG.delivery_generation == generation)
+                .values(
+                    delivery_attempts=ExecutionDAG.delivery_attempts + 1,
+                    delivery_error=error[:2000],
+                )
+                .returning(ExecutionDAG.delivery_attempts)
+            )
+            await session.commit()
+            row = result.scalar_one_or_none()
+            return int(row) if row is not None else 0
