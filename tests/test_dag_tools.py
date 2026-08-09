@@ -375,26 +375,44 @@ class TestCallbackDocumented:
     also mention "check" in that sentence or the one immediately
     following. That heuristic is stronger than substring blacklisting
     (round 1: it catches paraphrases, not just exact reuse of
-    yesterday's wording) but it is NOT an invariant and NOT exhaustive:
-    it has a demonstrated miss on same-sentence smuggling, where a false
-    claim rides alongside a legitimate mention of "check" in one
-    sentence — e.g. "It accepts tools just like check nodes do, plus
-    frame_type / model / timeout_seconds." passes every test in this
-    class despite falsely claiming callbacks get tools (round 2 review
-    finding). Closing that gap needs grammatical attribution — reading
-    WHO the "tools" claim is actually about — which is semantic
-    analysis, not string matching; a regex chasing it would fire on
-    honest prose and get deleted by the next author. This set does NOT
-    verify the description's prose is true in general; only a human or
-    reviewer reading it against the code establishes that.
+    yesterday's wording) but it is NOT an invariant and NOT exhaustive.
+    It has two demonstrated misses, and closing either needs grammatical
+    attribution — reading WHO (or WHICH node type) a given "tools" or
+    "check" mention is actually about — which is semantic analysis, not
+    string matching; a regex chasing either would fire on honest prose
+    and get deleted by the next author. This set does NOT verify the
+    description's prose is true in general; only a human or reviewer
+    reading it against the code establishes that.
 
-    KNOWN ACCEPTED LIMITATION (round 2, deliberately not fixed):
-    same-sentence smuggling of a false "tools" claim into a sentence
-    that also legitimately names "check" defeats every test here.
-    Confirmed defeating phrasing: "It accepts tools just like check
-    nodes do, plus frame_type / model / timeout_seconds." Do not
-    mistake a green run of this suite for a semantic verification of
-    the description's prose.
+    KNOWN ACCEPTED LIMITATIONS (deliberately not fixed):
+
+    1. Same-sentence smuggling (round 2 review finding): a false "tools"
+       claim riding alongside a legitimate mention of "check" in ONE
+       sentence defeats every test here. Confirmed defeating phrasing:
+       "It accepts tools just like check nodes do, plus frame_type /
+       model / timeout_seconds."
+
+    2. Unrelated-neighbor adjacency (round 3 review finding, a direct
+       side effect of the round-2 fix to hole #1's sibling problem): the
+       2-sentence window that admits honest sentence-splitting (see
+       test_every_tools_mention_is_check_scoped's own docstring) also
+       admits a false "tools" claim whose neighboring sentence mentions
+       "check" for an unrelated reason. Confirmed defeating reordering
+       of the description's own existing sentences: "...It accepts
+       tools, plus frame_type / model / timeout_seconds, just as a
+       subtask does. 'gate' currently auto-passes — it is a marker, not
+       an enforced quality check. Requires
+       NOUS_DAG_CALLBACK_EXECUTION_ENABLED=true; ..." — the false-claim
+       sentence has no "check" of its own; the next sentence's "check"
+       is about gate auto-pass, not tools-scoping, and the window can't
+       tell the two apart. Narrowing back to same-sentence would close
+       this but reopen hole #1 in its round-1 form (failing on honest
+       sentence-splitting) — deliberately not done; two known holes are
+       the accepted cost of a cheap, non-semantic guard.
+
+    Do not mistake a green run of this suite for a semantic verification
+    of the description's prose — both holes above are accepted limits,
+    not outstanding work.
     """
 
     def test_callback_semantics_are_described(self, tools):
