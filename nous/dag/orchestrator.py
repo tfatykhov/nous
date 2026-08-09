@@ -1714,7 +1714,13 @@ class DAGOrchestrator:
             # the cap. The conservative choice is to only ENFORCE the cap
             # for subtask nodes: check/gate/callback always launch (they
             # have no resource cost the cap is meant to bound).
-            if node.node_type not in _SUBTASK_BACKED:
+            # Deliberately NOT _SUBTASK_BACKED: this gate runs at DISPATCH
+            # time, before a subtask exists, so it has no subtask_id guard to
+            # make the callback case a no-op. Folding callbacks in here would
+            # cap-gate them even while they still complete instantly. F090.1
+            # ties this to dag_callback_execution_enabled instead, once
+            # callbacks actually consume a worker.
+            if node.node_type != "subtask":
                 await self._store.update_node(node.id, status="ready")
                 node.status = "ready"
                 try:
