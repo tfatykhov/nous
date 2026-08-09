@@ -98,6 +98,12 @@ _BUDGET_CANCEL_ERROR = "Token budget exceeded"
 # even though a cancelled worker's final usage was never flushed.
 _SETTLED_SUBTASK_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
+# How many consecutive ticks the reaper will defer when it cannot confirm that
+# cancellation took effect. Bounded so an orphaned row — whose worker died and
+# will therefore never settle — is still eventually reaped, rather than
+# re-creating the permanent 'running' wedge the reaper exists to prevent.
+_MAX_REAP_CANCEL_RETRIES = 5
+
 # Completion check polling
 _CHECK_CMD_TIMEOUT = 10.0  # Hard timeout per check command invocation
 
@@ -165,6 +171,11 @@ class DAGOrchestrator:
         self._delivery_lock = asyncio.Lock()
         # Strong reference to the detached sweep so it cannot be GC'd mid-flight.
         self._delivery_task: asyncio.Task | None = None
+        # Per-node count of reaps deferred because cancellation could not be
+        # confirmed. Bounded by _MAX_REAP_CANCEL_RETRIES; cleared whenever the
+        # node settles. In-memory only — a restart resets it, which is benign
+        # (the reap simply gets a fresh set of attempts).
+        self._reap_defer_counts: dict = {}
         # Audit DG-4 (review P2): in-memory per-node deferral counter so a node
         # that keeps hitting a saturated subtask/check pool can't bounce
         # ready<->pending forever invisibly (a perpetually-pending node never
@@ -513,6 +524,22 @@ class DAGOrchestrator:
                 "moment."
             )
 
+        # @codex P2 on f409568: reactivate FIRST, before touching any node.
+        # The node resets below commit one at a time, and the delivery sweep
+        # is detached — so with reactivation last there was a window where the
+        # sweep could select this DAG (still terminal, still the old
+        # generation, so the fence could not reject it) and eager-load nodes
+        # already half-reset, announcing an outcome representing neither
+        # attempt. Reactivating first makes the DAG non-terminal immediately,
+        # which removes it from the sweep's domain (get_undelivered_terminal_-
+        # dags filters on terminal status) and bumps the generation so any
+        # sweep already in flight is fenced out. Cheaper and lower-risk than
+        # threading every node reset through one transaction, and it closes
+        # the same window: the sweep can no longer observe the mutation at all.
+        if dag.status in ("failed", "partial"):
+            await self._store.reactivate_for_retry(dag_id)
+            dag.status = "running"
+
         await self._store.update_node(
             node.id,
             status="pending",  # was "ready" — _find_ready_nodes only checks "pending"
@@ -594,13 +621,10 @@ class DAGOrchestrator:
                     n.id, status="pending", error=None, tokens_counted=False
                 )
 
-        # Reactivate DAG if it was marked failed.
-        # Status and delivery state are ONE transition (@codex P2 on 9ca8fcd):
-        # a crash between a committed 'running' and a separate delivery reset
-        # leaves a live DAG carrying a stale delivered_at, which finishes
-        # normally and is then silently never announced.
-        if dag.status in ("failed", "partial"):
-            await self._store.reactivate_for_retry(dag_id)
+        # Reactivation already happened at the TOP of this method (@codex P2 on
+        # f409568) so the detached delivery sweep could never observe the
+        # half-mutated node set. Status and delivery state remain one atomic
+        # transition inside reactivate_for_retry (@codex P2 on 9ca8fcd).
 
     # ------------------------------------------------------------------
     # Internal: DAG advancement
@@ -1372,8 +1396,41 @@ class DAGOrchestrator:
                         "of the wall-clock error",
                         node.name, settled.status,
                     )
+                    self._reap_defer_counts.pop(node.id, None)
                     await self._sync_subtask_node(node, dag)
                     continue
+
+                # @codex P2 on f409568: `_cancel_node` swallows its errors, so
+                # a confirmation read of 'running'/'pending' means cancellation
+                # did NOT take. Marking the node failed here would abandon a
+                # worker that is still executing, and terminal nodes are never
+                # re-synced, so its eventual result would be discarded.
+                #
+                # Bounded, because unbounded deferral would re-create the wedge
+                # the reaper exists to prevent: an orphaned row whose worker
+                # died stays 'running' forever and would never be reaped. After
+                # the cap we fail it anyway, saying so explicitly rather than
+                # claiming a clean timeout.
+                if settled is not None and settled.status in ("running", "pending"):
+                    tries = self._reap_defer_counts.get(node.id, 0) + 1
+                    self._reap_defer_counts[node.id] = tries
+                    if tries < _MAX_REAP_CANCEL_RETRIES:
+                        logger.warning(
+                            "F087: cancellation of node %s did not take (still "
+                            "%s) — deferring the reap (%d/%d) rather than "
+                            "abandoning a live worker",
+                            node.name, settled.status, tries,
+                            _MAX_REAP_CANCEL_RETRIES,
+                        )
+                        continue
+                    self._reap_defer_counts.pop(node.id, None)
+                    error_msg = (
+                        f"{error_msg}; cancellation could not be confirmed "
+                        f"after {tries} attempts (subtask still "
+                        f"'{settled.status}' — it may still be running)"
+                    )
+                else:
+                    self._reap_defer_counts.pop(node.id, None)
 
             await self._store.update_node(
                 node.id,

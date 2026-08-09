@@ -90,6 +90,33 @@ def _subtask_dag(name: str = "reaper-dag") -> DAGCreateRequest:
     )
 
 
+def _cancel_takes_effect(mgr, subtask_id, exec_started=None):
+    """Wire subtask_mgr so cancellation actually flips the row terminal.
+
+    Production `SubtaskManager.cancel()` moves a running row to 'cancelled',
+    so the reaper's post-cancel confirmation read sees 'cancelled'. A mock
+    whose status never changes is describing a world where cancel silently
+    failed — which the reaper now (correctly) refuses to treat as a clean
+    reap, so these tests must model the real transition.
+    """
+    state = {"status": "running"}
+
+    async def _get(_sid):
+        return SimpleNamespace(
+            id=subtask_id, status=state["status"], result=None, error=None,
+            final_outcome=None, tokens_in=0, tokens_out=0,
+            started_at=exec_started,
+        )
+
+    async def _cancel(_sid):
+        state["status"] = "cancelled"
+        return True
+
+    mgr.get = AsyncMock(side_effect=_get)
+    mgr.cancel = AsyncMock(side_effect=_cancel)
+    return mgr
+
+
 async def _running_node_started_at(store: DAGStore, dag, when: datetime):
     """Put the DAG's single node into 'running' with a chosen start time.
 
@@ -125,10 +152,7 @@ class TestNodeReaper:
             store, dag, datetime.now(UTC) - timedelta(seconds=500)
         )
         # Subtask still claims to be running — nobody is coming for it.
-        subtask_mgr.get.return_value = SimpleNamespace(
-            id=node.subtask_id, status="running", result=None, error=None,
-            final_outcome=None, tokens_in=0, tokens_out=0,
-        )
+        _cancel_takes_effect(subtask_mgr, node.subtask_id)
 
         await _orch(store, subtask_mgr, dynamic_loader).tick()
 
@@ -232,10 +256,7 @@ class TestNodeReaper:
         node = await _running_node_started_at(
             store, dag, datetime.now(UTC) - timedelta(seconds=5000)
         )
-        subtask_mgr.get.return_value = SimpleNamespace(
-            id=node.subtask_id, status="running", result=None, error=None,
-            final_outcome=None, tokens_in=0, tokens_out=0,
-        )
+        _cancel_takes_effect(subtask_mgr, node.subtask_id)
         assert await store.count_active() == 1
 
         await _orch(store, subtask_mgr, dynamic_loader).tick()
@@ -1169,10 +1190,9 @@ class TestRoundElevenGuards:
         node = await _running_node_started_at(
             store, dag, datetime.now(UTC) - timedelta(seconds=5000)
         )
-        subtask_mgr.get.return_value = SimpleNamespace(
-            id=node.subtask_id, status="running", result=None, error=None,
-            final_outcome=None, tokens_in=0, tokens_out=0,
-            started_at=datetime.now(UTC) - timedelta(seconds=900),
+        _cancel_takes_effect(
+            subtask_mgr, node.subtask_id,
+            exec_started=datetime.now(UTC) - timedelta(seconds=900),
         )
 
         await _orch(store, subtask_mgr, dynamic_loader).tick()
@@ -1322,3 +1342,61 @@ class TestRoundElevenGuards:
         still = (await store.get_dag(dag.id)).nodes[0]
         assert still.status == "running"
         assert still.error is None
+
+    @pytest.mark.asyncio
+    async def test_reaper_defers_while_cancellation_has_not_taken(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex round 19: _cancel_node swallows its errors, so a confirmation
+        read of 'running' means cancellation did NOT take. Failing the node
+        there abandons a live worker whose result is then discarded, since
+        terminal nodes are never re-synced."""
+        dag = await store.create(_subtask_dag("cancel-didnt-take"))
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        node = await _running_node_started_at(
+            store, dag, datetime.now(UTC) - timedelta(seconds=5000)
+        )
+        long_ago = datetime.now(UTC) - timedelta(seconds=5000)
+        # Cancellation never takes: the row stays 'running' throughout.
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=node.subtask_id, status="running", result=None, error=None,
+            final_outcome=None, tokens_in=0, tokens_out=0,
+            started_at=long_ago,
+        )
+        subtask_mgr.cancel.side_effect = RuntimeError("cancel failed")
+        orch = _orch(store, subtask_mgr, dynamic_loader)
+
+        await orch.tick()
+        assert (await store.get_dag(dag.id)).nodes[0].status == "running"
+
+    @pytest.mark.asyncio
+    async def test_reaper_deferral_is_bounded_so_orphans_still_die(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """Unbounded deferral would re-create the wedge the reaper exists to
+        prevent: an orphaned row whose worker died never settles."""
+        dag = await store.create(_subtask_dag("orphan-eventually-reaped"))
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        node = await _running_node_started_at(
+            store, dag, datetime.now(UTC) - timedelta(seconds=5000)
+        )
+        long_ago = datetime.now(UTC) - timedelta(seconds=5000)
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=node.subtask_id, status="running", result=None, error=None,
+            final_outcome=None, tokens_in=0, tokens_out=0,
+            started_at=long_ago,
+        )
+        subtask_mgr.cancel.side_effect = RuntimeError("cancel failed")
+        orch = _orch(store, subtask_mgr, dynamic_loader)
+
+        for _ in range(6):
+            await orch.tick()
+            await store.update_dag_status(dag.id, "running")
+
+        reaped = (await store.get_dag(dag.id)).nodes[0]
+        assert reaped.status == "failed"
+        # The error is honest about what could not be confirmed.
+        assert "cancellation could not be confirmed" in reaped.error
+        assert "may still be running" in reaped.error
