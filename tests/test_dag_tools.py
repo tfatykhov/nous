@@ -351,3 +351,52 @@ class TestDagToolRegistration:
         """Both tools have schemas registered."""
         assert "dag_create" in tools._schemas
         assert "dag_manage" in tools._schemas
+
+
+# ------------------------------------------------------------------
+# Callback documentation (F090 phase 1 task 3)
+# ------------------------------------------------------------------
+
+
+class TestCallbackDocumented:
+    """The tool schema is the only place an authoring LLM reads before
+    building a DAG, so its callback description must be true. It must
+    describe predecessor context-flow and the feature flag, and it must
+    NOT claim callbacks receive 'tools' — that field is honored only for
+    'check' nodes and is silently dropped for every other node type
+    (subtask, callback, gate, fix). See orchestrator.py's
+    _launch_check_node (the sole node.tools forwarding site) and
+    SubtaskManager.create, which has no tools parameter.
+    """
+
+    def test_callback_semantics_are_described(self, tools):
+        schema = tools._schemas["dag_create"]
+        node_props = schema["properties"]["nodes"]["items"]["properties"]
+        assert "callback" in node_props["type"]["enum"]
+        blob = str(schema)
+        assert "predecessor" in blob.lower()
+        assert "NOUS_DAG_CALLBACK_EXECUTION_ENABLED" in blob
+
+    def test_callback_description_does_not_claim_tools(self, tools):
+        """The description must not tell the LLM that callbacks accept
+        'tools' like a subtask — SubtaskManager.create has no tools
+        parameter, so a callback author relying on that claim would be
+        misled. The original brief said 'the same tools / frame_type /
+        model / timeout_seconds as a subtask'; that phrasing must be gone."""
+        schema = tools._schemas["dag_create"]
+        type_description = schema["properties"]["nodes"]["items"]["properties"]["type"]["description"]
+        assert "tools / frame_type" not in type_description
+        assert "the same tools" not in type_description.lower()
+        # The shared-fields list itself must still be present, minus tools.
+        assert "frame_type / model / timeout_seconds" in type_description
+
+    def test_tools_field_scoped_to_check_nodes(self, tools):
+        """The description must state that 'tools' is honored only for
+        'check' nodes — not that it's "never forwarded" (that overstates
+        it; check nodes do get it)."""
+        schema = tools._schemas["dag_create"]
+        type_description = schema["properties"]["nodes"]["items"]["properties"]["type"]["description"]
+        lowered = type_description.lower()
+        assert "'tools'" in lowered or '"tools"' in lowered
+        assert "only" in lowered and "check" in lowered
+        assert "never forwarded" not in lowered

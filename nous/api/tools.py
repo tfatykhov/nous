@@ -3908,7 +3908,23 @@ def register_dag_tools(
                         # recovery nodes are authorable. Phase 1 ships
                         # rule-based dispatch; Phase 1.5 (NOUS_DAG_FIX_LLM_
                         # DISPATCH_ENABLED) routes to Haiku tool-use.
-                        "type": {"type": "string", "enum": ["subtask", "check", "gate", "callback", "fix"]},
+                        "type": {
+                            "type": "string",
+                            "enum": ["subtask", "check", "gate", "callback", "fix"],
+                            "description": (
+                                "'callback' runs AFTER its predecessors and receives "
+                                "their results as context — use it to interpret or act "
+                                "on what earlier nodes produced (point a context_flow "
+                                "edge at it). It accepts frame_type / model / "
+                                "timeout_seconds like a subtask. Requires "
+                                "NOUS_DAG_CALLBACK_EXECUTION_ENABLED=true; with the flag "
+                                "off a callback completes instantly without running. "
+                                "'gate' currently auto-passes — it is a marker, not an "
+                                "enforced quality check. Note: 'tools' below is honored "
+                                "ONLY for 'check' nodes — on every other node type "
+                                "(subtask, callback, gate, fix) it is silently ignored."
+                            ),
+                        },
                         "instructions": {"type": "string"},
                         "tools": {"type": "array", "items": {"type": "string"}},
                         "frame_type": {"type": "string"},
