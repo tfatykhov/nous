@@ -98,6 +98,14 @@ _BUDGET_CANCEL_ERROR = "Token budget exceeded"
 # even though a cancelled worker's final usage was never flushed.
 _SETTLED_SUBTASK_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
+# Node types whose work executes as a heart.subtasks row, and which therefore
+# carry a subtask_id. Every F087 backstop — wall-clock reaper, token roll-up,
+# status sync, cancellation confirmation — keys off this set rather than the
+# literal "subtask", because F087's review repeatedly found one site fixed and
+# a sibling missed. Adding a subtask-backed node type must mean editing this
+# line and nothing else.
+_SUBTASK_BACKED = frozenset({"subtask", "callback"})
+
 # How many consecutive ticks the reaper will defer when it cannot confirm that
 # cancellation took effect. Bounded so an orphaned row — whose worker died and
 # will therefore never settle — is still eventually reaped, rather than
@@ -715,7 +723,7 @@ class DAGOrchestrator:
             if node.status != "running":
                 continue
 
-            if node.node_type == "subtask" and node.subtask_id:
+            if node.node_type in _SUBTASK_BACKED and node.subtask_id:
                 await self._sync_subtask_node(node, dag)
             elif node.node_type == "check" and node.check_name:
                 await self._sync_check_node(node)
@@ -800,8 +808,8 @@ class DAGOrchestrator:
         for node in dag.nodes:
             if node.status not in _TERMINAL or node.tokens_counted:
                 continue
-            if node.node_type != "subtask" or not node.subtask_id:
-                continue  # gate/callback/fix nodes never consume tokens
+            if node.node_type not in _SUBTASK_BACKED or not node.subtask_id:
+                continue  # gate/fix nodes never consume tokens
             try:
                 subtask = await self._subtask_mgr.get(node.subtask_id)
             except Exception:
@@ -1313,7 +1321,7 @@ class DAGOrchestrator:
             # node.started_at still holds the dispatch time, so the very next
             # tick reaped work that had just begun. Measure from the execution
             # clock instead of adding another status guard.
-            if node.node_type == "subtask" and node.subtask_id and self._subtask_mgr:
+            if node.node_type in _SUBTASK_BACKED and node.subtask_id and self._subtask_mgr:
                 try:
                     subtask = await self._subtask_mgr.get(node.subtask_id)
                 except Exception:
@@ -1382,7 +1390,7 @@ class DAGOrchestrator:
             # matters is WHO ended it: a row that reached completed/failed on
             # its own carries the truth, whereas 'cancelled' is the reaper's own
             # doing and the wall-clock error is the honest description there.
-            if node.node_type == "subtask" and node.subtask_id and self._subtask_mgr:
+            if node.node_type in _SUBTASK_BACKED and node.subtask_id and self._subtask_mgr:
                 try:
                     settled = await self._subtask_mgr.get(node.subtask_id)
                 except Exception:
@@ -1706,7 +1714,7 @@ class DAGOrchestrator:
             # the cap. The conservative choice is to only ENFORCE the cap
             # for subtask nodes: check/gate/callback always launch (they
             # have no resource cost the cap is meant to bound).
-            if node.node_type != "subtask":
+            if node.node_type not in _SUBTASK_BACKED:
                 await self._store.update_node(node.id, status="ready")
                 node.status = "ready"
                 try:
@@ -2067,7 +2075,7 @@ class DAGOrchestrator:
         """Create the underlying primitive and set node to running."""
         node_type = node.node_type
 
-        if node_type == "subtask":
+        if node_type in _SUBTASK_BACKED:
             await self._launch_subtask_node(node, dag)
         elif node_type == "check":
             await self._launch_check_node(node, dag)
@@ -2077,16 +2085,6 @@ class DAGOrchestrator:
                 node.id,
                 status="completed",
                 result="Gate auto-passed (Phase 1)",
-                started_at=datetime.now(UTC),
-                completed_at=datetime.now(UTC),
-            )
-            node.status = "completed"
-        elif node_type == "callback":
-            # Mark completed with instructions as result
-            await self._store.update_node(
-                node.id,
-                status="completed",
-                result=node.instructions or "Callback completed",
                 started_at=datetime.now(UTC),
                 completed_at=datetime.now(UTC),
             )
@@ -2235,7 +2233,7 @@ class DAGOrchestrator:
 
     async def _cancel_node(self, node: DAGNode) -> None:
         """Cancel the underlying primitive for a node."""
-        if node.node_type == "subtask" and node.subtask_id and self._subtask_mgr:
+        if node.node_type in _SUBTASK_BACKED and node.subtask_id and self._subtask_mgr:
             try:
                 subtask = await self._subtask_mgr.get(node.subtask_id)
                 if subtask and subtask.status in ("pending", "running"):
