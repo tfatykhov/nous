@@ -524,41 +524,40 @@ class DAGOrchestrator:
                 "moment."
             )
 
-        # @codex P2 on f409568: reactivate FIRST, before touching any node.
-        # The node resets below commit one at a time, and the delivery sweep
-        # is detached — so with reactivation last there was a window where the
-        # sweep could select this DAG (still terminal, still the old
-        # generation, so the fence could not reject it) and eager-load nodes
-        # already half-reset, announcing an outcome representing neither
-        # attempt. Reactivating first makes the DAG non-terminal immediately,
-        # which removes it from the sweep's domain (get_undelivered_terminal_-
-        # dags filters on terminal status) and bumps the generation so any
-        # sweep already in flight is fenced out. Cheaper and lower-risk than
-        # threading every node reset through one transaction, and it closes
-        # the same window: the sweep can no longer observe the mutation at all.
-        if dag.status in ("failed", "partial"):
-            await self._store.reactivate_for_retry(dag_id)
-            dag.status = "running"
-
-        await self._store.update_node(
-            node.id,
-            status="pending",  # was "ready" — _find_ready_nodes only checks "pending"
-            error=None,
-            result=None,
-            subtask_id=None,
-            check_name=None,
-            started_at=None,
-            completed_at=None,
-            check_attempts=0,
-            last_check_at=None,
-            awaiting_check_at=None,
-            # @codex P2 on b3c78c3: the token claim is PER ATTEMPT. Leaving it
-            # set means the replacement subtask's terminal sync loses the
-            # claim race against its own predecessor and silently adds none of
-            # the retry's usage — permanently under-reporting tokens_consumed
-            # and letting later waves run past an enforced budget.
-            tokens_counted=False,
-        )
+        # @codex P2 on a616310: EVERY mutation below is collected and applied
+        # in one transaction at the end. My previous attempt merely reordered
+        # reactivation to the front, and codex was right that this only moved
+        # the window: reactivation-last let the detached sweep announce an
+        # outcome built from half-reset nodes, while reactivation-first let an
+        # ordinary tick load a *running* DAG whose nodes were all still
+        # terminal, re-finalize it via _check_dag_completion, and strand a
+        # pending node inside a terminal DAG. The invalid state is the split
+        # itself, so no ordering fixes it — only atomicity does.
+        node_updates: list[tuple[UUID, dict]] = [
+            (
+                node.id,
+                {
+                    # was "ready" — _find_ready_nodes only checks "pending"
+                    "status": "pending",
+                    "error": None,
+                    "result": None,
+                    "subtask_id": None,
+                    "check_name": None,
+                    "started_at": None,
+                    "completed_at": None,
+                    "check_attempts": 0,
+                    "last_check_at": None,
+                    "awaiting_check_at": None,
+                    # @codex P2 on b3c78c3: the token claim is PER ATTEMPT.
+                    # Leaving it set means the replacement subtask's terminal
+                    # sync loses the claim race against its own predecessor and
+                    # silently adds none of the retry's usage — permanently
+                    # under-reporting tokens_consumed and letting later waves
+                    # run past an enforced budget.
+                    "tokens_counted": False,
+                },
+            )
+        ]
 
         # Selectively unblock only nodes downstream of the retried node
         # that have no other failed predecessors
@@ -617,14 +616,19 @@ class DAGOrchestrator:
                         "total, but stranding the node would be worse",
                         n.name,
                     )
-                await self._store.update_node(
-                    n.id, status="pending", error=None, tokens_counted=False
+                node_updates.append(
+                    (n.id, {"status": "pending", "error": None,
+                            "tokens_counted": False})
                 )
 
-        # Reactivation already happened at the TOP of this method (@codex P2 on
-        # f409568) so the detached delivery sweep could never observe the
-        # half-mutated node set. Status and delivery state remain one atomic
-        # transition inside reactivate_for_retry (@codex P2 on 9ca8fcd).
+        # One transaction: every node reset plus the status/generation/delivery
+        # transition. No observer — tick loop or detached sweep — can see a DAG
+        # whose status and node set disagree.
+        await self._store.apply_retry(
+            dag_id,
+            node_updates,
+            reactivate=dag.status in ("failed", "partial"),
+        )
 
     # ------------------------------------------------------------------
     # Internal: DAG advancement
@@ -1270,6 +1274,15 @@ class DAGOrchestrator:
         grace = self._settings.dag_node_timeout_grace_seconds
         for node in dag.nodes:
             if node.status != "running":
+                # @codex P2 on a616310: clear the cancel-confirmation counter
+                # for any node that is no longer running. Without this, a node
+                # that settled normally (via _sync_subtask_node) after a failed
+                # cancellation kept its count, and a LATER retry — which reuses
+                # the same node id — inherited it, hitting the cap early and
+                # abandoning a live replacement worker. Covers both settling
+                # and being reset to 'pending' by a retry, since the reaper
+                # runs before dispatch in the tick.
+                self._reap_defer_counts.pop(node.id, None)
                 continue
             started = node.started_at
             if started is None:
@@ -1428,6 +1441,35 @@ class DAGOrchestrator:
                         f"{error_msg}; cancellation could not be confirmed "
                         f"after {tries} attempts (subtask still "
                         f"'{settled.status}' — it may still be running)"
+                    )
+                else:
+                    self._reap_defer_counts.pop(node.id, None)
+
+            # @codex P2 on a616310: the confirmation above was subtask-only.
+            # For a check node, `_cancel_node` calls manage_check(disable) and
+            # swallows any error — so a transient failure left the dynamic
+            # check enabled and registered while the DAG node was marked
+            # failed, and terminal nodes are never re-synced, so the check kept
+            # running indefinitely. Same bounded deferral, same reasoning.
+            elif node.node_type == "check" and node.check_name and self._dynamic_loader:
+                registry = getattr(self._dynamic_loader, "_registry", None)
+                still = registry.get_check(node.check_name) if registry else None
+                if still is not None and getattr(still, "active", False):
+                    tries = self._reap_defer_counts.get(node.id, 0) + 1
+                    self._reap_defer_counts[node.id] = tries
+                    if tries < _MAX_REAP_CANCEL_RETRIES:
+                        logger.warning(
+                            "F087: check '%s' for node %s is still active after "
+                            "disable — deferring the reap (%d/%d) rather than "
+                            "leaving it running untracked",
+                            node.check_name, node.name, tries,
+                            _MAX_REAP_CANCEL_RETRIES,
+                        )
+                        continue
+                    self._reap_defer_counts.pop(node.id, None)
+                    error_msg = (
+                        f"{error_msg}; the dynamic check could not be disabled "
+                        f"after {tries} attempts (it may still be running)"
                     )
                 else:
                     self._reap_defer_counts.pop(node.id, None)

@@ -1400,3 +1400,72 @@ class TestRoundElevenGuards:
         # The error is honest about what could not be confirmed.
         assert "cancellation could not be confirmed" in reaped.error
         assert "may still be running" in reaped.error
+
+    @pytest.mark.asyncio
+    async def test_retry_is_atomic_no_half_mutated_state_is_observable(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex round 20: reordering only MOVED the window — reactivation
+        last let the sweep announce half-reset nodes; reactivation first let a
+        tick load a running DAG whose nodes were all still terminal, re-finalize
+        it, and strand a pending node in a terminal DAG. The split itself is
+        the invalid state, so it must be one transaction."""
+        request = DAGCreateRequest(
+            name="atomic-retry",
+            nodes=[
+                DAGNodeSpec(name="a", type=DAGNodeType.subtask,
+                            instructions="a", timeout_seconds=120),
+                DAGNodeSpec(name="b", type=DAGNodeType.subtask,
+                            instructions="b", timeout_seconds=120),
+            ],
+            edges=[DAGEdgeSpec(from_node="a", to_node="b")],
+        )
+        dag = await store.create(request)
+        await store.update_dag_status(dag.id, "failed", result_summary="v1")
+        dag = await store.get_dag(dag.id)
+        a = next(n for n in dag.nodes if n.name == "a")
+        b = next(n for n in dag.nodes if n.name == "b")
+        await store.update_node(a.id, status="failed", error="boom")
+        await store.update_node(b.id, status="blocked", error="Predecessor failed")
+
+        await _orch(store, subtask_mgr, dynamic_loader).retry_node(dag.id, "a")
+
+        fetched = await store.get_dag(dag.id)
+        # Status and node set agree: running DAG, both nodes re-queued.
+        assert fetched.status == "running"
+        assert {n.status for n in fetched.nodes} == {"pending"}
+        # And the delivery state was reset in the SAME transition.
+        assert fetched.delivered_at is None
+        assert fetched.delivery_generation == 1
+
+    @pytest.mark.asyncio
+    async def test_reaper_defers_when_a_check_cannot_be_disabled(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex round 20: the cancellation confirmation was subtask-only, so
+        a check node whose disable failed was marked failed while the dynamic
+        check kept running untracked."""
+        dag = await store.create(
+            DAGCreateRequest(
+                name="check-cancel-fails",
+                nodes=[
+                    DAGNodeSpec(name="watcher", type=DAGNodeType.check,
+                                instructions="watch", timeout_seconds=120),
+                ],
+            )
+        )
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        await store.update_node(
+            dag.nodes[0].id, status="running", check_name="dag-x-watcher",
+            started_at=datetime.now(UTC) - timedelta(seconds=5000),
+        )
+        # Disable fails, and the registry keeps reporting the check as active.
+        dynamic_loader.manage_check.side_effect = RuntimeError("db down")
+        dynamic_loader._registry.get_check.return_value = SimpleNamespace(
+            active=True
+        )
+
+        await _orch(store, subtask_mgr, dynamic_loader).tick()
+
+        assert (await store.get_dag(dag.id)).nodes[0].status == "running"

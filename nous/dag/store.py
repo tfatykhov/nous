@@ -6,7 +6,8 @@ import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select, true as sa_true, update
+from sqlalchemy import func, select, update
+from sqlalchemy import true as sa_true
 from sqlalchemy.orm import selectinload
 
 from nous.config import Settings
@@ -557,6 +558,59 @@ class DAGStore:
                 .where(ExecutionDAG.delivery_generation == generation)
                 .values(delivery_summary=summary)
             )
+            await session.commit()
+
+    async def apply_retry(
+        self,
+        dag_id: UUID,
+        node_updates: list[tuple[UUID, dict]],
+        reactivate: bool,
+    ) -> None:
+        """F087: apply every retry mutation AND the reactivation atomically.
+
+        @codex P2 on a616310. Doing these as separate commits leaves an
+        invalid state visible to the ordinary tick loop no matter which order
+        they run in, which is why the previous reorder did not fix it:
+
+        - resets first, reactivation last → the detached delivery sweep can
+          select a still-terminal DAG on the OLD generation (so the fence
+          cannot reject it) and announce an outcome built from half-reset
+          nodes.
+        - reactivation first, resets after → a tick loads a *running* DAG
+          whose nodes are all still terminal, `_check_dag_completion` marks it
+          failed again immediately, and the retry then strands a pending node
+          inside a terminal DAG.
+
+        There is no safe ordering because the invalid state is the split
+        itself. One transaction removes the window rather than moving it: no
+        observer ever sees a DAG whose status and node set disagree.
+        """
+        async with self._db.session() as session:
+            scoped = select(ExecutionDAG.id).where(
+                ExecutionDAG.agent_id == self._agent_id
+            )
+            for node_id, values in node_updates:
+                await session.execute(
+                    update(DAGNode)
+                    .where(DAGNode.id == node_id)
+                    .where(DAGNode.dag_id.in_(scoped))
+                    .values(**values)
+                )
+            if reactivate:
+                await session.execute(
+                    update(ExecutionDAG)
+                    .where(ExecutionDAG.id == dag_id)
+                    .where(ExecutionDAG.agent_id == self._agent_id)
+                    .values(
+                        status="running",
+                        started_at=datetime.now(UTC),
+                        delivered_at=None,
+                        delivery_attempts=0,
+                        delivery_error=None,
+                        delivery_summary=None,
+                        delivery_generation=ExecutionDAG.delivery_generation + 1,
+                    )
+                )
             await session.commit()
 
     async def reactivate_for_retry(self, dag_id: UUID) -> None:
