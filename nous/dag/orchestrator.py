@@ -23,13 +23,15 @@ single function, and each was discovered separately during review.
      - `retry_node` — the selectively-unblocked downstream nodes
      - `_try_fix_failed_nodes` — the fix-stage retry branch
 
-   When banking FAILS the response is per-path, because the cost of refusing
-   differs. The directly-retried node raises (the operator can just try
-   again). The fix stage defers before consuming an attempt (it re-fires on a
-   later tick). Downstream descendants proceed anyway with an ERROR log —
-   they have no automatic second chance, so refusing would strand a
-   recoverable node, trading a bookkeeping loss for an availability loss in a
-   change whose whole purpose is removing silent dead ends.
+   When banking FAILS, ONLY the operator-initiated `retry_node` refuses (it
+   raises, and the operator simply tries again). Every AUTOMATIC path —
+   downstream descendants and the fix stage — proceeds with an ERROR log.
+   Refusing on an automatic path trades a bookkeeping loss for a permanent
+   availability loss: a descendant would be stranded, and the fix stage would
+   defer every tick forever, leaving the parent 'failed' and the fix node
+   non-terminal so `_check_dag_completion` could never finalize the DAG. Both
+   are the exact failure class this change exists to remove, and both are
+   strictly worse than an under-counted token total.
 
 3. **Subtask settlement.** A node reaching a terminal status does NOT mean its
    subtask has. `cancel_dag`, failure propagation and the reaper all
@@ -1259,6 +1261,29 @@ class DAGOrchestrator:
                 node.name, dag.id, error_msg,
             )
             await self._cancel_node(node)
+
+            # @codex P2 on ac9da7f: the subtask can complete between the status
+            # read above and this cancel. SubtaskManager.cancel refuses to
+            # touch an already-terminal row, so in that window the work
+            # actually SUCCEEDED and its result is persisted — overwriting the
+            # node as failed would discard a real result and could fail the
+            # whole DAG on a technicality. Terminal nodes are no longer
+            # re-synced, so this is the last chance to notice. Re-read and
+            # hand it to the normal completion path instead.
+            if node.node_type == "subtask" and node.subtask_id and self._subtask_mgr:
+                try:
+                    settled = await self._subtask_mgr.get(node.subtask_id)
+                except Exception:
+                    settled = None
+                if settled is not None and settled.status == "completed":
+                    logger.info(
+                        "F087: node %s completed while being reaped — keeping "
+                        "its result instead of failing it",
+                        node.name,
+                    )
+                    await self._sync_subtask_node(node, dag)
+                    continue
+
             await self._store.update_node(
                 node.id,
                 status="failed",
@@ -1725,19 +1750,28 @@ class DAGOrchestrator:
                     continue
 
             # F087 (@codex P2 on 954ecce): if this fix is going to re-enqueue
-            # the parent, its previous attempt's tokens must be banked first —
-            # the reset clears the claim and the relaunch overwrites
-            # subtask_id, after which that usage is unreachable. Checked BEFORE
-            # the attempt bump below so a deferral costs nothing: the parent
-            # stays 'failed' and the fix re-fires on a later tick.
+            # the parent, bank its previous attempt's tokens first — the reset
+            # clears the claim and the relaunch overwrites subtask_id, after
+            # which that usage is unreachable.
+            #
+            # This path PROCEEDS on failure (ERROR log), unlike retry_node.
+            # An earlier version deferred instead, and CI caught the
+            # consequence: the fix stage is automatic and re-fires every tick,
+            # so a subtask that never settles deferred forever — the parent
+            # stayed 'failed', the fix node never reached terminal, and
+            # _check_dag_completion could never finalize the DAG. That is a
+            # permanent wedge, which is strictly worse than an under-counted
+            # token total, and it is the very failure class this change exists
+            # to remove. Only the operator-initiated retry_node refuses;
+            # automatic paths always make progress.
             if outcome.action in ("retry_as_is", "retry_with_amended_prompt"):
                 if not await self._account_before_retry(parent, dag):
-                    logger.warning(
-                        "F087: deferring fix retry for %s — could not bank the "
-                        "previous attempt's tokens (no attempt consumed)",
+                    logger.error(
+                        "F087: retrying %s WITHOUT banking its previous "
+                        "attempt's tokens — that usage is lost from the DAG "
+                        "total, but wedging the DAG would be worse",
                         parent.name,
                     )
-                    continue
 
             logger.info(
                 "F066.1: fix '%s' chose '%s' for parent '%s' — %s",

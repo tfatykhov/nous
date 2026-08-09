@@ -674,11 +674,18 @@ class TestRetryResetsPerAttemptState:
         assert fetched.nodes[0].subtask_id is not None
 
     @pytest.mark.asyncio
-    async def test_fix_stage_defers_without_consuming_an_attempt(
+    async def test_fix_stage_proceeds_when_banking_fails(
         self, store, subtask_mgr, dynamic_loader
     ):
-        """The deferral must be free — otherwise a transient DB blip would
-        silently burn the parent's only fix attempt."""
+        """The fix stage must NOT refuse when banking fails.
+
+        An earlier version deferred here, and CI caught the consequence: the
+        fix stage is automatic and re-fires every tick, so a subtask that
+        never settles deferred forever — parent stuck 'failed', fix node never
+        terminal, DAG never finalizable. A permanent wedge is strictly worse
+        than an under-counted token total, so automatic paths always make
+        progress and log the loss at ERROR. Only retry_node refuses.
+        """
         request = DAGCreateRequest(
             name="fix-defer-free",
             nodes=[
@@ -717,8 +724,11 @@ class TestRetryResetsPerAttemptState:
         fetched = await store.get_dag(dag.id)
         fix_node = next(n for n in fetched.nodes if n.name == "fix-work")
         parent = next(n for n in fetched.nodes if n.name == "work")
-        assert fix_node.fix_attempts_used == 0  # deferral was free
-        assert parent.status == "failed"        # nothing reset
+        # The DAG makes progress rather than wedging: the parent is re-queued
+        # and the fix node reaches terminal so completion can finalize.
+        assert parent.status == "pending"
+        assert fix_node.status == "completed"
+        assert fix_node.fix_attempts_used == 1
 
     @pytest.mark.asyncio
     async def test_retry_node_reopens_delivery(
@@ -1168,3 +1178,45 @@ class TestRoundElevenGuards:
         reaped = (await store.get_dag(dag.id)).nodes[0]
         assert reaped.status == "failed"
         assert "exceeded wall-clock budget" in reaped.error
+
+    @pytest.mark.asyncio
+    async def test_reaper_keeps_a_result_that_landed_during_cancellation(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """@codex round 13: the subtask can complete between the status read
+        and the cancel. cancel() refuses to touch a terminal row, so the work
+        succeeded — failing the node would discard a real result."""
+        dag = await store.create(_subtask_dag("raced-completion"))
+        await store.update_dag_status(dag.id, "running")
+        dag = await store.get_dag(dag.id)
+        node = await _running_node_started_at(
+            store, dag, datetime.now(UTC) - timedelta(seconds=5000)
+        )
+        long_ago = datetime.now(UTC) - timedelta(seconds=5000)
+        calls = {"n": 0}
+
+        async def _completes_during_cancel(_sid):
+            calls["n"] += 1
+            # First read (reaper's status check): still running and overrun.
+            if calls["n"] == 1:
+                return SimpleNamespace(
+                    id=node.subtask_id, status="running", result=None,
+                    error=None, final_outcome=None, tokens_in=0, tokens_out=0,
+                    started_at=long_ago,
+                )
+            # By the time we cancel, it had already finished successfully.
+            return SimpleNamespace(
+                id=node.subtask_id, status="completed", result="the answer",
+                error=None, final_outcome="completed",
+                tokens_in=10, tokens_out=5, started_at=long_ago,
+            )
+
+        subtask_mgr.get = AsyncMock(side_effect=_completes_during_cancel)
+
+        await _orch(store, subtask_mgr, dynamic_loader).tick()
+
+        fetched = await store.get_dag(dag.id)
+        kept = fetched.nodes[0]
+        assert kept.status == "completed"
+        assert kept.result == "the answer"
+        assert fetched.status == "completed"
