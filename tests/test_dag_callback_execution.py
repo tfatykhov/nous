@@ -140,9 +140,13 @@ class TestCallbackExecutes:
         assert handle.subtask_id is not None
 
     @pytest.mark.asyncio
-    async def test_callback_forwards_tools_and_timeout(
+    async def test_callback_forwards_timeout_and_dag_node_id(
         self, store, subtask_mgr, dynamic_loader
     ):
+        """NOT a claim that tools are forwarded — they aren't, for any
+        node type. SubtaskManager.create has no tools parameter at all;
+        DAGNodeSpec.tools is silently dropped for both subtask and callback
+        nodes today (pre-existing, out of scope for F090.1)."""
         dag = await store.create(_callback_after_work())
         await store.update_dag_status(dag.id, "running")
         dag = await store.get_dag(dag.id)
@@ -169,6 +173,9 @@ class TestCallbackExecutes:
         await store.update_dag_status(dag.id, "running")
         dag = await store.get_dag(dag.id)
         work = next(n for n in dag.nodes if n.name == "work")
+        handle_instructions = next(
+            n for n in dag.nodes if n.name == "handle"
+        ).instructions
         await store.update_node(work.id, status="completed", result="done")
 
         orch = _orch(store, subtask_mgr, dynamic_loader,
@@ -181,6 +188,14 @@ class TestCallbackExecutes:
         assert handle.status == "completed"
         assert handle.subtask_id is None
         assert subtask_mgr.create.await_count == 0
+        # These two are the fields whose drift would actually change the 83
+        # existing DAG shapes on deploy: result feeds downstream
+        # _build_predecessor_context calls, and started_at/completed_at are
+        # what a dashboard or a wall-clock check would key off of. Byte-for-
+        # byte match to the pre-F090 stub, not just "some completion".
+        assert handle.result == handle_instructions
+        assert handle.started_at is not None
+        assert handle.completed_at is not None
 
     @pytest.mark.asyncio
     async def test_executing_callback_inherits_the_wall_clock_reaper(
@@ -256,25 +271,56 @@ class TestCallbackCapExemption:
     ):
         """Same contract test_check_nodes_bypass_frame_cap_enforcement
         already pins in tests/test_dag_concurrency_caps.py — repeated here,
-        scoped to this module, as the flag-OFF half of the pair."""
+        scoped to this module, as the flag-OFF half of the pair.
+
+        Fix round 1: the original version of this test used two independent
+        ready nodes ("sub-1" + "cb-1") against an EMPTY running_by_frame seed
+        (0 running subtasks). `0 >= cap(1)` is false whether or not the
+        callback is exempt, so an accidentally cap-gated callback still
+        launched, still completed once its (mocked) subtask resolved, and
+        still produced identical `by_status`/`create.await_count` — the test
+        could not distinguish the correct predicate from its inversion (the
+        reviewer confirmed this by mutation). Fixed by pre-exhausting the cap
+        via a stubbed `count_running_subtasks_by_frame_type` BEFORE dispatch,
+        so an exempt callback (correct) completes while a cap-gated callback
+        (broken) would be deferred to "pending" instead — an observable
+        split. Verified against both the correct predicate and its inversion;
+        see task-2-report.md for the mutation-proof transcript.
+        """
         settings = _settings(
             dag_callback_execution_enabled=False,
             dag_frame_concurrency_enabled=True,
             dag_global_max_concurrent_by_frame={},
         )
         local_store = DAGStore(store._db, store._agent_id, settings)
-        dag = await local_store.create(_work_and_callback_same_frame("debug"))
+        dag = await local_store.create(DAGCreateRequest(
+            name="cap-exhausted-dag",
+            nodes=[
+                DAGNodeSpec(name="cb-1", type=DAGNodeType.callback,
+                            instructions="handle it", frame_type="debug"),
+            ],
+            max_concurrent_by_frame_type={"debug": 1},
+        ))
+        # Pre-exhaust the frame's only slot. Stubbed rather than seeded via a
+        # second real subtask row: the count query joins dag_nodes scoped to
+        # THIS dag_id (@codex P1 on aa3c739), so a genuinely independent
+        # "already running elsewhere" subtask isn't reachable without a
+        # second DAG — the stub is the direct, honest way to force the
+        # pre-dispatch state this test needs.
+        local_store.count_running_subtasks_by_frame_type = AsyncMock(
+            return_value={"debug": 1}
+        )
         orch = _orch(local_store, subtask_mgr, dynamic_loader, settings)
 
         await orch.start_dag(dag.id)
 
         fetched = await local_store.get_dag(dag.id)
-        by_status = {n.name: n.status for n in fetched.nodes}
-        # The subtask consumes the cap's only slot; the callback still
-        # completes instantly (exempt) rather than being deferred behind it.
-        assert by_status["sub-1"] == "running"
-        assert by_status["cb-1"] == "completed"
-        assert subtask_mgr.create.await_count == 1  # only "sub-1" launched
+        cb = next(n for n in fetched.nodes if n.name == "cb-1")
+        # Exempt (correct): completes instantly, cap never consulted for it.
+        # Cap-gated (broken): would be deferred to "pending" instead, since
+        # running_by_frame["debug"]=1 >= cap=1.
+        assert cb.status == "completed"
+        assert subtask_mgr.create.await_count == 0
 
     @pytest.mark.asyncio
     async def test_flag_on_callback_consumes_a_cap_slot(
@@ -282,11 +328,21 @@ class TestCallbackCapExemption:
     ):
         """With the flag on, 'cb-1' now launches a real subtask and must
         compete for the same frame's cap slot instead of running alongside
-        'sub-1' for free — mirrors
+        'sub-1' for free.
+
+        Asserted on status counts, not node identity, mirroring
         test_in_memory_accumulator_prevents_overdispatch_within_tick in
-        tests/test_dag_concurrency_caps.py, which is order-agnostic for the
-        same reason: dispatch order within a wave isn't a contract, only the
-        cap count is."""
+        tests/test_dag_concurrency_caps.py — NOT because dispatch order is
+        uncontracted (fix round 1 correction: it is. ExecutionDAG.nodes is
+        `order_by="DAGNode.wave, DAGNode.name"` — nous/storage/models.py:1075
+        — and both start_dag and _find_ready_nodes preserve that relationship
+        order, so within wave 0 "cb-1" deterministically dispatches before
+        "sub-1" and wins the single slot every time here). The status-count
+        assertion is used because this test's claim is "exactly one of the
+        two gets the slot, not both" — which node doesn't matter to that
+        claim. A test that instead wants to pin a *specific* winner should
+        name nodes so the intended winner sorts first and assert node
+        identity directly, not rely on order being unspecified."""
         settings = _settings(
             dag_callback_execution_enabled=True,
             dag_frame_concurrency_enabled=True,
