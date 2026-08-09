@@ -112,8 +112,7 @@ class TestCallbackExecutes:
         """The whole point: a callback must READ its predecessor and act.
 
         Before F090.1 this node completed instantly with its own instruction
-        text as the result — 103 callback nodes in the dev DB, all 'completed',
-        none having executed anything.
+        text as the result, without having executed anything.
         """
         dag = await store.create(_callback_after_work())
         await store.update_dag_status(dag.id, "running")
@@ -143,8 +142,8 @@ class TestCallbackExecutes:
     async def test_callback_forwards_timeout_and_dag_node_id(
         self, store, subtask_mgr, dynamic_loader
     ):
-        """NOT a claim that tools are forwarded — they aren't, for any
-        node type. SubtaskManager.create has no tools parameter at all;
+        """NOT a claim that tools are forwarded — they aren't, for subtask
+        or callback nodes. SubtaskManager.create has no tools parameter at all;
         DAGNodeSpec.tools is silently dropped for both subtask and callback
         nodes today (pre-existing, out of scope for F090.1)."""
         dag = await store.create(_callback_after_work())

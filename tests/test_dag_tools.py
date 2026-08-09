@@ -406,7 +406,7 @@ class TestCallbackDocumented:
        sentence has no "check" of its own; the next sentence's "check"
        is about gate auto-pass, not tools-scoping, and the window can't
        tell the two apart. Narrowing back to same-sentence would close
-       this but reopen hole #1 in its round-1 form (failing on honest
+       this but reopen the round-1 brittleness (failing on honest
        sentence-splitting) — deliberately not done; two known holes are
        the accepted cost of a cheap, non-semantic guard.
 

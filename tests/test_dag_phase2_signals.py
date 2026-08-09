@@ -207,6 +207,54 @@ class TestPhase2Signals:
         assert out["gate_nodes"] == 1
 
     @pytest.mark.asyncio
+    async def test_unexecuted_callback_siblings_are_excluded(self, db):
+        """Two never-executed callbacks (flag-OFF shape: subtask_id NULL,
+        near-identical instructions-as-result) must contribute ZERO sibling
+        pairs — they never ran, so any overlap is shared authoring
+        boilerplate, not duplicated work. The same pair WITH subtask_id set
+        (F090.1 actually dispatched them) DOES contribute, proving the
+        exclusion is scoped to `subtask_id IS NULL`, not to node_type alone.
+        """
+        agent_id = f"test-p2-{uuid.uuid4().hex[:8]}"
+        store = DAGStore(db, agent_id=agent_id, settings=Settings(_env_file=None))
+        text_a = "the build succeeded with zero errors and all tests passing"
+        text_b = "the build succeeded with zero errors and all tests green"
+        req = DAGCreateRequest(
+            name="unexecuted-callback-dag",
+            nodes=[
+                DAGNodeSpec(name="a", type=DAGNodeType.subtask, instructions="A"),
+                DAGNodeSpec(name="cb1", type=DAGNodeType.callback, instructions="CB1"),
+                DAGNodeSpec(name="cb2", type=DAGNodeType.callback, instructions="CB2"),
+            ],
+            edges=[
+                DAGEdgeSpec(from_node="a", to_node="cb1"),
+                DAGEdgeSpec(from_node="a", to_node="cb2"),
+            ],
+        )
+        dag = await store.create(req)
+        by_name = {n.name: n.id for n in dag.nodes}
+        # Flag-OFF shape: completed with instructions-as-result, subtask_id
+        # never set (mirrors orchestrator.py:2119-2126's instant-completion path).
+        await store.update_node(by_name["cb1"], status="completed", result=text_a)
+        await store.update_node(by_name["cb2"], status="completed", result=text_b)
+
+        async with db.session() as session:
+            out = await get_dag_phase2_signals(session, agent_id)
+
+        assert out["sibling_pairs"] == 0
+        assert out["overlapping_sibling_pairs"] == 0
+
+        # Same pair, now genuinely executed (subtask_id stamped) — must count.
+        await store.update_node(by_name["cb1"], subtask_id=uuid.uuid4())
+        await store.update_node(by_name["cb2"], subtask_id=uuid.uuid4())
+
+        async with db.session() as session:
+            out = await get_dag_phase2_signals(session, agent_id)
+
+        assert out["sibling_pairs"] == 1
+        assert out["overlapping_sibling_pairs"] == 1
+
+    @pytest.mark.asyncio
     async def test_agent_scoping(self, db):
         """Signals are scoped to the requesting agent — another agent's DAG rows never leak in."""
         agent_a = f"test-p2-a-{uuid.uuid4().hex[:8]}"

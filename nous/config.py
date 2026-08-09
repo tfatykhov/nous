@@ -1506,11 +1506,10 @@ class Settings(BaseSettings):
     )
 
     # F090.1: execute callback nodes instead of instantly completing them with
-    # their own instruction text. Default OFF — the dev DB holds 103 callback
-    # nodes across 83 DAGs, every one 'completed' having executed nothing, so
-    # flipping this on deploy would silently start charging an LLM turn (and
-    # adding wall-clock) to every one of those DAG shapes. Flip after reading
-    # the callback execution stats from the Phase-2 signals block.
+    # their own instruction text. Default OFF — this changes the behavior of
+    # an existing node type, so it lands dark and is flipped deliberately
+    # rather than on deploy. Flip after reading the callback execution stats
+    # from the Phase-2 signals block.
     dag_callback_execution_enabled: bool = False
 
     # F087: act on tokens_consumed, which only becomes non-zero once the

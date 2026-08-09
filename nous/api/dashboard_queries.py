@@ -1722,6 +1722,19 @@ async def get_dag_phase2_signals(
     means "no verbatim duplication detected", not "siblings don't duplicate
     work" — it is NOT by itself grounds to cancel Phase 2.
 
+    The sibling population excludes never-executed callback nodes (those
+    with `subtask_id IS NULL`) and every gate node. With
+    `NOUS_DAG_CALLBACK_EXECUTION_ENABLED` off (the default), a callback's
+    `result` is `node.instructions` verbatim (`orchestrator.py:2122`) —
+    author-written boilerplate from a node that executed nothing — and a
+    gate's `result` is always the same constant string. Left in, those rows
+    push the reading in the OPPOSITE direction from the floor caveat above:
+    two unexecuted callbacks with similarly-worded instructions read as
+    "siblings duplicated work" when neither one ran. Measured on the dev DB
+    before this filter: 40 of 40 nodes participating in any sibling pair
+    were callbacks, and zero subtask/check/gate/fix nodes participated at
+    all.
+
     Scans the agent's ENTIRE DAG history on every call, unlike the sibling
     `nodes_completed_24h` stat — deliberately unbounded, because a go/no-go
     read wants maximum evidence and the right moment to add a time window is
@@ -1746,6 +1759,8 @@ async def get_dag_phase2_signals(
             WHERE d.agent_id = :agent_id
               AND n.status = 'completed'
               AND n.result IS NOT NULL
+              AND (n.node_type <> 'callback' OR n.subtask_id IS NOT NULL)
+              AND n.node_type <> 'gate'
         """),
         {"agent_id": agent_id},
     )).all()

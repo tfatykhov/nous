@@ -3916,7 +3916,8 @@ def register_dag_tools(
             "You do NOT need to poll for the result: when the DAG reaches a terminal "
             "state its outcome is delivered to you automatically (F087), so create it "
             "and move on. Use dag_manage only when the user asks about progress "
-            "mid-flight, or to cancel or retry."
+            "mid-flight, to cancel or retry, or to look up a DAG whose delivery you "
+            "missed or that finished before this session (dag_manage action='recent')."
         ),
         "properties": {
             "name": {"type": "string", "description": "DAG name"},
@@ -4000,9 +4001,12 @@ def register_dag_tools(
         "type": "object",
         "description": (
             "List, inspect, cancel, or retry nodes in DAGs. Not needed to collect "
-            "results — a finished DAG announces itself. 'retry_node' re-queues a "
-            "failed node (and any descendants it alone blocked); it is refused on a "
-            "cancelled DAG, since cancellation is deliberate."
+            "results — a finished DAG announces itself; use 'recent' only as a "
+            "fallback when a delivery was missed or you want an older outcome. "
+            "'recent' lists finished DAGs (completed/failed/cancelled) — the only way "
+            "to find one you don't already have the id or id-prefix for. 'retry_node' "
+            "re-queues a failed node (and any descendants it alone blocked); it is "
+            "refused on a cancelled DAG, since cancellation is deliberate."
         ),
         "properties": {
             "action": {"type": "string", "enum": ["list", "recent", "status", "cancel", "retry_node"]},
