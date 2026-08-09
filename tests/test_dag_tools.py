@@ -371,13 +371,30 @@ class TestCallbackDocumented:
     Scope of this test class: these are anti-regression pins on two past
     wordings (verbatim reintroduction of the brief's false "tools /
     frame_type" phrase, and the "never forwarded" overstatement) plus one
-    structural oracle — every sentence in the description that mentions
-    "tools" must also mention "check" — which is a real invariant for
-    the specific claim that shipped false twice, not a blacklist of
-    yesterday's phrasing. This set does NOT verify the description's
-    prose is true in general; a paraphrase of some other, unrelated
-    inaccuracy would sail through untouched. Only a human or reviewer
-    reading the description against the code establishes that.
+    sentence-window heuristic — every sentence mentioning "tools" must
+    also mention "check" in that sentence or the one immediately
+    following. That heuristic is stronger than substring blacklisting
+    (round 1: it catches paraphrases, not just exact reuse of
+    yesterday's wording) but it is NOT an invariant and NOT exhaustive:
+    it has a demonstrated miss on same-sentence smuggling, where a false
+    claim rides alongside a legitimate mention of "check" in one
+    sentence — e.g. "It accepts tools just like check nodes do, plus
+    frame_type / model / timeout_seconds." passes every test in this
+    class despite falsely claiming callbacks get tools (round 2 review
+    finding). Closing that gap needs grammatical attribution — reading
+    WHO the "tools" claim is actually about — which is semantic
+    analysis, not string matching; a regex chasing it would fire on
+    honest prose and get deleted by the next author. This set does NOT
+    verify the description's prose is true in general; only a human or
+    reviewer reading it against the code establishes that.
+
+    KNOWN ACCEPTED LIMITATION (round 2, deliberately not fixed):
+    same-sentence smuggling of a false "tools" claim into a sentence
+    that also legitimately names "check" defeats every test here.
+    Confirmed defeating phrasing: "It accepts tools just like check
+    nodes do, plus frame_type / model / timeout_seconds." Do not
+    mistake a green run of this suite for a semantic verification of
+    the description's prose.
     """
 
     def test_callback_semantics_are_described(self, tools):
@@ -402,37 +419,63 @@ class TestCallbackDocumented:
         assert "frame_type / model / timeout_seconds" in type_description
 
     def test_tools_field_scoped_to_check_nodes(self, tools):
-        """The description must state that 'tools' is honored only for
-        'check' nodes — not that it's "never forwarded" (that overstates
-        it; check nodes do get it)."""
+        """The description must acknowledge 'tools' is check-scoped
+        without overstating it as "never forwarded" (check nodes DO get
+        it).
+
+        Round 2: dropped the literal-"only" requirement from round 1.
+        The reviewer's honest rewrite — "The 'tools' field is honored by
+        exactly one node type. That type is 'check'; every other node
+        type silently drops it." — says the same thing without the word
+        "only", and a test that fires on honest prose is one the next
+        author deletes rather than honors. What's left here is mostly
+        redundant with test_every_tools_mention_is_check_scoped below;
+        kept only for the "never forwarded" overstatement check, which
+        that structural test does not cover (a sentence can legitimately
+        pair "tools" with "check" while still overstating that tools is
+        NEVER forwarded, full stop)."""
         schema = tools._schemas["dag_create"]
         type_description = schema["properties"]["nodes"]["items"]["properties"]["type"]["description"]
         lowered = type_description.lower()
         assert "'tools'" in lowered or '"tools"' in lowered
-        assert "only" in lowered and "check" in lowered
+        assert "check" in lowered
         assert "never forwarded" not in lowered
 
     def test_every_tools_mention_is_check_scoped(self, tools):
-        """Structural oracle, not a substring blacklist: split the
-        description into sentences and assert every sentence that
-        mentions 'tools' also mentions 'check' in the same sentence.
+        """Sentence-window heuristic, not a substring blacklist: split
+        the description into sentences and assert every sentence that
+        mentions 'tools' also mentions 'check' — either in that same
+        sentence, or in the sentence immediately following it.
 
-        This is the invariant that actually matters — 'tools' is true
-        ONLY in the context of check nodes, everywhere else in the
-        description it must not appear. It catches paraphrases of the
-        false "callbacks get tools" claim that don't reuse any of the
-        exact substrings the other two tests blacklist — e.g. "It
-        accepts tools, plus frame_type / model / timeout_seconds, just
-        as a subtask does." mentions tools in a sentence with no
-        'check' in it, and fails here even though it reuses none of
-        yesterday's exact wording."""
+        Stronger than substring blacklisting (round 1): it catches
+        paraphrases of the false "callbacks get tools" claim that reuse
+        none of yesterday's exact wording, e.g. "It accepts tools, plus
+        frame_type / model / timeout_seconds, just as a subtask does."
+        fails here because 'check' appears in neither that sentence nor
+        the next.
+
+        Round 2 widened same-sentence to a 2-sentence window because the
+        strict same-sentence version fired on the reviewer's HONEST
+        two-sentence rewrite — "The 'tools' field is honored by exactly
+        one node type. That type is 'check'; every other node type
+        silently drops it." — which is true but splits the claim across
+        a sentence boundary. The window admits that rewrite while still
+        catching the original paraphrase above.
+
+        NOT exhaustive: same-sentence smuggling still defeats this (see
+        the class docstring's KNOWN ACCEPTED LIMITATION). This is a
+        heuristic, not a semantic truth check on the prose."""
         schema = tools._schemas["dag_create"]
         type_description = schema["properties"]["nodes"]["items"]["properties"]["type"]["description"]
         sentences = [s for s in type_description.split(".") if s.strip()]
         assert sentences, "description unexpectedly empty"
-        for sentence in sentences:
-            if "tools" in sentence.lower():
-                assert "check" in sentence.lower(), (
-                    "sentence mentions 'tools' without scoping it to "
-                    f"'check' nodes: {sentence.strip()!r}"
-                )
+        for i, sentence in enumerate(sentences):
+            if "tools" not in sentence.lower():
+                continue
+            window = sentence.lower()
+            if i + 1 < len(sentences):
+                window += " " + sentences[i + 1].lower()
+            assert "check" in window, (
+                "sentence mentions 'tools' without 'check' appearing in "
+                f"it or the following sentence: {sentence.strip()!r}"
+            )
