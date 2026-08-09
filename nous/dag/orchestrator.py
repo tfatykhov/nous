@@ -153,6 +153,16 @@ class DAGOrchestrator:
         self.clock_wired = False
         self.last_tick_at: datetime | None = None
         self._lock = asyncio.Lock()
+        # F087 (@codex P2 on 9c8cf74): the delivery sweep does slow EXTERNAL
+        # I/O — a Telegram round-trip, and up to
+        # dag_delivery_agent_summary_timeout_seconds per DAG for an authored
+        # summary, times dag_delivery_batch_size DAGs. It must not sit inside
+        # `_lock`, which exists to serialize fast state-machine work: holding
+        # that for minutes blocks start_dag(), so dag_create hangs after
+        # inserting its DAG, and stalls the whole tick loop. Deliveries still
+        # serialize against each other on their own lock so a DAG cannot be
+        # announced twice by overlapping sweeps.
+        self._delivery_lock = asyncio.Lock()
         # Audit DG-4 (review P2): in-memory per-node deferral counter so a node
         # that keeps hitting a saturated subtask/check pool can't bounce
         # ready<->pending forever invisibly (a perpetually-pending node never
@@ -206,16 +216,27 @@ class DAGOrchestrator:
                 except Exception:
                     logger.exception("Error advancing DAG %s", dag.id)
 
-            # F087: drain terminal-but-undelivered DAGs. Deliberately outside
-            # the per-DAG loop above, which only sees pending/running rows —
-            # a DAG that reached terminal on an earlier tick (or before a
-            # restart) is picked up here and nowhere else.
-            try:
-                await self._deliver_terminal_dags()
-            except Exception:
-                logger.exception("F087: DAG delivery sweep failed")
+        # F087: drain terminal-but-undelivered DAGs. Deliberately outside the
+        # per-DAG loop above, which only sees pending/running rows — a DAG that
+        # reached terminal on an earlier tick (or before a restart) is picked
+        # up here and nowhere else.
+        #
+        # Also deliberately OUTSIDE `_lock` (@codex P2 on 9c8cf74): this does
+        # slow external I/O, and holding the state-machine lock across it made
+        # dag_create hang and stalled the tick loop. `_delivery_lock` keeps
+        # sweeps from overlapping each other without blocking anything else;
+        # when one is still in flight the next tick simply skips it rather
+        # than queueing ticks behind a two-minute summary turn.
+        if self._delivery_lock.locked():
+            logger.debug("F087: delivery sweep already in flight — skipping")
+        else:
+            async with self._delivery_lock:
+                try:
+                    await self._deliver_terminal_dags()
+                except Exception:
+                    logger.exception("F087: DAG delivery sweep failed")
 
-            return len(dags)
+        return len(dags)
 
     # ------------------------------------------------------------------
     # F087: durable result delivery

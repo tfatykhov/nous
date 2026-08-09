@@ -689,3 +689,81 @@ class TestDeliverySweep:
         await orch.tick()
 
         assert delivery.deliver.await_count == 2
+
+
+class TestDeliveryDoesNotBlockTheStateMachine:
+    """@codex P2 round 14: the sweep does slow EXTERNAL I/O (a Telegram
+    round-trip, and up to 120s per authored summary x batch_size DAGs). Holding
+    the state-machine lock across that blocked start_dag — so dag_create hung
+    after inserting its DAG — and stalled the tick loop."""
+
+    @pytest.mark.asyncio
+    async def test_start_dag_proceeds_while_a_delivery_is_in_flight(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        await _finished_dag(store, "slow-delivery")
+        released = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def _slow_deliver(_d):
+            entered.set()
+            await released.wait()  # stands in for a 120s summary turn
+            return SimpleNamespace(
+                delivered=True, legs=(), summary="ok", summary_authored=False,
+            )
+
+        delivery = AsyncMock()
+        delivery.deliver.side_effect = _slow_deliver
+        orch = DAGOrchestrator(
+            store=store, subtask_mgr=subtask_mgr,
+            dynamic_loader=dynamic_loader, settings=_settings(),
+            delivery=delivery,
+        )
+        orch.clock_wired = True
+
+        tick_task = asyncio.create_task(orch.tick())
+        await asyncio.wait_for(entered.wait(), timeout=5)
+
+        # A brand-new DAG must still be able to start while that await hangs.
+        pending_dag = await store.create(_callback_dag("needs-to-start"))
+        await asyncio.wait_for(orch.start_dag(pending_dag.id), timeout=5)
+        assert (await store.get_dag(pending_dag.id)).status == "running"
+
+        released.set()
+        await asyncio.wait_for(tick_task, timeout=5)
+
+    @pytest.mark.asyncio
+    async def test_overlapping_sweeps_do_not_double_announce(
+        self, store, subtask_mgr, dynamic_loader
+    ):
+        """Moving the sweep off _lock must not let two ticks announce the same
+        DAG twice — deliveries still serialize on their own lock."""
+        await _finished_dag(store, "no-double-send")
+        released = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def _slow_deliver(_d):
+            entered.set()
+            await released.wait()
+            return SimpleNamespace(
+                delivered=True, legs=(), summary="ok", summary_authored=False,
+            )
+
+        delivery = AsyncMock()
+        delivery.deliver.side_effect = _slow_deliver
+        orch = DAGOrchestrator(
+            store=store, subtask_mgr=subtask_mgr,
+            dynamic_loader=dynamic_loader, settings=_settings(),
+            delivery=delivery,
+        )
+        orch.clock_wired = True
+
+        first = asyncio.create_task(orch.tick())
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        # A second tick lands while the first sweep is still awaiting.
+        await asyncio.wait_for(orch.tick(), timeout=5)
+
+        released.set()
+        await asyncio.wait_for(first, timeout=5)
+
+        assert delivery.deliver.await_count == 1
