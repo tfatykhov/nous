@@ -367,6 +367,17 @@ class TestCallbackDocumented:
     (subtask, callback, gate, fix). See orchestrator.py's
     _launch_check_node (the sole node.tools forwarding site) and
     SubtaskManager.create, which has no tools parameter.
+
+    Scope of this test class: these are anti-regression pins on two past
+    wordings (verbatim reintroduction of the brief's false "tools /
+    frame_type" phrase, and the "never forwarded" overstatement) plus one
+    structural oracle — every sentence in the description that mentions
+    "tools" must also mention "check" — which is a real invariant for
+    the specific claim that shipped false twice, not a blacklist of
+    yesterday's phrasing. This set does NOT verify the description's
+    prose is true in general; a paraphrase of some other, unrelated
+    inaccuracy would sail through untouched. Only a human or reviewer
+    reading the description against the code establishes that.
     """
 
     def test_callback_semantics_are_described(self, tools):
@@ -400,3 +411,28 @@ class TestCallbackDocumented:
         assert "'tools'" in lowered or '"tools"' in lowered
         assert "only" in lowered and "check" in lowered
         assert "never forwarded" not in lowered
+
+    def test_every_tools_mention_is_check_scoped(self, tools):
+        """Structural oracle, not a substring blacklist: split the
+        description into sentences and assert every sentence that
+        mentions 'tools' also mentions 'check' in the same sentence.
+
+        This is the invariant that actually matters — 'tools' is true
+        ONLY in the context of check nodes, everywhere else in the
+        description it must not appear. It catches paraphrases of the
+        false "callbacks get tools" claim that don't reuse any of the
+        exact substrings the other two tests blacklist — e.g. "It
+        accepts tools, plus frame_type / model / timeout_seconds, just
+        as a subtask does." mentions tools in a sentence with no
+        'check' in it, and fails here even though it reuses none of
+        yesterday's exact wording."""
+        schema = tools._schemas["dag_create"]
+        type_description = schema["properties"]["nodes"]["items"]["properties"]["type"]["description"]
+        sentences = [s for s in type_description.split(".") if s.strip()]
+        assert sentences, "description unexpectedly empty"
+        for sentence in sentences:
+            if "tools" in sentence.lower():
+                assert "check" in sentence.lower(), (
+                    "sentence mentions 'tools' without scoping it to "
+                    f"'check' nodes: {sentence.strip()!r}"
+                )
