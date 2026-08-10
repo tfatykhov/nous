@@ -1785,7 +1785,8 @@ async def get_dag_phase2_signals(
         text("""
             SELECT n.node_type,
                    count(*)                                        AS total,
-                   count(*) FILTER (WHERE s.started_at IS NOT NULL) AS executed
+                   count(*) FILTER (WHERE s.started_at IS NOT NULL) AS executed,
+                   count(*) FILTER (WHERE n.started_at IS NOT NULL) AS node_started
             FROM nous_system.dag_nodes n
             JOIN nous_system.execution_dags d ON d.id = n.dag_id
             LEFT JOIN heart.subtasks s ON s.id = n.subtask_id
@@ -1795,7 +1796,7 @@ async def get_dag_phase2_signals(
         """),
         {"agent_id": agent_id},
     )).all()
-    by_type = {r[0]: (r[1], r[2]) for r in counts}
+    by_type = {r[0]: (r[1], r[2], r[3]) for r in counts}
 
     return {
         "sibling_pairs": pairs,
@@ -1804,17 +1805,28 @@ async def get_dag_phase2_signals(
         # docstring above before reading a low value as "no duplication".
         "sibling_overlap_rate": round(overlapping / pairs, 4) if pairs else 0.0,
         "overlap_threshold": _SIBLING_OVERLAP_THRESHOLD,
-        "callback_nodes": by_type.get("callback", (0, 0))[0],
+        "callback_nodes": by_type.get("callback", (0, 0, 0))[0],
         # codex P2: `subtask_id` is stamped the instant `_launch_subtask_node`
         # calls `SubtaskManager.create()`, which inserts a PENDING row —
         # `IS NOT NULL` alone was true before a worker ever touched it.
         # `dequeue()` (heart/subtasks.py) is what sets `started_at`, so the
-        # LEFT JOIN + `started_at IS NOT NULL` requires the subtask to have
-        # actually been picked up. LEFT JOIN (not INNER) so `total` above
-        # stays a count of every callback/gate node regardless of whether
-        # its subtask row still exists.
-        "callback_executed": by_type.get("callback", (0, 0))[1],
-        "gate_nodes": by_type.get("gate", (0, 0))[0],
+        # LEFT JOIN + `s.started_at IS NOT NULL` requires the subtask to
+        # have actually been picked up. LEFT JOIN (not INNER) so `total`
+        # above stays a count of every callback/gate node regardless of
+        # whether its subtask row still exists.
+        "callback_executed": by_type.get("callback", (0, 0, 0))[1],
+        "gate_nodes": by_type.get("gate", (0, 0, 0))[0],
+        # codex P2 (FINDING 6): same question as callback_executed --
+        # "did this node actually run, not just get authored?" -- but a
+        # DIFFERENT evidence source. A gate auto-passes IN-PROCESS
+        # (orchestrator.py:2097-2106) and stamps `started_at` on the NODE
+        # itself; it never creates a subtask, so `s.started_at` is always
+        # NULL for a gate row and can't be reused here. Deliberately NOT
+        # `n.started_at` for callbacks: that column is stamped at
+        # launch/queue time (`_launch_subtask_node`, alongside `subtask_id`),
+        # before a worker ever dequeues it -- using it there would
+        # reintroduce the exact bug `callback_executed` was fixed for.
+        "gate_executed": by_type.get("gate", (0, 0, 0))[2],
     }
 
 

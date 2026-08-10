@@ -274,6 +274,51 @@ class TestPhase2Signals:
         assert out["callback_executed"] == 1
 
     @pytest.mark.asyncio
+    async def test_gate_executed_requires_the_node_to_have_started(self, db):
+        """codex P2 FINDING 6: `gate_nodes` counted every authored gate row
+        regardless of whether it ever ran (pending, blocked by an upstream
+        failure, cancelled before ready) -- the signal is published as
+        evidence gates actually run, so an unfired gate inflated it.
+
+        A gate auto-passes IN-PROCESS and stamps `started_at` on the NODE
+        itself (`orchestrator.py:2103`) -- unlike a callback, which routes
+        through a worker and whose dispatch evidence lives on the SUBTASK
+        (`s.started_at`, since `node.started_at` is stamped at launch/queue
+        time, not at actual worker pickup -- using it for callbacks would
+        reintroduce FINDING 2's exact bug). Same question, different
+        evidence source per node type; `gate_executed` is unaffected by
+        FINDING 2's fix and needs its own.
+        """
+        agent_id = f"test-p2-{uuid.uuid4().hex[:8]}"
+        store = DAGStore(db, agent_id=agent_id, settings=Settings(_env_file=None))
+        req = DAGCreateRequest(
+            name="gate-dag",
+            nodes=[
+                DAGNodeSpec(name="a", type=DAGNodeType.subtask, instructions="A"),
+                DAGNodeSpec(name="gt1", type=DAGNodeType.gate, instructions="G1"),
+                DAGNodeSpec(name="gt2", type=DAGNodeType.gate, instructions="G2"),
+            ],
+            edges=[
+                DAGEdgeSpec(from_node="a", to_node="gt1"),
+                DAGEdgeSpec(from_node="a", to_node="gt2"),
+            ],
+        )
+        dag = await store.create(req)
+        by_name = {n.name: n.id for n in dag.nodes}
+        # gt1: auto-passed (mirrors orchestrator.py:2097-2106's dispatch).
+        await store.update_node(
+            by_name["gt1"], status="completed",
+            result="Gate auto-passed (Phase 1)", started_at=datetime.now(UTC),
+        )
+        # gt2: never dispatched -- still pending, no started_at.
+
+        async with db.session() as session:
+            out = await get_dag_phase2_signals(session, agent_id)
+
+        assert out["gate_nodes"] == 2
+        assert out["gate_executed"] == 1
+
+    @pytest.mark.asyncio
     async def test_unexecuted_callback_siblings_are_excluded(self, db):
         """Two never-executed callbacks (flag-OFF shape: subtask_id NULL,
         near-identical instructions-as-result) must contribute ZERO sibling
