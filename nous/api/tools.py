@@ -3843,9 +3843,15 @@ def register_dag_tools(
                 # was reachable by `status` only if you already knew its id
                 # prefix — there was no way to DISCOVER one, which made the
                 # F087 delivery notification the sole record of an outcome.
-                dags = await store.get_recent_dags(limit=20)
-                finished = [d for d in dags
-                            if d.status not in ("pending", "running")]
+                #
+                # codex P2: filtering to finished status in PYTHON after
+                # get_recent_dags' created_at-ordered LIMIT meant a DAG that
+                # finished after `limit` newer DAGs were CREATED never
+                # appeared here — hitting exactly the long-running DAGs this
+                # action exists to surface. get_recent_finished_dags filters
+                # to terminal status and orders by completed_at in SQL
+                # instead, so the limit applies to the finished population.
+                finished = await store.get_recent_finished_dags(limit=20)
                 if not finished:
                     return {"content": [{"type": "text",
                                          "text": "No finished DAGs."}]}

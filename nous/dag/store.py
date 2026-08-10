@@ -238,6 +238,42 @@ class DAGStore:
             )
             return list(result.scalars().all())
 
+    async def get_recent_finished_dags(self, limit: int = 20) -> list[ExecutionDAG]:
+        """codex P2 on F090.3: `get_recent_dags` orders by `created_at` and
+        applies LIMIT before any status filter. `dag_manage action=recent`
+        then filtered to finished status in Python — so a DAG that finishes
+        AFTER `limit` newer DAGs were created dropped off the created_at
+        top-`limit` entirely and was invisible, no matter how recently it
+        finished. Long-running DAGs are exactly the ones likely to have
+        newer DAGs created while they're still running, so the bug hit
+        `recent`'s primary use case (discovering a finished long-running
+        DAG). Filters to `_TERMINAL_DAG_STATUSES` and orders by
+        `completed_at` in SQL instead, so the limit applies to the
+        population the caller actually wants.
+
+        `completed_at` NULLs sort last: every live path to a terminal status
+        goes through `update_dag_status`, which stamps `completed_at` in the
+        same write whenever `status` moves to one of `_TERMINAL_DAG_STATUSES`
+        — a terminal row with a NULL `completed_at` should not exist today.
+        Still explicit rather than relying on that invariant never breaking:
+        Postgres' DESC default is NULLS FIRST, which would otherwise rank
+        such a row as "most recent" instead of the ambiguous case it is.
+
+        Only `nodes` is eager-loaded — the `recent` handler counts nodes but
+        never touches `edges`, unlike `get_recent_dags` (used by `list` and
+        the dashboard, which do).
+        """
+        async with self._db.session() as session:
+            result = await session.execute(
+                select(ExecutionDAG)
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .where(ExecutionDAG.status.in_(_TERMINAL_DAG_STATUSES))
+                .options(selectinload(ExecutionDAG.nodes))
+                .order_by(ExecutionDAG.completed_at.desc().nulls_last())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
+
     async def count_active(self) -> int:
         """Count pending + running DAGs."""
         async with self._db.session() as session:
