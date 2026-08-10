@@ -232,21 +232,6 @@ class DAGStore:
             )
             return list(result.scalars().all())
 
-    async def get_recent_dags(self, limit: int = 20) -> list[ExecutionDAG]:
-        """Get recent DAGs for dashboard display."""
-        async with self._db.session() as session:
-            result = await session.execute(
-                select(ExecutionDAG)
-                .where(ExecutionDAG.agent_id == self._agent_id)
-                .options(
-                    selectinload(ExecutionDAG.nodes),
-                    selectinload(ExecutionDAG.edges),
-                )
-                .order_by(ExecutionDAG.created_at.desc())
-                .limit(limit)
-            )
-            return list(result.scalars().all())
-
     async def get_recent_finished_dags(self, limit: int = 20) -> list[ExecutionDAG]:
         """codex P2 on F090.3: `get_recent_dags` orders by `created_at` and
         applies LIMIT before any status filter. `dag_manage action=recent`
@@ -269,8 +254,7 @@ class DAGStore:
         such a row as "most recent" instead of the ambiguous case it is.
 
         Only `nodes` is eager-loaded — the `recent` handler counts nodes but
-        never touches `edges`, unlike `get_recent_dags` (used by `list` and
-        the dashboard, which do).
+        never touches `edges`.
         """
         async with self._db.session() as session:
             result = await session.execute(
