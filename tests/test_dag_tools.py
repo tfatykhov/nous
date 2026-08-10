@@ -351,3 +351,149 @@ class TestDagToolRegistration:
         """Both tools have schemas registered."""
         assert "dag_create" in tools._schemas
         assert "dag_manage" in tools._schemas
+
+
+# ------------------------------------------------------------------
+# Callback documentation (F090 phase 1 task 3)
+# ------------------------------------------------------------------
+
+
+class TestCallbackDocumented:
+    """The tool schema is the only place an authoring LLM reads before
+    building a DAG, so its callback description must be true. It must
+    describe predecessor context-flow and the feature flag, and it must
+    NOT claim callbacks receive 'tools' — that field is honored only for
+    'check' nodes and is silently dropped for every other node type
+    (subtask, callback, gate, fix). See orchestrator.py's
+    _launch_check_node (the sole node.tools forwarding site) and
+    SubtaskManager.create, which has no tools parameter.
+
+    Scope of this test class: these are anti-regression pins on two past
+    wordings (verbatim reintroduction of the brief's false "tools /
+    frame_type" phrase, and the "never forwarded" overstatement) plus one
+    sentence-window heuristic — every sentence mentioning "tools" must
+    also mention "check" in that sentence or the one immediately
+    following. That heuristic is stronger than substring blacklisting
+    (round 1: it catches paraphrases, not just exact reuse of
+    yesterday's wording) but it is NOT an invariant and NOT exhaustive.
+    It has two demonstrated misses, and closing either needs grammatical
+    attribution — reading WHO (or WHICH node type) a given "tools" or
+    "check" mention is actually about — which is semantic analysis, not
+    string matching; a regex chasing either would fire on honest prose
+    and get deleted by the next author. This set does NOT verify the
+    description's prose is true in general; only a human or reviewer
+    reading it against the code establishes that.
+
+    KNOWN ACCEPTED LIMITATIONS (deliberately not fixed):
+
+    1. Same-sentence smuggling (round 2 review finding): a false "tools"
+       claim riding alongside a legitimate mention of "check" in ONE
+       sentence defeats every test here. Confirmed defeating phrasing:
+       "It accepts tools just like check nodes do, plus frame_type /
+       model / timeout_seconds."
+
+    2. Unrelated-neighbor adjacency (round 3 review finding, a direct
+       side effect of the round-2 fix to hole #1's sibling problem): the
+       2-sentence window that admits honest sentence-splitting (see
+       test_every_tools_mention_is_check_scoped's own docstring) also
+       admits a false "tools" claim whose neighboring sentence mentions
+       "check" for an unrelated reason. Confirmed defeating reordering
+       of the description's own existing sentences: "...It accepts
+       tools, plus frame_type / model / timeout_seconds, just as a
+       subtask does. 'gate' currently auto-passes — it is a marker, not
+       an enforced quality check. Requires
+       NOUS_DAG_CALLBACK_EXECUTION_ENABLED=true; ..." — the false-claim
+       sentence has no "check" of its own; the next sentence's "check"
+       is about gate auto-pass, not tools-scoping, and the window can't
+       tell the two apart. Narrowing back to same-sentence would close
+       this but reopen the round-1 brittleness (failing on honest
+       sentence-splitting) — deliberately not done; two known holes are
+       the accepted cost of a cheap, non-semantic guard.
+
+    Do not mistake a green run of this suite for a semantic verification
+    of the description's prose — both holes above are accepted limits,
+    not outstanding work.
+    """
+
+    def test_callback_semantics_are_described(self, tools):
+        schema = tools._schemas["dag_create"]
+        node_props = schema["properties"]["nodes"]["items"]["properties"]
+        assert "callback" in node_props["type"]["enum"]
+        blob = str(schema)
+        assert "predecessor" in blob.lower()
+        assert "NOUS_DAG_CALLBACK_EXECUTION_ENABLED" in blob
+
+    def test_callback_description_does_not_claim_tools(self, tools):
+        """The description must not tell the LLM that callbacks accept
+        'tools' like a subtask — SubtaskManager.create has no tools
+        parameter, so a callback author relying on that claim would be
+        misled. The original brief said 'the same tools / frame_type /
+        model / timeout_seconds as a subtask'; that phrasing must be gone."""
+        schema = tools._schemas["dag_create"]
+        type_description = schema["properties"]["nodes"]["items"]["properties"]["type"]["description"]
+        assert "tools / frame_type" not in type_description
+        assert "the same tools" not in type_description.lower()
+        # The shared-fields list itself must still be present, minus tools.
+        assert "frame_type / model / timeout_seconds" in type_description
+
+    def test_tools_field_scoped_to_check_nodes(self, tools):
+        """The description must acknowledge 'tools' is check-scoped
+        without overstating it as "never forwarded" (check nodes DO get
+        it).
+
+        Round 2: dropped the literal-"only" requirement from round 1.
+        The reviewer's honest rewrite — "The 'tools' field is honored by
+        exactly one node type. That type is 'check'; every other node
+        type silently drops it." — says the same thing without the word
+        "only", and a test that fires on honest prose is one the next
+        author deletes rather than honors. What's left here is mostly
+        redundant with test_every_tools_mention_is_check_scoped below;
+        kept only for the "never forwarded" overstatement check, which
+        that structural test does not cover (a sentence can legitimately
+        pair "tools" with "check" while still overstating that tools is
+        NEVER forwarded, full stop)."""
+        schema = tools._schemas["dag_create"]
+        type_description = schema["properties"]["nodes"]["items"]["properties"]["type"]["description"]
+        lowered = type_description.lower()
+        assert "'tools'" in lowered or '"tools"' in lowered
+        assert "check" in lowered
+        assert "never forwarded" not in lowered
+
+    def test_every_tools_mention_is_check_scoped(self, tools):
+        """Sentence-window heuristic, not a substring blacklist: split
+        the description into sentences and assert every sentence that
+        mentions 'tools' also mentions 'check' — either in that same
+        sentence, or in the sentence immediately following it.
+
+        Stronger than substring blacklisting (round 1): it catches
+        paraphrases of the false "callbacks get tools" claim that reuse
+        none of yesterday's exact wording, e.g. "It accepts tools, plus
+        frame_type / model / timeout_seconds, just as a subtask does."
+        fails here because 'check' appears in neither that sentence nor
+        the next.
+
+        Round 2 widened same-sentence to a 2-sentence window because the
+        strict same-sentence version fired on the reviewer's HONEST
+        two-sentence rewrite — "The 'tools' field is honored by exactly
+        one node type. That type is 'check'; every other node type
+        silently drops it." — which is true but splits the claim across
+        a sentence boundary. The window admits that rewrite while still
+        catching the original paraphrase above.
+
+        NOT exhaustive: same-sentence smuggling still defeats this (see
+        the class docstring's KNOWN ACCEPTED LIMITATION). This is a
+        heuristic, not a semantic truth check on the prose."""
+        schema = tools._schemas["dag_create"]
+        type_description = schema["properties"]["nodes"]["items"]["properties"]["type"]["description"]
+        sentences = [s for s in type_description.split(".") if s.strip()]
+        assert sentences, "description unexpectedly empty"
+        for i, sentence in enumerate(sentences):
+            if "tools" not in sentence.lower():
+                continue
+            window = sentence.lower()
+            if i + 1 < len(sentences):
+                window += " " + sentences[i + 1].lower()
+            assert "check" in window, (
+                "sentence mentions 'tools' without 'check' appearing in "
+                f"it or the following sentence: {sentence.strip()!r}"
+            )

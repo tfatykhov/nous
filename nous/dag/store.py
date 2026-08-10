@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import String, cast, func, select, update
 from sqlalchemy import true as sa_true
 from sqlalchemy.orm import selectinload
 
@@ -31,6 +32,14 @@ _TERMINAL_DAG_STATUSES = ("completed", "failed", "partial", "cancelled")
 # outcomes) so the reconciliation sweep also catches _cancel_node's
 # DAG-cancellation path and skip_and_continue's fix-stage path for free.
 _TERMINAL_CHECK_NODE_STATUSES = ("completed", "failed", "cancelled", "skipped")
+
+# codex P2 (FINDING 3): `find_dags_by_id_prefix` below matches this prefix
+# against `id::text` via SQL LIKE, where `%`/`_` are wildcards. Neither
+# character (nor anything but hex digits and hyphens) can appear in a real
+# UUID's string form, so validating against this pattern BEFORE the query
+# rejects both metacharacters outright — simpler and safer than escaping
+# them and passing an `escape=` clause through to `.like()`.
+_DAG_ID_PREFIX_RE = re.compile(r"^[0-9a-fA-F-]{1,36}$")
 
 
 class DAGStore:
@@ -230,16 +239,89 @@ class DAGStore:
             )
             return list(result.scalars().all())
 
-    async def get_recent_dags(self, limit: int = 20) -> list[ExecutionDAG]:
-        """Get recent DAGs for dashboard display."""
+    async def get_recent_finished_dags(self, limit: int = 20) -> list[ExecutionDAG]:
+        """codex P2 on F090.3: `get_recent_dags` orders by `created_at` and
+        applies LIMIT before any status filter. `dag_manage action=recent`
+        then filtered to finished status in Python — so a DAG that finishes
+        AFTER `limit` newer DAGs were created dropped off the created_at
+        top-`limit` entirely and was invisible, no matter how recently it
+        finished. Long-running DAGs are exactly the ones likely to have
+        newer DAGs created while they're still running, so the bug hit
+        `recent`'s primary use case (discovering a finished long-running
+        DAG). Filters to `_TERMINAL_DAG_STATUSES` and orders by
+        `completed_at` in SQL instead, so the limit applies to the
+        population the caller actually wants.
+
+        `completed_at` NULLs sort last: every live path to a terminal status
+        goes through `update_dag_status`, which stamps `completed_at` in the
+        same write whenever `status` moves to one of `_TERMINAL_DAG_STATUSES`
+        — a terminal row with a NULL `completed_at` should not exist today.
+        Still explicit rather than relying on that invariant never breaking:
+        Postgres' DESC default is NULLS FIRST, which would otherwise rank
+        such a row as "most recent" instead of the ambiguous case it is.
+
+        Only `nodes` is eager-loaded — the `recent` handler counts nodes but
+        never touches `edges`.
+        """
         async with self._db.session() as session:
             result = await session.execute(
                 select(ExecutionDAG)
                 .where(ExecutionDAG.agent_id == self._agent_id)
-                .options(
-                    selectinload(ExecutionDAG.nodes),
-                    selectinload(ExecutionDAG.edges),
-                )
+                .where(ExecutionDAG.status.in_(_TERMINAL_DAG_STATUSES))
+                .options(selectinload(ExecutionDAG.nodes))
+                .order_by(ExecutionDAG.completed_at.desc().nulls_last())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
+
+    async def find_dags_by_id_prefix(
+        self, prefix: str, limit: int = 10
+    ) -> list[ExecutionDAG]:
+        """codex P2 (FINDING 3): `_resolve_dag`'s old fallback scanned
+        `get_active_dags()` then a `get_recent_dags(limit=20)` window — a
+        prefix lookup for a finished DAG outside that created_at-bounded
+        window (exactly the DAG a user is likely to ask about right after
+        an F087 delivery notification announces it) silently returned "not
+        found". A prefix is a targeted point-lookup, not a recency query:
+        this is a single agent-scoped SQL match across every status and
+        age instead.
+
+        Invalid input (anything outside `_DAG_ID_PREFIX_RE`) returns an
+        empty list rather than querying — most importantly this rejects
+        `%`/`_` before they ever reach `LIKE`, where they are wildcards.
+
+        `limit=10`, not the 2 that would suffice to merely detect
+        ambiguity: the caller's `ValueError` lists the matches by id, and a
+        human resolving a collision benefits from seeing more than the
+        bare minimum. Real prefix collisions at the 8+ hex-char lengths
+        this is used with are rare enough that 10 effectively means "all
+        of them" without risking an unbounded query on a pathological
+        (e.g. single-character) prefix.
+
+        codex P2 (FINDING 7): `_DAG_ID_PREFIX_RE` legitimately admits
+        `A`-`F` — case-insensitively-typed hex is still valid UUID
+        content — but Postgres renders `id::text` lowercase and `LIKE` is
+        case-sensitive there (verified directly: `'2CDE...'::uuid::text
+        LIKE '2CDE%'` is `false`, `LIKE lower('2CDE') || '%'` is `true`),
+        so an uppercase or mixed-case prefix validated and then matched
+        nothing. Not a regression this method introduced — the
+        pre-FINDING-3 `str(d.id).startswith(dag_id_str)` had the identical
+        failure, since Python's `str(UUID)` is lowercase too — but the
+        validator now explicitly documents `A`-`F` as legal input, which
+        makes accepting-then-never-matching a worse contract than the old
+        code's silent one. Normalized here, not at the call site: a
+        caller should not have to know Postgres's rendering to use this
+        correctly.
+        """
+        if not _DAG_ID_PREFIX_RE.fullmatch(prefix):
+            return []
+        prefix = prefix.lower()
+        async with self._db.session() as session:
+            result = await session.execute(
+                select(ExecutionDAG)
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .where(cast(ExecutionDAG.id, String).like(f"{prefix}%"))
+                .options(selectinload(ExecutionDAG.nodes))
                 .order_by(ExecutionDAG.created_at.desc())
                 .limit(limit)
             )

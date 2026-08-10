@@ -137,13 +137,6 @@ class TestDAGStoreGet:
         dag_ids = {d.id for d in active}
         assert dag.id in dag_ids
 
-    @pytest.mark.asyncio
-    async def test_get_recent_dags(self, store):
-        """Recent DAGs returns at least one result."""
-        await store.create(_simple_request("recent-test"))
-        recent = await store.get_recent_dags(limit=5)
-        assert len(recent) >= 1
-
 
 class TestDAGStoreUpdate:
     """Test DAGStore update operations."""
