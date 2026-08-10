@@ -1784,10 +1784,11 @@ async def get_dag_phase2_signals(
     counts = (await session.execute(
         text("""
             SELECT n.node_type,
-                   count(*)                                    AS total,
-                   count(*) FILTER (WHERE n.subtask_id IS NOT NULL) AS executed
+                   count(*)                                        AS total,
+                   count(*) FILTER (WHERE s.started_at IS NOT NULL) AS executed
             FROM nous_system.dag_nodes n
             JOIN nous_system.execution_dags d ON d.id = n.dag_id
+            LEFT JOIN heart.subtasks s ON s.id = n.subtask_id
             WHERE d.agent_id = :agent_id
               AND n.node_type IN ('callback', 'gate')
             GROUP BY n.node_type
@@ -1804,7 +1805,14 @@ async def get_dag_phase2_signals(
         "sibling_overlap_rate": round(overlapping / pairs, 4) if pairs else 0.0,
         "overlap_threshold": _SIBLING_OVERLAP_THRESHOLD,
         "callback_nodes": by_type.get("callback", (0, 0))[0],
-        # subtask_id is non-NULL only when F090.1 actually executed it.
+        # codex P2: `subtask_id` is stamped the instant `_launch_subtask_node`
+        # calls `SubtaskManager.create()`, which inserts a PENDING row —
+        # `IS NOT NULL` alone was true before a worker ever touched it.
+        # `dequeue()` (heart/subtasks.py) is what sets `started_at`, so the
+        # LEFT JOIN + `started_at IS NOT NULL` requires the subtask to have
+        # actually been picked up. LEFT JOIN (not INNER) so `total` above
+        # stays a count of every callback/gate node regardless of whether
+        # its subtask row still exists.
         "callback_executed": by_type.get("callback", (0, 0))[1],
         "gate_nodes": by_type.get("gate", (0, 0))[0],
     }

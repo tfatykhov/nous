@@ -13,10 +13,13 @@ import uuid
 
 import pytest
 
+from datetime import UTC, datetime
+
 from nous.api.dashboard_queries import _shingle_overlap, get_dag_phase2_signals
 from nous.config import Settings
 from nous.dag.schemas import DAGCreateRequest, DAGEdgeSpec, DAGNodeSpec, DAGNodeType
 from nous.dag.store import DAGStore
+from nous.storage.models import Subtask
 
 
 class TestShingleOverlap:
@@ -178,7 +181,13 @@ class TestPhase2Signals:
 
     @pytest.mark.asyncio
     async def test_callback_executed_counts_only_nonnull_subtask_id(self, db):
-        """callback_nodes counts every callback node; callback_executed only those F090.1 actually ran."""
+        """callback_nodes counts every callback node; callback_executed only
+        those F090.1 actually ran — a real subtask that a worker dequeued
+        (started_at set), not merely a stamped subtask_id. See
+        test_callback_executed_requires_the_subtask_to_have_started for the
+        queued-but-never-dequeued discriminating case this test doesn't
+        cover.
+        """
         agent_id = f"test-p2-{uuid.uuid4().hex[:8]}"
         store = DAGStore(db, agent_id=agent_id, settings=Settings(_env_file=None))
         req = DAGCreateRequest(
@@ -196,8 +205,15 @@ class TestPhase2Signals:
         )
         dag = await store.create(req)
         by_name = {n.name: n.id for n in dag.nodes}
-        # cb1 was actually dispatched by F090.1 (subtask_id stamped); cb2 never ran.
-        await store.update_node(by_name["cb1"], subtask_id=uuid.uuid4())
+        # cb1 was actually dispatched by F090.1 AND dequeued by a worker
+        # (started_at set); cb2 never ran.
+        async with db.session() as session:
+            ran = Subtask(agent_id=agent_id, task="dequeued and executing",
+                          status="running", started_at=datetime.now(UTC))
+            session.add(ran)
+            await session.commit()
+            await session.refresh(ran)
+        await store.update_node(by_name["cb1"], subtask_id=ran.id)
 
         async with db.session() as session:
             out = await get_dag_phase2_signals(session, agent_id)
@@ -205,6 +221,57 @@ class TestPhase2Signals:
         assert out["callback_nodes"] == 2
         assert out["callback_executed"] == 1
         assert out["gate_nodes"] == 1
+
+    @pytest.mark.asyncio
+    async def test_callback_executed_requires_the_subtask_to_have_started(self, db):
+        """codex P2: `subtask_id` is stamped by `_launch_subtask_node` right
+        after `SubtaskManager.create()` inserts a PENDING row — that is not
+        evidence the subtask ever ran. `dequeue()` (heart/subtasks.py) is
+        what sets `started_at`, and only a subtask a worker actually
+        dequeued gets a `started_at`. A callback that is queued but never
+        dequeued (or cancelled before dequeue) must not count toward
+        `callback_executed` — under queue pressure that is exactly the state
+        callbacks pile up in, and this metric is the go/no-go evidence for
+        Phase 2. Must fail before the fix (which only checked
+        `subtask_id IS NOT NULL`, true the instant a row is queued).
+        """
+        agent_id = f"test-p2-{uuid.uuid4().hex[:8]}"
+        store = DAGStore(db, agent_id=agent_id, settings=Settings(_env_file=None))
+        req = DAGCreateRequest(
+            name="queued-vs-run-dag",
+            nodes=[
+                DAGNodeSpec(name="a", type=DAGNodeType.subtask, instructions="A"),
+                DAGNodeSpec(name="cb_queued", type=DAGNodeType.callback, instructions="Q"),
+                DAGNodeSpec(name="cb_run", type=DAGNodeType.callback, instructions="R"),
+            ],
+            edges=[
+                DAGEdgeSpec(from_node="a", to_node="cb_queued"),
+                DAGEdgeSpec(from_node="a", to_node="cb_run"),
+            ],
+        )
+        dag = await store.create(req)
+        by_name = {n.name: n.id for n in dag.nodes}
+
+        async with db.session() as session:
+            # Mirrors real heart.subtasks shapes: `queued` is a row a worker
+            # has not yet picked up (dequeue() never ran) — status stays
+            # 'pending', started_at stays NULL. `ran` is post-dequeue.
+            queued = Subtask(agent_id=agent_id, task="queued but never dequeued")
+            ran = Subtask(agent_id=agent_id, task="dequeued and executing",
+                          status="running", started_at=datetime.now(UTC))
+            session.add_all([queued, ran])
+            await session.commit()
+            await session.refresh(queued)
+            await session.refresh(ran)
+
+        await store.update_node(by_name["cb_queued"], subtask_id=queued.id)
+        await store.update_node(by_name["cb_run"], subtask_id=ran.id)
+
+        async with db.session() as session:
+            out = await get_dag_phase2_signals(session, agent_id)
+
+        assert out["callback_nodes"] == 2
+        assert out["callback_executed"] == 1
 
     @pytest.mark.asyncio
     async def test_unexecuted_callback_siblings_are_excluded(self, db):
@@ -290,7 +357,13 @@ class TestPhase2Signals:
         by_name = {n.name: n.id for n in dag_b.nodes}
         await store_b.update_node(by_name["a"], status="completed", result=text)
         await store_b.update_node(by_name["b"], status="completed", result=text)
-        await store_b.update_node(by_name["cb"], subtask_id=uuid.uuid4())
+        async with db.session() as session:
+            ran = Subtask(agent_id=agent_b, task="dequeued and executing",
+                          status="running", started_at=datetime.now(UTC))
+            session.add(ran)
+            await session.commit()
+            await session.refresh(ran)
+        await store_b.update_node(by_name["cb"], subtask_id=ran.id)
 
         async with db.session() as session:
             out_a = await get_dag_phase2_signals(session, agent_a)
