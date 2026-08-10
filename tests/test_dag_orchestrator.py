@@ -1307,6 +1307,116 @@ class TestCheckNodeCompletionCheck:
         assert monitor2.status == "completed"
         assert use_result.status == "running"
 
+    @pytest.mark.asyncio
+    async def test_check_node_active_heartbeat_with_completion_check_transitions_to_awaiting(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """Regression: check node with active heartbeat (run_count=0, quiet hours)
+        must still transition to awaiting_check and poll its shell completion_check.
+
+        Before the fix: _sync_check_node only hoisted when the heartbeat check
+        was unregistered (None) or inactive. A check present+active with run_count=0
+        (never ran — quiet hours suppressed it) hit neither branch and stayed
+        'running' until wall-clock timeout.
+
+        After the fix: completion_check present → awaiting_check immediately,
+        regardless of heartbeat state. Shell command is polled in the same tick.
+
+        This test MUST fail against pre-fix code (node stays 'running',
+        check_attempts stays 0) and pass after the fix.
+        """
+        dag = await store.create(self._check_node_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        monitor = next(n for n in fetched.nodes if n.name == "monitor")
+        await store.update_node(monitor.id, status="running", check_name="dag-test-monitor")
+
+        # Simulate: heartbeat check registered and active but run_count=0 (quiet hours).
+        # This is the exact state from the real incident (DAG ae5f2e9e, node verify-193-ci).
+        active_unrun_check = MagicMock()
+        active_unrun_check.active = True
+        active_unrun_check.run_count = 0
+        dynamic_loader._registry.get_check.return_value = active_unrun_check
+
+        # Shell check returns pending — we only care that it was invoked.
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("pending"))
+        await orchestrator.tick()
+
+        fetched2 = await store.get_dag(dag.id)
+        monitor2 = next(n for n in fetched2.nodes if n.name == "monitor")
+
+        assert monitor2.status == "awaiting_check", (
+            f"Expected awaiting_check, got {monitor2.status}. "
+            "completion_check was not polled — node deadlocked waiting for "
+            "heartbeat check that quiet hours suppressed."
+        )
+        assert monitor2.awaiting_check_at is not None
+        # Shell command must have been invoked in the same tick
+        orchestrator._run_completion_check.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_launch_check_node_registers_as_urgent(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """Secondary fix: DAG-managed checks must register with urgent=True so
+        quiet-hour suppression (runner.py:205) does not skip them.
+
+        A check node without completion_check depends entirely on the heartbeat
+        worker. If that worker is never scheduled (quiet hours, urgent=False),
+        the node can never self-disable → same deadlock, different path.
+        """
+        node = DAGNode(
+            id=uuid.uuid4(),
+            dag_id=uuid.uuid4(),
+            name="chk",
+            node_type="check",
+            status="ready",
+            wave=0,
+            instructions="Monitor CI",
+        )
+        dag = ExecutionDAG(
+            id=uuid.uuid4(),
+            agent_id="test",
+            name="t",
+            status="running",
+            nodes=[node],
+            edges=[],
+        )
+        await orchestrator._launch_check_node(node, dag)
+
+        dynamic_loader.create_check.assert_called_once()
+        _, kwargs = dynamic_loader.create_check.call_args
+        assert kwargs.get("urgent") is True, (
+            "DAG-managed checks must be registered with urgent=True so "
+            "runner.py:205 does not suppress them during quiet hours."
+        )
+
+    @pytest.mark.asyncio
+    async def test_check_node_heartbeat_disabled_on_shell_success(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """When the shell completion_check passes, the heartbeat worker is disabled
+        so it does not keep burning LLM tokens after the node is done."""
+        dag = await store.create(self._check_node_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        monitor = next(n for n in fetched.nodes if n.name == "monitor")
+        await store.update_node(
+            monitor.id, status="awaiting_check", check_name="dag-test-monitor",
+            awaiting_check_at=datetime.now(UTC),
+        )
+        # Shell check passes on first poll
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("success"))
+        await orchestrator.tick()
+
+        fetched2 = await store.get_dag(dag.id)
+        monitor2 = next(n for n in fetched2.nodes if n.name == "monitor")
+        assert monitor2.status == "completed"
+        # Heartbeat worker must have been disabled
+        dynamic_loader.manage_check.assert_called_with(
+            action="disable", name="dag-test-monitor"
+        )
+
 
 class TestDAGOrchestratorTimeoutClamp:
     """F046: Defensive re-clamp of node.timeout_seconds at launch time.

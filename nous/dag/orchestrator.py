@@ -981,49 +981,47 @@ class DAGOrchestrator:
         if not self._dynamic_loader:
             return
 
+        # When a shell completion_check is declared, it is the authoritative
+        # gate for node completion. Transition to awaiting_check immediately
+        # without waiting for the heartbeat check's lifecycle — the heartbeat
+        # check is the LLM worker doing the node's actual work and keeps
+        # running in parallel. Previously the hoist only occurred when the
+        # heartbeat check was unregistered or inactive, which deadlocked nodes
+        # created during quiet hours (check present+active, run_count=0,
+        # never scheduled by runner.py:205).
+        if node.completion_check and node.completion_check.strip():
+            now = datetime.now(UTC)
+            await self._store.update_node(
+                node.id,
+                status="awaiting_check",
+                awaiting_check_at=now,
+            )
+            node.status = "awaiting_check"
+            return
+
         registry = getattr(self._dynamic_loader, '_registry', None)
         check = registry.get_check(node.check_name) if registry else None
         if check is None:
             # Check was unregistered — for DAG-managed checks this means
             # self-disable completed (DynamicCheckLoader unregisters on disable).
-            if node.completion_check and node.completion_check.strip():
-                # Heartbeat check finished — now poll the shell completion_check
-                now = datetime.now(UTC)
-                await self._store.update_node(
-                    node.id,
-                    status="awaiting_check",
-                    awaiting_check_at=now,
-                )
-                node.status = "awaiting_check"
-            else:
-                await self._store.update_node(
-                    node.id,
-                    status="completed",
-                    result="Check completed (self-disabled)",
-                    completed_at=datetime.now(UTC),
-                )
-                node.status = "completed"
+            await self._store.update_node(
+                node.id,
+                status="completed",
+                result="Check completed (self-disabled)",
+                completed_at=datetime.now(UTC),
+            )
+            node.status = "completed"
             return
 
         # Use check.active to detect disabled checks (review fix)
         if not check.active:
-            if node.completion_check and node.completion_check.strip():
-                # Heartbeat check disabled itself — now poll the shell completion_check
-                now = datetime.now(UTC)
-                await self._store.update_node(
-                    node.id,
-                    status="awaiting_check",
-                    awaiting_check_at=now,
-                )
-                node.status = "awaiting_check"
-            else:
-                await self._store.update_node(
-                    node.id,
-                    status="completed",
-                    result="Check completed (disabled itself)",
-                    completed_at=datetime.now(UTC),
-                )
-                node.status = "completed"
+            await self._store.update_node(
+                node.id,
+                status="completed",
+                result="Check completed (disabled itself)",
+                completed_at=datetime.now(UTC),
+            )
+            node.status = "completed"
 
     async def _poll_awaiting_checks(self, dag: ExecutionDAG) -> None:
         """Poll completion_check commands for nodes in awaiting_check status."""
@@ -1099,6 +1097,9 @@ class DAGOrchestrator:
                         "Completion check passed for node %s (attempt %d)",
                         node.name, attempts,
                     )
+                    # Shell check resolved — stop the heartbeat worker so it
+                    # doesn't keep burning LLM tokens after the node is done.
+                    await self._cancel_heartbeat_check(node)
                 elif check.status == "failed":
                     error_msg = f"Completion check failed: {check.detail}" if check.detail else "Completion check failed (exit code 1)"
                     await self._store.update_node(
@@ -1114,6 +1115,7 @@ class DAGOrchestrator:
                         "Completion check definitively failed for node %s (attempt %d): %s",
                         node.name, attempts, check.detail,
                     )
+                    await self._cancel_heartbeat_check(node)
                 else:
                     await self._store.update_node(
                         node.id, check_attempts=attempts, last_check_at=now,
@@ -1128,6 +1130,24 @@ class DAGOrchestrator:
                 logger.exception(
                     "Error polling completion check for node %s", node.name
                 )
+
+    async def _cancel_heartbeat_check(self, node: DAGNode) -> None:
+        """Disable the heartbeat check for a node that resolved via shell completion_check.
+
+        Best-effort: errors are logged at DEBUG and swallowed so a transient
+        failure never prevents the node from reaching its terminal status.
+        """
+        if not node.check_name or not self._dynamic_loader:
+            return
+        try:
+            await self._dynamic_loader.manage_check(
+                action="disable", name=node.check_name
+            )
+        except Exception:
+            logger.debug(
+                "Could not disable heartbeat check %s after node %s resolved",
+                node.check_name, node.name,
+            )
 
     async def _run_completion_check(self, node: DAGNode) -> CheckResult:
         """Run a completion_check shell command.
@@ -2178,6 +2198,10 @@ class DAGOrchestrator:
                 tools=node.tools,
                 interval_seconds=300,
                 timeout_seconds=self._effective_timeout(node),
+                # DAG check nodes are user-initiated work, not proactive noise.
+                # urgent=True exempts them from quiet-hour suppression so the
+                # heartbeat worker actually runs when the node is created at night.
+                urgent=True,
             )
             await self._store.update_node(
                 node.id,
