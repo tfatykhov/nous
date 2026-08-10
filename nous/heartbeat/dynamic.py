@@ -367,6 +367,54 @@ class DynamicCheckLoader:
             )
             return result.scalar_one_or_none()
 
+    async def is_check_disabled(self, name: str) -> bool | None:
+        """Return whether a dynamic check's row exists and is disabled
+        (enabled=False), or None if no row exists at all.
+
+        codex P2 round 4 (quiet-hours check-node fix): a SECOND,
+        independent evidence source for _heartbeat_worker_has_run when
+        the successful-run counter reads zero. manage_check(action=
+        "disable") commits model.enabled = False BEFORE unregistering
+        the check — a durable DB fact that survives independently of
+        whether the immediately-following update_run_stats(success=
+        True) write in HeartbeatRunner._tick/.trigger_check succeeds.
+        A worker that completed, self-disabled, and then hit a
+        transient stats-write failure (that write is wrapped in a
+        bare try/except that logs and swallows) would otherwise be
+        indistinguishable from one that never ran — and with no
+        worker left registered to ever retry the stats write, the
+        node would wedge until wall-clock timeout: the ORIGINAL bug
+        this whole fix wave exists to close, arriving behind a rarer
+        trigger.
+
+        This is NOT the registry-absence signal Finding C removed.
+        That was an in-memory proxy any cold restart or failed
+        DynamicCheckLoader.sync() satisfies trivially — indistinguishable
+        from a genuine disable with no way to tell them apart.
+        enabled=False is a committed row that only manage_check(
+        action="disable") writes anywhere in this codebase (confirmed:
+        enable/disable are the sole writers of this column; delete
+        removes the row instead of flipping it; no migration or sweep
+        touches it) — narrower and durable in a way the in-memory
+        signal never was.
+
+        Returns None, not False, when the row is entirely absent
+        (deleted) — that is NOT evidence of anything and must not be
+        conflated with a deliberate disable.
+        """
+        from nous.storage.models import DynamicCheckModel
+
+        async with self._db.session() as session:
+            result = await session.execute(
+                select(DynamicCheckModel.enabled)
+                .where(DynamicCheckModel.agent_id == self._agent_id)
+                .where(DynamicCheckModel.name == name)
+            )
+            enabled = result.scalar_one_or_none()
+            if enabled is None:
+                return None
+            return not enabled
+
     async def create_check(
         self,
         name: str,

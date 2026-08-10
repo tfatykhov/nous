@@ -1182,6 +1182,32 @@ class DAGOrchestrator:
         successful runs and resolves via timeout — the correct
         outcome for "worker run reports failure", not silent success).
 
+        codex P2 round 4: that update_run_stats(success=True) call is
+        itself wrapped in a bare try/except that logs a WARNING and
+        SWALLOWS (runner.py) — and by the time it runs, disable has
+        already unregistered the check. A genuine self-disable whose
+        stats write then fails leaves the successful-run counter at
+        zero with no worker left to ever correct it, wedging the node
+        until wall-clock timeout: a false TIMEOUT instead of the false
+        SUCCESS this fix wave started out closing, just a rarer
+        trigger. When the counter reads zero, fall back to
+        DynamicCheckLoader.is_check_disabled: manage_check(action=
+        "disable") commits enabled=False BEFORE unregistering, so that
+        row is durable proof the check ran and chose to stop,
+        independent of whether the stats write that followed it
+        landed. See is_check_disabled's docstring for why this is NOT
+        a reintroduction of the registry-absence signal dropped above.
+
+        Trade-off, stated plainly: this also accepts a check that a
+        human or another agent disabled BEFORE it ever ran once. That
+        is deliberate. Once a check is durably off, nothing will ever
+        confirm the work through it again, so continuing to defer has
+        no safety benefit — and a check node with no completion_check
+        at all has always trusted bare disable alone as sufficient
+        (see _sync_check_node), predating this entire fix wave. The
+        shell completion_check remains the actual ground truth being
+        trusted either way.
+
         Fails CLOSED (returns False, deferring completion to the next
         poll) on a lookup error — the alternative, failing open, would
         reintroduce exactly the false-success risk this gate exists to
@@ -1200,7 +1226,17 @@ class DAGOrchestrator:
                 node.check_name, node.name,
             )
             return False
-        return bool(successful_runs)
+        if successful_runs:
+            return True
+        try:
+            disabled = await self._dynamic_loader.is_check_disabled(node.check_name)
+        except Exception:
+            logger.debug(
+                "Could not read disabled state for check %s — deferring node %s",
+                node.check_name, node.name,
+            )
+            return False
+        return bool(disabled)
 
     async def _finalize_awaiting_check_node(
         self,

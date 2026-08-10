@@ -1445,12 +1445,14 @@ class TestCheckNodeCompletionCheck:
             awaiting_check_at=datetime.now(UTC),
         )
         # Heartbeat check registered, active — ran once, and that one
-        # run errored.
+        # run errored. Still enabled (not disabled), so Finding D's
+        # is_check_disabled fallback must not accidentally admit it.
         active_check = MagicMock()
         active_check.active = True
         dynamic_loader._registry.get_check.return_value = active_check
         dynamic_loader.get_run_count = AsyncMock(return_value=1)  # pre-fix signal
         dynamic_loader.get_successful_run_count = AsyncMock(return_value=0)  # post-fix signal
+        dynamic_loader.is_check_disabled = AsyncMock(return_value=False)
 
         orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("success"))
         await orchestrator.tick()
@@ -1509,6 +1511,14 @@ class TestCheckNodeCompletionCheck:
 
         Must fail against the pre-fix implementation: registry
         absence alone completed the node regardless of run history.
+
+        codex P2 round 4 (Finding D) also exercises this exact
+        scenario — a check row that still exists and is enabled=True
+        (a genuine cold restart / failed sync, not a disable) must
+        keep deferring even with the new is_check_disabled fallback in
+        play. Explicitly mocked False (not left to the AsyncMock
+        default) so this test proves the fallback doesn't widen the
+        gate, not just that it happens to go unexercised.
         """
         dag = await store.create(self._check_node_request())
         await orchestrator.start_dag(dag.id)
@@ -1519,10 +1529,12 @@ class TestCheckNodeCompletionCheck:
             awaiting_check_at=datetime.now(UTC),
         )
         # Unregistered (fixture default) — but crucially, zero
-        # successful runs recorded in the DB either.
+        # successful runs recorded in the DB either, and the row is
+        # still enabled (not a disable).
         dynamic_loader._registry.get_check.return_value = None
         dynamic_loader.get_run_count = AsyncMock(return_value=0)  # pre-fix signal
         dynamic_loader.get_successful_run_count = AsyncMock(return_value=0)  # post-fix signal
+        dynamic_loader.is_check_disabled = AsyncMock(return_value=False)  # Finding D fallback signal
 
         orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("success"))
         await orchestrator.tick()
@@ -1569,6 +1581,50 @@ class TestCheckNodeCompletionCheck:
         assert monitor2.status == "completed", (
             "A self-disabled check with a recorded successful run must "
             "still complete — the quiet-hours deadlock must stay fixed."
+        )
+
+    @pytest.mark.asyncio
+    async def test_check_node_success_completes_when_stats_write_failed_after_self_disable(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """codex P2 round 4: update_run_stats(success=True) is wrapped in
+        a bare try/except that logs and swallows (runner.py) — and by
+        the time it would run, disable has already unregistered the
+        check. A genuine self-disable whose stats write then fails
+        leaves the successful-run counter at zero with no worker left
+        to ever correct it. The durable enabled=False row (committed
+        by manage_check BEFORE unregistering) must be trusted as a
+        fallback so the node still completes instead of wedging until
+        wall-clock timeout — a false timeout trading places with the
+        false success this fix wave started out closing.
+
+        Must fail against the pre-Finding-D implementation: with zero
+        successful runs and no is_check_disabled fallback, the node
+        stays awaiting_check forever (until timeout).
+        """
+        dag = await store.create(self._check_node_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        monitor = next(n for n in fetched.nodes if n.name == "monitor")
+        await store.update_node(
+            monitor.id, status="awaiting_check", check_name="dag-test-monitor",
+            awaiting_check_at=datetime.now(UTC),
+        )
+        # Zero successful runs recorded (the stats write failed), but
+        # the check's row is durably disabled (the disable write itself
+        # succeeded, before the stats write that failed).
+        dynamic_loader.get_successful_run_count = AsyncMock(return_value=0)
+        dynamic_loader.is_check_disabled = AsyncMock(return_value=True)
+
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("success"))
+        await orchestrator.tick()
+
+        fetched2 = await store.get_dag(dag.id)
+        monitor2 = next(n for n in fetched2.nodes if n.name == "monitor")
+        assert monitor2.status == "completed", (
+            f"Expected the node to complete — the check's row is durably "
+            f"disabled even though its stats write failed. Got "
+            f"{monitor2.status}."
         )
 
     @pytest.mark.asyncio

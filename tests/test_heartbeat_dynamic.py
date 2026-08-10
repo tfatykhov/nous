@@ -14,9 +14,9 @@
 - TestDynamicCheckLoaderCRUD (10): create check, create rejects low interval, create rejects max
     count, create rejects permanent name, create validates cron, manage list, manage enable,
     manage disable, manage delete, manage update
-- TestDynamicCheckLoaderStats (4): update stats success, update stats failure,
+- TestDynamicCheckLoaderStats (7): update stats success, update stats failure,
     get_successful_run_count returns value, get_successful_run_count returns
-    None when not found
+    None when not found, is_check_disabled returns true/false/None
 - TestHeartbeatRunnerDynamic (6): runner has dynamic loader, start syncs loader,
     tick tracks dynamic tokens, tick updates run stats, tick updates run stats on failure,
     periodic sync
@@ -866,6 +866,64 @@ class TestDynamicCheckLoaderStats:
         count = await loader.get_successful_run_count("missing-check")
 
         assert count is None
+
+    @pytest.mark.asyncio
+    async def test_is_check_disabled_returns_true_when_disabled(self):
+        """codex P2 round 4: manage_check(action="disable") commits
+        enabled=False before unregistering — durable evidence the DAG
+        orchestrator falls back to when the successful-run counter
+        reads zero (e.g. a self-disable whose stats write failed).
+        """
+        db, mock_session = _mock_db()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = False  # enabled=False
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        loader = DynamicCheckLoader(
+            db=db, registry=CheckRegistry(),
+            agent_id="test-agent",
+        )
+
+        disabled = await loader.is_check_disabled("my-check")
+
+        assert disabled is True
+        mock_session.execute.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_is_check_disabled_returns_false_when_enabled(self):
+        """A still-enabled row is not evidence of anything — the caller
+        must keep deferring."""
+        db, mock_session = _mock_db()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = True  # enabled=True
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        loader = DynamicCheckLoader(
+            db=db, registry=CheckRegistry(),
+            agent_id="test-agent",
+        )
+
+        disabled = await loader.is_check_disabled("my-check")
+
+        assert disabled is False
+
+    @pytest.mark.asyncio
+    async def test_is_check_disabled_returns_none_when_not_found(self):
+        """No row at all (e.g. deleted) → None, not False — must not be
+        conflated with "still enabled" or "definitely disabled"."""
+        db, mock_session = _mock_db()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        loader = DynamicCheckLoader(
+            db=db, registry=CheckRegistry(),
+            agent_id="test-agent",
+        )
+
+        disabled = await loader.is_check_disabled("missing-check")
+
+        assert disabled is None
 
 
 # ===========================================================================
