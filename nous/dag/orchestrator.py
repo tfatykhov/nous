@@ -1326,6 +1326,37 @@ class DAGOrchestrator:
         poll) on a lookup error — the alternative, failing open, would
         reintroduce exactly the false-success risk this gate exists to
         close, just behind a rarer trigger.
+
+        KNOWN RESIDUAL (codex P2 round 6, FINDING H) — accepted, not
+        fixed here. A successful run whose update_run_stats(success=True)
+        write fails (runner.py:237-243 swallows it), with no self-disable,
+        is invisible to this gate: the successful-run counter stays 0,
+        is_check_disabled stays False, and this method keeps returning
+        False until either a LATER run's write succeeds or the node hits
+        its wall-clock deadline. Accepted because the failure mode is the
+        one this whole fix wave prefers: a false TIMEOUT (status="failed",
+        an explicit error, retry_node-recoverable) rather than a false
+        SUCCESS (silent, permanent, poisons every downstream node).
+        Accepted also because the precondition is narrow, not the common
+        case: it needs a node timeout BELOW the heartbeat's own scheduling
+        cadence — _launch_check_node hardcodes interval_seconds=300
+        (orchestrator.py:2494) while dag_node_default_timeout is 600
+        (config.py:1040) — stacked on an independently rare DB write
+        failure. Root cause is the swallow in runner.py, which corrupts
+        stats for every check type, not just DAG-managed ones (F034.3's
+        self-tuning reads the same counters), and is tracked separately:
+        TODO(issue ref pending).
+
+        Evidence-signal history, so this isn't re-litigated: registry
+        presence/absence and raw run_count were both tried and rejected
+        (round 3) — attempts ≠ successes, and absence ≠ "ran". run_count -
+        error_count plus enabled=False (round 4) is what survived: both
+        are committed DB facts, each written by exactly one code path. An
+        in-process consecutive_failures==0 signal was considered (round 6)
+        and rejected — it IS success-specific, unlike raw run_count, but
+        it's a rolling counter: the next unrelated run failing silently
+        erases the evidence it exists to preserve, so it would work in
+        testing and evaporate in production.
         """
         if not node.check_name or not self._dynamic_loader:
             # No heartbeat check to gate on — nothing to defer for.
