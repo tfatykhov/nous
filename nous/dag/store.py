@@ -290,9 +290,25 @@ class DAGStore:
         this is used with are rare enough that 10 effectively means "all
         of them" without risking an unbounded query on a pathological
         (e.g. single-character) prefix.
+
+        codex P2 (FINDING 7): `_DAG_ID_PREFIX_RE` legitimately admits
+        `A`-`F` — case-insensitively-typed hex is still valid UUID
+        content — but Postgres renders `id::text` lowercase and `LIKE` is
+        case-sensitive there (verified directly: `'2CDE...'::uuid::text
+        LIKE '2CDE%'` is `false`, `LIKE lower('2CDE') || '%'` is `true`),
+        so an uppercase or mixed-case prefix validated and then matched
+        nothing. Not a regression this method introduced — the
+        pre-FINDING-3 `str(d.id).startswith(dag_id_str)` had the identical
+        failure, since Python's `str(UUID)` is lowercase too — but the
+        validator now explicitly documents `A`-`F` as legal input, which
+        makes accepting-then-never-matching a worse contract than the old
+        code's silent one. Normalized here, not at the call site: a
+        caller should not have to know Postgres's rendering to use this
+        correctly.
         """
         if not _DAG_ID_PREFIX_RE.fullmatch(prefix):
             return []
+        prefix = prefix.lower()
         async with self._db.session() as session:
             result = await session.execute(
                 select(ExecutionDAG)

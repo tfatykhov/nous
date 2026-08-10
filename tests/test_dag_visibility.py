@@ -247,6 +247,34 @@ class TestResolveDagPrefix:
         assert "not found" in text
         assert "wildcard-target" not in text
 
+    @pytest.mark.parametrize("case", ["upper", "mixed"])
+    @pytest.mark.asyncio
+    async def test_prefix_resolves_regardless_of_case(
+        self, tools, dag_store, case
+    ):
+        """codex P2 FINDING 7: Postgres renders `id::text` lowercase and
+        `LIKE` is case-sensitive, but `_DAG_ID_PREFIX_RE` legitimately
+        admits `A`-`F` (case-insensitively-typed hex is still valid UUID
+        content) -- an uppercase or mixed-case prefix validated and then
+        silently matched nothing. Not a regression: the pre-FINDING-3
+        `str(d.id).startswith(dag_id_str)` had the identical failure,
+        since Python's `str(UUID)` is lowercase too; the validator now
+        just accepts input it can't serve, which is worse than not
+        documenting it. Must fail against the pre-fix implementation.
+        """
+        target = await dag_store.create(_one("case-target"))
+        real_prefix = str(target.id)[:8]
+        corrupted = (
+            real_prefix.upper() if case == "upper"
+            else real_prefix[:4].upper() + real_prefix[4:]
+        )
+
+        text = (await tools._handlers["dag_manage"](
+            action="status", dag_id=corrupted))["content"][0]["text"]
+
+        assert "not found" not in text
+        assert "case-target" in text
+
     @pytest.mark.asyncio
     async def test_prefix_lookup_is_agent_scoped(self, tools, db):
         """A prefix belonging to another agent's DAG must not resolve —
