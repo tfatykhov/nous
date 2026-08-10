@@ -299,3 +299,47 @@ class TestSmartCompressEntryPoint:
         result = await smart_compress("web_fetch", {"url": "https://example.com"}, text, settings)
         assert result.original_text == text
         assert result.item_count == 50
+
+    @pytest.mark.asyncio
+    async def test_dag_manage_preserves_original_when_compressed(self):
+        """codex P2 round 6 FINDING 10: dag_manage's node_result advertises
+        a lossless recovery path (FINDING 9) -- but the gap is exactly
+        where an agent needs it most: a failed node's long, error-laden
+        result. Built from the REAL gate conditions smart_compress checks,
+        not invented prose or a mock -- `is_crushable` requires >=500
+        chars AND an `_ERROR_PATTERNS` match (has_errors short-circuits
+        the uniqueness check entirely); `compress_string_array` only
+        drops content once there are MORE than `max_k` (default 50)
+        newline-separated lines. Must fail against the pre-fix
+        implementation: `dag_manage` was absent from
+        `NON_REFETCHABLE_TOOLS`, so `original_text` stayed None even
+        though compression genuinely ran.
+
+        No genuine end-to-end harness (dispatch -> smart_compress ->
+        cache_compressed_result -> DB -> cache_retrieve) exists in this
+        test suite: test_tool_cache.py has no DB-backed round-trip tests
+        at all, and the runner.py tool loop that wires smart_compress and
+        tool_cache together has no test harness either. This calls the
+        real smart_compress() directly with real gate-triggering content,
+        mirroring this file's own established pattern for exactly this
+        class of assertion (test_non_refetchable_preserves_original
+        above, for web_fetch).
+        """
+        settings = Settings(_env_file=None, smart_compress_enabled=True)
+        lines = [f"line {i}: processing step {i} completed" for i in range(60)]
+        lines.append("Traceback (most recent call last):")
+        lines.append("RuntimeError: failed to complete the fix-stage retry")
+        text = "\n".join(lines)
+        # Confirm the gate conditions actually hold before trusting the
+        # result -- this is not incidental content, it MUST trip both gates.
+        assert len(text) >= settings.smart_compress_min_chars
+        assert len(lines) > settings.smart_compress_max_k
+        assert is_crushable(text, min_chars=settings.smart_compress_min_chars)
+
+        result = await smart_compress(
+            "dag_manage", {"action": "node_result", "node_name": "fix1"}, text, settings,
+        )
+
+        assert result.was_compressed is True  # confirms the gap is real, not hypothetical
+        assert result.text != text  # the model-facing text IS compressed
+        assert result.original_text == text  # but the original survives, recoverable

@@ -20,8 +20,17 @@ from nous.storage.models import ToolCache
 
 logger = logging.getLogger(__name__)
 
-# Tools whose results cannot be re-fetched (different results each time)
-NON_REFETCHABLE_TOOLS = frozenset({"web_search", "web_fetch"})
+# Tools where calling again does NOT recover the original, pre-compression
+# content — not "results differ each time" (dag_manage's node_result is
+# deterministic for unchanged DAG state, yet belongs here too). web_search
+# and web_fetch qualify because the upstream result can genuinely change on
+# a re-fetch. dag_manage qualifies for a different reason (codex P2 round
+# 6, FINDING 10): SmartCompress re-runs on every dispatch and re-compresses
+# the same input identically, so a second call reproduces the SAME
+# compressed output, not the original. Same criterion, different cause —
+# the next tool added here should satisfy "calling it again gets you back
+# to the original", not "the tool is nondeterministic".
+NON_REFETCHABLE_TOOLS = frozenset({"web_search", "web_fetch", "dag_manage"})
 
 
 def compute_hash_key(content: str) -> str:
