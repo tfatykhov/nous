@@ -1722,18 +1722,52 @@ async def get_dag_phase2_signals(
     means "no verbatim duplication detected", not "siblings don't duplicate
     work" — it is NOT by itself grounds to cancel Phase 2.
 
-    The sibling population excludes never-executed callback nodes (those
-    with `subtask_id IS NULL`) and every gate node. With
-    `NOUS_DAG_CALLBACK_EXECUTION_ENABLED` off (the default), a callback's
-    `result` is `node.instructions` verbatim (`orchestrator.py:2122`) —
-    author-written boilerplate from a node that executed nothing — and a
-    gate's `result` is always the same constant string. Left in, those rows
-    push the reading in the OPPOSITE direction from the floor caveat above:
-    two unexecuted callbacks with similarly-worded instructions read as
-    "siblings duplicated work" when neither one ran. Measured on the dev DB
-    before this filter: 40 of 40 nodes participating in any sibling pair
-    were callbacks, and zero subtask/check/gate/fix nodes participated at
-    all.
+    The sibling population is an ALLOWLIST, not a denylist. A node belongs
+    here only if its `result` is genuine work product something actually
+    produced in parallel with its siblings — not text the orchestrator
+    wrote about a node. A denylist has been wrong three times on this exact
+    query (never-executed callbacks, gates, then fix nodes — codex P2
+    round 4) as each new node type shipped without anyone re-auditing this
+    list; an allowlist forces the question onto whoever adds the next node
+    type instead of onto whoever next audits this query. `subtask` nodes
+    are always genuine — a subtask's `result` is the worker's actual
+    output. `callback` nodes are genuine only when `subtask_id IS NOT
+    NULL`: with `NOUS_DAG_CALLBACK_EXECUTION_ENABLED` off (the default), a
+    callback's `result` is `node.instructions` verbatim
+    (`orchestrator.py:2122`) — author-written boilerplate from a node that
+    executed nothing. Every other node type is excluded because its
+    completion can synthesize canned text: a gate's `result` is always the
+    same constant string; a fix node's `result` is always the
+    `"Fix-stage chose '{action}' for parent '{name}': {rationale}"`
+    template (`orchestrator.py:2005-2008`) — and since `compute_waves`
+    (`schemas.py`) doesn't follow `on_failure` edges, a fix node lands in
+    wave 0 alongside unrelated siblings, so two fix nodes sharing that
+    template's prefix clear the shingle threshold on boilerplate alone
+    (measured: two real fix results differing only in parent name, Jaccard
+    0.43 — comfortably over `_SIBLING_OVERLAP_THRESHOLD`); a check node can
+    ALSO write canned text on two of its completion paths ("Check
+    completed (self-disabled)", "Check completed (disabled itself)") with
+    no per-row signal distinguishing that from a genuine finding, so it is
+    excluded rather than trusted case-by-case. Left in, any of these push
+    the reading in the OPPOSITE direction from the floor caveat above:
+    boilerplate reads as "siblings duplicated work" when nothing was
+    produced at all. Measured on the dev DB before the callback/gate
+    filter: 40 of 40 nodes participating in any sibling pair were
+    callbacks.
+
+    `subtask_id IS NOT NULL` — not FINDING 2's `s.started_at IS NOT NULL`
+    standard for `callback_executed` — is deliberately kept here: a
+    callback can reach `status='completed'` exactly two ways. Real
+    execution through `_launch_subtask_node`'s worker-backed path
+    (`subtask_id` set, and `_sync_subtask_node` only marks the node
+    'completed' after observing the underlying SUBTASK's own completion,
+    which per the worker's dequeue -> execute -> complete sequencing
+    already implies it started) or the flag-off instant-completion stub
+    (`subtask_id` stays NULL). `status='completed' AND subtask_id IS NOT
+    NULL` already discriminates exactly these two cases with no join
+    required; requiring `s.started_at IS NOT NULL` here would add a
+    `heart.subtasks` join this query does not otherwise need, to
+    re-derive a fact `status='completed'` already guarantees.
 
     Scans the agent's ENTIRE DAG history on every call, unlike the sibling
     `nodes_completed_24h` stat — deliberately unbounded, because a go/no-go
@@ -1759,8 +1793,10 @@ async def get_dag_phase2_signals(
             WHERE d.agent_id = :agent_id
               AND n.status = 'completed'
               AND n.result IS NOT NULL
-              AND (n.node_type <> 'callback' OR n.subtask_id IS NOT NULL)
-              AND n.node_type <> 'gate'
+              AND (
+                    n.node_type = 'subtask'
+                    OR (n.node_type = 'callback' AND n.subtask_id IS NOT NULL)
+                  )
         """),
         {"agent_id": agent_id},
     )).all()

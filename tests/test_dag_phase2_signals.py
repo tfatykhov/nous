@@ -319,6 +319,106 @@ class TestPhase2Signals:
         assert out["gate_executed"] == 1
 
     @pytest.mark.asyncio
+    async def test_fix_node_sibling_is_excluded(self, db):
+        """codex P2 round 4 FINDING 8: `compute_waves` (schemas.py) only
+        follows `dependency`/`context_flow` edges -- `on_failure` is not
+        among them, so a fix node has no incoming dependency edge and lands
+        in wave 0 alongside its own parent (and any other wave-0 node).
+        `_try_fix_failed_nodes` (orchestrator.py:2004-2008) always completes
+        a fix node with the templated
+        "Fix-stage chose '{action}' for parent '{name}': {rationale}"
+        result -- never genuine work product. A fix node paired with a
+        real completed sibling must not register as a sibling pair at all.
+        Must fail against the pre-fix (denylist) implementation.
+        """
+        agent_id = f"test-p2-{uuid.uuid4().hex[:8]}"
+        store = DAGStore(db, agent_id=agent_id, settings=Settings(_env_file=None))
+        req = DAGCreateRequest(
+            name="parent-with-fix-dag",
+            nodes=[
+                DAGNodeSpec(name="parent", type=DAGNodeType.subtask, instructions="do thing"),
+                DAGNodeSpec(name="fix-parent", type=DAGNodeType.fix,
+                           parent_node="parent", fix_actions=["retry_as_is"],
+                           instructions="diagnose and recover"),
+            ],
+            edges=[
+                DAGEdgeSpec(from_node="parent", to_node="fix-parent", edge_type="on_failure"),
+            ],
+        )
+        dag = await store.create(req)
+        by_name = {n.name: n.id for n in dag.nodes}
+        await store.update_node(
+            by_name["parent"], status="completed",
+            result="the parent subtask did real work and produced a real payload",
+        )
+        # Real template text, mirrors orchestrator.py:2005-2008 exactly.
+        await store.update_node(
+            by_name["fix-parent"], status="completed",
+            result="Fix-stage chose 'retry_as_is' for parent 'parent': looked recoverable",
+        )
+
+        async with db.session() as session:
+            out = await get_dag_phase2_signals(session, agent_id)
+
+        assert out["sibling_pairs"] == 0
+
+    @pytest.mark.asyncio
+    async def test_two_fix_nodes_sharing_the_real_template_produce_no_pair(self, db):
+        """codex P2 round 4 FINDING 8: two fix nodes firing for DIFFERENT
+        parents still share the literal
+        "Fix-stage chose '{action}' for parent '...'" prefix and, when the
+        rationale also matches (a plausible case -- the same failure mode
+        firing twice), the shared run extends well past the 6-word shingle
+        floor. Constructed from the real template string, not invented
+        prose -- with a realistic rationale length this pair's raw Jaccard
+        is 0.43, comfortably clearing `_SIBLING_OVERLAP_THRESHOLD` (0.15),
+        which is exactly the "phantom pair from boilerplate" artifact class
+        that produced the 40/40 never-executed-callback pairs FINDING 1
+        fixed. Must fail against the pre-fix (denylist) implementation.
+        """
+        agent_id = f"test-p2-{uuid.uuid4().hex[:8]}"
+        store = DAGStore(db, agent_id=agent_id, settings=Settings(_env_file=None))
+        req = DAGCreateRequest(
+            name="two-fix-dag",
+            nodes=[
+                DAGNodeSpec(name="parent1", type=DAGNodeType.subtask, instructions="A"),
+                DAGNodeSpec(name="fix1", type=DAGNodeType.fix,
+                           parent_node="parent1", fix_actions=["retry_as_is"],
+                           instructions="diagnose"),
+                DAGNodeSpec(name="parent2", type=DAGNodeType.subtask, instructions="B"),
+                DAGNodeSpec(name="fix2", type=DAGNodeType.fix,
+                           parent_node="parent2", fix_actions=["retry_as_is"],
+                           instructions="diagnose"),
+            ],
+            edges=[
+                DAGEdgeSpec(from_node="parent1", to_node="fix1", edge_type="on_failure"),
+                DAGEdgeSpec(from_node="parent2", to_node="fix2", edge_type="on_failure"),
+            ],
+        )
+        dag = await store.create(req)
+        by_name = {n.name: n.id for n in dag.nodes}
+        rationale = (
+            "the subtask failed with a transient network timeout and "
+            "retrying should resolve it cleanly"
+        )
+        await store.update_node(
+            by_name["fix1"], status="completed",
+            result=f"Fix-stage chose 'retry_as_is' for parent 'parent1': {rationale}",
+        )
+        await store.update_node(
+            by_name["fix2"], status="completed",
+            result=f"Fix-stage chose 'retry_as_is' for parent 'parent2': {rationale}",
+        )
+        # parent1/parent2 stay pending (never completed) -- isolates the
+        # fix1/fix2 pair as the only candidate this test is about.
+
+        async with db.session() as session:
+            out = await get_dag_phase2_signals(session, agent_id)
+
+        assert out["sibling_pairs"] == 0
+        assert out["overlapping_sibling_pairs"] == 0
+
+    @pytest.mark.asyncio
     async def test_unexecuted_callback_siblings_are_excluded(self, db):
         """Two never-executed callbacks (flag-OFF shape: subtask_id NULL,
         near-identical instructions-as-result) must contribute ZERO sibling
