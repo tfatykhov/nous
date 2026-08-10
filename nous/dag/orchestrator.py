@@ -1082,6 +1082,26 @@ class DAGOrchestrator:
                 now = datetime.now(UTC)
 
                 if check.status == "success":
+                    # codex P1: the shell check can pass trivially before
+                    # the heartbeat worker (the LLM doing the node's
+                    # actual work) has even launched — a command like
+                    # `pgrep -f ... || exit 0` exits 0 BECAUSE the target
+                    # process doesn't exist yet, not because the work is
+                    # done. Do not accept "success" until there is
+                    # evidence the worker has actually run.
+                    if not await self._heartbeat_worker_has_run(node):
+                        await self._store.update_node(
+                            node.id, check_attempts=attempts, last_check_at=now,
+                        )
+                        node.check_attempts = attempts
+                        node.last_check_at = now
+                        logger.debug(
+                            "Completion check passed for node %s but heartbeat "
+                            "worker has not run yet (attempt %d) — deferring "
+                            "completion",
+                            node.name, attempts,
+                        )
+                        continue
                     result = await self._read_node_result(node, dag)
                     await self._store.update_node(
                         node.id,
@@ -1130,6 +1150,46 @@ class DAGOrchestrator:
                 logger.exception(
                     "Error polling completion check for node %s", node.name
                 )
+
+    async def _heartbeat_worker_has_run(self, node: DAGNode) -> bool:
+        """Whether node's heartbeat check has executed at least once.
+
+        codex P1: gates acceptance of a passing shell completion_check —
+        see the call site in _poll_awaiting_checks for why a bare
+        "success" isn't trustworthy on its own.
+
+        Two kinds of evidence, checked in this order:
+        - Unregistered or inactive: the check's OWN execution is what
+          triggers a self-disable (manage_check(action="disable") both
+          unregisters it and flips its DB row inactive, synchronously,
+          DURING that run) — update_run_stats() only commits run_count
+          AFTER check.run() returns, so a just-self-disabled check can
+          momentarily read run_count==0 even though it demonstrably ran.
+          Trusting run_count alone here would treat a check that just
+          finished as one that never started.
+        - Otherwise (still registered and active): run_count > 0.
+
+        Fails CLOSED (returns False, deferring completion to the next
+        poll) on a lookup error — the alternative, failing open, would
+        reintroduce exactly the false-success risk this gate exists to
+        close, just behind a rarer trigger.
+        """
+        if not node.check_name or not self._dynamic_loader:
+            # No heartbeat check to gate on — nothing to defer for.
+            return True
+        registry = getattr(self._dynamic_loader, '_registry', None)
+        check = registry.get_check(node.check_name) if registry else None
+        if check is None or not check.active:
+            return True
+        try:
+            run_count = await self._dynamic_loader.get_run_count(node.check_name)
+        except Exception:
+            logger.debug(
+                "Could not read run_count for check %s — deferring node %s",
+                node.check_name, node.name,
+            )
+            return False
+        return bool(run_count)
 
     async def _cancel_heartbeat_check(self, node: DAGNode) -> None:
         """Disable the heartbeat check for a node that resolved via shell completion_check.

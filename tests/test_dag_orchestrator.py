@@ -1417,6 +1417,86 @@ class TestCheckNodeCompletionCheck:
             action="disable", name="dag-test-monitor"
         )
 
+    @pytest.mark.asyncio
+    async def test_check_node_success_deferred_until_heartbeat_worker_has_run(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """codex P1: the unconditional completion_check hoist lets
+        _poll_awaiting_checks accept a shell check's "success" the moment
+        it first passes — which can be BEFORE the heartbeat worker (the
+        LLM doing the node's actual work) has launched at all. A command
+        like `pgrep -f ... || exit 0` passes trivially at t=0 for exactly
+        that reason: the target process legitimately doesn't exist yet.
+        A passing completion_check must not be trusted until there is
+        evidence (run_count > 0) the heartbeat has actually run.
+
+        Must fail against the pre-fix implementation: the node completes
+        on the very first passing shell check with no gating at all.
+        """
+        dag = await store.create(self._check_node_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        monitor = next(n for n in fetched.nodes if n.name == "monitor")
+        await store.update_node(
+            monitor.id, status="awaiting_check", check_name="dag-test-monitor",
+            awaiting_check_at=datetime.now(UTC),
+        )
+        # Heartbeat check registered, active, but never actually run yet.
+        active_unrun_check = MagicMock()
+        active_unrun_check.active = True
+        dynamic_loader._registry.get_check.return_value = active_unrun_check
+        dynamic_loader.get_run_count = AsyncMock(return_value=0)
+
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("success"))
+        await orchestrator.tick()
+
+        fetched2 = await store.get_dag(dag.id)
+        monitor2 = next(n for n in fetched2.nodes if n.name == "monitor")
+        assert monitor2.status == "awaiting_check", (
+            f"Expected the node to stay awaiting_check pending heartbeat-run "
+            f"evidence, got {monitor2.status} — a trivially-passing "
+            f"completion check completed the node before the heartbeat "
+            f"worker ever ran."
+        )
+        # The worker hasn't run yet — disabling it now would strand the
+        # DAG with no worker AND no confirmed result.
+        dynamic_loader.manage_check.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_check_node_success_completes_when_heartbeat_self_disabled(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """A self-disabled/unregistered heartbeat check IS evidence it
+        ran: manage_check(action='disable') both unregisters the check
+        and flips its DB row inactive DURING that same run — BEFORE
+        update_run_stats() commits run_count for the invocation. Must
+        not be mistaken for "never ran": doing so would reintroduce the
+        original quiet-hours deadlock from the other side (this exact
+        node type, blocked forever on evidence that already exists but
+        reads run_count==0 due to write ordering).
+        """
+        dag = await store.create(self._check_node_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        monitor = next(n for n in fetched.nodes if n.name == "monitor")
+        await store.update_node(
+            monitor.id, status="awaiting_check", check_name="dag-test-monitor",
+            awaiting_check_at=datetime.now(UTC),
+        )
+        # Unregistered (fixture default) — self-disabled.
+        dynamic_loader._registry.get_check.return_value = None
+
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("success"))
+        await orchestrator.tick()
+
+        fetched2 = await store.get_dag(dag.id)
+        monitor2 = next(n for n in fetched2.nodes if n.name == "monitor")
+        assert monitor2.status == "completed", (
+            "A self-disabled heartbeat check is evidence it ran — the "
+            "node must still complete, or the quiet-hours deadlock is "
+            "reintroduced from the other side."
+        )
+
 
 class TestDAGOrchestratorTimeoutClamp:
     """F046: Defensive re-clamp of node.timeout_seconds at launch time.

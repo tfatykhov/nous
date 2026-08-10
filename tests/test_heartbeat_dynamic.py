@@ -14,7 +14,8 @@
 - TestDynamicCheckLoaderCRUD (10): create check, create rejects low interval, create rejects max
     count, create rejects permanent name, create validates cron, manage list, manage enable,
     manage disable, manage delete, manage update
-- TestDynamicCheckLoaderStats (2): update stats success, update stats failure
+- TestDynamicCheckLoaderStats (4): update stats success, update stats failure,
+    get_run_count returns value, get_run_count returns None when not found
 - TestHeartbeatRunnerDynamic (6): runner has dynamic loader, start syncs loader,
     tick tracks dynamic tokens, tick updates run stats, tick updates run stats on failure,
     periodic sync
@@ -821,6 +822,45 @@ class TestDynamicCheckLoaderStats:
 
         mock_session.execute.assert_called_once()
         mock_session.commit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_run_count_returns_value(self):
+        """codex P1 (DAG check-node fix): get_run_count reads a single
+        check's run_count, the evidence the DAG orchestrator gates a
+        passing shell completion_check on before trusting it.
+        """
+        db, mock_session = _mock_db()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = 5
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        loader = DynamicCheckLoader(
+            db=db, registry=CheckRegistry(),
+            agent_id="test-agent",
+        )
+
+        count = await loader.get_run_count("my-check")
+
+        assert count == 5
+        mock_session.execute.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_run_count_returns_none_when_not_found(self):
+        """No row for the name (or agent_id) → None, not 0 — the caller
+        must not silently conflate "no such check" with "never ran"."""
+        db, mock_session = _mock_db()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        loader = DynamicCheckLoader(
+            db=db, registry=CheckRegistry(),
+            agent_id="test-agent",
+        )
+
+        count = await loader.get_run_count("missing-check")
+
+        assert count is None
 
 
 # ===========================================================================

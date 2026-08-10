@@ -339,6 +339,29 @@ class DynamicCheckLoader:
                 )
             await session.commit()
 
+    async def get_run_count(self, name: str) -> int | None:
+        """Return a dynamic check's run_count, or None if no row exists.
+
+        codex P1 (quiet-hours check-node fix, round 2): the DAG
+        orchestrator needs evidence a check's heartbeat worker has
+        actually executed before trusting a shell completion_check's
+        "success" — run_count is the only such signal. The in-memory
+        DynamicCheck object CheckRegistry holds does not track it;
+        update_run_stats() writes only to this DB row. A dedicated
+        single-row lookup rather than routing through
+        manage_check(action="list"), which fetches every check for the
+        agent just to read one field of one row.
+        """
+        from nous.storage.models import DynamicCheckModel
+
+        async with self._db.session() as session:
+            result = await session.execute(
+                select(DynamicCheckModel.run_count)
+                .where(DynamicCheckModel.agent_id == self._agent_id)
+                .where(DynamicCheckModel.name == name)
+            )
+            return result.scalar_one_or_none()
+
     async def create_check(
         self,
         name: str,
