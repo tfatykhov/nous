@@ -1142,22 +1142,45 @@ class DAGOrchestrator:
                 )
 
     async def _heartbeat_worker_has_run(self, node: DAGNode) -> bool:
-        """Whether node's heartbeat check has executed at least once.
+        """Whether node's heartbeat check has completed at least one
+        SUCCESSFUL run.
 
-        codex P1: gates acceptance of a passing shell completion_check —
-        see the call site in _poll_awaiting_checks for why a bare
-        "success" isn't trustworthy on its own.
+        codex P1 round 3: gates acceptance of a passing shell
+        completion_check — see the call site in _poll_awaiting_checks
+        for why a bare "success" isn't trustworthy on its own.
 
-        Two kinds of evidence, checked in this order:
-        - Unregistered or inactive: the check's OWN execution is what
-          triggers a self-disable (manage_check(action="disable") both
-          unregisters it and flips its DB row inactive, synchronously,
-          DURING that run) — update_run_stats() only commits run_count
-          AFTER check.run() returns, so a just-self-disabled check can
-          momentarily read run_count==0 even though it demonstrably ran.
-          Trusting run_count alone here would treat a check that just
-          finished as one that never started.
-        - Otherwise (still registered and active): run_count > 0.
+        Durable evidence only: DynamicCheckLoader.get_successful_run_count
+        (run_count - error_count) > 0. Two proxies used in the previous
+        round of this fix are deliberately NOT used anymore:
+        - raw run_count > 0: counts ATTEMPTS, not successes —
+          update_run_stats() increments it on failed/timed-out runs
+          too, so a check whose first LLM turn errored would satisfy
+          the gate despite never doing real work.
+        - registry absence / check.active == False as independent
+          "self-disabled, therefore ran" evidence: this conflated
+          "genuinely self-disabled after succeeding" (already covered
+          by the successful-run counter below — a self-disable only
+          ever reaches the DB via check.run() returning normally,
+          which update_run_stats() then records as a success) with
+          "never registered at all" (a cold restart, or a
+          DynamicCheckLoader.sync() that hasn't run yet, leaves the
+          registry empty for a check that has never executed once).
+
+        On the self-disable ordering race (manage_check(action=
+        "disable") unregisters the check synchronously DURING
+        check.run(), while update_run_stats() only commits AFTER
+        check.run() returns): dropping registry-absence means this now
+        just defers acceptance by one poll cycle rather than
+        reintroducing the deadlock. update_run_stats(success=True) is
+        the very next awaited statement after check.run() returns
+        without raising, in both call sites that invoke it
+        (HeartbeatRunner._tick and .trigger_check) — and the
+        awaiting_check wall-clock timeout is unconditional regardless
+        (see _finalize_awaiting_check_node), so there is no path back
+        to an unbounded wedge even in the rare case where the same
+        turn errors or times out after disabling (that nets zero
+        successful runs and resolves via timeout — the correct
+        outcome for "worker run reports failure", not silent success).
 
         Fails CLOSED (returns False, deferring completion to the next
         poll) on a lookup error — the alternative, failing open, would
@@ -1167,19 +1190,17 @@ class DAGOrchestrator:
         if not node.check_name or not self._dynamic_loader:
             # No heartbeat check to gate on — nothing to defer for.
             return True
-        registry = getattr(self._dynamic_loader, '_registry', None)
-        check = registry.get_check(node.check_name) if registry else None
-        if check is None or not check.active:
-            return True
         try:
-            run_count = await self._dynamic_loader.get_run_count(node.check_name)
+            successful_runs = await self._dynamic_loader.get_successful_run_count(
+                node.check_name
+            )
         except Exception:
             logger.debug(
-                "Could not read run_count for check %s — deferring node %s",
+                "Could not read successful run count for check %s — deferring node %s",
                 node.check_name, node.name,
             )
             return False
-        return bool(run_count)
+        return bool(successful_runs)
 
     async def _finalize_awaiting_check_node(
         self,

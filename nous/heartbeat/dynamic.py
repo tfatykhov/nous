@@ -339,24 +339,29 @@ class DynamicCheckLoader:
                 )
             await session.commit()
 
-    async def get_run_count(self, name: str) -> int | None:
-        """Return a dynamic check's run_count, or None if no row exists.
+    async def get_successful_run_count(self, name: str) -> int | None:
+        """Return a dynamic check's SUCCESSFUL run count, or None if no row exists.
 
-        codex P1 (quiet-hours check-node fix, round 2): the DAG
+        codex P1 (quiet-hours check-node fix, round 3): the DAG
         orchestrator needs evidence a check's heartbeat worker has
-        actually executed before trusting a shell completion_check's
-        "success" — run_count is the only such signal. The in-memory
-        DynamicCheck object CheckRegistry holds does not track it;
-        update_run_stats() writes only to this DB row. A dedicated
-        single-row lookup rather than routing through
-        manage_check(action="list"), which fetches every check for the
-        agent just to read one field of one row.
+        actually COMPLETED a run before trusting a shell
+        completion_check's "success" — raw run_count is not that
+        signal, because update_run_stats() increments it on every
+        execution attempt, success OR failure (error_count is bumped
+        alongside it only on the failure branch — confirmed the sole
+        writer of both columns anywhere in the codebase). A check
+        whose first LLM turn errors would satisfy a bare run_count>0
+        test despite never doing real work.
+
+        run_count - error_count is exactly the count of successful
+        completions, computed here rather than in the caller so a
+        stale intermediate read can't desync the two.
         """
         from nous.storage.models import DynamicCheckModel
 
         async with self._db.session() as session:
             result = await session.execute(
-                select(DynamicCheckModel.run_count)
+                select(DynamicCheckModel.run_count - DynamicCheckModel.error_count)
                 .where(DynamicCheckModel.agent_id == self._agent_id)
                 .where(DynamicCheckModel.name == name)
             )

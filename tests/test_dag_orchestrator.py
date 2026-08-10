@@ -1418,20 +1418,23 @@ class TestCheckNodeCompletionCheck:
         )
 
     @pytest.mark.asyncio
-    async def test_check_node_success_deferred_until_heartbeat_worker_has_run(
+    async def test_check_node_success_deferred_when_run_reported_failure(
         self, store, orchestrator, dynamic_loader
     ):
-        """codex P1: the unconditional completion_check hoist lets
-        _poll_awaiting_checks accept a shell check's "success" the moment
-        it first passes — which can be BEFORE the heartbeat worker (the
-        LLM doing the node's actual work) has launched at all. A command
-        like `pgrep -f ... || exit 0` passes trivially at t=0 for exactly
-        that reason: the target process legitimately doesn't exist yet.
-        A passing completion_check must not be trusted until there is
-        evidence (run_count > 0) the heartbeat has actually run.
+        """codex P1 round 3: raw run_count counts ATTEMPTS, not
+        successes — update_run_stats() increments it on the failure
+        branch too. A check whose one and only run errored
+        (run_count=1, error_count=1, net 0 successful runs) must NOT
+        satisfy the gate, even though it is still registered and
+        active. Mocks both the pre-fix signal (get_run_count, which a
+        real DB row would read as the raw attempt count 1 — truthy)
+        and the post-fix signal (get_successful_run_count, reading the
+        same row's run_count-error_count = 0) so this test exercises
+        whichever one the code under test actually calls.
 
-        Must fail against the pre-fix implementation: the node completes
-        on the very first passing shell check with no gating at all.
+        Must fail against the pre-fix implementation: run_count=1 alone
+        reads as "ran", completing the node despite the run having
+        failed.
         """
         dag = await store.create(self._check_node_request())
         await orchestrator.start_dag(dag.id)
@@ -1441,11 +1444,13 @@ class TestCheckNodeCompletionCheck:
             monitor.id, status="awaiting_check", check_name="dag-test-monitor",
             awaiting_check_at=datetime.now(UTC),
         )
-        # Heartbeat check registered, active, but never actually run yet.
-        active_unrun_check = MagicMock()
-        active_unrun_check.active = True
-        dynamic_loader._registry.get_check.return_value = active_unrun_check
-        dynamic_loader.get_run_count = AsyncMock(return_value=0)
+        # Heartbeat check registered, active — ran once, and that one
+        # run errored.
+        active_check = MagicMock()
+        active_check.active = True
+        dynamic_loader._registry.get_check.return_value = active_check
+        dynamic_loader.get_run_count = AsyncMock(return_value=1)  # pre-fix signal
+        dynamic_loader.get_successful_run_count = AsyncMock(return_value=0)  # post-fix signal
 
         orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("success"))
         await orchestrator.tick()
@@ -1453,27 +1458,20 @@ class TestCheckNodeCompletionCheck:
         fetched2 = await store.get_dag(dag.id)
         monitor2 = next(n for n in fetched2.nodes if n.name == "monitor")
         assert monitor2.status == "awaiting_check", (
-            f"Expected the node to stay awaiting_check pending heartbeat-run "
-            f"evidence, got {monitor2.status} — a trivially-passing "
-            f"completion check completed the node before the heartbeat "
-            f"worker ever ran."
+            f"Expected the node to stay awaiting_check — the heartbeat's "
+            f"only run reported failure (0 successful runs), so a "
+            f"trivially-passing completion check must not complete the "
+            f"node. Got {monitor2.status}."
         )
-        # The worker hasn't run yet — disabling it now would strand the
-        # DAG with no worker AND no confirmed result.
         dynamic_loader.manage_check.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_check_node_success_completes_when_heartbeat_self_disabled(
+    async def test_check_node_success_completes_when_successful_run_recorded(
         self, store, orchestrator, dynamic_loader
     ):
-        """A self-disabled/unregistered heartbeat check IS evidence it
-        ran: manage_check(action='disable') both unregisters the check
-        and flips its DB row inactive DURING that same run — BEFORE
-        update_run_stats() commits run_count for the invocation. Must
-        not be mistaken for "never ran": doing so would reintroduce the
-        original quiet-hours deadlock from the other side (this exact
-        node type, blocked forever on evidence that already exists but
-        reads run_count==0 due to write ordering).
+        """A check with one successful run (run_count=1, error_count=0)
+        must satisfy the gate — confirms the fix doesn't overcorrect
+        and start rejecting genuinely successful runs.
         """
         dag = await store.create(self._check_node_request())
         await orchestrator.start_dag(dag.id)
@@ -1483,8 +1481,85 @@ class TestCheckNodeCompletionCheck:
             monitor.id, status="awaiting_check", check_name="dag-test-monitor",
             awaiting_check_at=datetime.now(UTC),
         )
-        # Unregistered (fixture default) — self-disabled.
+        active_check = MagicMock()
+        active_check.active = True
+        dynamic_loader._registry.get_check.return_value = active_check
+        dynamic_loader.get_run_count = AsyncMock(return_value=1)  # pre-fix signal
+        dynamic_loader.get_successful_run_count = AsyncMock(return_value=1)  # post-fix signal
+
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("success"))
+        await orchestrator.tick()
+
+        fetched2 = await store.get_dag(dag.id)
+        monitor2 = next(n for n in fetched2.nodes if n.name == "monitor")
+        assert monitor2.status == "completed"
+
+    @pytest.mark.asyncio
+    async def test_check_node_success_deferred_when_absent_from_registry_with_zero_successful_runs(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """codex P1 round 3: registry-absence is no longer treated as
+        independent "self-disabled, therefore ran" evidence — it
+        conflated a genuine self-disable with a cold restart or a
+        DynamicCheckLoader.sync() that simply hasn't loaded the check
+        yet, either of which leaves the registry empty for a check
+        that has never executed once. With zero successful runs
+        recorded, an absent-from-registry check must NOT satisfy the
+        gate.
+
+        Must fail against the pre-fix implementation: registry
+        absence alone completed the node regardless of run history.
+        """
+        dag = await store.create(self._check_node_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        monitor = next(n for n in fetched.nodes if n.name == "monitor")
+        await store.update_node(
+            monitor.id, status="awaiting_check", check_name="dag-test-monitor",
+            awaiting_check_at=datetime.now(UTC),
+        )
+        # Unregistered (fixture default) — but crucially, zero
+        # successful runs recorded in the DB either.
         dynamic_loader._registry.get_check.return_value = None
+        dynamic_loader.get_run_count = AsyncMock(return_value=0)  # pre-fix signal
+        dynamic_loader.get_successful_run_count = AsyncMock(return_value=0)  # post-fix signal
+
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("success"))
+        await orchestrator.tick()
+
+        fetched2 = await store.get_dag(dag.id)
+        monitor2 = next(n for n in fetched2.nodes if n.name == "monitor")
+        assert monitor2.status == "awaiting_check", (
+            f"Expected the node to stay awaiting_check — the check is "
+            f"absent from the registry (restart / failed sync — NOT "
+            f"proof of a self-disable) AND has zero successful runs "
+            f"recorded. Got {monitor2.status}."
+        )
+        dynamic_loader.manage_check.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_check_node_success_completes_when_self_disabled_with_recorded_success(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """The deadlock-fix side of the same coin: a check that is
+        absent from the registry (self-disabled) AND has a successful
+        run recorded must still complete — dropping registry-absence
+        as a signal must not reintroduce the original quiet-hours
+        deadlock from the other side. This is a non-regression check:
+        pre-fix code also completes this case (via registry-absence
+        directly), just via a different, race-prone mechanism.
+        """
+        dag = await store.create(self._check_node_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        monitor = next(n for n in fetched.nodes if n.name == "monitor")
+        await store.update_node(
+            monitor.id, status="awaiting_check", check_name="dag-test-monitor",
+            awaiting_check_at=datetime.now(UTC),
+        )
+        dynamic_loader._registry.get_check.return_value = None
+        dynamic_loader.get_run_count = AsyncMock(return_value=1)  # pre-fix signal
+        dynamic_loader.get_successful_run_count = AsyncMock(return_value=1)  # post-fix signal
 
         orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("success"))
         await orchestrator.tick()
@@ -1492,9 +1567,8 @@ class TestCheckNodeCompletionCheck:
         fetched2 = await store.get_dag(dag.id)
         monitor2 = next(n for n in fetched2.nodes if n.name == "monitor")
         assert monitor2.status == "completed", (
-            "A self-disabled heartbeat check is evidence it ran — the "
-            "node must still complete, or the quiet-hours deadlock is "
-            "reintroduced from the other side."
+            "A self-disabled check with a recorded successful run must "
+            "still complete — the quiet-hours deadlock must stay fixed."
         )
 
     @pytest.mark.asyncio
