@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import String, cast, func, select, update
 from sqlalchemy import true as sa_true
 from sqlalchemy.orm import selectinload
 
@@ -24,6 +25,14 @@ MAX_ACTIVE_DAGS = 5
 # orchestrator lock and can reactivate a DAG while deliver() is awaiting
 # Telegram or a 120s summary turn (@codex P1 on fa988e7).
 _TERMINAL_DAG_STATUSES = ("completed", "failed", "partial", "cancelled")
+
+# codex P2 (FINDING 3): `find_dags_by_id_prefix` below matches this prefix
+# against `id::text` via SQL LIKE, where `%`/`_` are wildcards. Neither
+# character (nor anything but hex digits and hyphens) can appear in a real
+# UUID's string form, so validating against this pattern BEFORE the query
+# rejects both metacharacters outright — simpler and safer than escaping
+# them and passing an `escape=` clause through to `.like()`.
+_DAG_ID_PREFIX_RE = re.compile(r"^[0-9a-fA-F-]{1,36}$")
 
 
 class DAGStore:
@@ -270,6 +279,43 @@ class DAGStore:
                 .where(ExecutionDAG.status.in_(_TERMINAL_DAG_STATUSES))
                 .options(selectinload(ExecutionDAG.nodes))
                 .order_by(ExecutionDAG.completed_at.desc().nulls_last())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
+
+    async def find_dags_by_id_prefix(
+        self, prefix: str, limit: int = 10
+    ) -> list[ExecutionDAG]:
+        """codex P2 (FINDING 3): `_resolve_dag`'s old fallback scanned
+        `get_active_dags()` then a `get_recent_dags(limit=20)` window — a
+        prefix lookup for a finished DAG outside that created_at-bounded
+        window (exactly the DAG a user is likely to ask about right after
+        an F087 delivery notification announces it) silently returned "not
+        found". A prefix is a targeted point-lookup, not a recency query:
+        this is a single agent-scoped SQL match across every status and
+        age instead.
+
+        Invalid input (anything outside `_DAG_ID_PREFIX_RE`) returns an
+        empty list rather than querying — most importantly this rejects
+        `%`/`_` before they ever reach `LIKE`, where they are wildcards.
+
+        `limit=10`, not the 2 that would suffice to merely detect
+        ambiguity: the caller's `ValueError` lists the matches by id, and a
+        human resolving a collision benefits from seeing more than the
+        bare minimum. Real prefix collisions at the 8+ hex-char lengths
+        this is used with are rare enough that 10 effectively means "all
+        of them" without risking an unbounded query on a pathological
+        (e.g. single-character) prefix.
+        """
+        if not _DAG_ID_PREFIX_RE.fullmatch(prefix):
+            return []
+        async with self._db.session() as session:
+            result = await session.execute(
+                select(ExecutionDAG)
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .where(cast(ExecutionDAG.id, String).like(f"{prefix}%"))
+                .options(selectinload(ExecutionDAG.nodes))
+                .order_by(ExecutionDAG.created_at.desc())
                 .limit(limit)
             )
             return list(result.scalars().all())

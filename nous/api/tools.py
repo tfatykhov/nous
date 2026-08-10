@@ -4026,7 +4026,18 @@ def register_dag_tools(
 
 
 async def _resolve_dag(store: "Any", dag_id_str: str) -> "Any | None":
-    """Resolve a DAG by full UUID or 8-char prefix.
+    """Resolve a DAG by full UUID or id prefix, any status, any age.
+
+    codex P2 (FINDING 3): previously two Python-side scans — active DAGs,
+    then a `get_recent_dags(limit=20)` created_at-bounded window — with the
+    same blind spot FINDING 1 fixed for `dag_manage action=recent`: a
+    finished DAG outside that window was unresolvable by prefix no matter
+    how recently it finished. Collapsed into one agent-scoped SQL prefix
+    match (`DAGStore.find_dags_by_id_prefix`), which also closes a dormant
+    bug the two-scan version had: it could never detect an active DAG and a
+    finished DAG sharing a prefix as mutually ambiguous, because it
+    returned on the first pool's single match without ever consulting the
+    second.
 
     Raises ValueError if prefix matches multiple DAGs.
     Returns None if no match found.
@@ -4040,19 +4051,7 @@ async def _resolve_dag(store: "Any", dag_id_str: str) -> "Any | None":
     except ValueError:
         pass
 
-    # Try prefix match against active DAGs
-    dags = await store.get_active_dags()
-    matches = [d for d in dags if str(d.id).startswith(dag_id_str)]
-    if len(matches) == 1:
-        return matches[0]
-    if len(matches) > 1:
-        ids = ", ".join(str(d.id)[:8] for d in matches)
-        raise ValueError(f"Prefix '{dag_id_str}' is ambiguous, matches: {ids}")
-
-    # Also check recent DAGs for status/retry on completed/failed
-    recent = await store.get_recent_dags(limit=20)
-    finished = [d for d in recent if d.status not in ("pending", "running")]
-    matches = [d for d in finished if str(d.id).startswith(dag_id_str)]
+    matches = await store.find_dags_by_id_prefix(dag_id_str)
     if len(matches) == 1:
         return matches[0]
     if len(matches) > 1:
