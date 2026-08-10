@@ -3704,6 +3704,20 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
 # DAG orchestration tools (F038)
 # ---------------------------------------------------------------------------
 
+# codex P2 round 5 (FINDING 9): `status`'s per-node result preview. [:80]
+# (the `error` truncation width) is right for a classified error string and
+# useless for an LLM's actual output — a subtask result is routinely
+# hundreds to thousands of characters. 500 is a deliberate middle ground,
+# not the `error`/`recent` widths reused blindly: enough characters for a
+# genuine paragraph of prose (the shape most subtask results take), while
+# DAGCreateRequest's validator caps every DAG at MAX_WAVES(4) x
+# MAX_PARALLEL_PER_WAVE(4) = 16 nodes (schemas.py), so worst case this adds
+# ~8000 chars to `status` — a bigger overview, not a flood. `status` stays
+# an OVERVIEW, not the recovery path — a truncated line always says how
+# much was cut and names `node_result`, the lossless per-node retrieval
+# action, rather than silently slicing.
+_STATUS_RESULT_PREVIEW_CHARS = 500
+
 
 def register_dag_tools(
     dispatcher: ToolDispatcher,
@@ -3901,20 +3915,29 @@ def register_dag_tools(
                         line += f" | polls: {node.check_attempts}"
                     if node.error:
                         line += f" | error: {node.error[:80]}"
-                    # codex P2: result was rendered nowhere here -- an agent
-                    # recovering a missed delivery could see THAT a node
-                    # finished but not WHAT it produced. [:80] matches the
-                    # `error` truncation above rather than inventing a new
-                    # width. Not `elif`: a failed node can carry both (F061
-                    # outcome-aware branch sets error to the classified
-                    # message and result to the subtask's raw output in the
-                    # same update). No separate cap on how many nodes show a
-                    # result: DAGCreateRequest's validator already bounds
-                    # every DAG to MAX_WAVES(4) x MAX_PARALLEL_PER_WAVE(4) =
-                    # 16 nodes total, so per-line truncation alone keeps
-                    # this readable.
+                    # codex P2 round 5 (FINDING 9): result was rendered
+                    # nowhere here -- an agent recovering a missed delivery
+                    # could see THAT a node finished but not WHAT it
+                    # produced. Not `elif` on error: a failed node can carry
+                    # both (F061 outcome-aware branch sets error to the
+                    # classified message and result to the subtask's raw
+                    # output in the same update). Truncation is never
+                    # silent -- FINDING 9 exists because the original [:80]
+                    # slice gave no indication anything was cut, let alone
+                    # how to get the rest.
                     if node.result:
-                        line += f" | result: {node.result[:80]}"
+                        result = node.result
+                        if len(result) > _STATUS_RESULT_PREVIEW_CHARS:
+                            preview = result[:_STATUS_RESULT_PREVIEW_CHARS]
+                            line += (
+                                f" | result: {preview} "
+                                f"[truncated, {len(result)} chars total -- "
+                                f'use dag_manage(action="node_result", '
+                                f'dag_id="{str(dag.id)[:8]}", '
+                                f'node_name="{node.name}") for the full result]'
+                            )
+                        else:
+                            line += f" | result: {result}"
                     lines.append(line)
                 return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
@@ -3928,6 +3951,29 @@ def register_dag_tools(
                     return {"content": [{"type": "text", "text": "Error: node_name required for retry_node"}]}
                 await orchestrator.retry_node(dag.id, node_name)
                 return {"content": [{"type": "text", "text": f"Reset node '{node_name}' to pending for retry"}]}
+
+            elif action == "node_result":
+                # codex P2 round 5 (FINDING 9): the lossless retrieval path
+                # `status`'s truncated preview points at. Full node.result,
+                # byte-for-byte -- no cap here. `status` is the bounded
+                # overview; this is the deliberately unbounded escape hatch,
+                # scoped to exactly the one node asked for.
+                node_name = kwargs.get("node_name")
+                if not node_name:
+                    return {"content": [{"type": "text", "text": "Error: node_name required for node_result"}]}
+                node = next((n for n in dag.nodes if n.name == node_name), None)
+                if node is None:
+                    available = ", ".join(sorted(n.name for n in dag.nodes)) or "(none)"
+                    return {"content": [{"type": "text", "text": (
+                        f"Error: node '{node_name}' not found in DAG "
+                        f"'{dag.name}' ({str(dag.id)[:8]}). "
+                        f"Available nodes: {available}"
+                    )}]}
+                if node.result is None:
+                    return {"content": [{"type": "text", "text": (
+                        f"Node '{node_name}' has no result yet (status: {node.status})"
+                    )}]}
+                return {"content": [{"type": "text", "text": node.result}]}
 
             else:
                 return {"content": [{"type": "text", "text": f"Error: unknown action '{action}'"}]}
@@ -4031,14 +4077,19 @@ def register_dag_tools(
             "results — a finished DAG announces itself; use 'recent' only as a "
             "fallback when a delivery was missed or you want an older outcome. "
             "'recent' lists finished DAGs (completed/failed/cancelled) — the only way "
-            "to find one you don't already have the id or id-prefix for. 'retry_node' "
-            "re-queues a failed node (and any descendants it alone blocked); it is "
-            "refused on a cancelled DAG, since cancellation is deliberate."
+            "to find one you don't already have the id or id-prefix for. 'status' "
+            f"shows every node with a preview of its result (truncated past "
+            f"{_STATUS_RESULT_PREVIEW_CHARS} chars — it says so when it does, and "
+            "names the node). 'node_result' returns one named node's COMPLETE "
+            "result, byte-for-byte — use it whenever 'status' shows a truncated "
+            "preview. 'retry_node' re-queues a failed node (and any descendants it "
+            "alone blocked); it is refused on a cancelled DAG, since cancellation "
+            "is deliberate."
         ),
         "properties": {
-            "action": {"type": "string", "enum": ["list", "recent", "status", "cancel", "retry_node"]},
+            "action": {"type": "string", "enum": ["list", "recent", "status", "cancel", "retry_node", "node_result"]},
             "dag_id": {"type": "string"},
-            "node_name": {"type": "string"},
+            "node_name": {"type": "string", "description": "Required for 'retry_node' and 'node_result'; ignored by every other action."},
         },
         "required": ["action"],
     })

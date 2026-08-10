@@ -346,4 +346,84 @@ class TestFinishedDagOutputIsRecoverable:
         text = (await tools._handlers["dag_manage"](action="recent"))["content"][0]["text"]
 
         assert "Deployed the new pricing page" in text
+
+    @pytest.mark.asyncio
+    async def test_status_truncates_long_results_and_names_the_recovery_command(
+        self, tools, dag_store
+    ):
+        """codex P2 round 5 FINDING 9: [:80] (the `error` convention) is
+        right for a classified error string and useless for an LLM's
+        actual output — a subtask result is routinely hundreds to
+        thousands of characters. `status`'s preview must be a MEANINGFUL
+        length, and truncation must never be silent: the line must say
+        how much was cut and name the exact command that recovers the
+        rest. Must fail against the pre-fix implementation, whose [:80]
+        slice gives no indication anything was cut at all.
+        """
+        dag = await dag_store.create(_one("long-result-dag"))
+        node = dag.nodes[0]
+        long_result = "word " * 200  # 1000 chars, past any reasonable preview bound
+        await dag_store.update_node(node.id, status="completed", result=long_result)
+
+        text = (await tools._handlers["dag_manage"](
+            action="status", dag_id=str(dag.id)))["content"][0]["text"]
+
+        assert long_result not in text
+        assert "truncated" in text
+        assert "node_result" in text
+        assert node.name in text
+
+    @pytest.mark.asyncio
+    async def test_status_does_not_mark_short_results_truncated(
+        self, tools, dag_store
+    ):
+        """Guard against a truncation notice that always fires regardless
+        of length.
+        """
+        dag = await dag_store.create(_one("short-result-dag"))
+        node = dag.nodes[0]
+        short_result = "all good, done."
+        await dag_store.update_node(node.id, status="completed", result=short_result)
+
+        text = (await tools._handlers["dag_manage"](
+            action="status", dag_id=str(dag.id)))["content"][0]["text"]
+
+        assert short_result in text
+        assert "truncated" not in text
+
+    @pytest.mark.asyncio
+    async def test_node_result_returns_the_complete_result(self, tools, dag_store):
+        """codex P2 round 5 FINDING 9: `status` stays a bounded overview —
+        16 nodes rendered in full would flood the context, which is the
+        actual reason for bounding it — so recovery is a lossless PATH,
+        not an unbounded overview. Must fail against the pre-fix
+        implementation: `node_result` does not exist as an action yet.
+        """
+        dag = await dag_store.create(_one("full-result-dag"))
+        node = dag.nodes[0]
+        long_result = "word " * 500  # 2500 chars
+        await dag_store.update_node(node.id, status="completed", result=long_result)
+
+        text = (await tools._handlers["dag_manage"](
+            action="node_result", dag_id=str(dag.id), node_name=node.name
+        ))["content"][0]["text"]
+
+        assert text == long_result
+
+    @pytest.mark.asyncio
+    async def test_node_result_unknown_node_name_lists_available_nodes(
+        self, tools, dag_store
+    ):
+        """Unknown node_name must give a clear, helpful error — not an
+        empty response.
+        """
+        dag = await dag_store.create(_one("known-nodes-dag"))
+        node = dag.nodes[0]
+
+        text = (await tools._handlers["dag_manage"](
+            action="node_result", dag_id=str(dag.id), node_name="does-not-exist"
+        ))["content"][0]["text"]
+
+        assert "Error" in text
+        assert node.name in text
         assert "All nodes completed successfully" not in text
