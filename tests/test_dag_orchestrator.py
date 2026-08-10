@@ -1497,6 +1497,74 @@ class TestCheckNodeCompletionCheck:
             "reintroduced from the other side."
         )
 
+    @pytest.mark.asyncio
+    async def test_check_node_timeout_cancels_heartbeat_check(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """codex P2: timeout marks the node failed and `continue`s
+        straight past cleanup — the dynamic check stays registered (and,
+        with urgent=True, exempt from quiet hours) burning LLM turns
+        after the DAG has already failed. Must fail against the pre-fix
+        implementation: manage_check is never called on this path.
+        """
+        from datetime import timedelta
+
+        settings = orchestrator._settings
+        dag = await store.create(self._check_node_request())
+        node = next(n for n in dag.nodes if n.name == "monitor")
+        past = datetime.now(UTC) - timedelta(seconds=settings.dag_node_max_timeout + 300)
+        await store.update_node(
+            node.id, status="awaiting_check", check_name="dag-test-monitor",
+            awaiting_check_at=past,
+        )
+
+        fetched = await store.get_dag(dag.id)
+        await orchestrator._poll_awaiting_checks(fetched)
+
+        final = await store.get_dag(dag.id)
+        timed_out = next(n for n in final.nodes if n.name == "monitor")
+        assert timed_out.status == "failed"
+        dynamic_loader.manage_check.assert_called_with(
+            action="disable", name="dag-test-monitor"
+        )
+
+    @pytest.mark.asyncio
+    async def test_check_node_max_attempts_cancels_heartbeat_check(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """codex P2: the max-attempts path has the identical leak as
+        timeout — marks the node failed and `continue`s past cleanup.
+        Must fail against the pre-fix implementation: manage_check is
+        never called on this path.
+        """
+        dag = await store.create(DAGCreateRequest(
+            name="check-node-max-attempts",
+            nodes=[
+                DAGNodeSpec(
+                    name="monitor",
+                    type=DAGNodeType.check,
+                    instructions="Monitor something",
+                    completion_check="test -f /tmp/done.flag",
+                    max_check_attempts=3,
+                ),
+            ],
+        ))
+        node = dag.nodes[0]
+        await store.update_node(
+            node.id, status="awaiting_check", check_name="dag-test-monitor",
+            awaiting_check_at=datetime.now(UTC), check_attempts=3,
+        )
+
+        fetched = await store.get_dag(dag.id)
+        await orchestrator._poll_awaiting_checks(fetched)
+
+        final = await store.get_dag(dag.id)
+        exhausted = next(n for n in final.nodes if n.name == "monitor")
+        assert exhausted.status == "failed"
+        dynamic_loader.manage_check.assert_called_with(
+            action="disable", name="dag-test-monitor"
+        )
+
 
 class TestDAGOrchestratorTimeoutClamp:
     """F046: Defensive re-clamp of node.timeout_seconds at launch time.

@@ -1055,24 +1055,20 @@ class DAGOrchestrator:
                 elapsed_total = (datetime.now(UTC) - ref_time).total_seconds()
                 effective_timeout = self._effective_timeout(node)
                 if elapsed_total > effective_timeout:
-                    await self._store.update_node(
-                        node.id,
+                    await self._finalize_awaiting_check_node(
+                        node,
                         status="failed",
                         error=f"Completion check timed out after {effective_timeout}s ({node.check_attempts} attempts)",
-                        completed_at=datetime.now(UTC),
                     )
-                    node.status = "failed"
                     continue
 
             # Check max attempts
             if node.max_check_attempts and node.check_attempts >= node.max_check_attempts:
-                await self._store.update_node(
-                    node.id,
+                await self._finalize_awaiting_check_node(
+                    node,
                     status="failed",
                     error=f"Completion check exceeded max attempts ({node.max_check_attempts})",
-                    completed_at=datetime.now(UTC),
                 )
-                node.status = "failed"
                 continue
 
             # Run the completion check
@@ -1103,39 +1099,33 @@ class DAGOrchestrator:
                         )
                         continue
                     result = await self._read_node_result(node, dag)
-                    await self._store.update_node(
-                        node.id,
+                    # Terminal transition + heartbeat cancel both go through
+                    # _finalize_awaiting_check_node — see its docstring for
+                    # why cleanup lives there and not inline per-branch.
+                    await self._finalize_awaiting_check_node(
+                        node,
                         status="completed",
                         result=result,
                         check_attempts=attempts,
                         last_check_at=now,
-                        completed_at=now,
                     )
-                    node.status = "completed"
-                    node.result = result
                     logger.info(
                         "Completion check passed for node %s (attempt %d)",
                         node.name, attempts,
                     )
-                    # Shell check resolved — stop the heartbeat worker so it
-                    # doesn't keep burning LLM tokens after the node is done.
-                    await self._cancel_heartbeat_check(node)
                 elif check.status == "failed":
                     error_msg = f"Completion check failed: {check.detail}" if check.detail else "Completion check failed (exit code 1)"
-                    await self._store.update_node(
-                        node.id,
+                    await self._finalize_awaiting_check_node(
+                        node,
                         status="failed",
                         error=error_msg,
                         check_attempts=attempts,
                         last_check_at=now,
-                        completed_at=now,
                     )
-                    node.status = "failed"
                     logger.warning(
                         "Completion check definitively failed for node %s (attempt %d): %s",
                         node.name, attempts, check.detail,
                     )
-                    await self._cancel_heartbeat_check(node)
                 else:
                     await self._store.update_node(
                         node.id, check_attempts=attempts, last_check_at=now,
@@ -1190,6 +1180,56 @@ class DAGOrchestrator:
             )
             return False
         return bool(run_count)
+
+    async def _finalize_awaiting_check_node(
+        self,
+        node: DAGNode,
+        *,
+        status: str,
+        error: str | None = None,
+        result: dict | None = None,
+        check_attempts: int | None = None,
+        last_check_at: datetime | None = None,
+    ) -> None:
+        """Single choke point for every terminal transition out of
+        awaiting_check: persist the status, then cancel the heartbeat check.
+
+        codex P2: the timeout and max_check_attempts branches used to
+        persist status="failed" and `continue` straight past cleanup —
+        the dynamic check stayed registered, and with urgent=True (which
+        exempts it from quiet-hour suppression too) kept burning LLM
+        turns on a DAG that had already failed. Success and definitive
+        failure already called _cancel_heartbeat_check inline; a fourth
+        near-identical call site was exactly how the other two got
+        skipped in the first place. Routing all four through one method
+        makes the cancel structural — attached to reaching a terminal
+        status — rather than something each branch has to remember to
+        add. (The one other awaiting_check exit, the "no valid check
+        command" branch above, isn't routed through this: a node only
+        reaches awaiting_check when completion_check is a non-empty
+        string, so that branch is unreachable in practice.)
+        """
+        completed_at = datetime.now(UTC)
+        update_kwargs: dict[str, object] = {"status": status, "completed_at": completed_at}
+        if error is not None:
+            update_kwargs["error"] = error
+        if result is not None:
+            update_kwargs["result"] = result
+        if check_attempts is not None:
+            update_kwargs["check_attempts"] = check_attempts
+        if last_check_at is not None:
+            update_kwargs["last_check_at"] = last_check_at
+
+        await self._store.update_node(node.id, **update_kwargs)
+        node.status = status
+        if result is not None:
+            node.result = result
+        if check_attempts is not None:
+            node.check_attempts = check_attempts
+        if last_check_at is not None:
+            node.last_check_at = last_check_at
+
+        await self._cancel_heartbeat_check(node)
 
     async def _cancel_heartbeat_check(self, node: DAGNode) -> None:
         """Disable the heartbeat check for a node that resolved via shell completion_check.
