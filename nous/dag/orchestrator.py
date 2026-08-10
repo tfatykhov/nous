@@ -1344,8 +1344,8 @@ class DAGOrchestrator:
         (config.py:1040) — stacked on an independently rare DB write
         failure. Root cause is the swallow in runner.py, which corrupts
         stats for every check type, not just DAG-managed ones (F034.3's
-        self-tuning reads the same counters), and is tracked separately:
-        TODO(issue ref pending).
+        self-tuning reads the same counters), and is tracked separately as
+        issue #590.
 
         Evidence-signal history, so this isn't re-litigated: registry
         presence/absence and raw run_count were both tried and rejected
