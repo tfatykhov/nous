@@ -1033,13 +1033,23 @@ class DAGOrchestrator:
         # heartbeat check was unregistered or inactive, which deadlocked nodes
         # created during quiet hours (check present+active, run_count=0,
         # never scheduled by runner.py:205).
+        #
+        # codex P1 round 4: deliberately does NOT stamp awaiting_check_at
+        # here. Before this hoist existed, the equivalent write only ever
+        # fired inside the check-is-None / not-check.active branches below
+        # — i.e. only once the heartbeat worker had ALREADY finished. The
+        # hoist moved that write to fire unconditionally at t=0 without
+        # moving _poll_awaiting_checks' deadline computation with it, so
+        # the completion-check timeout clock could burn through the
+        # worker's own scheduling wait (interval_seconds, up to 300s) —
+        # and Finding A/C's deferral, which waits for that same worker
+        # evidence before trusting a passing shell check — before the
+        # shell check was ever polled with a fair chance. Restoring the
+        # pre-hoist semantic: _poll_awaiting_checks now stamps
+        # awaiting_check_at itself, the first tick worker evidence is
+        # established (see the comment there), not before.
         if node.completion_check and node.completion_check.strip():
-            now = datetime.now(UTC)
-            await self._store.update_node(
-                node.id,
-                status="awaiting_check",
-                awaiting_check_at=now,
-            )
+            await self._store.update_node(node.id, status="awaiting_check")
             node.status = "awaiting_check"
             return
 
@@ -1082,6 +1092,26 @@ class DAGOrchestrator:
                 node.status = "completed"
                 continue
 
+            # codex P1 round 4: the completion-check deadline must not start
+            # before the heartbeat worker can possibly have produced
+            # evidence it ran — see _sync_check_node's hoist for why. Stamp
+            # awaiting_check_at here instead, the FIRST tick evidence
+            # exists, using the same evidence _heartbeat_worker_has_run
+            # computes for the success gate further down. Checked on every
+            # tick — deliberately NOT gated on completion_check_interval,
+            # which throttles the (possibly expensive) shell command only;
+            # this is a cheap single-row lookup, worth the freshness so
+            # phase 2's full window starts as close to the true evidence
+            # moment as possible. Idempotent: once set, never rechecked or
+            # overwritten while status stays awaiting_check (retry_node's
+            # full reset is the only other writer of this column).
+            if node.awaiting_check_at is None and await self._heartbeat_worker_has_run(node):
+                established_at = datetime.now(UTC)
+                await self._store.update_node(
+                    node.id, awaiting_check_at=established_at,
+                )
+                node.awaiting_check_at = established_at
+
             # Check interval throttle
             if node.completion_check_interval and node.last_check_at:
                 last = node.last_check_at
@@ -1091,7 +1121,15 @@ class DAGOrchestrator:
                 if elapsed < node.completion_check_interval:
                     continue
 
-            # Check timeout (based on awaiting_check_at, not started_at)
+            # Check timeout. ref_time falls back to started_at while no
+            # worker evidence has been established yet (awaiting_check_at
+            # is still None) — a worker that never runs still fails on the
+            # overall deadline measured from node start, so this can't
+            # hang. F087's wall-clock reaper does NOT cover awaiting_check
+            # nodes (only status='running'), so this fallback is the ONLY
+            # bound on that phase — started_at is guaranteed non-NULL here
+            # since _launch_check_node always sets it before a node can
+            # reach awaiting_check.
             ref_time = node.awaiting_check_at or node.started_at
             if ref_time:
                 if ref_time.tzinfo is None:

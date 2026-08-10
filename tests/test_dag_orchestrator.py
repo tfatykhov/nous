@@ -1695,6 +1695,141 @@ class TestCheckNodeCompletionCheck:
             action="disable", name="dag-test-monitor"
         )
 
+    @pytest.mark.asyncio
+    async def test_check_node_timeout_deadline_starts_at_worker_evidence_not_hoist(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """codex P1 round 4: before this fix, the hoist stamped
+        awaiting_check_at unconditionally at t=0 (heartbeat worker possibly
+        not even launched), and _poll_awaiting_checks used that SAME
+        timestamp as the completion-check deadline — so Finding A/C's own
+        deferral (waiting for worker evidence before trusting a passing
+        shell check) could burn through the deadline before the shell
+        check was ever given a fair chance, failing a node whose worker
+        went on to succeed.
+
+        Simulates: node started long ago (started_at old enough that
+        elapsed-since-launch already exceeds effective_timeout), but no
+        worker evidence has been established yet (awaiting_check_at is
+        still None — the post-fix hoist no longer sets it). Worker
+        evidence appears RIGHT NOW. The node must NOT be failed for
+        timeout on this poll — awaiting_check_at should be freshly
+        stamped, giving the shell check its own full window from here.
+
+        Must fail against the pre-fix implementation: ref_time falls back
+        straight to the old started_at with no evidence-based reset,
+        elapsed already exceeds the timeout, and the node is failed
+        before the shell check (mocked "pending") is ever trusted.
+        """
+        from datetime import timedelta
+
+        settings = orchestrator._settings
+        dag = await store.create(self._check_node_request())
+        node = next(n for n in dag.nodes if n.name == "monitor")
+        old_start = datetime.now(UTC) - timedelta(seconds=settings.dag_node_max_timeout + 100)
+        await store.update_node(
+            node.id, status="awaiting_check", check_name="dag-test-monitor",
+            started_at=old_start, awaiting_check_at=None,
+        )
+        dynamic_loader.get_successful_run_count = AsyncMock(return_value=1)
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("pending"))
+
+        fetched = await store.get_dag(dag.id)
+        await orchestrator._poll_awaiting_checks(fetched)
+
+        final = await store.get_dag(dag.id)
+        monitor = next(n for n in final.nodes if n.name == "monitor")
+        assert monitor.status == "awaiting_check", (
+            f"Expected the node to keep waiting — worker evidence just "
+            f"appeared, so the deadline should reset from now rather than "
+            f"fail immediately just because started_at is old. Got "
+            f"{monitor.status}."
+        )
+        assert monitor.awaiting_check_at is not None, (
+            "Expected awaiting_check_at to be freshly stamped now that "
+            "worker evidence exists."
+        )
+
+    @pytest.mark.asyncio
+    async def test_check_node_full_window_applies_from_evidence_established(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """Once awaiting_check_at has been stamped (worker evidence
+        established on an earlier poll), the full effective_timeout
+        window applies measured from THAT point — even if started_at is
+        much older. Confirms the reset is a genuine fresh window, not
+        just a one-tick grace.
+
+        This exercises the ref_time fallback logic itself, which this fix
+        does not change — only WHEN awaiting_check_at gets set. Does not
+        fail pre-fix: both old and new code compute the same ref_time
+        once awaiting_check_at is non-None. Included as explicit coverage
+        of the required scenario, not a regression proof.
+        """
+        from datetime import timedelta
+
+        settings = orchestrator._settings
+        dag = await store.create(self._check_node_request())
+        node = next(n for n in dag.nodes if n.name == "monitor")
+        very_old_start = datetime.now(UTC) - timedelta(seconds=settings.dag_node_max_timeout * 3)
+        recent_evidence = datetime.now(UTC) - timedelta(seconds=10)
+        await store.update_node(
+            node.id, status="awaiting_check", check_name="dag-test-monitor",
+            started_at=very_old_start, awaiting_check_at=recent_evidence,
+        )
+        dynamic_loader.get_successful_run_count = AsyncMock(return_value=1)
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("pending"))
+
+        fetched = await store.get_dag(dag.id)
+        await orchestrator._poll_awaiting_checks(fetched)
+
+        final = await store.get_dag(dag.id)
+        monitor = next(n for n in final.nodes if n.name == "monitor")
+        assert monitor.status == "awaiting_check", (
+            f"Expected the node to still be within its window — "
+            f"awaiting_check_at was stamped only 10s ago even though "
+            f"started_at is ancient. Got {monitor.status}."
+        )
+
+    @pytest.mark.asyncio
+    async def test_check_node_never_run_worker_still_fails_on_deadline(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """Regression guard for the fix itself: a worker that NEVER
+        produces evidence must still fail on the overall deadline,
+        measured from started_at while awaiting_check_at stays None — no
+        hang. F087's reaper does not cover awaiting_check nodes, so this
+        fallback is the only backstop.
+
+        Does not fail pre-fix — this exercises the ref_time fallback
+        logic, unchanged by this fix. Included as explicit coverage that
+        the fix doesn't introduce a hang, not a regression proof.
+        """
+        from datetime import timedelta
+
+        settings = orchestrator._settings
+        dag = await store.create(self._check_node_request())
+        node = next(n for n in dag.nodes if n.name == "monitor")
+        old_start = datetime.now(UTC) - timedelta(seconds=settings.dag_node_max_timeout + 100)
+        await store.update_node(
+            node.id, status="awaiting_check", check_name="dag-test-monitor",
+            started_at=old_start, awaiting_check_at=None,
+        )
+        # Evidence never appears.
+        dynamic_loader.get_successful_run_count = AsyncMock(return_value=0)
+        dynamic_loader.is_check_disabled = AsyncMock(return_value=False)
+
+        fetched = await store.get_dag(dag.id)
+        await orchestrator._poll_awaiting_checks(fetched)
+
+        final = await store.get_dag(dag.id)
+        monitor = next(n for n in final.nodes if n.name == "monitor")
+        assert monitor.status == "failed", (
+            f"Expected the node to fail on the overall deadline — the "
+            f"worker never produced evidence, so started_at must still "
+            f"bound this phase (no hang). Got {monitor.status}."
+        )
+
 
 class TestCheckNodeReconciliationSweep:
     """codex P2 round 4 (Finding E): tick()'s reconciliation sweep for
