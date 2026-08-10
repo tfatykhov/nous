@@ -13,7 +13,7 @@ from sqlalchemy.orm import selectinload
 from nous.config import Settings
 from nous.dag.schemas import DAGCreateRequest
 from nous.storage.database import Database
-from nous.storage.models import DAGEdge, DAGNode, ExecutionDAG, Subtask
+from nous.storage.models import DAGEdge, DAGNode, DynamicCheckModel, ExecutionDAG, Subtask
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,13 @@ MAX_ACTIVE_DAGS = 5
 # orchestrator lock and can reactivate a DAG while deliver() is awaiting
 # Telegram or a 120s summary turn (@codex P1 on fa988e7).
 _TERMINAL_DAG_STATUSES = ("completed", "failed", "partial", "cancelled")
+
+# codex P2 round 4: every non-active DAGNode status, i.e. every status a
+# check-type node can leave its heartbeat check leaked behind on. Broader
+# than just "completed"/"failed" (the two _finalize_awaiting_check_node
+# outcomes) so the reconciliation sweep also catches _cancel_node's
+# DAG-cancellation path and skip_and_continue's fix-stage path for free.
+_TERMINAL_CHECK_NODE_STATUSES = ("completed", "failed", "cancelled", "skipped")
 
 
 class DAGStore:
@@ -480,6 +487,49 @@ class DAGStore:
                     selectinload(ExecutionDAG.edges),
                 )
                 .order_by(ExecutionDAG.completed_at.asc().nulls_last())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
+
+    async def get_terminal_check_nodes_with_enabled_heartbeat(
+        self, limit: int = 20
+    ) -> list[DAGNode]:
+        """codex P2 round 4: check-type nodes that reached a terminal status
+        but whose heartbeat check row is still enabled=True — the
+        reconciliation sweep's work queue.
+
+        _cancel_heartbeat_check / _cancel_node swallow manage_check(disable)
+        failures with no retry, and skip_and_continue never calls it at all;
+        once a node is terminal, _poll_awaiting_checks never looks at it
+        again. Unlike F087's DAG delivery sweep this needs no delivered_at-
+        style column: manage_check(disable) has no externally-visible side
+        effect, so re-issuing it on an already-disabled check is a harmless
+        no-op — the ``enabled == True`` predicate itself is what makes a
+        node drop out of every future sweep the instant disable actually
+        lands, with no separate "handled" flag to maintain.
+
+        dynamic_checks carries a UNIQUE(agent_id, name) constraint (migration
+        027), so the join cannot fan out duplicate rows per node.
+
+        Oldest first so a backlog drains in the order nodes went terminal.
+        ``limit`` bounds the per-tick query cost regardless of how much
+        terminal-node history has accumulated.
+        """
+        async with self._db.session() as session:
+            result = await session.execute(
+                select(DAGNode)
+                .join(ExecutionDAG, DAGNode.dag_id == ExecutionDAG.id)
+                .join(
+                    DynamicCheckModel,
+                    DynamicCheckModel.name == DAGNode.check_name,
+                )
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .where(DynamicCheckModel.agent_id == self._agent_id)
+                .where(DAGNode.node_type == "check")
+                .where(DAGNode.check_name.is_not(None))
+                .where(DAGNode.status.in_(_TERMINAL_CHECK_NODE_STATUSES))
+                .where(DynamicCheckModel.enabled == sa_true())
+                .order_by(DAGNode.completed_at.asc().nulls_last())
                 .limit(limit)
             )
             return list(result.scalars().all())

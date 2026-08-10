@@ -255,7 +255,51 @@ class DAGOrchestrator:
             # mid-flight, which would silently drop the notification.
             self._delivery_task = asyncio.create_task(self._run_delivery_sweep())
 
+        # codex P2 round 4: reconciliation sweep for leaked heartbeat checks.
+        # Unlike the delivery sweep above, this is pure fast DB-only work (no
+        # LLM turn, no Telegram HTTP call) — comparable in cost to the
+        # per-DAG advancement already inside `_lock`, so it runs inline
+        # rather than detached. Awaited directly, still outside `_lock`
+        # since it isn't part of any single DAG's state machine.
+        await self._sweep_leaked_heartbeat_checks()
+
         return len(dags)
+
+    async def _sweep_leaked_heartbeat_checks(self) -> None:
+        """Re-issue disable for terminal check-nodes whose heartbeat check
+        is still enabled — the at-least-once backstop for
+        _cancel_heartbeat_check / _cancel_node / skip_and_continue, all of
+        which can leave a check registered (worse with urgent=True, exempt
+        from quiet hours, so it keeps burning LLM turns on a DAG that has
+        already finished).
+
+        No delivered_at-style column or attempt/error bookkeeping, unlike
+        F087's delivery sweep: manage_check(action="disable") has no
+        externally-visible side effect, so retrying it on an already-
+        disabled check is a harmless no-op. The store query's own
+        ``enabled == True`` predicate is what makes this self-limiting —
+        see get_terminal_check_nodes_with_enabled_heartbeat's docstring.
+        """
+        if not self._dynamic_loader:
+            return
+        try:
+            nodes = await self._store.get_terminal_check_nodes_with_enabled_heartbeat(
+                limit=self._settings.dag_check_reconciliation_batch_size
+            )
+        except Exception:
+            logger.exception("Error querying leaked heartbeat checks")
+            return
+        for node in nodes:
+            try:
+                await self._dynamic_loader.manage_check(
+                    action="disable", name=node.check_name
+                )
+            except Exception:
+                logger.debug(
+                    "Reconciliation sweep could not disable check %s for "
+                    "node %s — will retry next tick",
+                    node.check_name, node.name,
+                )
 
     async def _run_delivery_sweep(self) -> None:
         """Body of the detached sweep. Never raises into the task."""

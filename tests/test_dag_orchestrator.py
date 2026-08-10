@@ -19,7 +19,7 @@ from nous.dag.schemas import (
     DAGNodeType,
 )
 from nous.dag.store import DAGStore
-from nous.storage.models import DAGNode, ExecutionDAG
+from nous.storage.models import DAGNode, DynamicCheckModel, ExecutionDAG
 
 @pytest_asyncio.fixture
 async def store(db):
@@ -1694,6 +1694,102 @@ class TestCheckNodeCompletionCheck:
         dynamic_loader.manage_check.assert_called_with(
             action="disable", name="dag-test-monitor"
         )
+
+
+class TestCheckNodeReconciliationSweep:
+    """codex P2 round 4 (Finding E): tick()'s reconciliation sweep for
+    check-nodes whose heartbeat check leaked past a terminal status."""
+
+    def _check_node_request(self, name: str = "check-node-sweep-test") -> DAGCreateRequest:
+        return DAGCreateRequest(
+            name=name,
+            nodes=[
+                DAGNodeSpec(
+                    name="monitor",
+                    type=DAGNodeType.check,
+                    instructions="Monitor something",
+                    completion_check="test -f /tmp/done.flag",
+                ),
+            ],
+        )
+
+    async def _seed_check_row(self, db, store, name: str, enabled: bool) -> None:
+        """Insert a real DynamicCheckModel row — the sweep's query joins
+        dag_nodes against the real dynamic_checks table, so a mocked
+        dynamic_loader alone can't exercise it."""
+        async with db.session() as session:
+            session.add(DynamicCheckModel(
+                agent_id=store._agent_id,
+                name=name,
+                description="test check",
+                prompt="test prompt",
+                tools=[],
+                on_complete_tools=[],
+                enabled=enabled,
+            ))
+            await session.commit()
+
+    @pytest.mark.asyncio
+    async def test_reconciliation_sweep_retries_failed_cancellation(
+        self, db, store, orchestrator, dynamic_loader
+    ):
+        """The sweep's own retry behaviour, isolated from whichever call
+        site made the original attempt: a terminal check-node whose
+        check row is still enabled gets manage_check(disable) re-issued
+        on the NEXT tick if the first sweep attempt raised.
+
+        Must fail against the pre-Finding-E implementation: no sweep
+        exists, so manage_check is never called for an already-terminal
+        node at all.
+        """
+        dag = await store.create(self._check_node_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        node = next(n for n in fetched.nodes if n.name == "monitor")
+        await store.update_node(
+            node.id, status="failed", check_name="dag-sweep-retry",
+            completed_at=datetime.now(UTC),
+        )
+        await self._seed_check_row(db, store, "dag-sweep-retry", enabled=True)
+
+        dynamic_loader.manage_check = AsyncMock(
+            side_effect=[
+                Exception("transient db error"),
+                {"status": "disabled", "name": "dag-sweep-retry"},
+            ]
+        )
+
+        await orchestrator.tick()  # sweep attempt 1: raises, swallowed
+        await orchestrator.tick()  # sweep attempt 2: succeeds
+
+        assert dynamic_loader.manage_check.call_count == 2, (
+            "Expected the sweep to retry on the next tick after the first "
+            "attempt raised, not give up permanently."
+        )
+        for call in dynamic_loader.manage_check.call_args_list:
+            assert call.kwargs == {"action": "disable", "name": "dag-sweep-retry"}
+
+    @pytest.mark.asyncio
+    async def test_reconciliation_sweep_skips_already_disabled_check(
+        self, db, store, orchestrator, dynamic_loader
+    ):
+        """A check row that is already enabled=False must not be
+        re-swept — the query's own predicate excludes it, so no
+        redundant manage_check call is issued.
+        """
+        dag = await store.create(self._check_node_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        node = next(n for n in fetched.nodes if n.name == "monitor")
+        await store.update_node(
+            node.id, status="completed", check_name="dag-sweep-already-off",
+            completed_at=datetime.now(UTC),
+        )
+        await self._seed_check_row(db, store, "dag-sweep-already-off", enabled=False)
+
+        await orchestrator.tick()
+
+        dynamic_loader.manage_check.assert_not_called()
 
 
 class TestDAGOrchestratorTimeoutClamp:
