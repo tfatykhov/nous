@@ -1654,6 +1654,218 @@ async def get_heartbeat_dashboard_data(
 # ── F038: DAG Orchestration Dashboard ──────────────────────────────────────
 
 
+def _shingle_set(text: str | None) -> set[tuple[str, ...]]:
+    """6-word shingle set for one piece of text. Empty when text has < 6 words."""
+    words = (text or "").lower().split()
+    if len(words) < 6:
+        return set()
+    return {tuple(words[i:i + 6]) for i in range(len(words) - 5)}
+
+
+def _jaccard(sa: set[tuple[str, ...]], sb: set[tuple[str, ...]]) -> float:
+    """Jaccard similarity between two shingle sets. Zero when either is empty."""
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+
+def _shingle_overlap(a: str | None, b: str | None) -> float:
+    """Jaccard overlap over 6-word shingles. Zero when either side is short.
+
+    F090.4 needs a cheap, deterministic proxy for "these two siblings did
+    overlapping work" — an LLM judge is deliberately avoided so the gate
+    metric costs nothing to run. This is a LOWER BOUND on duplication, not a
+    measurement of it: it only catches verbatim phrase reuse. Two results
+    describing the identical finding in independently-generated prose share
+    no fixed 6-word run and score ~0.0 — a low `sibling_overlap_rate` means
+    "no verbatim duplication was detected", not "siblings don't duplicate
+    work". See `get_dag_phase2_signals` for what that means for reading the
+    number.
+
+    Six words resists shared boilerplate only on LONG results — the fraction
+    a shared B-word run contributes to an N-word/N-word pair's score is
+    (B-5)/(2N-B-5), which washes out as N grows (B=20, N=200 -> 0.04) but is
+    NOT negligible on short results (B=7, N=10 -> 0.25, over the default
+    threshold). Every constant `result` string the orchestrator writes today
+    ("Check completed (self-disabled)", "Check completed (disabled itself)",
+    "Gate auto-passed (Phase 1)") is under 6 words and so yields zero
+    shingles — accidental, not by design; re-check this if the orchestrator
+    ever grows a longer canned string.
+    """
+    return _jaccard(_shingle_set(a), _shingle_set(b))
+
+
+# Uncalibrated: chosen as a plausible verbatim-overlap cutoff, not fit to
+# data. `overlap_threshold` rides along in the returned dict specifically so
+# a reader can recalibrate once real sibling_overlap_rate readings exist.
+# Datapoint: two 10-word results sharing only a verbatim 6-word prefix score
+# 0.111 and do NOT count as overlapping at this threshold.
+_SIBLING_OVERLAP_THRESHOLD = 0.15
+
+
+async def get_dag_phase2_signals(
+    session: AsyncSession, agent_id: str
+) -> dict[str, Any]:
+    """F090.4: the evidence base for whether Phase 2 (worklog/blackboard) is
+    worth building.
+
+    Phase 2 exists because parallel siblings are mutually deaf —
+    _build_predecessor_context is the only inter-node channel and it reads
+    only terminated predecessors. `sibling_overlap_rate` measures whether that
+    deafness actually produces duplicated work; the callback/gate counters
+    say whether those node types run at all, without which the first number
+    describes a graph nobody uses.
+
+    `sibling_overlap_rate` is a FLOOR, not a measurement: `_shingle_overlap`
+    only catches verbatim 6-word reuse, and independently-generated LLM
+    prose describing the same finding routinely shares none. A low reading
+    means "no verbatim duplication detected", not "siblings don't duplicate
+    work" — it is NOT by itself grounds to cancel Phase 2.
+
+    The sibling population is an ALLOWLIST, not a denylist. A node belongs
+    here only if its `result` is genuine work product something actually
+    produced in parallel with its siblings — not text the orchestrator
+    wrote about a node. A denylist has been wrong three times on this exact
+    query (never-executed callbacks, gates, then fix nodes — codex P2
+    round 4) as each new node type shipped without anyone re-auditing this
+    list; an allowlist forces the question onto whoever adds the next node
+    type instead of onto whoever next audits this query. `subtask` nodes
+    are always genuine — a subtask's `result` is the worker's actual
+    output. `callback` nodes are genuine only when `subtask_id IS NOT
+    NULL`: with `NOUS_DAG_CALLBACK_EXECUTION_ENABLED` off (the default), a
+    callback's `result` is `node.instructions` verbatim
+    (`orchestrator.py:2122`) — author-written boilerplate from a node that
+    executed nothing. Every other node type is excluded because its
+    completion can synthesize canned text: a gate's `result` is always the
+    same constant string; a fix node's `result` is always the
+    `"Fix-stage chose '{action}' for parent '{name}': {rationale}"`
+    template (`orchestrator.py:2005-2008`) — and since `compute_waves`
+    (`schemas.py`) doesn't follow `on_failure` edges, a fix node lands in
+    wave 0 alongside unrelated siblings, so two fix nodes sharing that
+    template's prefix clear the shingle threshold on boilerplate alone
+    (measured: two real fix results differing only in parent name, Jaccard
+    0.43 — comfortably over `_SIBLING_OVERLAP_THRESHOLD`); a check node can
+    ALSO write canned text on two of its completion paths ("Check
+    completed (self-disabled)", "Check completed (disabled itself)") with
+    no per-row signal distinguishing that from a genuine finding, so it is
+    excluded rather than trusted case-by-case. Left in, any of these push
+    the reading in the OPPOSITE direction from the floor caveat above:
+    boilerplate reads as "siblings duplicated work" when nothing was
+    produced at all. Measured on the dev DB before the callback/gate
+    filter: 40 of 40 nodes participating in any sibling pair were
+    callbacks.
+
+    `subtask_id IS NOT NULL` — not FINDING 2's `s.started_at IS NOT NULL`
+    standard for `callback_executed` — is deliberately kept here: a
+    callback can reach `status='completed'` exactly two ways. Real
+    execution through `_launch_subtask_node`'s worker-backed path
+    (`subtask_id` set, and `_sync_subtask_node` only marks the node
+    'completed' after observing the underlying SUBTASK's own completion,
+    which per the worker's dequeue -> execute -> complete sequencing
+    already implies it started) or the flag-off instant-completion stub
+    (`subtask_id` stays NULL). `status='completed' AND subtask_id IS NOT
+    NULL` already discriminates exactly these two cases with no join
+    required; requiring `s.started_at IS NOT NULL` here would add a
+    `heart.subtasks` join this query does not otherwise need, to
+    re-derive a fact `status='completed'` already guarantees.
+
+    Scans the agent's ENTIRE DAG history on every call, unlike the sibling
+    `nodes_completed_24h` stat — deliberately unbounded, because a go/no-go
+    read wants maximum evidence and the right moment to add a time window is
+    once a human has seen a first reading, not before. That makes this query
+    a latency and failure dependency of `GET /dashboard/dag`
+    (`dashboard_dag` wraps its whole handler in try/except -> 500) that will
+    grow with DAG volume. Since the shingle-set hoist below, memory is the
+    stronger argument for that bound, not latency: every node's shingle set
+    is held resident at once, and a shingle stores word POINTERS, so the
+    cost tracks word COUNT, not byte count — ~170 bytes per word of result
+    text, measured ~100 MB at 2000 nodes x 300 words (alongside the result
+    strings, still alive at peak because `rows` stays in scope). Expressed
+    as a multiple of the stored text it swings ~4x-50x with average word
+    length, so plan with the per-word figure, not a ratio. Tens of MB at
+    today's scale, fine, but the dominant term if this ever needs bounding.
+    """
+    rows = (await session.execute(
+        text("""
+            SELECT n.dag_id, n.wave, n.result
+            FROM nous_system.dag_nodes n
+            JOIN nous_system.execution_dags d ON d.id = n.dag_id
+            WHERE d.agent_id = :agent_id
+              AND n.status = 'completed'
+              AND n.result IS NOT NULL
+              AND (
+                    n.node_type = 'subtask'
+                    OR (n.node_type = 'callback' AND n.subtask_id IS NOT NULL)
+                  )
+        """),
+        {"agent_id": agent_id},
+    )).all()
+
+    # Shingle set built once per NODE here, not once per PAIR inside the loop
+    # below — 50 nodes x 300 words measured 139ms rebuilding both sides per
+    # comparison vs 19ms hoisted (100 nodes: 566ms vs 71ms).
+    by_wave: dict[tuple[Any, int], list[set[tuple[str, ...]]]] = {}
+    for dag_id, wave, result in rows:
+        by_wave.setdefault((dag_id, wave or 0), []).append(_shingle_set(result))
+
+    pairs = 0
+    overlapping = 0
+    for shingle_sets in by_wave.values():
+        for i in range(len(shingle_sets)):
+            for j in range(i + 1, len(shingle_sets)):
+                pairs += 1
+                if _jaccard(shingle_sets[i], shingle_sets[j]) >= _SIBLING_OVERLAP_THRESHOLD:
+                    overlapping += 1
+
+    counts = (await session.execute(
+        text("""
+            SELECT n.node_type,
+                   count(*)                                        AS total,
+                   count(*) FILTER (WHERE s.started_at IS NOT NULL) AS executed,
+                   count(*) FILTER (WHERE n.started_at IS NOT NULL) AS node_started
+            FROM nous_system.dag_nodes n
+            JOIN nous_system.execution_dags d ON d.id = n.dag_id
+            LEFT JOIN heart.subtasks s ON s.id = n.subtask_id
+            WHERE d.agent_id = :agent_id
+              AND n.node_type IN ('callback', 'gate')
+            GROUP BY n.node_type
+        """),
+        {"agent_id": agent_id},
+    )).all()
+    by_type = {r[0]: (r[1], r[2], r[3]) for r in counts}
+
+    return {
+        "sibling_pairs": pairs,
+        "overlapping_sibling_pairs": overlapping,
+        # FLOOR, not a measurement — verbatim overlap only. See the
+        # docstring above before reading a low value as "no duplication".
+        "sibling_overlap_rate": round(overlapping / pairs, 4) if pairs else 0.0,
+        "overlap_threshold": _SIBLING_OVERLAP_THRESHOLD,
+        "callback_nodes": by_type.get("callback", (0, 0, 0))[0],
+        # codex P2: `subtask_id` is stamped the instant `_launch_subtask_node`
+        # calls `SubtaskManager.create()`, which inserts a PENDING row —
+        # `IS NOT NULL` alone was true before a worker ever touched it.
+        # `dequeue()` (heart/subtasks.py) is what sets `started_at`, so the
+        # LEFT JOIN + `s.started_at IS NOT NULL` requires the subtask to
+        # have actually been picked up. LEFT JOIN (not INNER) so `total`
+        # above stays a count of every callback/gate node regardless of
+        # whether its subtask row still exists.
+        "callback_executed": by_type.get("callback", (0, 0, 0))[1],
+        "gate_nodes": by_type.get("gate", (0, 0, 0))[0],
+        # codex P2 (FINDING 6): same question as callback_executed --
+        # "did this node actually run, not just get authored?" -- but a
+        # DIFFERENT evidence source. A gate auto-passes IN-PROCESS
+        # (orchestrator.py:2097-2106) and stamps `started_at` on the NODE
+        # itself; it never creates a subtask, so `s.started_at` is always
+        # NULL for a gate row and can't be reused here. Deliberately NOT
+        # `n.started_at` for callbacks: that column is stamped at
+        # launch/queue time (`_launch_subtask_node`, alongside `subtask_id`),
+        # before a worker ever dequeues it -- using it there would
+        # reintroduce the exact bug `callback_executed` was fixed for.
+        "gate_executed": by_type.get("gate", (0, 0, 0))[2],
+    }
+
+
 def _dag_iso(val: Any) -> str | None:
     """Convert a datetime or string to ISO string, or None."""
     if val is None:
@@ -1849,6 +2061,7 @@ async def get_dag_dashboard_data(session: AsyncSession, agent_id: str) -> dict[s
             "success_rate": round(success_rate, 3),
             "avg_completion_seconds": round(avg_seconds, 1),
         },
+        "phase2_signals": await get_dag_phase2_signals(session, agent_id),
     }
 
 

@@ -46,6 +46,17 @@ class TestNonRefetchableTools:
     def test_read_file_not_included(self):
         assert "read_file" not in NON_REFETCHABLE_TOOLS
 
+    def test_dag_manage_included(self):
+        """codex P2 round 6 FINDING 10: dag_manage's node_result is
+        deterministic (calling it again reproduces the same content), but
+        that is not the criterion this set encodes -- the criterion is
+        whether calling the tool again RECOVERS THE ORIGINAL. It does not:
+        SmartCompress re-runs on every dispatch and re-compresses the same
+        input identically, so without caching, a compressed node_result
+        has no recovery path at all.
+        """
+        assert "dag_manage" in NON_REFETCHABLE_TOOLS
+
 
 class TestKeywordFilter:
     def test_json_array_filter(self):

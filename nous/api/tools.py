@@ -3704,6 +3704,20 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
 # DAG orchestration tools (F038)
 # ---------------------------------------------------------------------------
 
+# codex P2 round 5 (FINDING 9): `status`'s per-node result preview. [:80]
+# (the `error` truncation width) is right for a classified error string and
+# useless for an LLM's actual output — a subtask result is routinely
+# hundreds to thousands of characters. 500 is a deliberate middle ground,
+# not the `error`/`recent` widths reused blindly: enough characters for a
+# genuine paragraph of prose (the shape most subtask results take), while
+# DAGCreateRequest's validator caps every DAG at MAX_WAVES(4) x
+# MAX_PARALLEL_PER_WAVE(4) = 16 nodes (schemas.py), so worst case this adds
+# ~8000 chars to `status` — a bigger overview, not a flood. `status` stays
+# an OVERVIEW, not the recovery path — a truncated line always says how
+# much was cut and names `node_result`, the lossless per-node retrieval
+# action, rather than silently slicing.
+_STATUS_RESULT_PREVIEW_CHARS = 500
+
 
 def register_dag_tools(
     dispatcher: ToolDispatcher,
@@ -3838,6 +3852,42 @@ def register_dag_tools(
                     lines.append(f"  {str(d.id)[:8]} | {d.name} | {d.status} | {completed}/{total} nodes done")
                 return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
+            if action == "recent":
+                # F090.3: `list` serves only pending/running. A finished DAG
+                # was reachable by `status` only if you already knew its id
+                # prefix — there was no way to DISCOVER one, which made the
+                # F087 delivery notification the sole record of an outcome.
+                #
+                # codex P2: filtering to finished status in PYTHON after
+                # get_recent_dags' created_at-ordered LIMIT meant a DAG that
+                # finished after `limit` newer DAGs were CREATED never
+                # appeared here — hitting exactly the long-running DAGs this
+                # action exists to surface. get_recent_finished_dags filters
+                # to terminal status and orders by completed_at in SQL
+                # instead, so the limit applies to the finished population.
+                finished = await store.get_recent_finished_dags(limit=20)
+                if not finished:
+                    return {"content": [{"type": "text",
+                                         "text": "No finished DAGs."}]}
+                lines = [f"Recent finished DAGs ({len(finished)}):"]
+                for d in finished:
+                    done = sum(1 for n in d.nodes if n.status == "completed")
+                    when = d.completed_at.strftime("%Y-%m-%d %H:%M") if d.completed_at else "—"
+                    lines.append(
+                        f"  {str(d.id)[:8]} | {d.name} | {d.status} | "
+                        f"{done}/{len(d.nodes)} nodes | {when}"
+                    )
+                    # codex P2: result_summary is the generic constant
+                    # _check_dag_completion writes ("All nodes completed
+                    # successfully", "Failed nodes: ...") -- never the real
+                    # outcome. delivery_summary is the agent-authored prose
+                    # F087 caches for exactly this purpose (delivery.py,
+                    # ahead of retries), so prefer it when present.
+                    summary = d.delivery_summary or d.result_summary
+                    if summary:
+                        lines.append(f"      {summary[:120]}")
+                return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+
             if not dag_id_str:
                 return {"content": [{"type": "text", "text": "Error: dag_id required for this action"}]}
 
@@ -3865,6 +3915,29 @@ def register_dag_tools(
                         line += f" | polls: {node.check_attempts}"
                     if node.error:
                         line += f" | error: {node.error[:80]}"
+                    # codex P2 round 5 (FINDING 9): result was rendered
+                    # nowhere here -- an agent recovering a missed delivery
+                    # could see THAT a node finished but not WHAT it
+                    # produced. Not `elif` on error: a failed node can carry
+                    # both (F061 outcome-aware branch sets error to the
+                    # classified message and result to the subtask's raw
+                    # output in the same update). Truncation is never
+                    # silent -- FINDING 9 exists because the original [:80]
+                    # slice gave no indication anything was cut, let alone
+                    # how to get the rest.
+                    if node.result:
+                        result = node.result
+                        if len(result) > _STATUS_RESULT_PREVIEW_CHARS:
+                            preview = result[:_STATUS_RESULT_PREVIEW_CHARS]
+                            line += (
+                                f" | result: {preview} "
+                                f"[truncated, {len(result)} chars total -- "
+                                f'use dag_manage(action="node_result", '
+                                f'dag_id="{str(dag.id)[:8]}", '
+                                f'node_name="{node.name}") for the full result]'
+                            )
+                        else:
+                            line += f" | result: {result}"
                     lines.append(line)
                 return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
@@ -3878,6 +3951,29 @@ def register_dag_tools(
                     return {"content": [{"type": "text", "text": "Error: node_name required for retry_node"}]}
                 await orchestrator.retry_node(dag.id, node_name)
                 return {"content": [{"type": "text", "text": f"Reset node '{node_name}' to pending for retry"}]}
+
+            elif action == "node_result":
+                # codex P2 round 5 (FINDING 9): the lossless retrieval path
+                # `status`'s truncated preview points at. Full node.result,
+                # byte-for-byte -- no cap here. `status` is the bounded
+                # overview; this is the deliberately unbounded escape hatch,
+                # scoped to exactly the one node asked for.
+                node_name = kwargs.get("node_name")
+                if not node_name:
+                    return {"content": [{"type": "text", "text": "Error: node_name required for node_result"}]}
+                node = next((n for n in dag.nodes if n.name == node_name), None)
+                if node is None:
+                    available = ", ".join(sorted(n.name for n in dag.nodes)) or "(none)"
+                    return {"content": [{"type": "text", "text": (
+                        f"Error: node '{node_name}' not found in DAG "
+                        f"'{dag.name}' ({str(dag.id)[:8]}). "
+                        f"Available nodes: {available}"
+                    )}]}
+                if node.result is None:
+                    return {"content": [{"type": "text", "text": (
+                        f"Node '{node_name}' has no result yet (status: {node.status})"
+                    )}]}
+                return {"content": [{"type": "text", "text": node.result}]}
 
             else:
                 return {"content": [{"type": "text", "text": f"Error: unknown action '{action}'"}]}
@@ -3893,7 +3989,8 @@ def register_dag_tools(
             "You do NOT need to poll for the result: when the DAG reaches a terminal "
             "state its outcome is delivered to you automatically (F087), so create it "
             "and move on. Use dag_manage only when the user asks about progress "
-            "mid-flight, or to cancel or retry."
+            "mid-flight, to cancel or retry, or to look up a DAG whose delivery you "
+            "missed or that finished before this session (dag_manage action='recent')."
         ),
         "properties": {
             "name": {"type": "string", "description": "DAG name"},
@@ -3908,7 +4005,23 @@ def register_dag_tools(
                         # recovery nodes are authorable. Phase 1 ships
                         # rule-based dispatch; Phase 1.5 (NOUS_DAG_FIX_LLM_
                         # DISPATCH_ENABLED) routes to Haiku tool-use.
-                        "type": {"type": "string", "enum": ["subtask", "check", "gate", "callback", "fix"]},
+                        "type": {
+                            "type": "string",
+                            "enum": ["subtask", "check", "gate", "callback", "fix"],
+                            "description": (
+                                "'callback' runs AFTER its predecessors and receives "
+                                "their results as context — use it to interpret or act "
+                                "on what earlier nodes produced (point a context_flow "
+                                "edge at it). It accepts frame_type / model / "
+                                "timeout_seconds like a subtask. Requires "
+                                "NOUS_DAG_CALLBACK_EXECUTION_ENABLED=true; with the flag "
+                                "off a callback completes instantly without running. "
+                                "'gate' currently auto-passes — it is a marker, not an "
+                                "enforced quality check. Note: 'tools' below is honored "
+                                "ONLY for 'check' nodes — on every other node type "
+                                "(subtask, callback, gate, fix) it is silently ignored."
+                            ),
+                        },
                         "instructions": {"type": "string"},
                         "tools": {"type": "array", "items": {"type": "string"}},
                         "frame_type": {"type": "string"},
@@ -3961,14 +4074,22 @@ def register_dag_tools(
         "type": "object",
         "description": (
             "List, inspect, cancel, or retry nodes in DAGs. Not needed to collect "
-            "results — a finished DAG announces itself. 'retry_node' re-queues a "
-            "failed node (and any descendants it alone blocked); it is refused on a "
-            "cancelled DAG, since cancellation is deliberate."
+            "results — a finished DAG announces itself; use 'recent' only as a "
+            "fallback when a delivery was missed or you want an older outcome. "
+            "'recent' lists finished DAGs (completed/failed/cancelled) — the only way "
+            "to find one you don't already have the id or id-prefix for. 'status' "
+            f"shows every node with a preview of its result (truncated past "
+            f"{_STATUS_RESULT_PREVIEW_CHARS} chars — it says so when it does, and "
+            "names the node). 'node_result' returns one named node's COMPLETE "
+            "result, byte-for-byte — use it whenever 'status' shows a truncated "
+            "preview. 'retry_node' re-queues a failed node (and any descendants it "
+            "alone blocked); it is refused on a cancelled DAG, since cancellation "
+            "is deliberate."
         ),
         "properties": {
-            "action": {"type": "string", "enum": ["list", "status", "cancel", "retry_node"]},
+            "action": {"type": "string", "enum": ["list", "recent", "status", "cancel", "retry_node", "node_result"]},
             "dag_id": {"type": "string"},
-            "node_name": {"type": "string"},
+            "node_name": {"type": "string", "description": "Required for 'retry_node' and 'node_result'; ignored by every other action."},
         },
         "required": ["action"],
     })
@@ -3977,7 +4098,18 @@ def register_dag_tools(
 
 
 async def _resolve_dag(store: "Any", dag_id_str: str) -> "Any | None":
-    """Resolve a DAG by full UUID or 8-char prefix.
+    """Resolve a DAG by full UUID or id prefix, any status, any age.
+
+    codex P2 (FINDING 3): previously two Python-side scans — active DAGs,
+    then a `get_recent_dags(limit=20)` created_at-bounded window — with the
+    same blind spot FINDING 1 fixed for `dag_manage action=recent`: a
+    finished DAG outside that window was unresolvable by prefix no matter
+    how recently it finished. Collapsed into one agent-scoped SQL prefix
+    match (`DAGStore.find_dags_by_id_prefix`), which also closes a dormant
+    bug the two-scan version had: it could never detect an active DAG and a
+    finished DAG sharing a prefix as mutually ambiguous, because it
+    returned on the first pool's single match without ever consulting the
+    second.
 
     Raises ValueError if prefix matches multiple DAGs.
     Returns None if no match found.
@@ -3991,19 +4123,7 @@ async def _resolve_dag(store: "Any", dag_id_str: str) -> "Any | None":
     except ValueError:
         pass
 
-    # Try prefix match against active DAGs
-    dags = await store.get_active_dags()
-    matches = [d for d in dags if str(d.id).startswith(dag_id_str)]
-    if len(matches) == 1:
-        return matches[0]
-    if len(matches) > 1:
-        ids = ", ".join(str(d.id)[:8] for d in matches)
-        raise ValueError(f"Prefix '{dag_id_str}' is ambiguous, matches: {ids}")
-
-    # Also check recent DAGs for status/retry on completed/failed
-    recent = await store.get_recent_dags(limit=20)
-    finished = [d for d in recent if d.status not in ("pending", "running")]
-    matches = [d for d in finished if str(d.id).startswith(dag_id_str)]
+    matches = await store.find_dags_by_id_prefix(dag_id_str)
     if len(matches) == 1:
         return matches[0]
     if len(matches) > 1:
