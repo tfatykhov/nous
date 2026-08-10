@@ -3863,8 +3863,15 @@ def register_dag_tools(
                         f"  {str(d.id)[:8]} | {d.name} | {d.status} | "
                         f"{done}/{len(d.nodes)} nodes | {when}"
                     )
-                    if d.result_summary:
-                        lines.append(f"      {d.result_summary[:120]}")
+                    # codex P2: result_summary is the generic constant
+                    # _check_dag_completion writes ("All nodes completed
+                    # successfully", "Failed nodes: ...") -- never the real
+                    # outcome. delivery_summary is the agent-authored prose
+                    # F087 caches for exactly this purpose (delivery.py,
+                    # ahead of retries), so prefer it when present.
+                    summary = d.delivery_summary or d.result_summary
+                    if summary:
+                        lines.append(f"      {summary[:120]}")
                 return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
             if not dag_id_str:
@@ -3894,6 +3901,20 @@ def register_dag_tools(
                         line += f" | polls: {node.check_attempts}"
                     if node.error:
                         line += f" | error: {node.error[:80]}"
+                    # codex P2: result was rendered nowhere here -- an agent
+                    # recovering a missed delivery could see THAT a node
+                    # finished but not WHAT it produced. [:80] matches the
+                    # `error` truncation above rather than inventing a new
+                    # width. Not `elif`: a failed node can carry both (F061
+                    # outcome-aware branch sets error to the classified
+                    # message and result to the subtask's raw output in the
+                    # same update). No separate cap on how many nodes show a
+                    # result: DAGCreateRequest's validator already bounds
+                    # every DAG to MAX_WAVES(4) x MAX_PARALLEL_PER_WAVE(4) =
+                    # 16 nodes total, so per-line truncation alone keeps
+                    # this readable.
+                    if node.result:
+                        line += f" | result: {node.result[:80]}"
                     lines.append(line)
                 return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 

@@ -261,3 +261,61 @@ class TestResolveDagPrefix:
             action="status", dag_id=prefix))["content"][0]["text"]
 
         assert "not found" in text
+
+
+class TestFinishedDagOutputIsRecoverable:
+    """codex P2 FINDING 5: `recent` and `status` could tell an agent THAT a
+    DAG finished but not WHAT it produced. `result_summary` is the generic
+    constant `_check_dag_completion` writes ("All nodes completed
+    successfully") — never the real outcome. `status` rendered every node
+    field except `node.result`. Both matter most exactly when an F087
+    delivery was missed, since that was this PR's whole justification for
+    `recent` existing at all.
+    """
+
+    @pytest.mark.asyncio
+    async def test_status_surfaces_node_results(self, tools, dag_store):
+        """Must fail against the pre-fix implementation — `status` listed
+        every node's name/type/wave/status/error but never its result.
+        """
+        dag = await dag_store.create(_one("result-bearing"))
+        node = dag.nodes[0]
+        await dag_store.update_node(
+            node.id, status="completed",
+            result="distinctive-output-xyz-the-actual-payload",
+        )
+
+        text = (await tools._handlers["dag_manage"](
+            action="status", dag_id=str(dag.id)))["content"][0]["text"]
+
+        assert "distinctive-output-xyz-the-actual-payload" in text
+
+    @pytest.mark.asyncio
+    async def test_recent_prefers_delivery_summary_over_generic_result_summary(
+        self, tools, dag_store, db
+    ):
+        """Must fail against the pre-fix implementation — `recent` only
+        ever read `result_summary`, the generic constant, never
+        `delivery_summary`, the real agent-authored outcome F087 caches
+        for exactly this purpose (delivery.py, ahead of retries).
+        """
+        dag = await dag_store.create(_one("summarized-dag"))
+        await dag_store.update_dag_status(
+            dag.id, "completed",
+            result_summary="All nodes completed successfully",
+        )
+        async with db.session() as session:
+            await session.execute(
+                update(ExecutionDAG).where(ExecutionDAG.id == dag.id).values(
+                    delivery_summary=(
+                        "Deployed the new pricing page and verified it "
+                        "renders correctly in production."
+                    ),
+                )
+            )
+            await session.commit()
+
+        text = (await tools._handlers["dag_manage"](action="recent"))["content"][0]["text"]
+
+        assert "Deployed the new pricing page" in text
+        assert "All nodes completed successfully" not in text
