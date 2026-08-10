@@ -1312,18 +1312,28 @@ class TestCheckNodeCompletionCheck:
         self, store, orchestrator, dynamic_loader
     ):
         """Regression: check node with active heartbeat (run_count=0, quiet hours)
-        must still transition to awaiting_check and poll its shell completion_check.
+        must still transition to awaiting_check — regardless of heartbeat state,
+        so it isn't left deadlocked waiting for a check that quiet hours
+        suppressed. This part of the original hoist fix is unchanged and still
+        correct.
 
-        Before the fix: _sync_check_node only hoisted when the heartbeat check
-        was unregistered (None) or inactive. A check present+active with run_count=0
-        (never ran — quiet hours suppressed it) hit neither branch and stayed
-        'running' until wall-clock timeout.
-
-        After the fix: completion_check present → awaiting_check immediately,
-        regardless of heartbeat state. Shell command is polled in the same tick.
-
-        This test MUST fail against pre-fix code (node stays 'running',
-        check_attempts stays 0) and pass after the fix.
+        codex P1 round 5 (FINDING G) correction: this test's OWN framing is
+        "the worker has NOT run" (run_count=0) — but it used to assert the
+        shell command fires anyway (`assert_called_once()`) and that
+        awaiting_check_at gets stamped (`is not None`). That is the exact bug
+        FINDING G closed: polling a completion check before the worker has
+        run treats a `test -f flag`-shaped check's pre-existing "false" state
+        as meaningful (and, before this correction, the failure branch had no
+        gate at all — a `test -f` check would have been killed as definitive
+        failure). The old assertions passed only because this test's mock
+        never set `dynamic_loader.get_successful_run_count` explicitly and
+        the registry-based `run_count` it DID set has been dead/unread since
+        FINDING C dropped registry state from `_heartbeat_worker_has_run`
+        entirely — an unmocked-AsyncMock-default coincidence, not evidence
+        the scenario was actually exercised. Corrected: mock
+        get_successful_run_count explicitly to match this test's own
+        run_count=0 stated scenario, and assert the shell command is NOT
+        invoked and awaiting_check_at stays None while evidence is absent.
         """
         dag = await store.create(self._check_node_request())
         await orchestrator.start_dag(dag.id)
@@ -1337,8 +1347,11 @@ class TestCheckNodeCompletionCheck:
         active_unrun_check.active = True
         active_unrun_check.run_count = 0
         dynamic_loader._registry.get_check.return_value = active_unrun_check
+        # The signal _heartbeat_worker_has_run actually reads (registry state
+        # above is legacy/unread — kept only to match the real incident).
+        dynamic_loader.get_successful_run_count = AsyncMock(return_value=0)
+        dynamic_loader.is_check_disabled = AsyncMock(return_value=False)
 
-        # Shell check returns pending — we only care that it was invoked.
         orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("pending"))
         await orchestrator.tick()
 
@@ -1350,9 +1363,153 @@ class TestCheckNodeCompletionCheck:
             "completion_check was not polled — node deadlocked waiting for "
             "heartbeat check that quiet hours suppressed."
         )
-        assert monitor2.awaiting_check_at is not None
-        # Shell command must have been invoked in the same tick
-        orchestrator._run_completion_check.assert_called_once()
+        # No worker evidence yet — the deadline has not started (FINDING F)
+        # and the shell command must not have run at all (FINDING G).
+        assert monitor2.awaiting_check_at is None, (
+            "Expected awaiting_check_at to stay None — no worker evidence "
+            "exists yet, so the completion-check deadline must not start."
+        )
+        orchestrator._run_completion_check.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_check_node_failed_shaped_check_before_evidence_stays_awaiting(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """codex P1 round 5 (FINDING G): a `test -f /tmp/done.flag`-shaped
+        completion_check — the CORRECT shape, false before the work and
+        true after — exits 1 before the worker has even launched, for the
+        same reason it will exit 0 once the work is done: the flag
+        genuinely doesn't exist yet. Before this fix, the failure branch
+        had NO evidence gate (only success did), so this was accepted as
+        DEFINITIVE FAILURE: the node was killed and its worker disabled
+        for a condition about to become true.
+
+        Must fail against the pre-fix implementation: the node is marked
+        'failed' and manage_check(disable) is called on the very first
+        poll, before the worker had any chance to create the flag.
+        """
+        dag = await store.create(self._check_node_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        node = next(n for n in fetched.nodes if n.name == "monitor")
+        await store.update_node(
+            node.id, status="awaiting_check", check_name="dag-test-monitor",
+            awaiting_check_at=None,
+        )
+        dynamic_loader.get_successful_run_count = AsyncMock(return_value=0)
+        dynamic_loader.is_check_disabled = AsyncMock(return_value=False)
+        orchestrator._run_completion_check = AsyncMock(
+            return_value=CheckResult("failed", "exit code 1")
+        )
+
+        fetched2 = await store.get_dag(dag.id)
+        await orchestrator._poll_awaiting_checks(fetched2)
+
+        final = await store.get_dag(dag.id)
+        monitor = next(n for n in final.nodes if n.name == "monitor")
+        assert monitor.status == "awaiting_check", (
+            f"Expected the node to keep waiting — no worker evidence exists "
+            f"yet, so a `test -f flag`-shaped check exiting 1 (the flag "
+            f"doesn't exist YET, not a genuine failure) must not be treated "
+            f"as definitive. Got {monitor.status}."
+        )
+        dynamic_loader.manage_check.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_check_node_success_shaped_check_after_evidence_completes(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """Once worker evidence exists, a passing completion_check (the
+        flag now exists) completes the node normally.
+        """
+        dag = await store.create(self._check_node_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        node = next(n for n in fetched.nodes if n.name == "monitor")
+        await store.update_node(
+            node.id, status="awaiting_check", check_name="dag-test-monitor",
+            awaiting_check_at=None,
+        )
+        dynamic_loader.get_successful_run_count = AsyncMock(return_value=1)
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("success"))
+
+        fetched2 = await store.get_dag(dag.id)
+        await orchestrator._poll_awaiting_checks(fetched2)
+
+        final = await store.get_dag(dag.id)
+        monitor = next(n for n in final.nodes if n.name == "monitor")
+        assert monitor.status == "completed"
+
+    @pytest.mark.asyncio
+    async def test_check_node_failed_shaped_check_after_evidence_fails_definitively(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """Guard against overcorrecting into "never fail": once worker
+        evidence exists, a completion_check that STILL exits 1 (the flag
+        genuinely doesn't exist even after the worker ran) must fail the
+        node definitively and disable its worker, exactly as before.
+        """
+        dag = await store.create(self._check_node_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        node = next(n for n in fetched.nodes if n.name == "monitor")
+        await store.update_node(
+            node.id, status="awaiting_check", check_name="dag-test-monitor",
+            awaiting_check_at=None,
+        )
+        dynamic_loader.get_successful_run_count = AsyncMock(return_value=1)
+        orchestrator._run_completion_check = AsyncMock(
+            return_value=CheckResult("failed", "exit code 1")
+        )
+
+        fetched2 = await store.get_dag(dag.id)
+        await orchestrator._poll_awaiting_checks(fetched2)
+
+        final = await store.get_dag(dag.id)
+        monitor = next(n for n in final.nodes if n.name == "monitor")
+        assert monitor.status == "failed", (
+            f"Expected the node to fail — worker evidence exists and the "
+            f"check genuinely failed, so this must still be treated as "
+            f"definitive. Got {monitor.status}."
+        )
+        dynamic_loader.manage_check.assert_called_with(
+            action="disable", name="dag-test-monitor"
+        )
+
+    @pytest.mark.asyncio
+    async def test_check_node_no_shell_subprocess_while_evidence_absent(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """No shell subprocess is spawned at all while worker evidence is
+        absent — not "spawned but its result is ignored". Distinct from
+        the "stays awaiting_check" tests above, which only prove the
+        OUTCOME; this proves the MECHANISM (no subprocess), which is also
+        what stops check_attempts and last_check_at from being consumed
+        by polls that could never have produced a meaningful answer.
+        """
+        dag = await store.create(self._check_node_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        node = next(n for n in fetched.nodes if n.name == "monitor")
+        await store.update_node(
+            node.id, status="awaiting_check", check_name="dag-test-monitor",
+            awaiting_check_at=None,
+        )
+        dynamic_loader.get_successful_run_count = AsyncMock(return_value=0)
+        dynamic_loader.is_check_disabled = AsyncMock(return_value=False)
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("pending"))
+
+        fetched2 = await store.get_dag(dag.id)
+        await orchestrator._poll_awaiting_checks(fetched2)
+
+        orchestrator._run_completion_check.assert_not_called()
+        final = await store.get_dag(dag.id)
+        monitor = next(n for n in final.nodes if n.name == "monitor")
+        assert monitor.check_attempts == 0, (
+            "Expected check_attempts to stay 0 — max_check_attempts is a "
+            "termination condition and must not be consumed by polls that "
+            "ran before the worker had a chance to do anything."
+        )
 
     @pytest.mark.asyncio
     async def test_launch_check_node_registers_as_urgent(
