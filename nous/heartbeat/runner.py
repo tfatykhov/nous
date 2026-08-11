@@ -24,7 +24,7 @@ from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
 from nous.heartbeat.finding_store import FindingStore
-from nous.heartbeat.registry import CheckRegistry
+from nous.heartbeat.registry import BaseCheck, CheckRegistry
 from nous.heartbeat.dynamic import CALLBACK_RETRY_DELAY_SECONDS, DynamicCheck, DynamicCheckLoader
 from nous.heartbeat.schemas import CheckResult, Finding, FindingAction, HeartbeatResult
 from nous.heartbeat.tuner import HeartbeatTuner
@@ -195,6 +195,74 @@ class HeartbeatRunner:
             except Exception:
                 logger.exception("Heartbeat tick failed")
 
+    async def _record_run_stats(
+        self, check: BaseCheck, *, success: bool, error_msg: str | None = None,
+    ) -> None:
+        """Single choke point for persisting a check's run outcome to the DB.
+
+        Issue #590: DynamicCheckLoader.update_run_stats's caller-side
+        try/except was duplicated across five call sites (two _tick
+        branches, trigger_check's two branches) with inconsistent
+        handling — two of the five (_tick's timeout and exception
+        branches) were a bare `pass`, dropping a FAILED run record with
+        no log line at all. A dropped failure record is worse than a
+        dropped success record: it inflates apparent success rates,
+        which is exactly what F034.3's self-tuning consumes. Root cause
+        of the family (this method exists to close): a durable record of
+        check execution was written best-effort, and its loss was
+        invisible to every caller.
+
+        Never raises into the caller — a stats-write failure must not
+        break check execution, abort the tick loop, or (for
+        trigger_check) change the caller's own exception contract.
+
+        Retries once (2 total attempts) with a short fixed 0.1s gap —
+        matching the existing _embed_with_retry(attempts=2) convention
+        elsewhere in the codebase (nous/heart/facts.py,
+        nous/heart/procedures.py) for this class of fast-operation
+        transient-blip retry. No exponential backoff: this is a
+        single-row UPDATE, not a rate-limited external API, so a short
+        fixed gap is enough to let a transient connection-pool/deadlock
+        condition clear without meaningfully slowing the tick loop, which
+        runs every due check through this same sequential loop — any
+        added per-check latency here is directly additive across a tick.
+        The guaranteed worst-case ADDED latency from this policy is one
+        0.1s sleep per check; the retried attempt's own execution time is
+        not bounded by this method (the DB layer configures no query or
+        connection timeout), but that risk already existed for the
+        single non-retried attempt today — this policy does not
+        introduce it, only adds one more bounded-gap attempt.
+
+        On exhaustion, escalates to ERROR with exc_info, naming the check
+        and which record was lost. The point of #590 is that a silent
+        drop leaves no consumer able to distinguish "did not run" from
+        "ran, and we failed to record it" — F034.3's self-tuning,
+        /heartbeat/status, the dashboard, and #589's completion gate all
+        read this table and need that distinction.
+        """
+        if not isinstance(check, DynamicCheck) or self._dynamic_loader is None:
+            return
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            if attempt == 1:
+                await asyncio.sleep(0.1)
+            try:
+                await self._dynamic_loader.update_run_stats(
+                    check.check_id, success=success, error_msg=error_msg,
+                )
+                return
+            except Exception as exc:
+                last_exc = exc
+        outcome = "success" if success else "failure"
+        logger.error(
+            "F034.5/#590: failed to record %s run stats for check '%s' "
+            "after retry — this run's record is LOST (downstream "
+            "consumers cannot distinguish this from the check never "
+            "having run)",
+            outcome, check.name,
+            exc_info=last_exc,
+        )
+
     async def _tick(self, urgent_only: bool = False) -> list[Finding]:
         """Run due checks and triage findings."""
         self._tick_count += 1
@@ -234,13 +302,7 @@ class HeartbeatRunner:
                     self._tokens_used_today += result.tokens_used
 
                 # F034.5: Update run stats in DB for dynamic checks
-                if isinstance(check, DynamicCheck) and self._dynamic_loader is not None:
-                    try:
-                        await self._dynamic_loader.update_run_stats(
-                            check.check_id, success=True,
-                        )
-                    except Exception:
-                        logger.warning("F034.5: Failed to update run stats for '%s'", check.name)
+                await self._record_run_stats(check, success=True)
 
                 # #273: Collect self-disabled checks with callbacks
                 if (
@@ -261,24 +323,12 @@ class HeartbeatRunner:
                 check.mark_failure()
                 logger.warning("Heartbeat check '%s' timed out", check.name)
                 # F034.5: Record timeout as error for dynamic checks
-                if isinstance(check, DynamicCheck) and self._dynamic_loader is not None:
-                    try:
-                        await self._dynamic_loader.update_run_stats(
-                            check.check_id, success=False, error_msg="timeout",
-                        )
-                    except Exception:
-                        pass
+                await self._record_run_stats(check, success=False, error_msg="timeout")
             except Exception as exc:
                 check.mark_failure()
                 logger.exception("Heartbeat check '%s' failed", check.name)
                 # F034.5: Record error for dynamic checks
-                if isinstance(check, DynamicCheck) and self._dynamic_loader is not None:
-                    try:
-                        await self._dynamic_loader.update_run_stats(
-                            check.check_id, success=False, error_msg=str(exc)[:200],
-                        )
-                    except Exception:
-                        pass
+                await self._record_run_stats(check, success=False, error_msg=str(exc)[:200])
 
         # #273: Fire callbacks as background tasks (non-blocking)
         for cb_check in callback_candidates:
@@ -895,11 +945,7 @@ class HeartbeatRunner:
             result = await asyncio.wait_for(check.run(), timeout=check.timeout)
             check.mark_success()
             # F034.5: Update DB stats for dynamic checks
-            if isinstance(check, DynamicCheck) and self._dynamic_loader:
-                try:
-                    await self._dynamic_loader.update_run_stats(check.check_id, success=True)
-                except Exception:
-                    logger.debug("Failed to update run stats for %s", name, exc_info=True)
+            await self._record_run_stats(check, success=True)
             if result.tokens_used:
                 self._tokens_used_today += result.tokens_used
             # #273: Fire callback if check self-disabled
@@ -922,11 +968,5 @@ class HeartbeatRunner:
         except Exception as e:
             check.mark_failure()
             # F034.5: Update DB stats for dynamic checks on failure
-            if isinstance(check, DynamicCheck) and self._dynamic_loader:
-                try:
-                    await self._dynamic_loader.update_run_stats(
-                        check.check_id, success=False, error_msg=str(e)[:200],
-                    )
-                except Exception:
-                    logger.debug("Failed to update run stats for %s", name, exc_info=True)
+            await self._record_run_stats(check, success=False, error_msg=str(e)[:200])
             raise

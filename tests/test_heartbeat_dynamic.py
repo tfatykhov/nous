@@ -30,6 +30,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -904,8 +906,13 @@ class TestHeartbeatRunnerDynamic:
         runner = self._make_runner(registry=reg, dynamic_loader=loader)
         await runner._tick()
 
+        # issue #590: the call now routes through _record_run_stats, which
+        # always threads error_msg explicitly (default None) — same
+        # effective behavior as the old call site that omitted it and
+        # relied on update_run_stats's own default, just a different
+        # exact call signature.
         loader.update_run_stats.assert_called_once_with(
-            "check-uuid-001", success=True,
+            "check-uuid-001", success=True, error_msg=None,
         )
 
     @pytest.mark.asyncio
@@ -927,6 +934,166 @@ class TestHeartbeatRunnerDynamic:
         call_kwargs = loader.update_run_stats.call_args
         assert call_kwargs[1]["success"] is False
         assert "boom" in call_kwargs[1]["error_msg"]
+
+    @pytest.mark.asyncio
+    async def test_record_run_stats_retries_transient_failure_and_succeeds(self, caplog):
+        """issue #590: a transient update_run_stats failure (first write
+        raises, retry succeeds) results in the stats being recorded, with
+        no ERROR logged — the retry absorbed the blip.
+        """
+        reg = CheckRegistry()
+        check = _make_dynamic_check(name="dyn_1")
+        check.run = AsyncMock(return_value=CheckResult(has_updates=False))
+        reg.register(check)
+
+        loader = MagicMock()
+        loader.update_run_stats = AsyncMock(
+            side_effect=[Exception("transient db error"), None]
+        )
+
+        runner = self._make_runner(registry=reg, dynamic_loader=loader)
+
+        with patch("nous.heartbeat.runner.asyncio.sleep", new_callable=AsyncMock):
+            with caplog.at_level(logging.ERROR, logger="nous.heartbeat.runner"):
+                await runner._tick()
+
+        assert loader.update_run_stats.call_count == 2, (
+            "Expected a retry after the transient failure."
+        )
+        for call in loader.update_run_stats.call_args_list:
+            assert call.args[0] == "check-uuid-001"
+            assert call.kwargs.get("success") is True
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert not errors, f"Expected no ERROR log — the retry succeeded. Got: {errors}"
+
+    @pytest.mark.asyncio
+    async def test_record_run_stats_persistent_failure_logs_error_and_does_not_raise(self, caplog):
+        """issue #590: a persistent update_run_stats failure (every
+        attempt raises) logs ERROR and does NOT raise into the caller —
+        _tick must complete normally, not abort the whole tick loop over
+        one check's lost stats write.
+        """
+        reg = CheckRegistry()
+        check = _make_dynamic_check(name="dyn_1")
+        check.run = AsyncMock(return_value=CheckResult(has_updates=False))
+        reg.register(check)
+
+        loader = MagicMock()
+        loader.update_run_stats = AsyncMock(side_effect=Exception("persistent db error"))
+
+        runner = self._make_runner(registry=reg, dynamic_loader=loader)
+
+        with patch("nous.heartbeat.runner.asyncio.sleep", new_callable=AsyncMock):
+            with caplog.at_level(logging.ERROR, logger="nous.heartbeat.runner"):
+                findings = await runner._tick()  # must not raise
+
+        assert findings == []
+        stats_errors = [
+            r for r in caplog.records
+            if r.levelname == "ERROR" and "stats" in r.getMessage().lower()
+        ]
+        assert stats_errors, "Expected an ERROR log naming the lost stats record."
+        assert "dyn_1" in stats_errors[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_trigger_check_failure_reraises_original_exception_after_stats_write_failure(self):
+        """issue #590: trigger_check's failure path must still re-raise the
+        ORIGINAL exception after a stats-write failure — the contract
+        (REST callers see the real error) must survive exactly.
+        """
+        reg = CheckRegistry()
+        check = _make_dynamic_check(name="dyn_trigger_fail")
+        check.run = AsyncMock(side_effect=RuntimeError("the real failure"))
+        check.timeout = 30
+        reg.register(check)
+
+        loader = MagicMock()
+        loader.update_run_stats = AsyncMock(side_effect=Exception("stats write also failed"))
+
+        runner = self._make_runner(registry=reg, dynamic_loader=loader)
+
+        with patch("nous.heartbeat.runner.asyncio.sleep", new_callable=AsyncMock):
+            with pytest.raises(RuntimeError, match="the real failure"):
+                await runner.trigger_check("dyn_trigger_fail")
+
+    @pytest.mark.asyncio
+    async def test_tick_timeout_records_failure_stats_and_logs_error_when_write_fails(self, caplog):
+        """issue #590: the _tick timeout path used to swallow a
+        stats-write failure with a bare `pass` — completely silent, no
+        log at all. Must fail against the pre-fix implementation: no
+        ERROR is logged for a lost 'timeout' failure record.
+        """
+        reg = CheckRegistry()
+        check = _make_dynamic_check(name="dyn_timeout")
+        # asyncio.sleep is patched below (needed for the retry backoff),
+        # which would neuter a REAL wait_for timeout too — raise
+        # asyncio.TimeoutError directly instead. asyncio.wait_for
+        # propagates an exception the awaited coroutine itself raises
+        # unchanged, so this reaches _tick's `except asyncio.TimeoutError:`
+        # branch identically to a genuine timeout, without depending on
+        # real timing.
+        check.run = AsyncMock(side_effect=asyncio.TimeoutError())
+        check.timeout = 30
+        reg.register(check)
+
+        loader = MagicMock()
+        loader.update_run_stats = AsyncMock(side_effect=Exception("db write failed"))
+
+        runner = self._make_runner(registry=reg, dynamic_loader=loader)
+
+        with patch("nous.heartbeat.runner.asyncio.sleep", new_callable=AsyncMock):
+            with caplog.at_level(logging.ERROR, logger="nous.heartbeat.runner"):
+                await runner._tick()  # must not raise
+
+        loader.update_run_stats.assert_called_with(
+            "check-uuid-001", success=False, error_msg="timeout",
+        )
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert errors, (
+            "Expected an ERROR log for the lost timeout-failure stats "
+            "record — the pre-fix bare `pass` produces none."
+        )
+
+    @pytest.mark.asyncio
+    async def test_tick_exception_records_failure_stats_and_logs_error_when_write_fails(self, caplog):
+        """issue #590: the _tick exception path used to swallow a
+        stats-write failure with a bare `pass` — completely silent, no
+        log at all. Must fail against the pre-fix implementation: no
+        ERROR is logged for a lost failure record.
+        """
+        reg = CheckRegistry()
+        check = _make_dynamic_check(name="dyn_exc")
+        check.run = AsyncMock(side_effect=RuntimeError("boom"))
+        check.timeout = 30
+        reg.register(check)
+
+        loader = MagicMock()
+        loader.update_run_stats = AsyncMock(side_effect=Exception("db write failed"))
+
+        runner = self._make_runner(registry=reg, dynamic_loader=loader)
+
+        with patch("nous.heartbeat.runner.asyncio.sleep", new_callable=AsyncMock):
+            with caplog.at_level(logging.ERROR, logger="nous.heartbeat.runner"):
+                await runner._tick()  # must not raise
+
+        loader.update_run_stats.assert_called_with(
+            "check-uuid-001", success=False, error_msg="boom",
+        )
+        # Narrowed to "stats"-mentioning ERROR records: this path already
+        # logs an unrelated ERROR via logger.exception() for the check's
+        # OWN failure (RuntimeError("boom")) regardless of whether the
+        # stats write succeeds — a bare "any ERROR record exists" check
+        # would pass even pre-fix for the wrong reason.
+        stats_errors = [
+            r for r in caplog.records
+            if r.levelname == "ERROR" and "stats" in r.getMessage().lower()
+        ]
+        assert stats_errors, (
+            "Expected an ERROR log specifically about the lost run-stats "
+            "record — the pre-fix bare `pass` produces none (only the "
+            "unrelated 'Heartbeat check failed' ERROR from the check's "
+            "own RuntimeError, not from the stats write)."
+        )
 
     @pytest.mark.asyncio
     async def test_periodic_sync(self):
