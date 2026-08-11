@@ -216,52 +216,53 @@ class HeartbeatRunner:
         break check execution, abort the tick loop, or (for
         trigger_check) change the caller's own exception contract.
 
-        Retries once (2 total attempts) with a short fixed 0.1s gap —
-        matching the existing _embed_with_retry(attempts=2) convention
-        elsewhere in the codebase (nous/heart/facts.py,
-        nous/heart/procedures.py) for this class of fast-operation
-        transient-blip retry. No exponential backoff: this is a
-        single-row UPDATE, not a rate-limited external API, so a short
-        fixed gap is enough to let a transient connection-pool/deadlock
-        condition clear without meaningfully slowing the tick loop, which
-        runs every due check through this same sequential loop — any
-        added per-check latency here is directly additive across a tick.
-        The guaranteed worst-case ADDED latency from this policy is one
-        0.1s sleep per check; the retried attempt's own execution time is
-        not bounded by this method (the DB layer configures no query or
-        connection timeout), but that risk already existed for the
-        single non-retried attempt today — this policy does not
-        introduce it, only adds one more bounded-gap attempt.
+        NO RETRY, deliberately (codex P2 on the original version of this
+        fix, which retried once). update_run_stats writes a RELATIVE
+        increment (`run_count = run_count + 1`), not an absolute value —
+        if the UPDATE commits on the server but the client never learns
+        that (e.g. the connection drops after commit, before the
+        acknowledgement arrives), we cannot tell "the write never
+        landed" from "the write landed and we just didn't hear back". A
+        retry in the second case double-counts a single execution,
+        silently corrupting the exact two consumers this fix protects:
+        F034.3's self-tuner and #589's `run_count - error_count` gate.
+        That is a worse failure than the one #590 filed — #590's ask is
+        visibility, and one ERROR-logged attempt already delivers it.
+        Considered and rejected: retrying only on
+        sqlalchemy.exc.TimeoutError (pool-checkout timeout — provably
+        never reached the server, so provably safe) is real, but covers
+        only pool exhaustion. The likelier failure for a live connection
+        mid-UPDATE — a dropped connection — is exactly the ambiguous
+        case with no safe classification, so a retry that skips the
+        common case in exchange for a "which exceptions are safe" list
+        that breaks quietly on a driver upgrade is a bad trade. Making
+        the write itself idempotent (an execution-scoped dedup key) would
+        close this properly, but needs a schema change — proportionate
+        only if a real double-count is ever observed, not for a defect
+        whose filed symptom is a missing log line.
 
-        On exhaustion, escalates to ERROR with exc_info, naming the check
-        and which record was lost. The point of #590 is that a silent
-        drop leaves no consumer able to distinguish "did not run" from
-        "ran, and we failed to record it" — F034.3's self-tuning,
+        Escalates to ERROR with exc_info on any failure, naming the
+        check and which record was lost. The point of #590 is that a
+        silent drop leaves no consumer able to distinguish "did not run"
+        from "ran, and we failed to record it" — F034.3's self-tuning,
         /heartbeat/status, the dashboard, and #589's completion gate all
         read this table and need that distinction.
         """
         if not isinstance(check, DynamicCheck) or self._dynamic_loader is None:
             return
-        last_exc: Exception | None = None
-        for attempt in range(2):
-            if attempt == 1:
-                await asyncio.sleep(0.1)
-            try:
-                await self._dynamic_loader.update_run_stats(
-                    check.check_id, success=success, error_msg=error_msg,
-                )
-                return
-            except Exception as exc:
-                last_exc = exc
-        outcome = "success" if success else "failure"
-        logger.error(
-            "F034.5/#590: failed to record %s run stats for check '%s' "
-            "after retry — this run's record is LOST (downstream "
-            "consumers cannot distinguish this from the check never "
-            "having run)",
-            outcome, check.name,
-            exc_info=last_exc,
-        )
+        try:
+            await self._dynamic_loader.update_run_stats(
+                check.check_id, success=success, error_msg=error_msg,
+            )
+        except Exception as exc:
+            outcome = "success" if success else "failure"
+            logger.error(
+                "F034.5/#590: failed to record %s run stats for check "
+                "'%s' — this run's record is LOST (downstream consumers "
+                "cannot distinguish this from the check never having run)",
+                outcome, check.name,
+                exc_info=exc,
+            )
 
     async def _tick(self, urgent_only: bool = False) -> list[Finding]:
         """Run due checks and triage findings."""

@@ -936,10 +936,15 @@ class TestHeartbeatRunnerDynamic:
         assert "boom" in call_kwargs[1]["error_msg"]
 
     @pytest.mark.asyncio
-    async def test_record_run_stats_retries_transient_failure_and_succeeds(self, caplog):
-        """issue #590: a transient update_run_stats failure (first write
-        raises, retry succeeds) results in the stats being recorded, with
-        no ERROR logged — the retry absorbed the blip.
+    async def test_record_run_stats_write_failure_logs_error_and_does_not_raise(self, caplog):
+        """issue #590: an update_run_stats write failure logs ERROR and
+        does NOT raise into the caller — _tick must complete normally,
+        not abort the whole tick loop over one check's lost stats write.
+
+        No retry (codex P2, resolved by dropping the retry rather than
+        building a safe-classification scheme — see _record_run_stats's
+        docstring): update_run_stats is a relative increment, so a
+        single failed attempt is the whole story, not a first-of-two.
         """
         reg = CheckRegistry()
         check = _make_dynamic_check(name="dyn_1")
@@ -947,46 +952,14 @@ class TestHeartbeatRunnerDynamic:
         reg.register(check)
 
         loader = MagicMock()
-        loader.update_run_stats = AsyncMock(
-            side_effect=[Exception("transient db error"), None]
-        )
+        loader.update_run_stats = AsyncMock(side_effect=Exception("db write failed"))
 
         runner = self._make_runner(registry=reg, dynamic_loader=loader)
 
-        with patch("nous.heartbeat.runner.asyncio.sleep", new_callable=AsyncMock):
-            with caplog.at_level(logging.ERROR, logger="nous.heartbeat.runner"):
-                await runner._tick()
+        with caplog.at_level(logging.ERROR, logger="nous.heartbeat.runner"):
+            findings = await runner._tick()  # must not raise
 
-        assert loader.update_run_stats.call_count == 2, (
-            "Expected a retry after the transient failure."
-        )
-        for call in loader.update_run_stats.call_args_list:
-            assert call.args[0] == "check-uuid-001"
-            assert call.kwargs.get("success") is True
-        errors = [r for r in caplog.records if r.levelname == "ERROR"]
-        assert not errors, f"Expected no ERROR log — the retry succeeded. Got: {errors}"
-
-    @pytest.mark.asyncio
-    async def test_record_run_stats_persistent_failure_logs_error_and_does_not_raise(self, caplog):
-        """issue #590: a persistent update_run_stats failure (every
-        attempt raises) logs ERROR and does NOT raise into the caller —
-        _tick must complete normally, not abort the whole tick loop over
-        one check's lost stats write.
-        """
-        reg = CheckRegistry()
-        check = _make_dynamic_check(name="dyn_1")
-        check.run = AsyncMock(return_value=CheckResult(has_updates=False))
-        reg.register(check)
-
-        loader = MagicMock()
-        loader.update_run_stats = AsyncMock(side_effect=Exception("persistent db error"))
-
-        runner = self._make_runner(registry=reg, dynamic_loader=loader)
-
-        with patch("nous.heartbeat.runner.asyncio.sleep", new_callable=AsyncMock):
-            with caplog.at_level(logging.ERROR, logger="nous.heartbeat.runner"):
-                findings = await runner._tick()  # must not raise
-
+        loader.update_run_stats.assert_called_once()
         assert findings == []
         stats_errors = [
             r for r in caplog.records
@@ -1012,9 +985,8 @@ class TestHeartbeatRunnerDynamic:
 
         runner = self._make_runner(registry=reg, dynamic_loader=loader)
 
-        with patch("nous.heartbeat.runner.asyncio.sleep", new_callable=AsyncMock):
-            with pytest.raises(RuntimeError, match="the real failure"):
-                await runner.trigger_check("dyn_trigger_fail")
+        with pytest.raises(RuntimeError, match="the real failure"):
+            await runner.trigger_check("dyn_trigger_fail")
 
     @pytest.mark.asyncio
     async def test_tick_timeout_records_failure_stats_and_logs_error_when_write_fails(self, caplog):
@@ -1025,13 +997,12 @@ class TestHeartbeatRunnerDynamic:
         """
         reg = CheckRegistry()
         check = _make_dynamic_check(name="dyn_timeout")
-        # asyncio.sleep is patched below (needed for the retry backoff),
-        # which would neuter a REAL wait_for timeout too — raise
-        # asyncio.TimeoutError directly instead. asyncio.wait_for
-        # propagates an exception the awaited coroutine itself raises
-        # unchanged, so this reaches _tick's `except asyncio.TimeoutError:`
-        # branch identically to a genuine timeout, without depending on
-        # real timing.
+        # A real wait_for timeout requires a genuinely slow check.run(),
+        # which is fragile/slow in a test. asyncio.wait_for propagates an
+        # exception the awaited coroutine itself raises unchanged, so
+        # raising asyncio.TimeoutError directly reaches _tick's `except
+        # asyncio.TimeoutError:` branch identically to a genuine timeout,
+        # without depending on real timing.
         check.run = AsyncMock(side_effect=asyncio.TimeoutError())
         check.timeout = 30
         reg.register(check)
@@ -1041,9 +1012,8 @@ class TestHeartbeatRunnerDynamic:
 
         runner = self._make_runner(registry=reg, dynamic_loader=loader)
 
-        with patch("nous.heartbeat.runner.asyncio.sleep", new_callable=AsyncMock):
-            with caplog.at_level(logging.ERROR, logger="nous.heartbeat.runner"):
-                await runner._tick()  # must not raise
+        with caplog.at_level(logging.ERROR, logger="nous.heartbeat.runner"):
+            await runner._tick()  # must not raise
 
         loader.update_run_stats.assert_called_with(
             "check-uuid-001", success=False, error_msg="timeout",
@@ -1072,9 +1042,8 @@ class TestHeartbeatRunnerDynamic:
 
         runner = self._make_runner(registry=reg, dynamic_loader=loader)
 
-        with patch("nous.heartbeat.runner.asyncio.sleep", new_callable=AsyncMock):
-            with caplog.at_level(logging.ERROR, logger="nous.heartbeat.runner"):
-                await runner._tick()  # must not raise
+        with caplog.at_level(logging.ERROR, logger="nous.heartbeat.runner"):
+            await runner._tick()  # must not raise
 
         loader.update_run_stats.assert_called_with(
             "check-uuid-001", success=False, error_msg="boom",
