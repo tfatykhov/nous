@@ -1493,6 +1493,21 @@ class Settings(BaseSettings):
         description="Max terminal-but-undelivered DAGs drained per tick.",
     )
 
+    # codex P2 round 4: _cancel_heartbeat_check / _cancel_node / skip_and_continue
+    # all swallow manage_check(disable) failures with no retry, and once a
+    # check-type node reaches a terminal status _poll_awaiting_checks never
+    # looks at it again — a transient failure leaks the heartbeat check
+    # permanently (worse with urgent=True, exempt from quiet hours). Unlike
+    # F087's delivery sweep, disable has no externally-visible side effect
+    # (no Telegram push), so retrying it is a harmless no-op and needs no
+    # delivered_at-style column or attempt bookkeeping — only a bound on the
+    # per-tick query cost, mirroring dag_delivery_batch_size.
+    dag_check_reconciliation_batch_size: int = Field(
+        20,
+        ge=1,
+        description="Max terminal check-nodes with a still-enabled heartbeat check re-swept per tick for disable retry.",
+    )
+
     # F087: wall-clock backstop on running nodes. Defaults ON — a node whose
     # underlying primitive is orphaned otherwise stays 'running' forever, which
     # keeps its DAG 'running' forever and permanently consumes one of

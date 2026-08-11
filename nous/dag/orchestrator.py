@@ -263,7 +263,51 @@ class DAGOrchestrator:
             # mid-flight, which would silently drop the notification.
             self._delivery_task = asyncio.create_task(self._run_delivery_sweep())
 
+        # codex P2 round 4: reconciliation sweep for leaked heartbeat checks.
+        # Unlike the delivery sweep above, this is pure fast DB-only work (no
+        # LLM turn, no Telegram HTTP call) — comparable in cost to the
+        # per-DAG advancement already inside `_lock`, so it runs inline
+        # rather than detached. Awaited directly, still outside `_lock`
+        # since it isn't part of any single DAG's state machine.
+        await self._sweep_leaked_heartbeat_checks()
+
         return len(dags)
+
+    async def _sweep_leaked_heartbeat_checks(self) -> None:
+        """Re-issue disable for terminal check-nodes whose heartbeat check
+        is still enabled — the at-least-once backstop for
+        _cancel_heartbeat_check / _cancel_node / skip_and_continue, all of
+        which can leave a check registered (worse with urgent=True, exempt
+        from quiet hours, so it keeps burning LLM turns on a DAG that has
+        already finished).
+
+        No delivered_at-style column or attempt/error bookkeeping, unlike
+        F087's delivery sweep: manage_check(action="disable") has no
+        externally-visible side effect, so retrying it on an already-
+        disabled check is a harmless no-op. The store query's own
+        ``enabled == True`` predicate is what makes this self-limiting —
+        see get_terminal_check_nodes_with_enabled_heartbeat's docstring.
+        """
+        if not self._dynamic_loader:
+            return
+        try:
+            nodes = await self._store.get_terminal_check_nodes_with_enabled_heartbeat(
+                limit=self._settings.dag_check_reconciliation_batch_size
+            )
+        except Exception:
+            logger.exception("Error querying leaked heartbeat checks")
+            return
+        for node in nodes:
+            try:
+                await self._dynamic_loader.manage_check(
+                    action="disable", name=node.check_name
+                )
+            except Exception:
+                logger.debug(
+                    "Reconciliation sweep could not disable check %s for "
+                    "node %s — will retry next tick",
+                    node.check_name, node.name,
+                )
 
     async def _run_delivery_sweep(self) -> None:
         """Body of the detached sweep. Never raises into the task."""
@@ -989,49 +1033,57 @@ class DAGOrchestrator:
         if not self._dynamic_loader:
             return
 
+        # When a shell completion_check is declared, it is the authoritative
+        # gate for node completion. Transition to awaiting_check immediately
+        # without waiting for the heartbeat check's lifecycle — the heartbeat
+        # check is the LLM worker doing the node's actual work and keeps
+        # running in parallel. Previously the hoist only occurred when the
+        # heartbeat check was unregistered or inactive, which deadlocked nodes
+        # created during quiet hours (check present+active, run_count=0,
+        # never scheduled by runner.py:205).
+        #
+        # codex P1 round 4: deliberately does NOT stamp awaiting_check_at
+        # here. Before this hoist existed, the equivalent write only ever
+        # fired inside the check-is-None / not-check.active branches below
+        # — i.e. only once the heartbeat worker had ALREADY finished. The
+        # hoist moved that write to fire unconditionally at t=0 without
+        # moving _poll_awaiting_checks' deadline computation with it, so
+        # the completion-check timeout clock could burn through the
+        # worker's own scheduling wait (interval_seconds, up to 300s) —
+        # and Finding A/C's deferral, which waits for that same worker
+        # evidence before trusting a passing shell check — before the
+        # shell check was ever polled with a fair chance. Restoring the
+        # pre-hoist semantic: _poll_awaiting_checks now stamps
+        # awaiting_check_at itself, the first tick worker evidence is
+        # established (see the comment there), not before.
+        if node.completion_check and node.completion_check.strip():
+            await self._store.update_node(node.id, status="awaiting_check")
+            node.status = "awaiting_check"
+            return
+
         registry = getattr(self._dynamic_loader, '_registry', None)
         check = registry.get_check(node.check_name) if registry else None
         if check is None:
             # Check was unregistered — for DAG-managed checks this means
             # self-disable completed (DynamicCheckLoader unregisters on disable).
-            if node.completion_check and node.completion_check.strip():
-                # Heartbeat check finished — now poll the shell completion_check
-                now = datetime.now(UTC)
-                await self._store.update_node(
-                    node.id,
-                    status="awaiting_check",
-                    awaiting_check_at=now,
-                )
-                node.status = "awaiting_check"
-            else:
-                await self._store.update_node(
-                    node.id,
-                    status="completed",
-                    result="Check completed (self-disabled)",
-                    completed_at=datetime.now(UTC),
-                )
-                node.status = "completed"
+            await self._store.update_node(
+                node.id,
+                status="completed",
+                result="Check completed (self-disabled)",
+                completed_at=datetime.now(UTC),
+            )
+            node.status = "completed"
             return
 
         # Use check.active to detect disabled checks (review fix)
         if not check.active:
-            if node.completion_check and node.completion_check.strip():
-                # Heartbeat check disabled itself — now poll the shell completion_check
-                now = datetime.now(UTC)
-                await self._store.update_node(
-                    node.id,
-                    status="awaiting_check",
-                    awaiting_check_at=now,
-                )
-                node.status = "awaiting_check"
-            else:
-                await self._store.update_node(
-                    node.id,
-                    status="completed",
-                    result="Check completed (disabled itself)",
-                    completed_at=datetime.now(UTC),
-                )
-                node.status = "completed"
+            await self._store.update_node(
+                node.id,
+                status="completed",
+                result="Check completed (disabled itself)",
+                completed_at=datetime.now(UTC),
+            )
+            node.status = "completed"
 
     async def _poll_awaiting_checks(self, dag: ExecutionDAG) -> None:
         """Poll completion_check commands for nodes in awaiting_check status."""
@@ -1048,7 +1100,83 @@ class DAGOrchestrator:
                 node.status = "completed"
                 continue
 
-            # Check interval throttle
+            # codex P1 round 4: the completion-check deadline must not start
+            # before the heartbeat worker can possibly have produced
+            # evidence it ran — see _sync_check_node's hoist for why. Stamp
+            # awaiting_check_at here instead, the FIRST tick evidence
+            # exists. Checked on every tick — deliberately NOT gated on
+            # completion_check_interval, which throttles the (possibly
+            # expensive) shell command only; this is a cheap single-row
+            # lookup, worth the freshness so phase 2's full window starts
+            # as close to the true evidence moment as possible. Idempotent:
+            # once set, never rechecked or overwritten while status stays
+            # awaiting_check (retry_node's full reset is the only other
+            # writer of this column).
+            #
+            # codex P1 round 5 (FINDING G — the earlier brief's "only gate
+            # success" instruction was wrong): computed once here and
+            # reused for the rest of this node's iteration — see below for
+            # why re-checking per-branch was itself the bug.
+            worker_has_run = await self._heartbeat_worker_has_run(node)
+            if node.awaiting_check_at is None and worker_has_run:
+                established_at = datetime.now(UTC)
+                await self._store.update_node(
+                    node.id, awaiting_check_at=established_at,
+                )
+                node.awaiting_check_at = established_at
+
+            # Check timeout. Runs UNCONDITIONALLY — regardless of worker
+            # evidence — because it is the only backstop while evidence is
+            # absent (see the "no worker evidence" branch below, which
+            # skips everything past this point). ref_time falls back to
+            # started_at while awaiting_check_at is still None: a worker
+            # that never runs still fails on the overall deadline measured
+            # from node start, so this can't hang. F087's wall-clock
+            # reaper does NOT cover awaiting_check nodes (only
+            # status='running'), so this fallback is the ONLY bound on
+            # that phase — started_at is guaranteed non-NULL here since
+            # _launch_check_node always sets it before a node can reach
+            # awaiting_check.
+            ref_time = node.awaiting_check_at or node.started_at
+            if ref_time:
+                if ref_time.tzinfo is None:
+                    ref_time = ref_time.replace(tzinfo=UTC)
+                elapsed_total = (datetime.now(UTC) - ref_time).total_seconds()
+                effective_timeout = self._effective_timeout(node)
+                if elapsed_total > effective_timeout:
+                    await self._finalize_awaiting_check_node(
+                        node,
+                        status="failed",
+                        error=f"Completion check timed out after {effective_timeout}s ({node.check_attempts} attempts)",
+                    )
+                    continue
+
+            # codex P1 round 5 (FINDING G): the completion check is
+            # MEANINGLESS until the worker has run — do not consult it at
+            # all. Before this fix, only the success branch gated on
+            # worker evidence; the failure branch had no gate whatsoever,
+            # so a `test -f /tmp/done.flag`-shaped check (the CORRECT
+            # shape — false before the work, true after) exited 1 before
+            # the worker had even launched and was accepted as DEFINITIVE
+            # FAILURE: the node was killed and its worker disabled for a
+            # condition that was about to become true. (The `pgrep -f ...
+            # || exit 0` pattern FINDING A defended against is, in
+            # hindsight, a BAD completion check — true both before and
+            # after the work — so hardening against it broke the good
+            # pattern.) Skipping here — before running the shell command
+            # at all — also means no subprocess is spawned for a poll that
+            # cannot produce a meaningful answer, and check_attempts is
+            # not consumed by it (max_check_attempts is a termination
+            # condition; pre-fix, EVERY branch — including the success
+            # branch's own defer path — incremented check_attempts on
+            # these invalid polls, so a check could exhaust its attempt
+            # budget purely from polls that ran before the worker had a
+            # chance to do anything).
+            if not worker_has_run:
+                continue
+
+            # Check interval throttle. Only relevant once we're actually
+            # about to run the shell command (worker evidence exists).
             if node.completion_check_interval and node.last_check_at:
                 last = node.last_check_at
                 if last.tzinfo is None:
@@ -1057,32 +1185,13 @@ class DAGOrchestrator:
                 if elapsed < node.completion_check_interval:
                     continue
 
-            # Check timeout (based on awaiting_check_at, not started_at)
-            ref_time = node.awaiting_check_at or node.started_at
-            if ref_time:
-                if ref_time.tzinfo is None:
-                    ref_time = ref_time.replace(tzinfo=UTC)
-                elapsed_total = (datetime.now(UTC) - ref_time).total_seconds()
-                effective_timeout = self._effective_timeout(node)
-                if elapsed_total > effective_timeout:
-                    await self._store.update_node(
-                        node.id,
-                        status="failed",
-                        error=f"Completion check timed out after {effective_timeout}s ({node.check_attempts} attempts)",
-                        completed_at=datetime.now(UTC),
-                    )
-                    node.status = "failed"
-                    continue
-
             # Check max attempts
             if node.max_check_attempts and node.check_attempts >= node.max_check_attempts:
-                await self._store.update_node(
-                    node.id,
+                await self._finalize_awaiting_check_node(
+                    node,
                     status="failed",
                     error=f"Completion check exceeded max attempts ({node.max_check_attempts})",
-                    completed_at=datetime.now(UTC),
                 )
-                node.status = "failed"
                 continue
 
             # Run the completion check
@@ -1092,32 +1201,35 @@ class DAGOrchestrator:
                 now = datetime.now(UTC)
 
                 if check.status == "success":
+                    # worker_has_run is guaranteed True here — we already
+                    # `continue`d above otherwise, in this SAME iteration,
+                    # with no intervening await that could change the
+                    # underlying run_count/error_count/enabled state. No
+                    # need to re-check.
                     result = await self._read_node_result(node, dag)
-                    await self._store.update_node(
-                        node.id,
+                    # Terminal transition + heartbeat cancel both go through
+                    # _finalize_awaiting_check_node — see its docstring for
+                    # why cleanup lives there and not inline per-branch.
+                    await self._finalize_awaiting_check_node(
+                        node,
                         status="completed",
                         result=result,
                         check_attempts=attempts,
                         last_check_at=now,
-                        completed_at=now,
                     )
-                    node.status = "completed"
-                    node.result = result
                     logger.info(
                         "Completion check passed for node %s (attempt %d)",
                         node.name, attempts,
                     )
                 elif check.status == "failed":
                     error_msg = f"Completion check failed: {check.detail}" if check.detail else "Completion check failed (exit code 1)"
-                    await self._store.update_node(
-                        node.id,
+                    await self._finalize_awaiting_check_node(
+                        node,
                         status="failed",
                         error=error_msg,
                         check_attempts=attempts,
                         last_check_at=now,
-                        completed_at=now,
                     )
-                    node.status = "failed"
                     logger.warning(
                         "Completion check definitively failed for node %s (attempt %d): %s",
                         node.name, attempts, check.detail,
@@ -1136,6 +1248,208 @@ class DAGOrchestrator:
                 logger.exception(
                     "Error polling completion check for node %s", node.name
                 )
+
+    async def _heartbeat_worker_has_run(self, node: DAGNode) -> bool:
+        """Whether node's heartbeat check has completed at least one
+        SUCCESSFUL run.
+
+        codex P1 round 3: originally gated acceptance of a passing shell
+        completion_check only. codex P1 round 5 (FINDING G) broadened the
+        call site: the completion check is meaningless in EITHER direction
+        (pass or fail) until the worker has run, so _poll_awaiting_checks
+        now gates whether the shell command is even executed on this
+        single evidence check, computed once per poll and reused — not
+        three independent per-branch gates that must each be remembered
+        (which is how the failure branch was missed in the first place).
+        See the call site for the full reasoning.
+
+        Durable evidence only: DynamicCheckLoader.get_successful_run_count
+        (run_count - error_count) > 0. Two proxies used in the previous
+        round of this fix are deliberately NOT used anymore:
+        - raw run_count > 0: counts ATTEMPTS, not successes —
+          update_run_stats() increments it on failed/timed-out runs
+          too, so a check whose first LLM turn errored would satisfy
+          the gate despite never doing real work.
+        - registry absence / check.active == False as independent
+          "self-disabled, therefore ran" evidence: this conflated
+          "genuinely self-disabled after succeeding" (already covered
+          by the successful-run counter below — a self-disable only
+          ever reaches the DB via check.run() returning normally,
+          which update_run_stats() then records as a success) with
+          "never registered at all" (a cold restart, or a
+          DynamicCheckLoader.sync() that hasn't run yet, leaves the
+          registry empty for a check that has never executed once).
+
+        On the self-disable ordering race (manage_check(action=
+        "disable") unregisters the check synchronously DURING
+        check.run(), while update_run_stats() only commits AFTER
+        check.run() returns): dropping registry-absence means this now
+        just defers acceptance by one poll cycle rather than
+        reintroducing the deadlock. update_run_stats(success=True) is
+        the very next awaited statement after check.run() returns
+        without raising, in both call sites that invoke it
+        (HeartbeatRunner._tick and .trigger_check) — and the
+        awaiting_check wall-clock timeout is unconditional regardless
+        (see _finalize_awaiting_check_node), so there is no path back
+        to an unbounded wedge even in the rare case where the same
+        turn errors or times out after disabling (that nets zero
+        successful runs and resolves via timeout — the correct
+        outcome for "worker run reports failure", not silent success).
+
+        codex P2 round 4: that update_run_stats(success=True) call is
+        itself wrapped in a bare try/except that logs a WARNING and
+        SWALLOWS (runner.py) — and by the time it runs, disable has
+        already unregistered the check. A genuine self-disable whose
+        stats write then fails leaves the successful-run counter at
+        zero with no worker left to ever correct it, wedging the node
+        until wall-clock timeout: a false TIMEOUT instead of the false
+        SUCCESS this fix wave started out closing, just a rarer
+        trigger. When the counter reads zero, fall back to
+        DynamicCheckLoader.is_check_disabled: manage_check(action=
+        "disable") commits enabled=False BEFORE unregistering, so that
+        row is durable proof the check ran and chose to stop,
+        independent of whether the stats write that followed it
+        landed. See is_check_disabled's docstring for why this is NOT
+        a reintroduction of the registry-absence signal dropped above.
+
+        Trade-off, stated plainly: this also accepts a check that a
+        human or another agent disabled BEFORE it ever ran once. That
+        is deliberate. Once a check is durably off, nothing will ever
+        confirm the work through it again, so continuing to defer has
+        no safety benefit — and a check node with no completion_check
+        at all has always trusted bare disable alone as sufficient
+        (see _sync_check_node), predating this entire fix wave. The
+        shell completion_check remains the actual ground truth being
+        trusted either way.
+
+        Fails CLOSED (returns False, deferring completion to the next
+        poll) on a lookup error — the alternative, failing open, would
+        reintroduce exactly the false-success risk this gate exists to
+        close, just behind a rarer trigger.
+
+        KNOWN RESIDUAL (codex P2 round 6, FINDING H) — accepted, not
+        fixed here. A successful run whose update_run_stats(success=True)
+        write fails (runner.py:237-243 swallows it), with no self-disable,
+        is invisible to this gate: the successful-run counter stays 0,
+        is_check_disabled stays False, and this method keeps returning
+        False until either a LATER run's write succeeds or the node hits
+        its wall-clock deadline. Accepted because the failure mode is the
+        one this whole fix wave prefers: a false TIMEOUT (status="failed",
+        an explicit error, retry_node-recoverable) rather than a false
+        SUCCESS (silent, permanent, poisons every downstream node).
+        Accepted also because the precondition is narrow, not the common
+        case: it needs a node timeout BELOW the heartbeat's own scheduling
+        cadence — _launch_check_node hardcodes interval_seconds=300
+        (orchestrator.py:2494) while dag_node_default_timeout is 600
+        (config.py:1040) — stacked on an independently rare DB write
+        failure. Root cause is the swallow in runner.py, which corrupts
+        stats for every check type, not just DAG-managed ones (F034.3's
+        self-tuning reads the same counters), and is tracked separately as
+        issue #590.
+
+        Evidence-signal history, so this isn't re-litigated: registry
+        presence/absence and raw run_count were both tried and rejected
+        (round 3) — attempts ≠ successes, and absence ≠ "ran". run_count -
+        error_count plus enabled=False (round 4) is what survived: both
+        are committed DB facts, each written by exactly one code path. An
+        in-process consecutive_failures==0 signal was considered (round 6)
+        and rejected — it IS success-specific, unlike raw run_count, but
+        it's a rolling counter: the next unrelated run failing silently
+        erases the evidence it exists to preserve, so it would work in
+        testing and evaporate in production.
+        """
+        if not node.check_name or not self._dynamic_loader:
+            # No heartbeat check to gate on — nothing to defer for.
+            return True
+        try:
+            successful_runs = await self._dynamic_loader.get_successful_run_count(
+                node.check_name
+            )
+        except Exception:
+            logger.debug(
+                "Could not read successful run count for check %s — deferring node %s",
+                node.check_name, node.name,
+            )
+            return False
+        if successful_runs:
+            return True
+        try:
+            disabled = await self._dynamic_loader.is_check_disabled(node.check_name)
+        except Exception:
+            logger.debug(
+                "Could not read disabled state for check %s — deferring node %s",
+                node.check_name, node.name,
+            )
+            return False
+        return bool(disabled)
+
+    async def _finalize_awaiting_check_node(
+        self,
+        node: DAGNode,
+        *,
+        status: str,
+        error: str | None = None,
+        result: dict | None = None,
+        check_attempts: int | None = None,
+        last_check_at: datetime | None = None,
+    ) -> None:
+        """Single choke point for every terminal transition out of
+        awaiting_check: persist the status, then cancel the heartbeat check.
+
+        codex P2: the timeout and max_check_attempts branches used to
+        persist status="failed" and `continue` straight past cleanup —
+        the dynamic check stayed registered, and with urgent=True (which
+        exempts it from quiet-hour suppression too) kept burning LLM
+        turns on a DAG that had already failed. Success and definitive
+        failure already called _cancel_heartbeat_check inline; a fourth
+        near-identical call site was exactly how the other two got
+        skipped in the first place. Routing all four through one method
+        makes the cancel structural — attached to reaching a terminal
+        status — rather than something each branch has to remember to
+        add. (The one other awaiting_check exit, the "no valid check
+        command" branch above, isn't routed through this: a node only
+        reaches awaiting_check when completion_check is a non-empty
+        string, so that branch is unreachable in practice.)
+        """
+        completed_at = datetime.now(UTC)
+        update_kwargs: dict[str, object] = {"status": status, "completed_at": completed_at}
+        if error is not None:
+            update_kwargs["error"] = error
+        if result is not None:
+            update_kwargs["result"] = result
+        if check_attempts is not None:
+            update_kwargs["check_attempts"] = check_attempts
+        if last_check_at is not None:
+            update_kwargs["last_check_at"] = last_check_at
+
+        await self._store.update_node(node.id, **update_kwargs)
+        node.status = status
+        if result is not None:
+            node.result = result
+        if check_attempts is not None:
+            node.check_attempts = check_attempts
+        if last_check_at is not None:
+            node.last_check_at = last_check_at
+
+        await self._cancel_heartbeat_check(node)
+
+    async def _cancel_heartbeat_check(self, node: DAGNode) -> None:
+        """Disable the heartbeat check for a node that resolved via shell completion_check.
+
+        Best-effort: errors are logged at DEBUG and swallowed so a transient
+        failure never prevents the node from reaching its terminal status.
+        """
+        if not node.check_name or not self._dynamic_loader:
+            return
+        try:
+            await self._dynamic_loader.manage_check(
+                action="disable", name=node.check_name
+            )
+        except Exception:
+            logger.debug(
+                "Could not disable heartbeat check %s after node %s resolved",
+                node.check_name, node.name,
+            )
 
     async def _run_completion_check(self, node: DAGNode) -> CheckResult:
         """Run a completion_check shell command.
@@ -2210,6 +2524,10 @@ class DAGOrchestrator:
                 tools=node.tools,
                 interval_seconds=300,
                 timeout_seconds=self._effective_timeout(node),
+                # DAG check nodes are user-initiated work, not proactive noise.
+                # urgent=True exempts them from quiet-hour suppression so the
+                # heartbeat worker actually runs when the node is created at night.
+                urgent=True,
             )
             await self._store.update_node(
                 node.id,
