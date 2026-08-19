@@ -1216,6 +1216,8 @@ export interface RetrievalCandidate {
   final_rank: number | null;
   disposition: string;
   disposition_stage: string | null;
+  /** Set when a gate dropped this but a later stage (e.g. pinning) rescued it. */
+  restored_from: string | null;
 }
 
 /**

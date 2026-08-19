@@ -296,3 +296,60 @@ def test_sampling_off_keeps_header_legs_and_expansions():
     assert d["n_candidates"] == 0
     assert d["legs"][0]["n_returned"] == 7
     assert d["n_expansions"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Resurrection (F083 fact pinning)
+# ---------------------------------------------------------------------------
+
+
+def test_a_dropped_candidate_that_reaches_the_prompt_reads_rendered():
+    """`_reinsert_pinned` exists to rescue facts past diversity/relevance
+    demotion. The drop really happened, but the fact IS in the prompt — so
+    the disposition must say rendered or the accounting misreports context."""
+    t = _trace()
+    fid = uuid4()
+    t.add(fid, "fact", "context_facts", score=0.85)
+    t.drop(fid, "fact", "filter_dropped", "diversity")
+
+    t.finalize([FakeResult(fid, "fact")])
+
+    cand = t.to_dict()["candidates"][0]
+    assert cand["disposition"] == RENDERED
+    assert cand["restored_from"] == "filter_dropped@diversity"
+    assert cand["final_rank"] == 1
+
+
+def test_restored_from_is_absent_for_an_ordinary_survivor():
+    t = _trace()
+    fid = uuid4()
+    t.add(fid, "fact", "context_facts", score=0.9)
+    t.finalize([FakeResult(fid, "fact")])
+    assert t.to_dict()["candidates"][0]["restored_from"] is None
+
+
+def test_a_drop_that_is_never_resurrected_keeps_its_gate():
+    t = _trace()
+    fid = uuid4()
+    t.add(fid, "fact", "context_facts", score=0.3)
+    t.drop(fid, "fact", "filter_dropped", "diversity")
+    t.finalize([])
+
+    cand = t.to_dict()["candidates"][0]
+    assert cand["disposition"] == "filter_dropped"
+    assert cand["restored_from"] is None
+
+
+def test_rendered_count_matches_what_was_finalized_even_with_resurrection():
+    t = _trace()
+    ids = [uuid4() for _ in range(4)]
+    for f in ids:
+        t.add(f, "fact", "context_facts", score=0.5)
+    t.drop(ids[0], "fact", "filter_dropped", "diversity")
+    t.drop(ids[1], "fact", "filter_dropped", "diversity")
+
+    t.finalize([FakeResult(ids[0], "fact"), FakeResult(ids[2], "fact")])
+
+    d = t.to_dict()
+    assert d["n_rendered"] == 2
+    assert sum(d["disposition_counts"].values()) == 4

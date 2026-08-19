@@ -82,6 +82,13 @@ class Candidate:
     final_rank: int | None = None
     disposition: str = UNACCOUNTED
     disposition_stage: str | None = None
+    # Set when a gate dropped this candidate but a later stage brought it back
+    # (F083 fact pinning is the live example: `_reinsert_pinned` exists
+    # precisely to rescue items past diversity/dedup/relevance demotion). The
+    # drop really happened, so discarding it would hide which gate the rescue
+    # was needed for — but the item DID reach the model, so `disposition` must
+    # say `rendered` or the accounting lies about what the prompt contained.
+    restored_from: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +102,7 @@ class Candidate:
             "final_rank": self.final_rank,
             "disposition": self.disposition,
             "disposition_stage": self.disposition_stage,
+            "restored_from": self.restored_from,
         }
 
 
@@ -349,6 +357,11 @@ class RetrievalTrace:
     def finalize(self, results: list, duration_ms: float | None = None) -> None:
         """Mark what survived, and rank it.
 
+        ``results`` is authoritative about what reached the model, so presence
+        here OVERRIDES an earlier drop — a stage that resurrects a candidate
+        (pinning) would otherwise leave it counted as dropped while it sits in
+        the prompt. The overridden gate is preserved on ``restored_from``.
+
         Anything registered but neither dropped nor present here keeps
         ``UNACCOUNTED`` on purpose — see the module docstring.
         """
@@ -360,9 +373,10 @@ class RetrievalTrace:
             if cand is None:
                 continue
             cand.final_rank = i + 1
-            if cand.disposition == UNACCOUNTED:
-                cand.disposition = RENDERED
-                cand.disposition_stage = "final"
+            if cand.disposition not in (UNACCOUNTED, RENDERED):
+                cand.restored_from = f"{cand.disposition}@{cand.disposition_stage}"
+            cand.disposition = RENDERED
+            cand.disposition_stage = "final"
 
     # -- output -------------------------------------------------------------
 

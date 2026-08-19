@@ -1481,6 +1481,22 @@ async def _run_stages(
                                 created_at=created or datetime.now(UTC),
                             )
                         )
+                        # F091: spreading is multi-hop, so the CTE returns an
+                        # activation rather than a single (seed, edge) pair —
+                        # there is no one seed to attribute. Record the whole
+                        # seed set's origin as the stage and hop=2+ to mark it
+                        # as a traversal result, not a 1-hop neighbour.
+                        tr.expansion(
+                            seed_id=seeds[0][0] if seeds else nid,
+                            seed_type="multi",
+                            seed_score=None,
+                            neighbor_id=nid, neighbor_type=ntype,
+                            stage="stage4_spreading_activation", hop=2,
+                            edge_relation="spreading_activation",
+                            edge_weight=activation,
+                            composed_score=activation,
+                            won_best_path=True,
+                        )
                         seen_ids.add(nid)
                         n_appended += 1
                 if n_appended > 0:
@@ -1536,6 +1552,20 @@ async def _run_stages(
                     )
                     for n in neighbors:
                         prev = seen_hop.get(n.id)
+                        # F091: capture BEFORE the dedup guards below, so an
+                        # edge that loses best-path is still visible as an
+                        # edge that was traversed.
+                        tr.expansion(
+                            seed_id=dec.id, seed_type="decision",
+                            seed_score=dec.score,
+                            neighbor_id=n.id, neighbor_type=n.node_type,
+                            stage="stage4_decision_1hop", hop=1,
+                            edge_relation=n.edge_relation,
+                            edge_weight=n.edge_weight,
+                            extraction_method=getattr(n, "extraction_method", None),
+                            composed_score=(dec.score or 0.0) * (n.edge_weight or 0.0),
+                            won_best_path=n.id not in seen_ids and prev is None,
+                        )
                         if prev is n:
                             # Aliasing guard — see Stage 2.
                             continue

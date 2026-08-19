@@ -371,7 +371,14 @@
                         {/each}
                       </td>
                       <td>{c.final_rank ?? '—'}</td>
-                      <td>{c.disposition_stage ? `${c.disposition_stage}` : '—'}</td>
+                      <td>
+                        {c.disposition_stage ?? '—'}
+                        {#if c.restored_from}
+                          <span class="chip sm restored" title="Dropped by {c.restored_from}, then rescued (e.g. fact pinning)">
+                            rescued from {c.restored_from}
+                          </span>
+                        {/if}
+                      </td>
                       <td class="snippet-cell" title={c.snippet}>{c.snippet || '—'}</td>
                     </tr>
                   {/each}
@@ -465,6 +472,7 @@
 
   .mut { font-size: 0.78rem; opacity: 0.7; margin-left: 0.2rem; }
   .chip.sm { font-size: 0.72rem; }
+  .chip.restored { opacity: 0.8; }
   .muted { opacity: 0.6; }
   .mt { margin-top: 1rem; }
 </style>
