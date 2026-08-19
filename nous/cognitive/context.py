@@ -27,6 +27,7 @@ from nous.observability.retrieval_logger import get_active as get_active_retriev
 from nous.observability.retrieval_trace import (
     BELOW_FLOOR,
     BUDGET_TRUNCATED,
+    DEDUPED,
     FILTER_DROPPED,
     NULL_TRACE,
     SLICED_OFF,
@@ -1111,7 +1112,13 @@ class ContextEngine:
                     recalled_score_map=recalled_score_map,
                     session=session,
                     query=input_text,
+                    trace=tr,
                 )
+                # This is the LIVE procedure path whenever
+                # proc_selection_graph_primary is on (it is, here and in prod),
+                # so the passive/embedding leg further down never runs. Register
+                # here or procedures are absent from the trace entirely.
+                _tr_enter(selected or [], "procedure", "context_procedures_graph")
                 if selected:
                     cap = getattr(
                         self._settings, "proc_recommended_body_max_chars", 2500,
@@ -1228,6 +1235,12 @@ class ContextEngine:
                     )
 
                 if embedding_procedures:
+                    # Registration for the procedure leg. Without this the
+                    # `_tr_filtered` calls below no-op (drop() is keyed on a
+                    # candidate that was never added), procedure drops vanish,
+                    # and rendered procedures are missing from n_rendered — the
+                    # dashboard would imply no procedures were even considered.
+                    _tr_enter(embedding_procedures, "procedure", "context_procedures")
                     # Standard pipeline: staleness -> frame boost -> dedup -> usage boost -> relevance
                     embedding_procedures = self._apply_staleness_penalty(embedding_procedures)
                     embedding_procedures = apply_frame_boost(
@@ -1257,16 +1270,25 @@ class ContextEngine:
 
                     # Deduplicate: exclude Critic picks from embedding results
                     if critic_names:
+                        _before = embedding_procedures
                         embedding_procedures = [
                             p for p in embedding_procedures
                             if getattr(p, "name", "") not in critic_names
                         ]
+                        # DEDUPED, not a loss: the Critic track already carries
+                        # this procedure, so it still reaches the prompt.
+                        _tr_filtered(_before, embedding_procedures, "procedure",
+                                     DEDUPED, "critic_track_overlap")
 
+                    _before = embedding_procedures
                     embedding_procedures = embedding_procedures[:embedding_limit]
+                    _tr_filtered(_before, embedding_procedures, "procedure",
+                                 SLICED_OFF, "embedding_slot_limit")
 
                 # F038-1.3: Dedup procedures vs identity prompt
                 _effective_identity = identity_override or self._identity_prompt
                 if embedding_procedures and _effective_identity:
+                    _before = embedding_procedures
                     embedding_procedures = [
                         p for p in embedding_procedures
                         if text_overlap(
@@ -1274,10 +1296,15 @@ class ContextEngine:
                             _effective_identity,
                         ) < _IDENTITY_OVERLAP_THRESHOLD
                     ]
+                    _tr_filtered(_before, embedding_procedures, "procedure",
+                                 FILTER_DROPPED, "identity_overlap")
 
                 # --- Combine tracks ---
                 all_procedures = critic_procedures + (embedding_procedures or [])
+                _before_slots = all_procedures
                 all_procedures = all_procedures[:total_slots]
+                _tr_filtered(_before_slots, all_procedures, "procedure",
+                             SLICED_OFF, "total_slot_limit")
 
                 if all_procedures:
                     for p in all_procedures:
@@ -1932,6 +1959,7 @@ class ContextEngine:
         recalled_score_map: dict[str, float],
         session,
         query: str = "",
+        trace=None,
     ) -> list:
         """§14.7 procedure selection ladder: graph K-line -> critic -> cosine.
 
@@ -1974,6 +2002,23 @@ class ContextEngine:
                 continue
             for n in neighbors:
                 score = (getattr(n, "edge_weight", 0.0) or 0.0) * seed_score
+                # F091: Path B has its own graph expansion (F080 §14.7 K-line
+                # procedure selection) and it was entirely uncaptured — the
+                # pipeline's Stage 2/2b/4 traversals are a different code path.
+                # won_best_path mirrors the max-score replacement immediately
+                # below, so a seed that loses to a better path still shows as
+                # traversed.
+                if trace is not None:
+                    trace.expansion(
+                        seed_id=mid, seed_type=stype, seed_score=seed_score,
+                        neighbor_id=n.id, neighbor_type="procedure",
+                        stage="context_procedure_kline", hop=1,
+                        edge_relation=getattr(n, "edge_relation", None),
+                        edge_weight=getattr(n, "edge_weight", None),
+                        extraction_method=getattr(n, "extraction_method", None),
+                        composed_score=score,
+                        won_best_path=score > scores.get(n.id, -1.0),
+                    )
                 if score > scores.get(n.id, -1.0):
                     scores[n.id] = score
 
