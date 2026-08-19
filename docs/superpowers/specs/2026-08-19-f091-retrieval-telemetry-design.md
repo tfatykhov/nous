@@ -220,6 +220,46 @@ Tests use real Postgres per project convention. Note CI is the gate: the local f
 
 **Deferred:** per-candidate CE/MMR rank movement inside `Heart.recall`; cross-retrieval trend analytics (disposition rates over time); replay ("re-run this query with flag X off and diff"); export to the `nous_eval` harness; alerting on disposition-rate drift.
 
-## Open items reconciled at implementation time
+## Implementation notes (2026-08-19)
 
-Fable was dispatched as adviser on this design (hot-path cost, `Heart.recall` invasiveness, flag default, missed drop sites, v1 split). Its input is folded into the plan before implementation begins; any correction it raises against the tables above supersedes them.
+Shipped in `2de1141` + `e5f6a5e`. Two corrections to the design above, both
+found by running live probes against the real pipeline rather than trusting
+the instrumentation by inspection:
+
+**Stage 4 was missing from the instrumentation table.** The table listed
+Stage 2 and Stage 2b but not Stage 4's 1-hop decision expansion or spreading
+activation — which between them produce most graph expansion in practice. The
+probe caught it immediately: `brain_graph` reported attempted while the trace
+showed zero edges on every query. Both are now captured. 1-hop edges are
+recorded *before* the dedup guards so an edge that loses best-path is still
+shown as traversed. Spreading records `hop=2` with `seed_type="multi"`,
+because the CTE returns an activation rather than a `(seed, edge)` pair —
+attributing it to a single seed would be a fabrication.
+
+**A dropped candidate can legitimately reach the prompt.** `_reinsert_pinned`
+(F083 pinning) exists specifically to rescue facts past diversity/dedup/
+relevance demotion. With `NOUS_FACT_PIN_TOP_K=5`, a fact dropped at
+`diversity` came back and rendered, while the trace still counted it as
+dropped — `n_rendered=8` against 10 ids actually in the prompt. `finalize()`
+is now authoritative: presence in the final result set overrides an earlier
+drop, and the overridden gate is preserved on a new `restored_from` field
+rather than discarded. Both facts matter — the drop really happened, and the
+item really reached the model. The design's completeness invariant
+(`n_rendered + Σ(dropped) == n_candidates`) was what surfaced this.
+
+Also as planned: `Heart.recall` internals stayed out of v1 (boundary + slice
+only), and the flag split shipped as designed — master ON, candidate capture
+sampled at 0.1.
+
+Three probes ship as executable verification under `scripts/diag/`:
+`f091_e2e_check.py` (write→Postgres→dashboard-query round trip),
+`f091_pipeline_probe.py` (results byte-identical traced vs untraced),
+`f091_context_probe.py` (system prompt byte-identical; `n_rendered`
+reconciles exactly with `recalled_ids`).
+
+### Adviser input
+
+Fable was dispatched as adviser on this design. It had not returned by the
+time implementation completed, so the design was validated by direct code
+reading plus the three probes instead. Any correction it raises later should
+be checked against the shipped instrumentation tables above.
