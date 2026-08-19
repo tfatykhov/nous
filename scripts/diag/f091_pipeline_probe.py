@@ -87,11 +87,23 @@ async def main() -> int:
             )
             rl.commit(tr)
 
-            check(
-                "results identical with tracing on vs off",
-                _fingerprint(off_results) == _fingerprint(on_results),
-                f"off={len(off_results)} on={len(on_results)}",
+            # CONTROL: a second untraced run. This probe hits a LIVE database
+            # and the pipeline itself writes (`track_access` on keyed-leg
+            # survivors, F044 recall-touch), so "off != on" alone cannot
+            # distinguish "tracing changed results" from "the corpus moved".
+            off2_results, _ = await run_recall_pipeline(
+                query=q, heart=heart, brain=brain, settings=settings, limit=10,
+                trace=None,
             )
+            if _fingerprint(off_results) != _fingerprint(off2_results):
+                print("  SKIP  byte-identity — corpus changed between untraced "
+                      "runs; the comparison is not valid this run")
+            else:
+                check(
+                    "results identical with tracing on vs off",
+                    _fingerprint(off_results) == _fingerprint(on_results),
+                    f"off={len(off_results)} on={len(on_results)}",
+                )
             check(
                 "stats identical",
                 (off_stats.n_heart_results, off_stats.n_brain_results,
@@ -108,6 +120,20 @@ async def main() -> int:
             print(f"    dispositions={counts}")
 
             check("at least one leg recorded", len(d["legs"]) > 0)
+            # A leg that ran and produced rows must not report 0. The
+            # attempted-legs rollup used to overwrite the keyed/exemplar
+            # counts (which are known only at assembly) with a default 0.
+            legs_by_name = {leg["name"]: leg for leg in d["legs"]}
+            producing = {c["entry_leg"] for c in (d["candidates"] or [])}
+            for leg_name in producing:
+                leg = legs_by_name.get(leg_name)
+                if leg is None:
+                    continue
+                check(
+                    f"leg '{leg_name}' reports a non-zero count (it produced rows)",
+                    leg["n_returned"] > 0,
+                    f"n_returned={leg['n_returned']}",
+                )
             check("no unaccounted candidates", UNACCOUNTED not in counts, str(counts))
             check(
                 "rendered count matches returned results",

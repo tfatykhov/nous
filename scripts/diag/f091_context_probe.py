@@ -88,16 +88,31 @@ async def main() -> int:
             )
             set_active(None)
 
-            check(
-                "system prompt identical with tracing on vs off",
-                off.system_prompt == on.system_prompt,
-                f"off={len(off.system_prompt)}ch on={len(on.system_prompt)}ch",
+            # CONTROL: a second untraced build. This probe runs against a LIVE
+            # database that other tooling mutates — `track_access` writes on
+            # every keyed-leg survivor, for one — so "off != on" alone cannot
+            # distinguish "tracing changed the prompt" from "the corpus moved
+            # under us". Without this control the byte-identity assertion is
+            # unsound, and a flake here would be mis-attributed to tracing.
+            off2 = await engine.build(
+                agent_id=settings.agent_id, session_id=f"probe-off2-{i}",
+                input_text=q, frame=FRAME,
             )
-            check(
-                "recalled ids identical",
-                off.recalled_ids == on.recalled_ids,
-                f"off={ {k: len(v) for k, v in off.recalled_ids.items()} }",
-            )
+
+            if off.system_prompt != off2.system_prompt:
+                print("  SKIP  byte-identity — corpus changed between untraced "
+                      "builds; the comparison is not valid this run")
+            else:
+                check(
+                    "system prompt identical with tracing on vs off",
+                    off.system_prompt == on.system_prompt,
+                    f"off={len(off.system_prompt)}ch on={len(on.system_prompt)}ch",
+                )
+                check(
+                    "recalled ids identical",
+                    off.recalled_ids == on.recalled_ids,
+                    f"off={ {k: len(v) for k, v in off.recalled_ids.items()} }",
+                )
 
             entries = rl.get_recent()
             check("a trace was committed", len(entries) == 1, str(len(entries)))

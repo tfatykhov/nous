@@ -701,7 +701,12 @@ async def run_recall_pipeline(
         "spreading_activation": len(acc.graph_expanded) if acc.spreading_activation_used else 0,
     }
     for _leg_name in acc.attempted_legs:
-        tr.leg(_leg_name, attempted=True, n_returned=_leg_counts.get(_leg_name, 0))
+        # ``.get(name)`` -> None, NOT 0, for legs absent from _leg_counts.
+        # keyed / keyed_r2 / exemplar report their own counts at assembly
+        # (they are the only legs whose yield is known there), and they are
+        # ALSO in attempted_legs — so defaulting to 0 here overwrote a
+        # correct count with zero. ``leg()`` treats None as "leave it alone".
+        tr.leg(_leg_name, attempted=True, n_returned=_leg_counts.get(_leg_name))
     for _stage, _n_err in acc.stage_errors.items():
         tr.leg(_stage, attempted=True, error=f"{_n_err} error(s)")
 

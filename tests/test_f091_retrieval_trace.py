@@ -385,3 +385,23 @@ def test_coerced_content_still_respects_the_truncation_bound():
     t = _trace(snippet_chars=5)
     t.add(uuid4(), "fact", "heart_primary", content=1234567890)
     assert t.to_dict()["candidates"][0]["snippet"] == "12345"
+
+
+def test_leg_update_without_a_count_preserves_the_existing_one():
+    """The pipeline's attempted-legs rollup runs AFTER the keyed/exemplar legs
+    report their own yield. Passing 0 there overwrote a correct count with
+    zero, so those legs must be updated with n_returned=None instead."""
+    t = _trace()
+    t.leg("keyed", attempted=True, n_returned=3, n_deduped=2)
+    t.leg("keyed", attempted=True, n_returned=None)  # rollup pass
+
+    leg = t.to_dict()["legs"][0]
+    assert leg["n_returned"] == 3
+    assert leg["n_deduped"] == 2
+
+
+def test_leg_update_with_an_explicit_count_still_overwrites():
+    t = _trace()
+    t.leg("heart_primary", n_returned=3)
+    t.leg("heart_primary", n_returned=9)
+    assert t.to_dict()["legs"][0]["n_returned"] == 9
