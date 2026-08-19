@@ -137,16 +137,68 @@ async def main() -> int:
                 sum(counts.values()) == d["n_candidates"],
                 f"{sum(counts.values())} vs {d['n_candidates']}",
             )
+            # `recalled_ids` is collected BEFORE section-budget truncation, so
+            # it over-states delivery. Subtract what the trace attributed to
+            # truncation to get the set that actually reached the model.
+            n_budget_cut = counts.get("budget_truncated", 0)
             check(
                 "rendered matches what actually reached the prompt",
-                d["n_rendered"] == n_rendered_expected,
-                f"trace={d['n_rendered']} recalled_ids={n_rendered_expected}",
+                d["n_rendered"] == n_rendered_expected - n_budget_cut,
+                f"trace={d['n_rendered']} recalled_ids={n_rendered_expected} "
+                f"budget_truncated={n_budget_cut}",
             )
 
             any_candidates = any_candidates or d["n_candidates"] > 0
             any_drops = any_drops or any(
                 k != "rendered" for k in counts
             )
+
+        # ---- Budget truncation: no phantom "rendered" candidates ----------
+        # `recalled_ids` is populated BEFORE `_truncate_to_budget`, so without
+        # explicit attribution a fact cut by the section budget still reads as
+        # rendered. Measured pre-fix: 3 of 5 "rendered" facts were absent from
+        # the prompt. Squeeze the budget so truncation definitely fires.
+        print("\nBUDGET TRUNCATION (squeezed facts budget)")
+        squeezed = Settings()
+        squeezed.context_budget_overrides = {"facts": 60}
+        eng2 = ContextEngine(
+            Brain(database, squeezed, embedding_provider=embeddings),
+            Heart(database, squeezed, embedding_provider=embeddings),
+            squeezed, identity_prompt="Probe agent.",
+        )
+        rl2 = RetrievalLogger(candidate_sample_rate=1.0, agent_id=squeezed.agent_id)
+        set_active(rl2)
+        squeezed_build = await eng2.build(
+            agent_id=squeezed.agent_id, session_id="probe-trunc",
+            input_text="user preferences", frame=FRAME,
+        )
+        set_active(None)
+
+        td = rl2.get_recent()[0]
+        rendered_facts = [
+            c for c in (td["candidates"] or [])
+            if c["disposition"] == "rendered" and c["type"] == "fact"
+        ]
+        ghosts = [
+            c for c in rendered_facts
+            if (c["snippet"] or "").strip()[:40]
+            and (c["snippet"] or "").strip()[:40] not in squeezed_build.system_prompt
+        ]
+        n_trunc = td["disposition_counts"].get("budget_truncated", 0)
+        print(f"    rendered facts={len(rendered_facts)} "
+              f"budget_truncated={n_trunc} ghosts={len(ghosts)}")
+        check(
+            "no candidate is marked rendered while absent from the prompt",
+            not ghosts,
+            f"{len(ghosts)} phantom(s): " + "; ".join(
+                (c['snippet'] or '')[:40] for c in ghosts[:3]
+            ),
+        )
+        check(
+            "truncation actually fired (probe is exercising the path)",
+            n_trunc > 0,
+            f"budget_truncated={n_trunc} — squeeze the budget further",
+        )
 
         print("\nACROSS ALL QUERIES")
         check("candidates captured on the context path", any_candidates)

@@ -267,6 +267,34 @@ class ContextEngine:
                        content=_tr_content(it))
             return items
 
+        # Ids cut by section token-budget truncation. Collected because
+        # `recalled_ids` is populated BEFORE `_truncate_to_budget` runs, so it
+        # over-states delivery — the same trap already documented for the
+        # bullet-count counters at observability/context_logger.py:178.
+        # Measured: at a squeezed facts budget, 3 of 5 facts marked rendered
+        # were absent from the prompt. Without this the dashboard answers
+        # "is this fact in context?" with a confident yes when it is not.
+        _tr_budget_cut: set[tuple[str, str]] = set()
+
+        def _tr_budget(items: list, mem_type: str, rendered_text: str) -> None:
+            """Attribute section-budget truncation, conservatively.
+
+            `_truncate_to_budget` is a raw char slice, so an item's line can
+            survive partially and there is no exact item-level cut point to
+            read. We therefore test whether a distinctive prefix of the item's
+            content still appears in the rendered text and only ever DOWNGRADE
+            on a clear absence — a partially-sliced item stays `rendered`.
+            Deliberately an approximation, and only ever conservative.
+            """
+            for it in (items or []):
+                iid = str(getattr(it, "id", ""))
+                if not iid:
+                    continue
+                probe = (_tr_content(it) or "").strip()[:40]
+                if probe and probe not in rendered_text:
+                    _tr_budget_cut.add((iid, mem_type))
+                    tr.drop(iid, mem_type, BUDGET_TRUNCATED, "section_budget_truncation")
+
         def _tr_filtered(before: list, after: list, mem_type: str,
                          disposition: str, stage: str) -> list:
             """Attribute whatever ``before`` lost to ``stage``.
@@ -841,6 +869,7 @@ class ContextEngine:
                             desc = getattr(d, "description", "")
                             recalled_content_map[mid] = desc
                     dec_text = self._truncate_to_budget(dec_text, self._scaled_budget(budget.decisions))
+                    _tr_budget(decisions, "decision", dec_text)
                     sections.append(
                         ContextSection(
                             priority=5,
@@ -937,6 +966,7 @@ class ContextEngine:
                         lineage=_lineage_by_id or None,
                     )
                     facts_text = self._truncate_to_budget(facts_text, self._scaled_budget(budget.facts))
+                    _tr_budget(facts, "fact", facts_text)
                     sections.append(
                         ContextSection(
                             priority=6,
@@ -1396,6 +1426,7 @@ class ContextEngine:
 
                     ep_text = self._format_episodes(episodes)
                     ep_text = self._truncate_to_budget(ep_text, self._scaled_budget(budget.episodes))
+                    _tr_budget(episodes, "episode", ep_text)
                     sections.append(
                         ContextSection(
                             priority=8,
@@ -1444,10 +1475,16 @@ class ContextEngine:
         # drift signal rather than a plausible-looking guess.
         if _rl is not None:
             try:
+                # Exclude ids cut by section-budget truncation: they ARE in
+                # recalled_ids (collected pre-truncation) but never reached
+                # the model, and finalize() treats presence here as
+                # authoritative — it would otherwise resurrect them straight
+                # back to `rendered` and undo the attribution above.
                 _rendered = [
                     _RenderedRef(mid, mtype)
                     for mtype, mids in recalled_ids.items()
                     for mid in mids
+                    if (mid, mtype) not in _tr_budget_cut
                 ]
                 tr.finalize(_rendered, duration_ms=(time.monotonic() - _tr_t0) * 1000.0)
                 _rl.commit(tr)

@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 
 from nous.observability.retrieval_trace import (
+    BUDGET_TRUNCATED,
     BELOW_FLOOR,
     DEDUPED,
     F071_EXCLUDED,
@@ -405,3 +406,38 @@ def test_leg_update_with_an_explicit_count_still_overwrites():
     t.leg("heart_primary", n_returned=3)
     t.leg("heart_primary", n_returned=9)
     assert t.to_dict()["legs"][0]["n_returned"] == 9
+
+
+def test_budget_truncated_survives_finalize_when_excluded_from_rendered():
+    """Section-budget truncation happens AFTER recalled_ids is collected, so
+    the caller must exclude cut ids from what it hands finalize(). If it does,
+    the drop must stick — finalize's resurrection rule is for items that
+    genuinely reached the model."""
+    t = _trace()
+    kept, cut = uuid4(), uuid4()
+    t.add(kept, "fact", "context_facts", score=0.9)
+    t.add(cut, "fact", "context_facts", score=0.8)
+    t.drop(cut, "fact", BUDGET_TRUNCATED, "section_budget_truncation")
+
+    t.finalize([FakeResult(kept, "fact")])  # cut id deliberately absent
+
+    by_id = {c["id"]: c for c in t.to_dict()["candidates"]}
+    assert by_id[str(cut)]["disposition"] == BUDGET_TRUNCATED
+    assert by_id[str(cut)]["restored_from"] is None
+    assert t.to_dict()["n_rendered"] == 1
+
+
+def test_budget_truncated_is_resurrected_if_caller_still_reports_it_rendered():
+    """Documents the trap: finalize treats its argument as authoritative, so a
+    caller that forgets to exclude budget-cut ids silently undoes the
+    attribution. context.py filters via _tr_budget_cut for exactly this."""
+    t = _trace()
+    cut = uuid4()
+    t.add(cut, "fact", "context_facts", score=0.8)
+    t.drop(cut, "fact", BUDGET_TRUNCATED, "section_budget_truncation")
+
+    t.finalize([FakeResult(cut, "fact")])
+
+    cand = t.to_dict()["candidates"][0]
+    assert cand["disposition"] == RENDERED
+    assert cand["restored_from"] == f"{BUDGET_TRUNCATED}@section_budget_truncation"
