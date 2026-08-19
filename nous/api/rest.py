@@ -1974,6 +1974,51 @@ def create_app(
             logger.error("Dashboard density error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    # --- F091: Retrieval telemetry dashboard ---
+
+    async def dashboard_retrieval(request: Request) -> JSONResponse:
+        """GET /dashboard/retrieval - Recent retrievals + aggregate dispositions."""
+        try:
+            limit = max(1, min(int(request.query_params.get("limit", "50")), 200))
+        except ValueError:
+            return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+        path_filter = request.query_params.get("path")
+        if path_filter and path_filter not in ("pipeline", "context"):
+            return JSONResponse(
+                {"error": "path must be 'pipeline' or 'context'"}, status_code=400
+            )
+
+        try:
+            from nous.api.dashboard_queries import get_retrieval_data
+
+            async with database.session() as session:
+                data = await get_retrieval_data(
+                    session, settings.agent_id, limit=limit, path=path_filter,
+                )
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard retrieval error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def dashboard_retrieval_detail(request: Request) -> JSONResponse:
+        """GET /dashboard/retrieval/{entry_id} - One retrieval's candidates + expansions."""
+        entry_id = request.path_params["entry_id"]
+        # Ids are uuid4().hex[:16] — validate shape before hitting the DB.
+        if not entry_id or len(entry_id) > 32 or not entry_id.isalnum():
+            return JSONResponse({"error": "invalid entry_id"}, status_code=400)
+
+        try:
+            from nous.api.dashboard_queries import get_retrieval_detail
+
+            async with database.session() as session:
+                data = await get_retrieval_detail(session, settings.agent_id, entry_id)
+            if data is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard retrieval detail error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     # --- F035.6: Consolidation audit diff dashboard ---
 
     async def dashboard_consolidation(request: Request) -> JSONResponse:
@@ -2944,6 +2989,9 @@ def create_app(
         Route("/dashboard/heartbeat", dashboard_heartbeat),
         # F035: Observability dashboard
         Route("/dashboard/observability", dashboard_observability),
+        # F091: Retrieval telemetry dashboard
+        Route("/dashboard/retrieval", dashboard_retrieval),
+        Route("/dashboard/retrieval/{entry_id}", dashboard_retrieval_detail),
         # F036.1: Cache dashboard
         Route("/dashboard/cache", dashboard_cache),
         # F038: DAG orchestration dashboard

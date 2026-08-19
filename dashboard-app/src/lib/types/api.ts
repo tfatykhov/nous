@@ -1193,3 +1193,98 @@ export interface ProfileFactsResponse {
   facts: BrowserFact[];  // superset cast — endpoint omits some BrowserFact fields; view reads none of them
   total: number;
 }
+
+// ── Retrieval telemetry (F091 — GET /dashboard/retrieval, /dashboard/retrieval/{id}) ──
+
+/** One score change applied to a candidate by a named stage. */
+export interface RetrievalMutation {
+  stage: string;
+  score_before: number | null;
+  score_after: number | null;
+  reason: string | null;
+}
+
+/** One item that entered retrieval, and what became of it. */
+export interface RetrievalCandidate {
+  id: string;
+  type: string;
+  entry_leg: string;
+  entry_score: number | null;
+  entry_rank: number | null;
+  snippet: string;
+  mutations: RetrievalMutation[];
+  final_rank: number | null;
+  disposition: string;
+  disposition_stage: string | null;
+}
+
+/**
+ * One leg's summary. `attempted` distinguishes a leg that ran and found
+ * nothing from one that never ran — no combination of config flags can
+ * reconstruct that, since some legs are skipped on runtime state.
+ */
+export interface RetrievalLeg {
+  name: string;
+  attempted: boolean;
+  n_returned: number;
+  n_deduped: number;
+  score_min: number | null;
+  score_max: number | null;
+  error: string | null;
+  skip_reason: string | null;
+}
+
+/** One seed → edge → neighbor traversal. */
+export interface RetrievalExpansion {
+  seed_id: string;
+  seed_type: string;
+  seed_score: number | null;
+  neighbor_id: string;
+  neighbor_type: string;
+  stage: string;
+  hop: number;
+  edge_relation: string | null;
+  edge_weight: number | null;
+  extraction_method: string | null;
+  composed_score: number | null;
+  won_best_path: boolean;
+}
+
+/** A memory type dropped from the pool BEFORE search ran. */
+export interface RetrievalExcludedType {
+  type: string;
+  stage: string;
+}
+
+/** List-view row — headers only; candidate/expansion payloads are not fetched. */
+export interface RetrievalEntry {
+  id: string;
+  session_id: string | null;
+  turn_number: number | null;
+  trace_id: string | null;
+  timestamp: string;
+  path: 'pipeline' | 'context';
+  query: string | null;
+  duration_ms: number | null;
+  legs: RetrievalLeg[];
+  excluded_types: RetrievalExcludedType[];
+  n_candidates: number;
+  n_rendered: number;
+  n_expansions: number;
+  disposition_counts: Record<string, number>;
+  truncated: boolean;
+  has_candidates: boolean;
+}
+
+export interface RetrievalData {
+  entries: RetrievalEntry[];
+  disposition_totals: Record<string, number>;
+  leg_totals: Record<string, { attempted: number; returned: number; deduped: number; errors: number }>;
+  count: number;
+}
+
+export interface RetrievalDetail extends Omit<RetrievalEntry, 'has_candidates'> {
+  /** null when this retrieval was not sampled — NOT the same as "found nothing". */
+  candidates_by_disposition: Record<string, RetrievalCandidate[]> | null;
+  expansions: RetrievalExpansion[];
+}

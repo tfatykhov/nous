@@ -540,6 +540,89 @@ async def create_components(settings: Settings) -> dict:
         # only fires after the entire turn finishes).
         runner._session_monitor = session_monitor
 
+    # F091: Retrieval Telemetry — what recall retrieved, and what it dropped.
+    # Registered process-wide because the two retrieval paths are reached from
+    # very different places (a tool closure and a cognitive-layer component).
+    retrieval_log_retention_task = None
+    if settings.retrieval_telemetry_enabled:
+        from nous.observability.retrieval_logger import RetrievalLogger, set_active
+
+        async def _write_retrieval_log(payload: dict):
+            try:
+                async with database.session() as s:
+                    from sqlalchemy import text
+                    await s.execute(text(
+                        "INSERT INTO nous_system.retrieval_log "
+                        "(id, agent_id, session_id, turn_number, trace_id, path, query, "
+                        "duration_ms, legs, excluded_types, n_candidates, n_rendered, "
+                        "n_expansions, disposition_counts, candidates, expansions, truncated) "
+                        "VALUES (:id, :agent_id, :sid, :turn, :trace, :path, :query, "
+                        ":dur, :legs, :excl, :n_cand, :n_rend, :n_exp, :disp, "
+                        ":cands, :exps, :trunc)"
+                    ), {
+                        "id": payload["id"],
+                        "agent_id": payload.get("agent_id") or settings.agent_id,
+                        "sid": payload.get("session_id"),
+                        "turn": payload.get("turn_number"),
+                        "trace": payload.get("trace_id"),
+                        "path": payload.get("path", "pipeline"),
+                        "query": payload.get("query"),
+                        "dur": payload.get("duration_ms"),
+                        "legs": json.dumps(payload.get("legs", [])),
+                        "excl": json.dumps(payload.get("excluded_types", [])),
+                        "n_cand": payload.get("n_candidates", 0),
+                        "n_rend": payload.get("n_rendered", 0),
+                        "n_exp": payload.get("n_expansions", 0),
+                        "disp": json.dumps(payload.get("disposition_counts", {})),
+                        # NULL (not '[]') when unsampled, so "not captured" is
+                        # distinguishable from "captured, found nothing".
+                        "cands": (
+                            json.dumps(payload["candidates"])
+                            if payload.get("candidates") is not None else None
+                        ),
+                        "exps": json.dumps(payload.get("expansions", [])),
+                        "trunc": payload.get("truncated", False),
+                    })
+                    await s.commit()
+            except Exception:
+                logger.debug("F091: retrieval log write failed", exc_info=True)
+
+        retrieval_logger = RetrievalLogger(
+            db_writer=_write_retrieval_log,
+            enabled=True,
+            candidate_sample_rate=settings.retrieval_telemetry_candidate_sample_rate,
+            snippet_chars=settings.retrieval_telemetry_snippet_chars,
+            max_candidates=settings.retrieval_telemetry_max_candidates,
+            ring_size=settings.retrieval_telemetry_ring_size,
+            agent_id=settings.agent_id,
+        )
+        set_active(retrieval_logger)
+        logger.info(
+            "F091: RetrievalLogger wired (candidate_sample_rate=%.2f)",
+            settings.retrieval_telemetry_candidate_sample_rate,
+        )
+
+        if getattr(settings, "retrieval_telemetry_retention_days", 0) > 0:
+            async def _retrieval_log_retention_loop():
+                while True:
+                    try:
+                        await asyncio.sleep(86400)  # daily
+                        days = settings.retrieval_telemetry_retention_days
+                        async with database.session() as s:
+                            from sqlalchemy import text
+                            await s.execute(text(
+                                "DELETE FROM nous_system.retrieval_log "
+                                "WHERE timestamp < now() - make_interval(days => :d)"
+                            ), {"d": days})
+                            await s.commit()
+                        logger.info("F091: retrieval_log retention sweep (>%dd) done", days)
+                    except asyncio.CancelledError:
+                        break
+                    except Exception:
+                        logger.debug("F091: retrieval retention sweep failed", exc_info=True)
+
+            retrieval_log_retention_task = asyncio.create_task(_retrieval_log_retention_loop())
+
     # F035.4: Context Logger
     context_logger = None
     context_log_retention_task = None
@@ -909,6 +992,7 @@ async def create_components(settings: Settings) -> dict:
         "dag_orchestrator": dag_orchestrator,
         "context_logger": context_logger,
         "context_log_retention_task": context_log_retention_task,
+        "retrieval_log_retention_task": retrieval_log_retention_task,
     }
 
 
@@ -946,6 +1030,21 @@ async def shutdown_components(components: dict) -> None:
             await retention_task
         except (asyncio.CancelledError, Exception):
             pass
+
+    # F091: stop the retrieval-log retention sweep and unregister the sink so a
+    # restarted process never writes through a logger bound to a closed pool.
+    retrieval_retention_task = components.get("retrieval_log_retention_task")
+    if retrieval_retention_task:
+        retrieval_retention_task.cancel()
+        try:
+            await retrieval_retention_task
+        except (asyncio.CancelledError, Exception):
+            pass
+    try:
+        from nous.observability.retrieval_logger import set_active
+        set_active(None)
+    except Exception:
+        pass
 
     # 011.1: Stop subtask pool and task scheduler first
     subtask_pool = components.get("subtask_pool")

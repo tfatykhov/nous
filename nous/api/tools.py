@@ -31,6 +31,7 @@ from nous.config import Settings
 from nous.heart.exemplars import parse_label
 from nous.heart.heart import Heart
 from nous.heart.schemas import CensorInput, FactInput, FactRejected, ProcedureInput
+from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
 from nous.skills.parser import SkillParser
 
 logger = logging.getLogger(__name__)
@@ -1048,6 +1049,13 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 getattr(settings, "episode_chunks_enabled", False)
                 and (search_all_for_rerank or "fact" in search_types)
             )
+            # F091: open a telemetry trace for this retrieval. NULL_TRACE when
+            # the feature is off, so the pipeline call below is unchanged.
+            _rl = get_active_retrieval_logger()
+            _tr = (
+                _rl.start(query=query, path="pipeline", session_id=_session_id)
+                if _rl is not None else None
+            )
             results, stats = await run_recall_pipeline(
                 query=query,
                 heart=heart,
@@ -1058,7 +1066,13 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 residual_activations=residual_activations or None,  # F055
                 rerank_by_score=chunks_rerank,
                 exclude_ids=_f071_exclude_ids,  # F071
+                trace=_tr,  # F091
             )
+            if _rl is not None and _tr is not None:
+                try:
+                    _rl.commit(_tr)
+                except Exception:
+                    logger.debug("F091: retrieval trace commit failed", exc_info=True)
             # F067 observability: one INFO line per recall_deep call so
             # operators can grep for chunk surfacing in prod without
             # turning on F055 residual_activation. Logs the gate state

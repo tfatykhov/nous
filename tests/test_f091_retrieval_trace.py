@@ -1,0 +1,298 @@
+"""F091: retrieval trace collector — contract + drop-attribution invariants."""
+
+from __future__ import annotations
+
+import inspect
+from dataclasses import dataclass
+from uuid import uuid4
+
+import pytest
+
+from nous.observability.retrieval_trace import (
+    BELOW_FLOOR,
+    DEDUPED,
+    F071_EXCLUDED,
+    NULL_TRACE,
+    RENDERED,
+    SLICED_OFF,
+    UNACCOUNTED,
+    NullTrace,
+    RetrievalTrace,
+)
+
+
+@dataclass
+class FakeResult:
+    id: object
+    type: str
+    score: float = 0.5
+    summary: str = ""
+
+
+def _trace(**kw) -> RetrievalTrace:
+    kw.setdefault("query", "why is my fact missing")
+    kw.setdefault("agent_id", "nous-test")
+    return RetrievalTrace(**kw)
+
+
+# ---------------------------------------------------------------------------
+# Null-object contract
+# ---------------------------------------------------------------------------
+
+
+def test_nulltrace_exposes_every_public_method_of_retrievaltrace():
+    """A capture method added to one must be added to the other.
+
+    Instrumented call sites never guard on `is not None`, so a method present
+    on RetrievalTrace but missing from NullTrace is an AttributeError that
+    only fires with telemetry disabled — i.e. in the configuration least
+    likely to be exercised in tests.
+    """
+    def public_methods(cls):
+        return {
+            name for name, _ in inspect.getmembers(cls)
+            if not name.startswith("_")
+        }
+
+    missing = public_methods(RetrievalTrace) - public_methods(NullTrace)
+    assert not missing, f"NullTrace is missing: {sorted(missing)}"
+
+
+def test_nulltrace_swallows_every_call():
+    t = NULL_TRACE
+    t.leg("heart_primary", n_returned=5)
+    t.add(uuid4(), "fact", "heart_primary", score=0.9)
+    t.mutate(uuid4(), "fact", "boost", 0.5, 0.6)
+    t.drop(uuid4(), "fact", SLICED_OFF, "limit")
+    t.exclude_type("censor", "coherent_ranking")
+    t.expansion(seed_id=uuid4(), neighbor_id=uuid4(), seed_type="fact",
+                neighbor_type="decision", stage="stage2")
+    t.finalize([], duration_ms=1.0)
+    assert t.to_dict() == {}
+    assert t.n_rendered == 0
+
+
+# ---------------------------------------------------------------------------
+# Drop attribution
+# ---------------------------------------------------------------------------
+
+
+def test_survivors_are_rendered_and_ranked():
+    t = _trace()
+    a, b = uuid4(), uuid4()
+    t.add(a, "fact", "heart_primary", score=0.9)
+    t.add(b, "fact", "heart_primary", score=0.7)
+
+    t.finalize([FakeResult(a, "fact"), FakeResult(b, "fact")])
+
+    d = t.to_dict()
+    by_id = {c["id"]: c for c in d["candidates"]}
+    assert by_id[str(a)]["disposition"] == RENDERED
+    assert by_id[str(a)]["final_rank"] == 1
+    assert by_id[str(b)]["final_rank"] == 2
+    assert d["n_rendered"] == 2
+
+
+def test_dropped_candidate_keeps_its_gate_and_is_not_rendered():
+    t = _trace()
+    kept, dropped = uuid4(), uuid4()
+    t.add(kept, "fact", "heart_primary", score=0.9)
+    t.add(dropped, "fact", "heart_primary", score=0.2)
+
+    t.drop(dropped, "fact", BELOW_FLOOR, "exemplar_similarity_floor")
+    t.finalize([FakeResult(kept, "fact")])
+
+    by_id = {c["id"]: c for c in t.to_dict()["candidates"]}
+    assert by_id[str(dropped)]["disposition"] == BELOW_FLOOR
+    assert by_id[str(dropped)]["disposition_stage"] == "exemplar_similarity_floor"
+    assert by_id[str(dropped)]["final_rank"] is None
+
+
+def test_first_drop_wins():
+    """An early gate's attribution must not be overwritten by a later stage
+    that merely observes the candidate's absence."""
+    t = _trace()
+    fid = uuid4()
+    t.add(fid, "fact", "heart_primary", score=0.5)
+
+    t.drop(fid, "fact", DEDUPED, "keyed_r2_prefilter")
+    t.drop(fid, "fact", F071_EXCLUDED, "f071")
+
+    cand = t.to_dict()["candidates"][0]
+    assert cand["disposition"] == DEDUPED
+    assert cand["disposition_stage"] == "keyed_r2_prefilter"
+
+
+def test_unclaimed_candidate_is_unaccounted_not_silently_plausible():
+    """Drift guard: a filter added later that forgets to report leaves a
+    distinguishable value, not a believable-looking `sliced_off`."""
+    t = _trace()
+    ghost = uuid4()
+    t.add(ghost, "fact", "heart_primary", score=0.4)
+
+    t.finalize([])  # never rendered, never explicitly dropped
+
+    assert t.to_dict()["candidates"][0]["disposition"] == UNACCOUNTED
+
+
+def test_every_candidate_is_accounted_for():
+    """n_rendered + dropped == n_candidates, the completeness invariant."""
+    t = _trace()
+    ids = [uuid4() for _ in range(5)]
+    for i, fid in enumerate(ids):
+        t.add(fid, "fact", "heart_primary", score=1.0 - i * 0.1)
+
+    t.drop(ids[3], "fact", SLICED_OFF, "heart_recall_limit")
+    t.drop(ids[4], "fact", F071_EXCLUDED, "f071")
+    t.finalize([FakeResult(i, "fact") for i in ids[:3]])
+
+    d = t.to_dict()
+    assert sum(d["disposition_counts"].values()) == d["n_candidates"] == 5
+    assert d["disposition_counts"][RENDERED] == 3
+    assert UNACCOUNTED not in d["disposition_counts"]
+
+
+def test_type_exclusion_is_recorded_without_candidates():
+    """F080 drops censor/procedure BEFORE search, so there are no candidates
+    to attribute — it needs its own channel."""
+    t = _trace()
+    t.exclude_type("censor", "f080_coherent_ranking")
+    t.exclude_type("procedure", "f080_coherent_ranking")
+
+    d = t.to_dict()
+    assert {e["type"] for e in d["excluded_types"]} == {"censor", "procedure"}
+    assert d["n_candidates"] == 0
+
+
+def test_same_id_different_type_does_not_collide():
+    t = _trace()
+    shared = uuid4()
+    t.add(shared, "fact", "heart_primary", score=0.9)
+    t.add(shared, "episode", "heart_primary", score=0.4)
+
+    t.drop(shared, "episode", SLICED_OFF, "limit")
+    t.finalize([FakeResult(shared, "fact")])
+
+    by_type = {c["type"]: c for c in t.to_dict()["candidates"]}
+    assert by_type["fact"]["disposition"] == RENDERED
+    assert by_type["episode"]["disposition"] == SLICED_OFF
+
+
+def test_first_leg_to_report_owns_entry_attribution():
+    t = _trace()
+    fid = uuid4()
+    t.add(fid, "fact", "heart_primary", score=0.8, rank=1)
+    t.add(fid, "fact", "keyed", score=0.55, rank=1)
+
+    cand = t.to_dict()["candidates"][0]
+    assert cand["entry_leg"] == "heart_primary"
+    assert cand["entry_score"] == 0.8
+
+
+# ---------------------------------------------------------------------------
+# Mutations, legs, expansions
+# ---------------------------------------------------------------------------
+
+
+def test_mutations_accumulate_in_order():
+    t = _trace()
+    fid = uuid4()
+    t.add(fid, "fact", "heart_primary", score=0.50)
+    t.mutate(fid, "fact", "adjacency_boost", 0.50, 0.58, reason="degree=3")
+    t.mutate(fid, "fact", "recency_resolver", 0.58, 0.17, reason="superseded")
+
+    muts = t.to_dict()["candidates"][0]["mutations"]
+    assert [m["stage"] for m in muts] == ["adjacency_boost", "recency_resolver"]
+    assert muts[1]["score_after"] == pytest.approx(0.17)
+
+
+def test_mutating_unknown_candidate_is_a_noop():
+    t = _trace()
+    t.mutate(uuid4(), "fact", "boost", 0.1, 0.2)
+    assert t.to_dict()["n_candidates"] == 0
+
+
+def test_leg_distinguishes_ran_empty_from_never_ran():
+    t = _trace()
+    t.leg("heart_primary", attempted=True, n_returned=0, scores=[])
+    t.leg("exemplar", attempted=False, skip_reason="not classification-shaped")
+
+    legs = {leg["name"]: leg for leg in t.to_dict()["legs"]}
+    assert legs["heart_primary"]["attempted"] is True
+    assert legs["exemplar"]["attempted"] is False
+    assert legs["exemplar"]["skip_reason"] == "not classification-shaped"
+
+
+def test_leg_tracks_score_range_across_updates():
+    t = _trace()
+    t.leg("heart_primary", scores=[0.4, 0.9])
+    t.leg("heart_primary", scores=[0.2, 0.6])
+
+    leg = t.to_dict()["legs"][0]
+    assert leg["score_min"] == pytest.approx(0.2)
+    assert leg["score_max"] == pytest.approx(0.9)
+
+
+def test_expansion_captures_the_full_edge():
+    t = _trace()
+    seed, nbr = uuid4(), uuid4()
+    t.expansion(
+        seed_id=seed, seed_type="fact", seed_score=0.8,
+        neighbor_id=nbr, neighbor_type="decision",
+        stage="stage2_heart_graph", hop=1,
+        edge_relation="evidence_for", edge_weight=0.72,
+        extraction_method="inferred", composed_score=0.576,
+        won_best_path=True,
+    )
+    e = t.to_dict()["expansions"][0]
+    assert e["seed_id"] == str(seed)
+    assert e["neighbor_id"] == str(nbr)
+    assert e["edge_relation"] == "evidence_for"
+    assert e["composed_score"] == pytest.approx(0.576)
+    assert t.to_dict()["n_expansions"] == 1
+
+
+def test_expansion_without_endpoints_is_ignored():
+    t = _trace()
+    t.expansion(seed_id=None, neighbor_id=uuid4(), seed_type="fact",
+                neighbor_type="fact", stage="s")
+    assert t.to_dict()["n_expansions"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Bounds
+# ---------------------------------------------------------------------------
+
+
+def test_snippet_is_truncated():
+    t = _trace(snippet_chars=10)
+    fid = uuid4()
+    t.add(fid, "fact", "heart_primary", content="x" * 500)
+    assert t.to_dict()["candidates"][0]["snippet"] == "x" * 10
+
+
+def test_max_candidates_caps_and_flags_truncation():
+    t = _trace(max_candidates=3)
+    for _ in range(10):
+        t.add(uuid4(), "fact", "heart_primary")
+
+    d = t.to_dict()
+    assert d["n_candidates"] == 3
+    assert d["truncated"] is True
+
+
+def test_sampling_off_keeps_header_legs_and_expansions():
+    """An unsampled retrieval still answers 'which legs fired' and 'how did
+    graph expansion work' — only the per-candidate array is dropped."""
+    t = _trace(capture_candidates=False)
+    t.leg("heart_primary", n_returned=7)
+    t.add(uuid4(), "fact", "heart_primary", score=0.9)
+    t.expansion(seed_id=uuid4(), neighbor_id=uuid4(), seed_type="fact",
+                neighbor_type="decision", stage="stage2")
+    t.finalize([])
+
+    d = t.to_dict()
+    assert d["candidates"] is None
+    assert d["n_candidates"] == 0
+    assert d["legs"][0]["n_returned"] == 7
+    assert d["n_expansions"] == 1

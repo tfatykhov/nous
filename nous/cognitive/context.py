@@ -7,6 +7,7 @@ and concatenates them in priority order within per-section token budgets.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -22,6 +23,37 @@ from nous.cognitive.usage_tracker import UsageTracker
 from nous.config import Settings
 from nous.heart.heart import Heart
 from nous.heart.search import apply_frame_boost, _wrap_with_score
+from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
+from nous.observability.retrieval_trace import (
+    BELOW_FLOOR,
+    BUDGET_TRUNCATED,
+    FILTER_DROPPED,
+    NULL_TRACE,
+    SLICED_OFF,
+)
+
+
+class _RenderedRef:
+    """Minimal (id, type) pair for ``RetrievalTrace.finalize``.
+
+    ``recalled_ids`` is a plain type -> [str id] dict, not result objects, so
+    finalize needs something with ``.id`` / ``.type`` to match against.
+    """
+
+    __slots__ = ("id", "type")
+
+    def __init__(self, item_id: str, item_type: str) -> None:
+        self.id = item_id
+        self.type = item_type
+
+
+def _tr_content(item: object) -> str | None:
+    """F091: best-effort display text across the heterogeneous result types."""
+    for attr in ("content", "summary", "description", "name"):
+        val = getattr(item, attr, None)
+        if val:
+            return str(val)
+    return None
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +244,43 @@ class ContextEngine:
             "episode": [],
         }
         recalled_content_map: dict[str, str] = {}
+
+        # F091: this path runs on EVERY turn and fills the system prompt, but
+        # until now its only telemetry was counting bullets in the rendered
+        # prose (context_logger.py:165). Write-only collector — nothing below
+        # reads it back, so behavior is unchanged when telemetry is off.
+        _rl = get_active_retrieval_logger()
+        tr = (
+            _rl.start(query=input_text, path="context", session_id=session_id,
+                      turn_number=None)
+            if _rl is not None else NULL_TRACE
+        )
+        _tr_t0 = time.monotonic()
+
+        def _tr_enter(items: list, mem_type: str, leg: str) -> list:
+            """Register a leg's raw hits before any filter has run."""
+            tr.leg(leg, attempted=True, n_returned=len(items or []),
+                   scores=[getattr(i, "score", None) for i in (items or [])])
+            for rank, it in enumerate(items or []):
+                tr.add(getattr(it, "id", None), mem_type, leg,
+                       score=getattr(it, "score", None), rank=rank + 1,
+                       content=_tr_content(it))
+            return items
+
+        def _tr_filtered(before: list, after: list, mem_type: str,
+                         disposition: str, stage: str) -> list:
+            """Attribute whatever ``before`` lost to ``stage``.
+
+            Diffing at the call site means the filter methods themselves stay
+            untouched — they are shared, and threading a collector through
+            each one would be a far wider change than this feature needs.
+            """
+            kept = {str(getattr(i, "id", "")) for i in (after or [])}
+            for it in (before or []):
+                iid = str(getattr(it, "id", ""))
+                if iid and iid not in kept:
+                    tr.drop(iid, mem_type, disposition, stage)
+            return after
         recalled_score_map: dict[str, float] = {}
 
         # Apply budget overrides from retrieval plan (F6: REPLACE semantics)
@@ -747,12 +816,17 @@ class ContextEngine:
                     [round(getattr(d, "score", 0) or 0, 3) for d in (decisions or [])[:5]],
                     [(getattr(d, "description", "") or "")[:50] for d in (decisions or [])[:3]])
                 if decisions:
+                    _tr_enter(decisions, "decision", "context_decisions")
                     # F017: Staleness penalty (before boosts)
                     decisions = self._apply_staleness_penalty(decisions)
                     # 007.2: Diversity filter — use category as topic key
+                    _before = decisions
                     decisions = self._enforce_diversity(decisions, "category", max_per_subject=3)
+                    _tr_filtered(_before, decisions, "decision", FILTER_DROPPED, "diversity")
                     # Adaptive relevance filter (min/max K + gap detection)
+                    _before = decisions
                     decisions = self._apply_relevance_filter(decisions, "decision")
+                    _tr_filtered(_before, decisions, "decision", SLICED_OFF, "relevance_filter")
                     # F1: Collect recalled IDs and scores
                     for d in decisions:
                         mid = str(getattr(d, "id", ""))
@@ -795,10 +869,13 @@ class ContextEngine:
                     [round(getattr(f, "score", 0) or 0, 3) for f in (facts or [])[:5]],
                     [(getattr(f, "subject", "") or "")[:30] for f in (facts or [])[:5]])
                 if facts:
+                    _tr_enter(facts, "fact", "context_facts")
                     # Gap-2: resolve same-subject current-vs-stale conflicts (demote +
                     # tag) BEFORE the staleness/boost/relevance pipeline, so a superseded
                     # value drops out of the injected set and the agent sees the current one.
+                    _before = facts
                     facts = self._resolve_recency(facts)
+                    _tr_filtered(_before, facts, "fact", FILTER_DROPPED, "recency_resolver")
                     pin_k = getattr(self._settings, "fact_pin_top_k", 0)
                     pinned_facts = list(facts[:pin_k]) if pin_k > 0 else []
                     # F017: Staleness penalty (before boosts)
@@ -807,15 +884,23 @@ class ContextEngine:
                     facts = apply_frame_boost(facts, frame.frame_id, _active_censor_names)
 
                     # 007.2: Diversity filter — use subject as topic key
+                    _before = facts
                     facts = self._enforce_diversity(facts, "subject", max_per_subject=2)
+                    _tr_filtered(_before, facts, "fact", FILTER_DROPPED, "diversity")
 
                     # Dedup against conversation
+                    _before = facts
                     facts = await self._apply_dedup(facts, _conv_msgs, "content")
+                    _tr_filtered(_before, facts, "fact", FILTER_DROPPED, "conversation_dedup")
 
                     # Usage boost
                     facts = self._apply_usage_boost(facts, usage_tracker)
                     # Adaptive relevance filter (min/max K + gap detection)
+                    # NOTE: this is the max_k=5 cap at _apply_relevance_filter:1420 —
+                    # the single largest silent drop on this path.
+                    _before = facts
                     facts = self._apply_relevance_filter(facts, "fact")
+                    _tr_filtered(_before, facts, "fact", SLICED_OFF, "relevance_filter")
                     if pinned_facts:
                         facts = self._reinsert_pinned(pinned_facts, facts)
 
@@ -1126,13 +1211,19 @@ class ContextEngine:
                     )
                     # F038-2.1: Absolute procedure score floor (embedding mode only)
                     if self._has_embeddings and self._settings.procedure_score_floor > 0:
+                        _before = embedding_procedures
                         embedding_procedures = [
                             p for p in embedding_procedures
                             if (getattr(p, "score", 0) or 0) >= self._settings.procedure_score_floor
                         ]
+                        _tr_filtered(_before, embedding_procedures, "procedure",
+                                     BELOW_FLOOR, "procedure_score_floor")
+                    _before = embedding_procedures
                     embedding_procedures = self._apply_relevance_filter(
                         embedding_procedures, "procedure",
                     )
+                    _tr_filtered(_before, embedding_procedures, "procedure",
+                                 SLICED_OFF, "relevance_filter")
 
                     # Deduplicate: exclude Critic picks from embedding results
                     if critic_names:
@@ -1264,11 +1355,16 @@ class ContextEngine:
                 limit = _limits.get("episode", DEFAULT_FETCH_LIMITS.get("episode", 5))
                 q_text = _query_texts.get("episode", _default_query)
                 episodes = await self._heart.search_episodes(q_text, limit=limit, session=session)
+                _tr_enter(episodes, "episode", "context_episodes")
                 # Filter out system/internal episodes
+                _before = episodes
                 episodes = [e for e in episodes if not _is_system_episode(e)]
+                _tr_filtered(_before, episodes, "episode", FILTER_DROPPED, "system_episode")
                 # 008.6: Exclude episodes already shown in temporal tier
                 if _temporal_episode_ids:
+                    _before = episodes
                     episodes = [e for e in episodes if str(e.id) not in _temporal_episode_ids]
+                    _tr_filtered(_before, episodes, "episode", FILTER_DROPPED, "temporal_tier_dedup")
                 if episodes:
                     # F038-2.3: Episode-specific recency weighting (replaces general staleness)
                     episodes = self._apply_episode_recency(episodes)
@@ -1276,13 +1372,19 @@ class ContextEngine:
                     episodes = apply_frame_boost(episodes, frame.frame_id, _active_censor_names)
 
                     # 007.2: Diversity filter — use first tag as topic key
+                    _before = episodes
                     episodes = self._enforce_diversity(episodes, "tags", max_per_subject=2)
+                    _tr_filtered(_before, episodes, "episode", FILTER_DROPPED, "diversity")
 
                     # Dedup + usage boost
+                    _before = episodes
                     episodes = await self._apply_dedup(episodes, _conv_msgs, "summary")
+                    _tr_filtered(_before, episodes, "episode", FILTER_DROPPED, "conversation_dedup")
                     episodes = self._apply_usage_boost(episodes, usage_tracker)
                     # Adaptive relevance filter (min/max K + gap detection)
+                    _before = episodes
                     episodes = self._apply_relevance_filter(episodes, "episode")
+                    _tr_filtered(_before, episodes, "episode", SLICED_OFF, "relevance_filter")
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix)
                     for e in episodes:
@@ -1334,6 +1436,23 @@ class ContextEngine:
             for tier, parts in tier_groups.items()
             if parts
         }
+
+        # F091: everything still in recalled_ids at this point survived every
+        # filter and was rendered into the prompt. Anything registered but
+        # absent here was dropped by a stage that reported why — or, if a new
+        # filter forgot to report, it lands as `unaccounted`, which is the
+        # drift signal rather than a plausible-looking guess.
+        if _rl is not None:
+            try:
+                _rendered = [
+                    _RenderedRef(mid, mtype)
+                    for mtype, mids in recalled_ids.items()
+                    for mid in mids
+                ]
+                tr.finalize(_rendered, duration_ms=(time.monotonic() - _tr_t0) * 1000.0)
+                _rl.commit(tr)
+            except Exception:
+                logger.debug("F091: context retrieval trace failed", exc_info=True)
 
         return BuildResult(
             system_prompt=system_prompt,

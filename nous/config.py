@@ -1464,6 +1464,18 @@ class Settings(BaseSettings):
     context_log_max_total: int = 50
     context_log_retention_days: int = 30
 
+    # F091: Retrieval telemetry. Master flag ships ON — header rows, leg
+    # summaries and graph expansions are cheap, and a telemetry system that
+    # lands dark measures nothing. The expensive part is the per-candidate
+    # array on every turn, so THAT is what the sample rate governs; cost and
+    # visibility are separate knobs on purpose.
+    retrieval_telemetry_enabled: bool = True
+    retrieval_telemetry_candidate_sample_rate: float = 0.1
+    retrieval_telemetry_snippet_chars: int = 200
+    retrieval_telemetry_max_candidates: int = 300
+    retrieval_telemetry_ring_size: int = 100
+    retrieval_telemetry_retention_days: int = 14
+
     # F038: DAG Orchestration
     dag_enabled: bool = True
 
