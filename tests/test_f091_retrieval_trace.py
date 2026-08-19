@@ -353,3 +353,35 @@ def test_rendered_count_matches_what_was_finalized_even_with_resurrection():
     d = t.to_dict()
     assert d["n_rendered"] == 2
     assert sum(d["disposition_counts"].values()) == 4
+
+
+# ---------------------------------------------------------------------------
+# Robustness: telemetry must never break the retrieval it observes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("content", [12345, {"a": 1}, ["x"], object(), 3.14])
+def test_non_string_content_is_coerced_not_raised(content):
+    """`add` takes whatever a producer's result object carries in its
+    description/summary field. A raise here would propagate into the
+    retrieval hot path and break recall — the exact outcome telemetry must
+    never cause."""
+    t = _trace()
+    fid = uuid4()
+    t.add(fid, "fact", "heart_primary", content=content)
+
+    snippet = t.to_dict()["candidates"][0]["snippet"]
+    assert isinstance(snippet, str)
+    assert snippet
+
+
+def test_none_content_yields_empty_snippet():
+    t = _trace()
+    t.add(uuid4(), "fact", "heart_primary", content=None)
+    assert t.to_dict()["candidates"][0]["snippet"] == ""
+
+
+def test_coerced_content_still_respects_the_truncation_bound():
+    t = _trace(snippet_chars=5)
+    t.add(uuid4(), "fact", "heart_primary", content=1234567890)
+    assert t.to_dict()["candidates"][0]["snippet"] == "12345"

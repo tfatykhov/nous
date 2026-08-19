@@ -283,13 +283,25 @@ class RetrievalTrace:
                     self._max_candidates, self.query[:80],
                 )
             return
+        # Coerce rather than assume: producers hand us whatever their result
+        # object carries in a description/summary/content field, and a
+        # non-str there would raise INSIDE the retrieval hot path. Telemetry
+        # must never break the thing it observes, so the one place untrusted
+        # values enter is the one place that has to be defensive.
+        if content is None:
+            snippet = ""
+        elif isinstance(content, str):
+            snippet = content
+        else:
+            snippet = str(content)
+
         self._candidates[k] = Candidate(
             id=str(item_id),
             type=item_type,
             entry_leg=leg,
             entry_score=score,
             entry_rank=rank,
-            snippet=(content or "")[: self._snippet_chars],
+            snippet=snippet[: self._snippet_chars],
         )
 
     def add_many(self, items: list, leg: str, *, type_of, score_of, content_of=None) -> None:
