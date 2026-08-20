@@ -176,3 +176,44 @@ def test_active_registry_round_trips_and_clears():
         assert get_active() is None
     finally:
         set_active(original)
+
+
+@pytest.mark.asyncio
+async def test_drain_awaits_in_flight_writes():
+    """Fire-and-forget writes are cancelled by loop teardown or wake against a
+    closed pool at shutdown, and the writer swallows its own errors — so the
+    loss is silent unless shutdown drains first."""
+    written: list = []
+
+    async def _slow_writer(payload):
+        await asyncio.sleep(0.05)
+        written.append(payload)
+
+    rl = _logger(db_writer=_slow_writer)
+    rl.commit(rl.start(query="q", path="pipeline"))
+    assert written == []  # still in flight
+
+    await rl.drain()
+
+    assert len(written) == 1
+
+
+@pytest.mark.asyncio
+async def test_drain_is_a_noop_with_nothing_pending():
+    rl = _logger()
+    await rl.drain()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_drain_is_bounded_by_its_timeout():
+    """A wedged write must not hold shutdown open forever."""
+    async def _never(payload):
+        await asyncio.sleep(30)
+
+    rl = _logger(db_writer=_never)
+    rl.commit(rl.start(query="q", path="pipeline"))
+
+    await asyncio.wait_for(rl.drain(timeout=0.05), timeout=2.0)
+
+    for t in list(rl._pending_tasks):
+        t.cancel()

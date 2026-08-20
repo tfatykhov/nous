@@ -113,6 +113,24 @@ class RetrievalLogger:
         self._pending_tasks.add(task)
         task.add_done_callback(self._pending_tasks.discard)
 
+    async def drain(self, timeout: float = 5.0) -> None:
+        """Await in-flight DB writes. Call before closing the DB pool.
+
+        Writes are fire-and-forget, so at shutdown a slow final one is either
+        cancelled by loop teardown or wakes up against a disconnected pool —
+        and `_write_retrieval_log` swallows the resulting error, so the loss is
+        silent. Bounded so a wedged write cannot hold shutdown open.
+        """
+        import asyncio
+
+        pending = [t for t in self._pending_tasks if not t.done()]
+        if not pending:
+            return
+        try:
+            await asyncio.wait(pending, timeout=timeout)
+        except Exception:
+            logger.debug("F091: drain failed", exc_info=True)
+
     # -- reads for the dashboard -------------------------------------------
 
     def get_recent(self, limit: int = 50, path: str | None = None) -> list[dict]:

@@ -544,6 +544,7 @@ async def create_components(settings: Settings) -> dict:
     # Registered process-wide because the two retrieval paths are reached from
     # very different places (a tool closure and a cognitive-layer component).
     retrieval_log_retention_task = None
+    retrieval_logger = None
     if settings.retrieval_telemetry_enabled:
         from nous.observability.retrieval_logger import RetrievalLogger, set_active
 
@@ -1025,6 +1026,7 @@ async def create_components(settings: Settings) -> dict:
         "context_logger": context_logger,
         "context_log_retention_task": context_log_retention_task,
         "retrieval_log_retention_task": retrieval_log_retention_task,
+        "retrieval_logger": retrieval_logger,
     }
 
 
@@ -1072,6 +1074,15 @@ async def shutdown_components(components: dict) -> None:
             await retrieval_retention_task
         except (asyncio.CancelledError, Exception):
             pass
+    # Drain in-flight writes BEFORE unregistering and before the pool closes —
+    # a fire-and-forget write caught by loop teardown is lost silently, since
+    # the writer swallows its own errors.
+    retrieval_logger = components.get("retrieval_logger")
+    if retrieval_logger is not None:
+        try:
+            await retrieval_logger.drain()
+        except Exception:
+            logger.debug("F091: retrieval drain failed", exc_info=True)
     try:
         from nous.observability.retrieval_logger import set_active
         set_active(None)

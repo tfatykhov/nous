@@ -489,6 +489,12 @@ class AgentRunner:
             # F035.4: Store current context for context logger
             self._current_session_id = session_id
             self._current_turn_number = (len(conversation.messages) + 1) // 2
+            # F091: snapshot HERE, in the same synchronous stretch as the write.
+            # Capturing at the _tool_loop call site was still too late — history
+            # compaction awaits pre_compaction/compact/_save_conversation in
+            # between, and a concurrent session can overwrite the shared field
+            # across any of them.
+            _turn_number_local = self._current_turn_number
             self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
             self._current_call_type = "subtask" if is_subtask else "chat"
 
@@ -579,9 +585,7 @@ class AgentRunner:
                             conversation=conversation,
                             frame_id=turn_context.frame.frame_id,
                             session_id=session_id,
-                            # F091: capture HERE, before any await can let a
-                            # concurrent session overwrite the shared field.
-                            turn_number=self._current_turn_number,
+                            turn_number=_turn_number_local,  # F091, see capture above
                             is_subtask=is_subtask,
                             max_tool_calls=max_tool_calls,
                             model_override=model_override,
