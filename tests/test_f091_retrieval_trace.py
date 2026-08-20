@@ -600,3 +600,42 @@ def test_mark_rendered_is_idempotent():
     assert cand["disposition"] == RENDERED
     # A second call must not manufacture a restored_from from RENDERED itself.
     assert cand["restored_from"] is None
+
+
+def test_mark_not_delivered_downgrades_a_rendered_candidate():
+    """The formatter's per-section scope gate can decline to emit something
+    that WAS in the ranked result set — e.g. spreading surfaces a decision on a
+    memory_types=["fact"] call. drop() refuses to touch a candidate that
+    already has a disposition, so this is the only way to express it."""
+    t = _trace()
+    did = uuid4()
+    t.add(did, "decision", "spreading_activation", score=0.6)
+    t.finalize([FakeResult(did, "decision")])
+    assert t.to_dict()["candidates"][0]["disposition"] == RENDERED
+
+    t.mark_not_delivered(did, "decision", SLICED_OFF, "formatter_scope_filter")
+
+    cand = t.to_dict()["candidates"][0]
+    assert cand["disposition"] == SLICED_OFF
+    assert cand["disposition_stage"] == "formatter_scope_filter"
+    assert cand["final_rank"] is None
+    assert t.to_dict()["n_rendered"] == 0
+
+
+def test_mark_not_delivered_leaves_an_already_dropped_candidate_alone():
+    """The FIRST gate to remove an item is the true cause."""
+    t = _trace()
+    fid = uuid4()
+    t.add(fid, "fact", "heart_primary")
+    t.drop(fid, "fact", BELOW_FLOOR, "exemplar_similarity_floor")
+    t.mark_not_delivered(fid, "fact", SLICED_OFF, "formatter_scope_filter")
+
+    cand = t.to_dict()["candidates"][0]
+    assert cand["disposition"] == BELOW_FLOOR
+    assert cand["disposition_stage"] == "exemplar_similarity_floor"
+
+
+def test_mark_not_delivered_on_an_unknown_candidate_is_a_noop():
+    t = _trace()
+    t.mark_not_delivered(uuid4(), "decision", SLICED_OFF, "formatter_scope_filter")
+    assert t.to_dict()["n_candidates"] == 0

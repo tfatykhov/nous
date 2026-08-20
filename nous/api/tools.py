@@ -32,6 +32,7 @@ from nous.heart.exemplars import parse_label
 from nous.heart.heart import Heart
 from nous.heart.schemas import CensorInput, FactInput, FactRejected, ProcedureInput
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
+from nous.observability.retrieval_trace import SLICED_OFF
 from nous.skills.parser import SkillParser
 
 logger = logging.getLogger(__name__)
@@ -1156,6 +1157,23 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # them rendered, then commit — committing before this fetch left
             # them absent from n_candidates/n_rendered on the one retrieval
             # path where the flag makes them appear.
+            # F091: the formatter gates the Brain Decisions section on
+            # `search_all or "decision" in search_types` (see :455). Spreading
+            # activation seeded from fact results can put a DECISION into
+            # `results` on a memory_types=["fact"] call, where the pipeline
+            # marks it rendered but the formatter never emits it. Attribute
+            # that scope filter rather than counting it as delivered.
+            # (Raised in review round 1 and again independently; my earlier
+            # passes fixed other post-commit gaps and left this one.)
+            if _tr is not None:
+                _fmt_all = "all" in search_types
+                if not (_fmt_all or "decision" in search_types):
+                    for _r in results:
+                        if _r.type == "decision" or _r.metadata.get("stage_origin") == "brain_graph":
+                            _tr.mark_not_delivered(
+                                _r.id, _r.type, SLICED_OFF,
+                                "formatter_scope_filter",
+                            )
             if _tr is not None and parent_episodes:
                 for _rank, (_ep_id, _summary) in enumerate(parent_episodes):
                     _tr.add(_ep_id, "episode", "parent_episode",

@@ -35,6 +35,15 @@ logger = logging.getLogger(__name__)
 # The one case explicitly excluded is a pre-turn censor block, where the prompt
 # is discarded before any handoff at all: pre_turn withholds the commit there,
 # so a blocked turn never claims delivery. See cognitive/layer.py.
+#
+# KNOWN UPPER BOUND (not fixed, stated so it is not mistaken for exact): on the
+# recall_deep path the runner may apply F020 SmartCompress to the tool RESULT
+# TEXT after the trace has been committed (runner.py, smart_compress), dropping
+# lines from large results before the next model call. Those candidates stay
+# counted `rendered`, so on compressible retrievals `n_rendered` is an upper
+# bound. Reconciling would require parsing compressed text back to candidate
+# ids, or threading the trace across the tool-return boundary into the runner's
+# compression stage — a restructuring deliberately not taken here.
 RENDERED = "rendered"
 SLICED_OFF = "sliced_off"
 BELOW_FLOOR = "below_floor"
@@ -389,6 +398,26 @@ class RetrievalTrace:
         cand.disposition = RENDERED
         cand.disposition_stage = stage
 
+    def mark_not_delivered(
+        self, item_id: Any, item_type: str, disposition: str, stage: str,
+    ) -> None:
+        """Counterpart to ``mark_rendered``: a stage AFTER ``finalize`` removed
+        something finalize had counted as delivered.
+
+        ``drop`` deliberately refuses to touch a candidate that already has a
+        disposition, so it cannot express this — the item really was in the
+        ranked result set, and a later stage (the formatter's per-section scope
+        gate, for one) then declined to emit it. Only downgrades from
+        ``RENDERED``; anything already dropped keeps its original gate, since
+        the first gate to remove an item is the true cause.
+        """
+        cand = self._candidates.get(_key(item_id, item_type))
+        if cand is None or cand.disposition != RENDERED:
+            return
+        cand.disposition = disposition
+        cand.disposition_stage = stage
+        cand.final_rank = None
+
     def drop_all(self, items: list, item_type: str, disposition: str, stage: str) -> None:
         for item in items:
             self.drop(getattr(item, "id", item), item_type, disposition, stage)
@@ -521,6 +550,7 @@ class NullTrace:
     def drop(self, *a: Any, **k: Any) -> None: ...
     def drop_all(self, *a: Any, **k: Any) -> None: ...
     def mark_rendered(self, *a: Any, **k: Any) -> None: ...
+    def mark_not_delivered(self, *a: Any, **k: Any) -> None: ...
     def exclude_type(self, *a: Any, **k: Any) -> None: ...
     def expansion(self, *a: Any, **k: Any) -> None: ...
     def finalize(self, *a: Any, **k: Any) -> None: ...
