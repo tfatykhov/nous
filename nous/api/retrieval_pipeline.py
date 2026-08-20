@@ -831,10 +831,16 @@ async def _run_stages(
             # largest drop on this path — per-type fetch is limit*2 across up to
             # four types — and without it n_candidates could equal n_rendered on
             # a crowded corpus, hiding the principal loss entirely.
+            # Gated on `tr.enabled`: Heart takes `dropped_out is not None` as
+            # the signal to snapshot `merged` before its cut (heart.py:1205).
+            # Passing the list unconditionally made every retrieval pay for
+            # that copy — plus a set build and a filtering pass — even with
+            # telemetry off, which is exactly the cost the master flag is
+            # supposed to buy back.
             _heart_cut: list = []
             heart_results = await heart.recall(
                 query, limit=limit, types=heart_types,
-                dropped_out=_heart_cut,
+                dropped_out=_heart_cut if tr.enabled else None,
                 residual_activations=residual_activations,  # F055
                 apply_mmr=apply_mmr,  # F030.2
                 date_window=date_window,  # F075 L3
@@ -845,6 +851,18 @@ async def _run_stages(
                 stage_errors=acc.stage_errors,
             )
             acc.heart_results = list(heart_results or [])
+            # F091: register SURVIVORS FIRST. `add` is first-wins and refuses
+            # new ids once max_candidates is reached, so registering the cut
+            # set first let the losers consume every slot — the survivors then
+            # never entered the trace at all, `finalize` could not mark them,
+            # and the row read "N entered -> 0 reached the model, N dropped at
+            # a gate". A manufactured total loss, on exactly the sampled rows
+            # an operator opens for candidate detail. The later assembly-time
+            # `_tr_entries("heart_primary", ...)` is a harmless no-op for these.
+            for _hr in acc.heart_results:
+                tr.add(_hr.id, _hr.type, "heart_primary",
+                       score=getattr(_hr, "score", None),
+                       content=getattr(_hr, "summary", None))
             for _cut in _heart_cut:
                 tr.add(_cut.id, _cut.type, "heart_primary",
                        score=getattr(_cut, "score", None),

@@ -234,7 +234,16 @@
   let sortBy = $state<'recent' | 'slowest'>('recent');
   let visibleEntries = $derived(
     sortBy === 'slowest'
-      ? [...filteredEntries].sort((a, b) => (b.duration_ms ?? 0) - (a.duration_ms ?? 0))
+      // Same absence-is-not-a-value rule as `timing`: an untimed row is not a
+      // fast row. Coercing null to 0 sorted every failed retrieval to the
+      // bottom of a slowest-first list, which is where an operator is least
+      // likely to look for a failure.
+      ? [...filteredEntries].sort((a, b) => {
+          const av = a.duration_ms, bv = b.duration_ms;
+          if (typeof av !== 'number') return typeof bv !== 'number' ? 0 : 1;
+          if (typeof bv !== 'number') return -1;
+          return bv - av;
+        })
       : filteredEntries,
   );
 
@@ -252,10 +261,16 @@
     if (sortBy !== 'recent') return out;
     let i = 0;
     while (i < visibleEntries.length) {
+      // A null session_id is "no session was available" (retrievals outside a
+      // tool loop), not a session that two rows share. Matching null to null
+      // asserted a relationship the data does not contain — the same
+      // absence-is-not-a-value error as the timing stats above.
+      const sid = visibleEntries[i].session_id;
+      if (sid == null) { i++; continue; }
       let j = i;
       while (
         j + 1 < visibleEntries.length &&
-        visibleEntries[j + 1].session_id === visibleEntries[i].session_id
+        visibleEntries[j + 1].session_id === sid
       ) j++;
       const len = j - i + 1;
       if (len >= 2) out.set(i, len);
@@ -277,17 +292,34 @@
   // number inside a single row. Computed over the WHOLE window, like the
   // funnel, not the automated-filtered view.
   let timing = $derived.by(() => {
-    const ds = ($store.data?.entries ?? [])
-      .map((e) => e.duration_ms ?? 0)
+    const all = $store.data?.entries ?? [];
+    // MEASURED rows only. A persisted partial trace from a failed recall_deep
+    // carries duration_ms: null; coercing that to 0 reports a failure as
+    // instantaneous, drags the median and p95 down, and pads the "over 5s"
+    // denominator with rows that were never timed. If nothing was timed we
+    // return null so the strip renders nothing at all rather than "0ms".
+    const ds = all
+      .map((e) => e.duration_ms)
+      .filter((d): d is number => typeof d === 'number')
       .sort((a, b) => a - b);
     if (!ds.length) return null;
-    const at = (p: number) => ds[Math.min(Math.floor(ds.length * p), ds.length - 1)];
+    // Linear-interpolated quantile. Nearest-rank on an even-sized window
+    // returns the UPPER middle, not the median — a 1ms/100ms pair reads as
+    // 100ms instead of 50.5ms, which matters most on the skewed windows the
+    // strip exists to surface.
+    const q = (p: number) => {
+      const pos = (ds.length - 1) * p;
+      const lo = Math.floor(pos);
+      const hi = Math.ceil(pos);
+      return lo === hi ? ds[lo] : ds[lo] + (ds[hi] - ds[lo]) * (pos - lo);
+    };
     return {
-      p50: at(0.5),
-      p95: at(0.95),
+      p50: q(0.5),
+      p95: q(0.95),
       max: ds[ds.length - 1],
       slow: ds.filter((x) => x >= 5000).length,
       n: ds.length,
+      untimed: all.length - ds.length,
     };
   });
 
@@ -578,6 +610,12 @@
             {timing.slow} of {timing.n} over 5s
           </span>
         {/if}
+        {#if timing.untimed > 0}
+          <!-- Say what the figures are NOT computed over. Silently narrowing
+               the denominator is how "median 3.8s" starts describing a
+               different population than the list below it. -->
+          <span class="muted">{timing.untimed} untimed</span>
+        {/if}
       </div>
     {/if}
   </section>
@@ -771,8 +809,16 @@
         {:else}
           <p class="detail-query">{detail.query || '(no query)'}</p>
           <div class="detail-stats">
-            <span><strong>{detail.n_candidates}</strong> candidates</span>
-            <span><strong>{detail.n_rendered}</strong> rendered</span>
+            <!-- The columns are NOT NULL DEFAULT 0, so an unsampled row stores
+                 0/0 — printing those as counts contradicts the "not sampled"
+                 notice this same panel shows below. `candidates_by_disposition`
+                 is the authoritative null-vs-empty signal the API preserves. -->
+            {#if detail.candidates_by_disposition === null}
+              <span class="muted">candidates not sampled</span>
+            {:else}
+              <span><strong>{detail.n_candidates}</strong> candidates</span>
+              <span><strong>{detail.n_rendered}</strong> rendered</span>
+            {/if}
             <span><strong>{detail.n_expansions}</strong> graph edges</span>
             <span><strong>{fmtMs(detail.duration_ms)}</strong></span>
           </div>

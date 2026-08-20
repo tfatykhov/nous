@@ -775,3 +775,58 @@ def test_undeliver_all_is_a_noop_when_nothing_was_rendered():
     t.drop(fid, "fact", BELOW_FLOOR, "floor")
     t.undeliver_all(SLICED_OFF, "recall_deep_failed")
     assert t.to_dict()["candidates"][0]["disposition"] == BELOW_FLOOR
+
+
+# ---------------------------------------------------------------------------
+# Capture cap must never manufacture a total loss
+# ---------------------------------------------------------------------------
+
+def test_capture_cap_does_not_zero_out_survivors():
+    """The cap bounds ROW SIZE. It must never turn a normal retrieval into a
+    row claiming nothing reached the model.
+
+    `add` is first-wins and refuses new ids once full, so a stage that
+    registers its LOSERS before its WINNERS could exhaust every slot on
+    dropped candidates. `finalize` then found no survivor to mark and the row
+    read "N entered -> 0 rendered, N dropped at a gate" — indistinguishable
+    from a real systemic failure, on exactly the sampled rows an operator
+    opens to diagnose one.
+    """
+    t = _trace(max_candidates=5)
+    for _ in range(8):
+        lost = uuid4()
+        t.add(lost, "fact", "heart_primary", score=0.1)
+        t.drop(lost, "fact", SLICED_OFF, "heart_recall_limit")
+
+    survivors = [FakeResult(uuid4(), "fact") for _ in range(3)]
+    t.finalize(survivors)
+
+    d = t.to_dict()
+    assert d["n_rendered"] == 3, "survivors must be represented even past the cap"
+    assert d["truncated"] is True, "the cap must still be reported, not hidden"
+    # Conservation: every recorded candidate carries exactly one disposition.
+    assert sum(d["disposition_counts"].values()) == d["n_candidates"]
+    ranks = sorted(c["final_rank"] for c in d["candidates"] if c["disposition"] == RENDERED)
+    assert ranks == [1, 2, 3]
+
+
+def test_capture_cap_backstop_records_lost_provenance_honestly():
+    """A backstopped candidate must not invent an entry leg it never had."""
+    t = _trace(max_candidates=1)
+    lost = uuid4()
+    t.add(lost, "fact", "heart_primary")
+    t.drop(lost, "fact", SLICED_OFF, "heart_recall_limit")
+
+    late = uuid4()
+    t.finalize([FakeResult(late, "fact")])
+
+    by_id = {c["id"]: c for c in t.to_dict()["candidates"]}
+    assert by_id[str(late)]["disposition"] == RENDERED
+    assert "cap" in (by_id[str(late)]["entry_leg"] or "")
+
+
+def test_real_trace_and_null_trace_agree_on_enabled():
+    """`enabled` must exist on BOTH, or a future `if tr.enabled:` guard raises
+    only when telemetry is actually on — failing in the one case it guards."""
+    assert NullTrace().enabled is False
+    assert _trace().enabled is True

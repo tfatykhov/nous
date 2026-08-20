@@ -235,6 +235,12 @@ class RetrievalTrace:
     never holds a reference to an object the pipeline can still mutate.
     """
 
+    # Mirrors NullTrace.enabled. Without it, any future `if tr.enabled:` guard
+    # raises AttributeError on a REAL trace and silently works on the no-op —
+    # failing precisely when telemetry is on. The parity test compares methods,
+    # not attributes, so it would not have caught this.
+    enabled = True
+
     def __init__(
         self,
         query: str = "",
@@ -499,9 +505,25 @@ class RetrievalTrace:
         if not self._capture_candidates:
             return
         for i, r in enumerate(results):
-            cand = self._candidates.get(_key(getattr(r, "id", r), getattr(r, "type", "")))
+            k = _key(getattr(r, "id", r), getattr(r, "type", ""))
+            cand = self._candidates.get(k)
             if cand is None:
-                continue
+                # BACKSTOP for the cap. An item in `results` reached the model,
+                # so it must never be absent merely because bulk drop
+                # registration exhausted max_candidates before it was added —
+                # that turns the cap into a manufactured total loss rather than
+                # a truncation. Deliberately bypasses the cap: `results` is
+                # bounded by the caller's limit, and a row that overshoots
+                # slightly is far better than one claiming nothing was
+                # delivered. entry_leg records that the provenance itself was
+                # the casualty, instead of inventing one.
+                cand = Candidate(
+                    id=str(getattr(r, "id", r)),
+                    type=getattr(r, "type", ""),
+                    entry_leg="(unrecorded — capture cap reached)",
+                )
+                self._candidates[k] = cand
+                self._truncated = True
             cand.final_rank = i + 1
             if cand.disposition not in (UNACCOUNTED, RENDERED):
                 cand.restored_from = f"{cand.disposition}@{cand.disposition_stage}"
