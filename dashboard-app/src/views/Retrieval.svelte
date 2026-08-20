@@ -278,42 +278,48 @@
       </p>
     {:else}
       {@const rendered = $store.data.disposition_totals['rendered'] ?? 0}
-      <div class="funnel-figures">
-        <div class="fig">
-          <span class="fig-n">{totals.sum.toLocaleString()}</span>
-          <span class="fig-l">entered</span>
+      {@const dropped = totals.sum - rendered}
+      <!-- One element, one job: the bar IS the figure. The old version stated
+           each number three times — headline, bar, then a legend column. -->
+      <div class="funnel">
+        <div class="funnel-in">
+          <span class="funnel-n">{totals.sum.toLocaleString()}</span>
+          <span class="funnel-l">candidates entered</span>
         </div>
-        <span class="fig-arrow">→</span>
-        <div class="fig">
-          <span class="fig-n good">{rendered.toLocaleString()}</span>
-          <span class="fig-l">reached the model</span>
-        </div>
-        <div class="fig drop">
-          <span class="fig-n warn">{(totals.sum - rendered).toLocaleString()}</span>
-          <span class="fig-l">dropped at a gate</span>
-        </div>
-      </div>
 
-      <div class="disp-bar" role="img" aria-label="Candidate dispositions">
-        {#each orderDispositions(totals.entries.map(([k]) => k)) as key (key)}
-          {@const val = $store.data.disposition_totals[key] ?? 0}
-          <div
-            class="disp-seg {dispositionClass(key)}"
-            style="flex-grow: {val}"
-            title="{key}: {val} ({((val / totals.sum) * 100).toFixed(1)}%)"
-          ></div>
-        {/each}
+        <div class="funnel-track" role="img"
+             aria-label="{rendered} of {totals.sum} candidates reached the model">
+          {#each orderDispositions(totals.entries.map(([k]) => k)) as key (key)}
+            {@const val = $store.data.disposition_totals[key] ?? 0}
+            <div
+              class="funnel-seg {dispositionClass(key)}"
+              style="flex-grow: {val}"
+              title="{key}: {val} ({((val / totals.sum) * 100).toFixed(1)}%) — {DISPOSITION_HELP[key] ?? ''}"
+            >
+              <!-- Only the DROP segments carry a count. The survivors already
+                   have one as the headline to the right, and stating it twice
+                   is the duplication this bar was meant to remove. -->
+              {#if key !== 'rendered'}
+                <span class="seg-label">{val.toLocaleString()}</span>
+              {/if}
+            </div>
+          {/each}
+        </div>
+
+        <div class="funnel-out">
+          <span class="funnel-n good">{rendered.toLocaleString()}</span>
+          <span class="funnel-l">reached the model</span>
+          <span class="funnel-sub">{dropped.toLocaleString()} dropped at a gate</span>
+        </div>
       </div>
 
       <ul class="disp-legend">
         {#each orderDispositions(totals.entries.map(([k]) => k)) as key (key)}
           {@const val = $store.data.disposition_totals[key] ?? 0}
-          <li>
+          <li title={DISPOSITION_HELP[key] ?? ''}>
             <span class="dot {dispositionClass(key)}"></span>
             <span class="k">{key}</span>
-            <span class="v">{val.toLocaleString()}</span>
             <span class="pct">{((val / totals.sum) * 100).toFixed(1)}%</span>
-            <span class="help">{DISPOSITION_HELP[key] ?? ''}</span>
           </li>
         {/each}
       </ul>
@@ -647,53 +653,106 @@
   .mt { margin-top: 1rem; }
 
   /* ── Window funnel ───────────────────────────────────────── */
-  .funnel-head { display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 0.85rem; }
-
-  .funnel-figures {
+  .funnel-head {
     display: flex;
     align-items: baseline;
-    gap: 1.25rem;
-    margin-bottom: 0.7rem;
-    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin-bottom: 1rem;
   }
-  .fig { display: flex; align-items: baseline; gap: 0.4rem; }
-  .fig.drop { margin-left: auto; }
-  .fig-n {
-    font-size: 1.55rem;
+  /* Section label: small, tracked, quiet — so the figures below carry the
+     weight instead of competing with a same-size heading. */
+  .funnel-head h2 {
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .funnel {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 1.5rem;
+  }
+  .funnel-in { text-align: right; }
+  .funnel-out { text-align: left; }
+  .funnel-n {
+    display: block;
+    font-size: 2.4rem;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
     color: var(--text);
     line-height: 1;
   }
-  .fig-n.good { color: var(--green); }
-  .fig-n.warn { color: var(--yellow); }
-  .fig-l { font-size: 0.78rem; color: var(--muted); }
-  .fig-arrow { color: var(--muted); font-size: 1.1rem; }
-
-  .disp-bar { display: flex; height: 16px; border-radius: 4px; overflow: hidden; gap: 1px; }
-  .disp-seg { min-width: 2px; }
-  .disp-seg.badge-good { background: var(--green); }
-  .disp-seg.badge-warn { background: var(--yellow); }
-  .disp-seg.badge-bad  { background: var(--red); }
-
-  .disp-legend { list-style: none; margin: 0.75rem 0 0; padding: 0; }
-  .disp-legend li {
-    display: grid;
-    grid-template-columns: 10px 10rem 4.5rem 4rem 1fr;
-    gap: 0.6rem;
-    align-items: center;
-    padding: 0.16rem 0;
-    font-size: 0.8rem;
+  .funnel-n.good { color: var(--green); }
+  .funnel-l {
+    display: block;
+    margin-top: 0.25rem;
+    font-size: 0.75rem;
+    color: var(--muted);
   }
-  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  /* The dropped count belongs BESIDE the survivors it is measured against —
+     it was previously flung to the far edge of the card by margin-left:auto. */
+  .funnel-sub {
+    display: block;
+    margin-top: 0.15rem;
+    font-size: 0.75rem;
+    color: var(--yellow);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .funnel-track {
+    display: flex;
+    height: 34px;
+    border-radius: 6px;
+    overflow: hidden;
+    gap: 2px;
+  }
+  .funnel-seg {
+    min-width: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: filter var(--transition, 0.2s ease);
+  }
+  .funnel-seg:hover { filter: brightness(1.15); }
+  .funnel-seg.badge-good { background: var(--green); }
+  .funnel-seg.badge-warn { background: var(--yellow); }
+  .funnel-seg.badge-bad  { background: var(--red); }
+  /* Counts sit ON the bar, so the bar is the figure rather than a decoration
+     the legend then restates. Hidden when a segment is too thin to hold them. */
+  .seg-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #0a0a0f;
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: clip;
+    white-space: nowrap;
+  }
+
+  .disp-legend {
+    list-style: none;
+    margin: 0.85rem 0 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 1.1rem;
+  }
+  .disp-legend li {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.75rem;
+    cursor: default;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; flex-shrink: 0; }
   .dot.badge-good { background: var(--green); }
   .dot.badge-warn { background: var(--yellow); }
   .dot.badge-bad  { background: var(--red); }
   .disp-legend .k { font-family: var(--font-mono, monospace); color: var(--text); }
-  .disp-legend .v,
-  .disp-legend .pct { text-align: right; font-variant-numeric: tabular-nums; }
-  .disp-legend .pct { color: var(--muted); }
-  .disp-legend .help { color: var(--muted); }
+  .disp-legend .pct { color: var(--muted); font-variant-numeric: tabular-nums; }
 
   /* ── Split layout ────────────────────────────────────────── */
   .split {
@@ -750,41 +809,56 @@
   .rrow.automated .rq { color: var(--muted); font-style: italic; }
 
   .rrow-top { display: flex; align-items: baseline; gap: 0.6rem; }
+  /* The query is the row's subject — give it real size and full contrast so
+     the eye lands there first instead of on a wall of same-size grey. */
   .rq {
     flex: 1;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 0.84rem;
+    font-size: 0.9rem;
+    font-weight: 500;
     color: var(--text);
   }
-  .rms { font-size: 0.72rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .rms {
+    font-size: 0.72rem;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
   .rms.slow { color: var(--yellow); }
 
-  .rrow-bar { display: flex; align-items: center; gap: 1px; height: 7px; margin: 0.4rem 0 0.35rem; }
-  .rseg { height: 7px; border-radius: 2px; }
+  /* A 3px rule under the row rather than a floating bar between two text
+     lines — the row reads as one block with a progress underline instead of
+     a text/bar/text sandwich. */
+  .rrow-bar { display: flex; align-items: center; gap: 1.5px; height: 3px; margin: 0.45rem 0 0.3rem; }
+  .rseg { height: 3px; border-radius: 1px; }
   .rseg.badge-good { background: var(--green); }
   .rseg.badge-warn { background: var(--yellow); }
   .rseg.badge-bad  { background: var(--red); }
   .rseg.unsampled {
     flex: 1;
     background: repeating-linear-gradient(
-      90deg, var(--border), var(--border) 3px, transparent 3px, transparent 6px
+      90deg, var(--border), var(--border) 4px, transparent 4px, transparent 8px
     );
   }
   .rbar-n {
     flex-shrink: 0;
-    margin-left: 0.5rem;
-    font-size: 0.72rem;
+    margin-left: 0.55rem;
+    font-size: 0.7rem;
     color: var(--muted);
     font-variant-numeric: tabular-nums;
+    line-height: 1;
   }
-  .rbar-n strong { color: var(--green); }
+  .rbar-n strong { color: var(--green); font-weight: 600; }
 
-  .rrow-meta { display: flex; align-items: center; gap: 0.45rem; font-size: 0.72rem; }
+  .rrow-meta { display: flex; align-items: center; gap: 0.5rem; font-size: 0.7rem; color: var(--muted); }
   .spacer { flex: 1; }
+  /* Graph edges are the datum unique to this row and captured even unsampled,
+     so it keeps colour while time and leg count recede. */
   .expn { color: var(--chunk-color); }
+  .rrow-meta .muted { opacity: 0.75; }
 
   /* ── Detail ──────────────────────────────────────────────── */
   .detail-card { position: sticky; top: 1rem; max-height: 88vh; overflow-y: auto; }
