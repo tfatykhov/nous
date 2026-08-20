@@ -229,12 +229,67 @@
     ($store.data?.entries ?? []).length - filteredEntries.length,
   );
 
+  // Chronological or slowest-first. The latency strip above surfaces a 54s
+  // outlier; without a sort there is no way to reach it except scrolling.
+  let sortBy = $state<'recent' | 'slowest'>('recent');
+  let visibleEntries = $derived(
+    sortBy === 'slowest'
+      ? [...filteredEntries].sort((a, b) => (b.duration_ms ?? 0) - (a.duration_ms ?? 0))
+      : filteredEntries,
+  );
+
+  /**
+   * Session cluster markers. Retrievals cluster by session, but most clusters
+   * are a single row — 26 sessions across 66 rows on the instance this was
+   * built against — so marking every boundary put a rule every ~2.5 rows and
+   * read as noise rather than structure. Only runs of 2+ get a marker, and it
+   * carries the run length (a raw session hex means nothing on its own).
+   * Chronological order only: sorting by duration interleaves sessions, so a
+   * "cluster" would be a lie.
+   */
+  let sessionRuns = $derived.by(() => {
+    const out = new Map<number, number>(); // start index -> run length
+    if (sortBy !== 'recent') return out;
+    let i = 0;
+    while (i < visibleEntries.length) {
+      let j = i;
+      while (
+        j + 1 < visibleEntries.length &&
+        visibleEntries[j + 1].session_id === visibleEntries[i].session_id
+      ) j++;
+      const len = j - i + 1;
+      if (len >= 2) out.set(i, len);
+      i = j + 1;
+    }
+    return out;
+  });
+
   // Rows whose candidate array stopped at retrieval_telemetry_max_candidates.
   // Counted over the WHOLE window, not the automated-filtered view, because the
   // funnel above it is a window-level rollup.
   let cappedRows = $derived(
     ($store.data?.entries ?? []).filter((e) => e.truncated).length,
   );
+
+  // Latency was the one window-level dimension the page never showed. On the
+  // instance this was built against: p50 3.8s, p95 11.7s, slowest 54.7s, with
+  // 21 of 66 over 5s — a user-facing stall that existed only as one orange
+  // number inside a single row. Computed over the WHOLE window, like the
+  // funnel, not the automated-filtered view.
+  let timing = $derived.by(() => {
+    const ds = ($store.data?.entries ?? [])
+      .map((e) => e.duration_ms ?? 0)
+      .sort((a, b) => a - b);
+    if (!ds.length) return null;
+    const at = (p: number) => ds[Math.min(Math.floor(ds.length * p), ds.length - 1)];
+    return {
+      p50: at(0.5),
+      p95: at(0.95),
+      max: ds[ds.length - 1],
+      slow: ds.filter((x) => x >= 5000).length,
+      n: ds.length,
+    };
+  });
 
   let totals = $derived.by(() => {
     const t = $store.data?.disposition_totals ?? {};
@@ -506,6 +561,25 @@
         {/each}
       </ul>
     {/if}
+
+    {#if timing}
+      <!-- Separate strip, own label: this card's subject is candidate flow, and
+           latency is a different dimension. Folding it into the funnel figures
+           would make the heading a category error. -->
+      <div class="timing">
+        <span class="timing-label">Timing</span>
+        <span><strong>{fmtMs(timing.p50)}</strong> median</span>
+        <span><strong>{fmtMs(timing.p95)}</strong> p95</span>
+        <span class:slow={timing.max >= 20000}>
+          <strong>{fmtMs(timing.max)}</strong> slowest
+        </span>
+        {#if timing.slow > 0}
+          <span class="timing-slow">
+            {timing.slow} of {timing.n} over 5s
+          </span>
+        {/if}
+      </div>
+    {/if}
   </section>
 
   <!-- ── Master / detail ─────────────────────────────────────────────────── -->
@@ -529,13 +603,29 @@
           >
             Hide automated{hiddenCount > 0 ? ` (${hiddenCount})` : ''}
           </button>
+          <button
+            class="chip-btn"
+            class:on={sortBy === 'slowest'}
+            title="Sort by duration — session grouping only applies in time order"
+            onclick={() => (sortBy = sortBy === 'slowest' ? 'recent' : 'slowest')}
+          >
+            Slowest first
+          </button>
         </div>
       </div>
 
       <ul class="rlist">
-        {#each filteredEntries as e (e.id)}
+        {#each visibleEntries as e, ei (e.id)}
           {@const segs = funnelSegments(e)}
           <li>
+            {#if sessionRuns.has(ei)}
+              <div class="sess-break">
+                <span class="sess-id">
+                  {sessionRuns.get(ei)} retrievals · one session
+                </span>
+                <span class="sess-rule"></span>
+              </div>
+            {/if}
             <button
               class="rrow"
               class:selected={selectedId === e.id}
@@ -583,6 +673,12 @@
               </div>
               <div class="rrow-meta">
                 <span class="chip sm">{e.path === 'context' ? 'pre-turn' : 'recall_deep'}</span>
+                <!-- turn_number is populated on every row by the correlation
+                     fix and was never surfaced; it is what joins a retrieval to
+                     its context_log entry. -->
+                {#if e.turn_number !== null && e.turn_number !== undefined}
+                  <span class="muted">turn {e.turn_number}</span>
+                {/if}
                 <span class="muted">{e.legs.length} legs</span>
                 {#if e.n_expansions > 0}
                   <span class="expn">{e.n_expansions} graph edges</span>
@@ -1034,6 +1130,41 @@
   .dot.badge-bad  { background: var(--red); }
   .disp-legend .k { font-family: var(--font-mono, monospace); color: var(--text); }
   .disp-legend .pct { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  .timing {
+    display: flex;
+    align-items: baseline;
+    gap: 1.1rem;
+    flex-wrap: wrap;
+    margin-top: 0.85rem;
+    padding-top: 0.7rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.75rem;
+    color: var(--muted);
+  }
+  .timing strong { color: var(--text); font-variant-numeric: tabular-nums; }
+  .timing-label {
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .timing .slow strong { color: var(--red); }
+  .timing-slow { color: var(--yellow); margin-left: auto; }
+
+  /* ── Session break ───────────────────────────────────────── */
+  .sess-break {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.55rem 0.15rem;
+  }
+  .sess-id {
+    font-family: var(--font-mono, monospace);
+    font-size: 0.65rem;
+    color: var(--muted);
+    letter-spacing: 0.04em;
+  }
+  .sess-rule { flex: 1; height: 1px; background: var(--border); }
 
   /* ── Split layout ────────────────────────────────────────── */
   .split {
