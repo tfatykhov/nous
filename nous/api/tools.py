@@ -1076,11 +1076,9 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 exclude_ids=_f071_exclude_ids,  # F071
                 trace=_tr,  # F091
             )
-            if _rl is not None and _tr is not None:
-                try:
-                    _rl.commit(_tr)
-                except Exception:
-                    logger.debug("F091: retrieval trace commit failed", exc_info=True)
+            # NOTE: the trace is committed further down, AFTER the
+            # parent-episode fetch — those summaries reach the model, so
+            # committing here would leave them unrepresented in the counts.
             # F067 observability: one INFO line per recall_deep call so
             # operators can grep for chunk surfacing in prod without
             # turning on F055 residual_activation. Logs the gate state
@@ -1144,6 +1142,23 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                         heart.agent_id, n_facts, exc_info=True,
                     )
                     parent_episodes = []
+            # F091: parent episodes are memory DELIVERED to the model, appended
+            # by the formatter below. Register them as their own leg and mark
+            # them rendered, then commit — committing before this fetch left
+            # them absent from n_candidates/n_rendered on the one retrieval
+            # path where the flag makes them appear.
+            if _tr is not None and parent_episodes:
+                for _rank, (_ep_id, _summary) in enumerate(parent_episodes):
+                    _tr.add(_ep_id, "episode", "parent_episode",
+                            rank=_rank + 1, content=_summary)
+                    _tr.mark_rendered(_ep_id, "episode", "parent_episode_section")
+                _tr.leg("parent_episode", attempted=True,
+                        n_returned=len(parent_episodes))
+            if _rl is not None and _tr is not None:
+                try:
+                    _rl.commit(_tr)
+                except Exception:
+                    logger.debug("F091: retrieval trace commit failed", exc_info=True)
             text = _format_pipeline_text(
                 results, stats, search_types, parent_episodes=parent_episodes,
                 session_group_heart=getattr(settings, "session_group_heart_section", False),

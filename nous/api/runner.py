@@ -1241,6 +1241,13 @@ class AgentRunner:
             _f071_exclude = _build_exclude_ids(self._settings, turn_context)
             if _f071_exclude is not None:
                 CURRENT_TURN_EXCLUDE_IDS.set(_f071_exclude)
+            # F091: streaming has its OWN tool-dispatch loop, so setting this
+            # only around run_turn left every recall_deep issued through
+            # /chat/stream with turn_number=NULL. Value-based set/clear (not
+            # reset(token)) for the same reason as the F071 line above: a token
+            # cannot be safely reset across an async generator's per-chunk
+            # context boundaries.
+            CURRENT_TURN_NUMBER.set(self._current_turn_number)
             try:
                 for turn in range(self._settings.max_turns):
                     # Unified block accumulator: keyed by block_index, preserves
@@ -1550,6 +1557,7 @@ class AgentRunner:
                 # async-generator's per-chunk context boundaries (see set above).
                 if _f071_exclude is not None:
                     CURRENT_TURN_EXCLUDE_IDS.set(None)
+                CURRENT_TURN_NUMBER.set(None)  # F091, same value-based rule
                 # F024 F2/F3: compact the live user message (strip base64) on
                 # every exit path — success, exception, and client-disconnect.
                 if valid_attachments:

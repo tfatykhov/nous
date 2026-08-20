@@ -357,6 +357,21 @@ class RetrievalTrace:
         cand.disposition = disposition
         cand.disposition_stage = stage
 
+    def mark_rendered(self, item_id: Any, item_type: str, stage: str) -> None:
+        """Mark an item that reached the model but was registered AFTER
+        ``finalize`` (so finalize's own pass could not see it).
+
+        Used for content appended past the ranked result set — parent-episode
+        summaries, for one, which the formatter adds after the pipeline has
+        already finished. Without this they are memory delivered to the model
+        with no representation in the counts.
+        """
+        cand = self._candidates.get(_key(item_id, item_type))
+        if cand is None or cand.disposition != UNACCOUNTED:
+            return
+        cand.disposition = RENDERED
+        cand.disposition_stage = stage
+
     def drop_all(self, items: list, item_type: str, disposition: str, stage: str) -> None:
         for item in items:
             self.drop(getattr(item, "id", item), item_type, disposition, stage)
@@ -488,6 +503,7 @@ class NullTrace:
     def mutate(self, *a: Any, **k: Any) -> None: ...
     def drop(self, *a: Any, **k: Any) -> None: ...
     def drop_all(self, *a: Any, **k: Any) -> None: ...
+    def mark_rendered(self, *a: Any, **k: Any) -> None: ...
     def exclude_type(self, *a: Any, **k: Any) -> None: ...
     def expansion(self, *a: Any, **k: Any) -> None: ...
     def finalize(self, *a: Any, **k: Any) -> None: ...

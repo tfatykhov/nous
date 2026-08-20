@@ -530,3 +530,34 @@ def test_add_many_on_an_empty_list_is_harmless():
     t = _trace()
     t.add_many([], "empty_leg", type_of=lambda i: "fact", score_of=lambda i: 0.0)
     assert t.to_dict()["n_candidates"] == 0
+
+
+def test_mark_rendered_covers_content_registered_after_finalize():
+    """Parent-episode summaries are appended by the formatter AFTER the
+    pipeline finished, so finalize's pass cannot see them. Without an explicit
+    mark they stay `unaccounted` — memory delivered to the model that the
+    counts deny."""
+    t = _trace()
+    t.finalize([])  # pipeline already done
+    ep = uuid4()
+    t.add(ep, "episode", "parent_episode", content="summary text")
+    t.mark_rendered(ep, "episode", "parent_episode_section")
+
+    d = t.to_dict()
+    assert d["candidates"][0]["disposition"] == RENDERED
+    assert d["n_rendered"] == 1
+
+
+def test_mark_rendered_never_overwrites_an_existing_disposition():
+    t = _trace()
+    fid = uuid4()
+    t.add(fid, "fact", "heart_primary")
+    t.drop(fid, "fact", SLICED_OFF, "limit")
+    t.mark_rendered(fid, "fact", "late")
+    assert t.to_dict()["candidates"][0]["disposition"] == SLICED_OFF
+
+
+def test_mark_rendered_on_an_unknown_candidate_is_a_noop():
+    t = _trace()
+    t.mark_rendered(uuid4(), "episode", "late")
+    assert t.to_dict()["n_candidates"] == 0

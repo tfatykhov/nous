@@ -15,14 +15,20 @@
   // is routinely 100% context — filtering locally showed an empty table while
   // pipeline rows sat pages back. Refetch on change so the rollups match too.
   let pathFilter = $state<'' | 'pipeline' | 'context'>('');
+  // Which path the data currently in the store was actually fetched for.
+  // Stamped when a request STARTS, so it always describes the in-flight or
+  // most-recent fetch rather than the selection.
+  let appliedPath: '' | 'pipeline' | 'context' = '';
 
   const store = usePoll(
     makePollStore<RetrievalData>(
-      (signal) =>
-        apiGet<RetrievalData>(
+      (signal) => {
+        appliedPath = pathFilter;
+        return apiGet<RetrievalData>(
           `/dashboard/retrieval${pathFilter ? `?path=${pathFilter}` : ''}`,
           { signal },
-        ),
+        );
+      },
       0, // fetch-once + manual refresh, matching sibling views
     ),
   );
@@ -32,6 +38,17 @@
     pathFilter = p;
     void store.refresh();
   }
+
+  // makePollStore.refresh() returns immediately when a request is already in
+  // flight — it does not queue. In fetch-once mode (intervalMs=0) nothing
+  // re-arms, so a filter change during the initial load, or rapid switching,
+  // would leave the selected chip paired with the previous path's rows
+  // indefinitely. Reconcile once the in-flight request settles.
+  $effect(() => {
+    if (!$store.loading && appliedPath !== pathFilter) {
+      void store.refresh();
+    }
+  });
 
   // ── Detail drill-through (own state, out-of-order guarded) ────────────────
   let selectedId = $state<string | null>(null);
