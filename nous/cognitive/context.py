@@ -31,6 +31,7 @@ from nous.observability.retrieval_trace import (
     FILTER_DROPPED,
     NULL_TRACE,
     SLICED_OFF,
+    SUPERSEDED,
 )
 
 
@@ -933,9 +934,26 @@ class ContextEngine:
                     # Gap-2: resolve same-subject current-vs-stale conflicts (demote +
                     # tag) BEFORE the staleness/boost/relevance pipeline, so a superseded
                     # value drops out of the injected set and the agent sees the current one.
+                    # _resolve_recency DEMOTES (score *= 0.3) rather than
+                    # removing, so the diff below sees nothing. Record the score
+                    # change instead: without it, a fact later cut by the
+                    # relevance gap shows `sliced_off` against its ORIGINAL
+                    # entry score, hiding the resolver that actually caused the
+                    # loss. The diff stays as a belt in case it ever removes.
+                    _pre_recency = {
+                        str(getattr(f, "id", "")): getattr(f, "score", None)
+                        for f in (facts or [])
+                    }
                     _before = facts
                     facts = self._resolve_recency(facts)
                     _tr_filtered(_before, facts, "fact", FILTER_DROPPED, "recency_resolver")
+                    for _f in (facts or []):
+                        _fid = str(getattr(_f, "id", ""))
+                        _was = _pre_recency.get(_fid)
+                        _now = getattr(_f, "score", None)
+                        if _fid and _was is not None and _now != _was:
+                            tr.mutate(_fid, "fact", "recency_resolver", _was, _now,
+                                      reason=SUPERSEDED)
                     pin_k = getattr(self._settings, "fact_pin_top_k", 0)
                     pinned_facts = list(facts[:pin_k]) if pin_k > 0 else []
                     # F017: Staleness penalty (before boosts)

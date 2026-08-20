@@ -372,10 +372,20 @@ class RetrievalTrace:
         summaries, for one, which the formatter adds after the pipeline has
         already finished. Without this they are memory delivered to the model
         with no representation in the counts.
+
+        This is an AUTHORITATIVE late render, so it OVERRIDES an earlier drop
+        the same way ``finalize`` does, preserving the overridden gate on
+        ``restored_from``. The concrete case: a parent episode can be a Heart
+        candidate already marked ``sliced_off`` by the Heart limit, and then be
+        appended as parent context because a surviving fact pointed at it. It
+        genuinely reached the model, so refusing to override would leave
+        delivered content counted as dropped.
         """
         cand = self._candidates.get(_key(item_id, item_type))
-        if cand is None or cand.disposition != UNACCOUNTED:
+        if cand is None or cand.disposition == RENDERED:
             return
+        if cand.disposition != UNACCOUNTED:
+            cand.restored_from = f"{cand.disposition}@{cand.disposition_stage}"
         cand.disposition = RENDERED
         cand.disposition_stage = stage
 

@@ -548,16 +548,55 @@ def test_mark_rendered_covers_content_registered_after_finalize():
     assert d["n_rendered"] == 1
 
 
-def test_mark_rendered_never_overwrites_an_existing_disposition():
+def test_mark_rendered_overrides_a_drop_because_delivery_is_authoritative():
+    """Superseded contract. This originally asserted that mark_rendered refused
+    to overwrite — which loses real content: an item can be dropped by one gate
+    and still be delivered through a later channel. Delivery wins; the
+    overridden gate is preserved rather than discarded."""
     t = _trace()
     fid = uuid4()
     t.add(fid, "fact", "heart_primary")
     t.drop(fid, "fact", SLICED_OFF, "limit")
     t.mark_rendered(fid, "fact", "late")
-    assert t.to_dict()["candidates"][0]["disposition"] == SLICED_OFF
+
+    cand = t.to_dict()["candidates"][0]
+    assert cand["disposition"] == RENDERED
+    assert cand["restored_from"] == f"{SLICED_OFF}@limit"
 
 
 def test_mark_rendered_on_an_unknown_candidate_is_a_noop():
     t = _trace()
     t.mark_rendered(uuid4(), "episode", "late")
     assert t.to_dict()["n_candidates"] == 0
+
+
+def test_mark_rendered_overrides_an_earlier_drop_and_keeps_the_gate():
+    """A parent episode can be a Heart candidate already cut by the Heart
+    limit, then be appended as parent context because a surviving fact pointed
+    at it. It genuinely reached the model, so a late authoritative render must
+    override — otherwise delivered content stays counted as dropped."""
+    t = _trace()
+    ep = uuid4()
+    t.add(ep, "episode", "heart_primary", score=0.4)
+    t.drop(ep, "episode", SLICED_OFF, "heart_recall_limit")
+    t.finalize([])
+
+    t.mark_rendered(ep, "episode", "parent_episode_section")
+
+    cand = t.to_dict()["candidates"][0]
+    assert cand["disposition"] == RENDERED
+    assert cand["restored_from"] == f"{SLICED_OFF}@heart_recall_limit"
+    assert t.to_dict()["n_rendered"] == 1
+
+
+def test_mark_rendered_is_idempotent():
+    t = _trace()
+    ep = uuid4()
+    t.add(ep, "episode", "parent_episode")
+    t.mark_rendered(ep, "episode", "parent_episode_section")
+    t.mark_rendered(ep, "episode", "parent_episode_section")
+
+    cand = t.to_dict()["candidates"][0]
+    assert cand["disposition"] == RENDERED
+    # A second call must not manufacture a restored_from from RENDERED itself.
+    assert cand["restored_from"] is None
