@@ -1234,6 +1234,21 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             return {"content": [{"type": "text", "text": text}]}
         except Exception as e:
             logger.exception("recall_deep tool failed")
+            # F091: commit the PARTIAL trace. The only commit sits on the happy
+            # path, so an exception escaping run_recall_pipeline left no row at
+            # all — hiding exactly the failures the leg `error` field exists to
+            # diagnose, and making a crashed retrieval look like one that never
+            # happened. Whatever legs/candidates were recorded before the raise
+            # are worth more than nothing.
+            try:
+                _rl_err = get_active_retrieval_logger()
+                _tr_err = locals().get("_tr")
+                if _rl_err is not None and _tr_err is not None:
+                    _tr_err.leg("recall_deep", attempted=True, error=str(e)[:200])
+                    _tr_err.finalize([])
+                    _rl_err.commit(_tr_err)
+            except Exception:
+                logger.debug("F091: failed to commit partial trace", exc_info=True)
             return {"content": [{"type": "text", "text": f"Error searching memory: {e}"}]}
 
     async def create_censor(

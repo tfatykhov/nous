@@ -713,3 +713,29 @@ def test_finite_scores_are_left_untouched():
     fid = uuid4()
     t.add(fid, "fact", "heart_primary", score=0.0)
     assert t.to_dict()["candidates"][0]["entry_score"] == 0.0
+
+
+def test_query_chars_zero_suppresses_the_query_entirely():
+    """0 means ZERO CHARS, matching snippet_chars. Treating it as "unlimited"
+    inverted the setting: an operator setting 0 to suppress user text got the
+    complete unbounded message persisted for the whole retention window."""
+    t = RetrievalTrace(query="a very private user message", query_chars=0)
+    assert t.to_dict()["query"] == ""
+
+
+def test_query_chars_negative_is_clamped_not_wrapped():
+    """A negative slice would wrap and keep the message MINUS n chars."""
+    t = RetrievalTrace(query="abcdefghij", query_chars=-3)
+    assert t.to_dict()["query"] == ""
+
+
+def test_query_chars_positive_truncates():
+    t = RetrievalTrace(query="abcdefghij", query_chars=4)
+    assert t.to_dict()["query"] == "abcd"
+
+
+def test_snippet_chars_zero_suppresses_snippets_too():
+    """The sibling setting this one now matches."""
+    t = _trace(snippet_chars=0)
+    t.add(uuid4(), "fact", "heart_primary", content="secret content")
+    assert t.to_dict()["candidates"][0]["snippet"] == ""

@@ -253,7 +253,12 @@ class RetrievalTrace:
         # the raw user message, and an untruncated copy would sit in a
         # diagnostics table for the full retention window. The query is a label
         # for finding the retrieval again, not a record of what the user said.
-        self.query = (query or "")[:query_chars] if query_chars > 0 else (query or "")
+        # 0 means ZERO CHARS, matching snippet_chars — it does NOT mean
+        # unlimited. Treating it as unlimited inverted the setting: an operator
+        # setting 0 to suppress user text got the complete, unbounded message
+        # persisted for the whole retention window instead. Negative is clamped
+        # to 0 rather than wrapping the slice.
+        self.query = (query or "")[: max(0, query_chars)]
         self.path = path
         self.agent_id = agent_id
         self.session_id = session_id
