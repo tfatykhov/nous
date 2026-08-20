@@ -2618,10 +2618,19 @@ async def get_retrieval_data(
     entries: list[dict[str, Any]] = []
     totals: Counter = Counter()
     leg_totals: dict[str, dict[str, int]] = {}
+    n_sampled = 0
 
     for row in rows:
         counts = row.disposition_counts or {}
-        totals.update({k: int(v) for k, v in counts.items()})
+        # Dispositions exist ONLY on sampled rows. Legs are captured on every
+        # row. Summing the two over the same denominator makes an unsampled
+        # window look like a systemic drop — e.g. 50 turns that each retrieved
+        # 10 and rendered 5 would report legs.returned=500 beside
+        # rendered=25/sliced_off=25, reading as a 95% loss that never happened.
+        # `sampled_count` is returned so the UI can state the real denominator.
+        if row.has_candidates:
+            n_sampled += 1
+            totals.update({k: int(v) for k, v in counts.items()})
         legs = row.legs or []
         for leg in legs:
             name = leg.get("name")
@@ -2658,9 +2667,14 @@ async def get_retrieval_data(
         "entries": entries,
         # Window-level rollup so a systemic drop (say, half of everything
         # dying at max_k) is visible without opening a single detail view.
+        # Aggregated over SAMPLED rows only — see the note at the loop above.
         "disposition_totals": dict(totals),
+        # Aggregated over ALL rows (legs are captured regardless of sampling).
         "leg_totals": leg_totals,
         "count": len(entries),
+        # The honest denominator for disposition_totals. Without this the UI
+        # cannot tell the operator that the bar covers 5 of 50 retrievals.
+        "sampled_count": n_sampled,
     }
 
 

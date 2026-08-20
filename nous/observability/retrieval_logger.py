@@ -31,11 +31,13 @@ class RetrievalLogger:
         max_candidates: int = 300,
         ring_size: int = 100,
         agent_id: str = "",
+        query_chars: int = 500,
     ):
         self._db_writer = db_writer
         self._enabled = enabled
         self._sample_rate = max(0.0, min(1.0, candidate_sample_rate))
         self._snippet_chars = snippet_chars
+        self._query_chars = query_chars
         self._max_candidates = max_candidates
         self._agent_id = agent_id
         self._entries: deque[dict] = deque(maxlen=ring_size)
@@ -66,6 +68,7 @@ class RetrievalLogger:
             trace_id=trace_id,
             snippet_chars=self._snippet_chars,
             max_candidates=self._max_candidates,
+            query_chars=self._query_chars,
             # Sampled per-retrieval: header, legs and expansions are cheap and
             # always captured; the per-candidate array is the expensive part.
             capture_candidates=random.random() < self._sample_rate,

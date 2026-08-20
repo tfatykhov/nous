@@ -163,9 +163,18 @@
 {#if $store.data}
   <!-- ── Window rollup: systemic drops visible without opening a detail ──── -->
   <section class="chart-card">
-    <h2>Dispositions across {$store.data.count} retrievals</h2>
+    <!-- Denominator is the SAMPLED count, not the window count: dispositions
+         only exist on sampled rows, so claiming the full window here would
+         understate every rate by 1/sample_rate. -->
+    <h2>
+      Dispositions across {$store.data.sampled_count ?? 0}
+      sampled of {$store.data.count} retrievals
+    </h2>
     {#if totals.sum === 0}
-      <p class="status-msg">No candidates captured yet in this window.</p>
+      <p class="status-msg">
+        No candidates captured yet in this window — candidate detail is sampled,
+        so a quiet bar here does not mean retrieval found nothing.
+      </p>
     {:else}
       <div class="disp-bar" role="img" aria-label="Candidate dispositions">
         {#each orderDispositions(totals.entries.map(([k]) => k)) as key (key)}
@@ -312,14 +321,20 @@
                 <span class="muted">· {group.items.length} neighbour{group.items.length === 1 ? '' : 's'}</span>
               </div>
               <ul class="edge-list">
-                {#each group.items as edge (edge.neighbor_id + edge.stage)}
+                <!-- Keyed by index deliberately: brain.neighbors UNIONs source-
+                     and target-side rows with no DISTINCT, and graph_edges has
+                     no unique constraint, so one seed can reach one neighbour
+                     over two relations. Those duplicates are recorded ON PURPOSE
+                     (before the dedup guards), and a composite key would collide
+                     and throw each_key_duplicate — in production builds too. -->
+                {#each group.items as edge, ei (ei)}
                   <li class:lost={!edge.won_best_path}>
                     <span class="rel">{edge.edge_relation ?? 'related'}</span>
                     <span class="arrow">→</span>
                     <span class="chip">{edge.neighbor_type}</span>
                     <code>{shortId(edge.neighbor_id)}</code>
                     <span class="muted">w {fmtScore(edge.edge_weight)}</span>
-                    <span class="muted">· composed {fmtScore(edge.composed_score)}</span>
+                    <span class="muted">· strength {fmtScore(edge.path_strength)}</span>
                     <span class="muted">· hop {edge.hop}</span>
                     {#if edge.extraction_method}<span class="chip sm">{edge.extraction_method}</span>{/if}
                     {#if !edge.won_best_path}<span class="chip sm">lost best-path</span>{/if}
@@ -332,10 +347,23 @@
 
         <!-- Candidates -->
         <h3 class="phase-head">Candidates</h3>
+        {#if detail.truncated}
+          <p class="status-msg error">
+            Candidate recording hit its cap for this retrieval — candidates beyond
+            the limit have no row and no disposition here. If an item you expect is
+            missing below, it may have been retrieved and dropped without being
+            recorded, rather than never retrieved.
+          </p>
+        {/if}
         {#if detail.candidates_by_disposition === null}
           <p class="status-msg">
             This retrieval was not sampled for candidate capture, so per-item detail was
             never recorded. Legs and graph expansion above are complete.
+          </p>
+        {:else if detailDispositions.length === 0}
+          <p class="status-msg">
+            This retrieval was sampled, and no candidates entered — every leg
+            returned nothing. (Distinct from "not sampled" above.)
           </p>
         {:else}
           {#each detailDispositions as disp (disp)}
@@ -364,7 +392,7 @@
                       <td><code>{c.entry_leg}</code></td>
                       <td>
                         {fmtScore(c.entry_score)}
-                        {#each c.mutations as m (m.stage)}
+                        {#each c.mutations as m, mi (mi)}
                           <span class="mut" title="{m.stage}: {fmtScore(m.score_before)} → {fmtScore(m.score_after)}">
                             → {fmtScore(m.score_after)}
                           </span>

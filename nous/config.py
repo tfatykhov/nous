@@ -1472,6 +1472,12 @@ class Settings(BaseSettings):
     retrieval_telemetry_enabled: bool = True
     retrieval_telemetry_candidate_sample_rate: float = 0.1
     retrieval_telemetry_snippet_chars: int = 200
+    # The query is a debugging LABEL, not evidence. On the context path it is
+    # the raw user message, so storing it untruncated put verbatim user text
+    # into a diagnostics table with 14-day retention, readable through an
+    # unauthenticated endpoint — a new CLASS of content for these tables
+    # (context_log stores counts and ids, never message text).
+    retrieval_telemetry_query_chars: int = 500
     retrieval_telemetry_max_candidates: int = 300
     retrieval_telemetry_ring_size: int = 100
     retrieval_telemetry_retention_days: int = 14

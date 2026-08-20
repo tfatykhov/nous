@@ -63,7 +63,7 @@ def _build_trace(rl: RetrievalLogger):
                      stage="stage2_heart_graph", hop=1,
                      edge_relation=rel, edge_weight=w,
                      extraction_method="inferred",
-                     composed_score=0.9 * w, won_best_path=True)
+                     path_strength=0.9 * w, won_best_path=True)
 
     tr.finalize([_R(i, "fact") for i in ids[:3]], duration_ms=42.5)
     return tr, ids

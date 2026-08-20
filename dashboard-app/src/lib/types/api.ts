@@ -1248,7 +1248,8 @@ export interface RetrievalExpansion {
   edge_relation: string | null;
   edge_weight: number | null;
   extraction_method: string | null;
-  composed_score: number | null;
+  /** seed_score × edge_weight — traversal path strength, NOT the pipeline ranking score. */
+  path_strength: number | null;
   won_best_path: boolean;
 }
 
@@ -1280,9 +1281,13 @@ export interface RetrievalEntry {
 
 export interface RetrievalData {
   entries: RetrievalEntry[];
+  /** Aggregated over SAMPLED rows only — dispositions do not exist otherwise. */
   disposition_totals: Record<string, number>;
+  /** Aggregated over ALL rows — legs are captured regardless of sampling. */
   leg_totals: Record<string, { attempted: number; returned: number; deduped: number; errors: number }>;
   count: number;
+  /** Honest denominator for disposition_totals. */
+  sampled_count: number;
 }
 
 export interface RetrievalDetail extends Omit<RetrievalEntry, 'has_candidates'> {

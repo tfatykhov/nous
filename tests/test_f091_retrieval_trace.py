@@ -242,14 +242,14 @@ def test_expansion_captures_the_full_edge():
         neighbor_id=nbr, neighbor_type="decision",
         stage="stage2_heart_graph", hop=1,
         edge_relation="evidence_for", edge_weight=0.72,
-        extraction_method="inferred", composed_score=0.576,
+        extraction_method="inferred", path_strength=0.576,
         won_best_path=True,
     )
     e = t.to_dict()["expansions"][0]
     assert e["seed_id"] == str(seed)
     assert e["neighbor_id"] == str(nbr)
     assert e["edge_relation"] == "evidence_for"
-    assert e["composed_score"] == pytest.approx(0.576)
+    assert e["path_strength"] == pytest.approx(0.576)
     assert t.to_dict()["n_expansions"] == 1
 
 
@@ -441,3 +441,74 @@ def test_budget_truncated_is_resurrected_if_caller_still_reports_it_rendered():
     cand = t.to_dict()["candidates"][0]
     assert cand["disposition"] == RENDERED
     assert cand["restored_from"] == f"{BUDGET_TRUNCATED}@section_budget_truncation"
+
+
+# ---------------------------------------------------------------------------
+# Best-path resolution (won_best_path is decided at finalize, not at record time)
+# ---------------------------------------------------------------------------
+
+
+def _exp(t, seed, nbr, strength, stage="s"):
+    t.expansion(seed_id=seed, seed_type="fact", neighbor_id=nbr,
+                neighbor_type="decision", stage=stage, path_strength=strength)
+
+
+def test_a_later_stronger_path_wins_over_an_earlier_weak_one():
+    """Recorded eagerly this was first-arrival-wins, which named the LOSER as
+    the winner wherever the pipeline does best-composed-path replacement."""
+    t = _trace()
+    nbr = uuid4()
+    _exp(t, uuid4(), nbr, 0.1)   # weak, arrives first
+    _exp(t, uuid4(), nbr, 0.9)   # strong, arrives second
+
+    t.finalize([])
+
+    exps = t.to_dict()["expansions"]
+    assert [e["won_best_path"] for e in exps] == [False, True]
+
+
+def test_exactly_one_winner_per_neighbour_and_stage():
+    t = _trace()
+    nbr = uuid4()
+    for s in (0.2, 0.7, 0.5):
+        _exp(t, uuid4(), nbr, s)
+    t.finalize([])
+    assert sum(1 for e in t.to_dict()["expansions"] if e["won_best_path"]) == 1
+
+
+def test_same_neighbour_via_different_stages_each_get_a_winner():
+    """Stages are independent traversals — one must not suppress the other."""
+    t = _trace()
+    nbr = uuid4()
+    _exp(t, uuid4(), nbr, 0.3, stage="stage2")
+    _exp(t, uuid4(), nbr, 0.8, stage="stage4")
+    t.finalize([])
+    assert all(e["won_best_path"] for e in t.to_dict()["expansions"])
+
+
+def test_none_strength_loses_to_a_scored_path():
+    t = _trace()
+    nbr = uuid4()
+    _exp(t, uuid4(), nbr, None)
+    _exp(t, uuid4(), nbr, 0.01)
+    t.finalize([])
+    exps = t.to_dict()["expansions"]
+    assert [e["won_best_path"] for e in exps] == [False, True]
+
+
+def test_best_paths_resolve_even_when_candidates_are_not_sampled():
+    """Expansions are captured at 100% regardless of sampling, so their
+    resolution must not sit behind the candidate-capture guard."""
+    t = _trace(capture_candidates=False)
+    nbr = uuid4()
+    _exp(t, uuid4(), nbr, 0.1)
+    _exp(t, uuid4(), nbr, 0.9)
+    t.finalize([])
+    assert [e["won_best_path"] for e in t.to_dict()["expansions"]] == [False, True]
+
+
+def test_query_is_truncated_at_construction():
+    """The context path passes the raw user message; an untruncated copy would
+    sit in a diagnostics table for the full retention window."""
+    t = RetrievalTrace(query="x" * 5000, query_chars=500)
+    assert len(t.to_dict()["query"]) == 500

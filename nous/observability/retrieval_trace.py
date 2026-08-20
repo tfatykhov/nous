@@ -48,6 +48,7 @@ DISPOSITIONS = frozenset({
 
 _DEFAULT_SNIPPET_CHARS = 200
 _DEFAULT_MAX_CANDIDATES = 300
+_DEFAULT_QUERY_CHARS = 500
 
 
 @dataclass
@@ -155,7 +156,17 @@ class Expansion:
     edge_relation: str | None = None
     edge_weight: float | None = None
     extraction_method: str | None = None
-    composed_score: float | None = None
+    # ``seed_score * edge_weight`` — the strength of THIS traversal path, NOT
+    # the score the pipeline ranks the neighbour by. Those differ: with
+    # ``graph_neighbor_seed_score_enabled`` off (the prod default) the ranking
+    # scorer drops the seed term entirely and applies a provenance penalty, and
+    # with it on it clamps weight at 1.0. Naming this "score" invited exactly
+    # that confusion, so it says what it is.
+    path_strength: float | None = None
+    # Resolved in ``finalize`` by comparing path_strength across every
+    # traversal that reached the same neighbour — NOT at record time, where
+    # first-arrival is all that is knowable and a later, stronger path can
+    # still win. Recording it eagerly reported the loser as the winner.
     won_best_path: bool = True
 
     def to_dict(self) -> dict[str, Any]:
@@ -170,7 +181,7 @@ class Expansion:
             "edge_relation": self.edge_relation,
             "edge_weight": self.edge_weight,
             "extraction_method": self.extraction_method,
-            "composed_score": self.composed_score,
+            "path_strength": self.path_strength,
             "won_best_path": self.won_best_path,
         }
 
@@ -199,9 +210,14 @@ class RetrievalTrace:
         snippet_chars: int = _DEFAULT_SNIPPET_CHARS,
         max_candidates: int = _DEFAULT_MAX_CANDIDATES,
         capture_candidates: bool = True,
+        query_chars: int = _DEFAULT_QUERY_CHARS,
     ):
         self.id = uuid4().hex[:16]
-        self.query = query
+        # Truncated at construction, not at render: on the context path this is
+        # the raw user message, and an untruncated copy would sit in a
+        # diagnostics table for the full retention window. The query is a label
+        # for finding the retrieval again, not a record of what the user said.
+        self.query = (query or "")[:query_chars] if query_chars > 0 else (query or "")
         self.path = path
         self.agent_id = agent_id
         self.session_id = session_id
@@ -378,6 +394,7 @@ class RetrievalTrace:
         ``UNACCOUNTED`` on purpose — see the module docstring.
         """
         self.duration_ms = duration_ms
+        self._resolve_best_paths()
         if not self._capture_candidates:
             return
         for i, r in enumerate(results):
@@ -391,6 +408,28 @@ class RetrievalTrace:
             cand.disposition_stage = "final"
 
     # -- output -------------------------------------------------------------
+
+    def _resolve_best_paths(self) -> None:
+        """Decide which traversal won, once every traversal is known.
+
+        Recorded eagerly, ``won_best_path`` could only mean "first to arrive",
+        which is wrong wherever the pipeline does best-composed-path
+        replacement (a later, stronger path adopts the slot) and can even mark
+        two paths as winners when a weak seed is visited first. Resolving here
+        is order-independent: highest ``path_strength`` per (neighbour, stage)
+        wins, ties break on first arrival, and None sorts last.
+        """
+        best: dict[tuple[str, str], int] = {}
+        for i, e in enumerate(self._expansions):
+            key = (e.neighbor_id, e.stage)
+            cur = best.get(key)
+            if cur is None or (e.path_strength or -1.0) > (
+                self._expansions[cur].path_strength or -1.0
+            ):
+                best[key] = i
+        winners = set(best.values())
+        for i, e in enumerate(self._expansions):
+            e.won_best_path = i in winners
 
     def disposition_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}

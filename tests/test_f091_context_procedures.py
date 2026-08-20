@@ -78,7 +78,7 @@ async def test_kline_traversal_is_captured_as_graph_expansion():
     assert e["neighbor_type"] == "procedure"
     assert e["stage"] == "context_procedure_kline"
     assert e["edge_relation"] == "uses"
-    assert e["composed_score"] == pytest.approx(0.8 * 0.5)
+    assert e["path_strength"] == pytest.approx(0.8 * 0.5)
 
 
 @pytest.mark.asyncio
@@ -103,9 +103,17 @@ async def test_losing_seed_is_still_recorded_as_traversed():
         session=None, query="q", trace=trace,
     )
 
+    # won_best_path is resolved in finalize(), not at record time — at record
+    # time only first-arrival is knowable, and seeds are visited in
+    # recalled_score_map order, so a weak-first ordering used to yield TWO
+    # winners for one procedure.
+    trace.finalize([])
+
     exps = trace.to_dict()["expansions"]
     assert len(exps) == 2, "both traversals must be recorded, not just the winner"
     assert sum(1 for e in exps if e["won_best_path"]) == 1
+    winner = next(e for e in exps if e["won_best_path"])
+    assert winner["seed_id"] == str(strong)
 
 
 @pytest.mark.asyncio

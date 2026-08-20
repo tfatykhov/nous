@@ -1167,8 +1167,7 @@ async def _run_stages(
                             edge_relation=n.edge_relation,
                             edge_weight=n.edge_weight,
                             extraction_method=getattr(n, "extraction_method", None),
-                            composed_score=(hr.score or 0.0) * (n.edge_weight or 0.0),
-                            won_best_path=n.id not in seen_graph,
+                            path_strength=(hr.score or 0.0) * (n.edge_weight or 0.0),
                         )
                         prev = seen_graph.get(n.id)
                         if prev is n:
@@ -1294,8 +1293,7 @@ async def _run_stages(
                             edge_relation=n.edge_relation,
                             edge_weight=n.edge_weight,
                             extraction_method=getattr(n, "extraction_method", None),
-                            composed_score=(seed_score or 0.0) * (n.edge_weight or 0.0),
-                            won_best_path=n.id not in seen_mem,
+                            path_strength=(seed_score or 0.0) * (n.edge_weight or 0.0),
                         )
                         if n.id in seen_mem:
                             # Reached from multiple seeds: keep the PATH (seed + edge)
@@ -1499,8 +1497,7 @@ async def _run_stages(
                             stage="stage4_spreading_activation", hop=2,
                             edge_relation="spreading_activation",
                             edge_weight=activation,
-                            composed_score=activation,
-                            won_best_path=True,
+                            path_strength=activation,
                         )
                         seen_ids.add(nid)
                         n_appended += 1
@@ -1568,8 +1565,7 @@ async def _run_stages(
                             edge_relation=n.edge_relation,
                             edge_weight=n.edge_weight,
                             extraction_method=getattr(n, "extraction_method", None),
-                            composed_score=(dec.score or 0.0) * (n.edge_weight or 0.0),
-                            won_best_path=n.id not in seen_ids and prev is None,
+                            path_strength=(dec.score or 0.0) * (n.edge_weight or 0.0),
                         )
                         if prev is n:
                             # Aliasing guard — see Stage 2.

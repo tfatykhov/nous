@@ -547,6 +547,10 @@ async def create_components(settings: Settings) -> dict:
     if settings.retrieval_telemetry_enabled:
         from nous.observability.retrieval_logger import RetrievalLogger, set_active
 
+        # Latch so only the FIRST write failure logs at ERROR (list, not bool,
+        # so the closure can mutate it without `nonlocal`).
+        _retrieval_write_failed: list[bool] = []
+
         async def _write_retrieval_log(payload: dict):
             try:
                 async with database.session() as s:
@@ -585,7 +589,19 @@ async def create_components(settings: Settings) -> dict:
                     })
                     await s.commit()
             except Exception:
-                logger.debug("F091: retrieval log write failed", exc_info=True)
+                # First failure at ERROR, the rest at DEBUG. Swallowing every
+                # one at DEBUG meant an unapplied migration 070 (or a renamed
+                # column) showed up only as "No retrievals recorded yet" on the
+                # dashboard, with nothing above info to explain the silence.
+                if not _retrieval_write_failed:
+                    _retrieval_write_failed.append(True)
+                    logger.error(
+                        "F091: retrieval log write failed — telemetry will not "
+                        "persist. Is migration 070 applied? Further failures "
+                        "log at DEBUG.", exc_info=True,
+                    )
+                else:
+                    logger.debug("F091: retrieval log write failed", exc_info=True)
 
         retrieval_logger = RetrievalLogger(
             db_writer=_write_retrieval_log,
@@ -595,6 +611,7 @@ async def create_components(settings: Settings) -> dict:
             max_candidates=settings.retrieval_telemetry_max_candidates,
             ring_size=settings.retrieval_telemetry_ring_size,
             agent_id=settings.agent_id,
+            query_chars=settings.retrieval_telemetry_query_chars,
         )
         set_active(retrieval_logger)
         logger.info(

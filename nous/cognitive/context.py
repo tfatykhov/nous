@@ -258,6 +258,23 @@ class ContextEngine:
         )
         _tr_t0 = time.monotonic()
 
+        # Every instrumented call below sits INSIDE its section's own
+        # `try/except Exception`, and precedes that section's
+        # `sections.append`. So an exception in telemetry does not merely lose
+        # a trace — it deletes the whole Relevant Facts / Related Decisions
+        # section from the prompt and logs "Brain.query failed", naming the
+        # wrong subsystem. The containment boundary is the section, not the
+        # telemetry, so the telemetry has to contain itself.
+        def _tr_guard(fn):
+            def _wrapped(*a, **kw):
+                try:
+                    return fn(*a, **kw)
+                except Exception:
+                    logger.debug("F091: trace helper failed (non-fatal)", exc_info=True)
+                    return None
+            return _wrapped
+
+        @_tr_guard
         def _tr_enter(items: list, mem_type: str, leg: str) -> list:
             """Register a leg's raw hits before any filter has run."""
             tr.leg(leg, attempted=True, n_returned=len(items or []),
@@ -277,6 +294,7 @@ class ContextEngine:
         # "is this fact in context?" with a confident yes when it is not.
         _tr_budget_cut: set[tuple[str, str]] = set()
 
+        @_tr_guard
         def _tr_budget(items: list, mem_type: str, rendered_text: str) -> None:
             """Attribute section-budget truncation, conservatively.
 
@@ -296,6 +314,7 @@ class ContextEngine:
                     _tr_budget_cut.add((iid, mem_type))
                     tr.drop(iid, mem_type, BUDGET_TRUNCATED, "section_budget_truncation")
 
+        @_tr_guard
         def _tr_filtered(before: list, after: list, mem_type: str,
                          disposition: str, stage: str) -> list:
             """Attribute whatever ``before`` lost to ``stage``.
@@ -1141,6 +1160,13 @@ class ContextEngine:
                         shown_blocks.append(block)
                         shown_procs.append(p)
                         used += cost
+                    # Deliberate budget cut — attribute it. Without this the
+                    # unshown procedures were registered but never dropped and
+                    # never rendered, so they landed in `unaccounted`, which is
+                    # reserved as the drift signal for a filter that forgot to
+                    # report. A known cut pinned that alarm permanently high.
+                    _tr_filtered(selected, shown_procs, "procedure",
+                                 BUDGET_TRUNCATED, "procedure_budget_accumulation")
                     if shown_procs:
                         proc_text = "\n\n".join(shown_blocks)
                         sections.append(
@@ -1421,7 +1447,13 @@ class ContextEngine:
                 if _temporal_episode_ids:
                     _before = episodes
                     episodes = [e for e in episodes if str(e.id) not in _temporal_episode_ids]
-                    _tr_filtered(_before, episodes, "episode", FILTER_DROPPED, "temporal_tier_dedup")
+                    # DEDUPED, not FILTER_DROPPED: these episodes ARE in the
+                    # prompt — the temporal tier rendered them into "Recent
+                    # Conversations" already, and this leg skips them to avoid
+                    # duplicating. Reporting them as dropped told an operator
+                    # asking "why isn't episode X in context?" that it was
+                    # removed, while X's summary sat two sections above.
+                    _tr_filtered(_before, episodes, "episode", DEDUPED, "temporal_tier_already_rendered")
                 if episodes:
                     # F038-2.3: Episode-specific recency weighting (replaces general staleness)
                     episodes = self._apply_episode_recency(episodes)
@@ -2005,9 +2037,9 @@ class ContextEngine:
                 # F091: Path B has its own graph expansion (F080 §14.7 K-line
                 # procedure selection) and it was entirely uncaptured — the
                 # pipeline's Stage 2/2b/4 traversals are a different code path.
-                # won_best_path mirrors the max-score replacement immediately
-                # below, so a seed that loses to a better path still shows as
-                # traversed.
+                # won_best_path is resolved in finalize() across all paths, not
+                # here — first-arrival is all that is knowable at record time.
+                # Losing paths are still recorded, flagged not-won.
                 if trace is not None:
                     trace.expansion(
                         seed_id=mid, seed_type=stype, seed_score=seed_score,
@@ -2016,8 +2048,7 @@ class ContextEngine:
                         edge_relation=getattr(n, "edge_relation", None),
                         edge_weight=getattr(n, "edge_weight", None),
                         extraction_method=getattr(n, "extraction_method", None),
-                        composed_score=score,
-                        won_best_path=score > scores.get(n.id, -1.0),
+                        path_strength=score,
                     )
                 if score > scores.get(n.id, -1.0):
                     scores[n.id] = score
