@@ -1280,9 +1280,15 @@ class ContextEngine:
                     embedding_procedures = apply_frame_boost(
                         embedding_procedures, frame.frame_id, _active_censor_names,
                     )
+                    _before = embedding_procedures
                     embedding_procedures = await self._apply_dedup(
                         embedding_procedures, _conv_msgs, "name",
                     )
+                    # Unattributed, this left every conversation-deduped
+                    # procedure at `unaccounted` — pinning the drift alarm on
+                    # any normal chat that mentions a procedure by name.
+                    _tr_filtered(_before, embedding_procedures, "procedure",
+                                 FILTER_DROPPED, "conversation_dedup")
                     embedding_procedures = self._apply_usage_boost(
                         embedding_procedures, usage_tracker,
                     )
@@ -1410,16 +1416,21 @@ class ContextEngine:
         if self._settings.temporal_context_enabled:
             try:
                 recent = await self._heart.list_episodes(limit=5, hours=48)
+                # Registered on the RAW result, before any filtering and outside
+                # `if recent`. These episodes render into "Recent Conversations"
+                # but never enter recalled_ids, so without this they were memory
+                # delivered to the model with no trace representation — and
+                # registering after the system filter (or inside the `if`) hid
+                # both the internal-episode drops and an executed empty search.
+                _tr_enter(recent or [], "episode", "context_episodes_temporal")
                 # Filter out system/internal episodes (handler tasks, summarization runs)
                 if recent:
+                    _before = recent
                     recent = [e for e in recent if not _is_system_episode(e)]
+                    _tr_filtered(_before, recent, "episode",
+                                 FILTER_DROPPED, "system_episode")
                 if recent:
                     _temporal_episode_ids = {str(e.id) for e in recent}
-                    # Register the temporal tier as its own leg: these episodes
-                    # are rendered into "Recent Conversations" but never enter
-                    # recalled_ids, so without this they were memory delivered
-                    # to the model with no representation in the trace at all.
-                    _tr_enter(recent, "episode", "context_episodes_temporal")
                     recent_lines = []
                     inject_full = self._settings.followup_first_turn_episode and is_first_turn
                     for idx, e in enumerate(recent):
@@ -1578,11 +1589,13 @@ class ContextEngine:
                     _RenderedRef(mid, "episode") for mid in _temporal_episode_ids
                 )
                 tr.finalize(_rendered, duration_ms=(time.monotonic() - _tr_t0) * 1000.0)
-                _rl.commit(tr)
             except Exception:
                 logger.debug("F091: context retrieval trace failed", exc_info=True)
 
         return BuildResult(
+            # Finalized but NOT committed — pre_turn commits once it knows the
+            # prompt is actually going to be sent (a censor block discards it).
+            retrieval_trace=(tr if _rl is not None else None),
             system_prompt=system_prompt,
             sections=sections,
             recalled_ids=recalled_ids,
@@ -2088,17 +2101,35 @@ class ContextEngine:
         # Phase 2: rank by score, fetch bodies only for enough top candidates to
         # fill the slots (skip stale/inactive and continue down the ranked list).
         selected: list = []
-        for pid, _score in sorted(scores.items(), key=lambda x: (-x[1], str(x[0]))):
+        # F091: register EVERY ranked K-line candidate before the gates below,
+        # not just the survivors. The slot cut and the deleted/inactive skips
+        # are this path's principal drops — registering only `selected` left
+        # them present in `expansions` but absent from n_candidates with no
+        # disposition at all, so the graph path's losses were unattributable.
+        _ranked = sorted(scores.items(), key=lambda x: (-x[1], str(x[0])))
+        if trace is not None:
+            for _rank, (_pid, _sc) in enumerate(_ranked):
+                trace.add(_pid, "procedure", "context_procedures_graph",
+                          score=_sc, rank=_rank + 1)
+        for pid, _score in _ranked:
             if len(selected) >= slots:
-                break
+                if trace is not None:
+                    trace.drop(pid, "procedure", SLICED_OFF, "kline_slot_limit")
+                continue  # keep going so every remaining candidate is attributed
             try:
                 detail = await self._heart.get_procedure(pid, session=session)
             except ValueError:
+                if trace is not None:
+                    trace.drop(pid, "procedure", FILTER_DROPPED, "procedure_deleted")
                 continue  # stale edge → procedure deleted; benign
             except Exception as e:
                 logger.warning("F080 §14.7: get_procedure failed for %s: %s", pid, e)
+                if trace is not None:
+                    trace.drop(pid, "procedure", FILTER_DROPPED, "procedure_fetch_failed")
                 continue
             if not getattr(detail, "active", False):
+                if trace is not None:
+                    trace.drop(pid, "procedure", FILTER_DROPPED, "procedure_inactive")
                 continue  # archived/superseded → never surface
             selected.append(detail)
 

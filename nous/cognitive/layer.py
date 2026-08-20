@@ -1053,6 +1053,20 @@ class CognitiveLayer:
         # F024: Attach pending diagnostic nudges from previous turn
         _diagnostic_nudges = self._pending_nudges.pop(session_id, "")
 
+        # F091: commit the retrieval trace only now that the censor verdict is
+        # known. `rendered` asserts "reached the model", and a censor-blocked
+        # turn never makes the model call — committing inside build() would
+        # have every survivor claim a delivery that did not happen.
+        _f091_trace = getattr(build_result, "retrieval_trace", None) if not _is_initiation else None
+        if _f091_trace is not None and not censor_blocked:
+            try:
+                from nous.observability.retrieval_logger import get_active
+                _f091_rl = get_active()
+                if _f091_rl is not None:
+                    _f091_rl.commit(_f091_trace)
+            except Exception:
+                logger.debug("F091: retrieval trace commit failed", exc_info=True)
+
         return TurnContext(
             system_prompt=system_prompt,
             frame=frame,

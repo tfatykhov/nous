@@ -32,6 +32,13 @@ QUERIES = [
     "how does graph expansion work here",
 ]
 
+def _commit_build_trace(rl, build_result) -> None:
+    """Stand in for pre_turn's commit (see the call sites)."""
+    trace = getattr(build_result, "retrieval_trace", None)
+    if trace is not None:
+        rl.commit(trace)
+
+
 FRAME = FrameSelection(
     frame_id="conversation", frame_name="Conversation",
     description="probe", confidence=1.0, match_method="default",
@@ -87,6 +94,11 @@ async def main() -> int:
                 input_text=q, frame=FRAME,
             )
             set_active(None)
+            # build() finalizes but no longer COMMITS — pre_turn does that once
+            # the censor verdict is known, so a blocked turn cannot claim
+            # delivery. This probe calls build() directly, so it plays the role
+            # pre_turn would.
+            _commit_build_trace(rl, on)
 
             # CONTROL: a second untraced build. This probe runs against a LIVE
             # database that other tooling mutates — `track_access` writes on
@@ -173,6 +185,7 @@ async def main() -> int:
             input_text="user preferences", frame=FRAME,
         )
         set_active(None)
+        _commit_build_trace(rl2, squeezed_build)
 
         td = rl2.get_recent()[0]
         rendered_facts = [
