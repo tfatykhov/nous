@@ -252,7 +252,14 @@
     const legs = e.legs ?? [];
     const errored = legs.filter((l) => l.error).length;
     if (errored > 0) return `0 entered · ${errored} leg${errored === 1 ? '' : 's'} errored`;
-    if (legs.length > 0 && legs.every((l) => !l.attempted)) return '0 entered · no leg ran';
+    const ran = legs.filter((l) => l.attempted).length;
+    const skipped = legs.length - ran;
+    if (legs.length > 0 && ran === 0) return '0 entered · no leg ran';
+    // MIXED is its own case. Falling through to "every leg ran" whenever the
+    // all-skipped test failed asserted something false and hid the skips.
+    if (skipped > 0) {
+      return `0 entered · ${ran} ran empty, ${skipped} skipped`;
+    }
     return '0 entered · every leg ran and returned nothing';
   }
 
@@ -541,7 +548,14 @@
                   {fmtMs(e.duration_ms)}
                 </span>
               </div>
-              <div class="rrow-bar" aria-hidden="true">
+              <!-- NOT aria-hidden as a whole: this row is a button, so its
+                   accessible name is its content, and hiding the bar removed
+                   the retrieval's OUTCOME ("not sampled", the zero reason, the
+                   in→out counts) from what a screen reader announces — leaving
+                   only the query and metadata. The old table exposed the
+                   outcome as text. Only the coloured segments are decorative;
+                   they carry aria-hidden individually. -->
+              <div class="rrow-bar">
                 <!-- Three distinct states, not two. Folding "sampled, nothing
                      entered" into the unsampled branch made the row assert
                      false sampling information — the same null-vs-empty
@@ -549,16 +563,17 @@
                 {#if !e.has_candidates}
                   <!-- Not sampled is not "nothing happened": legs and graph
                        expansion are captured on every retrieval regardless. -->
-                  <span class="rseg unsampled"></span>
+                  <span class="rseg unsampled" aria-hidden="true"></span>
                   <span class="rbar-n muted">candidates not sampled</span>
                 {:else if segs.length === 0}
-                  <span class="rseg empty"></span>
+                  <span class="rseg empty" aria-hidden="true"></span>
                   <span class="rbar-n muted">{zeroReason(e)}</span>
                 {:else}
                   {@const tot = segs.reduce((a, s) => a + s.val, 0)}
                   {#each segs as s, si (si)}
                     <span
                       class="rseg {s.cls}"
+                      aria-hidden="true"
                       style="flex-grow: {s.val}"
                       title="{s.key}: {s.val}"
                     ></span>
