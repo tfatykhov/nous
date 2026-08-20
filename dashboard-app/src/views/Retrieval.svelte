@@ -205,6 +205,20 @@
     return { entries: Object.entries(t), sum };
   });
 
+  /**
+   * Why a sampled retrieval produced no candidates. "Every leg silent" is only
+   * one of three causes — legs can also have errored or never run — and the
+   * entry already carries `error`/`attempted` per leg, so stating the actual
+   * cause costs nothing and naming the wrong one hides a failure.
+   */
+  function zeroReason(e: RetrievalEntry): string {
+    const legs = e.legs ?? [];
+    const errored = legs.filter((l) => l.error).length;
+    if (errored > 0) return `0 entered · ${errored} leg${errored === 1 ? '' : 's'} errored`;
+    if (legs.length > 0 && legs.every((l) => !l.attempted)) return '0 entered · no leg ran';
+    return '0 entered · every leg ran and returned nothing';
+  }
+
   /** Per-row funnel segments, so the list is scannable without drilling in. */
   function funnelSegments(e: RetrievalEntry) {
     const counts = e.disposition_counts ?? {};
@@ -296,6 +310,7 @@
         title: `${r.seed_type} ${shortId(r.seed_id, 6)} —[${r.edge_relation ?? 'related'}]→ `
              + `${r.neighbor_type} ${shortId(r.neighbor_id, 6)}  `
              + `strength ${fmtScore(r.path_strength)} · hop ${r.hop}`
+             + (r.extraction_method ? ` · ${r.extraction_method}` : '')
              + (r.won_best_path ? '' : ' · lost best-path'),
       };
     });
@@ -317,8 +332,13 @@
    * comment and then sorted by yield descending — which buried the silent legs
    * at the bottom of a height-limited pane, i.e. the exact opposite.
    */
-  function legRank(v: { returned: number; errors: number }): number {
+  function legRank(v: { returned: number; errors: number; attempted: number }): number {
     if (v.errors > 0) return 0;
+    // `attempted` here is a COUNT of retrievals in which the leg actually ran
+    // (dashboard_queries sums the per-retrieval boolean). Zero means it never
+    // fired at all — a planner or budget skip, which is expected and benign, so
+    // it must not be promoted as a ran-but-empty diagnostic.
+    if (v.attempted === 0) return 3;
     return v.returned === 0 ? 1 : 2;
   }
   let sortedLegs = $derived.by(() => {
@@ -465,7 +485,7 @@
                   <span class="rbar-n muted">candidates not sampled</span>
                 {:else if segs.length === 0}
                   <span class="rseg empty"></span>
-                  <span class="rbar-n muted">0 entered · every leg silent</span>
+                  <span class="rbar-n muted">{zeroReason(e)}</span>
                 {:else}
                   {@const tot = segs.reduce((a, s) => a + s.val, 0)}
                   {#each segs as s, si (si)}
@@ -533,7 +553,11 @@
                 <td class="num">{agg.attempted.toLocaleString()}</td>
                 <td class="num">
                   {agg.returned.toLocaleString()}
-                  {#if agg.returned === 0}<span class="muted sm">silent</span>{/if}
+                  {#if agg.attempted === 0}
+                    <span class="muted sm">never fired</span>
+                  {:else if agg.returned === 0}
+                    <span class="muted sm">silent</span>
+                  {/if}
                 </td>
                 <td class="num muted">{agg.deduped ? agg.deduped.toLocaleString() : '—'}</td>
                 <td class="num" class:err={agg.errors > 0}>{agg.errors || '—'}</td>
@@ -679,6 +703,13 @@
                       <span class="chip sm t-{edge.neighbor_type}">{edge.neighbor_type}</span>
                       <code>{shortId(edge.neighbor_id)}</code>
                       <span class="muted sm">w {fmtScore(edge.edge_weight)} · str {fmtScore(edge.path_strength)} · hop {edge.hop}</span>
+                      <!-- Provenance is load-bearing, not decoration: inferred
+                           edges take graph_inferred_edge_penalty, so without it
+                           two otherwise-identical edges score differently with
+                           no visible reason. Dropped in the rewrite; restored. -->
+                      {#if edge.extraction_method}
+                        <span class="chip sm prov">{edge.extraction_method}</span>
+                      {/if}
                       {#if !edge.won_best_path}<span class="chip sm">lost best-path</span>{/if}
                     </li>
                   {/each}
@@ -1178,6 +1209,7 @@
   .chip.sm { font-size: 0.68rem; }
   .chip.restored { opacity: 0.85; }
   .chip.warnchip { color: var(--yellow); border-color: var(--yellow); }
+  .chip.prov { color: var(--muted); border-style: dashed; }
   /* Memory-type identity, reusing the palette the rest of the dashboard uses. */
   .chip.t-fact      { color: var(--fact-color);      border-color: var(--fact-color); }
   .chip.t-episode   { color: var(--episode-color);   border-color: var(--episode-color); }
