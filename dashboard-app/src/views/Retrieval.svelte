@@ -514,9 +514,22 @@
       // candidate's `rendered`. Counting those as expansion yield credited the
       // graph for memories it did not contribute; entry_leg is first-wins, so
       // it names how the candidate ACTUALLY got into the pool.
-      viaGraph: [...nbrs].filter((n) =>
-        GRAPH_ENTRY_LEGS.has(candidateIndex.get(String(n))?.entryLeg ?? ''),
-      ).length,
+      // THREE outcomes, not two. A neighbour missing from the index has not
+      // been shown to come from a direct leg — it was never recorded, because
+      // the capture cap rejected it or the row was not sampled. Folding those
+      // into "direct" turned an absent record into a positive claim about
+      // provenance, which is the same error the cap already caused once on the
+      // write side. `?? ''` made the miss silent; it is now its own bucket.
+      ...(() => {
+        let viaGraph = 0, viaDirect = 0, unknown = 0;
+        for (const n of nbrs) {
+          const leg = candidateIndex.get(String(n))?.entryLeg;
+          if (leg === undefined || leg === null) unknown++;
+          else if (GRAPH_ENTRY_LEGS.has(leg)) viaGraph++;
+          else viaDirect++;
+        }
+        return { viaGraph, viaDirect, unknown };
+      })(),
     };
   });
 
@@ -975,9 +988,13 @@
             {#if candidateIndex.size > 0}
               <p class="status-msg sm">
                 {expansionTotals.viaGraph} of {expansionTotals.neighbours} neighbours entered
-                the candidate pool through a graph leg; the rest were already present from a
-                direct leg and were corroborated, not contributed. Neighbours dropped before
-                the merge have no edge recorded, so expansion's true reach is wider than
+                the candidate pool through a graph leg{#if expansionTotals.viaDirect > 0}; {expansionTotals.viaDirect}
+                  {expansionTotals.viaDirect === 1 ? 'was' : 'were'} already present from a
+                  direct leg and {expansionTotals.viaDirect === 1 ? 'was' : 'were'} corroborated,
+                  not contributed{/if}{#if expansionTotals.unknown > 0}; {expansionTotals.unknown}
+                  {expansionTotals.unknown === 1 ? 'has' : 'have'} no candidate record, so their
+                  provenance is unknown — capture stopped at the cap{/if}. Neighbours dropped
+                before the merge have no edge recorded, so expansion's true reach is wider than
                 shown.
               </p>
             {/if}
