@@ -311,14 +311,21 @@
     orderDispositions(Object.keys(detail?.candidates_by_disposition ?? {})),
   );
 
-  /** Legs that produced nothing are the interesting ones; sort them up. */
+  /**
+   * Diagnostic order: errored legs, then SILENT ones (ran, returned nothing),
+   * then productive ones by yield. The previous comparator claimed this in a
+   * comment and then sorted by yield descending — which buried the silent legs
+   * at the bottom of a height-limited pane, i.e. the exact opposite.
+   */
+  function legRank(v: { returned: number; errors: number }): number {
+    if (v.errors > 0) return 0;
+    return v.returned === 0 ? 1 : 2;
+  }
   let sortedLegs = $derived.by(() => {
     const legs = [...($store.data ? Object.entries($store.data.leg_totals) : [])];
     return legs.sort((a, b) => {
-      if ((b[1].errors > 0 ? 1 : 0) !== (a[1].errors > 0 ? 1 : 0)) {
-        return (b[1].errors > 0 ? 1 : 0) - (a[1].errors > 0 ? 1 : 0);
-      }
-      return b[1].returned - a[1].returned;
+      const r = legRank(a[1]) - legRank(b[1]);
+      return r !== 0 ? r : b[1].returned - a[1].returned;
     });
   });
 </script>
@@ -447,7 +454,19 @@
                 </span>
               </div>
               <div class="rrow-bar" aria-hidden="true">
-                {#if e.has_candidates && segs.length}
+                <!-- Three distinct states, not two. Folding "sampled, nothing
+                     entered" into the unsampled branch made the row assert
+                     false sampling information — the same null-vs-empty
+                     distinction the detail view and the API already keep. -->
+                {#if !e.has_candidates}
+                  <!-- Not sampled is not "nothing happened": legs and graph
+                       expansion are captured on every retrieval regardless. -->
+                  <span class="rseg unsampled"></span>
+                  <span class="rbar-n muted">candidates not sampled</span>
+                {:else if segs.length === 0}
+                  <span class="rseg empty"></span>
+                  <span class="rbar-n muted">0 entered · every leg silent</span>
+                {:else}
                   {@const tot = segs.reduce((a, s) => a + s.val, 0)}
                   {#each segs as s, si (si)}
                     <span
@@ -457,11 +476,6 @@
                     ></span>
                   {/each}
                   <span class="rbar-n">{tot} → <strong>{e.n_rendered}</strong></span>
-                {:else}
-                  <!-- Not sampled is not "nothing happened": legs and graph
-                       expansion are captured on every retrieval regardless. -->
-                  <span class="rseg unsampled"></span>
-                  <span class="rbar-n muted">candidates not sampled</span>
                 {/if}
               </div>
               <div class="rrow-meta">
@@ -969,12 +983,15 @@
   .rseg.badge-good { background: var(--green); }
   .rseg.badge-warn { background: var(--yellow); }
   .rseg.badge-bad  { background: var(--red); }
+  /* Hatched = we did not look. Solid hairline = we looked and found nothing.
+     Two different facts, so two different marks. */
   .rseg.unsampled {
     flex: 1;
     background: repeating-linear-gradient(
       90deg, var(--border), var(--border) 4px, transparent 4px, transparent 8px
     );
   }
+  .rseg.empty { flex: 1; background: var(--border); }
   .rbar-n {
     flex-shrink: 0;
     margin-left: 0.55rem;
