@@ -691,6 +691,13 @@ async def run_recall_pipeline(
     # ``attempted_legs`` is the producer's own answer to "did this run",
     # which no combination of config flags can reconstruct — the one-hop
     # fallback, for one, is skipped based on runtime spreading success.
+    # ``acc.graph_expanded`` is filled by EITHER spreading activation OR the
+    # 1-hop fallback — never both — and `_tr_entries` tags every one of those
+    # candidates `entry_leg="graph_expanded"`. So the yield must be reported
+    # under THAT name, or candidates reference a leg that has no record while
+    # the legs that do exist claim zero. `brain_graph` / `spreading_activation`
+    # stay as attempt markers (which mechanism ran), carrying no count of
+    # their own — a count on them would double the same rows.
     _leg_counts = {
         "heart_primary": len(acc.heart_results),
         "chunk": len(acc.chunk_results),
@@ -698,14 +705,20 @@ async def run_recall_pipeline(
         "heart_graph_memory": len(acc.heart_graph_memory_neighbors),
         "brain": len(acc.decision_results),
         "graph_expanded": len(acc.graph_expanded),
-        "spreading_activation": len(acc.graph_expanded) if acc.spreading_activation_used else 0,
     }
-    for _leg_name in acc.attempted_legs:
+    _attempted = set(acc.attempted_legs)
+    # Emit the graph_expanded leg whenever it produced rows, even though no
+    # stage adds that literal name to attempted_legs (the stages mark the
+    # MECHANISM: brain_graph or spreading_activation).
+    if acc.graph_expanded:
+        _attempted.add("graph_expanded")
+    for _leg_name in _attempted:
         # ``.get(name)`` -> None, NOT 0, for legs absent from _leg_counts.
         # keyed / keyed_r2 / exemplar report their own counts at assembly
         # (they are the only legs whose yield is known there), and they are
         # ALSO in attempted_legs — so defaulting to 0 here overwrote a
         # correct count with zero. ``leg()`` treats None as "leave it alone".
+        # brain_graph / spreading_activation land here with None by design.
         tr.leg(_leg_name, attempted=True, n_returned=_leg_counts.get(_leg_name))
     for _stage, _n_err in acc.stage_errors.items():
         tr.leg(_stage, attempted=True, error=f"{_n_err} error(s)")

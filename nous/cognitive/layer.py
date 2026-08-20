@@ -727,6 +727,10 @@ class CognitiveLayer:
                     critic_skills=_critic_skills,  # Issue #229
                     epistemic_class=epistemic_class,  # §2
                     is_first_turn=is_first_turn,  # F083 A2
+                    # F091: turn_count is incremented in post_turn, so during
+                    # this turn's pre_turn it is the count of COMPLETED turns —
+                    # +1 makes the telemetry row say which turn it fed.
+                    turn_number=((_meta_ft.turn_count + 1) if _meta_ft else 1),
                 )
                 system_prompt = build_result.system_prompt
                 context_token_estimate = sum(s.token_estimate for s in build_result.sections)

@@ -10,14 +10,28 @@
   } from '../lib/types/api';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
 
+  // Server-side, not a client filter over the fetched page: the `context` path
+  // fires every turn while recall_deep is occasional, so the recent-50 window
+  // is routinely 100% context — filtering locally showed an empty table while
+  // pipeline rows sat pages back. Refetch on change so the rollups match too.
   let pathFilter = $state<'' | 'pipeline' | 'context'>('');
 
   const store = usePoll(
     makePollStore<RetrievalData>(
-      (signal) => apiGet<RetrievalData>('/dashboard/retrieval', { signal }),
+      (signal) =>
+        apiGet<RetrievalData>(
+          `/dashboard/retrieval${pathFilter ? `?path=${pathFilter}` : ''}`,
+          { signal },
+        ),
       0, // fetch-once + manual refresh, matching sibling views
     ),
   );
+
+  function setPath(p: '' | 'pipeline' | 'context') {
+    if (p === pathFilter) return;
+    pathFilter = p;
+    void store.refresh();
+  }
 
   // ── Detail drill-through (own state, out-of-order guarded) ────────────────
   let selectedId = $state<string | null>(null);
@@ -118,9 +132,9 @@
     });
   }
 
-  let filteredEntries = $derived(
-    ($store.data?.entries ?? []).filter((e) => !pathFilter || e.path === pathFilter),
-  );
+  // Server already applied `path`; no second client-side filter, which would
+  // silently disagree with the rollups above it.
+  let filteredEntries = $derived($store.data?.entries ?? []);
 
   let totals = $derived.by(() => {
     const t = $store.data?.disposition_totals ?? {};
@@ -235,11 +249,11 @@
     <div class="detail-head">
       <h2>Recent Retrievals</h2>
       <div class="filters">
-        <button class="chip-btn" class:on={pathFilter === ''} onclick={() => (pathFilter = '')}>All</button>
-        <button class="chip-btn" class:on={pathFilter === 'pipeline'} onclick={() => (pathFilter = 'pipeline')}>
+        <button class="chip-btn" class:on={pathFilter === ''} onclick={() => setPath('')}>All</button>
+        <button class="chip-btn" class:on={pathFilter === 'pipeline'} onclick={() => setPath('pipeline')}>
           recall_deep
         </button>
-        <button class="chip-btn" class:on={pathFilter === 'context'} onclick={() => (pathFilter = 'context')}>
+        <button class="chip-btn" class:on={pathFilter === 'context'} onclick={() => setPath('context')}>
           pre-turn context
         </button>
       </div>

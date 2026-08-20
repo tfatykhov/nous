@@ -40,6 +40,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -2003,8 +2004,10 @@ def create_app(
     async def dashboard_retrieval_detail(request: Request) -> JSONResponse:
         """GET /dashboard/retrieval/{entry_id} - One retrieval's candidates + expansions."""
         entry_id = request.path_params["entry_id"]
-        # Ids are uuid4().hex[:16] — validate shape before hitting the DB.
-        if not entry_id or len(entry_id) > 32 or not entry_id.isalnum():
+        # Ids are uuid4().hex[:16]. `isalnum()` is Unicode-aware, so it let
+        # non-hex through while reading like a validation control; match the
+        # actual shape instead.
+        if not re.fullmatch(r"[0-9a-f]{16}", entry_id or ""):
             return JSONResponse({"error": "invalid entry_id"}, status_code=400)
 
         try:

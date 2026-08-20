@@ -208,6 +208,7 @@ class ContextEngine:
         critic_skills: list[str] | None = None,
         epistemic_class: str | None = None,  # §2
         is_first_turn: bool = False,  # F083 A2
+        turn_number: int | None = None,  # F091 telemetry correlation
     ) -> BuildResult:
         """Build system prompt + context sections within budget.
 
@@ -253,7 +254,7 @@ class ContextEngine:
         _rl = get_active_retrieval_logger()
         tr = (
             _rl.start(query=input_text, path="context", session_id=session_id,
-                      turn_number=None)
+                      turn_number=turn_number)
             if _rl is not None else NULL_TRACE
         )
         _tr_t0 = time.monotonic()

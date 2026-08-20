@@ -621,9 +621,16 @@ async def create_components(settings: Settings) -> dict:
 
         if getattr(settings, "retrieval_telemetry_retention_days", 0) > 0:
             async def _retrieval_log_retention_loop():
+                # Sweep once at startup, THEN daily. These rows are 10-100x
+                # larger than context_log's, so a process restarted daily would
+                # never prune under a sleep-first loop.
+                first = True
                 while True:
                     try:
-                        await asyncio.sleep(86400)  # daily
+                        if first:
+                            first = False
+                        else:
+                            await asyncio.sleep(86400)
                         days = settings.retrieval_telemetry_retention_days
                         async with database.session() as s:
                             from sqlalchemy import text

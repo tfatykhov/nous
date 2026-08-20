@@ -5,14 +5,19 @@
 -- that needs to be filtered or aggregated is hoisted to a header column and the
 -- detail stays in JSONB.
 --
--- trace_id joins to nous_system.context_log (migration 026) so a retrieval
--- attaches to the turn that caused it.
+-- Correlation is (agent_id, session_id, turn_number) -> nous_system.context_log.
+-- NOT trace_id: the causal-chain trace id is minted on the turn_completed event
+-- in post_turn (cognitive/layer.py), which is AFTER retrieval has already run,
+-- so no trace id exists at the moment a retrieval happens. The column is kept
+-- nullable and RESERVED for a future pre_turn-minted id, and is deliberately
+-- left unindexed until something populates it.
 
 CREATE TABLE IF NOT EXISTS nous_system.retrieval_log (
     id              TEXT PRIMARY KEY,
     agent_id        TEXT NOT NULL,
     session_id      TEXT,
     turn_number     INTEGER,
+    -- Reserved. See the correlation note above. Nothing populates this yet.
     trace_id        VARCHAR(12),
     timestamp       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -47,6 +52,5 @@ CREATE TABLE IF NOT EXISTS nous_system.retrieval_log (
 
 CREATE INDEX IF NOT EXISTS idx_retrieval_log_time  ON nous_system.retrieval_log(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_retrieval_log_agent ON nous_system.retrieval_log(agent_id);
-CREATE INDEX IF NOT EXISTS idx_retrieval_log_trace ON nous_system.retrieval_log(trace_id);
 CREATE INDEX IF NOT EXISTS idx_retrieval_log_sess  ON nous_system.retrieval_log(session_id, turn_number);
 CREATE INDEX IF NOT EXISTS idx_retrieval_log_path  ON nous_system.retrieval_log(path, timestamp DESC);

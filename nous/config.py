@@ -1479,7 +1479,10 @@ class Settings(BaseSettings):
     # (context_log stores counts and ids, never message text).
     retrieval_telemetry_query_chars: int = 500
     retrieval_telemetry_max_candidates: int = 300
-    retrieval_telemetry_ring_size: int = 100
+    # Live-read fallback only; both dashboard endpoints read Postgres, so this
+    # ring has no consumer today. Kept small deliberately — at sample_rate 1.0
+    # a 100-deep ring pins 60-100 MB RSS holding candidate arrays nobody reads.
+    retrieval_telemetry_ring_size: int = 20
     retrieval_telemetry_retention_days: int = 14
 
     # F038: DAG Orchestration
