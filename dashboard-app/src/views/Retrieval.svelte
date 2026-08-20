@@ -108,12 +108,21 @@
     return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
   }
 
+  // A ticking clock, because this store is fetch-once: without it `fmtAge` is
+  // only evaluated on a parent render, so a row that said "just now" keeps
+  // saying it for hours — stale recency is worse than no recency.
+  let nowMs = $state(Date.now());
+  $effect(() => {
+    const id = setInterval(() => { nowMs = Date.now(); }, 30_000);
+    return () => clearInterval(id);
+  });
+
   /** Relative age. The absolute stamp repeated 50x is noise; recency is signal. */
-  function fmtAge(iso: string | null): string {
+  function fmtAge(iso: string | null, now: number): string {
     if (!iso) return '';
     const t = new Date(iso).getTime();
     if (Number.isNaN(t)) return '';
-    const s = Math.max(0, (Date.now() - t) / 1000);
+    const s = Math.max(0, (now - t) / 1000);
     if (s < 60) return 'just now';
     if (s < 3600) return `${Math.floor(s / 60)}m ago`;
     if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
@@ -197,6 +206,13 @@
   );
   let hiddenCount = $derived(
     ($store.data?.entries ?? []).length - filteredEntries.length,
+  );
+
+  // Rows whose candidate array stopped at retrieval_telemetry_max_candidates.
+  // Counted over the WHOLE window, not the automated-filtered view, because the
+  // funnel above it is a window-level rollup.
+  let cappedRows = $derived(
+    ($store.data?.entries ?? []).filter((e) => e.truncated).length,
   );
 
   let totals = $derived.by(() => {
@@ -385,13 +401,29 @@
       </p>
     {:else}
       {@const rendered = $store.data.disposition_totals['rendered'] ?? 0}
-      {@const dropped = totals.sum - rendered}
+      {@const unaccounted = $store.data.disposition_totals['unaccounted'] ?? 0}
+      <!-- `unaccounted` is BY DEFINITION "no stage claimed this drop" — the
+           drift alarm. Summing it into "dropped at a gate" would bury the one
+           number that says the instrumentation itself is incomplete inside an
+           ordinary total, which is the class of error this whole feature
+           exists to prevent. -->
+      {@const dropped = totals.sum - rendered - unaccounted}
       <!-- One element, one job: the bar IS the figure. The old version stated
            each number three times — headline, bar, then a legend column. -->
       <div class="funnel">
         <div class="funnel-in">
           <span class="funnel-n">{totals.sum.toLocaleString()}</span>
-          <span class="funnel-l">candidates entered</span>
+          <!-- Once any row hit the per-retrieval capture cap, this sum is the
+               recorded prefix, not the true intake. Say "recorded" rather than
+               presenting an undercount as exact. -->
+          <span class="funnel-l">
+            {cappedRows > 0 ? 'candidates recorded' : 'candidates entered'}
+          </span>
+          {#if cappedRows > 0}
+            <span class="funnel-cap">
+              {cappedRows} retrieval{cappedRows === 1 ? '' : 's'} hit the capture cap
+            </span>
+          {/if}
         </div>
 
         <div class="funnel-track" role="img"
@@ -417,6 +449,11 @@
           <span class="funnel-n good">{rendered.toLocaleString()}</span>
           <span class="funnel-l">reached the model</span>
           <span class="funnel-sub">{dropped.toLocaleString()} dropped at a gate</span>
+          {#if unaccounted > 0}
+            <span class="funnel-alarm">
+              {unaccounted.toLocaleString()} unaccounted — a filter is not reporting
+            </span>
+          {/if}
         </div>
       </div>
 
@@ -506,7 +543,7 @@
                 {/if}
                 {#if e.truncated}<span class="chip sm warnchip">capped</span>{/if}
                 <span class="spacer"></span>
-                <span class="muted" title={e.timestamp}>{fmtClock(e.timestamp)} · {fmtAge(e.timestamp)}</span>
+                <span class="muted" title={e.timestamp}>{fmtClock(e.timestamp)} · {fmtAge(e.timestamp, nowMs)}</span>
               </div>
             </button>
           </li>
@@ -877,6 +914,20 @@
     font-size: 0.75rem;
     color: var(--yellow);
     font-variant-numeric: tabular-nums;
+  }
+
+  .funnel-alarm {
+    display: block;
+    margin-top: 0.15rem;
+    font-size: 0.72rem;
+    color: var(--red);
+    font-variant-numeric: tabular-nums;
+  }
+  .funnel-cap {
+    display: block;
+    margin-top: 0.15rem;
+    font-size: 0.7rem;
+    color: var(--muted);
   }
 
   .funnel-track {
