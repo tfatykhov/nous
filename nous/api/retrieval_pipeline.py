@@ -723,7 +723,16 @@ async def run_recall_pipeline(
         # brain_graph / spreading_activation land here with None by design.
         tr.leg(_leg_name, attempted=True, n_returned=_leg_counts.get(_leg_name))
     for _stage, _n_err in acc.stage_errors.items():
-        tr.leg(_stage, attempted=True, error=f"{_n_err} error(s)")
+        # ``stage_errors`` is not purely errors: Stage 2b files its
+        # corroboration counter there (``*_duplicates``, documented at :1343 as
+        # "signal, not noise" — the graph reaching an item direct search already
+        # found). Reporting those as errors put a red "9 error(s)" on the
+        # dashboard for a healthy retrieval. They are dedup counts, which is
+        # exactly what ``n_deduped`` means.
+        if _stage.endswith("_duplicates"):
+            tr.leg(_stage[: -len("_duplicates")], attempted=True, n_deduped=_n_err)
+        else:
+            tr.leg(_stage, attempted=True, error=f"{_n_err} error(s)")
 
     tr.finalize(results, duration_ms=(time.monotonic() - _t0) * 1000.0)
 
