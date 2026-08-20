@@ -634,12 +634,20 @@ async def create_components(settings: Settings) -> dict:
                         days = settings.retrieval_telemetry_retention_days
                         async with database.session() as s:
                             from sqlalchemy import text
+                            # agent-scoped: the table is agent-scoped and the
+                            # retention setting is per-process, so an unscoped
+                            # DELETE lets a default-configured agent destroy
+                            # the rows of one configured to keep them longer.
                             await s.execute(text(
                                 "DELETE FROM nous_system.retrieval_log "
-                                "WHERE timestamp < now() - make_interval(days => :d)"
-                            ), {"d": days})
+                                "WHERE agent_id = :agent_id "
+                                "AND timestamp < now() - make_interval(days => :d)"
+                            ), {"d": days, "agent_id": settings.agent_id})
                             await s.commit()
-                        logger.info("F091: retrieval_log retention sweep (>%dd) done", days)
+                        logger.info(
+                            "F091: retrieval_log retention sweep (>%dd, agent=%s) done",
+                            days, settings.agent_id,
+                        )
                     except asyncio.CancelledError:
                         break
                     except Exception:

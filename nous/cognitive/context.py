@@ -1334,6 +1334,12 @@ class ContextEngine:
                                  FILTER_DROPPED, "identity_overlap")
 
                 # --- Combine tracks ---
+                # Track A (Critic) is registered HERE, not at the embedding
+                # registration above: a critic pick that the embedding search
+                # did not also return is rendered and lands in recalled_ids,
+                # but finalize() cannot mark a candidate nobody registered — so
+                # it fell out of n_candidates/n_rendered entirely.
+                _tr_enter(critic_procedures or [], "procedure", "context_procedures_critic")
                 all_procedures = critic_procedures + (embedding_procedures or [])
                 _before_slots = all_procedures
                 all_procedures = all_procedures[:total_slots]
@@ -1380,6 +1386,11 @@ class ContextEngine:
                         proc_text = self._truncate_to_budget(
                             proc_text, self._scaled_budget(budget.procedures),
                         )
+                        # Same trap the fact/decision/episode sections already
+                        # guard: recalled_ids is populated before this cut, so
+                        # a procedure whose line the budget removed would be
+                        # finalized as `rendered` while absent from the prompt.
+                        _tr_budget(all_procedures, "procedure", proc_text)
                         sections.append(
                             ContextSection(
                                 priority=7,
@@ -1404,6 +1415,11 @@ class ContextEngine:
                     recent = [e for e in recent if not _is_system_episode(e)]
                 if recent:
                     _temporal_episode_ids = {str(e.id) for e in recent}
+                    # Register the temporal tier as its own leg: these episodes
+                    # are rendered into "Recent Conversations" but never enter
+                    # recalled_ids, so without this they were memory delivered
+                    # to the model with no representation in the trace at all.
+                    _tr_enter(recent, "episode", "context_episodes_temporal")
                     recent_lines = []
                     inject_full = self._settings.followup_first_turn_episode and is_first_turn
                     for idx, e in enumerate(recent):
@@ -1553,6 +1569,14 @@ class ContextEngine:
                     for mid in mids
                     if (mid, mtype) not in _tr_budget_cut
                 ]
+                # Temporal-tier episodes DID reach the model (rendered into
+                # "Recent Conversations"), but they never enter recalled_ids,
+                # so finalize could not override their `deduped` mark. Relabel
+                # alone was half a fix: they still counted as a drop and sat
+                # outside n_rendered while their summaries were in the prompt.
+                _rendered.extend(
+                    _RenderedRef(mid, "episode") for mid in _temporal_episode_ids
+                )
                 tr.finalize(_rendered, duration_ms=(time.monotonic() - _tr_t0) * 1000.0)
                 _rl.commit(tr)
             except Exception:
