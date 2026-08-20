@@ -639,3 +639,28 @@ def test_mark_not_delivered_on_an_unknown_candidate_is_a_noop():
     t = _trace()
     t.mark_not_delivered(uuid4(), "decision", SLICED_OFF, "formatter_scope_filter")
     assert t.to_dict()["n_candidates"] == 0
+
+
+def test_a_deliberately_skipped_leg_is_recorded_not_omitted():
+    """A type in skip_types (short acks set skip_types={"fact"}) or a zero
+    section budget produced NO leg row — indistinguishable from instrumentation
+    that simply is not there."""
+    t = _trace()
+    t.leg("context_facts", attempted=False, n_returned=0,
+          skip_reason="retrieval plan skipped 'fact'")
+
+    leg = t.to_dict()["legs"][0]
+    assert leg["attempted"] is False
+    assert leg["n_returned"] == 0
+    assert "fact" in leg["skip_reason"]
+
+
+def test_skip_then_run_upgrades_attempted():
+    """leg() ORs attempted, so a skip record can never mask a later real run."""
+    t = _trace()
+    t.leg("context_facts", attempted=False, skip_reason="section budget is 0")
+    t.leg("context_facts", attempted=True, n_returned=3)
+
+    leg = t.to_dict()["legs"][0]
+    assert leg["attempted"] is True
+    assert leg["n_returned"] == 3

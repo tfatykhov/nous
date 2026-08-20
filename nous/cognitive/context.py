@@ -277,6 +277,21 @@ class ContextEngine:
             return _wrapped
 
         @_tr_guard
+        def _tr_skip(leg: str, budget_value: int, mem_type: str) -> None:
+            """Record a leg the planner or the budget deliberately skipped.
+
+            Without this, a type in `skip_types` (short acks set
+            skip_types={"fact"}) or a zero section budget produced NO leg row —
+            indistinguishable from instrumentation that simply is not there.
+            `Leg` already carries attempted/skip_reason for exactly this.
+            """
+            reason = (
+                "section budget is 0" if budget_value <= 0
+                else f"retrieval plan skipped '{mem_type}'"
+            )
+            tr.leg(leg, attempted=False, n_returned=0, skip_reason=reason)
+
+        @_tr_guard
         def _tr_enter(items: list, mem_type: str, leg: str) -> list:
             """Register a leg's raw hits before any filter has run."""
             tr.leg(leg, attempted=True, n_returned=len(items or []),
@@ -856,6 +871,8 @@ class ContextEngine:
         logger.info("Context build query: topic=%r, input=%r, default_query=%r", current_topic, input_text, _default_query)
 
         # 5. Decisions (F26: skip_types is primary skip mechanism)
+        if not (budget.decisions > 0 and "decision" not in skip_types):
+            _tr_skip("context_decisions", budget.decisions, "decision")
         if budget.decisions > 0 and "decision" not in skip_types:
             try:
                 limit = _limits.get("decision", DEFAULT_FETCH_LIMITS.get("decision", 5))
@@ -915,6 +932,8 @@ class ContextEngine:
 
         facts_injected = False
         # 6. Facts (F10: retrieve -> apply_frame_boost -> dedup -> usage_boost -> truncate)
+        if not (budget.facts > 0 and "fact" not in skip_types):
+            _tr_skip("context_facts", budget.facts, "fact")
         if budget.facts > 0 and "fact" not in skip_types:
             try:
                 limit = _limits.get("fact", DEFAULT_FETCH_LIMITS.get("fact", 5))
@@ -1124,6 +1143,12 @@ class ContextEngine:
                     tier="dynamic",
                 )
             )
+
+        # One skip record for the procedure TYPE, not per branch: the two
+        # blocks below are alternative implementations behind the same
+        # budget/skip_types gate, so a type-level skip belongs to neither.
+        if not (budget.procedures > 0 and "procedure" not in skip_types):
+            _tr_skip("context_procedures", budget.procedures, "procedure")
 
         # 7. F080 §14.7: graph-primary procedure selection — preloads the BODIES of
         # procedures activated via K-line graph edges from recalled facts/decisions,
@@ -1442,6 +1467,8 @@ class ContextEngine:
         # Not gated by budget.episodes — this is a lightweight tier that shows
         # only titles (+ summaries when boosted), separate from heavy semantic retrieval
         _temporal_episode_ids: set[str] = set()
+        if not self._settings.temporal_context_enabled:
+            _tr_skip("context_episodes_temporal", 1, "temporal episodes")
         if self._settings.temporal_context_enabled:
             try:
                 recent = await self._heart.list_episodes(limit=5, hours=48)
@@ -1498,6 +1525,8 @@ class ContextEngine:
                 tr.leg("context_episodes_temporal", attempted=True, error=str(e)[:200])
 
         # 8. Episodes
+        if not (budget.episodes > 0 and "episode" not in skip_types):
+            _tr_skip("context_episodes", budget.episodes, "episode")
         if budget.episodes > 0 and "episode" not in skip_types:
             try:
                 limit = _limits.get("episode", DEFAULT_FETCH_LIMITS.get("episode", 5))
