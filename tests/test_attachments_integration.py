@@ -81,7 +81,8 @@ class _MockCognitive:
 
     async def pre_turn(self, agent_id, session_id, user_input, session=None, *,
                        conversation_messages=None, user_id=None,
-                       user_display_name=None, skip_episode=False, is_subtask=False):
+                       user_display_name=None, skip_episode=False, is_subtask=False,
+                       turn_number=None):
         return self.preset_context
 
     async def post_turn(self, agent_id, session_id, turn_result, turn_context,

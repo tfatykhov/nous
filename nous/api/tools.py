@@ -1169,7 +1169,15 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 _fmt_all = "all" in search_types
                 if not (_fmt_all or "decision" in search_types):
                     for _r in results:
-                        if _r.type == "decision" or _r.metadata.get("stage_origin") == "brain_graph":
+                        # ONLY what the Brain Decisions section gates (:455):
+                        # source=="brain" plus its brain_graph bucket. The
+                        # Graph-Connected Decisions section (:440) emits
+                        # heart_graph decisions UNCONDITIONALLY, so downgrading
+                        # every decision-typed result — as this first did —
+                        # reported content that DID reach the model as filtered
+                        # out, inverting the error it was written to fix.
+                        _origin = _r.metadata.get("stage_origin")
+                        if _r.source == "brain" or _origin == "brain_graph":
                             _tr.mark_not_delivered(
                                 _r.id, _r.type, SLICED_OFF,
                                 "formatter_scope_filter",

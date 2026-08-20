@@ -45,7 +45,7 @@ class MockCognitiveLayer:
             context_token_estimate=100,
         )
 
-    async def pre_turn(self, agent_id, session_id, user_input, session=None, *, conversation_messages=None, user_id=None, user_display_name=None, skip_episode=False, is_subtask=False):
+    async def pre_turn(self, agent_id, session_id, user_input, session=None, *, conversation_messages=None, user_id=None, user_display_name=None, skip_episode=False, is_subtask=False, turn_number=None):
         self.pre_turn_calls.append((agent_id, session_id, user_input))
         return self.preset_context
 

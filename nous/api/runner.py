@@ -415,6 +415,11 @@ class AgentRunner:
                 user_display_name=user_display_name,
                 skip_episode=skip_episode,
                 is_subtask=is_subtask,
+                # F091: same conversation-derived number context_log records,
+                # computed here BEFORE the user message is appended below —
+                # matching how _current_turn_number is derived after the
+                # append, so both name the same turn.
+                turn_number=(len(conversation.messages) + 2) // 2,
             )
 
             # 3. Append user message (text-only; upgraded to multimodal after censor check)
@@ -1058,6 +1063,7 @@ class AgentRunner:
                 conversation_messages=recent_messages or None,
                 user_id=user_id,
                 user_display_name=user_display_name,
+                turn_number=(len(conversation.messages) + 2) // 2,  # F091, see run_turn
             )
 
             # Append user message (text-only; upgraded to multimodal after censor check)
