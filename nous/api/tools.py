@@ -1064,6 +1064,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             )
             # F091: open a telemetry trace for this retrieval. NULL_TRACE when
             # the feature is off, so the pipeline call below is unchanged.
+            _tr_committed = False  # F091: guards against a second insert
             _rl = get_active_retrieval_logger()
             _tr = (
                 _rl.start(
@@ -1189,15 +1190,22 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     _tr.mark_rendered(_ep_id, "episode", "parent_episode_section")
                 _tr.leg("parent_episode", attempted=True,
                         n_returned=len(parent_episodes))
-            if _rl is not None and _tr is not None:
-                try:
-                    _rl.commit(_tr)
-                except Exception:
-                    logger.debug("F091: retrieval trace commit failed", exc_info=True)
+            # Format FIRST, commit after. `rendered` means the text reached the
+            # model, and until the formatter returns, no text exists — a raise
+            # here with the trace already persisted would claim every survivor
+            # was delivered while the tool returned only an error. Committing
+            # first also let the exception handler attempt a SECOND insert on
+            # the same trace id, which merely collided on the primary key.
             text = _format_pipeline_text(
                 results, stats, search_types, parent_episodes=parent_episodes,
                 session_group_heart=getattr(settings, "session_group_heart_section", False),
             )
+            if _rl is not None and _tr is not None:
+                try:
+                    _rl.commit(_tr)
+                    _tr_committed = True
+                except Exception:
+                    logger.debug("F091: retrieval trace commit failed", exc_info=True)
 
             # F055: fire-and-forget record_surfaced so the request returns
             # immediately. record_surfaced opens its OWN DB session inside
@@ -1243,7 +1251,18 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             try:
                 _rl_err = get_active_retrieval_logger()
                 _tr_err = locals().get("_tr")
-                if _rl_err is not None and _tr_err is not None:
+                # Only if the happy path did not already commit — a second
+                # commit on the same trace id is a duplicate insert that merely
+                # collides on the primary key.
+                if (
+                    _rl_err is not None and _tr_err is not None
+                    and not locals().get("_tr_committed", False)
+                ):
+                    # Nothing was returned to the model, so anything finalize
+                    # had already marked `rendered` (e.g. a formatter raise
+                    # after the pipeline finished) must be un-claimed before
+                    # this row is persisted.
+                    _tr_err.undeliver_all(SLICED_OFF, "recall_deep_failed")
                     _tr_err.leg("recall_deep", attempted=True, error=str(e)[:200])
                     _tr_err.finalize([])
                     _rl_err.commit(_tr_err)

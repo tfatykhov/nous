@@ -443,6 +443,21 @@ class RetrievalTrace:
         cand.disposition_stage = stage
         cand.final_rank = None
 
+    def undeliver_all(self, disposition: str, stage: str) -> None:
+        """Un-claim every ``RENDERED`` candidate, for a path that returns
+        nothing to the model at all.
+
+        The failure case: the pipeline finished and ``finalize`` marked its
+        survivors delivered, then a later step (the formatter) raised and the
+        tool returned only an error. Without this the persisted row asserts
+        that memory reached the model when no memory text was emitted.
+        """
+        for cand in self._candidates.values():
+            if cand.disposition == RENDERED:
+                cand.disposition = disposition
+                cand.disposition_stage = stage
+                cand.final_rank = None
+
     def drop_all(self, items: list, item_type: str, disposition: str, stage: str) -> None:
         for item in items:
             self.drop(getattr(item, "id", item), item_type, disposition, stage)
@@ -576,6 +591,7 @@ class NullTrace:
     def drop_all(self, *a: Any, **k: Any) -> None: ...
     def mark_rendered(self, *a: Any, **k: Any) -> None: ...
     def mark_not_delivered(self, *a: Any, **k: Any) -> None: ...
+    def undeliver_all(self, *a: Any, **k: Any) -> None: ...
     def exclude_type(self, *a: Any, **k: Any) -> None: ...
     def expansion(self, *a: Any, **k: Any) -> None: ...
     def finalize(self, *a: Any, **k: Any) -> None: ...

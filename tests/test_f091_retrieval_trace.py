@@ -739,3 +739,39 @@ def test_snippet_chars_zero_suppresses_snippets_too():
     t = _trace(snippet_chars=0)
     t.add(uuid4(), "fact", "heart_primary", content="secret content")
     assert t.to_dict()["candidates"][0]["snippet"] == ""
+
+
+def test_undeliver_all_unclaims_rendered_when_nothing_reached_the_model():
+    """The pipeline can finish and finalize can mark survivors delivered, and
+    THEN a later step (the formatter) can raise so the tool returns only an
+    error. Without un-claiming, the persisted row asserts memory reached the
+    model when no memory text was ever emitted."""
+    t = _trace()
+    a, b, c = uuid4(), uuid4(), uuid4()
+    t.add(a, "fact", "heart_primary", score=0.9)
+    t.add(b, "fact", "heart_primary", score=0.8)
+    t.add(c, "fact", "heart_primary", score=0.1)
+    t.drop(c, "fact", BELOW_FLOOR, "floor")
+    t.finalize([FakeResult(a, "fact"), FakeResult(b, "fact")])
+    assert t.to_dict()["n_rendered"] == 2
+
+    t.undeliver_all(SLICED_OFF, "recall_deep_failed")
+
+    d = t.to_dict()
+    assert d["n_rendered"] == 0
+    by_id = {x["id"]: x for x in d["candidates"]}
+    assert by_id[str(a)]["disposition"] == SLICED_OFF
+    assert by_id[str(a)]["disposition_stage"] == "recall_deep_failed"
+    assert by_id[str(a)]["final_rank"] is None
+    # An earlier, more specific gate is the true cause and must survive.
+    assert by_id[str(c)]["disposition"] == BELOW_FLOOR
+    assert by_id[str(c)]["disposition_stage"] == "floor"
+
+
+def test_undeliver_all_is_a_noop_when_nothing_was_rendered():
+    t = _trace()
+    fid = uuid4()
+    t.add(fid, "fact", "heart_primary")
+    t.drop(fid, "fact", BELOW_FLOOR, "floor")
+    t.undeliver_all(SLICED_OFF, "recall_deep_failed")
+    assert t.to_dict()["candidates"][0]["disposition"] == BELOW_FLOOR
