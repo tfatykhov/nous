@@ -25,19 +25,40 @@
   // CLIENT-side on purpose: the server has no notion of "agent-initiated", and
   // the rollups above deliberately keep covering the whole window.
   let hideAutomated = $state(true);
+  let appliedAutomated = true;
+
+  // The automated predicate runs CLIENT-side (the server has no notion of
+  // agent-initiated), but the API limits to the newest N rows BEFORE we see
+  // them. On a heartbeat-heavy agent a run of automated turns can fill that
+  // whole window, so the filter would empty the table while the user's own
+  // retrieval sat just past the cutoff — the exact pagination trap that moved
+  // `path` filtering server-side. Widen the request to the endpoint maximum
+  // while the toggle is on. The window size is disclosed in the funnel header,
+  // so the rollup denominator changing with it is visible, not silent.
+  const DEFAULT_LIMIT = 50;
+  const WIDE_LIMIT = 200; // rest.py caps `limit` at 200
 
   const store = usePoll(
     makePollStore<RetrievalData>(
       (signal) => {
         appliedPath = pathFilter;
+        appliedAutomated = hideAutomated;
+        const params = new URLSearchParams();
+        if (pathFilter) params.set('path', pathFilter);
+        params.set('limit', String(hideAutomated ? WIDE_LIMIT : DEFAULT_LIMIT));
         return apiGet<RetrievalData>(
-          `/dashboard/retrieval${pathFilter ? `?path=${pathFilter}` : ''}`,
+          `/dashboard/retrieval?${params}`,
           { signal },
         );
       },
       0, // fetch-once + manual refresh, matching sibling views
     ),
   );
+
+  function toggleAutomated() {
+    hideAutomated = !hideAutomated;
+    void store.refresh();
+  }
 
   function setPath(p: '' | 'pipeline' | 'context') {
     if (p === pathFilter) return;
@@ -51,7 +72,7 @@
   // would leave the selected chip paired with the previous path's rows
   // indefinitely. Reconcile once the in-flight request settles.
   $effect(() => {
-    if (!$store.loading && appliedPath !== pathFilter) {
+    if (!$store.loading && (appliedPath !== pathFilter || appliedAutomated !== hideAutomated)) {
       void store.refresh();
     }
   });
@@ -487,7 +508,7 @@
             class="chip-btn"
             class:on={hideAutomated}
             title="Heartbeat and other agent-initiated turns"
-            onclick={() => (hideAutomated = !hideAutomated)}
+            onclick={toggleAutomated}
           >
             Hide automated{hiddenCount > 0 ? ` (${hiddenCount})` : ''}
           </button>
@@ -549,9 +570,16 @@
           </li>
         {:else}
           <li class="empty-cell">
-            {hiddenCount > 0
-              ? `All ${hiddenCount} retrievals in this window were automated — turn off “Hide automated” to see them.`
-              : 'No retrievals recorded yet'}
+            <!-- Say which of the two situations this is. An all-automated
+                 window at the widened limit means older user retrievals exist
+                 further back than the endpoint will return in one page. -->
+            {#if hiddenCount > 0}
+              All {hiddenCount} retrievals in the last {WIDE_LIMIT} were automated.
+              Turn off “Hide automated” to see them — any of your own retrievals
+              are older than this window.
+            {:else}
+              No retrievals recorded yet
+            {/if}
           </li>
         {/each}
       </ul>
