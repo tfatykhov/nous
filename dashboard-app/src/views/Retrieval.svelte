@@ -229,12 +229,99 @@
     ($store.data?.entries ?? []).length - filteredEntries.length,
   );
 
+  // Chronological or slowest-first. The latency strip above surfaces a 54s
+  // outlier; without a sort there is no way to reach it except scrolling.
+  let sortBy = $state<'recent' | 'slowest'>('recent');
+  let visibleEntries = $derived(
+    sortBy === 'slowest'
+      // Same absence-is-not-a-value rule as `timing`: an untimed row is not a
+      // fast row. Coercing null to 0 sorted every failed retrieval to the
+      // bottom of a slowest-first list, which is where an operator is least
+      // likely to look for a failure.
+      ? [...filteredEntries].sort((a, b) => {
+          const av = a.duration_ms, bv = b.duration_ms;
+          if (typeof av !== 'number') return typeof bv !== 'number' ? 0 : 1;
+          if (typeof bv !== 'number') return -1;
+          return bv - av;
+        })
+      : filteredEntries,
+  );
+
+  /**
+   * Session cluster markers. Retrievals cluster by session, but most clusters
+   * are a single row — 26 sessions across 66 rows on the instance this was
+   * built against — so marking every boundary put a rule every ~2.5 rows and
+   * read as noise rather than structure. Only runs of 2+ get a marker, and it
+   * carries the run length (a raw session hex means nothing on its own).
+   * Chronological order only: sorting by duration interleaves sessions, so a
+   * "cluster" would be a lie.
+   */
+  let sessionRuns = $derived.by(() => {
+    const out = new Map<number, number>(); // start index -> run length
+    if (sortBy !== 'recent') return out;
+    let i = 0;
+    while (i < visibleEntries.length) {
+      // A null session_id is "no session was available" (retrievals outside a
+      // tool loop), not a session that two rows share. Matching null to null
+      // asserted a relationship the data does not contain — the same
+      // absence-is-not-a-value error as the timing stats above.
+      const sid = visibleEntries[i].session_id;
+      if (sid == null) { i++; continue; }
+      let j = i;
+      while (
+        j + 1 < visibleEntries.length &&
+        visibleEntries[j + 1].session_id === sid
+      ) j++;
+      const len = j - i + 1;
+      if (len >= 2) out.set(i, len);
+      i = j + 1;
+    }
+    return out;
+  });
+
   // Rows whose candidate array stopped at retrieval_telemetry_max_candidates.
   // Counted over the WHOLE window, not the automated-filtered view, because the
   // funnel above it is a window-level rollup.
   let cappedRows = $derived(
     ($store.data?.entries ?? []).filter((e) => e.truncated).length,
   );
+
+  // Latency was the one window-level dimension the page never showed. On the
+  // instance this was built against: p50 3.8s, p95 11.7s, slowest 54.7s, with
+  // 21 of 66 over 5s — a user-facing stall that existed only as one orange
+  // number inside a single row. Computed over the WHOLE window, like the
+  // funnel, not the automated-filtered view.
+  let timing = $derived.by(() => {
+    const all = $store.data?.entries ?? [];
+    // MEASURED rows only. A persisted partial trace from a failed recall_deep
+    // carries duration_ms: null; coercing that to 0 reports a failure as
+    // instantaneous, drags the median and p95 down, and pads the "over 5s"
+    // denominator with rows that were never timed. If nothing was timed we
+    // return null so the strip renders nothing at all rather than "0ms".
+    const ds = all
+      .map((e) => e.duration_ms)
+      .filter((d): d is number => typeof d === 'number')
+      .sort((a, b) => a - b);
+    if (!ds.length) return null;
+    // Linear-interpolated quantile. Nearest-rank on an even-sized window
+    // returns the UPPER middle, not the median — a 1ms/100ms pair reads as
+    // 100ms instead of 50.5ms, which matters most on the skewed windows the
+    // strip exists to surface.
+    const q = (p: number) => {
+      const pos = (ds.length - 1) * p;
+      const lo = Math.floor(pos);
+      const hi = Math.ceil(pos);
+      return lo === hi ? ds[lo] : ds[lo] + (ds[hi] - ds[lo]) * (pos - lo);
+    };
+    return {
+      p50: q(0.5),
+      p95: q(0.95),
+      max: ds[ds.length - 1],
+      slow: ds.filter((x) => x >= 5000).length,
+      n: ds.length,
+      untimed: all.length - ds.length,
+    };
+  });
 
   let totals = $derived.by(() => {
     const t = $store.data?.disposition_totals ?? {};
@@ -506,6 +593,31 @@
         {/each}
       </ul>
     {/if}
+
+    {#if timing}
+      <!-- Separate strip, own label: this card's subject is candidate flow, and
+           latency is a different dimension. Folding it into the funnel figures
+           would make the heading a category error. -->
+      <div class="timing">
+        <span class="timing-label">Timing</span>
+        <span><strong>{fmtMs(timing.p50)}</strong> median</span>
+        <span><strong>{fmtMs(timing.p95)}</strong> p95</span>
+        <span class:slow={timing.max >= 20000}>
+          <strong>{fmtMs(timing.max)}</strong> slowest
+        </span>
+        {#if timing.slow > 0}
+          <span class="timing-slow">
+            {timing.slow} of {timing.n} over 5s
+          </span>
+        {/if}
+        {#if timing.untimed > 0}
+          <!-- Say what the figures are NOT computed over. Silently narrowing
+               the denominator is how "median 3.8s" starts describing a
+               different population than the list below it. -->
+          <span class="muted">{timing.untimed} untimed</span>
+        {/if}
+      </div>
+    {/if}
   </section>
 
   <!-- ── Master / detail ─────────────────────────────────────────────────── -->
@@ -529,13 +641,29 @@
           >
             Hide automated{hiddenCount > 0 ? ` (${hiddenCount})` : ''}
           </button>
+          <button
+            class="chip-btn"
+            class:on={sortBy === 'slowest'}
+            title="Sort by duration — session grouping only applies in time order"
+            onclick={() => (sortBy = sortBy === 'slowest' ? 'recent' : 'slowest')}
+          >
+            Slowest first
+          </button>
         </div>
       </div>
 
       <ul class="rlist">
-        {#each filteredEntries as e (e.id)}
+        {#each visibleEntries as e, ei (e.id)}
           {@const segs = funnelSegments(e)}
           <li>
+            {#if sessionRuns.has(ei)}
+              <div class="sess-break">
+                <span class="sess-id">
+                  {sessionRuns.get(ei)} retrievals · one session
+                </span>
+                <span class="sess-rule"></span>
+              </div>
+            {/if}
             <button
               class="rrow"
               class:selected={selectedId === e.id}
@@ -583,6 +711,12 @@
               </div>
               <div class="rrow-meta">
                 <span class="chip sm">{e.path === 'context' ? 'pre-turn' : 'recall_deep'}</span>
+                <!-- turn_number is populated on every row by the correlation
+                     fix and was never surfaced; it is what joins a retrieval to
+                     its context_log entry. -->
+                {#if e.turn_number !== null && e.turn_number !== undefined}
+                  <span class="muted">turn {e.turn_number}</span>
+                {/if}
                 <span class="muted">{e.legs.length} legs</span>
                 {#if e.n_expansions > 0}
                   <span class="expn">{e.n_expansions} graph edges</span>
@@ -675,8 +809,16 @@
         {:else}
           <p class="detail-query">{detail.query || '(no query)'}</p>
           <div class="detail-stats">
-            <span><strong>{detail.n_candidates}</strong> candidates</span>
-            <span><strong>{detail.n_rendered}</strong> rendered</span>
+            <!-- The columns are NOT NULL DEFAULT 0, so an unsampled row stores
+                 0/0 — printing those as counts contradicts the "not sampled"
+                 notice this same panel shows below. `candidates_by_disposition`
+                 is the authoritative null-vs-empty signal the API preserves. -->
+            {#if detail.candidates_by_disposition === null}
+              <span class="muted">candidates not sampled</span>
+            {:else}
+              <span><strong>{detail.n_candidates}</strong> candidates</span>
+              <span><strong>{detail.n_rendered}</strong> rendered</span>
+            {/if}
             <span><strong>{detail.n_expansions}</strong> graph edges</span>
             <span><strong>{fmtMs(detail.duration_ms)}</strong></span>
           </div>
@@ -1034,6 +1176,41 @@
   .dot.badge-bad  { background: var(--red); }
   .disp-legend .k { font-family: var(--font-mono, monospace); color: var(--text); }
   .disp-legend .pct { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  .timing {
+    display: flex;
+    align-items: baseline;
+    gap: 1.1rem;
+    flex-wrap: wrap;
+    margin-top: 0.85rem;
+    padding-top: 0.7rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.75rem;
+    color: var(--muted);
+  }
+  .timing strong { color: var(--text); font-variant-numeric: tabular-nums; }
+  .timing-label {
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .timing .slow strong { color: var(--red); }
+  .timing-slow { color: var(--yellow); margin-left: auto; }
+
+  /* ── Session break ───────────────────────────────────────── */
+  .sess-break {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.55rem 0.15rem;
+  }
+  .sess-id {
+    font-family: var(--font-mono, monospace);
+    font-size: 0.65rem;
+    color: var(--muted);
+    letter-spacing: 0.04em;
+  }
+  .sess-rule { flex: 1; height: 1px; background: var(--border); }
 
   /* ── Split layout ────────────────────────────────────────── */
   .split {

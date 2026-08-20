@@ -897,7 +897,7 @@ class ContextEngine:
                     _tr_filtered(_before, decisions, "decision", FILTER_DROPPED, "diversity")
                     # Adaptive relevance filter (min/max K + gap detection)
                     _before = decisions
-                    decisions = self._apply_relevance_filter(decisions, "decision")
+                    decisions = self._apply_relevance_filter(decisions, "decision", trace=tr)
                     _tr_filtered(_before, decisions, "decision", SLICED_OFF, "relevance_filter")
                     # F1: Collect recalled IDs and scores
                     for d in decisions:
@@ -996,7 +996,7 @@ class ContextEngine:
                     # NOTE: this is the max_k=5 cap at _apply_relevance_filter:1420 —
                     # the single largest silent drop on this path.
                     _before = facts
-                    facts = self._apply_relevance_filter(facts, "fact")
+                    facts = self._apply_relevance_filter(facts, "fact", trace=tr)
                     _tr_filtered(_before, facts, "fact", SLICED_OFF, "relevance_filter")
                     if pinned_facts:
                         facts = self._reinsert_pinned(pinned_facts, facts)
@@ -1357,7 +1357,7 @@ class ContextEngine:
                                      BELOW_FLOOR, "procedure_score_floor")
                     _before = embedding_procedures
                     embedding_procedures = self._apply_relevance_filter(
-                        embedding_procedures, "procedure",
+                        embedding_procedures, "procedure", trace=tr,
                     )
                     _tr_filtered(_before, embedding_procedures, "procedure",
                                  SLICED_OFF, "relevance_filter")
@@ -1566,7 +1566,7 @@ class ContextEngine:
                     episodes = self._apply_usage_boost(episodes, usage_tracker)
                     # Adaptive relevance filter (min/max K + gap detection)
                     _before = episodes
-                    episodes = self._apply_relevance_filter(episodes, "episode")
+                    episodes = self._apply_relevance_filter(episodes, "episode", trace=tr)
                     _tr_filtered(_before, episodes, "episode", SLICED_OFF, "relevance_filter")
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix)
@@ -1714,7 +1714,8 @@ class ContextEngine:
         boosted.sort(key=lambda x: x[0].score, reverse=True)
         return [item for item, _ in boosted]
 
-    def _apply_relevance_filter(self, results: list, memory_type: str) -> list:
+    def _apply_relevance_filter(self, results: list, memory_type: str,
+                                trace: Any = NULL_TRACE) -> list:
         """Adaptive relevance filtering (replaces F017 floor + diminishing returns).
 
         Strategy: Keep top-K results, then cut at score gaps.
@@ -1722,6 +1723,13 @@ class ContextEngine:
         - Always keep at most max_results (don't flood context)
         - Between min and max, cut at sharp score drops
         - Items from exempt sources bypass gap detection
+
+        ``trace`` exists because this method makes TWO cuts with opposite
+        remedies, and reporting both as one stage tells an operator nothing
+        actionable: the max_k cap means "the budget is N, raise it to see more",
+        while the gap cut means "the scores fell off a cliff, raising the cap
+        changes nothing". Callers still label the residue `relevance_filter`;
+        `drop` is first-wins, so those calls no-op for anything attributed here.
         """
         if not self._settings.relevance_floor_enabled:
             return results
@@ -1737,6 +1745,9 @@ class ContextEngine:
             return results
 
         # Cap at max_k
+        for _over in results[max_k:]:
+            trace.drop(getattr(_over, "id", _over), memory_type,
+                       SLICED_OFF, f"relevance_filter:max_k={max_k}")
         results = results[:max_k]
 
         # Within [min_k, max_k], cut at sharp score drops
@@ -1754,6 +1765,11 @@ class ContextEngine:
                     r for r in results[i:]
                     if getattr(r, "source", None) in FILTER_EXEMPT_SOURCES
                 ]
+                _kept = {id(r) for r in tail_exempt}
+                for _cut in results[i:]:
+                    if id(_cut) not in _kept:
+                        trace.drop(getattr(_cut, "id", _cut), memory_type, BELOW_FLOOR,
+                                   f"relevance_filter:score_gap<{drop_ratio:g}x")
                 return results[:i] + tail_exempt
             prev_score = score
 
