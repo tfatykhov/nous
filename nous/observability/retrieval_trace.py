@@ -28,6 +28,13 @@ logger = logging.getLogger(__name__)
 # when no site claimed it, which happens when a new filter is added without
 # reporting. Defaulting to `sliced_off` instead would let that drift hide as a
 # plausible-looking number; a distinct value makes it a test failure.
+# RENDERED means: this item was in the prompt HANDED TO the model client for
+# delivery. Deliberately not "the model demonstrably received it" — a transport
+# or API failure after handoff is a delivery problem, not a retrieval one, and
+# chasing it through every runner error path would couple this module to them.
+# The one case explicitly excluded is a pre-turn censor block, where the prompt
+# is discarded before any handoff at all: pre_turn withholds the commit there,
+# so a blocked turn never claims delivery. See cognitive/layer.py.
 RENDERED = "rendered"
 SLICED_OFF = "sliced_off"
 BELOW_FLOOR = "below_floor"

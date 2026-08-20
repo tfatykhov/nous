@@ -71,15 +71,13 @@ CURRENT_TURN_EXCLUDE_IDS: ContextVar[dict[str, set[str]] | None] = ContextVar(
     "CURRENT_TURN_EXCLUDE_IDS", default=None,
 )
 
-# F091: the turn a tool-loop retrieval belongs to. recall_deep runs inside a
-# turn but has no reference to the runner, so without this every
-# path="pipeline" row persisted turn_number=NULL and could not be correlated
-# with the context build that preceded it — the (agent_id, session_id,
-# turn_number) key the migration documents. Same ContextVar discipline as the
-# F071 set above: per-asyncio-Task, set before the loop, reset in `finally`.
-CURRENT_TURN_NUMBER: ContextVar[int | None] = ContextVar(
-    "CURRENT_TURN_NUMBER", default=None,
-)
+# F091 NOTE: turn correlation is threaded EXPLICITLY through
+# ToolDispatcher.dispatch(turn_number=...), deliberately NOT via a ContextVar.
+# A contextvar was tried and was inert on the streaming path: stream_chat is an
+# async generator whose every resume runs in a fresh copied context (see the
+# KNOWN LIMITATION comment further down), so a value set inside it is invisible
+# to any tool dispatched after the first yielded event — and a tool call always
+# yields tool_start before dispatch. Explicit threading works on both paths.
 
 
 def _build_exclude_ids(
@@ -571,7 +569,6 @@ class AgentRunner:
                 _f071_token = CURRENT_TURN_EXCLUDE_IDS.set(
                     _build_exclude_ids(self._settings, turn_context)
                 )
-                _f091_turn_token = CURRENT_TURN_NUMBER.set(self._current_turn_number)
                 # F024 F2/F3: compact the live user message (strip base64) on BOTH
                 # success and exception. Outer try wraps the F071 try/finally so
                 # this runs after the contextvar reset on every path.
@@ -596,7 +593,6 @@ class AgentRunner:
                         )
                     finally:
                         CURRENT_TURN_EXCLUDE_IDS.reset(_f071_token)
-                        CURRENT_TURN_NUMBER.reset(_f091_turn_token)
                 finally:
                     if valid_attachments:
                         for i in range(len(conversation.messages) - 1, -1, -1):
@@ -1241,13 +1237,6 @@ class AgentRunner:
             _f071_exclude = _build_exclude_ids(self._settings, turn_context)
             if _f071_exclude is not None:
                 CURRENT_TURN_EXCLUDE_IDS.set(_f071_exclude)
-            # F091: streaming has its OWN tool-dispatch loop, so setting this
-            # only around run_turn left every recall_deep issued through
-            # /chat/stream with turn_number=NULL. Value-based set/clear (not
-            # reset(token)) for the same reason as the F071 line above: a token
-            # cannot be safely reset across an async generator's per-chunk
-            # context boundaries.
-            CURRENT_TURN_NUMBER.set(self._current_turn_number)
             try:
                 for turn in range(self._settings.max_turns):
                     # Unified block accumulator: keyed by block_index, preserves
@@ -1557,7 +1546,6 @@ class AgentRunner:
                 # async-generator's per-chunk context boundaries (see set above).
                 if _f071_exclude is not None:
                     CURRENT_TURN_EXCLUDE_IDS.set(None)
-                CURRENT_TURN_NUMBER.set(None)  # F091, same value-based rule
                 # F024 F2/F3: compact the live user message (strip base64) on
                 # every exit path — success, exception, and client-disconnect.
                 if valid_attachments:
@@ -1904,6 +1892,7 @@ class AgentRunner:
                                 result_text, is_error = await self._dispatcher.dispatch(
                                     tool_name, tool_input, session_id=session_id,
                                     is_background=is_background,
+                                    turn_number=self._current_turn_number,  # F091
                                 )
                             finally:
                                 await self._stop_activity_heartbeat(_hb)
@@ -2636,7 +2625,10 @@ Rules:
 
         task = asyncio.create_task(
             asyncio.wait_for(
-                self._dispatcher.dispatch(name, args, session_id=session_id),
+                self._dispatcher.dispatch(
+                    name, args, session_id=session_id,
+                    turn_number=self._current_turn_number,  # F091
+                ),
                 timeout=timeout,
             )
         )

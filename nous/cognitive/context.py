@@ -1144,7 +1144,12 @@ class ContextEngine:
                 # proc_selection_graph_primary is on (it is, here and in prod),
                 # so the passive/embedding leg further down never runs. Register
                 # here or procedures are absent from the trace entirely.
-                _tr_enter(selected or [], "procedure", "context_procedures_graph")
+                # Leg name is the LADDER as a whole; _select_procedures has
+                # already registered each survivor under the rung that actually
+                # produced it (graph K-line / critic fallback / cosine
+                # fallback). `add` is first-wins, so those true attributions
+                # stand and this only catches anything it missed.
+                _tr_enter(selected or [], "procedure", "context_procedures_ladder")
                 if selected:
                     cap = getattr(
                         self._settings, "proc_recommended_body_max_chars", 2500,
@@ -2145,6 +2150,10 @@ class ContextEngine:
                     logger.warning("F080 §14.7: critic-skill lookup failed for %r: %s", name, e)
                     continue
                 if detail is not None and detail.id not in have and getattr(detail, "active", True):
+                    # F091: its OWN leg. Registering these under the graph leg
+                    # reported a critic pick as a successful graph candidate.
+                    if trace is not None:
+                        trace.add(detail.id, "procedure", "context_procedures_critic_fallback")
                     selected.append(detail)
                     have.add(detail.id)
 
@@ -2188,6 +2197,9 @@ class ContextEngine:
                 except Exception:
                     continue
                 if detail is not None and getattr(detail, "active", False):
+                    if trace is not None:
+                        trace.add(detail.id, "procedure", "context_procedures_cosine_fallback",
+                                  score=summ.score)
                     selected.append(detail)
                     have.add(detail.id)
         return selected[:slots]

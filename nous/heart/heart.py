@@ -878,8 +878,16 @@ class Heart:
         apply_mmr: bool | None = None,
         date_window: "DateWindow | None" = None,
         stage_errors: dict[str, int] | None = None,
+        dropped_out: list | None = None,
     ) -> list[RecallResult]:
         """Search across ALL memory types, return ranked results.
+
+        ``dropped_out`` is an optional caller-supplied list. When provided, the
+        RecallResults cut by the final ``[:limit]`` are appended to it. That cut
+        is the single largest drop on this path — per-type fetch is ``limit*2``
+        across up to four types, so most of what is retrieved dies here. Without
+        it a caller sees only survivors and cannot tell a thin corpus from a
+        crowded one (F091).
 
         Results carry their original hybrid search scores (configurable
         vector/keyword weighting via hybrid_search(); default 0.7/0.3,
@@ -920,6 +928,7 @@ class Heart:
                     apply_mmr=apply_mmr,
                     date_window=date_window,
                     stage_errors=stage_errors,
+                    dropped_out=dropped_out,
                 )
         # Caller-provided session: caller owns transaction recovery. We do
         # NOT rollback after a sub-search failure (would silently discard
@@ -930,6 +939,7 @@ class Heart:
             apply_mmr=apply_mmr,
             date_window=date_window,
             stage_errors=stage_errors,
+            dropped_out=dropped_out,
         )
 
     def set_residual_activator(self, activator: "ResidualActivator | None") -> None:
@@ -976,6 +986,7 @@ class Heart:
         apply_mmr: bool | None = None,
         date_window: "DateWindow | None" = None,
         stage_errors: dict[str, int] | None = None,
+        dropped_out: list | None = None,
     ) -> list[RecallResult]:
         search_types = types or ["episode", "fact", "procedure", "censor"]
         fetch_limit = limit * 2  # Fetch more for merging
@@ -1187,6 +1198,12 @@ class Heart:
                 logger.info(
                     "MMR: skipped (F030.1 — CE reordered head, mmr_skip_after_ce=True)"
                 )
+        # F091: snapshot before the ranking block, which cuts to `limit` in
+        # three different places (mmr_rerank's own limit, the MMR-failure
+        # fallback, and the plain sort branch). Diffing once at the return
+        # covers all three without instrumenting each.
+        _pre_cut = list(merged) if dropped_out is not None else None
+
         if (
             mmr_active
             and len(merged) > 1
@@ -1233,6 +1250,10 @@ class Heart:
             # Sort by original hybrid score DESC
             merged.sort(key=lambda r: r.score, reverse=True)
             merged = merged[:limit]
+
+        if _pre_cut is not None:
+            _kept = {(r.id, r.type) for r in merged}
+            dropped_out.extend(r for r in _pre_cut if (r.id, r.type) not in _kept)
 
         # F079 catalog-first: recall_deep returns procedures as name+desc summaries (like
         # facts/episodes). Procedure BREADTH is the static `## Procedure Catalog` and DEPTH

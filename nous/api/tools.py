@@ -81,7 +81,7 @@ class ToolDispatcher:
 
     async def dispatch(
         self, name: str, args: dict[str, Any], session_id: str | None = None,
-        is_background: bool = False,
+        is_background: bool = False, turn_number: int | None = None,
     ) -> tuple[str, bool]:
         """Dispatch a tool call and return (result_text, is_error).
 
@@ -117,6 +117,15 @@ class ToolDispatcher:
                 # no substrate. Consumers: Brain.get_session_decisions and
                 # the optional filter in Brain._query.
                 args = {**args, "_session_id": session_id}
+            if turn_number is not None and name == "recall_deep":
+                # F091: threaded EXPLICITLY, not via ContextVar. stream_chat is
+                # an async generator whose every resume runs in a fresh copied
+                # context (see the KNOWN LIMITATION at runner.py:1231), so a
+                # contextvar set inside it is invisible to any tool dispatched
+                # after the first yielded event — and a tool call always yields
+                # tool_start first. An earlier contextvar attempt at this was
+                # therefore inert on the streaming path.
+                args = {**args, "_turn_number": turn_number}
             if session_id is not None and name == "recall_deep":
                 # F051.4 / F055: inject session_id into recall_deep so
                 # F055's Cross-Turn Residual Activation can read it via
@@ -958,6 +967,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         limit: int = 10,
         memory_types: list[str] | None = None,
         _session_id: str | None = None,
+        _turn_number: int | None = None,
     ) -> dict[str, Any]:
         """Search memory in Heart and Brain.
 
@@ -1002,9 +1012,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         # pipeline's `if exclude_ids:` short-circuit keeps output byte-identical.
         # Deferred import (same as F071 below): runner imports tools, so a
         # module-level import here would be circular.
-        from nous.api.runner import CURRENT_TURN_EXCLUDE_IDS, CURRENT_TURN_NUMBER
+        from nous.api.runner import CURRENT_TURN_EXCLUDE_IDS
         _f071_exclude_ids = CURRENT_TURN_EXCLUDE_IDS.get()
-        _CURRENT_TURN_NUMBER = CURRENT_TURN_NUMBER
 
         try:
             search_types = memory_types or ["all"]
@@ -1060,7 +1069,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     query=query, path="pipeline", session_id=_session_id,
                     # None outside a tool loop (eval harness, scripts), which is
                     # honest — there is no turn to attribute those to.
-                    turn_number=_CURRENT_TURN_NUMBER.get(),
+                    turn_number=_turn_number,
                 )
                 if _rl is not None else None
             )

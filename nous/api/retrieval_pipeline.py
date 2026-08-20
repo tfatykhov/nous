@@ -42,6 +42,7 @@ from nous.observability.retrieval_trace import (
     F071_EXCLUDED,
     NULL_TRACE,
     REPLACED_AT_MERGE,
+    SLICED_OFF,
     SUPERSEDED,
     TYPE_EXCLUDED,
 )
@@ -816,8 +817,14 @@ async def _run_stages(
             acc.searched_heart = True
             acc.attempted_legs.add("heart_primary")
             acc.heart_types_searched = heart_types
+            # F091: collect what Heart's final [:limit] cut. That is the single
+            # largest drop on this path — per-type fetch is limit*2 across up to
+            # four types — and without it n_candidates could equal n_rendered on
+            # a crowded corpus, hiding the principal loss entirely.
+            _heart_cut: list = []
             heart_results = await heart.recall(
                 query, limit=limit, types=heart_types,
+                dropped_out=_heart_cut,
                 residual_activations=residual_activations,  # F055
                 apply_mmr=apply_mmr,  # F030.2
                 date_window=date_window,  # F075 L3
@@ -828,6 +835,11 @@ async def _run_stages(
                 stage_errors=acc.stage_errors,
             )
             acc.heart_results = list(heart_results or [])
+            for _cut in _heart_cut:
+                tr.add(_cut.id, _cut.type, "heart_primary",
+                       score=getattr(_cut, "score", None),
+                       content=getattr(_cut, "summary", None))
+                tr.drop(_cut.id, _cut.type, SLICED_OFF, "heart_recall_limit")
 
     # ------------------------------------------------------------------
     # Stage 1.5: F067 episode chunks (opt-in; default off)
