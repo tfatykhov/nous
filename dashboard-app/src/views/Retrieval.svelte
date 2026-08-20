@@ -399,14 +399,33 @@
    *  carry a snippet, so the tree can say what a node IS. Empty when the row
    *  was not sampled, in which case we fall back to the short id. */
   let candidateIndex = $derived.by(() => {
-    const m = new Map<string, { snippet: string | null; disposition: string }>();
+    const m = new Map<
+      string,
+      { snippet: string | null; disposition: string; entryLeg: string | null }
+    >();
     const cbd = detail?.candidates_by_disposition;
     if (!cbd) return m;
     for (const [disp, arr] of Object.entries(cbd)) {
-      for (const c of arr) m.set(String(c.id), { snippet: c.snippet ?? null, disposition: disp });
+      for (const c of arr) {
+        m.set(String(c.id), {
+          snippet: c.snippet ?? null,
+          disposition: disp,
+          entryLeg: c.entry_leg ?? null,
+        });
+      }
     }
     return m;
   });
+
+  // Legs that mean "this candidate ENTERED the pool through graph expansion".
+  // An unknown leg counts as NOT graph, which under-reports graph provenance —
+  // the safe direction for a claim stated as a floor.
+  const GRAPH_ENTRY_LEGS = new Set([
+    'heart_graph',
+    'heart_graph_memory',
+    'graph_expanded',
+    'spreading_activation',
+  ]);
 
   function nodeLabel(id: string): string {
     const s = candidateIndex.get(String(id))?.snippet;
@@ -463,7 +482,6 @@
     }
     return out.map((g) => ({
       ...g,
-      convergent: g.items.filter((e) => (seedsPerNeighbour.get(e.neighbor_id)?.size ?? 1) > 1).length,
       seedCount: (e: RetrievalExpansion) => seedsPerNeighbour.get(e.neighbor_id)?.size ?? 1,
     }));
   });
@@ -478,15 +496,26 @@
       if (!s) { s = new Set(); conv.set(r.neighbor_id, s); }
       s.add(r.seed_id);
     }
+    // `seeds` counts DIRECT (hop-1) seeds only. Spreading activation is
+    // multi-seed by construction and stores its first id as an unattributable
+    // placeholder, so on a spreading-only retrieval this set is empty — and
+    // printing "0 seeds" would be observably false, since the producer starts
+    // from a non-empty seed list. Report it as absent instead.
+    const directRows = rows.filter((r) => r.hop !== 2);
     return {
-      seeds: seeds.size,
+      seeds: directRows.length ? seeds.size : null,
       edges: rows.length,
       neighbours: nbrs.size,
       convergent: [...conv.values()].filter((s) => s.size > 1).length,
-      // Expansion edges are recorded only for neighbours that reached the
-      // merged candidate set, so this is a yield FLOOR, not a yield.
-      rendered: [...nbrs].filter(
-        (n) => candidateIndex.get(String(n))?.disposition === 'rendered',
+      // Counted by ENTRY LEG, not disposition. `tr.expansion()` is recorded at
+      // retrieval_pipeline.py:1341, BEFORE the duplicate guard at :1371 — so a
+      // neighbour that merely corroborated an existing direct candidate still
+      // has an edge, and joining on id alone resolves it to that direct
+      // candidate's `rendered`. Counting those as expansion yield credited the
+      // graph for memories it did not contribute; entry_leg is first-wins, so
+      // it names how the candidate ACTUALLY got into the pool.
+      viaGraph: [...nbrs].filter((n) =>
+        GRAPH_ENTRY_LEGS.has(candidateIndex.get(String(n))?.entryLeg ?? ''),
       ).length,
     };
   });
@@ -922,7 +951,11 @@
                  diagram showed at all. Its one unique contribution was
                  convergence, so that is now called out here in words. -->
             <div class="xsummary">
-              <span><strong>{expansionTotals.seeds}</strong> seeds</span>
+              {#if expansionTotals.seeds !== null}
+                <span><strong>{expansionTotals.seeds}</strong> direct seeds</span>
+              {:else}
+                <span class="muted">multi-seed traversal only</span>
+              {/if}
               <span><strong>{expansionTotals.edges}</strong> edges</span>
               <span><strong>{expansionTotals.neighbours}</strong> neighbours</span>
               {#if expansionTotals.convergent > 0}
@@ -931,17 +964,21 @@
                 </span>
               {/if}
             </div>
-            <!-- Yield is a FLOOR, not a measurement: an expansion edge is
-                 recorded only for a neighbour that reached the merged
-                 candidate set, so dropped neighbours have no edge and cannot
-                 appear here. Stated rather than shown as a disposition column,
-                 which would read 100% rendered on every retrieval and imply a
-                 perfect yield that has not been measured. -->
+            <!-- Provenance, deliberately NOT yield. Two separate reasons a
+                 yield figure here would be false: an edge is only recorded for
+                 a neighbour that reached the merged candidate set (so drops
+                 are invisible), AND the edge is recorded before the duplicate
+                 guard (so a neighbour that merely corroborated a direct hit
+                 also has one). What IS answerable is how many neighbours the
+                 graph actually put in the pool versus how many were already
+                 there. -->
             {#if candidateIndex.size > 0}
               <p class="status-msg sm">
-                {expansionTotals.rendered} of {expansionTotals.neighbours} neighbours reached
-                the model. Expansion records surviving neighbours only, so this is a lower
-                bound on what expansion discarded.
+                {expansionTotals.viaGraph} of {expansionTotals.neighbours} neighbours entered
+                the candidate pool through a graph leg; the rest were already present from a
+                direct leg and were corroborated, not contributed. Neighbours dropped before
+                the merge have no edge recorded, so expansion's true reach is wider than
+                shown.
               </p>
             {/if}
 
@@ -1508,7 +1545,6 @@
   }
   .edge-list li.lost { opacity: 0.5; }
   .rel { font-family: var(--font-mono, monospace); color: var(--accent); }
-  .arrow { opacity: 0.5; }
 
   /* ── Chips / badges ──────────────────────────────────────── */
   .chip {
