@@ -907,6 +907,10 @@ class ContextEngine:
                     )
             except Exception as e:
                 logger.warning("Brain.query failed during context build: %s", e)
+                # F091: a leg that CRASHED must not read as one that never
+                # ran. Registration lives after the await, so the exception
+                # path skips it entirely.
+                tr.leg("context_decisions", attempted=True, error=str(e)[:200])
 
         facts_injected = False
         # 6. Facts (F10: retrieve -> apply_frame_boost -> dedup -> usage_boost -> truncate)
@@ -1005,6 +1009,7 @@ class ContextEngine:
                     )
             except Exception as e:
                 logger.warning("Heart.search_facts failed during context build: %s", e)
+                tr.leg("context_facts", attempted=True, error=str(e)[:200])
 
         # 6a. Session Profile intent leg (Task 2, land dark): intent-selected
         # tier-1 domain facts (trading stances, sailing contacts, project
@@ -1197,6 +1202,7 @@ class ContextEngine:
                             recalled_score_map[mid] = 1.0
             except Exception as e:
                 logger.warning("F080 §14.7 procedure selection failed: %s", e)
+                tr.leg("context_procedures_ladder", attempted=True, error=str(e)[:200])
 
         # 7. Procedures (dual-track: Critic reserved slots + embedding slots, issue #229)
         # F079 unified pull: `proc_passive_injection_enabled=False` removes only the
@@ -1471,6 +1477,7 @@ class ContextEngine:
                     )
             except Exception as e:
                 logger.warning("Temporal tier failed: %s", e)
+                tr.leg("context_episodes_temporal", attempted=True, error=str(e)[:200])
 
         # 8. Episodes
         if budget.episodes > 0 and "episode" not in skip_types:
@@ -1537,6 +1544,7 @@ class ContextEngine:
                     )
             except Exception as e:
                 logger.warning("Heart.search_episodes failed during context build: %s", e)
+                tr.leg("context_episodes", attempted=True, error=str(e)[:200])
 
         # Assemble system prompt with markdown headers
         parts: list[str] = []

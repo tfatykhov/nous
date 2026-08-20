@@ -579,6 +579,9 @@ class AgentRunner:
                             conversation=conversation,
                             frame_id=turn_context.frame.frame_id,
                             session_id=session_id,
+                            # F091: capture HERE, before any await can let a
+                            # concurrent session overwrite the shared field.
+                            turn_number=self._current_turn_number,
                             is_subtask=is_subtask,
                             max_tool_calls=max_tool_calls,
                             model_override=model_override,
@@ -1121,6 +1124,10 @@ class AgentRunner:
             # F035.4: Store current context for context logger
             self._current_session_id = session_id
             self._current_turn_number = (len(conversation.messages) + 1) // 2
+            # F091: snapshot into a generator-LOCAL immediately. The shared
+            # field is overwritten by any concurrent session, and this
+            # generator awaits the model many times before dispatching a tool.
+            _stream_turn_number = self._current_turn_number
             self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
             self._current_call_type = "chat"
 
@@ -1445,7 +1452,8 @@ class AgentRunner:
                             start_time = time.monotonic()
                             result_text, is_error = "", False
                             async for item in self._dispatch_with_keepalive(
-                                tc["name"], dispatch_input, session_id=session_id
+                                tc["name"], dispatch_input, session_id=session_id,
+                                turn_number=_stream_turn_number,  # F091
                             ):
                                 if isinstance(item, StreamEvent):
                                     yield item
@@ -1606,6 +1614,13 @@ class AgentRunner:
         force_tool_on_penultimate: str | None = None,
         dag_node_id: UUID | None = None,  # F064.1: activity-ping target
         refuse_active: bool = False,  # F078: strip state-modifying tools for the turn
+        # F091: captured by the CALLER, not read from self at dispatch time.
+        # `self._current_turn_number` is shared mutable runner state: with two
+        # sessions on one AgentRunner, either can overwrite it while the other
+        # awaits the model, so a later recall_deep would be stamped with the
+        # other session's turn — a row whose session_id and turn_number point
+        # at different turns, which is worse than a NULL.
+        turn_number: int | None = None,
     ) -> tuple[str, list[ToolResult], dict[str, int], list[str]]:
         """Run the tool use loop until completion or max_turns.
 
@@ -1892,7 +1907,7 @@ class AgentRunner:
                                 result_text, is_error = await self._dispatcher.dispatch(
                                     tool_name, tool_input, session_id=session_id,
                                     is_background=is_background,
-                                    turn_number=self._current_turn_number,  # F091
+                                    turn_number=turn_number,  # F091 (caller-captured)
                                 )
                             finally:
                                 await self._stop_activity_heartbeat(_hb)
@@ -2613,6 +2628,7 @@ Rules:
 
     async def _dispatch_with_keepalive(
         self, name: str, args: dict[str, Any], session_id: str | None = None,
+        turn_number: int | None = None,  # F091: caller-captured, see _tool_loop
     ) -> AsyncGenerator[StreamEvent | tuple[str, bool], None]:
         """Execute a tool, yielding keepalive events during long execution.
 
@@ -2627,7 +2643,7 @@ Rules:
             asyncio.wait_for(
                 self._dispatcher.dispatch(
                     name, args, session_id=session_id,
-                    turn_number=self._current_turn_number,  # F091
+                    turn_number=turn_number,  # F091 (caller-captured)
                 ),
                 timeout=timeout,
             )

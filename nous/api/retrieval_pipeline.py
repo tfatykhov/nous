@@ -40,6 +40,7 @@ from nous.observability.retrieval_trace import (
     BELOW_FLOOR,
     DEDUPED,
     F071_EXCLUDED,
+    FILTER_DROPPED,
     NULL_TRACE,
     REPLACED_AT_MERGE,
     SLICED_OFF,
@@ -1491,12 +1492,31 @@ async def _run_stages(
                         if ids_by_type
                         else {}
                     )
+                    # F091: the activation floor drops nodes BEFORE `hits` is
+                    # built, and the two gates below drop more. Register and
+                    # attribute all three, or a spreading run reports only what
+                    # survived and looks like it activated nothing else.
+                    for _nid, _ntype, _act in activated:
+                        if _act <= 0.1 and _nid not in seed_ids and _nid not in seen_ids:
+                            tr.add(_nid, _ntype, "spreading_activation", score=_act)
+                            tr.drop(_nid, _ntype, BELOW_FLOOR, "spreading_activation_floor")
+
                     n_appended = 0
                     for nid, ntype, activation in hits:
                         if n_appended >= _SPREADING_RESULT_CAP:
-                            break
+                            # Attribute the rest of the window rather than
+                            # breaking — a cap that silently truncates is the
+                            # thing this feature exists to make visible.
+                            tr.add(nid, ntype, "spreading_activation", score=activation)
+                            tr.drop(nid, ntype, SLICED_OFF, "spreading_result_cap")
+                            continue
                         resolved = descriptions.get(nid)
                         if resolved is None or not resolved[0]:
+                            # Inactive / missing / foreign row — the resolver
+                            # omitted it, so it ships no content.
+                            tr.add(nid, ntype, "spreading_activation", score=activation)
+                            tr.drop(nid, ntype, FILTER_DROPPED,
+                                    "spreading_content_unresolved")
                             continue
                         desc, created = resolved
                         graph_expanded.append(
