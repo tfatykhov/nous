@@ -664,3 +664,52 @@ def test_skip_then_run_upgrades_attempted():
     leg = t.to_dict()["legs"][0]
     assert leg["attempted"] is True
     assert leg["n_returned"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Non-finite scores (JSONB would reject the whole row)
+# ---------------------------------------------------------------------------
+
+
+def test_non_finite_scores_never_reach_json():
+    """cross_encoder_rerank assigns float('-inf') to empty-text candidates.
+    json.dumps emits the NON-STANDARD token -Infinity, PostgreSQL JSONB rejects
+    it outright, and the writer swallows the error — so one such value silently
+    discarded the ENTIRE retrieval row. Telemetry destroying its own record."""
+    import json
+    import math
+
+    t = _trace()
+    a, b, c = uuid4(), uuid4(), uuid4()
+    t.add(a, "fact", "heart_primary", score=float("-inf"))
+    t.add(b, "fact", "heart_primary", score=float("inf"))
+    t.add(c, "fact", "heart_primary", score=float("nan"))
+    t.mutate(a, "fact", "ce_rerank", float("-inf"), float("nan"))
+    t.leg("heart_primary", scores=[float("-inf"), 0.5])
+    t.expansion(seed_id=a, neighbor_id=b, seed_type="fact",
+                neighbor_type="decision", stage="s",
+                seed_score=float("nan"), edge_weight=float("inf"),
+                path_strength=float("-inf"))
+    t.finalize([], duration_ms=float("nan"))
+
+    payload = json.dumps(t.to_dict())
+    for token in ("Infinity", "-Infinity", "NaN"):
+        assert token not in payload, f"{token} would be rejected by JSONB"
+
+    # And it round-trips through strict JSON, which is what asyncpg hands PG.
+    json.loads(payload, parse_constant=lambda c: (_ for _ in ()).throw(
+        AssertionError(f"non-finite constant {c} survived")))
+
+    by_id = {x["id"]: x for x in t.to_dict()["candidates"]}
+    assert by_id[str(a)]["entry_score"] is None
+    assert not any(
+        isinstance(v, float) and not math.isfinite(v)
+        for x in t.to_dict()["candidates"] for v in (x["entry_score"],)
+    )
+
+
+def test_finite_scores_are_left_untouched():
+    t = _trace()
+    fid = uuid4()
+    t.add(fid, "fact", "heart_primary", score=0.0)
+    assert t.to_dict()["candidates"][0]["entry_score"] == 0.0

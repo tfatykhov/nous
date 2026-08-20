@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -79,8 +80,8 @@ class Mutation:
     def to_dict(self) -> dict[str, Any]:
         return {
             "stage": self.stage,
-            "score_before": self.score_before,
-            "score_after": self.score_after,
+            "score_before": _finite(self.score_before),
+            "score_after": _finite(self.score_after),
             "reason": self.reason,
         }
 
@@ -112,7 +113,7 @@ class Candidate:
             "id": self.id,
             "type": self.type,
             "entry_leg": self.entry_leg,
-            "entry_score": self.entry_score,
+            "entry_score": _finite(self.entry_score),
             "entry_rank": self.entry_rank,
             "snippet": self.snippet,
             "mutations": [m.to_dict() for m in self.mutations],
@@ -147,8 +148,8 @@ class Leg:
             "attempted": self.attempted,
             "n_returned": self.n_returned,
             "n_deduped": self.n_deduped,
-            "score_min": self.score_min,
-            "score_max": self.score_max,
+            "score_min": _finite(self.score_min),
+            "score_max": _finite(self.score_max),
             "error": self.error,
             "skip_reason": self.skip_reason,
         }
@@ -192,18 +193,37 @@ class Expansion:
             "neighbor_id": self.neighbor_id,
             "neighbor_type": self.neighbor_type,
             "stage": self.stage,
-            "seed_score": self.seed_score,
+            "seed_score": _finite(self.seed_score),
             "hop": self.hop,
             "edge_relation": self.edge_relation,
-            "edge_weight": self.edge_weight,
+            "edge_weight": _finite(self.edge_weight),
             "extraction_method": self.extraction_method,
-            "path_strength": self.path_strength,
+            "path_strength": _finite(self.path_strength),
             "won_best_path": self.won_best_path,
         }
 
 
 def _key(item_id: Any, item_type: str) -> tuple[str, str]:
     return (str(item_id), item_type)
+
+
+def _finite(value: Any) -> Any:
+    """Map non-finite floats to None at the serialization boundary.
+
+    ``json.dumps`` emits the NON-STANDARD tokens ``Infinity`` / ``-Infinity`` /
+    ``NaN``, which PostgreSQL JSONB rejects outright ("Token \"-Infinity\" is
+    invalid"). Because the writer swallows its own errors, one such value
+    silently discards the ENTIRE retrieval row — telemetry destroying its own
+    record. Real source: ``cross_encoder_rerank`` assigns ``float("-inf")`` to
+    empty-text candidates (heart/reranker.py), so any sampled trace containing
+    one was unpersistable whenever CE reranking is on.
+
+    None, not 0.0: an unscorable candidate has no score, and 0.0 would be a
+    plausible-looking lie in a column operators sort by.
+    """
+    if isinstance(value, float) and not isfinite(value):
+        return None
+    return value
 
 
 class RetrievalTrace:
@@ -512,7 +532,7 @@ class RetrievalTrace:
             "trace_id": self.trace_id,
             "path": self.path,
             "query": self.query,
-            "duration_ms": self.duration_ms,
+            "duration_ms": _finite(self.duration_ms),
             "legs": [leg.to_dict() for leg in self._legs.values()],
             "excluded_types": [
                 {"type": t, "stage": s} for t, s in self._excluded_types
