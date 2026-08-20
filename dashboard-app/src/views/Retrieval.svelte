@@ -286,7 +286,7 @@
   // cannot, because it prints that neighbour once under each parent.
   const DIAGRAM_MAX_EDGES = 120;
   const ROW_H = 21;
-  const NODE_R = 4.5;
+  const NODE_R = 5;
 
   let expansionGraph = $derived.by(() => {
     const rows: RetrievalExpansion[] = detail?.expansions ?? [];
@@ -308,11 +308,15 @@
 
     const rowsCount = Math.max(seedIds.length, nbrIds.length, 1);
     const height = rowsCount * ROW_H + 16;
-    // viewBox width is derived from the height so the aspect stays landscape.
-    // A fixed narrow width against a tall row stack makes the default
-    // `xMidYMid meet` scale to fit the HEIGHT, collapsing the whole diagram
-    // into a thin band down the middle of a wide card.
-    const width = Math.max(420, Math.round(height * 1.55));
+    // FIXED drawing width, so rendered row height is constant
+    // (container_px * ROW_H / WIDTH) and the diagram grows TALLER as nodes
+    // multiply. Deriving width from height instead locked the aspect at
+    // ~1.55:1, which held on-screen height roughly constant and shrank every
+    // row as the count rose — near the 120-edge cap, nodes and labels would
+    // collide or go subpixel. The earlier thin-band bug this replaced came
+    // from an explicit `height` attribute fighting `width:100%`; that is gone,
+    // so a fixed width no longer letterboxes. The card scrolls.
+    const width = 900;
     const leftX = Math.round(width * 0.13);
     const rightX = width - leftX;
 
@@ -451,9 +455,15 @@
              aria-label="{rendered} of {totals.sum} candidates reached the model">
           {#each orderDispositions(totals.entries.map(([k]) => k)) as key (key)}
             {@const val = $store.data.disposition_totals[key] ?? 0}
+            <!-- `flex: <n> 1 0` — a ZERO basis. With the default `auto` basis
+                 the label's intrinsic width is allotted before the remaining
+                 space is divided by count, so a label-bearing drop segment
+                 renders wider than its share while the label-free `rendered`
+                 segment does not. A bar chart that misstates its proportions
+                 is worse than no bar. -->
             <div
               class="funnel-seg {dispositionClass(key)}"
-              style="flex-grow: {val}"
+              style="flex: {val} 1 0"
               title="{key}: {val} ({((val / totals.sum) * 100).toFixed(1)}%) — {DISPOSITION_HELP[key] ?? ''}"
             >
               <!-- Only the DROP segments carry a count. The survivors already
@@ -1260,7 +1270,9 @@
 
   .xd-label {
     font-family: var(--font-mono, monospace);
-    font-size: 7px;
+    /* Sized for the fixed 900-unit drawing width: at a ~840px panel this
+       renders near 9px, and stays there as rows are added. */
+    font-size: 10px;
     fill: var(--muted);
   }
   .xd-label.right { text-anchor: end; }
