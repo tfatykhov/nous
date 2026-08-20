@@ -6,6 +6,7 @@
   import DagView from './views/DagView.svelte';
   import Heartbeat from './views/Heartbeat.svelte';
   import Observability from './views/Observability.svelte';
+  import Retrieval from './views/Retrieval.svelte';
   import Ledger from './views/Ledger.svelte';
   import Subtasks from './views/Subtasks.svelte';
   import GraphView from './views/GraphView.svelte';
@@ -176,6 +177,8 @@
     <Heartbeat />
   {:else if $currentRoute === 'observability'}
     <Observability />
+  {:else if $currentRoute === 'retrieval'}
+    <Retrieval />
   {:else if $currentRoute === 'health'}
     <Health />
   {:else if $currentRoute === 'admission'}

@@ -2571,3 +2571,161 @@ async def get_consolidation_cycle_detail(
     ]
 
     return {"cycle": cycle, "actions": actions}
+
+
+# ---------------------------------------------------------------------------
+# F091: Retrieval telemetry
+# ---------------------------------------------------------------------------
+
+
+def _retrieval_iso(value: Any) -> str | None:
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
+async def get_retrieval_data(
+    session: AsyncSession,
+    agent_id: str,
+    limit: int = 50,
+    path: str | None = None,
+) -> dict[str, Any]:
+    """Recent retrievals plus aggregate dispositions over the same window.
+
+    The heavy ``candidates`` / ``expansions`` payloads are deliberately NOT
+    selected here — the list view only needs headers, and pulling every
+    candidate array for 50 rows would dominate the response.
+    """
+    where = ["agent_id = :agent_id"]
+    params: dict[str, Any] = {"agent_id": agent_id, "limit": limit}
+    if path:
+        where.append("path = :path")
+        params["path"] = path
+    where_sql = " AND ".join(where)
+
+    rows = await session.execute(
+        text(f"""
+            SELECT id, session_id, turn_number, trace_id, timestamp, path,
+                   query, duration_ms, legs, excluded_types, n_candidates,
+                   n_rendered, n_expansions, disposition_counts, truncated,
+                   (candidates IS NOT NULL) AS has_candidates
+            FROM nous_system.retrieval_log
+            WHERE {where_sql}
+            ORDER BY timestamp DESC
+            LIMIT :limit
+        """),
+        params,
+    )
+
+    entries: list[dict[str, Any]] = []
+    totals: Counter = Counter()
+    leg_totals: dict[str, dict[str, int]] = {}
+    n_sampled = 0
+
+    for row in rows:
+        counts = row.disposition_counts or {}
+        # Dispositions exist ONLY on sampled rows. Legs are captured on every
+        # row. Summing the two over the same denominator makes an unsampled
+        # window look like a systemic drop — e.g. 50 turns that each retrieved
+        # 10 and rendered 5 would report legs.returned=500 beside
+        # rendered=25/sliced_off=25, reading as a 95% loss that never happened.
+        # `sampled_count` is returned so the UI can state the real denominator.
+        if row.has_candidates:
+            n_sampled += 1
+            totals.update({k: int(v) for k, v in counts.items()})
+        legs = row.legs or []
+        for leg in legs:
+            name = leg.get("name")
+            if not name:
+                continue
+            agg = leg_totals.setdefault(
+                name, {"attempted": 0, "returned": 0, "deduped": 0, "errors": 0}
+            )
+            agg["attempted"] += 1 if leg.get("attempted") else 0
+            agg["returned"] += int(leg.get("n_returned") or 0)
+            agg["deduped"] += int(leg.get("n_deduped") or 0)
+            agg["errors"] += 1 if leg.get("error") else 0
+
+        entries.append({
+            "id": row.id,
+            "session_id": row.session_id,
+            "turn_number": row.turn_number,
+            "trace_id": row.trace_id,
+            "timestamp": _retrieval_iso(row.timestamp),
+            "path": row.path,
+            "query": row.query,
+            "duration_ms": row.duration_ms,
+            "legs": legs,
+            "excluded_types": row.excluded_types or [],
+            "n_candidates": row.n_candidates,
+            "n_rendered": row.n_rendered,
+            "n_expansions": row.n_expansions,
+            "disposition_counts": counts,
+            "truncated": row.truncated,
+            "has_candidates": bool(row.has_candidates),
+        })
+
+    return {
+        "entries": entries,
+        # Window-level rollup so a systemic drop (say, half of everything
+        # dying at max_k) is visible without opening a single detail view.
+        # Aggregated over SAMPLED rows only — see the note at the loop above.
+        "disposition_totals": dict(totals),
+        # Aggregated over ALL rows (legs are captured regardless of sampling).
+        "leg_totals": leg_totals,
+        "count": len(entries),
+        # The honest denominator for disposition_totals. Without this the UI
+        # cannot tell the operator that the bar covers 5 of 50 retrievals.
+        "sampled_count": n_sampled,
+    }
+
+
+async def get_retrieval_detail(
+    session: AsyncSession,
+    agent_id: str,
+    entry_id: str,
+) -> dict[str, Any] | None:
+    """One retrieval's full candidate list and graph-expansion edges."""
+    row = (
+        await session.execute(
+            text("""
+                SELECT id, session_id, turn_number, trace_id, timestamp, path,
+                       query, duration_ms, legs, excluded_types, n_candidates,
+                       n_rendered, n_expansions, disposition_counts,
+                       candidates, expansions, truncated
+                FROM nous_system.retrieval_log
+                WHERE agent_id = :agent_id AND id = :id
+            """),
+            {"agent_id": agent_id, "id": entry_id},
+        )
+    ).first()
+
+    if row is None:
+        return None
+
+    candidates = row.candidates
+    grouped: dict[str, list[dict]] = {}
+    for cand in candidates or []:
+        grouped.setdefault(cand.get("disposition", "unaccounted"), []).append(cand)
+    for group in grouped.values():
+        group.sort(key=lambda c: (c.get("entry_score") is None, -(c.get("entry_score") or 0.0)))
+
+    return {
+        "id": row.id,
+        "session_id": row.session_id,
+        "turn_number": row.turn_number,
+        "trace_id": row.trace_id,
+        "timestamp": _retrieval_iso(row.timestamp),
+        "path": row.path,
+        "query": row.query,
+        "duration_ms": row.duration_ms,
+        "legs": row.legs or [],
+        "excluded_types": row.excluded_types or [],
+        "n_candidates": row.n_candidates,
+        "n_rendered": row.n_rendered,
+        "n_expansions": row.n_expansions,
+        "disposition_counts": row.disposition_counts or {},
+        "truncated": row.truncated,
+        # None (not {}) when this retrieval was not sampled — the UI must say
+        # "not captured", never imply the retrieval found nothing.
+        "candidates_by_disposition": grouped if candidates is not None else None,
+        "expansions": row.expansions or [],
+    }

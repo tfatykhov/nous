@@ -53,6 +53,8 @@ async def test_all_tables_exist(db):
         # F035.6: consolidation audit diff
         ("nous_system", "consolidation_cycles"),
         ("nous_system", "consolidation_actions"),
+        # F091: retrieval telemetry (migration 070)
+        ("nous_system", "retrieval_log"),
         # brain (8)
         ("brain", "decisions"),
         ("brain", "decision_tags"),

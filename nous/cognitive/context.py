@@ -7,6 +7,7 @@ and concatenates them in priority order within per-section token budgets.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -22,6 +23,39 @@ from nous.cognitive.usage_tracker import UsageTracker
 from nous.config import Settings
 from nous.heart.heart import Heart
 from nous.heart.search import apply_frame_boost, _wrap_with_score
+from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
+from nous.observability.retrieval_trace import (
+    BELOW_FLOOR,
+    BUDGET_TRUNCATED,
+    DEDUPED,
+    FILTER_DROPPED,
+    NULL_TRACE,
+    SLICED_OFF,
+    SUPERSEDED,
+)
+
+
+class _RenderedRef:
+    """Minimal (id, type) pair for ``RetrievalTrace.finalize``.
+
+    ``recalled_ids`` is a plain type -> [str id] dict, not result objects, so
+    finalize needs something with ``.id`` / ``.type`` to match against.
+    """
+
+    __slots__ = ("id", "type")
+
+    def __init__(self, item_id: str, item_type: str) -> None:
+        self.id = item_id
+        self.type = item_type
+
+
+def _tr_content(item: object) -> str | None:
+    """F091: best-effort display text across the heterogeneous result types."""
+    for attr in ("content", "summary", "description", "name"):
+        val = getattr(item, attr, None)
+        if val:
+            return str(val)
+    return None
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +209,7 @@ class ContextEngine:
         critic_skills: list[str] | None = None,
         epistemic_class: str | None = None,  # §2
         is_first_turn: bool = False,  # F083 A2
+        turn_number: int | None = None,  # F091 telemetry correlation
     ) -> BuildResult:
         """Build system prompt + context sections within budget.
 
@@ -212,6 +247,105 @@ class ContextEngine:
             "episode": [],
         }
         recalled_content_map: dict[str, str] = {}
+
+        # F091: this path runs on EVERY turn and fills the system prompt, but
+        # until now its only telemetry was counting bullets in the rendered
+        # prose (context_logger.py:165). Write-only collector — nothing below
+        # reads it back, so behavior is unchanged when telemetry is off.
+        _rl = get_active_retrieval_logger()
+        tr = (
+            _rl.start(query=input_text, path="context", session_id=session_id,
+                      turn_number=turn_number)
+            if _rl is not None else NULL_TRACE
+        )
+        _tr_t0 = time.monotonic()
+
+        # Every instrumented call below sits INSIDE its section's own
+        # `try/except Exception`, and precedes that section's
+        # `sections.append`. So an exception in telemetry does not merely lose
+        # a trace — it deletes the whole Relevant Facts / Related Decisions
+        # section from the prompt and logs "Brain.query failed", naming the
+        # wrong subsystem. The containment boundary is the section, not the
+        # telemetry, so the telemetry has to contain itself.
+        def _tr_guard(fn):
+            def _wrapped(*a, **kw):
+                try:
+                    return fn(*a, **kw)
+                except Exception:
+                    logger.debug("F091: trace helper failed (non-fatal)", exc_info=True)
+                    return None
+            return _wrapped
+
+        @_tr_guard
+        def _tr_skip(leg: str, budget_value: int, mem_type: str) -> None:
+            """Record a leg the planner or the budget deliberately skipped.
+
+            Without this, a type in `skip_types` (short acks set
+            skip_types={"fact"}) or a zero section budget produced NO leg row —
+            indistinguishable from instrumentation that simply is not there.
+            `Leg` already carries attempted/skip_reason for exactly this.
+            """
+            reason = (
+                "section budget is 0" if budget_value <= 0
+                else f"retrieval plan skipped '{mem_type}'"
+            )
+            tr.leg(leg, attempted=False, n_returned=0, skip_reason=reason)
+
+        @_tr_guard
+        def _tr_enter(items: list, mem_type: str, leg: str) -> list:
+            """Register a leg's raw hits before any filter has run."""
+            tr.leg(leg, attempted=True, n_returned=len(items or []),
+                   scores=[getattr(i, "score", None) for i in (items or [])])
+            for rank, it in enumerate(items or []):
+                tr.add(getattr(it, "id", None), mem_type, leg,
+                       score=getattr(it, "score", None), rank=rank + 1,
+                       content=_tr_content(it))
+            return items
+
+        # Ids cut by section token-budget truncation. Collected because
+        # `recalled_ids` is populated BEFORE `_truncate_to_budget` runs, so it
+        # over-states delivery — the same trap already documented for the
+        # bullet-count counters at observability/context_logger.py:178.
+        # Measured: at a squeezed facts budget, 3 of 5 facts marked rendered
+        # were absent from the prompt. Without this the dashboard answers
+        # "is this fact in context?" with a confident yes when it is not.
+        _tr_budget_cut: set[tuple[str, str]] = set()
+
+        @_tr_guard
+        def _tr_budget(items: list, mem_type: str, rendered_text: str) -> None:
+            """Attribute section-budget truncation, conservatively.
+
+            `_truncate_to_budget` is a raw char slice, so an item's line can
+            survive partially and there is no exact item-level cut point to
+            read. We therefore test whether a distinctive prefix of the item's
+            content still appears in the rendered text and only ever DOWNGRADE
+            on a clear absence — a partially-sliced item stays `rendered`.
+            Deliberately an approximation, and only ever conservative.
+            """
+            for it in (items or []):
+                iid = str(getattr(it, "id", ""))
+                if not iid:
+                    continue
+                probe = (_tr_content(it) or "").strip()[:40]
+                if probe and probe not in rendered_text:
+                    _tr_budget_cut.add((iid, mem_type))
+                    tr.drop(iid, mem_type, BUDGET_TRUNCATED, "section_budget_truncation")
+
+        @_tr_guard
+        def _tr_filtered(before: list, after: list, mem_type: str,
+                         disposition: str, stage: str) -> list:
+            """Attribute whatever ``before`` lost to ``stage``.
+
+            Diffing at the call site means the filter methods themselves stay
+            untouched — they are shared, and threading a collector through
+            each one would be a far wider change than this feature needs.
+            """
+            kept = {str(getattr(i, "id", "")) for i in (after or [])}
+            for it in (before or []):
+                iid = str(getattr(it, "id", ""))
+                if iid and iid not in kept:
+                    tr.drop(iid, mem_type, disposition, stage)
+            return after
         recalled_score_map: dict[str, float] = {}
 
         # Apply budget overrides from retrieval plan (F6: REPLACE semantics)
@@ -737,6 +871,8 @@ class ContextEngine:
         logger.info("Context build query: topic=%r, input=%r, default_query=%r", current_topic, input_text, _default_query)
 
         # 5. Decisions (F26: skip_types is primary skip mechanism)
+        if not (budget.decisions > 0 and "decision" not in skip_types):
+            _tr_skip("context_decisions", budget.decisions, "decision")
         if budget.decisions > 0 and "decision" not in skip_types:
             try:
                 limit = _limits.get("decision", DEFAULT_FETCH_LIMITS.get("decision", 5))
@@ -746,13 +882,23 @@ class ContextEngine:
                     len(decisions) if decisions else 0, self._has_embeddings,
                     [round(getattr(d, "score", 0) or 0, 3) for d in (decisions or [])[:5]],
                     [(getattr(d, "description", "") or "")[:50] for d in (decisions or [])[:3]])
+                # Registered OUTSIDE `if decisions:` — a leg that ran and
+                # returned nothing must still emit `attempted=true,
+                # n_returned=0`. Skipping it made "the query found nothing"
+                # indistinguishable from "this leg never ran", which is the
+                # single distinction the leg record exists to make.
+                _tr_enter(decisions or [], "decision", "context_decisions")
                 if decisions:
                     # F017: Staleness penalty (before boosts)
                     decisions = self._apply_staleness_penalty(decisions)
                     # 007.2: Diversity filter — use category as topic key
+                    _before = decisions
                     decisions = self._enforce_diversity(decisions, "category", max_per_subject=3)
+                    _tr_filtered(_before, decisions, "decision", FILTER_DROPPED, "diversity")
                     # Adaptive relevance filter (min/max K + gap detection)
+                    _before = decisions
                     decisions = self._apply_relevance_filter(decisions, "decision")
+                    _tr_filtered(_before, decisions, "decision", SLICED_OFF, "relevance_filter")
                     # F1: Collect recalled IDs and scores
                     for d in decisions:
                         mid = str(getattr(d, "id", ""))
@@ -767,6 +913,7 @@ class ContextEngine:
                             desc = getattr(d, "description", "")
                             recalled_content_map[mid] = desc
                     dec_text = self._truncate_to_budget(dec_text, self._scaled_budget(budget.decisions))
+                    _tr_budget(decisions, "decision", dec_text)
                     sections.append(
                         ContextSection(
                             priority=5,
@@ -778,9 +925,15 @@ class ContextEngine:
                     )
             except Exception as e:
                 logger.warning("Brain.query failed during context build: %s", e)
+                # F091: a leg that CRASHED must not read as one that never
+                # ran. Registration lives after the await, so the exception
+                # path skips it entirely.
+                tr.leg("context_decisions", attempted=True, error=str(e)[:200])
 
         facts_injected = False
         # 6. Facts (F10: retrieve -> apply_frame_boost -> dedup -> usage_boost -> truncate)
+        if not (budget.facts > 0 and "fact" not in skip_types):
+            _tr_skip("context_facts", budget.facts, "fact")
         if budget.facts > 0 and "fact" not in skip_types:
             try:
                 limit = _limits.get("fact", DEFAULT_FETCH_LIMITS.get("fact", 5))
@@ -794,11 +947,32 @@ class ContextEngine:
                     len(facts) if facts else 0, self._has_embeddings,
                     [round(getattr(f, "score", 0) or 0, 3) for f in (facts or [])[:5]],
                     [(getattr(f, "subject", "") or "")[:30] for f in (facts or [])[:5]])
+                # Outside the `if` — see the decisions leg above.
+                _tr_enter(facts or [], "fact", "context_facts")
                 if facts:
                     # Gap-2: resolve same-subject current-vs-stale conflicts (demote +
                     # tag) BEFORE the staleness/boost/relevance pipeline, so a superseded
                     # value drops out of the injected set and the agent sees the current one.
+                    # _resolve_recency DEMOTES (score *= 0.3) rather than
+                    # removing, so the diff below sees nothing. Record the score
+                    # change instead: without it, a fact later cut by the
+                    # relevance gap shows `sliced_off` against its ORIGINAL
+                    # entry score, hiding the resolver that actually caused the
+                    # loss. The diff stays as a belt in case it ever removes.
+                    _pre_recency = {
+                        str(getattr(f, "id", "")): getattr(f, "score", None)
+                        for f in (facts or [])
+                    }
+                    _before = facts
                     facts = self._resolve_recency(facts)
+                    _tr_filtered(_before, facts, "fact", FILTER_DROPPED, "recency_resolver")
+                    for _f in (facts or []):
+                        _fid = str(getattr(_f, "id", ""))
+                        _was = _pre_recency.get(_fid)
+                        _now = getattr(_f, "score", None)
+                        if _fid and _was is not None and _now != _was:
+                            tr.mutate(_fid, "fact", "recency_resolver", _was, _now,
+                                      reason=SUPERSEDED)
                     pin_k = getattr(self._settings, "fact_pin_top_k", 0)
                     pinned_facts = list(facts[:pin_k]) if pin_k > 0 else []
                     # F017: Staleness penalty (before boosts)
@@ -807,15 +981,23 @@ class ContextEngine:
                     facts = apply_frame_boost(facts, frame.frame_id, _active_censor_names)
 
                     # 007.2: Diversity filter — use subject as topic key
+                    _before = facts
                     facts = self._enforce_diversity(facts, "subject", max_per_subject=2)
+                    _tr_filtered(_before, facts, "fact", FILTER_DROPPED, "diversity")
 
                     # Dedup against conversation
+                    _before = facts
                     facts = await self._apply_dedup(facts, _conv_msgs, "content")
+                    _tr_filtered(_before, facts, "fact", FILTER_DROPPED, "conversation_dedup")
 
                     # Usage boost
                     facts = self._apply_usage_boost(facts, usage_tracker)
                     # Adaptive relevance filter (min/max K + gap detection)
+                    # NOTE: this is the max_k=5 cap at _apply_relevance_filter:1420 —
+                    # the single largest silent drop on this path.
+                    _before = facts
                     facts = self._apply_relevance_filter(facts, "fact")
+                    _tr_filtered(_before, facts, "fact", SLICED_OFF, "relevance_filter")
                     if pinned_facts:
                         facts = self._reinsert_pinned(pinned_facts, facts)
 
@@ -852,6 +1034,7 @@ class ContextEngine:
                         lineage=_lineage_by_id or None,
                     )
                     facts_text = self._truncate_to_budget(facts_text, self._scaled_budget(budget.facts))
+                    _tr_budget(facts, "fact", facts_text)
                     sections.append(
                         ContextSection(
                             priority=6,
@@ -863,6 +1046,7 @@ class ContextEngine:
                     )
             except Exception as e:
                 logger.warning("Heart.search_facts failed during context build: %s", e)
+                tr.leg("context_facts", attempted=True, error=str(e)[:200])
 
         # 6a. Session Profile intent leg (Task 2, land dark): intent-selected
         # tier-1 domain facts (trading stances, sailing contacts, project
@@ -960,6 +1144,12 @@ class ContextEngine:
                 )
             )
 
+        # One skip record for the procedure TYPE, not per branch: the two
+        # blocks below are alternative implementations behind the same
+        # budget/skip_types gate, so a type-level skip belongs to neither.
+        if not (budget.procedures > 0 and "procedure" not in skip_types):
+            _tr_skip("context_procedures", budget.procedures, "procedure")
+
         # 7. F080 §14.7: graph-primary procedure selection — preloads the BODIES of
         # procedures activated via K-line graph edges from recalled facts/decisions,
         # with critic-recommended skills as fallback. Replaces the passive-injection
@@ -996,7 +1186,18 @@ class ContextEngine:
                     recalled_score_map=recalled_score_map,
                     session=session,
                     query=input_text,
+                    trace=tr,
                 )
+                # This is the LIVE procedure path whenever
+                # proc_selection_graph_primary is on (it is, here and in prod),
+                # so the passive/embedding leg further down never runs. Register
+                # here or procedures are absent from the trace entirely.
+                # Leg name is the LADDER as a whole; _select_procedures has
+                # already registered each survivor under the rung that actually
+                # produced it (graph K-line / critic fallback / cosine
+                # fallback). `add` is first-wins, so those true attributions
+                # stand and this only catches anything it missed.
+                _tr_enter(selected or [], "procedure", "context_procedures_ladder")
                 if selected:
                     cap = getattr(
                         self._settings, "proc_recommended_body_max_chars", 2500,
@@ -1019,6 +1220,13 @@ class ContextEngine:
                         shown_blocks.append(block)
                         shown_procs.append(p)
                         used += cost
+                    # Deliberate budget cut — attribute it. Without this the
+                    # unshown procedures were registered but never dropped and
+                    # never rendered, so they landed in `unaccounted`, which is
+                    # reserved as the drift signal for a filter that forgot to
+                    # report. A known cut pinned that alarm permanently high.
+                    _tr_filtered(selected, shown_procs, "procedure",
+                                 BUDGET_TRUNCATED, "procedure_budget_accumulation")
                     if shown_procs:
                         proc_text = "\n\n".join(shown_blocks)
                         sections.append(
@@ -1037,6 +1245,7 @@ class ContextEngine:
                             recalled_score_map[mid] = 1.0
             except Exception as e:
                 logger.warning("F080 §14.7 procedure selection failed: %s", e)
+                tr.leg("context_procedures_ladder", attempted=True, error=str(e)[:200])
 
         # 7. Procedures (dual-track: Critic reserved slots + embedding slots, issue #229)
         # F079 unified pull: `proc_passive_injection_enabled=False` removes only the
@@ -1112,40 +1321,68 @@ class ContextEngine:
                         q_text, limit=embedding_limit, frame_type=frame.frame_id, session=session,
                     )
 
+                # Registration for the procedure leg, outside the `if` so an
+                # empty result still emits the leg. Without this the
+                # `_tr_filtered` calls below no-op (drop() is keyed on a
+                # candidate that was never added), procedure drops vanish,
+                # and rendered procedures are missing from n_rendered — the
+                # dashboard would imply no procedures were even considered.
+                _tr_enter(embedding_procedures or [], "procedure", "context_procedures")
                 if embedding_procedures:
                     # Standard pipeline: staleness -> frame boost -> dedup -> usage boost -> relevance
                     embedding_procedures = self._apply_staleness_penalty(embedding_procedures)
                     embedding_procedures = apply_frame_boost(
                         embedding_procedures, frame.frame_id, _active_censor_names,
                     )
+                    _before = embedding_procedures
                     embedding_procedures = await self._apply_dedup(
                         embedding_procedures, _conv_msgs, "name",
                     )
+                    # Unattributed, this left every conversation-deduped
+                    # procedure at `unaccounted` — pinning the drift alarm on
+                    # any normal chat that mentions a procedure by name.
+                    _tr_filtered(_before, embedding_procedures, "procedure",
+                                 FILTER_DROPPED, "conversation_dedup")
                     embedding_procedures = self._apply_usage_boost(
                         embedding_procedures, usage_tracker,
                     )
                     # F038-2.1: Absolute procedure score floor (embedding mode only)
                     if self._has_embeddings and self._settings.procedure_score_floor > 0:
+                        _before = embedding_procedures
                         embedding_procedures = [
                             p for p in embedding_procedures
                             if (getattr(p, "score", 0) or 0) >= self._settings.procedure_score_floor
                         ]
+                        _tr_filtered(_before, embedding_procedures, "procedure",
+                                     BELOW_FLOOR, "procedure_score_floor")
+                    _before = embedding_procedures
                     embedding_procedures = self._apply_relevance_filter(
                         embedding_procedures, "procedure",
                     )
+                    _tr_filtered(_before, embedding_procedures, "procedure",
+                                 SLICED_OFF, "relevance_filter")
 
                     # Deduplicate: exclude Critic picks from embedding results
                     if critic_names:
+                        _before = embedding_procedures
                         embedding_procedures = [
                             p for p in embedding_procedures
                             if getattr(p, "name", "") not in critic_names
                         ]
+                        # DEDUPED, not a loss: the Critic track already carries
+                        # this procedure, so it still reaches the prompt.
+                        _tr_filtered(_before, embedding_procedures, "procedure",
+                                     DEDUPED, "critic_track_overlap")
 
+                    _before = embedding_procedures
                     embedding_procedures = embedding_procedures[:embedding_limit]
+                    _tr_filtered(_before, embedding_procedures, "procedure",
+                                 SLICED_OFF, "embedding_slot_limit")
 
                 # F038-1.3: Dedup procedures vs identity prompt
                 _effective_identity = identity_override or self._identity_prompt
                 if embedding_procedures and _effective_identity:
+                    _before = embedding_procedures
                     embedding_procedures = [
                         p for p in embedding_procedures
                         if text_overlap(
@@ -1153,10 +1390,21 @@ class ContextEngine:
                             _effective_identity,
                         ) < _IDENTITY_OVERLAP_THRESHOLD
                     ]
+                    _tr_filtered(_before, embedding_procedures, "procedure",
+                                 FILTER_DROPPED, "identity_overlap")
 
                 # --- Combine tracks ---
+                # Track A (Critic) is registered HERE, not at the embedding
+                # registration above: a critic pick that the embedding search
+                # did not also return is rendered and lands in recalled_ids,
+                # but finalize() cannot mark a candidate nobody registered — so
+                # it fell out of n_candidates/n_rendered entirely.
+                _tr_enter(critic_procedures or [], "procedure", "context_procedures_critic")
                 all_procedures = critic_procedures + (embedding_procedures or [])
+                _before_slots = all_procedures
                 all_procedures = all_procedures[:total_slots]
+                _tr_filtered(_before_slots, all_procedures, "procedure",
+                             SLICED_OFF, "total_slot_limit")
 
                 if all_procedures:
                     for p in all_procedures:
@@ -1198,6 +1446,11 @@ class ContextEngine:
                         proc_text = self._truncate_to_budget(
                             proc_text, self._scaled_budget(budget.procedures),
                         )
+                        # Same trap the fact/decision/episode sections already
+                        # guard: recalled_ids is populated before this cut, so
+                        # a procedure whose line the budget removed would be
+                        # finalized as `rendered` while absent from the prompt.
+                        _tr_budget(all_procedures, "procedure", proc_text)
                         sections.append(
                             ContextSection(
                                 priority=7,
@@ -1214,12 +1467,24 @@ class ContextEngine:
         # Not gated by budget.episodes — this is a lightweight tier that shows
         # only titles (+ summaries when boosted), separate from heavy semantic retrieval
         _temporal_episode_ids: set[str] = set()
+        if not self._settings.temporal_context_enabled:
+            _tr_skip("context_episodes_temporal", 1, "temporal episodes")
         if self._settings.temporal_context_enabled:
             try:
                 recent = await self._heart.list_episodes(limit=5, hours=48)
+                # Registered on the RAW result, before any filtering and outside
+                # `if recent`. These episodes render into "Recent Conversations"
+                # but never enter recalled_ids, so without this they were memory
+                # delivered to the model with no trace representation — and
+                # registering after the system filter (or inside the `if`) hid
+                # both the internal-episode drops and an executed empty search.
+                _tr_enter(recent or [], "episode", "context_episodes_temporal")
                 # Filter out system/internal episodes (handler tasks, summarization runs)
                 if recent:
+                    _before = recent
                     recent = [e for e in recent if not _is_system_episode(e)]
+                    _tr_filtered(_before, recent, "episode",
+                                 FILTER_DROPPED, "system_episode")
                 if recent:
                     _temporal_episode_ids = {str(e.id) for e in recent}
                     recent_lines = []
@@ -1257,18 +1522,32 @@ class ContextEngine:
                     )
             except Exception as e:
                 logger.warning("Temporal tier failed: %s", e)
+                tr.leg("context_episodes_temporal", attempted=True, error=str(e)[:200])
 
         # 8. Episodes
+        if not (budget.episodes > 0 and "episode" not in skip_types):
+            _tr_skip("context_episodes", budget.episodes, "episode")
         if budget.episodes > 0 and "episode" not in skip_types:
             try:
                 limit = _limits.get("episode", DEFAULT_FETCH_LIMITS.get("episode", 5))
                 q_text = _query_texts.get("episode", _default_query)
                 episodes = await self._heart.search_episodes(q_text, limit=limit, session=session)
+                _tr_enter(episodes, "episode", "context_episodes")
                 # Filter out system/internal episodes
+                _before = episodes
                 episodes = [e for e in episodes if not _is_system_episode(e)]
+                _tr_filtered(_before, episodes, "episode", FILTER_DROPPED, "system_episode")
                 # 008.6: Exclude episodes already shown in temporal tier
                 if _temporal_episode_ids:
+                    _before = episodes
                     episodes = [e for e in episodes if str(e.id) not in _temporal_episode_ids]
+                    # DEDUPED, not FILTER_DROPPED: these episodes ARE in the
+                    # prompt — the temporal tier rendered them into "Recent
+                    # Conversations" already, and this leg skips them to avoid
+                    # duplicating. Reporting them as dropped told an operator
+                    # asking "why isn't episode X in context?" that it was
+                    # removed, while X's summary sat two sections above.
+                    _tr_filtered(_before, episodes, "episode", DEDUPED, "temporal_tier_already_rendered")
                 if episodes:
                     # F038-2.3: Episode-specific recency weighting (replaces general staleness)
                     episodes = self._apply_episode_recency(episodes)
@@ -1276,13 +1555,19 @@ class ContextEngine:
                     episodes = apply_frame_boost(episodes, frame.frame_id, _active_censor_names)
 
                     # 007.2: Diversity filter — use first tag as topic key
+                    _before = episodes
                     episodes = self._enforce_diversity(episodes, "tags", max_per_subject=2)
+                    _tr_filtered(_before, episodes, "episode", FILTER_DROPPED, "diversity")
 
                     # Dedup + usage boost
+                    _before = episodes
                     episodes = await self._apply_dedup(episodes, _conv_msgs, "summary")
+                    _tr_filtered(_before, episodes, "episode", FILTER_DROPPED, "conversation_dedup")
                     episodes = self._apply_usage_boost(episodes, usage_tracker)
                     # Adaptive relevance filter (min/max K + gap detection)
+                    _before = episodes
                     episodes = self._apply_relevance_filter(episodes, "episode")
+                    _tr_filtered(_before, episodes, "episode", SLICED_OFF, "relevance_filter")
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix)
                     for e in episodes:
@@ -1294,6 +1579,7 @@ class ContextEngine:
 
                     ep_text = self._format_episodes(episodes)
                     ep_text = self._truncate_to_budget(ep_text, self._scaled_budget(budget.episodes))
+                    _tr_budget(episodes, "episode", ep_text)
                     sections.append(
                         ContextSection(
                             priority=8,
@@ -1305,6 +1591,7 @@ class ContextEngine:
                     )
             except Exception as e:
                 logger.warning("Heart.search_episodes failed during context build: %s", e)
+                tr.leg("context_episodes", attempted=True, error=str(e)[:200])
 
         # Assemble system prompt with markdown headers
         parts: list[str] = []
@@ -1335,7 +1622,40 @@ class ContextEngine:
             if parts
         }
 
+        # F091: everything still in recalled_ids at this point survived every
+        # filter and was rendered into the prompt. Anything registered but
+        # absent here was dropped by a stage that reported why — or, if a new
+        # filter forgot to report, it lands as `unaccounted`, which is the
+        # drift signal rather than a plausible-looking guess.
+        if _rl is not None:
+            try:
+                # Exclude ids cut by section-budget truncation: they ARE in
+                # recalled_ids (collected pre-truncation) but never reached
+                # the model, and finalize() treats presence here as
+                # authoritative — it would otherwise resurrect them straight
+                # back to `rendered` and undo the attribution above.
+                _rendered = [
+                    _RenderedRef(mid, mtype)
+                    for mtype, mids in recalled_ids.items()
+                    for mid in mids
+                    if (mid, mtype) not in _tr_budget_cut
+                ]
+                # Temporal-tier episodes DID reach the model (rendered into
+                # "Recent Conversations"), but they never enter recalled_ids,
+                # so finalize could not override their `deduped` mark. Relabel
+                # alone was half a fix: they still counted as a drop and sat
+                # outside n_rendered while their summaries were in the prompt.
+                _rendered.extend(
+                    _RenderedRef(mid, "episode") for mid in _temporal_episode_ids
+                )
+                tr.finalize(_rendered, duration_ms=(time.monotonic() - _tr_t0) * 1000.0)
+            except Exception:
+                logger.debug("F091: context retrieval trace failed", exc_info=True)
+
         return BuildResult(
+            # Finalized but NOT committed — pre_turn commits once it knows the
+            # prompt is actually going to be sent (a censor block discards it).
+            retrieval_trace=(tr if _rl is not None else None),
             system_prompt=system_prompt,
             sections=sections,
             recalled_ids=recalled_ids,
@@ -1776,6 +2096,7 @@ class ContextEngine:
         recalled_score_map: dict[str, float],
         session,
         query: str = "",
+        trace=None,
     ) -> list:
         """§14.7 procedure selection ladder: graph K-line -> critic -> cosine.
 
@@ -1818,23 +2139,57 @@ class ContextEngine:
                 continue
             for n in neighbors:
                 score = (getattr(n, "edge_weight", 0.0) or 0.0) * seed_score
+                # F091: Path B has its own graph expansion (F080 §14.7 K-line
+                # procedure selection) and it was entirely uncaptured — the
+                # pipeline's Stage 2/2b/4 traversals are a different code path.
+                # won_best_path is resolved in finalize() across all paths, not
+                # here — first-arrival is all that is knowable at record time.
+                # Losing paths are still recorded, flagged not-won.
+                if trace is not None:
+                    trace.expansion(
+                        seed_id=mid, seed_type=stype, seed_score=seed_score,
+                        neighbor_id=n.id, neighbor_type="procedure",
+                        stage="context_procedure_kline", hop=1,
+                        edge_relation=getattr(n, "edge_relation", None),
+                        edge_weight=getattr(n, "edge_weight", None),
+                        extraction_method=getattr(n, "extraction_method", None),
+                        path_strength=score,
+                    )
                 if score > scores.get(n.id, -1.0):
                     scores[n.id] = score
 
         # Phase 2: rank by score, fetch bodies only for enough top candidates to
         # fill the slots (skip stale/inactive and continue down the ranked list).
         selected: list = []
-        for pid, _score in sorted(scores.items(), key=lambda x: (-x[1], str(x[0]))):
+        # F091: register EVERY ranked K-line candidate before the gates below,
+        # not just the survivors. The slot cut and the deleted/inactive skips
+        # are this path's principal drops — registering only `selected` left
+        # them present in `expansions` but absent from n_candidates with no
+        # disposition at all, so the graph path's losses were unattributable.
+        _ranked = sorted(scores.items(), key=lambda x: (-x[1], str(x[0])))
+        if trace is not None:
+            for _rank, (_pid, _sc) in enumerate(_ranked):
+                trace.add(_pid, "procedure", "context_procedures_graph",
+                          score=_sc, rank=_rank + 1)
+        for pid, _score in _ranked:
             if len(selected) >= slots:
-                break
+                if trace is not None:
+                    trace.drop(pid, "procedure", SLICED_OFF, "kline_slot_limit")
+                continue  # keep going so every remaining candidate is attributed
             try:
                 detail = await self._heart.get_procedure(pid, session=session)
             except ValueError:
+                if trace is not None:
+                    trace.drop(pid, "procedure", FILTER_DROPPED, "procedure_deleted")
                 continue  # stale edge → procedure deleted; benign
             except Exception as e:
                 logger.warning("F080 §14.7: get_procedure failed for %s: %s", pid, e)
+                if trace is not None:
+                    trace.drop(pid, "procedure", FILTER_DROPPED, "procedure_fetch_failed")
                 continue
             if not getattr(detail, "active", False):
+                if trace is not None:
+                    trace.drop(pid, "procedure", FILTER_DROPPED, "procedure_inactive")
                 continue  # archived/superseded → never surface
             selected.append(detail)
 
@@ -1850,6 +2205,10 @@ class ContextEngine:
                     logger.warning("F080 §14.7: critic-skill lookup failed for %r: %s", name, e)
                     continue
                 if detail is not None and detail.id not in have and getattr(detail, "active", True):
+                    # F091: its OWN leg. Registering these under the graph leg
+                    # reported a critic pick as a successful graph candidate.
+                    if trace is not None:
+                        trace.add(detail.id, "procedure", "context_procedures_critic_fallback")
                     selected.append(detail)
                     have.add(detail.id)
 
@@ -1893,6 +2252,9 @@ class ContextEngine:
                 except Exception:
                     continue
                 if detail is not None and getattr(detail, "active", False):
+                    if trace is not None:
+                        trace.add(detail.id, "procedure", "context_procedures_cosine_fallback",
+                                  score=summ.score)
                     selected.append(detail)
                     have.add(detail.id)
         return selected[:slots]

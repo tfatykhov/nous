@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -174,6 +175,12 @@ class BuildResult(BaseModel):
     recalled_content_map: dict[str, str] = Field(default_factory=dict)
     recalled_score_map: dict[str, float] = Field(default_factory=dict)
     sections_by_tier: dict[str, str] = Field(default_factory=dict)  # F036: tier -> joined text
+    # F091: the finalized-but-uncommitted retrieval trace. `rendered` means
+    # "reached the model", and whether it did is not known until AFTER build —
+    # a pre-turn censor block discards the prompt entirely. pre_turn commits
+    # this only once the prompt is actually going to be used, so a blocked turn
+    # cannot claim a delivery it never made. Excluded from serialization.
+    retrieval_trace: Any = Field(default=None, exclude=True, repr=False)
 
 
 class TurnContext(BaseModel):

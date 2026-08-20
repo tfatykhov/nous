@@ -45,7 +45,7 @@ class MockCognitiveLayer:
             context_token_estimate=100,
         )
 
-    async def pre_turn(self, agent_id, session_id, user_input, session=None, *, conversation_messages=None, user_id=None, user_display_name=None, skip_episode=False, is_subtask=False):
+    async def pre_turn(self, agent_id, session_id, user_input, session=None, *, conversation_messages=None, user_id=None, user_display_name=None, skip_episode=False, is_subtask=False, turn_number=None):
         self.pre_turn_calls.append((agent_id, session_id, user_input))
         return self.preset_context
 
@@ -1081,7 +1081,7 @@ async def test_tool_loop_preserves_thinking_blocks(mock_cognitive):
         def available_tools(self, frame_id):
             return [{"name": "test_tool", "description": "test", "input_schema": {"type": "object"}}]
 
-        async def dispatch(self, name, input_data, session_id=None, is_background=False):
+        async def dispatch(self, name, input_data, session_id=None, is_background=False, turn_number=None):
             return "tool result", False
 
     r.set_dispatcher(MockDispatcher())
@@ -1128,7 +1128,7 @@ async def test_tool_loop_preserves_redacted_thinking(mock_cognitive):
         def available_tools(self, frame_id):
             return [{"name": "test_tool", "description": "test", "input_schema": {"type": "object"}}]
 
-        async def dispatch(self, name, input_data, session_id=None, is_background=False):
+        async def dispatch(self, name, input_data, session_id=None, is_background=False, turn_number=None):
             return "ok", False
 
     r.set_dispatcher(MockDispatcher())

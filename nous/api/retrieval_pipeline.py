@@ -36,6 +36,17 @@ from sqlalchemy import select
 
 from nous.heart.exemplars import parse_label
 from nous.heart.keys import extract_entity_candidates, normalize_key
+from nous.observability.retrieval_trace import (
+    BELOW_FLOOR,
+    DEDUPED,
+    F071_EXCLUDED,
+    FILTER_DROPPED,
+    NULL_TRACE,
+    REPLACED_AT_MERGE,
+    SLICED_OFF,
+    SUPERSEDED,
+    TYPE_EXCLUDED,
+)
 
 if TYPE_CHECKING:
     from nous.brain.brain import Brain
@@ -348,6 +359,7 @@ async def run_recall_pipeline(
     apply_mmr: bool | None = None,
     rerank_by_score: bool = False,
     exclude_ids: dict[str, set[str]] | None = None,
+    trace: object | None = None,
 ) -> tuple[list[PipelineResult], PipelineStats]:
     """Run the full retrieval pipeline.
 
@@ -368,6 +380,10 @@ async def run_recall_pipeline(
             decision``). ``None`` or containing ``"all"`` searches everything.
         apply_mmr: F030.2 per-consumer MMR override. None=settings-driven,
             True=force MMR (bypass skip_after_ce), False=force MMR off.
+        trace: F091 write-only telemetry collector. Defaults to the shared
+            no-op, so behavior is byte-identical when telemetry is off — the
+            pipeline only ever writes INTO it, never reads back out, so no
+            branch can depend on trace state.
 
     Returns:
         ``(results, stats)`` where ``results`` is a flat list of
@@ -379,6 +395,8 @@ async def run_recall_pipeline(
     # F075 L3: parse the date window once per query when the leg is enabled.
     # The parser is fail-open (returns None on timeout/error/no-date), so
     # no try/except is needed; None → no leg → byte-identical to today.
+    tr = trace if trace is not None else NULL_TRACE
+    _t0 = time.monotonic()
     date_window = None
     parser = getattr(heart, "date_window_parser", None)
     # Only the fact leg consumes the window, so skip the Haiku parse (latency +
@@ -393,23 +411,40 @@ async def run_recall_pipeline(
     acc = await _run_stages(
         query, heart, brain, settings, limit, memory_types,
         residual_activations, apply_mmr=apply_mmr, date_window=date_window,
-        exclude_ids=exclude_ids,
+        exclude_ids=exclude_ids, trace=tr,
     )
 
     # Build flat PipelineResult list in stage order
     results: list[PipelineResult] = []
+
+    def _tr_entries(leg: str, start: int) -> None:
+        """F091: register everything appended since ``start`` under ``leg``."""
+        for offset, r in enumerate(results[start:]):
+            tr.add(r.id, r.type, leg, score=r.score, rank=offset + 1,
+                   content=r.description)
+
+    _m = len(results)
     results.extend(_heart_results_to_pipeline(acc.heart_results))
+    _tr_entries("heart_primary", _m)
     # F067: episode chunks appended to Heart section (same source tag,
     # naturally co-displayed). Empty when feature flag is off.
+    _m = len(results)
     results.extend(_chunks_to_pipeline(acc.chunk_results))
+    _tr_entries("chunk", _m)
+    _m = len(results)
     results.extend(_heart_graph_to_pipeline(acc.heart_graph_decisions, settings))
+    _tr_entries("heart_graph", _m)
     # Path A: non-decision neighbors land in the same stage-order slot as the
     # decision-only graph results so subsequent ``rerank_by_score`` reorders
     # them uniformly with everything else.
+    _m = len(results)
     results.extend(_heart_graph_memory_to_pipeline(
         acc.heart_graph_memory_neighbors, settings,
     ))
+    _tr_entries("heart_graph_memory", _m)
+    _m = len(results)
     results.extend(_decisions_to_pipeline(acc.decision_results))
+    _tr_entries("brain", _m)
     # P1.1: batch-resolve source_episode_id for fact-type results so the
     # formatter can session-group the Heart section. Episodes already carry
     # their id as the session; chunks got their episode_id from the chunk
@@ -424,10 +459,17 @@ async def run_recall_pipeline(
     # by feature flag; default off.
     if getattr(settings, "graph_adjacency_boost_enabled", False):
         alpha = float(getattr(settings, "graph_adjacency_boost_alpha", 0.15))
+        _pre_boost = {(r.id, r.type): r.score for r in results}
         results = await _apply_graph_adjacency_boost(
             brain, results, alpha=alpha,
         )
+        for r in results:
+            before = _pre_boost.get((r.id, r.type))
+            if before is not None and before != r.score:
+                tr.mutate(r.id, r.type, "adjacency_boost", before, r.score)
+    _m = len(results)
     results.extend(_graph_expanded_to_pipeline(acc.graph_expanded, settings))
+    _tr_entries("graph_expanded", _m)
 
     # R3.3 (F085): keyed fact leg assembly. Additive-only placement — each
     # keyed hit is inserted before the first existing result with a strictly
@@ -447,6 +489,13 @@ async def run_recall_pipeline(
             len(results),
         )
         results.insert(pos, kr)
+        tr.add(kr.id, kr.type, "keyed", score=kr.score, rank=pos + 1,
+               content=kr.description)
+    # Deduped keyed hits are NOT recorded as drops: the item is still in the
+    # result set under whichever leg found it first, so it is corroboration,
+    # not a loss. Counting it as a drop would overstate retrieval failure.
+    tr.leg("keyed", attempted=acc.keyed_leg_used, n_returned=len(keyed),
+           n_deduped=acc.n_keyed_dup)
 
     # R3v2: round-2 keyed assembly — same additive-only, score-ordered
     # insertion pattern as round 1 above, run strictly after it so round-2
@@ -495,6 +544,12 @@ async def run_recall_pipeline(
             len(results),
         )
         results.insert(pos, kr)
+        tr.add(kr.id, kr.type, "keyed_r2", score=kr.score, rank=pos + 1,
+               content=kr.description)
+    if acc.keyed_r2_ran:
+        tr.leg("keyed_r2", attempted=True, n_returned=len(keyed_r2),
+               n_deduped=acc.n_keyed_r2_dup,
+               skip_reason="truncated" if acc.keyed_r2_truncated else None)
 
     # codex r3: ONE combined telemetry line at assembly, carrying both the
     # stage-time counters (threaded through the accumulator) and the
@@ -531,6 +586,9 @@ async def run_recall_pipeline(
         # recomputed AFTER the removal so the score-banded insertion sees the
         # pruned list.
         fetched_ids = {h.id for h in acc.exemplar_hits}
+        for r in results:
+            if r.id in fetched_ids and r.metadata.get("retrieval_leg") != "exemplar":
+                tr.drop(r.id, r.type, REPLACED_AT_MERGE, "exemplar_fetched_strip")
         results = [r for r in results if not (r.id in fetched_ids and r.metadata.get("retrieval_leg") != "exemplar")]
         # Codex r15: source-aware strip. The fetched-set strip above misses an
         # exemplar-source row that ordinary recall (BM25/hybrid, or beyond the
@@ -546,6 +604,11 @@ async def run_recall_pipeline(
         ]
         stray_exemplar_ids = await heart.facts.exemplar_ids_among(remaining_fact_ids)
         if stray_exemplar_ids:
+            # Distinct from the fetched-set strip above — collapsing the two
+            # into one disposition would hide which rule removed the row.
+            for r in results:
+                if r.type == "fact" and r.id in stray_exemplar_ids:
+                    tr.drop(r.id, r.type, REPLACED_AT_MERGE, "exemplar_stray_strip")
             results = [r for r in results if not (r.type == "fact" and r.id in stray_exemplar_ids)]
         existing_ids = {r.id for r in results}
         exemplar_rows, n_exemplar_dup = _exemplar_to_pipeline(acc.exemplar_hits, settings, existing_ids)
@@ -555,6 +618,10 @@ async def run_recall_pipeline(
                 len(results),
             )
             results.insert(pos, er)
+            tr.add(er.id, er.type, "exemplar", score=er.score, rank=pos + 1,
+                   content=er.description)
+        tr.leg("exemplar", attempted=True, n_returned=len(exemplar_rows),
+               n_deduped=n_exemplar_dup)
 
     # Attach contradiction links to matching results
     if acc.contradictions:
@@ -564,7 +631,16 @@ async def run_recall_pipeline(
     # facts). Runs on the full cross-leg candidate set with contradiction links
     # present, BEFORE the rerank_by_score sort below.
     if getattr(settings, "recency_resolver_enabled", False):
+        _pre_recency = {(r.id, r.type): r.score for r in results}
         results = _resolve_recency_conflicts(results, settings)
+        # Superseded facts are DEMOTED, never removed — so this is a score
+        # mutation, not a drop. Recording it as a drop would claim the fact
+        # left the result set when it is still there, ranked lower and tagged.
+        for r in results:
+            before = _pre_recency.get((r.id, r.type))
+            if before is not None and before != r.score:
+                tr.mutate(r.id, r.type, "recency_resolver", before, r.score,
+                          reason=SUPERSEDED)
 
     # F065 follow-up (2026-05-23): optional score-based merge.
     #
@@ -594,6 +670,9 @@ async def run_recall_pipeline(
     excluded_in_context = 0
     if exclude_ids:
         before = len(results)
+        for r in results:
+            if str(r.id) in exclude_ids.get(r.type, set()):
+                tr.drop(r.id, r.type, F071_EXCLUDED, "f071_cross_context_dedup")
         results = [
             r for r in results
             if str(r.id) not in exclude_ids.get(r.type, set())
@@ -608,6 +687,45 @@ async def run_recall_pipeline(
         and getattr(settings, "tinyhippo_recall_touch_enabled", False)
     ):
         await _record_recall_reactivation(brain, results)
+
+    # F091: leg summaries for the stages that mark themselves in
+    # ``attempted_legs``. Reported here (not at each stage) because
+    # ``attempted_legs`` is the producer's own answer to "did this run",
+    # which no combination of config flags can reconstruct — the one-hop
+    # fallback, for one, is skipped based on runtime spreading success.
+    # ``acc.graph_expanded`` is filled by EITHER spreading activation OR the
+    # 1-hop fallback — never both — and `_tr_entries` tags every one of those
+    # candidates `entry_leg="graph_expanded"`. So the yield must be reported
+    # under THAT name, or candidates reference a leg that has no record while
+    # the legs that do exist claim zero. `brain_graph` / `spreading_activation`
+    # stay as attempt markers (which mechanism ran), carrying no count of
+    # their own — a count on them would double the same rows.
+    _leg_counts = {
+        "heart_primary": len(acc.heart_results),
+        "chunk": len(acc.chunk_results),
+        "heart_graph": len(acc.heart_graph_decisions),
+        "heart_graph_memory": len(acc.heart_graph_memory_neighbors),
+        "brain": len(acc.decision_results),
+        "graph_expanded": len(acc.graph_expanded),
+    }
+    _attempted = set(acc.attempted_legs)
+    # Emit the graph_expanded leg whenever it produced rows, even though no
+    # stage adds that literal name to attempted_legs (the stages mark the
+    # MECHANISM: brain_graph or spreading_activation).
+    if acc.graph_expanded:
+        _attempted.add("graph_expanded")
+    for _leg_name in _attempted:
+        # ``.get(name)`` -> None, NOT 0, for legs absent from _leg_counts.
+        # keyed / keyed_r2 / exemplar report their own counts at assembly
+        # (they are the only legs whose yield is known there), and they are
+        # ALSO in attempted_legs — so defaulting to 0 here overwrote a
+        # correct count with zero. ``leg()`` treats None as "leave it alone".
+        # brain_graph / spreading_activation land here with None by design.
+        tr.leg(_leg_name, attempted=True, n_returned=_leg_counts.get(_leg_name))
+    for _stage, _n_err in acc.stage_errors.items():
+        tr.leg(_stage, attempted=True, error=f"{_n_err} error(s)")
+
+    tr.finalize(results, duration_ms=(time.monotonic() - _t0) * 1000.0)
 
     stats = PipelineStats(
         ce_reranked=False,  # CE rerank happens inside heart.recall already
@@ -653,8 +771,10 @@ async def _run_stages(
     apply_mmr: bool | None = None,
     date_window: "object | None" = None,
     exclude_ids: dict[str, set[str]] | None = None,
+    trace: object | None = None,
 ) -> _PipelineAccumulator:
     acc = _PipelineAccumulator()
+    tr = trace if trace is not None else NULL_TRACE
 
     # Determine which types to search
     search_types = memory_types or ["all"]
@@ -685,6 +805,12 @@ async def _run_stages(
         # eval probes, codex P1). recall_deep-only — the cognitive path uses per-type
         # search_*, not heart.recall.
         if search_all and getattr(settings, "coherent_ranking_enabled", False):
+            # F091: a TYPE-level drop — these are removed before search runs,
+            # so there are no candidates to attribute it to. Recorded on its
+            # own channel rather than inferred from an absence.
+            for _excluded in ("censor", "procedure"):
+                if _excluded in heart_types:
+                    tr.exclude_type(_excluded, "f080_coherent_ranking")
             heart_types = [t for t in heart_types if t not in ("censor", "procedure")]
             acc.coherent_ranking_applied = True
 
@@ -692,8 +818,14 @@ async def _run_stages(
             acc.searched_heart = True
             acc.attempted_legs.add("heart_primary")
             acc.heart_types_searched = heart_types
+            # F091: collect what Heart's final [:limit] cut. That is the single
+            # largest drop on this path — per-type fetch is limit*2 across up to
+            # four types — and without it n_candidates could equal n_rendered on
+            # a crowded corpus, hiding the principal loss entirely.
+            _heart_cut: list = []
             heart_results = await heart.recall(
                 query, limit=limit, types=heart_types,
+                dropped_out=_heart_cut,
                 residual_activations=residual_activations,  # F055
                 apply_mmr=apply_mmr,  # F030.2
                 date_window=date_window,  # F075 L3
@@ -704,6 +836,11 @@ async def _run_stages(
                 stage_errors=acc.stage_errors,
             )
             acc.heart_results = list(heart_results or [])
+            for _cut in _heart_cut:
+                tr.add(_cut.id, _cut.type, "heart_primary",
+                       score=getattr(_cut, "score", None),
+                       content=getattr(_cut, "summary", None))
+                tr.drop(_cut.id, _cut.type, SLICED_OFF, "heart_recall_limit")
 
     # ------------------------------------------------------------------
     # Stage 1.5: F067 episode chunks (opt-in; default off)
@@ -975,6 +1112,14 @@ async def _run_stages(
                     floor = getattr(settings, "exemplar_min_similarity", 0.30)
                     surviving = [h for h in hits if h.similarity >= floor]
                     acc.exemplar_hits = surviving
+                    # F091: below-floor hits are dropped here and never reach
+                    # assembly, so register+drop them now or they are invisible.
+                    for h in hits:
+                        if h.similarity < floor:
+                            tr.add(h.id, "fact", "exemplar", score=h.similarity,
+                                   content=getattr(h, "content", None))
+                            tr.drop(h.id, "fact", BELOW_FLOOR,
+                                    "exemplar_similarity_floor")
                     if surviving:
                         # Codex r3: retrieval == access. Track recall on the
                         # post-floor survivors (the set that will merge) so
@@ -1039,6 +1184,17 @@ async def _run_stages(
                     for n in neighbors:
                         if n.node_type != "decision":
                             continue
+                        # F091: every field below already exists on the
+                        # NeighborResult at this point — pure capture, no query.
+                        tr.expansion(
+                            seed_id=hr.id, seed_type=hr.type, seed_score=hr.score,
+                            neighbor_id=n.id, neighbor_type=n.node_type,
+                            stage="stage2_heart_graph", hop=1,
+                            edge_relation=n.edge_relation,
+                            edge_weight=n.edge_weight,
+                            extraction_method=getattr(n, "extraction_method", None),
+                            path_strength=(hr.score or 0.0) * (n.edge_weight or 0.0),
+                        )
                         prev = seen_graph.get(n.id)
                         if prev is n:
                             # Aliasing guard: the same object reached again
@@ -1155,6 +1311,16 @@ async def _run_stages(
                         # keep the guard for defense against future filter drift.
                         if n.node_type == "decision":
                             continue
+                        tr.expansion(
+                            seed_id=seed_id, seed_type=seed_type,
+                            seed_score=seed_score,
+                            neighbor_id=n.id, neighbor_type=n.node_type,
+                            stage="stage2b_heart_graph_memory", hop=1,
+                            edge_relation=n.edge_relation,
+                            edge_weight=n.edge_weight,
+                            extraction_method=getattr(n, "extraction_method", None),
+                            path_strength=(seed_score or 0.0) * (n.edge_weight or 0.0),
+                        )
                         if n.id in seen_mem:
                             # Reached from multiple seeds: keep the PATH (seed + edge)
                             # with the highest COMPOSED score, not just the strongest
@@ -1326,12 +1492,31 @@ async def _run_stages(
                         if ids_by_type
                         else {}
                     )
+                    # F091: the activation floor drops nodes BEFORE `hits` is
+                    # built, and the two gates below drop more. Register and
+                    # attribute all three, or a spreading run reports only what
+                    # survived and looks like it activated nothing else.
+                    for _nid, _ntype, _act in activated:
+                        if _act <= 0.1 and _nid not in seed_ids and _nid not in seen_ids:
+                            tr.add(_nid, _ntype, "spreading_activation", score=_act)
+                            tr.drop(_nid, _ntype, BELOW_FLOOR, "spreading_activation_floor")
+
                     n_appended = 0
                     for nid, ntype, activation in hits:
                         if n_appended >= _SPREADING_RESULT_CAP:
-                            break
+                            # Attribute the rest of the window rather than
+                            # breaking — a cap that silently truncates is the
+                            # thing this feature exists to make visible.
+                            tr.add(nid, ntype, "spreading_activation", score=activation)
+                            tr.drop(nid, ntype, SLICED_OFF, "spreading_result_cap")
+                            continue
                         resolved = descriptions.get(nid)
                         if resolved is None or not resolved[0]:
+                            # Inactive / missing / foreign row — the resolver
+                            # omitted it, so it ships no content.
+                            tr.add(nid, ntype, "spreading_activation", score=activation)
+                            tr.drop(nid, ntype, FILTER_DROPPED,
+                                    "spreading_content_unresolved")
                             continue
                         desc, created = resolved
                         graph_expanded.append(
@@ -1343,6 +1528,21 @@ async def _run_stages(
                                 edge_weight=activation,
                                 created_at=created or datetime.now(UTC),
                             )
+                        )
+                        # F091: spreading is multi-hop, so the CTE returns an
+                        # activation rather than a single (seed, edge) pair —
+                        # there is no one seed to attribute. Record the whole
+                        # seed set's origin as the stage and hop=2+ to mark it
+                        # as a traversal result, not a 1-hop neighbour.
+                        tr.expansion(
+                            seed_id=seeds[0][0] if seeds else nid,
+                            seed_type="multi",
+                            seed_score=None,
+                            neighbor_id=nid, neighbor_type=ntype,
+                            stage="stage4_spreading_activation", hop=2,
+                            edge_relation="spreading_activation",
+                            edge_weight=activation,
+                            path_strength=activation,
                         )
                         seen_ids.add(nid)
                         n_appended += 1
@@ -1399,6 +1599,19 @@ async def _run_stages(
                     )
                     for n in neighbors:
                         prev = seen_hop.get(n.id)
+                        # F091: capture BEFORE the dedup guards below, so an
+                        # edge that loses best-path is still visible as an
+                        # edge that was traversed.
+                        tr.expansion(
+                            seed_id=dec.id, seed_type="decision",
+                            seed_score=dec.score,
+                            neighbor_id=n.id, neighbor_type=n.node_type,
+                            stage="stage4_decision_1hop", hop=1,
+                            edge_relation=n.edge_relation,
+                            edge_weight=n.edge_weight,
+                            extraction_method=getattr(n, "extraction_method", None),
+                            path_strength=(dec.score or 0.0) * (n.edge_weight or 0.0),
+                        )
                         if prev is n:
                             # Aliasing guard — see Stage 2.
                             continue

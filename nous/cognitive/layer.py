@@ -425,6 +425,14 @@ class CognitiveLayer:
         user_display_name: str | None = None,
         skip_episode: bool = False,
         is_subtask: bool = False,
+        # F091: the runner's conversation-derived turn number, which is the
+        # SAME value context_log records. `_session_metadata` is in-process and
+        # restarts at turn_count==0 even when warm_active_episode() restores an
+        # ongoing session and the runner reloads its prior conversation — so
+        # deriving the turn here would number a resumed session's next
+        # retrieval "1" while context_log called it 7, breaking the documented
+        # (agent_id, session_id, turn_number) join precisely on restart.
+        turn_number: int | None = None,
     ) -> TurnContext:
         """SENSE -> FRAME -> RECALL -> DELIBERATE — prepare for LLM turn.
 
@@ -727,6 +735,15 @@ class CognitiveLayer:
                     critic_skills=_critic_skills,  # Issue #229
                     epistemic_class=epistemic_class,  # §2
                     is_first_turn=is_first_turn,  # F083 A2
+                    # F091: prefer the caller's conversation-derived number —
+                    # it is what context_log stores and it survives a restart.
+                    # The in-process turn_count is the fallback for callers
+                    # that do not pass one (+1 because it counts COMPLETED
+                    # turns, being incremented in post_turn).
+                    turn_number=(
+                        turn_number if turn_number is not None
+                        else ((_meta_ft.turn_count + 1) if _meta_ft else 1)
+                    ),
                 )
                 system_prompt = build_result.system_prompt
                 context_token_estimate = sum(s.token_estimate for s in build_result.sections)
@@ -1048,6 +1065,20 @@ class CognitiveLayer:
 
         # F024: Attach pending diagnostic nudges from previous turn
         _diagnostic_nudges = self._pending_nudges.pop(session_id, "")
+
+        # F091: commit the retrieval trace only now that the censor verdict is
+        # known. `rendered` asserts "reached the model", and a censor-blocked
+        # turn never makes the model call — committing inside build() would
+        # have every survivor claim a delivery that did not happen.
+        _f091_trace = getattr(build_result, "retrieval_trace", None) if not _is_initiation else None
+        if _f091_trace is not None and not censor_blocked:
+            try:
+                from nous.observability.retrieval_logger import get_active
+                _f091_rl = get_active()
+                if _f091_rl is not None:
+                    _f091_rl.commit(_f091_trace)
+            except Exception:
+                logger.debug("F091: retrieval trace commit failed", exc_info=True)
 
         return TurnContext(
             system_prompt=system_prompt,

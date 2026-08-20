@@ -31,6 +31,8 @@ from nous.config import Settings
 from nous.heart.exemplars import parse_label
 from nous.heart.heart import Heart
 from nous.heart.schemas import CensorInput, FactInput, FactRejected, ProcedureInput
+from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
+from nous.observability.retrieval_trace import SLICED_OFF
 from nous.skills.parser import SkillParser
 
 logger = logging.getLogger(__name__)
@@ -80,7 +82,7 @@ class ToolDispatcher:
 
     async def dispatch(
         self, name: str, args: dict[str, Any], session_id: str | None = None,
-        is_background: bool = False,
+        is_background: bool = False, turn_number: int | None = None,
     ) -> tuple[str, bool]:
         """Dispatch a tool call and return (result_text, is_error).
 
@@ -116,6 +118,15 @@ class ToolDispatcher:
                 # no substrate. Consumers: Brain.get_session_decisions and
                 # the optional filter in Brain._query.
                 args = {**args, "_session_id": session_id}
+            if turn_number is not None and name == "recall_deep":
+                # F091: threaded EXPLICITLY, not via ContextVar. stream_chat is
+                # an async generator whose every resume runs in a fresh copied
+                # context (see the KNOWN LIMITATION at runner.py:1231), so a
+                # contextvar set inside it is invisible to any tool dispatched
+                # after the first yielded event — and a tool call always yields
+                # tool_start first. An earlier contextvar attempt at this was
+                # therefore inert on the streaming path.
+                args = {**args, "_turn_number": turn_number}
             if session_id is not None and name == "recall_deep":
                 # F051.4 / F055: inject session_id into recall_deep so
                 # F055's Cross-Turn Residual Activation can read it via
@@ -957,6 +968,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         limit: int = 10,
         memory_types: list[str] | None = None,
         _session_id: str | None = None,
+        _turn_number: int | None = None,
     ) -> dict[str, Any]:
         """Search memory in Heart and Brain.
 
@@ -999,6 +1011,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         # pattern used elsewhere in this module. Returns None when the feature
         # flag is off or no turn is active (e.g. F051 eval harness), and the
         # pipeline's `if exclude_ids:` short-circuit keeps output byte-identical.
+        # Deferred import (same as F071 below): runner imports tools, so a
+        # module-level import here would be circular.
         from nous.api.runner import CURRENT_TURN_EXCLUDE_IDS
         _f071_exclude_ids = CURRENT_TURN_EXCLUDE_IDS.get()
 
@@ -1048,6 +1062,19 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 getattr(settings, "episode_chunks_enabled", False)
                 and (search_all_for_rerank or "fact" in search_types)
             )
+            # F091: open a telemetry trace for this retrieval. NULL_TRACE when
+            # the feature is off, so the pipeline call below is unchanged.
+            _tr_committed = False  # F091: guards against a second insert
+            _rl = get_active_retrieval_logger()
+            _tr = (
+                _rl.start(
+                    query=query, path="pipeline", session_id=_session_id,
+                    # None outside a tool loop (eval harness, scripts), which is
+                    # honest — there is no turn to attribute those to.
+                    turn_number=_turn_number,
+                )
+                if _rl is not None else None
+            )
             results, stats = await run_recall_pipeline(
                 query=query,
                 heart=heart,
@@ -1058,7 +1085,11 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 residual_activations=residual_activations or None,  # F055
                 rerank_by_score=chunks_rerank,
                 exclude_ids=_f071_exclude_ids,  # F071
+                trace=_tr,  # F091
             )
+            # NOTE: the trace is committed further down, AFTER the
+            # parent-episode fetch — those summaries reach the model, so
+            # committing here would leave them unrepresented in the counts.
             # F067 observability: one INFO line per recall_deep call so
             # operators can grep for chunk surfacing in prod without
             # turning on F055 residual_activation. Logs the gate state
@@ -1122,10 +1153,59 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                         heart.agent_id, n_facts, exc_info=True,
                     )
                     parent_episodes = []
+            # F091: parent episodes are memory DELIVERED to the model, appended
+            # by the formatter below. Register them as their own leg and mark
+            # them rendered, then commit — committing before this fetch left
+            # them absent from n_candidates/n_rendered on the one retrieval
+            # path where the flag makes them appear.
+            # F091: the formatter gates the Brain Decisions section on
+            # `search_all or "decision" in search_types` (see :455). Spreading
+            # activation seeded from fact results can put a DECISION into
+            # `results` on a memory_types=["fact"] call, where the pipeline
+            # marks it rendered but the formatter never emits it. Attribute
+            # that scope filter rather than counting it as delivered.
+            # (Raised in review round 1 and again independently; my earlier
+            # passes fixed other post-commit gaps and left this one.)
+            if _tr is not None:
+                _fmt_all = "all" in search_types
+                if not (_fmt_all or "decision" in search_types):
+                    for _r in results:
+                        # ONLY what the Brain Decisions section gates (:455):
+                        # source=="brain" plus its brain_graph bucket. The
+                        # Graph-Connected Decisions section (:440) emits
+                        # heart_graph decisions UNCONDITIONALLY, so downgrading
+                        # every decision-typed result — as this first did —
+                        # reported content that DID reach the model as filtered
+                        # out, inverting the error it was written to fix.
+                        _origin = _r.metadata.get("stage_origin")
+                        if _r.source == "brain" or _origin == "brain_graph":
+                            _tr.mark_not_delivered(
+                                _r.id, _r.type, SLICED_OFF,
+                                "formatter_scope_filter",
+                            )
+            if _tr is not None and parent_episodes:
+                for _rank, (_ep_id, _summary) in enumerate(parent_episodes):
+                    _tr.add(_ep_id, "episode", "parent_episode",
+                            rank=_rank + 1, content=_summary)
+                    _tr.mark_rendered(_ep_id, "episode", "parent_episode_section")
+                _tr.leg("parent_episode", attempted=True,
+                        n_returned=len(parent_episodes))
+            # Format FIRST, commit after. `rendered` means the text reached the
+            # model, and until the formatter returns, no text exists — a raise
+            # here with the trace already persisted would claim every survivor
+            # was delivered while the tool returned only an error. Committing
+            # first also let the exception handler attempt a SECOND insert on
+            # the same trace id, which merely collided on the primary key.
             text = _format_pipeline_text(
                 results, stats, search_types, parent_episodes=parent_episodes,
                 session_group_heart=getattr(settings, "session_group_heart_section", False),
             )
+            if _rl is not None and _tr is not None:
+                try:
+                    _rl.commit(_tr)
+                    _tr_committed = True
+                except Exception:
+                    logger.debug("F091: retrieval trace commit failed", exc_info=True)
 
             # F055: fire-and-forget record_surfaced so the request returns
             # immediately. record_surfaced opens its OWN DB session inside
@@ -1162,6 +1242,32 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             return {"content": [{"type": "text", "text": text}]}
         except Exception as e:
             logger.exception("recall_deep tool failed")
+            # F091: commit the PARTIAL trace. The only commit sits on the happy
+            # path, so an exception escaping run_recall_pipeline left no row at
+            # all — hiding exactly the failures the leg `error` field exists to
+            # diagnose, and making a crashed retrieval look like one that never
+            # happened. Whatever legs/candidates were recorded before the raise
+            # are worth more than nothing.
+            try:
+                _rl_err = get_active_retrieval_logger()
+                _tr_err = locals().get("_tr")
+                # Only if the happy path did not already commit — a second
+                # commit on the same trace id is a duplicate insert that merely
+                # collides on the primary key.
+                if (
+                    _rl_err is not None and _tr_err is not None
+                    and not locals().get("_tr_committed", False)
+                ):
+                    # Nothing was returned to the model, so anything finalize
+                    # had already marked `rendered` (e.g. a formatter raise
+                    # after the pipeline finished) must be un-claimed before
+                    # this row is persisted.
+                    _tr_err.undeliver_all(SLICED_OFF, "recall_deep_failed")
+                    _tr_err.leg("recall_deep", attempted=True, error=str(e)[:200])
+                    _tr_err.finalize([])
+                    _rl_err.commit(_tr_err)
+            except Exception:
+                logger.debug("F091: failed to commit partial trace", exc_info=True)
             return {"content": [{"type": "text", "text": f"Error searching memory: {e}"}]}
 
     async def create_censor(
