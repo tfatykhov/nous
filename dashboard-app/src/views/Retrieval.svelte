@@ -227,6 +227,86 @@
     return [...groups.values()];
   });
 
+  // ── Expansion diagram ────────────────────────────────────────────────────
+  // Bipartite (seeds left, neighbours right), NOT a force layout: the whole
+  // structure here IS "seed reached neighbour", and physics would scramble the
+  // one distinction worth showing. It also surfaces CONVERGENCE — two seeds
+  // arriving at the same neighbour — which the grouped list structurally
+  // cannot, because it prints that neighbour once under each parent.
+  const DIAGRAM_MAX_EDGES = 120;
+  const ROW_H = 21;
+  const NODE_R = 4.5;
+
+  let expansionGraph = $derived.by(() => {
+    const rows: RetrievalExpansion[] = detail?.expansions ?? [];
+    const shown = rows.slice(0, DIAGRAM_MAX_EDGES);
+
+    const seedIds: string[] = [];
+    const nbrIds: string[] = [];
+    const seedMeta = new Map<string, RetrievalExpansion>();
+    const nbrMeta = new Map<string, RetrievalExpansion>();
+    const nbrSeeds = new Map<string, Set<string>>();
+
+    for (const r of shown) {
+      if (!seedMeta.has(r.seed_id)) { seedMeta.set(r.seed_id, r); seedIds.push(r.seed_id); }
+      if (!nbrMeta.has(r.neighbor_id)) { nbrMeta.set(r.neighbor_id, r); nbrIds.push(r.neighbor_id); }
+      let s = nbrSeeds.get(r.neighbor_id);
+      if (!s) { s = new Set(); nbrSeeds.set(r.neighbor_id, s); }
+      s.add(r.seed_id);
+    }
+
+    const rowsCount = Math.max(seedIds.length, nbrIds.length, 1);
+    const height = rowsCount * ROW_H + 16;
+    // viewBox width is derived from the height so the aspect stays landscape.
+    // A fixed narrow width against a tall row stack makes the default
+    // `xMidYMid meet` scale to fit the HEIGHT, collapsing the whole diagram
+    // into a thin band down the middle of a wide card.
+    const width = Math.max(420, Math.round(height * 1.55));
+    const leftX = Math.round(width * 0.13);
+    const rightX = width - leftX;
+
+    const yOf = (i: number, n: number) =>
+      8 + (n <= 1 ? (height - 16) / 2 : (i * (height - 16)) / (n - 1));
+
+    const seeds = seedIds.map((id, i) => ({
+      id, meta: seedMeta.get(id)!, x: leftX, y: yOf(i, seedIds.length),
+    }));
+    const neighbours = nbrIds.map((id, i) => ({
+      id, meta: nbrMeta.get(id)!, x: rightX, y: yOf(i, nbrIds.length),
+      convergent: (nbrSeeds.get(id)?.size ?? 1) > 1,
+    }));
+
+    const sy = new Map(seeds.map((s) => [s.id, s.y]));
+    const ny = new Map(neighbours.map((n) => [n.id, n.y]));
+    const maxStrength = Math.max(
+      ...shown.map((r) => r.path_strength ?? 0), 0.0001,
+    );
+
+    const edges = shown.map((r, i) => {
+      const y1 = sy.get(r.seed_id) ?? 0;
+      const y2 = ny.get(r.neighbor_id) ?? 0;
+      const mx = (leftX + rightX) / 2;
+      return {
+        i,
+        d: `M ${leftX + NODE_R} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${rightX - NODE_R} ${y2}`,
+        // Stroke weight carries traversal strength; a hairline still renders so
+        // a zero-strength edge is visible as "traversed but weak", not absent.
+        w: 0.5 + 1.9 * ((r.path_strength ?? 0) / maxStrength),
+        lost: !r.won_best_path,
+        title: `${r.seed_type} ${shortId(r.seed_id, 6)} —[${r.edge_relation ?? 'related'}]→ `
+             + `${r.neighbor_type} ${shortId(r.neighbor_id, 6)}  `
+             + `strength ${fmtScore(r.path_strength)} · hop ${r.hop}`
+             + (r.won_best_path ? '' : ' · lost best-path'),
+      };
+    });
+
+    return {
+      seeds, neighbours, edges, width, height,
+      truncated: rows.length - shown.length,
+      convergentCount: neighbours.filter((n) => n.convergent).length,
+    };
+  });
+
   let detailDispositions = $derived(
     orderDispositions(Object.keys(detail?.candidates_by_disposition ?? {})),
   );
@@ -517,6 +597,58 @@
           {#if expansionsBySeed.length === 0}
             <p class="status-msg">No graph expansion ran for this retrieval.</p>
           {:else}
+            {@const g = expansionGraph}
+            <div class="xdiagram">
+              <div class="xd-cols">
+                <span>{g.seeds.length} seed{g.seeds.length === 1 ? '' : 's'}</span>
+                <span class="muted">
+                  {g.edges.length} edges
+                  {#if g.convergentCount > 0}
+                    · <span class="conv-note">{g.convergentCount} reached from more than one seed</span>
+                  {/if}
+                </span>
+                <span>{g.neighbours.length} neighbour{g.neighbours.length === 1 ? '' : 's'}</span>
+              </div>
+              <!-- No height attribute: with a viewBox, `width:100%; height:auto`
+                   in CSS preserves the aspect exactly and avoids letterboxing. -->
+              <svg
+                viewBox="0 0 {g.width} {g.height}"
+                role="img"
+                aria-label="{g.edges.length} graph edges from {g.seeds.length} seeds to {g.neighbours.length} neighbours"
+              >
+                {#each g.edges as e (e.i)}
+                  <path
+                    class="xd-edge"
+                    class:lost={e.lost}
+                    d={e.d}
+                    style="stroke-width: {e.w}"
+                  ><title>{e.title}</title></path>
+                {/each}
+                {#each g.seeds as s (s.id)}
+                  <circle class="xd-node t-{s.meta.seed_type}" cx={s.x} cy={s.y} r={NODE_R}>
+                    <title>{s.meta.seed_type} {shortId(s.id, 8)} · seed {fmtScore(s.meta.seed_score)}</title>
+                  </circle>
+                  <text class="xd-label right" x={s.x - 9} y={s.y + 3}>{shortId(s.id, 6)}</text>
+                {/each}
+                {#each g.neighbours as n (n.id)}
+                  <circle
+                    class="xd-node t-{n.meta.neighbor_type}"
+                    class:convergent={n.convergent}
+                    cx={n.x} cy={n.y} r={n.convergent ? NODE_R + 1.5 : NODE_R}
+                  >
+                    <title>{n.meta.neighbor_type} {shortId(n.id, 8)}{n.convergent ? ' · reached from several seeds' : ''}</title>
+                  </circle>
+                  <text class="xd-label" x={n.x + 9} y={n.y + 3}>{shortId(n.id, 6)}</text>
+                {/each}
+              </svg>
+              {#if g.truncated > 0}
+                <p class="status-msg warn sm">
+                  {g.truncated} further edge{g.truncated === 1 ? '' : 's'} not drawn — the full
+                  set is listed below.
+                </p>
+              {/if}
+            </div>
+
             {#each expansionsBySeed as group (group.seed.seed_id)}
               <details class="seed-group">
                 <summary class="seed-head">
@@ -957,6 +1089,54 @@
   details[open] > .disp-head::before, details[open] > .seed-head::before { content: '▾'; }
   .disp-head .count { font-variant-numeric: tabular-nums; color: var(--text); font-weight: 600; }
   .disp-head .help { color: var(--muted); font-size: 0.74rem; }
+
+  /* ── Expansion diagram ───────────────────────────────────── */
+  .xdiagram {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.6rem 0.5rem 0.4rem;
+    margin-bottom: 0.75rem;
+  }
+  .xd-cols {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    font-size: 0.7rem;
+    color: var(--text);
+    padding: 0 0.25rem 0.4rem;
+  }
+  .xd-cols .muted { text-align: center; }
+  .conv-note { color: var(--accent); }
+  .xdiagram svg { display: block; width: 100%; height: auto; }
+
+  .xd-edge {
+    fill: none;
+    stroke: var(--muted);
+    opacity: 0.45;
+    transition: opacity var(--transition, 0.2s ease), stroke var(--transition, 0.2s ease);
+  }
+  .xd-edge:hover { stroke: var(--accent); opacity: 1; }
+  /* A path that lost best-path arbitration still HAPPENED — dashed rather than
+     hidden, so the traversal that was attempted stays visible. */
+  .xd-edge.lost { stroke-dasharray: 2 3; opacity: 0.22; }
+
+  .xd-node { fill: var(--muted); stroke: var(--bg); stroke-width: 1; }
+  .xd-node.convergent { stroke: var(--accent); stroke-width: 1.5; }
+  .xd-node.t-fact      { fill: var(--fact-color); }
+  .xd-node.t-episode   { fill: var(--episode-color); }
+  .xd-node.t-decision  { fill: var(--decision-color); }
+  .xd-node.t-procedure { fill: var(--procedure-color); }
+  .xd-node.t-chunk     { fill: var(--chunk-color); }
+  .xd-node.t-censor    { fill: var(--censor-color); }
+  .xd-node.t-multi     { fill: var(--accent); }
+
+  .xd-label {
+    font-family: var(--font-mono, monospace);
+    font-size: 7px;
+    fill: var(--muted);
+  }
+  .xd-label.right { text-anchor: end; }
 
   .edge-list { list-style: none; margin: 0.2rem 0 0; padding: 0 0 0 1rem; border-left: 2px solid var(--border); }
   .edge-list li {
