@@ -864,8 +864,13 @@ class ContextEngine:
                     len(decisions) if decisions else 0, self._has_embeddings,
                     [round(getattr(d, "score", 0) or 0, 3) for d in (decisions or [])[:5]],
                     [(getattr(d, "description", "") or "")[:50] for d in (decisions or [])[:3]])
+                # Registered OUTSIDE `if decisions:` — a leg that ran and
+                # returned nothing must still emit `attempted=true,
+                # n_returned=0`. Skipping it made "the query found nothing"
+                # indistinguishable from "this leg never ran", which is the
+                # single distinction the leg record exists to make.
+                _tr_enter(decisions or [], "decision", "context_decisions")
                 if decisions:
-                    _tr_enter(decisions, "decision", "context_decisions")
                     # F017: Staleness penalty (before boosts)
                     decisions = self._apply_staleness_penalty(decisions)
                     # 007.2: Diversity filter — use category as topic key
@@ -918,8 +923,9 @@ class ContextEngine:
                     len(facts) if facts else 0, self._has_embeddings,
                     [round(getattr(f, "score", 0) or 0, 3) for f in (facts or [])[:5]],
                     [(getattr(f, "subject", "") or "")[:30] for f in (facts or [])[:5]])
+                # Outside the `if` — see the decisions leg above.
+                _tr_enter(facts or [], "fact", "context_facts")
                 if facts:
-                    _tr_enter(facts, "fact", "context_facts")
                     # Gap-2: resolve same-subject current-vs-stale conflicts (demote +
                     # tag) BEFORE the staleness/boost/relevance pipeline, so a superseded
                     # value drops out of the injected set and the agent sees the current one.
@@ -1261,13 +1267,14 @@ class ContextEngine:
                         q_text, limit=embedding_limit, frame_type=frame.frame_id, session=session,
                     )
 
+                # Registration for the procedure leg, outside the `if` so an
+                # empty result still emits the leg. Without this the
+                # `_tr_filtered` calls below no-op (drop() is keyed on a
+                # candidate that was never added), procedure drops vanish,
+                # and rendered procedures are missing from n_rendered — the
+                # dashboard would imply no procedures were even considered.
+                _tr_enter(embedding_procedures or [], "procedure", "context_procedures")
                 if embedding_procedures:
-                    # Registration for the procedure leg. Without this the
-                    # `_tr_filtered` calls below no-op (drop() is keyed on a
-                    # candidate that was never added), procedure drops vanish,
-                    # and rendered procedures are missing from n_rendered — the
-                    # dashboard would imply no procedures were even considered.
-                    _tr_enter(embedding_procedures, "procedure", "context_procedures")
                     # Standard pipeline: staleness -> frame boost -> dedup -> usage boost -> relevance
                     embedding_procedures = self._apply_staleness_penalty(embedding_procedures)
                     embedding_procedures = apply_frame_boost(

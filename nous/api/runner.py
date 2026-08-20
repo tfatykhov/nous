@@ -71,6 +71,16 @@ CURRENT_TURN_EXCLUDE_IDS: ContextVar[dict[str, set[str]] | None] = ContextVar(
     "CURRENT_TURN_EXCLUDE_IDS", default=None,
 )
 
+# F091: the turn a tool-loop retrieval belongs to. recall_deep runs inside a
+# turn but has no reference to the runner, so without this every
+# path="pipeline" row persisted turn_number=NULL and could not be correlated
+# with the context build that preceded it — the (agent_id, session_id,
+# turn_number) key the migration documents. Same ContextVar discipline as the
+# F071 set above: per-asyncio-Task, set before the loop, reset in `finally`.
+CURRENT_TURN_NUMBER: ContextVar[int | None] = ContextVar(
+    "CURRENT_TURN_NUMBER", default=None,
+)
+
 
 def _build_exclude_ids(
     settings: Settings,
@@ -561,6 +571,7 @@ class AgentRunner:
                 _f071_token = CURRENT_TURN_EXCLUDE_IDS.set(
                     _build_exclude_ids(self._settings, turn_context)
                 )
+                _f091_turn_token = CURRENT_TURN_NUMBER.set(self._current_turn_number)
                 # F024 F2/F3: compact the live user message (strip base64) on BOTH
                 # success and exception. Outer try wraps the F071 try/finally so
                 # this runs after the contextvar reset on every path.
@@ -585,6 +596,7 @@ class AgentRunner:
                         )
                     finally:
                         CURRENT_TURN_EXCLUDE_IDS.reset(_f071_token)
+                        CURRENT_TURN_NUMBER.reset(_f091_turn_token)
                 finally:
                     if valid_attachments:
                         for i in range(len(conversation.messages) - 1, -1, -1):

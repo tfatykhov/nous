@@ -1000,8 +1000,11 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         # pattern used elsewhere in this module. Returns None when the feature
         # flag is off or no turn is active (e.g. F051 eval harness), and the
         # pipeline's `if exclude_ids:` short-circuit keeps output byte-identical.
-        from nous.api.runner import CURRENT_TURN_EXCLUDE_IDS
+        # Deferred import (same as F071 below): runner imports tools, so a
+        # module-level import here would be circular.
+        from nous.api.runner import CURRENT_TURN_EXCLUDE_IDS, CURRENT_TURN_NUMBER
         _f071_exclude_ids = CURRENT_TURN_EXCLUDE_IDS.get()
+        _CURRENT_TURN_NUMBER = CURRENT_TURN_NUMBER
 
         try:
             search_types = memory_types or ["all"]
@@ -1053,7 +1056,12 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # the feature is off, so the pipeline call below is unchanged.
             _rl = get_active_retrieval_logger()
             _tr = (
-                _rl.start(query=query, path="pipeline", session_id=_session_id)
+                _rl.start(
+                    query=query, path="pipeline", session_id=_session_id,
+                    # None outside a tool loop (eval harness, scripts), which is
+                    # honest — there is no turn to attribute those to.
+                    turn_number=_CURRENT_TURN_NUMBER.get(),
+                )
                 if _rl is not None else None
             )
             results, stats = await run_recall_pipeline(

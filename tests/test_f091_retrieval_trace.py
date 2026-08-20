@@ -512,3 +512,21 @@ def test_query_is_truncated_at_construction():
     sit in a diagnostics table for the full retention window."""
     t = RetrievalTrace(query="x" * 5000, query_chars=500)
     assert len(t.to_dict()["query"]) == 500
+
+
+def test_a_leg_that_ran_and_found_nothing_is_still_recorded():
+    """The whole point of the leg record: "ran and returned 0" must be
+    distinguishable from "never ran". Registering only inside `if results:`
+    collapsed those two into the same empty output."""
+    t = _trace()
+    t.leg("context_decisions", attempted=True, n_returned=0)
+
+    legs = {leg["name"]: leg for leg in t.to_dict()["legs"]}
+    assert legs["context_decisions"]["attempted"] is True
+    assert legs["context_decisions"]["n_returned"] == 0
+
+
+def test_add_many_on_an_empty_list_is_harmless():
+    t = _trace()
+    t.add_many([], "empty_leg", type_of=lambda i: "fact", score_of=lambda i: 0.0)
+    assert t.to_dict()["n_candidates"] == 0
