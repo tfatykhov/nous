@@ -417,14 +417,46 @@
     return m;
   });
 
-  // Legs that mean "this candidate ENTERED the pool through graph expansion".
-  // An unknown leg counts as NOT graph, which under-reports graph provenance —
-  // the safe direction for a claim stated as a floor.
+  // TWO allowlists, not one allowlist and an else-branch. Saying a neighbour
+  // "was already present from a direct leg" is a positive claim and needs
+  // positive evidence; deriving it from "not in the graph list" made every
+  // unrecognised leg into a direct-leg assertion. That produced two wrong
+  // answers at once: `context_procedures_graph` (the K-line traversal, which
+  // genuinely IS graph entry) was reported as corroboration, and the cap
+  // sentinel written by RetrievalTrace.finalize() — a NON-null string meaning
+  // "provenance was the casualty" — sailed past the null check into `direct`.
+  //
+  // With both sides enumerated, anything unrecognised falls to `unknown` by
+  // construction: the sentinel, a leg added later, a typo. No string matching
+  // against the sentinel, which would have to be kept in sync across two
+  // languages and would silently rot the day someone reworded it.
   const GRAPH_ENTRY_LEGS = new Set([
     'heart_graph',
+    'heart_graph_neighbors',
     'heart_graph_memory',
+    'heart_graph_memory_neighbors',
     'graph_expanded',
     'spreading_activation',
+    'context_procedures_graph',
+    'context_procedure_kline',
+  ]);
+  const DIRECT_ENTRY_LEGS = new Set([
+    'heart_primary',
+    'chunk',
+    'brain',
+    'keyed',
+    'keyed_r2',
+    'exemplar',
+    'parent_episode',
+    'context_facts',
+    'context_episodes',
+    'context_episodes_temporal',
+    'context_decisions',
+    'context_procedures',
+    'context_procedures_ladder',
+    'context_procedures_critic',
+    'context_procedures_critic_fallback',
+    'context_procedures_cosine_fallback',
   ]);
 
   function nodeLabel(id: string): string {
@@ -524,9 +556,9 @@
         let viaGraph = 0, viaDirect = 0, unknown = 0;
         for (const n of nbrs) {
           const leg = candidateIndex.get(String(n))?.entryLeg;
-          if (leg === undefined || leg === null) unknown++;
-          else if (GRAPH_ENTRY_LEGS.has(leg)) viaGraph++;
-          else viaDirect++;
+          if (leg && GRAPH_ENTRY_LEGS.has(leg)) viaGraph++;
+          else if (leg && DIRECT_ENTRY_LEGS.has(leg)) viaDirect++;
+          else unknown++; // missing, cap sentinel, or a leg we cannot classify
         }
         return { viaGraph, viaDirect, unknown };
       })(),
@@ -992,8 +1024,9 @@
                   {expansionTotals.viaDirect === 1 ? 'was' : 'were'} already present from a
                   direct leg and {expansionTotals.viaDirect === 1 ? 'was' : 'were'} corroborated,
                   not contributed{/if}{#if expansionTotals.unknown > 0}; {expansionTotals.unknown}
-                  {expansionTotals.unknown === 1 ? 'has' : 'have'} no candidate record, so their
-                  provenance is unknown — capture stopped at the cap{/if}. Neighbours dropped
+                  could not be attributed — no
+                  candidate record (capture stopped at the cap) or an entry leg this view does
+                  not recognise{/if}. Neighbours dropped
                 before the merge have no edge recorded, so expansion's true reach is wider than
                 shown.
               </p>
