@@ -471,8 +471,15 @@
     // thing a per-seed tree cannot show structurally (it prints the neighbour
     // once under each parent), and it was the sole justification for the
     // bipartite diagram — so the tree has to state it outright.
+    // HOP-1 ONLY. A hop-2 row's seed_id is `seeds[0][0]` with
+    // seed_type="multi" (retrieval_pipeline.py:1565) — a placeholder for the
+    // whole activation, not a seed that reached this neighbour. Counting it
+    // meant a neighbour found by one real seed AND present in the spreading
+    // result reported "reached from 2 seeds", inventing convergence out of a
+    // field explicitly documented as unattributable.
     const seedsPerNeighbour = new Map<string, Set<string>>();
     for (const r of rows) {
+      if (r.hop === 2 || r.seed_type === 'multi') continue;
       let s = seedsPerNeighbour.get(r.neighbor_id);
       if (!s) { s = new Set(); seedsPerNeighbour.set(r.neighbor_id, s); }
       s.add(r.seed_id);
@@ -522,8 +529,11 @@
     const rows: RetrievalExpansion[] = detail?.expansions ?? [];
     const seeds = new Set(rows.filter((r) => r.hop !== 2).map((r) => r.seed_id));
     const nbrs = new Set(rows.map((r) => r.neighbor_id));
+    // Same hop-1-only rule as the per-row chip: the header count and the chip
+    // must not disagree, and neither may treat the hop-2 placeholder as a seed.
     const conv = new Map<string, Set<string>>();
     for (const r of rows) {
+      if (r.hop === 2 || r.seed_type === 'multi') continue;
       let s = conv.get(r.neighbor_id);
       if (!s) { s = new Set(); conv.set(r.neighbor_id, s); }
       s.add(r.seed_id);
@@ -538,6 +548,14 @@
       seeds: directRows.length ? seeds.size : null,
       edges: rows.length,
       neighbours: nbrs.size,
+      // The unrecorded-drop caveat is TRUE only for spreading activation. The
+      // one-hop stages (2, 2b, 4 fallback, context K-line) all call
+      // tr.expansion() BEFORE their dedup/selection guards, so a neighbour they
+      // drop pre-merge still HAS an edge — on a one-hop-only retrieval the
+      // displayed reach may be complete, and a blanket "true reach is wider"
+      // was simply false. Generalised from one observation; narrowed to the
+      // stage that actually has the gap.
+      hasSpreading: rows.some((r) => r.hop === 2 || r.seed_type === 'multi'),
       convergent: [...conv.values()].filter((s) => s.size > 1).length,
       // Counted by ENTRY LEG, not disposition. `tr.expansion()` is recorded at
       // retrieval_pipeline.py:1341, BEFORE the duplicate guard at :1371 — so a
@@ -1026,9 +1044,9 @@
                   not contributed{/if}{#if expansionTotals.unknown > 0}; {expansionTotals.unknown}
                   could not be attributed — no
                   candidate record (capture stopped at the cap) or an entry leg this view does
-                  not recognise{/if}. Neighbours dropped
-                before the merge have no edge recorded, so expansion's true reach is wider than
-                shown.
+                  not recognise{/if}.{#if expansionTotals.hasSpreading}
+                  Spreading activation drops nodes inside its own stage without recording an
+                  edge, so its reach is wider than shown.{/if}
               </p>
             {/if}
 
