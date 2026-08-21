@@ -187,10 +187,44 @@
    * something without reporting why, which is a defect signal rather than a
    * category of drop — both get distinct treatment from ordinary drops.
    */
-  function dispositionClass(d: string): string {
-    if (d === 'rendered') return 'badge-good';
-    if (d === 'unaccounted') return 'badge-bad';
-    return 'badge-warn';
+  // Dispositions are not 10 nominal categories — they are one delivered
+  // outcome and nine ways to lose, with real family structure. Mapping them
+  // onto three semantic badge classes (good/warn/bad) painted every drop the
+  // same amber, so a five-entry legend rendered in two colours and a swatch
+  // could not identify the segment it belonged to — the legend's only job.
+  //
+  // Four hue families, distinguished WITHIN a family by lightness, keeps the
+  // hue count inside colour-vision-deficiency limits where nine hues would
+  // not. `unaccounted` keeps its own alarm hue and is never blended: it is
+  // the drift sentinel, and it should read as wrong on sight.
+  //
+  // `order` is load-bearing. A 0.1% segment is too small to identify by
+  // colour at any palette quality, so POSITION is authoritative: segments and
+  // legend are rendered in this order always, and colour only confirms.
+  const DISPOSITION_META: Record<string, { color: string; family: string; order: number }> = {
+    rendered:           { color: '#34d399', family: 'delivered',  order: 0 },
+    // capacity — a cut or budget removed it; the remedy is a bigger budget
+    sliced_off:         { color: '#f59e0b', family: 'capacity',   order: 1 },
+    budget_truncated:   { color: '#fcd34d', family: 'capacity',   order: 2 },
+    // quality — a score or filter judged it; a bigger budget changes nothing
+    below_floor:        { color: '#a78bfa', family: 'quality',    order: 3 },
+    filter_dropped:     { color: '#c4b5fd', family: 'quality',    order: 4 },
+    // redundancy/scope — deliberately not included, nothing is wrong
+    deduped:            { color: '#94a3b8', family: 'redundancy', order: 5 },
+    superseded:         { color: '#cbd5e1', family: 'redundancy', order: 6 },
+    replaced_at_merge:  { color: '#64748b', family: 'redundancy', order: 7 },
+    f071_excluded:      { color: '#7c8da3', family: 'redundancy', order: 8 },
+    type_excluded:      { color: '#475569', family: 'redundancy', order: 9 },
+    // anomaly — reserved, never reused
+    unaccounted:        { color: '#f472b6', family: 'anomaly',    order: 10 },
+  };
+
+  function dispositionColor(d: string): string {
+    return DISPOSITION_META[d]?.color ?? '#64748b';
+  }
+
+  function dispositionFamily(d: string): string {
+    return DISPOSITION_META[d]?.family ?? 'redundancy';
   }
 
   const DISPOSITION_HELP: Record<string, string> = {
@@ -209,13 +243,11 @@
 
   /** Ordered so `rendered` leads and the defect signal sorts last. */
   function orderDispositions(keys: string[]): string[] {
-    return [...keys].sort((a, b) => {
-      if (a === 'rendered') return -1;
-      if (b === 'rendered') return 1;
-      if (a === 'unaccounted') return 1;
-      if (b === 'unaccounted') return -1;
-      return a.localeCompare(b);
-    });
+    // Canonical order, so a segment's POSITION identifies it even when its
+    // width is 0.1%. Alphabetical-within-the-middle used to reshuffle the
+    // bar between windows as dispositions appeared and vanished.
+    const rank = (k: string) => DISPOSITION_META[k]?.order ?? 50;
+    return [...keys].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
   }
 
   // Server already applied `path`; the only client filter is the automated
@@ -356,106 +388,201 @@
     return orderDispositions(Object.keys(counts)).map((k) => ({
       key: k,
       val: counts[k] ?? 0,
-      cls: dispositionClass(k),
+      color: dispositionColor(k),
     }));
   }
 
   /** Group expansion edges by seed so the traversal reads as a tree. */
+  /** id -> {snippet, type} for every recorded candidate on this retrieval.
+   *  Graph rows carry only UUIDs, and a 6-hex prefix names nothing a human can
+   *  recognise — the single least useful token on the page. Candidates already
+   *  carry a snippet, so the tree can say what a node IS. Empty when the row
+   *  was not sampled, in which case we fall back to the short id. */
+  let candidateIndex = $derived.by(() => {
+    const m = new Map<
+      string,
+      { snippet: string | null; disposition: string; entryLeg: string | null }
+    >();
+    const cbd = detail?.candidates_by_disposition;
+    if (!cbd) return m;
+    for (const [disp, arr] of Object.entries(cbd)) {
+      for (const c of arr) {
+        m.set(String(c.id), {
+          snippet: c.snippet ?? null,
+          disposition: disp,
+          entryLeg: c.entry_leg ?? null,
+        });
+      }
+    }
+    return m;
+  });
+
+  // TWO allowlists, not one allowlist and an else-branch. Saying a neighbour
+  // "was already present from a direct leg" is a positive claim and needs
+  // positive evidence; deriving it from "not in the graph list" made every
+  // unrecognised leg into a direct-leg assertion. That produced two wrong
+  // answers at once: `context_procedures_graph` (the K-line traversal, which
+  // genuinely IS graph entry) was reported as corroboration, and the cap
+  // sentinel written by RetrievalTrace.finalize() — a NON-null string meaning
+  // "provenance was the casualty" — sailed past the null check into `direct`.
+  //
+  // With both sides enumerated, anything unrecognised falls to `unknown` by
+  // construction: the sentinel, a leg added later, a typo. No string matching
+  // against the sentinel, which would have to be kept in sync across two
+  // languages and would silently rot the day someone reworded it.
+  const GRAPH_ENTRY_LEGS = new Set([
+    'heart_graph',
+    'heart_graph_neighbors',
+    'heart_graph_memory',
+    'heart_graph_memory_neighbors',
+    'graph_expanded',
+    'spreading_activation',
+    'context_procedures_graph',
+    'context_procedure_kline',
+  ]);
+  const DIRECT_ENTRY_LEGS = new Set([
+    'heart_primary',
+    'chunk',
+    'brain',
+    'keyed',
+    'keyed_r2',
+    'exemplar',
+    'parent_episode',
+    'context_facts',
+    'context_episodes',
+    'context_episodes_temporal',
+    'context_decisions',
+    'context_procedures',
+    'context_procedures_ladder',
+    'context_procedures_critic',
+    'context_procedures_critic_fallback',
+    'context_procedures_cosine_fallback',
+  ]);
+
+  function nodeLabel(id: string): string {
+    const s = candidateIndex.get(String(id))?.snippet;
+    return s && s.trim() ? s.trim() : shortId(id, 8);
+  }
+
   let expansionsBySeed = $derived.by(() => {
     const rows: RetrievalExpansion[] = detail?.expansions ?? [];
-    const groups = new Map<string, { seed: RetrievalExpansion; items: RetrievalExpansion[] }>();
+
+    // How many DISTINCT seeds reached each neighbour. Convergence is the one
+    // thing a per-seed tree cannot show structurally (it prints the neighbour
+    // once under each parent), and it was the sole justification for the
+    // bipartite diagram — so the tree has to state it outright.
+    // HOP-1 ONLY. A hop-2 row's seed_id is `seeds[0][0]` with
+    // seed_type="multi" (retrieval_pipeline.py:1565) — a placeholder for the
+    // whole activation, not a seed that reached this neighbour. Counting it
+    // meant a neighbour found by one real seed AND present in the spreading
+    // result reported "reached from 2 seeds", inventing convergence out of a
+    // field explicitly documented as unattributable.
+    const seedsPerNeighbour = new Map<string, Set<string>>();
     for (const r of rows) {
+      if (r.hop === 2 || r.seed_type === 'multi') continue;
+      let s = seedsPerNeighbour.get(r.neighbor_id);
+      if (!s) { s = new Set(); seedsPerNeighbour.set(r.neighbor_id, s); }
+      s.add(r.seed_id);
+    }
+
+    // Hop-2 spreading activation has NO single attributable seed — the CTE is
+    // multi-seed by construction. Rooting it under whichever seed happened to
+    // be recorded would be a tree that lies. It gets its own pseudo-group.
+    const spreading = rows.filter((r) => r.hop === 2);
+    const direct = rows.filter((r) => r.hop !== 2);
+
+    const groups = new Map<string, { seed: RetrievalExpansion; items: RetrievalExpansion[] }>();
+    for (const r of direct) {
       const g = groups.get(r.seed_id);
       if (g) g.items.push(r);
       else groups.set(r.seed_id, { seed: r, items: [r] });
     }
-    return [...groups.values()];
+
+    const out = [...groups.values()]
+      .map((g) => ({
+        ...g,
+        key: g.seed.seed_id,
+        isSpreading: false,
+        items: [...g.items].sort(
+          (a, b) => (b.path_strength ?? 0) - (a.path_strength ?? 0),
+        ),
+      }))
+      // Widest fan-out first: that is where expansion actually did work, and
+      // it is the group an operator opens.
+      .sort((a, b) => b.items.length - a.items.length);
+
+    if (spreading.length) {
+      out.push({
+        seed: spreading[0],
+        key: '__spreading__',
+        isSpreading: true,
+        items: [...spreading].sort((a, b) => (b.path_strength ?? 0) - (a.path_strength ?? 0)),
+      });
+    }
+    return out.map((g) => ({
+      ...g,
+      seedCount: (e: RetrievalExpansion) => seedsPerNeighbour.get(e.neighbor_id)?.size ?? 1,
+    }));
   });
 
-  // ── Expansion diagram ────────────────────────────────────────────────────
-  // Bipartite (seeds left, neighbours right), NOT a force layout: the whole
-  // structure here IS "seed reached neighbour", and physics would scramble the
-  // one distinction worth showing. It also surfaces CONVERGENCE — two seeds
-  // arriving at the same neighbour — which the grouped list structurally
-  // cannot, because it prints that neighbour once under each parent.
-  const DIAGRAM_MAX_EDGES = 120;
-  const ROW_H = 21;
-  const NODE_R = 5;
-
-  let expansionGraph = $derived.by(() => {
+  let expansionTotals = $derived.by(() => {
     const rows: RetrievalExpansion[] = detail?.expansions ?? [];
-    const shown = rows.slice(0, DIAGRAM_MAX_EDGES);
-
-    const seedIds: string[] = [];
-    const nbrIds: string[] = [];
-    const seedMeta = new Map<string, RetrievalExpansion>();
-    const nbrMeta = new Map<string, RetrievalExpansion>();
-    const nbrSeeds = new Map<string, Set<string>>();
-
-    for (const r of shown) {
-      if (!seedMeta.has(r.seed_id)) { seedMeta.set(r.seed_id, r); seedIds.push(r.seed_id); }
-      if (!nbrMeta.has(r.neighbor_id)) { nbrMeta.set(r.neighbor_id, r); nbrIds.push(r.neighbor_id); }
-      let s = nbrSeeds.get(r.neighbor_id);
-      if (!s) { s = new Set(); nbrSeeds.set(r.neighbor_id, s); }
+    const seeds = new Set(rows.filter((r) => r.hop !== 2).map((r) => r.seed_id));
+    const nbrs = new Set(rows.map((r) => r.neighbor_id));
+    // Same hop-1-only rule as the per-row chip: the header count and the chip
+    // must not disagree, and neither may treat the hop-2 placeholder as a seed.
+    const conv = new Map<string, Set<string>>();
+    for (const r of rows) {
+      if (r.hop === 2 || r.seed_type === 'multi') continue;
+      let s = conv.get(r.neighbor_id);
+      if (!s) { s = new Set(); conv.set(r.neighbor_id, s); }
       s.add(r.seed_id);
     }
-
-    const rowsCount = Math.max(seedIds.length, nbrIds.length, 1);
-    const height = rowsCount * ROW_H + 16;
-    // FIXED drawing width, so rendered row height is constant
-    // (container_px * ROW_H / WIDTH) and the diagram grows TALLER as nodes
-    // multiply. Deriving width from height instead locked the aspect at
-    // ~1.55:1, which held on-screen height roughly constant and shrank every
-    // row as the count rose — near the 120-edge cap, nodes and labels would
-    // collide or go subpixel. The earlier thin-band bug this replaced came
-    // from an explicit `height` attribute fighting `width:100%`; that is gone,
-    // so a fixed width no longer letterboxes. The card scrolls.
-    const width = 900;
-    const leftX = Math.round(width * 0.13);
-    const rightX = width - leftX;
-
-    const yOf = (i: number, n: number) =>
-      8 + (n <= 1 ? (height - 16) / 2 : (i * (height - 16)) / (n - 1));
-
-    const seeds = seedIds.map((id, i) => ({
-      id, meta: seedMeta.get(id)!, x: leftX, y: yOf(i, seedIds.length),
-    }));
-    const neighbours = nbrIds.map((id, i) => ({
-      id, meta: nbrMeta.get(id)!, x: rightX, y: yOf(i, nbrIds.length),
-      convergent: (nbrSeeds.get(id)?.size ?? 1) > 1,
-    }));
-
-    const sy = new Map(seeds.map((s) => [s.id, s.y]));
-    const ny = new Map(neighbours.map((n) => [n.id, n.y]));
-    const maxStrength = Math.max(
-      ...shown.map((r) => r.path_strength ?? 0), 0.0001,
-    );
-
-    const edges = shown.map((r, i) => {
-      const y1 = sy.get(r.seed_id) ?? 0;
-      const y2 = ny.get(r.neighbor_id) ?? 0;
-      const mx = (leftX + rightX) / 2;
-      return {
-        i,
-        d: `M ${leftX + NODE_R} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${rightX - NODE_R} ${y2}`,
-        // Stroke weight carries traversal strength; a hairline still renders so
-        // a zero-strength edge is visible as "traversed but weak", not absent.
-        w: 0.5 + 1.9 * ((r.path_strength ?? 0) / maxStrength),
-        lost: !r.won_best_path,
-        title: `${r.seed_type} ${shortId(r.seed_id, 6)} —[${r.edge_relation ?? 'related'}]→ `
-             + `${r.neighbor_type} ${shortId(r.neighbor_id, 6)}  `
-             + `strength ${fmtScore(r.path_strength)} · hop ${r.hop}`
-             + (r.extraction_method ? ` · ${r.extraction_method}` : '')
-             + (r.won_best_path ? '' : ' · lost best-path'),
-      };
-    });
-
+    // `seeds` counts DIRECT (hop-1) seeds only. Spreading activation is
+    // multi-seed by construction and stores its first id as an unattributable
+    // placeholder, so on a spreading-only retrieval this set is empty — and
+    // printing "0 seeds" would be observably false, since the producer starts
+    // from a non-empty seed list. Report it as absent instead.
+    const directRows = rows.filter((r) => r.hop !== 2);
     return {
-      seeds, neighbours, edges, width, height,
-      truncated: rows.length - shown.length,
-      convergentCount: neighbours.filter((n) => n.convergent).length,
+      seeds: directRows.length ? seeds.size : null,
+      edges: rows.length,
+      neighbours: nbrs.size,
+      // The unrecorded-drop caveat is TRUE only for spreading activation. The
+      // one-hop stages (2, 2b, 4 fallback, context K-line) all call
+      // tr.expansion() BEFORE their dedup/selection guards, so a neighbour they
+      // drop pre-merge still HAS an edge — on a one-hop-only retrieval the
+      // displayed reach may be complete, and a blanket "true reach is wider"
+      // was simply false. Generalised from one observation; narrowed to the
+      // stage that actually has the gap.
+      hasSpreading: rows.some((r) => r.hop === 2 || r.seed_type === 'multi'),
+      convergent: [...conv.values()].filter((s) => s.size > 1).length,
+      // Counted by ENTRY LEG, not disposition. `tr.expansion()` is recorded at
+      // retrieval_pipeline.py:1341, BEFORE the duplicate guard at :1371 — so a
+      // neighbour that merely corroborated an existing direct candidate still
+      // has an edge, and joining on id alone resolves it to that direct
+      // candidate's `rendered`. Counting those as expansion yield credited the
+      // graph for memories it did not contribute; entry_leg is first-wins, so
+      // it names how the candidate ACTUALLY got into the pool.
+      // THREE outcomes, not two. A neighbour missing from the index has not
+      // been shown to come from a direct leg — it was never recorded, because
+      // the capture cap rejected it or the row was not sampled. Folding those
+      // into "direct" turned an absent record into a positive claim about
+      // provenance, which is the same error the cap already caused once on the
+      // write side. `?? ''` made the miss silent; it is now its own bucket.
+      ...(() => {
+        let viaGraph = 0, viaDirect = 0, unknown = 0;
+        for (const n of nbrs) {
+          const leg = candidateIndex.get(String(n))?.entryLeg;
+          if (leg && GRAPH_ENTRY_LEGS.has(leg)) viaGraph++;
+          else if (leg && DIRECT_ENTRY_LEGS.has(leg)) viaDirect++;
+          else unknown++; // missing, cap sentinel, or a leg we cannot classify
+        }
+        return { viaGraph, viaDirect, unknown };
+      })(),
     };
   });
+
 
   let detailDispositions = $derived(
     orderDispositions(Object.keys(detail?.candidates_by_disposition ?? {})),
@@ -556,8 +683,8 @@
                  segment does not. A bar chart that misstates its proportions
                  is worse than no bar. -->
             <div
-              class="funnel-seg {dispositionClass(key)}"
-              style="flex: {val} 1 0"
+              class="funnel-seg"
+              style="flex: {val} 1 0; background: {dispositionColor(key)}"
               title="{key}: {val} ({((val / totals.sum) * 100).toFixed(1)}%) — {DISPOSITION_HELP[key] ?? ''}"
             >
               <!-- Only the DROP segments carry a count. The survivors already
@@ -582,11 +709,23 @@
         </div>
       </div>
 
+      <!-- Legend order == segment order, always. The family separator is the
+           actual reading aid: it says WHY these are grouped (capacity vs
+           quality vs redundancy are three different remedies), which is the
+           thing a flat five-item list never conveyed. -->
       <ul class="disp-legend">
-        {#each orderDispositions(totals.entries.map(([k]) => k)) as key (key)}
+        {#each orderDispositions(totals.entries.map(([k]) => k)) as key, i (key)}
           {@const val = $store.data.disposition_totals[key] ?? 0}
-          <li title={DISPOSITION_HELP[key] ?? ''}>
-            <span class="dot {dispositionClass(key)}"></span>
+          {@const fam = dispositionFamily(key)}
+          {@const prevFam =
+            i === 0
+              ? null
+              : dispositionFamily(orderDispositions(totals.entries.map(([k]) => k))[i - 1])}
+          {#if prevFam !== null && prevFam !== fam}
+            <li class="fam-sep" aria-hidden="true"></li>
+          {/if}
+          <li title="{DISPOSITION_HELP[key] ?? ''} — {fam}">
+            <span class="dot" style="background: {dispositionColor(key)}"></span>
             <span class="k">{key}</span>
             <span class="pct">{((val / totals.sum) * 100).toFixed(1)}%</span>
           </li>
@@ -700,9 +839,9 @@
                   {@const tot = segs.reduce((a, s) => a + s.val, 0)}
                   {#each segs as s, si (si)}
                     <span
-                      class="rseg {s.cls}"
+                      class="rseg"
                       aria-hidden="true"
-                      style="flex-grow: {s.val}"
+                      style="flex-grow: {s.val}; background: {s.color}"
                       title="{s.key}: {s.val}"
                     ></span>
                   {/each}
@@ -867,80 +1006,90 @@
           {#if expansionsBySeed.length === 0}
             <p class="status-msg">No graph expansion ran for this retrieval.</p>
           {:else}
-            {@const g = expansionGraph}
-            <div class="xdiagram">
-              <div class="xd-cols">
-                <span>{g.seeds.length} seed{g.seeds.length === 1 ? '' : 's'}</span>
-                <span class="muted">
-                  {g.edges.length} edges
-                  {#if g.convergentCount > 0}
-                    · <span class="conv-note">{g.convergentCount} reached from more than one seed</span>
-                  {/if}
+            <!-- One summary line replaces the bipartite diagram this section
+                 used to open with. That diagram spent ~800px of width and
+                 three screens of scroll to encode "seed reached neighbour" —
+                 which the tree below already states, alongside relation,
+                 weight, strength, hop and provenance, none of which the
+                 diagram showed at all. Its one unique contribution was
+                 convergence, so that is now called out here in words. -->
+            <div class="xsummary">
+              {#if expansionTotals.seeds !== null}
+                <span><strong>{expansionTotals.seeds}</strong> direct seeds</span>
+              {:else}
+                <span class="muted">multi-seed traversal only</span>
+              {/if}
+              <span><strong>{expansionTotals.edges}</strong> edges</span>
+              <span><strong>{expansionTotals.neighbours}</strong> neighbours</span>
+              {#if expansionTotals.convergent > 0}
+                <span class="conv-note">
+                  {expansionTotals.convergent} reached from more than one seed
                 </span>
-                <span>{g.neighbours.length} neighbour{g.neighbours.length === 1 ? '' : 's'}</span>
-              </div>
-              <!-- No height attribute: with a viewBox, `width:100%; height:auto`
-                   in CSS preserves the aspect exactly and avoids letterboxing. -->
-              <svg
-                viewBox="0 0 {g.width} {g.height}"
-                role="img"
-                aria-label="{g.edges.length} graph edges from {g.seeds.length} seeds to {g.neighbours.length} neighbours"
-              >
-                {#each g.edges as e (e.i)}
-                  <path
-                    class="xd-edge"
-                    class:lost={e.lost}
-                    d={e.d}
-                    style="stroke-width: {e.w}"
-                  ><title>{e.title}</title></path>
-                {/each}
-                {#each g.seeds as s (s.id)}
-                  <circle class="xd-node t-{s.meta.seed_type}" cx={s.x} cy={s.y} r={NODE_R}>
-                    <title>{s.meta.seed_type} {shortId(s.id, 8)} · seed {fmtScore(s.meta.seed_score)}</title>
-                  </circle>
-                  <text class="xd-label right" x={s.x - 9} y={s.y + 3}>{shortId(s.id, 6)}</text>
-                {/each}
-                {#each g.neighbours as n (n.id)}
-                  <circle
-                    class="xd-node t-{n.meta.neighbor_type}"
-                    class:convergent={n.convergent}
-                    cx={n.x} cy={n.y} r={n.convergent ? NODE_R + 1.5 : NODE_R}
-                  >
-                    <title>{n.meta.neighbor_type} {shortId(n.id, 8)}{n.convergent ? ' · reached from several seeds' : ''}</title>
-                  </circle>
-                  <text class="xd-label" x={n.x + 9} y={n.y + 3}>{shortId(n.id, 6)}</text>
-                {/each}
-              </svg>
-              {#if g.truncated > 0}
-                <p class="status-msg warn sm">
-                  {g.truncated} further edge{g.truncated === 1 ? '' : 's'} not drawn — the full
-                  set is listed below.
-                </p>
               {/if}
             </div>
+            <!-- Provenance, deliberately NOT yield. Two separate reasons a
+                 yield figure here would be false: an edge is only recorded for
+                 a neighbour that reached the merged candidate set (so drops
+                 are invisible), AND the edge is recorded before the duplicate
+                 guard (so a neighbour that merely corroborated a direct hit
+                 also has one). What IS answerable is how many neighbours the
+                 graph actually put in the pool versus how many were already
+                 there. -->
+            {#if candidateIndex.size > 0}
+              <p class="status-msg sm">
+                {expansionTotals.viaGraph} of {expansionTotals.neighbours} neighbours entered
+                the candidate pool through a graph leg{#if expansionTotals.viaDirect > 0}; {expansionTotals.viaDirect}
+                  {expansionTotals.viaDirect === 1 ? 'was' : 'were'} already present from a
+                  direct leg and {expansionTotals.viaDirect === 1 ? 'was' : 'were'} corroborated,
+                  not contributed{/if}{#if expansionTotals.unknown > 0}; {expansionTotals.unknown}
+                  could not be attributed — no
+                  candidate record (capture stopped at the cap) or an entry leg this view does
+                  not recognise{/if}.{#if expansionTotals.hasSpreading}
+                  Spreading activation drops nodes inside its own stage without recording an
+                  edge, so its reach is wider than shown.{/if}
+              </p>
+            {/if}
 
-            {#each expansionsBySeed as group (group.seed.seed_id)}
-              <details class="seed-group">
+            {#each expansionsBySeed as group, gi (group.key)}
+              <details class="seed-group" open={gi === 0}>
                 <summary class="seed-head">
-                  <span class="chip sm">{group.seed.seed_type}</span>
-                  <code>{shortId(group.seed.seed_id)}</code>
-                  <span class="muted sm">seed {fmtScore(group.seed.seed_score)}</span>
-                  <span class="muted sm">· {group.items.length} neighbour{group.items.length === 1 ? '' : 's'}</span>
+                  {#if group.isSpreading}
+                    <span class="chip sm prov">spreading activation</span>
+                    <span class="seed-label">multi-seed traversal, hop 2</span>
+                  {:else}
+                    <span class="chip sm t-{group.seed.seed_type}">{group.seed.seed_type}</span>
+                    <span class="seed-label" title={nodeLabel(group.seed.seed_id)}>
+                      {nodeLabel(group.seed.seed_id)}
+                    </span>
+                    <span class="muted sm nowrap">seed {fmtScore(group.seed.seed_score)}</span>
+                  {/if}
+                  <span class="muted sm nowrap">
+                    · {group.items.length} neighbour{group.items.length === 1 ? '' : 's'}
+                  </span>
                 </summary>
                 <ul class="edge-list">
                   {#each group.items as edge, ei (ei)}
+                    {@const seeds = group.seedCount(edge)}
                     <li class:lost={!edge.won_best_path}>
                       <span class="rel">{edge.edge_relation ?? 'related'}</span>
-                      <span class="arrow">→</span>
                       <span class="chip sm t-{edge.neighbor_type}">{edge.neighbor_type}</span>
-                      <code>{shortId(edge.neighbor_id)}</code>
-                      <span class="muted sm">w {fmtScore(edge.edge_weight)} · str {fmtScore(edge.path_strength)} · hop {edge.hop}</span>
+                      <span class="nbr-label" title={nodeLabel(edge.neighbor_id)}>
+                        {nodeLabel(edge.neighbor_id)}
+                      </span>
+                      <span class="muted sm nowrap">
+                        w {fmtScore(edge.edge_weight)} · str {fmtScore(edge.path_strength)}
+                      </span>
                       <!-- Provenance is load-bearing, not decoration: inferred
                            edges take graph_inferred_edge_penalty, so without it
                            two otherwise-identical edges score differently with
-                           no visible reason. Dropped in the rewrite; restored. -->
+                           no visible reason. -->
                       {#if edge.extraction_method}
                         <span class="chip sm prov">{edge.extraction_method}</span>
+                      {/if}
+                      {#if seeds > 1}
+                        <span class="chip sm conv" title="Also reached from {seeds - 1} other seed(s)">
+                          ×{seeds} seeds
+                        </span>
                       {/if}
                       {#if !edge.won_best_path}<span class="chip sm">lost best-path</span>{/if}
                     </li>
@@ -975,7 +1124,10 @@
               {@const items = detail.candidates_by_disposition[disp] ?? []}
               <details class="phase-group" open={disp !== 'rendered'}>
                 <summary class="disp-head">
-                  <span class="badge {dispositionClass(disp)}">{disp}</span>
+                  <span
+                    class="badge disp-badge"
+                    style="color: {dispositionColor(disp)}; border-color: {dispositionColor(disp)}55"
+                  >{disp}</span>
                   <span class="count">{items.length}</span>
                   <span class="help">{DISPOSITION_HELP[disp] ?? ''}</span>
                 </summary>
@@ -1140,9 +1292,6 @@
     transition: filter var(--transition, 0.2s ease);
   }
   .funnel-seg:hover { filter: brightness(1.15); }
-  .funnel-seg.badge-good { background: var(--green); }
-  .funnel-seg.badge-warn { background: var(--yellow); }
-  .funnel-seg.badge-bad  { background: var(--red); }
   /* Counts sit ON the bar, so the bar is the figure rather than a decoration
      the legend then restates. Hidden when a segment is too thin to hold them. */
   .seg-label {
@@ -1163,6 +1312,19 @@
     flex-wrap: wrap;
     gap: 0.35rem 1.1rem;
   }
+  /* Family separator: a hairline, not a heading. It groups the legend into
+     capacity / quality / redundancy without spending a row on labels. */
+  .disp-legend li.fam-sep {
+    width: 1px;
+    align-self: stretch;
+    padding: 0;
+    background: var(--border);
+    margin: 0 0.15rem;
+  }
+  .disp-badge {
+    border: 1px solid;
+    background: transparent;
+  }
   .disp-legend li {
     display: flex;
     align-items: center;
@@ -1171,9 +1333,6 @@
     cursor: default;
   }
   .dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; flex-shrink: 0; }
-  .dot.badge-good { background: var(--green); }
-  .dot.badge-warn { background: var(--yellow); }
-  .dot.badge-bad  { background: var(--red); }
   .disp-legend .k { font-family: var(--font-mono, monospace); color: var(--text); }
   .disp-legend .pct { color: var(--muted); font-variant-numeric: tabular-nums; }
 
@@ -1292,9 +1451,6 @@
      a text/bar/text sandwich. */
   .rrow-bar { display: flex; align-items: center; gap: 1.5px; height: 3px; margin: 0.45rem 0 0.3rem; }
   .rseg { height: 3px; border-radius: 1px; }
-  .rseg.badge-good { background: var(--green); }
-  .rseg.badge-warn { background: var(--yellow); }
-  .rseg.badge-bad  { background: var(--red); }
   /* Hatched = we did not look. Solid hairline = we looked and found nothing.
      Two different facts, so two different marks. */
   .rseg.unsampled {
@@ -1419,55 +1575,36 @@
   .disp-head .count { font-variant-numeric: tabular-nums; color: var(--text); font-weight: 600; }
   .disp-head .help { color: var(--muted); font-size: 0.74rem; }
 
-  /* ── Expansion diagram ───────────────────────────────────── */
-  .xdiagram {
+
+  /* ── Expansion tree ──────────────────────────────────────── */
+  .xsummary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 1.1rem;
+    align-items: baseline;
+    font-size: 0.78rem;
+    color: var(--muted);
+    padding: 0.5rem 0.7rem;
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 0.6rem 0.5rem 0.4rem;
-    margin-bottom: 0.75rem;
+    border-radius: 6px;
+    margin-bottom: 0.5rem;
   }
-  .xd-cols {
-    display: flex;
-    justify-content: space-between;
-    gap: 0.75rem;
-    font-size: 0.7rem;
-    color: var(--text);
-    padding: 0 0.25rem 0.4rem;
-  }
-  .xd-cols .muted { text-align: center; }
+  .xsummary strong { color: var(--fg); font-variant-numeric: tabular-nums; }
   .conv-note { color: var(--accent); }
-  .xdiagram svg { display: block; width: 100%; height: auto; }
-
-  .xd-edge {
-    fill: none;
-    stroke: var(--muted);
-    opacity: 0.45;
-    transition: opacity var(--transition, 0.2s ease), stroke var(--transition, 0.2s ease);
+  /* The node's identity is the content, so it takes the flexible space and
+     truncates; the numbers next to it are fixed-width and must never wrap. */
+  .seed-label, .nbr-label {
+    flex: 1 1 12rem;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-  .xd-edge:hover { stroke: var(--accent); opacity: 1; }
-  /* A path that lost best-path arbitration still HAPPENED — dashed rather than
-     hidden, so the traversal that was attempted stays visible. */
-  .xd-edge.lost { stroke-dasharray: 2 3; opacity: 0.22; }
-
-  .xd-node { fill: var(--muted); stroke: var(--bg); stroke-width: 1; }
-  .xd-node.convergent { stroke: var(--accent); stroke-width: 1.5; }
-  .xd-node.t-fact      { fill: var(--fact-color); }
-  .xd-node.t-episode   { fill: var(--episode-color); }
-  .xd-node.t-decision  { fill: var(--decision-color); }
-  .xd-node.t-procedure { fill: var(--procedure-color); }
-  .xd-node.t-chunk     { fill: var(--chunk-color); }
-  .xd-node.t-censor    { fill: var(--censor-color); }
-  .xd-node.t-multi     { fill: var(--accent); }
-
-  .xd-label {
-    font-family: var(--font-mono, monospace);
-    /* Sized for the fixed 900-unit drawing width: at a ~840px panel this
-       renders near 9px, and stays there as rows are added. */
-    font-size: 10px;
-    fill: var(--muted);
-  }
-  .xd-label.right { text-anchor: end; }
+  .seed-label { color: var(--fg); font-weight: 500; }
+  .nbr-label { color: var(--fg); }
+  .nowrap { white-space: nowrap; flex: 0 0 auto; }
+  .chip.conv { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 
   .edge-list { list-style: none; margin: 0.2rem 0 0; padding: 0 0 0 1rem; border-left: 2px solid var(--border); }
   .edge-list li {
@@ -1476,7 +1613,6 @@
   }
   .edge-list li.lost { opacity: 0.5; }
   .rel { font-family: var(--font-mono, monospace); color: var(--accent); }
-  .arrow { opacity: 0.5; }
 
   /* ── Chips / badges ──────────────────────────────────────── */
   .chip {
