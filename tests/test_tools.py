@@ -563,7 +563,14 @@ class TestToolDispatcher:
 
     @pytest.mark.asyncio
     async def test_dispatcher_tool_error(self):
-        """Handler raises exception -> error tuple with exception message."""
+        """Handler raises exception -> error tuple with exception message.
+
+        The call must be COMPLETE for the handler to be reached at all: this
+        handler is (**kwargs) and _ECHO_SCHEMA requires `message`, so an empty
+        args dict is now caught by required-arg validation before dispatch and
+        the handler never runs. Passing `message` keeps this test about
+        exception propagation, which is what it is actually for.
+        """
         dispatcher = ToolDispatcher()
 
         async def failing_handler(**kwargs) -> dict:
@@ -571,7 +578,7 @@ class TestToolDispatcher:
 
         dispatcher.register("fail", failing_handler, _ECHO_SCHEMA)
 
-        result_text, is_error = await dispatcher.dispatch("fail", {})
+        result_text, is_error = await dispatcher.dispatch("fail", {"message": "hi"})
         assert is_error is True
         assert "Tool error:" in result_text
         assert "Something went wrong" in result_text
