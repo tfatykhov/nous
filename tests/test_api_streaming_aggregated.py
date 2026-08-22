@@ -570,3 +570,93 @@ def test_sdk_message_to_content_preserves_citations_on_text():
 
     assert result[0]["text"] == "answer"
     assert result[0]["citations"] == [{"type": "char_location", "cited_text": "q"}]
+
+
+# ---------------------------------------------------------------------------
+# #598: the aggregator must REPORT a malformed tool input, not just log it
+# ---------------------------------------------------------------------------
+
+
+async def test_httpx_aggregator_reports_malformed_input_via_input_errors(monkeypatch):
+    """Logging the decode failure was never enough: `_tool_loop` reads
+    api_response.content and cannot tell a blanked input from a genuine
+    no-argument call, so it dispatched anyway. The error is now carried on
+    ApiResponse.input_errors, keyed by tool_use id."""
+    client = HttpxAnthropicClient(_settings())
+    client._http = MagicMock()
+
+    events = [
+        StreamEvent(type="message_start", usage={"input_tokens": 10}),
+        StreamEvent(
+            type="tool_start", tool_name="bash", tool_id="toolu_bad", block_index=0,
+        ),
+        StreamEvent(type="tool_input_delta", text='{"cmd": "ls"', block_index=0),
+        StreamEvent(type="block_stop", block_index=0),
+        StreamEvent(type="done", stop_reason="tool_use", usage={"output_tokens": 5}),
+    ]
+    monkeypatch.setattr(client, "stream", _canned_stream(events))
+
+    resp = await client.call_streaming_aggregated({"model": "x", "messages": []})
+
+    assert resp.input_errors == {
+        "toolu_bad": resp.input_errors["toolu_bad"]
+    }, "keyed by tool_use id so the tool_result can be paired"
+    message = resp.input_errors["toolu_bad"]
+    assert "not executed" in message
+    assert "Re-emit" in message
+    # Structural only -- the payload must not travel in the model-facing text.
+    assert "ls" not in message.replace("valid JSON.", "")
+
+    # content stays byte-identical: no marker key on the block, because
+    # _tool_loop appends content verbatim into the persisted message history.
+    assert set(resp.content[0]) == {"type", "id", "name", "input"}
+    assert resp.content[0]["input"] == {}
+
+
+async def test_httpx_aggregator_leaves_input_errors_none_when_clean(monkeypatch):
+    client = HttpxAnthropicClient(_settings())
+    client._http = MagicMock()
+
+    events = [
+        StreamEvent(type="message_start", usage={"input_tokens": 10}),
+        StreamEvent(
+            type="tool_start", tool_name="bash", tool_id="toolu_ok", block_index=0,
+        ),
+        StreamEvent(type="tool_input_delta", text='{"cmd": "ls"}', block_index=0),
+        StreamEvent(type="block_stop", block_index=0),
+        StreamEvent(type="done", stop_reason="tool_use", usage={"output_tokens": 5}),
+    ]
+    monkeypatch.setattr(client, "stream", _canned_stream(events))
+
+    resp = await client.call_streaming_aggregated({"model": "x", "messages": []})
+
+    assert resp.input_errors is None
+    assert resp.content[0]["input"] == {"cmd": "ls"}
+
+
+async def test_httpx_aggregator_empty_input_is_not_an_error(monkeypatch):
+    """A tool called with NO arguments streams zero input fragments and
+    legitimately parses to {}. That must not be reported as malformed --
+    the same regression #597 had to guard on the streaming path."""
+    client = HttpxAnthropicClient(_settings())
+    client._http = MagicMock()
+
+    events = [
+        StreamEvent(type="message_start", usage={"input_tokens": 10}),
+        StreamEvent(
+            type="tool_start",
+            tool_name="list_tasks",
+            tool_id="toolu_noargs",
+            block_index=0,
+        ),
+        # Empty string fragment: the "" -> {} path, not a decode failure.
+        StreamEvent(type="tool_input_delta", text="", block_index=0),
+        StreamEvent(type="block_stop", block_index=0),
+        StreamEvent(type="done", stop_reason="tool_use", usage={"output_tokens": 5}),
+    ]
+    monkeypatch.setattr(client, "stream", _canned_stream(events))
+
+    resp = await client.call_streaming_aggregated({"model": "x", "messages": []})
+
+    assert resp.input_errors is None
+    assert resp.content[0]["input"] == {}

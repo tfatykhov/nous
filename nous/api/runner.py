@@ -1885,6 +1885,32 @@ class AgentRunner:
                     tool_input = block.get("input", {})
                     tool_use_id = block["id"]
 
+                    # Malformed tool-input JSON (#598): the aggregator could not
+                    # parse this call's streamed input and blanked it to {}.
+                    # Dispatching that can only fail, with a TypeError naming
+                    # whichever parameter comes first in the tool's signature --
+                    # which reads as a missing argument and hides the real
+                    # cause. Emit a paired tool_result instead so the block
+                    # stays matched (an unpaired tool_use 400s the next call)
+                    # and the model is told what to fix. Skips gating, dispatch
+                    # and the ledger: nothing ran, so nothing is recorded.
+                    input_error = (api_response.input_errors or {}).get(tool_use_id)
+                    if input_error:
+                        tool_results_for_message.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": input_error,
+                            "is_error": True,
+                        })
+                        all_tool_results.append(ToolResult(
+                            tool_name=tool_name,
+                            arguments=tool_input,
+                            result=None,
+                            error=input_error,
+                            duration_ms=0,
+                        ))
+                        continue
+
                     # F022: Auto-inject source_episode_id into learn_fact.
                     tool_input = self._maybe_inject_episode_id(tool_name, tool_input, session_id)
 

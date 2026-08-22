@@ -52,6 +52,21 @@ class ApiResponse:
     content: list[dict[str, Any]]  # Raw content blocks from API
     stop_reason: str  # end_turn, max_tokens, tool_use, stop_sequence
     usage: dict[str, int] | None = None
+    # tool_use id -> why its streamed input JSON could not be parsed.
+    #
+    # Deliberately NOT a key on the block itself. `content` is appended to
+    # `messages` verbatim by `_tool_loop`, so it persists in the Conversation
+    # and is re-sent on every subsequent API call and re-serialized by
+    # compaction -- a marker living inside a block would have to be stripped
+    # by every present and future consumer of history. Out here it cannot
+    # leak by construction.
+    #
+    # Only the httpx `call_streaming_aggregated` populates this: it assembles
+    # tool input from SSE fragments and json.loads them itself. The SDK
+    # aggregator goes through `get_final_message()`, which raises rather than
+    # handing back a blanked input, and non-streaming `call()` receives input
+    # already parsed by the API.
+    input_errors: dict[str, str] | None = None
 
 
 # F062: typed spawn_sync — formal alias for the seven canonical strings that

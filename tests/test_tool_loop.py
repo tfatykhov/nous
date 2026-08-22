@@ -389,3 +389,177 @@ class TestToolLoop:
         assert tool_results[0].tool_name == "nonexistent_tool"
         assert tool_results[0].error is not None
         assert "Unknown tool" in tool_results[0].error
+
+
+class TestMalformedToolInputOnTheBackgroundPath:
+    """#598: the same bug #597 fixed for `stream_chat`, on `_tool_loop`.
+
+    The httpx `call_streaming_aggregated` assembles tool input from SSE
+    fragments and parses it itself. On a decode failure it blanked the input
+    to `{}` and `_tool_loop` dispatched anyway -- the tool then raised
+    `TypeError: <tool>() missing 1 required positional argument`, naming
+    whichever parameter happens to come first in the signature. That reads as
+    "the model forgot an argument" and hides the actual failure.
+
+    This is the `is_background=True` path, so it covers subtasks, heartbeat
+    triage and DAG callback nodes -- turns nobody is watching in real time.
+    """
+
+    @staticmethod
+    def _malformed_response(tool_use_id: str = "toolu_bad") -> ApiResponse:
+        resp = _make_api_response(
+            stop_reason="tool_use",
+            tool_uses=[{"name": "echo", "input": {}, "id": tool_use_id}],
+        )
+        resp.input_errors = {
+            tool_use_id: (
+                "Tool input JSON was malformed and could not be parsed "
+                "(41 bytes, error at offset 41). The tool was not executed. "
+                "Re-emit the call with valid JSON."
+            )
+        }
+        return resp
+
+    @pytest.mark.asyncio
+    async def test_malformed_input_is_not_dispatched(self, loop_runner):
+        dispatched = []
+        original = loop_runner._dispatcher.dispatch
+
+        async def spy(name, args, **kwargs):
+            dispatched.append((name, args))
+            return await original(name, args, **kwargs)
+
+        loop_runner._dispatcher.dispatch = spy
+        loop_runner._call_api = AsyncMock(side_effect=[
+            self._malformed_response(),
+            _make_api_response(text="Retried", stop_reason="end_turn"),
+        ])
+
+        conv = _make_conversation([("user", "Echo something")])
+        response_text, tool_results, _usage, _ = await loop_runner._tool_loop(
+            system_prompt="Test prompt", conversation=conv, frame_id="task",
+        )
+
+        assert not dispatched, "a blanked-args call must never reach the dispatcher"
+        assert response_text == "Retried"
+        assert len(tool_results) == 1
+        assert tool_results[0].tool_name == "echo"
+        assert tool_results[0].result is None
+        assert "not executed" in tool_results[0].error
+        assert "Re-emit" in tool_results[0].error
+
+    @pytest.mark.asyncio
+    async def test_pairing_invariant_holds(self, loop_runner):
+        """Every tool_use needs exactly one matching tool_result or the next
+        API call 400s. Asserted on the messages actually passed to _call_api,
+        not just on the returned ToolResults."""
+        loop_runner._call_api = AsyncMock(side_effect=[
+            self._malformed_response("toolu_bad"),
+            _make_api_response(text="Retried", stop_reason="end_turn"),
+        ])
+
+        conv = _make_conversation([("user", "Echo something")])
+        await loop_runner._tool_loop(
+            system_prompt="Test prompt", conversation=conv, frame_id="task",
+        )
+
+        assert loop_runner._call_api.call_count == 2
+        messages = loop_runner._call_api.call_args_list[1].kwargs["messages"]
+        results = [
+            b
+            for m in messages
+            if m.get("role") == "user" and isinstance(m.get("content"), list)
+            for b in m["content"]
+            if isinstance(b, dict) and b.get("type") == "tool_result"
+        ]
+        assert len(results) == 1
+        assert results[0]["tool_use_id"] == "toolu_bad"
+        assert results[0]["is_error"] is True
+        assert "not executed" in results[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_marker_never_enters_the_assistant_message(self, loop_runner):
+        """The whole reason input_errors lives on ApiResponse and not on the
+        block: `content` is appended to `messages` verbatim, persists in the
+        conversation, and is re-sent on every later call."""
+        loop_runner._call_api = AsyncMock(side_effect=[
+            self._malformed_response("toolu_bad"),
+            _make_api_response(text="Retried", stop_reason="end_turn"),
+        ])
+
+        conv = _make_conversation([("user", "Echo something")])
+        await loop_runner._tool_loop(
+            system_prompt="Test prompt", conversation=conv, frame_id="task",
+        )
+
+        messages = loop_runner._call_api.call_args_list[1].kwargs["messages"]
+        tool_use_blocks = [
+            b
+            for m in messages
+            if m.get("role") == "assistant" and isinstance(m.get("content"), list)
+            for b in m["content"]
+            if isinstance(b, dict) and b.get("type") == "tool_use"
+        ]
+        assert len(tool_use_blocks) == 1
+        assert set(tool_use_blocks[0]) == {"type", "id", "name", "input"}
+        assert "input_error" not in tool_use_blocks[0]
+        assert "input_errors" not in tool_use_blocks[0]
+
+    @pytest.mark.asyncio
+    async def test_clean_call_alongside_a_malformed_one_still_dispatches(
+        self, loop_runner
+    ):
+        """One bad block must not suppress its siblings in the same message."""
+        resp = _make_api_response(
+            stop_reason="tool_use",
+            tool_uses=[
+                {"name": "echo", "input": {}, "id": "toolu_bad"},
+                {"name": "add", "input": {"a": 2, "b": 3}, "id": "toolu_ok"},
+            ],
+        )
+        resp.input_errors = {"toolu_bad": "malformed; not executed; Re-emit"}
+        loop_runner._call_api = AsyncMock(side_effect=[
+            resp, _make_api_response(text="Done", stop_reason="end_turn"),
+        ])
+
+        conv = _make_conversation([("user", "Two tools")])
+        _text, tool_results, _usage, _ = await loop_runner._tool_loop(
+            system_prompt="Test prompt", conversation=conv, frame_id="task",
+        )
+
+        assert len(tool_results) == 2
+        by_name = {r.tool_name: r for r in tool_results}
+        assert by_name["echo"].result is None
+        assert by_name["add"].result == "5"
+
+        messages = loop_runner._call_api.call_args_list[1].kwargs["messages"]
+        results = [
+            b
+            for m in messages
+            if m.get("role") == "user" and isinstance(m.get("content"), list)
+            for b in m["content"]
+            if isinstance(b, dict) and b.get("type") == "tool_result"
+        ]
+        assert {r["tool_use_id"] for r in results} == {"toolu_bad", "toolu_ok"}
+
+    @pytest.mark.asyncio
+    async def test_no_input_errors_dispatches_normally(self, loop_runner):
+        """Regression guard: input_errors defaults to None and the ordinary
+        path is untouched."""
+        resp = _make_api_response(
+            stop_reason="tool_use",
+            tool_uses=[{"name": "echo", "input": {"message": "hi"}, "id": "toolu_ok"}],
+        )
+        assert resp.input_errors is None
+        loop_runner._call_api = AsyncMock(side_effect=[
+            resp, _make_api_response(text="Done", stop_reason="end_turn"),
+        ])
+
+        conv = _make_conversation([("user", "Echo hi")])
+        _text, tool_results, _usage, _ = await loop_runner._tool_loop(
+            system_prompt="Test prompt", conversation=conv, frame_id="task",
+        )
+
+        assert len(tool_results) == 1
+        assert tool_results[0].error is None
+        assert tool_results[0].result == "Echo: hi"
