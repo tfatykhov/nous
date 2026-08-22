@@ -4484,7 +4484,13 @@ def register_dag_tools(
             "source": {"type": "string"},
             "token_budget": {"type": "integer"},
         },
-        "required": ["name", "nodes", "edges"],
+        # `edges` is NOT required: the handler reads kwargs.get("edges", []) and
+        # DAGCreateRequest.edges is default_factory=list, so a single-node DAG
+        # legitimately omits it. Listing it here told the model a lie, and once
+        # required-arg validation began trusting the schema for variadic
+        # handlers that lie became a rejection. `nodes` stays required — its
+        # .get default hits DAGCreateRequest's min_length=1 and fails anyway.
+        "required": ["name", "nodes"],
     })
 
     dispatcher.register("dag_manage", dag_manage, {

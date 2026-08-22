@@ -652,6 +652,64 @@ class TestLeakLocatorIsLinear:
         assert not received
 
 
+class TestVariadicSchemasMustBeHonest:
+    """codex P2: once required-arg validation trusts the schema for a variadic
+    handler, any schema that over-declares becomes a rejection of calls that
+    worked. dag_create listed `edges` as required while reading
+    kwargs.get("edges", []) against a default_factory=list field -- so a valid
+    single-node DAG would have been refused.
+
+    The invariant this locks: for a (**kwargs) handler the schema IS the
+    contract, so a key the handler defaults must not appear in `required`.
+    """
+
+    @staticmethod
+    def _dag_dispatcher() -> tuple[ToolDispatcher, dict]:
+        dispatcher = ToolDispatcher()
+        captured: dict = {}
+
+        async def dag_create(**kwargs) -> dict:
+            captured.update(
+                name=kwargs["name"],
+                nodes=kwargs.get("nodes", []),
+                edges=kwargs.get("edges", []),
+            )
+            return {"content": [{"type": "text", "text": "created"}]}
+
+        dispatcher.register("dag_create", dag_create, {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "nodes": {"type": "array", "items": {"type": "object"}},
+                "edges": {"type": "array", "items": {"type": "object"}},
+            },
+            "required": ["name", "nodes"],
+        })
+        return dispatcher, captured
+
+    @pytest.mark.asyncio
+    async def test_single_node_dag_without_edges_dispatches(self):
+        dispatcher, captured = self._dag_dispatcher()
+        result_text, is_error = await dispatcher.dispatch(
+            "dag_create",
+            {"name": "one-shot", "nodes": [{"name": "a"}]},
+        )
+        assert is_error is False, result_text
+        assert captured["edges"] == []
+
+    def test_real_dag_create_schema_omits_edges_from_required(self):
+        """Guards the actual registered schema, not just a stand-in."""
+        import re
+        from pathlib import Path
+
+        source = Path("nous/api/tools.py").read_text(encoding="utf-8")
+        assert '"required": ["name", "nodes", "edges"]' not in source, (
+            "dag_create must not declare `edges` required -- the handler "
+            "defaults it and a single-node DAG legitimately omits it"
+        )
+        assert re.search(r'"required": \["name", "nodes"\]', source)
+
+
 class TestSettingsFlag:
     def test_salvage_flag_default_on(self):
         from nous.config import Settings
