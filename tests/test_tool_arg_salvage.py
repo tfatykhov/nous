@@ -16,9 +16,18 @@ Two dispatch-layer defenses under test:
    leaked tail from the host string.
 """
 
+import re
+from pathlib import Path
+
 import pytest
 
 from nous.api.tools import ToolDispatcher
+
+_ECHO_SCHEMA: dict = {
+    "type": "object",
+    "properties": {"message": {"type": "string"}},
+    "required": ["message"],
+}
 
 _DECISION_SCHEMA: dict = {
     "type": "object",
@@ -781,15 +790,75 @@ class TestVariadicSchemasMustBeHonest:
 
     def test_real_dag_create_schema_omits_edges_from_required(self):
         """Guards the actual registered schema, not just a stand-in."""
-        import re
-        from pathlib import Path
-
         source = Path("nous/api/tools.py").read_text(encoding="utf-8")
         assert '"required": ["name", "nodes", "edges"]' not in source, (
             "dag_create must not declare `edges` required -- the handler "
             "defaults it and a single-node DAG legitimately omits it"
         )
         assert re.search(r'"required": \["name", "nodes"\]', source)
+
+
+class TestErrorReturnsAreMarked:
+    """The amplifier behind four separate codex findings: a handler returned
+    error prose WITHOUT `is_error`, so dispatch reported `is_error=False` and
+    the model was told a call succeeded when nothing had happened. Any
+    salvage/validation notice layered on top then decorated a failure as a
+    repaired success.
+
+    Empty-result messages are deliberately NOT flagged: a memory search that
+    finds nothing is a successful search, and marking it would teach the model
+    that an empty corpus is a tool failure.
+    """
+
+    ERROR_RETURN = re.compile(
+        r'return \{"content": \[\{"type": "text", "text": '
+        r'f?"(Error|Failed|Invalid|Unknown|Cannot|Refus|BLOCKED|\w+ error:)',
+        re.IGNORECASE,
+    )
+
+    def test_no_error_return_omits_the_flag(self):
+        source = Path("nous/api/tools.py").read_text(encoding="utf-8")
+        offenders = [
+            line.strip()
+            for line in source.splitlines()
+            if self.ERROR_RETURN.search(line)
+        ]
+        assert not offenders, (
+            "these error returns would be reported to the model as successes; "
+            'add "is_error": True:\n  ' + "\n  ".join(offenders)
+        )
+
+    def test_empty_result_messages_stay_unflagged(self):
+        source = Path("nous/api/tools.py").read_text(encoding="utf-8")
+        for message in (
+            "No episodes found in the last",
+            "No graph hubs found yet",
+            "No matching decisions.",
+            "No active DAGs.",
+        ):
+            line = next(
+                line for line in source.splitlines() if message in line
+            )
+            assert '"is_error": True' not in line, (
+                f"{message!r} reports an empty result, not a failure"
+            )
+
+    @pytest.mark.asyncio
+    async def test_dispatch_propagates_the_flag(self):
+        dispatcher = ToolDispatcher()
+
+        async def failing(message: str) -> dict:
+            return {
+                "is_error": True,
+                "content": [{"type": "text", "text": "Error: nope"}],
+            }
+
+        dispatcher.register("failing", failing, _ECHO_SCHEMA)
+        result_text, is_error = await dispatcher.dispatch(
+            "failing", {"message": "x"},
+        )
+        assert is_error is True
+        assert "Error: nope" in result_text
 
 
 class TestSettingsFlag:

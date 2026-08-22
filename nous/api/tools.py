@@ -52,6 +52,21 @@ _INITIATION_ONLY_TOOLS: frozenset[str] = frozenset(
     {"store_identity", "complete_initiation"}
 )
 
+
+def _tool_error(text: str) -> dict[str, Any]:
+    """An MCP error response — error prose that is actually FLAGGED as one.
+
+    Handlers used to return `{"content": [...]}` with error text and no
+    `is_error`, so `dispatch` read `bool(result.get("is_error"))` as False and
+    reported the failure to the model as a success. The model was told
+    `record_decision` worked when nothing had been written.
+
+    Use this for every failure path. Do NOT use it for an empty result: a
+    memory search that matched nothing SUCCEEDED and found nothing, and
+    flagging that would teach the model an empty corpus is a broken tool.
+    """
+    return {"is_error": True, "content": [{"type": "text", "text": text}]}
+
 # Trailing run of leaked XML tool syntax inside a JSON string arg. The model
 # can slip from JSON tool-input into Claude's internal XML tool-call format
 # mid-string (observed in prod 2026-07-13: record_decision's description
@@ -1194,7 +1209,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
         except Exception as e:
             logger.exception("record_decision tool failed")
-            return {"content": [{"type": "text", "text": f"Error recording decision: {e}"}]}
+            return _tool_error(f"Error recording decision: {e}")
 
     async def learn_fact(
         content: str,
@@ -1286,10 +1301,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
         except ValueError as e:
             # UUID parsing error or validation error
-            return {"content": [{"type": "text", "text": f"Validation error: {e}"}]}
+            return _tool_error(f"Validation error: {e}")
         except Exception as e:
             logger.exception("learn_fact tool failed")
-            return {"content": [{"type": "text", "text": f"Error learning fact: {e}"}]}
+            return _tool_error(f"Error learning fact: {e}")
 
     async def recall_deep(  # noqa: C901
         query: str,
@@ -1596,7 +1611,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     _rl_err.commit(_tr_err)
             except Exception:
                 logger.debug("F091: failed to commit partial trace", exc_info=True)
-            return {"content": [{"type": "text", "text": f"Error searching memory: {e}"}]}
+            return _tool_error(f"Error searching memory: {e}")
 
     async def create_censor(
         trigger_pattern: str,
@@ -1670,10 +1685,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
         except ValueError as e:
             # UUID parsing error or validation error
-            return {"content": [{"type": "text", "text": f"Validation error: {e}"}]}
+            return _tool_error(f"Validation error: {e}")
         except Exception as e:
             logger.exception("create_censor tool failed")
-            return {"content": [{"type": "text", "text": f"Error creating censor: {e}"}]}
+            return _tool_error(f"Error creating censor: {e}")
 
     async def recall_recent(
         hours: int = 48,
@@ -1719,7 +1734,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
         except Exception as e:
             logger.exception("recall_recent tool failed")
-            return {"content": [{"type": "text", "text": f"Error fetching recent episodes: {e}"}]}
+            return _tool_error(f"Error fetching recent episodes: {e}")
 
     # F011: learn_skill tool — register skills from URL, local path, or inline markdown
     _skill_parser = SkillParser()
@@ -1741,7 +1756,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # 1. Fetch content
             if source == "inline":
                 if not content:
-                    return {"content": [{"type": "text", "text": "Error: 'content' is required when source is 'inline'"}]}
+                    return _tool_error("Error: 'content' is required when source is 'inline'")
                 markdown = content
             elif source.startswith(("http://", "https://")):
                 # Fetch from URL
@@ -1756,7 +1771,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 workspace = settings.workspace_dir if settings else "."
                 path = os.path.join(workspace, source) if not os.path.isabs(source) else source
                 if not os.path.exists(path):
-                    return {"content": [{"type": "text", "text": f"Error: file not found: {path}"}]}
+                    return _tool_error(f"Error: file not found: {path}")
                 with open(path, encoding="utf-8") as f:
                     markdown = f.read()
 
@@ -1808,10 +1823,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             }
 
         except ValueError as e:
-            return {"content": [{"type": "text", "text": f"Parse error: {e}"}]}
+            return _tool_error(f"Parse error: {e}")
         except Exception as e:
             logger.exception("learn_skill tool failed")
-            return {"content": [{"type": "text", "text": f"Error learning skill: {e}"}]}
+            return _tool_error(f"Error learning skill: {e}")
 
     async def get_procedure(
         procedure_id: str,
@@ -1877,7 +1892,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
         except Exception as e:
             logger.exception("get_procedure tool failed")
-            return {"content": [{"type": "text", "text": f"Error fetching procedure: {e}"}]}
+            return _tool_error(f"Error fetching procedure: {e}")
 
     async def recall_hubs(
         limit: int = 10,
@@ -1909,7 +1924,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             return {"content": [{"type": "text", "text": "\n".join(lines)}]}
         except Exception as e:
             logger.exception("recall_hubs tool failed")
-            return {"content": [{"type": "text", "text": f"Error fetching hubs: {e}"}]}
+            return _tool_error(f"Error fetching hubs: {e}")
 
     async def ingest_document(
         content: str,
@@ -2011,7 +2026,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 outcome=superseded.
         """
         if _is_background:
-            return {"is_error": True, "content": [{"type": "text", "text": _BG_BLOCK_MSG}]}
+            return _tool_error(_BG_BLOCK_MSG)
         # A supersession without a successor is a lineage dead end: retrieval
         # can label the row `[superseded]` but cannot point at what replaced
         # it. Validated here, not as a JSON-schema conditional — the dispatcher
@@ -2040,7 +2055,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             return {"content": [{"type": "text", "text": text}]}
         except Exception as e:
             logger.exception("resolve_decision tool failed")
-            return {"is_error": True, "content": [{"type": "text", "text": f"Error resolving decision: {e}"}]}
+            return _tool_error(f"Error resolving decision: {e}")
 
     async def resolve_decisions(
         resolutions: list[dict[str, Any]],
@@ -2052,7 +2067,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         A per-item failure is reported and does not abort the batch.
         """
         if _is_background:
-            return {"is_error": True, "content": [{"type": "text", "text": _BG_BLOCK_MSG}]}
+            return _tool_error(_BG_BLOCK_MSG)
         try:
             # codex #577 r3: NO batch-wide lineage precheck here. ReviewInput's
             # validator (shared by every entry point) rejects a missing-lineage
@@ -2080,7 +2095,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             return {"content": [{"type": "text", "text": text}], "is_error": bool(failed and ok == 0)}
         except Exception as e:
             logger.exception("resolve_decisions tool failed")
-            return {"is_error": True, "content": [{"type": "text", "text": f"Error resolving decisions: {e}"}]}
+            return _tool_error(f"Error resolving decisions: {e}")
 
     async def list_decisions(
         outcome: str | None = None,
@@ -2109,7 +2124,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             return {"content": [{"type": "text", "text": header + "\n" + "\n".join(lines)}]}
         except Exception as e:
             logger.exception("list_decisions tool failed")
-            return {"is_error": True, "content": [{"type": "text", "text": f"Error listing decisions: {e}"}]}
+            return _tool_error(f"Error listing decisions: {e}")
 
     return {
         "record_decision": record_decision,
@@ -2547,7 +2562,7 @@ def register_cache_retrieve_tool(
         hash_key: str, query: str | None = None, session_id: str | None = None, **kwargs,
     ) -> dict:
         if not session_id:
-            return {"content": [{"type": "text", "text": "Error: no active session for cache lookup."}]}
+            return _tool_error("Error: no active session for cache lookup.")
         try:
             async with db_session_factory() as db_sess:
                 result = await retrieve_cached_result(db_sess, session_id, hash_key, query)
@@ -2558,7 +2573,7 @@ def register_cache_retrieve_tool(
                 return {"content": [{"type": "text", "text": text}]}
         except Exception as e:
             logger.exception("cache_retrieve error")
-            return {"content": [{"type": "text", "text": f"Error retrieving cached result: {e}"}]}
+            return _tool_error(f"Error retrieving cached result: {e}")
 
     dispatcher.register("cache_retrieve", _cache_retrieve, _CACHE_RETRIEVE_SCHEMA)
 
@@ -3122,10 +3137,10 @@ def create_subtask_tools(
                 }
 
         except ValueError as e:
-            return {"content": [{"type": "text", "text": f"Cannot spawn subtask: {e}"}]}
+            return _tool_error(f"Cannot spawn subtask: {e}")
         except Exception as e:
             logger.exception("spawn_task tool failed")
-            return {"content": [{"type": "text", "text": f"Error spawning subtask: {e}"}]}
+            return _tool_error(f"Error spawning subtask: {e}")
 
     async def schedule_task(
         task: str,
@@ -3202,10 +3217,10 @@ def create_subtask_tools(
                 ]
             }
         except ValueError as e:
-            return {"content": [{"type": "text", "text": f"Schedule error: {e}"}]}
+            return _tool_error(f"Schedule error: {e}")
         except Exception as e:
             logger.exception("schedule_task tool failed")
-            return {"content": [{"type": "text", "text": f"Error scheduling task: {e}"}]}
+            return _tool_error(f"Error scheduling task: {e}")
 
     async def list_tasks(
         status: str | None = None,
@@ -3253,7 +3268,7 @@ def create_subtask_tools(
             return {"content": [{"type": "text", "text": "\n".join(lines)}]}
         except Exception as e:
             logger.exception("list_tasks tool failed")
-            return {"content": [{"type": "text", "text": f"Error listing tasks: {e}"}]}
+            return _tool_error(f"Error listing tasks: {e}")
 
     async def cancel_task(
         task_id: str,
@@ -3296,10 +3311,10 @@ def create_subtask_tools(
                 ]
             }
         except ValueError:
-            return {"content": [{"type": "text", "text": f"Invalid task ID: {task_id}"}]}
+            return _tool_error(f"Invalid task ID: {task_id}")
         except Exception as e:
             logger.exception("cancel_task tool failed")
-            return {"content": [{"type": "text", "text": f"Error cancelling task: {e}"}]}
+            return _tool_error(f"Error cancelling task: {e}")
 
     # F062: spawn_sync — typed counterpart to spawn_task(await_result=True).
     # Returns SubtaskResult.to_dict() as a JSON blob in the content. The
@@ -4087,9 +4102,9 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
             )
             return {"content": [{"type": "text", "text": f"Created dynamic check: {json.dumps(result)}"}]}
         except ValueError as e:
-            return {"content": [{"type": "text", "text": f"Error: {e}"}]}
+            return _tool_error(f"Error: {e}")
         except Exception as e:
-            return {"content": [{"type": "text", "text": f"Failed to create check: {e}"}]}
+            return _tool_error(f"Failed to create check: {e}")
 
     async def heartbeat_check_manage(**kwargs) -> dict:
         try:
@@ -4100,9 +4115,9 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
             )
             return {"content": [{"type": "text", "text": json.dumps(result)}]}
         except ValueError as e:
-            return {"content": [{"type": "text", "text": f"Error: {e}"}]}
+            return _tool_error(f"Error: {e}")
         except Exception as e:
-            return {"content": [{"type": "text", "text": f"Failed: {e}"}]}
+            return _tool_error(f"Failed: {e}")
 
     dispatcher.register("heartbeat_check_create", heartbeat_check_create, {
         "type": "object",
@@ -4256,7 +4271,7 @@ def register_dag_tools(
             return {"content": [{"type": "text", "text": "\n".join(lines)}]}
         except Exception as e:
             logger.exception("dag_create failed")
-            return {"content": [{"type": "text", "text": f"Error creating DAG: {e}"}]}
+            return _tool_error(f"Error creating DAG: {e}")
 
     async def dag_manage(**kwargs: Any) -> dict:
         """List, inspect, cancel, or retry nodes in DAGs."""
@@ -4323,12 +4338,12 @@ def register_dag_tools(
                 return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
             if not dag_id_str:
-                return {"content": [{"type": "text", "text": "Error: dag_id required for this action"}]}
+                return _tool_error("Error: dag_id required for this action")
 
             # Support 8-char prefix lookup
             dag = await _resolve_dag(store, dag_id_str)
             if dag is None:
-                return {"content": [{"type": "text", "text": f"Error: DAG '{dag_id_str}' not found"}]}
+                return _tool_error(f"Error: DAG '{dag_id_str}' not found")
 
             if action == "status":
                 status_icons = {
@@ -4382,7 +4397,7 @@ def register_dag_tools(
             elif action == "retry_node":
                 node_name = kwargs.get("node_name")
                 if not node_name:
-                    return {"content": [{"type": "text", "text": "Error: node_name required for retry_node"}]}
+                    return _tool_error("Error: node_name required for retry_node")
                 await orchestrator.retry_node(dag.id, node_name)
                 return {"content": [{"type": "text", "text": f"Reset node '{node_name}' to pending for retry"}]}
 
@@ -4394,7 +4409,7 @@ def register_dag_tools(
                 # scoped to exactly the one node asked for.
                 node_name = kwargs.get("node_name")
                 if not node_name:
-                    return {"content": [{"type": "text", "text": "Error: node_name required for node_result"}]}
+                    return _tool_error("Error: node_name required for node_result")
                 node = next((n for n in dag.nodes if n.name == node_name), None)
                 if node is None:
                     available = ", ".join(sorted(n.name for n in dag.nodes)) or "(none)"
@@ -4410,11 +4425,11 @@ def register_dag_tools(
                 return {"content": [{"type": "text", "text": node.result}]}
 
             else:
-                return {"content": [{"type": "text", "text": f"Error: unknown action '{action}'"}]}
+                return _tool_error(f"Error: unknown action '{action}'")
 
         except Exception as e:
             logger.exception("dag_manage failed")
-            return {"content": [{"type": "text", "text": f"Error: {e}"}]}
+            return _tool_error(f"Error: {e}")
 
     dispatcher.register("dag_create", dag_create, {
         "type": "object",
