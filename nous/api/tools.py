@@ -14,8 +14,11 @@ Each tool returns MCP-compliant response format and handles errors gracefully.
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 import logging
+import math
+import re
 import sys
 import threading
 import time
@@ -50,6 +53,280 @@ _INITIATION_ONLY_TOOLS: frozenset[str] = frozenset(
 )
 
 
+def _tool_error(text: str) -> dict[str, Any]:
+    """An MCP error response — error prose that is actually FLAGGED as one.
+
+    Handlers used to return `{"content": [...]}` with error text and no
+    `is_error`, so `dispatch` read `bool(result.get("is_error"))` as False and
+    reported the failure to the model as a success. The model was told
+    `record_decision` worked when nothing had been written.
+
+    Use this for every failure path. Do NOT use it for an empty result: a
+    memory search that matched nothing SUCCEEDED and found nothing, and
+    flagging that would teach the model an empty corpus is a broken tool.
+    """
+    return {"is_error": True, "content": [{"type": "text", "text": text}]}
+
+# Trailing run of leaked XML tool syntax inside a JSON string arg. The model
+# can slip from JSON tool-input into Claude's internal XML tool-call format
+# mid-string (observed in prod 2026-07-13: record_decision's description
+# string ended with '</description>\n<parameter name="confidence">0.55', so
+# the parsed input had no top-level confidence key). Anchored to end-of-string
+# so legitimate XML/HTML quoted mid-string is never touched.
+#
+# The run must END in an UNTERMINATED <parameter> tag. That is the actual
+# evidence of a syntax transition: the model stopped emitting JSON and never
+# closed what it started. A well-formed '<parameter name="x">v</parameter>' at
+# the end of a string is far more likely to be prose QUOTING the format --
+# a decision describing this very bug would otherwise have its text truncated
+# and a value invented from the example. When the evidence is ambiguous we do
+# not guess: salvage declines, and the missing-arg error tells the model to
+# re-emit. Being told beats being silently repaired from a quotation.
+# Located by a backward walk rather than one combined pattern. A single regex
+# has to lead with `\s*`, which forces the engine to retry that greedy run at
+# every start position and rescan the suffix -- quadratic. Measured on the
+# combined form: 2k spaces 0.10s, 5k 0.62s, 10k 2.50s, 20k 10.78s, all inside
+# an async dispatcher, so one whitespace-heavy arg on a call that is missing a
+# required key stalls the shared event loop. Each pattern below is anchored at
+# `\Z` and led by a literal, so every non-matching start position is rejected
+# on its first character and the whole locator is linear.
+_XML_LEAK_FINAL = re.compile(r'<parameter\s+name="[^"]+">[^<]*\Z')
+_XML_LEAK_COMPLETE = re.compile(r'<parameter\s+name="[^"]+">[^<]*</parameter>\s*\Z')
+_XML_LEAK_CLOSER = re.compile(r"</\w+>\s*\Z")
+_XML_PARAM_LEAK_PAIR = re.compile(r'<parameter\s+name="([^"]+)">\s*([^<]*)')
+
+
+def _leak_tail_start(value: str) -> int | None:
+    """Index where the trailing XML-leak run begins, or None if there is none.
+
+    Walks right to left: the final UNTERMINATED tag (the syntax-transition
+    evidence -- see the note above), then any complete tags immediately before
+    it, then an optional closing tag, then preceding whitespace. Equivalent to
+    the old single-regex match, without its backtracking.
+    """
+    final = _XML_LEAK_FINAL.search(value)
+    if final is None:
+        return None
+    start = final.start()
+    # Step to each preceding tag via rfind rather than re-searching the whole
+    # prefix. `search(value, 0, start)` rescans from offset zero on every
+    # iteration, which is quadratic in the tag count -- measured on that form:
+    # 500 tags 0.015s, 1000 0.067s, 2500 0.40s, 5000 (202 KB) 1.67s. rfind
+    # walks backward over each gap exactly once, so the whole loop is linear.
+    # ("</parameter>" cannot false-match "<parameter" -- the slash is inside.)
+    while (cand := value.rfind("<parameter", 0, start)) != -1:
+        complete = _XML_LEAK_COMPLETE.match(value, cand, start)
+        if complete is None:
+            break
+        start = cand
+    if (closer := _XML_LEAK_CLOSER.search(value, 0, start)) is not None:
+        start = closer.start()
+    while start > 0 and value[start - 1].isspace():
+        start -= 1
+    return start
+
+
+def _satisfies_schema_constraints(value: Any, prop_schema: dict[str, Any]) -> bool:
+    """Check a salvaged value against enum / minimum / maximum.
+
+    Primitive-type coercion alone is not enough to call a key recovered: a
+    leaked ``confidence=2.0`` parses as a float and passes the type gate, then
+    fails RecordInput's ``le=1.0`` deep inside the handler. Nothing is stored,
+    yet the call is reported as a repaired success. A value that cannot satisfy
+    its declared constraints is not salvage — it stays missing so the model is
+    told to re-emit it.
+    """
+    enum = prop_schema.get("enum")
+    if isinstance(enum, list) and value not in enum:
+        return False
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        # NaN/inf first: every comparison against NaN is False, so a bare
+        # range check would wave it through as "within bounds" and the
+        # handler's own validator would then reject it downstream.
+        if not math.isfinite(value):
+            return False
+        minimum, maximum = prop_schema.get("minimum"), prop_schema.get("maximum")
+        if isinstance(minimum, int | float) and value < minimum:
+            return False
+        if isinstance(maximum, int | float) and value > maximum:
+            return False
+    return True
+
+
+def _coerce_to_schema_type(raw: str, prop_schema: dict[str, Any]) -> Any:
+    """Coerce a leaked string value to its schema-declared type.
+
+    Returns None when coercion fails — the caller treats the key as still
+    missing and falls through to the actionable error.
+
+    Containers are deliberately NOT salvaged. Accepting one would require
+    validating `items`, nested `required` and nested enums to know it is
+    usable, i.e. a real JSON-schema validator; without that, a leaked
+    ``nodes=[{"type":"bogus"}]`` clears the outer array check and is only
+    rejected deep inside the handler. The salvage path exists for one observed
+    prod failure — a SCALAR leaking into a string — and there is no evidence a
+    model emits nested JSON through XML tag text. Declining costs nothing: the
+    key stays missing and the model is told to re-emit it.
+    """
+    raw = raw.strip()
+    prop_type = prop_schema.get("type")
+    if prop_type in ("array", "object"):
+        return None
+    try:
+        if prop_type == "number":
+            value: Any = float(raw)
+        elif prop_type == "integer":
+            value = int(raw)
+        elif prop_type == "boolean":
+            value = {"true": True, "false": False}.get(raw.lower())
+        else:
+            value = raw  # string / untyped
+        if value is None:
+            return None
+        return value if _satisfies_schema_constraints(value, prop_schema) else None
+    except ValueError:
+        return None
+
+
+def _salvage_leaked_args(
+    tool_name: str,
+    args: dict[str, Any],
+    missing: list[str],
+    schema: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Recover schema-required args leaked as XML <parameter> tags.
+
+    Scans top-level string arg values for a trailing leak run, extracts any
+    of the missing keys found there, type-coerces them per the schema, and
+    strips the leaked tail from the host string. Returns (args, still_missing)
+    — unchanged inputs when nothing salvageable is found.
+    """
+    properties = schema.get("properties", {})
+    salvaged: dict[str, Any] = {}
+    cleaned: dict[str, str] = {}
+    for host_key, host_value in args.items():
+        if not isinstance(host_value, str):
+            continue
+        tail_start = _leak_tail_start(host_value)
+        if tail_start is None:
+            continue
+        found_in_host = False
+        for leaked_key, leaked_raw in _XML_PARAM_LEAK_PAIR.findall(
+            host_value[tail_start:]
+        ):
+            if leaked_key not in missing or leaked_key in salvaged:
+                continue
+            value = _coerce_to_schema_type(leaked_raw, properties.get(leaked_key, {}))
+            if value is None:
+                continue
+            salvaged[leaked_key] = value
+            found_in_host = True
+            logger.warning(
+                "Salvaged leaked tool arg %s.%s=%r from inside %r (model "
+                "emitted XML <parameter> syntax in a JSON string value)",
+                tool_name,
+                leaked_key,
+                value,
+                host_key,
+            )
+        if found_in_host:
+            cleaned[host_key] = host_value[:tail_start]
+    if not salvaged:
+        return args, missing
+    return {**args, **cleaned, **salvaged}, [k for k in missing if k not in salvaged]
+
+
+# Structural type mismatches no downstream coercion layer repairs. Deliberately
+# NOT a full JSON-schema validator: pydantic's lax mode happily turns "0.9" into
+# 0.9 and "true" into True, so rejecting scalar-for-scalar here would fail calls
+# that succeed today. Only container-vs-scalar confusion is flagged, which is
+# the shape that actually reaches the model as an opaque pydantic ValidationError
+# (observed 2026-08-22: record_decision tags='fannie-mae, cpm, condo, ...').
+_CONTAINER_TYPES = {"array": list, "object": dict}
+_SCALAR_TYPES = {"string": str, "number": (int, float), "integer": int, "boolean": bool}
+
+_JSON_TYPE_NAMES: dict[type, str] = {
+    str: "string", bool: "boolean", int: "integer",
+    float: "number", list: "array", dict: "object",
+}
+
+
+def _describe_json_type(value: Any) -> str:
+    """Name a Python value's JSON type for an error message."""
+    return _JSON_TYPE_NAMES.get(type(value), type(value).__name__)
+
+
+def _schema_type_errors(args: dict[str, Any], schema: dict[str, Any]) -> list[str]:
+    """Describe args whose JSON type cannot be what the schema declares.
+
+    Fail-open by construction: anything ambiguous (union types, absent type,
+    null values, unknown keys) is skipped. An over-eager check here would
+    reject tool calls that work today, which is strictly worse than the
+    opaque error it replaces.
+    """
+    properties = schema.get("properties") or {}
+    errors: list[str] = []
+    for key, value in args.items():
+        if key.startswith("_") or value is None:
+            continue
+        declared = (properties.get(key) or {}).get("type")
+        if not isinstance(declared, str):
+            continue  # union / unspecified -- not our business
+        expected_container = _CONTAINER_TYPES.get(declared)
+        if expected_container is not None:
+            if not isinstance(value, expected_container):
+                hint = ""
+                if declared == "array" and isinstance(value, str):
+                    items = (properties[key].get("items") or {}).get("type", "string")
+                    hint = (
+                        f' Send a JSON array of {items}s -- ["a", "b"] -- '
+                        f"not one delimited string."
+                    )
+                errors.append(
+                    f"{key} must be {declared}, got {_describe_json_type(value)}.{hint}"
+                )
+            continue
+        expected_scalar = _SCALAR_TYPES.get(declared)
+        # Only the reverse structural error: a container where a scalar belongs.
+        # Scalar-for-scalar is left to the handler, which coerces it.
+        if expected_scalar is not None and isinstance(value, list | dict):
+            errors.append(
+                f"{key} must be {declared}, got {_describe_json_type(value)}."
+            )
+    return errors
+
+
+def _required_handler_params(handler: Callable[..., Any]) -> set[str] | None:
+    """Parameter names the handler cannot be invoked without.
+
+    Returns ``None`` for a ``**kwargs``-only handler, meaning "the signature
+    cannot tell us" — the caller must then trust the schema's own ``required``
+    list. Without this distinction a variadic handler reports zero required
+    params, every schema-required key is treated as optional, and validation
+    silently no-ops. That is not hypothetical: ``heartbeat_check_create`` and
+    ``heartbeat_check_manage`` are ``(**kwargs)`` and index ``kwargs["name"]``
+    / ``kwargs["action"]`` directly, so a missing key raises KeyError inside
+    the handler and comes back as prose the dispatcher reports as success.
+    """
+    try:
+        sig = inspect.signature(handler)
+    except (TypeError, ValueError):
+        return None
+    named = {
+        p.name
+        for p in sig.parameters.values()
+        if p.default is inspect.Parameter.empty
+        and p.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+    accepts_var_kw = any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+    # A handler with BOTH named required params and **kwargs still can't be
+    # trusted to have defaults for the schema-required keys it swallows.
+    return None if accepts_var_kw else named
+
+
 class ToolDispatcher:
     """Registers tool handlers and dispatches tool calls from the API.
 
@@ -64,6 +341,7 @@ class ToolDispatcher:
         *,
         tool_schema_cache_enabled: bool = True,
         stable_tool_set_enabled: bool = True,
+        arg_salvage_enabled: bool = True,
     ) -> None:
         self._handlers: dict[str, Callable[..., Any]] = {}
         self._schemas: dict[str, dict[str, Any]] = {}  # P0-7 fix
@@ -73,6 +351,9 @@ class ToolDispatcher:
         # superset so the Anthropic prompt-cache prefix isn't busted on frame
         # change (tools sit at the front of the cacheable prefix).
         self._stable_tool_set_enabled = stable_tool_set_enabled
+        # Repair model-emitted input where a required arg leaked as an XML
+        # <parameter> tag inside another string arg (see _salvage_leaked_args).
+        self._arg_salvage_enabled = arg_salvage_enabled
 
     def register(self, name: str, handler: Callable[..., Any], schema: dict[str, Any]) -> None:
         """Register a tool handler with its JSON schema."""
@@ -97,6 +378,57 @@ class ToolDispatcher:
         if not handler:
             return f"Unknown tool: {name}", True
         try:
+            # Guard the **args unpacking below: validate schema-required keys
+            # up front and, when one is missing, try to salvage a value the
+            # model leaked as an XML <parameter> tag inside another string
+            # arg (observed prod failure mode, 2026-07-13). Only error when
+            # the handler signature would actually raise — schema-required
+            # keys with handler defaults keep today's lenient behavior.
+            schema = self._schemas.get(name) or {}
+            missing = [k for k in schema.get("required") or [] if k not in args]
+            salvaged_keys: list[str] = []
+            if missing and self._arg_salvage_enabled:
+                before = set(missing)
+                args, missing = _salvage_leaked_args(name, args, missing, schema)
+                salvaged_keys = sorted(before - set(missing))
+            if missing:
+                handler_required = _required_handler_params(handler)
+                # None == variadic handler, signature tells us nothing; fall
+                # back to the schema's own required list rather than skipping
+                # validation entirely (which is what zero named params meant).
+                hard_missing = (
+                    list(missing)
+                    if handler_required is None
+                    else [k for k in missing if k in handler_required]
+                )
+                if hard_missing:
+                    provided = sorted(k for k in args if not k.startswith("_"))
+                    return (
+                        f"Tool error: {name} is missing required argument(s): "
+                        f"{', '.join(hard_missing)}. Provided: "
+                        f"{', '.join(provided) if provided else 'none'}. Emit "
+                        "every required field as a top-level JSON key in the "
+                        "tool input — do not embed values as XML tags inside "
+                        "another field's text.",
+                        True,
+                    )
+
+            # Structural type mismatches: say what is wrong and how to fix it,
+            # rather than letting the handler surface a pydantic ValidationError
+            # (or worse, coercing silently -- the model never learns it emitted
+            # the wrong shape and repeats it next turn).
+            type_errors = _schema_type_errors(args, schema)
+            if type_errors:
+                logger.warning(
+                    "Tool arg type mismatch for %s: %s", name, "; ".join(type_errors)
+                )
+                return (
+                    f"Tool error: {name} received argument(s) of the wrong type. "
+                    + " ".join(type_errors)
+                    + " Re-emit the call with corrected types.",
+                    True,
+                )
+
             if name in ("resolve_decision", "resolve_decisions"):
                 args = {**args, "_is_background": is_background}
             if session_id is not None and name == "spawn_task":
@@ -138,7 +470,18 @@ class ToolDispatcher:
             # P1-1: Extract text from MCP-format response. is_error honors
             # the MCP field when a handler sets it (#179: run_python error
             # returns) — absent means success, as before.
-            return result["content"][0]["text"], bool(result.get("is_error"))
+            result_text = result["content"][0]["text"]
+            is_error = bool(result.get("is_error"))
+            if salvaged_keys and not is_error:
+                # Salvage recovered the call, but a silent success teaches the
+                # model nothing -- it emitted XML inside a JSON string and got
+                # a clean result, so it will do it again. Say so in the result.
+                result_text = (
+                    f"[input repaired] {', '.join(salvaged_keys)} had to be recovered "
+                    "from XML <parameter> syntax leaked inside another field's text. "
+                    "Emit every argument as a top-level JSON key.\n\n" + result_text
+                )
+            return result_text, is_error
         except Exception as e:
             logger.exception("Tool dispatch error for %s", name)
             return f"Tool error: {e}", True
@@ -816,16 +1159,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             if reasons:
                 for r in reasons:
                     if not isinstance(r, dict) or "type" not in r or "text" not in r:
-                        return {
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": (
-                                        f"Error: Invalid reason format. Expected dict with 'type' and 'text', got: {r}"
-                                    ),
-                                }
-                            ]
-                        }
+                        return _tool_error(
+                            "Error: Invalid reason format. Expected dict with "
+                            f"'type' and 'text', got: {r}"
+                        )
                     reason_inputs.append(ReasonInput(type=r["type"], text=r["text"]))
 
             input_data = RecordInput(
@@ -866,7 +1203,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
         except Exception as e:
             logger.exception("record_decision tool failed")
-            return {"content": [{"type": "text", "text": f"Error recording decision: {e}"}]}
+            return _tool_error(f"Error recording decision: {e}")
 
     async def learn_fact(
         content: str,
@@ -958,10 +1295,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
         except ValueError as e:
             # UUID parsing error or validation error
-            return {"content": [{"type": "text", "text": f"Validation error: {e}"}]}
+            return _tool_error(f"Validation error: {e}")
         except Exception as e:
             logger.exception("learn_fact tool failed")
-            return {"content": [{"type": "text", "text": f"Error learning fact: {e}"}]}
+            return _tool_error(f"Error learning fact: {e}")
 
     async def recall_deep(  # noqa: C901
         query: str,
@@ -1268,7 +1605,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     _rl_err.commit(_tr_err)
             except Exception:
                 logger.debug("F091: failed to commit partial trace", exc_info=True)
-            return {"content": [{"type": "text", "text": f"Error searching memory: {e}"}]}
+            return _tool_error(f"Error searching memory: {e}")
 
     async def create_censor(
         trigger_pattern: str,
@@ -1295,17 +1632,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         try:
             # F078: validate action vocabulary before constructing the input.
             if action not in ("steer", "refuse", "abort"):
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                f"Invalid action {action!r}; must be one of "
-                                "steer, refuse, abort."
-                            ),
-                        }
-                    ]
-                }
+                return _tool_error(
+                    f"Invalid action {action!r}; must be one of "
+                    "steer, refuse, abort."
+                )
 
             # Parse UUIDs if provided
             decision_uuid = UUID(learned_from_decision) if learned_from_decision else None
@@ -1342,10 +1672,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
         except ValueError as e:
             # UUID parsing error or validation error
-            return {"content": [{"type": "text", "text": f"Validation error: {e}"}]}
+            return _tool_error(f"Validation error: {e}")
         except Exception as e:
             logger.exception("create_censor tool failed")
-            return {"content": [{"type": "text", "text": f"Error creating censor: {e}"}]}
+            return _tool_error(f"Error creating censor: {e}")
 
     async def recall_recent(
         hours: int = 48,
@@ -1391,7 +1721,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
         except Exception as e:
             logger.exception("recall_recent tool failed")
-            return {"content": [{"type": "text", "text": f"Error fetching recent episodes: {e}"}]}
+            return _tool_error(f"Error fetching recent episodes: {e}")
 
     # F011: learn_skill tool — register skills from URL, local path, or inline markdown
     _skill_parser = SkillParser()
@@ -1413,7 +1743,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # 1. Fetch content
             if source == "inline":
                 if not content:
-                    return {"content": [{"type": "text", "text": "Error: 'content' is required when source is 'inline'"}]}
+                    return _tool_error("Error: 'content' is required when source is 'inline'")
                 markdown = content
             elif source.startswith(("http://", "https://")):
                 # Fetch from URL
@@ -1428,7 +1758,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 workspace = settings.workspace_dir if settings else "."
                 path = os.path.join(workspace, source) if not os.path.isabs(source) else source
                 if not os.path.exists(path):
-                    return {"content": [{"type": "text", "text": f"Error: file not found: {path}"}]}
+                    return _tool_error(f"Error: file not found: {path}")
                 with open(path, encoding="utf-8") as f:
                     markdown = f.read()
 
@@ -1480,10 +1810,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             }
 
         except ValueError as e:
-            return {"content": [{"type": "text", "text": f"Parse error: {e}"}]}
+            return _tool_error(f"Parse error: {e}")
         except Exception as e:
             logger.exception("learn_skill tool failed")
-            return {"content": [{"type": "text", "text": f"Error learning skill: {e}"}]}
+            return _tool_error(f"Error learning skill: {e}")
 
     async def get_procedure(
         procedure_id: str,
@@ -1549,7 +1879,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
         except Exception as e:
             logger.exception("get_procedure tool failed")
-            return {"content": [{"type": "text", "text": f"Error fetching procedure: {e}"}]}
+            return _tool_error(f"Error fetching procedure: {e}")
 
     async def recall_hubs(
         limit: int = 10,
@@ -1581,7 +1911,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             return {"content": [{"type": "text", "text": "\n".join(lines)}]}
         except Exception as e:
             logger.exception("recall_hubs tool failed")
-            return {"content": [{"type": "text", "text": f"Error fetching hubs: {e}"}]}
+            return _tool_error(f"Error fetching hubs: {e}")
 
     async def ingest_document(
         content: str,
@@ -1627,14 +1957,17 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
         if "error" in result:
             code = result.get("code")
+            # Ingestion failed, so this must be FLAGGED, not just worded like
+            # an error -- _block returns an unflagged envelope, which dispatch
+            # would report to the model as a successful ingest of nothing.
             # These messages historically carried an "Error: " prefix; the
             # helper drops it so callers get clean text. Re-add it here.
             if code in ("empty_content", "no_source_ref", "bad_uuid",
                         "no_session", "no_episode", "vector_mismatch"):
-                return _block(f"Error: {result['error']}")
+                return _tool_error(f"Error: {result['error']}")
             # disabled / too_short / embed_failed / exception are emitted
             # verbatim (they never had the prefix).
-            return _block(result["error"])
+            return _tool_error(result["error"])
 
         if result.get("already_ingested"):
             return _block(
@@ -1683,7 +2016,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 outcome=superseded.
         """
         if _is_background:
-            return {"is_error": True, "content": [{"type": "text", "text": _BG_BLOCK_MSG}]}
+            return _tool_error(_BG_BLOCK_MSG)
         # A supersession without a successor is a lineage dead end: retrieval
         # can label the row `[superseded]` but cannot point at what replaced
         # it. Validated here, not as a JSON-schema conditional — the dispatcher
@@ -1712,7 +2045,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             return {"content": [{"type": "text", "text": text}]}
         except Exception as e:
             logger.exception("resolve_decision tool failed")
-            return {"is_error": True, "content": [{"type": "text", "text": f"Error resolving decision: {e}"}]}
+            return _tool_error(f"Error resolving decision: {e}")
 
     async def resolve_decisions(
         resolutions: list[dict[str, Any]],
@@ -1724,7 +2057,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         A per-item failure is reported and does not abort the batch.
         """
         if _is_background:
-            return {"is_error": True, "content": [{"type": "text", "text": _BG_BLOCK_MSG}]}
+            return _tool_error(_BG_BLOCK_MSG)
         try:
             # codex #577 r3: NO batch-wide lineage precheck here. ReviewInput's
             # validator (shared by every entry point) rejects a missing-lineage
@@ -1752,7 +2085,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             return {"content": [{"type": "text", "text": text}], "is_error": bool(failed and ok == 0)}
         except Exception as e:
             logger.exception("resolve_decisions tool failed")
-            return {"is_error": True, "content": [{"type": "text", "text": f"Error resolving decisions: {e}"}]}
+            return _tool_error(f"Error resolving decisions: {e}")
 
     async def list_decisions(
         outcome: str | None = None,
@@ -1781,7 +2114,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             return {"content": [{"type": "text", "text": header + "\n" + "\n".join(lines)}]}
         except Exception as e:
             logger.exception("list_decisions tool failed")
-            return {"is_error": True, "content": [{"type": "text", "text": f"Error listing decisions: {e}"}]}
+            return _tool_error(f"Error listing decisions: {e}")
 
     return {
         "record_decision": record_decision,
@@ -2219,7 +2552,7 @@ def register_cache_retrieve_tool(
         hash_key: str, query: str | None = None, session_id: str | None = None, **kwargs,
     ) -> dict:
         if not session_id:
-            return {"content": [{"type": "text", "text": "Error: no active session for cache lookup."}]}
+            return _tool_error("Error: no active session for cache lookup.")
         try:
             async with db_session_factory() as db_sess:
                 result = await retrieve_cached_result(db_sess, session_id, hash_key, query)
@@ -2230,7 +2563,7 @@ def register_cache_retrieve_tool(
                 return {"content": [{"type": "text", "text": text}]}
         except Exception as e:
             logger.exception("cache_retrieve error")
-            return {"content": [{"type": "text", "text": f"Error retrieving cached result: {e}"}]}
+            return _tool_error(f"Error retrieving cached result: {e}")
 
     dispatcher.register("cache_retrieve", _cache_retrieve, _CACHE_RETRIEVE_SCHEMA)
 
@@ -2547,7 +2880,7 @@ def create_subtask_tools(
                             msg = f"Subtask rejected by censor: {reason}"
                             if match.action_instruction:
                                 msg += f"\n{match.action_instruction}"
-                            return {"content": [{"type": "text", "text": msg}]}
+                            return _tool_error(msg)
                         # downgraded refuse -> treat as steer directive below
                         directive = match.action_instruction or match.reason
                         if directive:
@@ -2621,14 +2954,10 @@ def create_subtask_tools(
 
             # 012.2: Synchronous inline execution
             if runner is None:
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Cannot execute inline subtask: runner not available. Use await_result=false.",
-                        }
-                    ]
-                }
+                return _tool_error(
+                    "Cannot execute inline subtask: runner not available. "
+                    "Use await_result=false."
+                )
 
             import asyncio as _asyncio
 
@@ -2696,6 +3025,11 @@ def create_subtask_tools(
                             f"[Subtask {subtask.id.hex[:8]} {_result.outcome}: "
                             f"{_result.reason}]"
                         )
+                    # Mixed path: `body` is a completion OR a blocked/failed
+                    # outcome, so the flag follows _result.ok rather than being
+                    # set blanket either way.
+                    if not _result.ok:
+                        return _tool_error(body)
                     return {"content": [{"type": "text", "text": body}]}
                 except _asyncio.TimeoutError:
                     if not executed:
@@ -2706,14 +3040,10 @@ def create_subtask_tools(
                             error_msg=f"Timeout after {effective_timeout}s",
                             state=state,
                         )
-                    return {
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": f"[Subtask {subtask.id.hex[:8]} timed out after {effective_timeout}s]",
-                            }
-                        ]
-                    }
+                    return _tool_error(
+                        f"[Subtask {subtask.id.hex[:8]} timed out after "
+                        f"{effective_timeout}s]"
+                    )
                 except Exception as e:
                     if not executed:
                         await _persist_and_emit_inline_outcome(
@@ -2723,14 +3053,7 @@ def create_subtask_tools(
                             error_msg=str(e),
                             state=state,
                         )
-                    return {
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": f"[Subtask {subtask.id.hex[:8]} failed: {e}]",
-                            }
-                        ]
-                    }
+                    return _tool_error(f"[Subtask {subtask.id.hex[:8]} failed: {e}]")
 
             # Legacy inline path — bytewise unchanged from pre-F061.
             system_prefix = build_subtask_prefix(task, frame_type)
@@ -2794,10 +3117,10 @@ def create_subtask_tools(
                 }
 
         except ValueError as e:
-            return {"content": [{"type": "text", "text": f"Cannot spawn subtask: {e}"}]}
+            return _tool_error(f"Cannot spawn subtask: {e}")
         except Exception as e:
             logger.exception("spawn_task tool failed")
-            return {"content": [{"type": "text", "text": f"Error spawning subtask: {e}"}]}
+            return _tool_error(f"Error spawning subtask: {e}")
 
     async def schedule_task(
         task: str,
@@ -2822,14 +3145,9 @@ def create_subtask_tools(
         """
         try:
             if bool(when) == bool(every):
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Exactly one of 'when' or 'every' must be provided.",
-                        }
-                    ]
-                }
+                return _tool_error(
+                    "Exactly one of 'when' or 'every' must be provided."
+                )
 
             from nous.handlers.time_parser import parse_every, parse_when
 
@@ -2874,10 +3192,10 @@ def create_subtask_tools(
                 ]
             }
         except ValueError as e:
-            return {"content": [{"type": "text", "text": f"Schedule error: {e}"}]}
+            return _tool_error(f"Schedule error: {e}")
         except Exception as e:
             logger.exception("schedule_task tool failed")
-            return {"content": [{"type": "text", "text": f"Error scheduling task: {e}"}]}
+            return _tool_error(f"Error scheduling task: {e}")
 
     async def list_tasks(
         status: str | None = None,
@@ -2925,7 +3243,7 @@ def create_subtask_tools(
             return {"content": [{"type": "text", "text": "\n".join(lines)}]}
         except Exception as e:
             logger.exception("list_tasks tool failed")
-            return {"content": [{"type": "text", "text": f"Error listing tasks: {e}"}]}
+            return _tool_error(f"Error listing tasks: {e}")
 
     async def cancel_task(
         task_id: str,
@@ -2968,10 +3286,10 @@ def create_subtask_tools(
                 ]
             }
         except ValueError:
-            return {"content": [{"type": "text", "text": f"Invalid task ID: {task_id}"}]}
+            return _tool_error(f"Invalid task ID: {task_id}")
         except Exception as e:
             logger.exception("cancel_task tool failed")
-            return {"content": [{"type": "text", "text": f"Error cancelling task: {e}"}]}
+            return _tool_error(f"Error cancelling task: {e}")
 
     # F062: spawn_sync — typed counterpart to spawn_task(await_result=True).
     # Returns SubtaskResult.to_dict() as a JSON blob in the content. The
@@ -3759,9 +4077,9 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
             )
             return {"content": [{"type": "text", "text": f"Created dynamic check: {json.dumps(result)}"}]}
         except ValueError as e:
-            return {"content": [{"type": "text", "text": f"Error: {e}"}]}
+            return _tool_error(f"Error: {e}")
         except Exception as e:
-            return {"content": [{"type": "text", "text": f"Failed to create check: {e}"}]}
+            return _tool_error(f"Failed to create check: {e}")
 
     async def heartbeat_check_manage(**kwargs) -> dict:
         try:
@@ -3772,9 +4090,9 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
             )
             return {"content": [{"type": "text", "text": json.dumps(result)}]}
         except ValueError as e:
-            return {"content": [{"type": "text", "text": f"Error: {e}"}]}
+            return _tool_error(f"Error: {e}")
         except Exception as e:
-            return {"content": [{"type": "text", "text": f"Failed: {e}"}]}
+            return _tool_error(f"Failed: {e}")
 
     dispatcher.register("heartbeat_check_create", heartbeat_check_create, {
         "type": "object",
@@ -3840,11 +4158,11 @@ def register_dag_tools(
         # heartbeat disabled a created DAG launches wave-0 and then sits
         # forever — previously with no error surfaced anywhere.
         if not getattr(orchestrator, "clock_wired", True):
-            return {"content": [{"type": "text", "text": (
+            return _tool_error(
                 "Error: DAG execution is not wired — no heartbeat runner is "
                 "active, so a created DAG would never advance past its first "
                 "wave. Set NOUS_HEARTBEAT_ENABLED=true and restart."
-            )}]}
+            )
         try:
             # Parse nodes
             node_specs: list[DAGNodeSpec] = []
@@ -3928,7 +4246,7 @@ def register_dag_tools(
             return {"content": [{"type": "text", "text": "\n".join(lines)}]}
         except Exception as e:
             logger.exception("dag_create failed")
-            return {"content": [{"type": "text", "text": f"Error creating DAG: {e}"}]}
+            return _tool_error(f"Error creating DAG: {e}")
 
     async def dag_manage(**kwargs: Any) -> dict:
         """List, inspect, cancel, or retry nodes in DAGs."""
@@ -3995,12 +4313,12 @@ def register_dag_tools(
                 return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
             if not dag_id_str:
-                return {"content": [{"type": "text", "text": "Error: dag_id required for this action"}]}
+                return _tool_error("Error: dag_id required for this action")
 
             # Support 8-char prefix lookup
             dag = await _resolve_dag(store, dag_id_str)
             if dag is None:
-                return {"content": [{"type": "text", "text": f"Error: DAG '{dag_id_str}' not found"}]}
+                return _tool_error(f"Error: DAG '{dag_id_str}' not found")
 
             if action == "status":
                 status_icons = {
@@ -4054,7 +4372,7 @@ def register_dag_tools(
             elif action == "retry_node":
                 node_name = kwargs.get("node_name")
                 if not node_name:
-                    return {"content": [{"type": "text", "text": "Error: node_name required for retry_node"}]}
+                    return _tool_error("Error: node_name required for retry_node")
                 await orchestrator.retry_node(dag.id, node_name)
                 return {"content": [{"type": "text", "text": f"Reset node '{node_name}' to pending for retry"}]}
 
@@ -4066,15 +4384,15 @@ def register_dag_tools(
                 # scoped to exactly the one node asked for.
                 node_name = kwargs.get("node_name")
                 if not node_name:
-                    return {"content": [{"type": "text", "text": "Error: node_name required for node_result"}]}
+                    return _tool_error("Error: node_name required for node_result")
                 node = next((n for n in dag.nodes if n.name == node_name), None)
                 if node is None:
                     available = ", ".join(sorted(n.name for n in dag.nodes)) or "(none)"
-                    return {"content": [{"type": "text", "text": (
+                    return _tool_error(
                         f"Error: node '{node_name}' not found in DAG "
                         f"'{dag.name}' ({str(dag.id)[:8]}). "
                         f"Available nodes: {available}"
-                    )}]}
+                    )
                 if node.result is None:
                     return {"content": [{"type": "text", "text": (
                         f"Node '{node_name}' has no result yet (status: {node.status})"
@@ -4082,11 +4400,11 @@ def register_dag_tools(
                 return {"content": [{"type": "text", "text": node.result}]}
 
             else:
-                return {"content": [{"type": "text", "text": f"Error: unknown action '{action}'"}]}
+                return _tool_error(f"Error: unknown action '{action}'")
 
         except Exception as e:
             logger.exception("dag_manage failed")
-            return {"content": [{"type": "text", "text": f"Error: {e}"}]}
+            return _tool_error(f"Error: {e}")
 
     dispatcher.register("dag_create", dag_create, {
         "type": "object",
@@ -4173,7 +4491,13 @@ def register_dag_tools(
             "source": {"type": "string"},
             "token_budget": {"type": "integer"},
         },
-        "required": ["name", "nodes", "edges"],
+        # `edges` is NOT required: the handler reads kwargs.get("edges", []) and
+        # DAGCreateRequest.edges is default_factory=list, so a single-node DAG
+        # legitimately omits it. Listing it here told the model a lie, and once
+        # required-arg validation began trusting the schema for variadic
+        # handlers that lie became a rejection. `nodes` stays required — its
+        # .get default hits DAGCreateRequest's min_length=1 and fails anyway.
+        "required": ["name", "nodes"],
     })
 
     dispatcher.register("dag_manage", dag_manage, {

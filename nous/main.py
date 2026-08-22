@@ -480,6 +480,7 @@ async def create_components(settings: Settings) -> dict:
     dispatcher = ToolDispatcher(
         tool_schema_cache_enabled=settings.tool_schema_cache_enabled,
         stable_tool_set_enabled=settings.stable_tool_set_enabled,
+        arg_salvage_enabled=settings.tool_arg_salvage_enabled,
     )
     register_nous_tools(dispatcher, brain, heart, settings=settings)
     register_builtin_tools(dispatcher, settings)
