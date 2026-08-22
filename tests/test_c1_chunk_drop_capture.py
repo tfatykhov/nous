@@ -402,22 +402,6 @@ class TestStageMapCompleteness:
         assert _CHUNK_DROP_DISPOSITIONS["keyword_filter"] == FILTER_DROPPED
 
 
-class TestLegCountIsExactAndUnsampled:
-    def test_n_dropped_recorded_even_when_candidates_are_not(self):
-        """The split is the whole point: `n_dropped` answers "how many" on
-        every row, while the candidate array answers "which ones" on a sample.
-        If `n_dropped` were gated on capture too, the count would vanish on
-        ~90% of retrievals and an empty array would be indistinguishable from
-        a leg that dropped nothing."""
-        tr = RetrievalTrace(capture_candidates=False)
-        tr.leg("chunk", attempted=True, n_dropped=150)
-        tr.add(uuid4(), "chunk", "chunk", score=0.5)
-
-        d = tr.to_dict()
-        assert d["candidates"] is None, "unsampled row must not fake an array"
-        assert d["legs"][0]["n_dropped"] == 150, "the count must survive sampling"
-
-
 class TestDrainAtAssembly:
     """The pipeline-level half: WHEN the buffered discard set is registered,
     and what it must refuse to claim."""
@@ -538,12 +522,63 @@ class TestDrainAtAssembly:
         assert c["snippet"] == "the served body", "first-wins ate the snippet"
 
 
-class TestCapturingGate:
-    def test_capturing_mirrors_sampling_and_null_trace_agrees(self):
-        """Producers gate the expensive complement build on `capturing`, not
-        `enabled` — every real trace is enabled, but capture is sampled."""
-        assert RetrievalTrace(capture_candidates=True).capturing is True
-        assert RetrievalTrace(capture_candidates=False).capturing is False
-        assert RetrievalTrace(capture_candidates=False).enabled is True
-        assert NULL_TRACE.capturing is False
+class TestLegCountIsExactAndUnsampled:
+    """`n_dropped` answers "how many" on EVERY row; the candidate array answers
+    "which ones" on a sample. The count is the load-bearing half.
+
+    An earlier revision gated the sink on a `tr.capturing` property, to avoid
+    building tuples the sampled `add` would discard. That left the sink empty
+    on the ~90% of unsampled retrievals, so `n_dropped` read 0 and every one of
+    those rows asserted the chunk leg had dropped NOTHING — the exact failure
+    the count exists to prevent. It survived the first round of tests because
+    the test set the leg count DIRECTLY instead of driving the pipeline: it was
+    testing itself. These go through `run_recall_pipeline`.
+    """
+
+    @pytest.mark.asyncio
+    async def test_n_dropped_survives_unsampled_retrievals(self, monkeypatch):
+        dropped = [(UUID(int=n), n, None, 0.2, "rrf_merge") for n in range(2, 12)]
+        run, heart, brain, settings, fake = TestDrainAtAssembly._pipeline_bits(
+            [], dropped,
+        )
+        monkeypatch.setattr(
+            "nous.api.retrieval_pipeline._search_episode_chunks", fake,
+        )
+        # capture_candidates=False IS the unsampled 90% case.
+        tr = RetrievalTrace(capture_candidates=False)
+        await run(query="q", heart=heart, brain=brain, settings=settings,
+                  limit=5, memory_types=["all"], trace=tr)
+
+        d = tr.to_dict()
+        assert d["candidates"] is None, "unsampled row must not fake an array"
+        leg = [lg for lg in d["legs"] if lg["name"] == "chunk"][0]
+        assert leg["n_dropped"] == 10, (
+            "n_dropped must be exact on unsampled rows — a mostly-zero "
+            "'always-on' count corrupts every window aggregate built on it"
+        )
+
+    @pytest.mark.asyncio
+    async def test_sampled_and_unsampled_agree_on_the_count(self, monkeypatch):
+        """Same retrieval, both sampling modes: the count must not move."""
+        base = [(UUID(int=n), n, None, 0.2, "rrf_merge") for n in range(2, 9)]
+
+        async def _count(capture: bool) -> int:
+            run, heart, brain, settings, fake = (
+                TestDrainAtAssembly._pipeline_bits([], list(base))
+            )
+            monkeypatch.setattr(
+                "nous.api.retrieval_pipeline._search_episode_chunks", fake,
+            )
+            tr = RetrievalTrace(capture_candidates=capture)
+            await run(query="q", heart=heart, brain=brain, settings=settings,
+                      limit=5, memory_types=["all"], trace=tr)
+            return [lg for lg in tr.to_dict()["legs"]
+                    if lg["name"] == "chunk"][0]["n_dropped"]
+
+        assert await _count(True) == await _count(False) == 7
+
+    def test_telemetry_off_pays_nothing(self):
+        """`tr.enabled` is the gate, so with telemetry off no sink is passed
+        and the complement is never built."""
         assert NULL_TRACE.enabled is False
+        assert RetrievalTrace(capture_candidates=False).enabled is True

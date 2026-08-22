@@ -906,6 +906,11 @@
               <th class="num">Fired</th>
               <th class="num">Returned</th>
               <th class="num">Corroborated</th>
+              <!-- Summed over ALL retrievals in the window, not just sampled
+                   ones: leg counters are recorded unconditionally, so unlike
+                   the disposition funnel above this column has the full
+                   window as its denominator. -->
+              <th class="num">Dropped</th>
               <th class="num">Errors</th>
             </tr>
           </thead>
@@ -923,10 +928,11 @@
                   {/if}
                 </td>
                 <td class="num muted">{agg.deduped ? agg.deduped.toLocaleString() : '—'}</td>
+                <td class="num muted">{agg.dropped ? agg.dropped.toLocaleString() : '—'}</td>
                 <td class="num" class:err={agg.errors > 0}>{agg.errors || '—'}</td>
               </tr>
             {:else}
-              <tr><td colspan="5" class="empty-cell">No legs recorded yet</td></tr>
+              <tr><td colspan="6" class="empty-cell">No legs recorded yet</td></tr>
             {/each}
           </tbody>
         </table>

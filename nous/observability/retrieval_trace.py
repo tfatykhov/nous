@@ -298,23 +298,6 @@ class RetrievalTrace:
         self._excluded_types: list[tuple[str, str]] = []
         self._truncated = False
 
-    @property
-    def capturing(self) -> bool:
-        """Whether per-candidate detail is being captured on THIS retrieval.
-
-        Distinct from ``enabled``, and the distinction is load-bearing:
-        ``enabled`` is True for every real trace, while candidate capture is
-        sampled (``capture_candidates``, 0.1 by default). A producer that
-        assembles an expensive candidate set for the trace — the C1 chunk
-        discard complement, ~180 set operations and up to 150 tuples — must
-        gate on THIS, or it pays that cost on the ~90% of retrievals where
-        ``add`` discards everything it is handed (see ``add``'s early return).
-
-        Leg-level counters deliberately do NOT consult this: they are cheap,
-        exact, and recorded on every retrieval by design.
-        """
-        return self._capture_candidates
-
     # -- legs ---------------------------------------------------------------
 
     def leg(
@@ -658,12 +641,6 @@ class NullTrace:
 
     @property
     def n_rendered(self) -> int: return 0
-
-    # Mirrors RetrievalTrace.capturing for the same reason `enabled` is
-    # mirrored above: a producer guarding an expensive capture on
-    # `tr.capturing` must not AttributeError when telemetry is off.
-    @property
-    def capturing(self) -> bool: return False
 
 
 NULL_TRACE = NullTrace()

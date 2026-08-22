@@ -1291,7 +1291,16 @@ export interface RetrievalData {
   /** Aggregated over SAMPLED rows only — dispositions do not exist otherwise. */
   disposition_totals: Record<string, number>;
   /** Aggregated over ALL rows — legs are captured regardless of sampling. */
-  leg_totals: Record<string, { attempted: number; returned: number; deduped: number; errors: number }>;
+  /**
+   * `dropped` is summed over EVERY retrieval in the window, not just the
+   * sampled ones — leg counters are recorded unconditionally, unlike the
+   * candidate array. So it has a different (larger) denominator than the
+   * disposition totals, and the two must not be combined into one ratio.
+   */
+  leg_totals: Record<
+    string,
+    { attempted: number; returned: number; deduped: number; dropped: number; errors: number }
+  >;
   count: number;
   /** Honest denominator for disposition_totals. */
   sampled_count: number;

@@ -973,12 +973,22 @@ async def _run_stages(
                 # The helper marks "chunk" only where it actually queries —
                 # the vector path returns early with no embedder/vector.
                 attempted=acc.attempted_legs,
-                # C1: gated on `tr.capturing`, NOT `tr.enabled`. Every real
-                # trace is enabled, but candidate capture is sampled — so
-                # gating on `enabled` would build ~180 set entries and up to
-                # 150 tuples on the ~90% of retrievals where `add` throws them
-                # all away. The leg-level count below is separate and exact.
-                dropped_out=acc.chunk_dropped if tr.capturing else None,
+                # C1: gated on `tr.enabled`, NOT on candidate sampling.
+                #
+                # Gating this on `tr.capturing` (as an earlier revision did, to
+                # avoid building tuples the sampled `add` would discard) meant
+                # the sink stayed empty on the ~90% of unsampled retrievals —
+                # so `Leg.n_dropped` read 0 and every one of those rows
+                # asserted the chunk leg dropped NOTHING. That is the precise
+                # failure the count exists to prevent: an always-on exact
+                # number silently becoming a mostly-zero one, corrupting any
+                # window-level aggregate built on it.
+                #
+                # The count is the load-bearing property; the CPU is not. This
+                # is ~180 dict/set operations immediately after two SQL
+                # round-trips. `tr.add` still no-ops on unsampled rows, so only
+                # the tuples are wasted, and only briefly.
+                dropped_out=acc.chunk_dropped if tr.enabled else None,
             )
             if not getattr(settings, "chunk_hybrid_search_enabled", False):
                 # C1: the vector-only branch's cut is pushed into SQL, so it
