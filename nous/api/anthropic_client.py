@@ -630,6 +630,9 @@ class HttpxAnthropicClient:
 
         blocks: dict[int, dict[str, Any]] = {}
         tool_input_fragments: dict[int, list[str]] = {}
+        # tool_use id -> decode failure. Kept out of `blocks` so the content
+        # handed back is byte-identical to today's; see ApiResponse.
+        input_errors: dict[str, str] = {}
         text_parts: dict[int, list[str]] = {}
         thinking_parts: dict[int, list[str]] = {}
         signature_parts: dict[int, list[str]] = {}
@@ -710,6 +713,19 @@ class HttpxAnthropicClient:
                             e.pos,
                         )
                         blocks[event.block_index]["input"] = {}
+                        # Record so _tool_loop refuses to dispatch this call.
+                        # Blanked args cannot succeed: the tool raises a
+                        # TypeError naming whichever parameter happens to come
+                        # first in its signature, which reads as "the model
+                        # forgot an argument" and hides the real failure.
+                        tool_use_id = blocks[event.block_index].get("id")
+                        if tool_use_id:
+                            input_errors[tool_use_id] = (
+                                "Tool input JSON was malformed and could not be "
+                                f"parsed ({len(joined)} bytes, error at offset "
+                                f"{e.pos}). The tool was not executed. Re-emit "
+                                "the call with valid JSON."
+                            )
                 # Finalize text / thinking block content on close
                 block = blocks.get(event.block_index)
                 if block is not None:
@@ -765,6 +781,7 @@ class HttpxAnthropicClient:
             content=ordered_content,
             stop_reason=stop_reason or "end_turn",
             usage=usage or None,
+            input_errors=input_errors or None,
         )
 
 
