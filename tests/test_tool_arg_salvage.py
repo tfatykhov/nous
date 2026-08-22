@@ -16,6 +16,7 @@ Two dispatch-layer defenses under test:
    leaked tail from the host string.
 """
 
+import ast
 import re
 from pathlib import Path
 
@@ -810,23 +811,89 @@ class TestErrorReturnsAreMarked:
     that an empty corpus is a tool failure.
     """
 
-    ERROR_RETURN = re.compile(
-        r'return \{"content": \[\{"type": "text", "text": '
-        r'f?"(Error|Failed|Invalid|Unknown|Cannot|Refus|BLOCKED|\w+ error:)',
+    ERRORISH = re.compile(
+        r"^(Error|Failed|Invalid|Unknown|Cannot|Refus|BLOCKED|\w+ error:)",
         re.IGNORECASE,
     )
 
+    @classmethod
+    def _literal_prefix(cls, node: ast.AST) -> str | None:
+        """Leading literal text of a str / f-string / concatenation."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):
+            for part in node.values:
+                if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                    if part.value.strip():
+                        return part.value
+                else:
+                    return None
+            return None
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return cls._literal_prefix(node.left)
+        return None
+
     def test_no_error_return_omits_the_flag(self):
-        source = Path("nous/api/tools.py").read_text(encoding="utf-8")
-        offenders = [
-            line.strip()
-            for line in source.splitlines()
-            if self.ERROR_RETURN.search(line)
-        ]
+        """Structure-aware on purpose. A line-based regex passes while a
+        multi-line error dict sits right there unflagged -- a guard that
+        reports clean over an open hole is worse than no guard, because it
+        stops anyone looking. Parsing the AST sees both forms identically.
+        """
+        tree = ast.parse(Path("nous/api/tools.py").read_text(encoding="utf-8"))
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Return) or not isinstance(node.value, ast.Dict):
+                continue
+            keys = [
+                k.value for k in node.value.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)
+            ]
+            if "content" not in keys or "is_error" in keys:
+                continue
+            content = next(
+                v for k, v in zip(node.value.keys, node.value.values)
+                if isinstance(k, ast.Constant) and k.value == "content"
+            )
+            if not isinstance(content, ast.List) or not content.elts:
+                continue
+            block = content.elts[0]
+            if not isinstance(block, ast.Dict):
+                continue
+            text = next(
+                (
+                    v for k, v in zip(block.keys, block.values)
+                    if isinstance(k, ast.Constant) and k.value == "text"
+                ),
+                None,
+            )
+            prefix = self._literal_prefix(text) if text is not None else None
+            if prefix and self.ERRORISH.match(prefix.strip()):
+                offenders.append(f"line {node.lineno}: {prefix.strip()[:70]}")
         assert not offenders, (
             "these error returns would be reported to the model as successes; "
-            'add "is_error": True:\n  ' + "\n  ".join(offenders)
+            "return them via _tool_error():\n  " + "\n  ".join(offenders)
         )
+
+    def test_the_guard_sees_multiline_returns(self):
+        """Mutation guard for the guard: the single-line regex this replaced
+        would score the snippet below as clean."""
+        snippet = (
+            "def f():\n"
+            "    return {\n"
+            '        "content": [\n'
+            '            {"type": "text", "text": "Error: nope"}\n'
+            "        ]\n"
+            "    }\n"
+        )
+        tree = ast.parse(snippet)
+        found = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Return) and isinstance(n.value, ast.Dict)
+        ]
+        assert found, "AST must see the multi-line return the regex missed"
+        node = found[0].value
+        keys = [k.value for k in node.keys if isinstance(k, ast.Constant)]
+        assert "is_error" not in keys  # the shape the real test rejects
 
     def test_empty_result_messages_stay_unflagged(self):
         source = Path("nous/api/tools.py").read_text(encoding="utf-8")

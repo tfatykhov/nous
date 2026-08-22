@@ -1159,16 +1159,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             if reasons:
                 for r in reasons:
                     if not isinstance(r, dict) or "type" not in r or "text" not in r:
-                        return {
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": (
-                                        f"Error: Invalid reason format. Expected dict with 'type' and 'text', got: {r}"
-                                    ),
-                                }
-                            ]
-                        }
+                        return _tool_error(
+                            "Error: Invalid reason format. Expected dict with "
+                            f"'type' and 'text', got: {r}"
+                        )
                     reason_inputs.append(ReasonInput(type=r["type"], text=r["text"]))
 
             input_data = RecordInput(
@@ -1638,17 +1632,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         try:
             # F078: validate action vocabulary before constructing the input.
             if action not in ("steer", "refuse", "abort"):
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                f"Invalid action {action!r}; must be one of "
-                                "steer, refuse, abort."
-                            ),
-                        }
-                    ]
-                }
+                return _tool_error(
+                    f"Invalid action {action!r}; must be one of "
+                    "steer, refuse, abort."
+                )
 
             # Parse UUIDs if provided
             decision_uuid = UUID(learned_from_decision) if learned_from_decision else None
@@ -1970,14 +1957,17 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
         if "error" in result:
             code = result.get("code")
+            # Ingestion failed, so this must be FLAGGED, not just worded like
+            # an error -- _block returns an unflagged envelope, which dispatch
+            # would report to the model as a successful ingest of nothing.
             # These messages historically carried an "Error: " prefix; the
             # helper drops it so callers get clean text. Re-add it here.
             if code in ("empty_content", "no_source_ref", "bad_uuid",
                         "no_session", "no_episode", "vector_mismatch"):
-                return _block(f"Error: {result['error']}")
+                return _tool_error(f"Error: {result['error']}")
             # disabled / too_short / embed_failed / exception are emitted
             # verbatim (they never had the prefix).
-            return _block(result["error"])
+            return _tool_error(result["error"])
 
         if result.get("already_ingested"):
             return _block(
@@ -2964,14 +2954,10 @@ def create_subtask_tools(
 
             # 012.2: Synchronous inline execution
             if runner is None:
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Cannot execute inline subtask: runner not available. Use await_result=false.",
-                        }
-                    ]
-                }
+                return _tool_error(
+                    "Cannot execute inline subtask: runner not available. "
+                    "Use await_result=false."
+                )
 
             import asyncio as _asyncio
 
@@ -4183,11 +4169,11 @@ def register_dag_tools(
         # heartbeat disabled a created DAG launches wave-0 and then sits
         # forever — previously with no error surfaced anywhere.
         if not getattr(orchestrator, "clock_wired", True):
-            return {"content": [{"type": "text", "text": (
+            return _tool_error(
                 "Error: DAG execution is not wired — no heartbeat runner is "
                 "active, so a created DAG would never advance past its first "
                 "wave. Set NOUS_HEARTBEAT_ENABLED=true and restart."
-            )}]}
+            )
         try:
             # Parse nodes
             node_specs: list[DAGNodeSpec] = []
@@ -4413,11 +4399,11 @@ def register_dag_tools(
                 node = next((n for n in dag.nodes if n.name == node_name), None)
                 if node is None:
                     available = ", ".join(sorted(n.name for n in dag.nodes)) or "(none)"
-                    return {"content": [{"type": "text", "text": (
+                    return _tool_error(
                         f"Error: node '{node_name}' not found in DAG "
                         f"'{dag.name}' ({str(dag.id)[:8]}). "
                         f"Available nodes: {available}"
-                    )}]}
+                    )
                 if node.result is None:
                     return {"content": [{"type": "text", "text": (
                         f"Node '{node_name}' has no result yet (status: {node.status})"
