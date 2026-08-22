@@ -132,6 +132,66 @@ def _salvage_leaked_args(
     return {**args, **cleaned, **salvaged}, [k for k in missing if k not in salvaged]
 
 
+# Structural type mismatches no downstream coercion layer repairs. Deliberately
+# NOT a full JSON-schema validator: pydantic's lax mode happily turns "0.9" into
+# 0.9 and "true" into True, so rejecting scalar-for-scalar here would fail calls
+# that succeed today. Only container-vs-scalar confusion is flagged, which is
+# the shape that actually reaches the model as an opaque pydantic ValidationError
+# (observed 2026-08-22: record_decision tags='fannie-mae, cpm, condo, ...').
+_CONTAINER_TYPES = {"array": list, "object": dict}
+_SCALAR_TYPES = {"string": str, "number": (int, float), "integer": int, "boolean": bool}
+
+_JSON_TYPE_NAMES: dict[type, str] = {
+    str: "string", bool: "boolean", int: "integer",
+    float: "number", list: "array", dict: "object",
+}
+
+
+def _describe_json_type(value: Any) -> str:
+    """Name a Python value's JSON type for an error message."""
+    return _JSON_TYPE_NAMES.get(type(value), type(value).__name__)
+
+
+def _schema_type_errors(args: dict[str, Any], schema: dict[str, Any]) -> list[str]:
+    """Describe args whose JSON type cannot be what the schema declares.
+
+    Fail-open by construction: anything ambiguous (union types, absent type,
+    null values, unknown keys) is skipped. An over-eager check here would
+    reject tool calls that work today, which is strictly worse than the
+    opaque error it replaces.
+    """
+    properties = schema.get("properties") or {}
+    errors: list[str] = []
+    for key, value in args.items():
+        if key.startswith("_") or value is None:
+            continue
+        declared = (properties.get(key) or {}).get("type")
+        if not isinstance(declared, str):
+            continue  # union / unspecified -- not our business
+        expected_container = _CONTAINER_TYPES.get(declared)
+        if expected_container is not None:
+            if not isinstance(value, expected_container):
+                hint = ""
+                if declared == "array" and isinstance(value, str):
+                    items = (properties[key].get("items") or {}).get("type", "string")
+                    hint = (
+                        f' Send a JSON array of {items}s -- ["a", "b"] -- '
+                        f"not one delimited string."
+                    )
+                errors.append(
+                    f"{key} must be {declared}, got {_describe_json_type(value)}.{hint}"
+                )
+            continue
+        expected_scalar = _SCALAR_TYPES.get(declared)
+        # Only the reverse structural error: a container where a scalar belongs.
+        # Scalar-for-scalar is left to the handler, which coerces it.
+        if expected_scalar is not None and isinstance(value, list | dict):
+            errors.append(
+                f"{key} must be {declared}, got {_describe_json_type(value)}."
+            )
+    return errors
+
+
 def _required_handler_params(handler: Callable[..., Any]) -> set[str]:
     """Parameter names the handler cannot be invoked without."""
     try:
@@ -206,8 +266,11 @@ class ToolDispatcher:
             # keys with handler defaults keep today's lenient behavior.
             schema = self._schemas.get(name) or {}
             missing = [k for k in schema.get("required") or [] if k not in args]
+            salvaged_keys: list[str] = []
             if missing and self._arg_salvage_enabled:
+                before = set(missing)
                 args, missing = _salvage_leaked_args(name, args, missing, schema)
+                salvaged_keys = sorted(before - set(missing))
             if missing:
                 hard_missing = [
                     k for k in missing if k in _required_handler_params(handler)
@@ -223,6 +286,23 @@ class ToolDispatcher:
                         "another field's text.",
                         True,
                     )
+
+            # Structural type mismatches: say what is wrong and how to fix it,
+            # rather than letting the handler surface a pydantic ValidationError
+            # (or worse, coercing silently -- the model never learns it emitted
+            # the wrong shape and repeats it next turn).
+            type_errors = _schema_type_errors(args, schema)
+            if type_errors:
+                logger.warning(
+                    "Tool arg type mismatch for %s: %s", name, "; ".join(type_errors)
+                )
+                return (
+                    f"Tool error: {name} received argument(s) of the wrong type. "
+                    + " ".join(type_errors)
+                    + " Re-emit the call with corrected types.",
+                    True,
+                )
+
             if name in ("resolve_decision", "resolve_decisions"):
                 args = {**args, "_is_background": is_background}
             if session_id is not None and name == "spawn_task":
@@ -264,7 +344,18 @@ class ToolDispatcher:
             # P1-1: Extract text from MCP-format response. is_error honors
             # the MCP field when a handler sets it (#179: run_python error
             # returns) — absent means success, as before.
-            return result["content"][0]["text"], bool(result.get("is_error"))
+            result_text = result["content"][0]["text"]
+            is_error = bool(result.get("is_error"))
+            if salvaged_keys and not is_error:
+                # Salvage recovered the call, but a silent success teaches the
+                # model nothing -- it emitted XML inside a JSON string and got
+                # a clean result, so it will do it again. Say so in the result.
+                result_text = (
+                    f"[input repaired] {', '.join(salvaged_keys)} had to be recovered "
+                    "from XML <parameter> syntax leaked inside another field's text. "
+                    "Emit every argument as a top-level JSON key.\n\n" + result_text
+                )
+            return result_text, is_error
         except Exception as e:
             logger.exception("Tool dispatch error for %s", name)
             return f"Tool error: {e}", True

@@ -245,6 +245,180 @@ class TestXmlParamLeakSalvage:
         assert not received
 
 
+class TestSalvageIsReportedToTheModel:
+    @pytest.mark.asyncio
+    async def test_repaired_call_tells_the_model_it_was_repaired(self):
+        """A salvaged call succeeds -- but a silent success teaches the model
+        nothing, so it emits the same broken shape next turn. The result must
+        say which key was recovered and what the correct form is."""
+        dispatcher, received = _make_decision_dispatcher()
+        result_text, is_error = await dispatcher.dispatch(
+            "record_decision",
+            {
+                "description": _OBSERVED_DESCRIPTION + _OBSERVED_TAIL,
+                "category": "architecture",
+                "stakes": "high",
+            },
+        )
+        assert is_error is False
+        assert received["confidence"] == 0.55  # still repaired
+        assert "[input repaired]" in result_text
+        assert "confidence" in result_text
+        assert "top-level JSON key" in result_text
+        assert result_text.endswith("ok")  # handler's own output preserved
+
+    @pytest.mark.asyncio
+    async def test_clean_call_gets_no_notice(self):
+        dispatcher, _ = _make_decision_dispatcher()
+        result_text, is_error = await dispatcher.dispatch(
+            "record_decision",
+            {
+                "description": "d",
+                "confidence": 0.8,
+                "category": "process",
+                "stakes": "low",
+            },
+        )
+        assert is_error is False
+        assert result_text == "ok"
+
+
+_TAGGED_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "description": {"type": "string"},
+        "confidence": {"type": "number"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "reasons": {"type": "array", "items": {"type": "object"}},
+        "meta": {"type": "object"},
+        "anything": {},
+    },
+    "required": ["description"],
+}
+
+
+def _make_tagged_dispatcher() -> tuple[ToolDispatcher, dict]:
+    dispatcher = ToolDispatcher()
+    received: dict = {}
+
+    async def record_decision(
+        description: str,
+        confidence: float = 0.5,
+        tags: list | None = None,
+        reasons: list | None = None,
+        meta: dict | None = None,
+        anything=None,
+    ) -> dict:
+        received.update(
+            description=description, confidence=confidence, tags=tags,
+            reasons=reasons, meta=meta, anything=anything,
+        )
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    dispatcher.register("record_decision", record_decision, _TAGGED_SCHEMA)
+    return dispatcher, received
+
+
+class TestSchemaTypeValidation:
+    """Observed 2026-08-22: the model sent tags as one comma-joined string,
+    which reached the model back as a raw pydantic ValidationError with a
+    docs URL. A wrong-shaped argument should be named, explained, and the
+    correct form shown -- not coerced behind the model's back."""
+
+    @pytest.mark.asyncio
+    async def test_delimited_string_for_array_is_rejected_with_a_usable_message(self):
+        dispatcher, received = _make_tagged_dispatcher()
+        result_text, is_error = await dispatcher.dispatch(
+            "record_decision",
+            {
+                "description": "d",
+                "tags": "fannie-mae, cpm, condo, selling-guide",
+            },
+        )
+        assert is_error is True
+        assert "tags" in result_text
+        assert "must be array" in result_text
+        assert "got string" in result_text
+        assert '["a", "b"]' in result_text  # shows the correct shape
+        assert not received  # handler never ran
+
+    @pytest.mark.asyncio
+    async def test_scalar_for_scalar_is_left_alone(self):
+        """pydantic's lax mode turns "0.9" into 0.9. Rejecting it here would
+        fail calls that succeed today -- the check must stay fail-open."""
+        dispatcher, received = _make_tagged_dispatcher()
+        _, is_error = await dispatcher.dispatch(
+            "record_decision", {"description": "d", "confidence": "0.9"},
+        )
+        assert is_error is False
+        assert received["confidence"] == "0.9"  # passed through untouched
+
+    @pytest.mark.asyncio
+    async def test_container_where_scalar_belongs_is_rejected(self):
+        dispatcher, received = _make_tagged_dispatcher()
+        result_text, is_error = await dispatcher.dispatch(
+            "record_decision", {"description": ["a", "b"]},
+        )
+        assert is_error is True
+        assert "description must be string, got array" in result_text
+        assert not received
+
+    @pytest.mark.asyncio
+    async def test_string_for_object_is_rejected_without_the_array_hint(self):
+        dispatcher, _ = _make_tagged_dispatcher()
+        result_text, is_error = await dispatcher.dispatch(
+            "record_decision", {"description": "d", "meta": "a=1"},
+        )
+        assert is_error is True
+        assert "meta must be object, got string" in result_text
+        assert "JSON array" not in result_text
+
+    @pytest.mark.asyncio
+    async def test_untyped_property_is_never_rejected(self):
+        """No declared type means no opinion -- fail open."""
+        dispatcher, received = _make_tagged_dispatcher()
+        _, is_error = await dispatcher.dispatch(
+            "record_decision", {"description": "d", "anything": "whatever"},
+        )
+        assert is_error is False
+        assert received["anything"] == "whatever"
+
+    @pytest.mark.asyncio
+    async def test_null_and_unknown_keys_are_skipped(self):
+        dispatcher, received = _make_tagged_dispatcher()
+        _, is_error = await dispatcher.dispatch(
+            "record_decision", {"description": "d", "tags": None},
+        )
+        assert is_error is False
+        assert received["tags"] is None
+
+    @pytest.mark.asyncio
+    async def test_well_formed_containers_pass(self):
+        dispatcher, received = _make_tagged_dispatcher()
+        _, is_error = await dispatcher.dispatch(
+            "record_decision",
+            {
+                "description": "d",
+                "tags": ["a", "b"],
+                "reasons": [{"type": "analysis", "text": "t"}],
+                "meta": {"k": "v"},
+            },
+        )
+        assert is_error is False
+        assert received["tags"] == ["a", "b"]
+
+    @pytest.mark.asyncio
+    async def test_missing_required_is_reported_before_type_errors(self):
+        """A call that is both incomplete and mis-typed should surface the
+        missing key first -- that is the one blocking dispatch outright."""
+        dispatcher, _ = _make_tagged_dispatcher()
+        result_text, is_error = await dispatcher.dispatch(
+            "record_decision", {"tags": "a, b"},
+        )
+        assert is_error is True
+        assert "missing required argument" in result_text
+
+
 class TestSettingsFlag:
     def test_salvage_flag_default_on(self):
         from nous.config import Settings
