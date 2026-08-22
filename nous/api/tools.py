@@ -63,6 +63,28 @@ _XML_PARAM_LEAK_TAIL = re.compile(
 _XML_PARAM_LEAK_PAIR = re.compile(r'<parameter\s+name="([^"]+)">\s*([^<]*)')
 
 
+def _satisfies_schema_constraints(value: Any, prop_schema: dict[str, Any]) -> bool:
+    """Check a salvaged value against enum / minimum / maximum.
+
+    Primitive-type coercion alone is not enough to call a key recovered: a
+    leaked ``confidence=2.0`` parses as a float and passes the type gate, then
+    fails RecordInput's ``le=1.0`` deep inside the handler. Nothing is stored,
+    yet the call is reported as a repaired success. A value that cannot satisfy
+    its declared constraints is not salvage — it stays missing so the model is
+    told to re-emit it.
+    """
+    enum = prop_schema.get("enum")
+    if isinstance(enum, list) and value not in enum:
+        return False
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        minimum, maximum = prop_schema.get("minimum"), prop_schema.get("maximum")
+        if isinstance(minimum, int | float) and value < minimum:
+            return False
+        if isinstance(maximum, int | float) and value > maximum:
+            return False
+    return True
+
+
 def _coerce_to_schema_type(raw: str, prop_schema: dict[str, Any]) -> Any:
     """Coerce a leaked string value to its schema-declared type.
 
@@ -73,15 +95,19 @@ def _coerce_to_schema_type(raw: str, prop_schema: dict[str, Any]) -> Any:
     prop_type = prop_schema.get("type")
     try:
         if prop_type == "number":
-            return float(raw)
-        if prop_type == "integer":
-            return int(raw)
-        if prop_type == "boolean":
-            return {"true": True, "false": False}.get(raw.lower())
-        if prop_type in ("array", "object"):
-            value = json.loads(raw)
-            return value if isinstance(value, list | dict) else None
-        return raw  # string / untyped
+            value: Any = float(raw)
+        elif prop_type == "integer":
+            value = int(raw)
+        elif prop_type == "boolean":
+            value = {"true": True, "false": False}.get(raw.lower())
+        elif prop_type in ("array", "object"):
+            parsed = json.loads(raw)
+            value = parsed if isinstance(parsed, list | dict) else None
+        else:
+            value = raw  # string / untyped
+        if value is None:
+            return None
+        return value if _satisfies_schema_constraints(value, prop_schema) else None
     except (ValueError, json.JSONDecodeError):
         return None
 
@@ -192,19 +218,35 @@ def _schema_type_errors(args: dict[str, Any], schema: dict[str, Any]) -> list[st
     return errors
 
 
-def _required_handler_params(handler: Callable[..., Any]) -> set[str]:
-    """Parameter names the handler cannot be invoked without."""
+def _required_handler_params(handler: Callable[..., Any]) -> set[str] | None:
+    """Parameter names the handler cannot be invoked without.
+
+    Returns ``None`` for a ``**kwargs``-only handler, meaning "the signature
+    cannot tell us" — the caller must then trust the schema's own ``required``
+    list. Without this distinction a variadic handler reports zero required
+    params, every schema-required key is treated as optional, and validation
+    silently no-ops. That is not hypothetical: ``heartbeat_check_create`` and
+    ``heartbeat_check_manage`` are ``(**kwargs)`` and index ``kwargs["name"]``
+    / ``kwargs["action"]`` directly, so a missing key raises KeyError inside
+    the handler and comes back as prose the dispatcher reports as success.
+    """
     try:
         sig = inspect.signature(handler)
     except (TypeError, ValueError):
-        return set()
-    return {
+        return None
+    named = {
         p.name
         for p in sig.parameters.values()
         if p.default is inspect.Parameter.empty
         and p.kind
         in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
     }
+    accepts_var_kw = any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+    # A handler with BOTH named required params and **kwargs still can't be
+    # trusted to have defaults for the schema-required keys it swallows.
+    return None if accepts_var_kw else named
 
 
 class ToolDispatcher:
@@ -272,9 +314,15 @@ class ToolDispatcher:
                 args, missing = _salvage_leaked_args(name, args, missing, schema)
                 salvaged_keys = sorted(before - set(missing))
             if missing:
-                hard_missing = [
-                    k for k in missing if k in _required_handler_params(handler)
-                ]
+                handler_required = _required_handler_params(handler)
+                # None == variadic handler, signature tells us nothing; fall
+                # back to the schema's own required list rather than skipping
+                # validation entirely (which is what zero named params meant).
+                hard_missing = (
+                    list(missing)
+                    if handler_required is None
+                    else [k for k in missing if k in handler_required]
+                )
                 if hard_missing:
                     provided = sorted(k for k in args if not k.startswith("_"))
                     return (

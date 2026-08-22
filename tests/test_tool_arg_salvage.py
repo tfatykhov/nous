@@ -419,6 +419,122 @@ class TestSchemaTypeValidation:
         assert "missing required argument" in result_text
 
 
+class TestVariadicHandlerValidation:
+    """codex P2: a (**kwargs) handler reports zero named required params, so
+    every schema-required key was excluded from hard_missing and validation
+    silently no-opped. heartbeat_check_create / heartbeat_check_manage have
+    exactly this shape and index kwargs["name"] / kwargs["action"] directly."""
+
+    @staticmethod
+    def _variadic_dispatcher() -> tuple[ToolDispatcher, dict]:
+        dispatcher = ToolDispatcher()
+        received: dict = {}
+
+        async def heartbeat_check_create(**kwargs) -> dict:
+            # Mirrors the real handler: direct indexing, KeyError if absent.
+            received.update(name=kwargs["name"], prompt=kwargs["prompt"])
+            return {"content": [{"type": "text", "text": "created"}]}
+
+        dispatcher.register(
+            "heartbeat_check_create",
+            heartbeat_check_create,
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "prompt": {"type": "string"},
+                },
+                "required": ["name", "prompt"],
+            },
+        )
+        return dispatcher, received
+
+    @pytest.mark.asyncio
+    async def test_missing_key_on_variadic_handler_is_caught(self):
+        dispatcher, received = self._variadic_dispatcher()
+        result_text, is_error = await dispatcher.dispatch(
+            "heartbeat_check_create", {"name": "watch-ci"},
+        )
+        assert is_error is True
+        assert "missing required argument" in result_text
+        assert "prompt" in result_text
+        assert not received  # KeyError never reached the handler
+
+    @pytest.mark.asyncio
+    async def test_complete_call_on_variadic_handler_still_works(self):
+        dispatcher, received = self._variadic_dispatcher()
+        result_text, is_error = await dispatcher.dispatch(
+            "heartbeat_check_create", {"name": "watch-ci", "prompt": "p"},
+        )
+        assert is_error is False
+        assert result_text == "created"
+        assert received["name"] == "watch-ci"
+
+
+class TestSalvageRespectsSchemaConstraints:
+    """codex P2: a leaked confidence=2.0 coerces to a float and passes the type
+    gate, then fails RecordInput's le=1.0 inside the handler -- nothing stored,
+    but the call reported success and got an [input repaired] prefix."""
+
+    @pytest.mark.asyncio
+    async def test_out_of_range_number_is_not_treated_as_salvaged(self):
+        dispatcher, received = _make_decision_dispatcher()
+        result_text, is_error = await dispatcher.dispatch(
+            "record_decision",
+            {
+                "description": (
+                    _OBSERVED_DESCRIPTION
+                    + '</description>\n<parameter name="confidence">2.0'
+                ),
+                "category": "architecture",
+                "stakes": "high",
+            },
+        )
+        assert is_error is True
+        assert "missing required argument" in result_text
+        assert "confidence" in result_text
+        assert "[input repaired]" not in result_text
+        assert not received
+
+    @pytest.mark.asyncio
+    async def test_in_range_number_still_salvages(self):
+        dispatcher, received = _make_decision_dispatcher()
+        _, is_error = await dispatcher.dispatch(
+            "record_decision",
+            {
+                "description": _OBSERVED_DESCRIPTION + _OBSERVED_TAIL,
+                "category": "architecture",
+                "stakes": "high",
+            },
+        )
+        assert is_error is False
+        assert received["confidence"] == 0.55
+
+    @pytest.mark.asyncio
+    async def test_value_outside_enum_is_not_salvaged(self):
+        dispatcher = ToolDispatcher()
+        received: dict = {}
+
+        async def tool(description: str, stakes: str) -> dict:
+            received.update(description=description, stakes=stakes)
+            return {"content": [{"type": "text", "text": "ok"}]}
+
+        dispatcher.register("tool", tool, {
+            "type": "object",
+            "properties": {
+                "description": {"type": "string"},
+                "stakes": {"type": "string", "enum": ["low", "medium", "high"]},
+            },
+            "required": ["description", "stakes"],
+        })
+        result_text, is_error = await dispatcher.dispatch(
+            "tool", {"description": 'd<parameter name="stakes">catastrophic'},
+        )
+        assert is_error is True
+        assert "stakes" in result_text
+        assert not received
+
+
 class TestSettingsFlag:
     def test_salvage_flag_default_on(self):
         from nous.config import Settings
