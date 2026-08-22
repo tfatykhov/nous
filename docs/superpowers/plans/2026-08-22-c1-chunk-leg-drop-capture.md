@@ -586,16 +586,45 @@ return fresh lists and the capture only reads (Q6 ✅). The conservation law
 Nothing divides by `n_candidates`. Empty snippets store as `""`; ~300 raw bytes per discard
 dict, TOAST-compresses well; the time-based retention sweep needs no resizing.
 
-### C5 — accepted as caveats, not code
+### C5 — rollup contamination: TWO of the three sources are permanent
 
-- **Deploy-boundary contamination.** For 14 days the window rollup mixes pre-C1 rows (no chunk
-  discards) with post-C1 rows (~150 each), so the rendered *share* drops sharply for
-  instrumentation reasons. Compounded by the default empty path filter mixing in `context`
-  rows, which have no chunk leg. Goes in the PR body — a real fix needs a version marker,
-  which a no-migration change cannot carry.
-- **Detail view density.** `sliced_off` sorts first and renders expanded, so a sampled row now
-  opens on a ~200-line table. Worth a follow-up (per-stage counts in the `<summary>`, collapse
-  above a threshold); not taken here to keep the change telemetry-only.
+The window rollup derives every percentage from `totals.sum` over
+`disposition_totals`. Three things now mix populations in that denominator, and only one of
+them washes out:
+
+- **(a) permanent, and the sharpest.** Stage 1.5 is gated on
+  `search_all or "fact" in search_types` (`retrieval_pipeline.py:881-883`), so a
+  `memory_types=["decision"]` or `["episode"]` recall never runs the chunk leg and contributes
+  **zero** discards — sitting in the same rollup as full-scope rows carrying +150 each. This
+  is structural; it does not decay.
+- **(b) permanent.** The default empty path filter (`Retrieval.svelte:17`) mixes `context`-path
+  rows, which have no chunk leg at all, into the same denominator.
+- **(c) transitional, 14 days.** Retention straddles the deploy, so the window briefly holds
+  pre-C1 and post-C1 rows together.
+
+Concrete failure: an operator opens `/dashboard/retrieval` the morning after deploy, sees the
+rendered share fall from ~10% to ~4%, and reads an instrumentation artifact as a retrieval
+regression — then keeps reading a distorted number **indefinitely** under (a)/(b).
+
+An earlier draft of this section listed only (c) and called the whole thing transitional. That
+was wrong in the way that matters: a caveat that says "this clears up in two weeks" when it
+does not is worse than no caveat. Stated in the PR body and the release note; a real fix needs
+a per-row "chunk capture present" marker, which a no-migration change cannot carry.
+
+### C5b — detail view density (deferred, with reasoning)
+
+`sliced_off` carries `order: 1` and renders `open` by default, so a sampled row now opens on a
+~180-row table of empty-content chunk rows, pushing `below_floor`, `filter_dropped`,
+`deduped`, `f071_excluded` and — worst — the `unaccounted` drift alarm (`order: 10`) several
+screens down. Second-order: the within-group sort mixes RRF-normalized heart scores with
+`best_leg_score`, which this plan itself declares non-comparable, so ordering inside the group
+that matters becomes meaningless.
+
+This is a regression **caused by this change**, so it is owed a fix: per-`disposition_stage`
+counts in the `<summary>` (so "182 — 150 chunk_rrf_merge, 32 heart_recall_limit" is readable
+without expanding) plus a row-count collapse threshold. Deferred to a follow-up rather than
+bundled, because it is a dashboard-behaviour change and this PR's contract is telemetry-only —
+but it is tracked, not dropped.
 
 ### C6 — capture gated on `capturing`, not `enabled`
 
