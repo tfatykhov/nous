@@ -535,6 +535,83 @@ class TestSalvageRespectsSchemaConstraints:
         assert not received
 
 
+class TestSalvageRequiresEvidenceOfASyntaxTransition:
+    """codex P2: a trailing XML *example* is not a leak. A description that
+    legitimately ends by quoting the format -- e.g. a decision written ABOUT
+    this bug -- would otherwise be truncated and have a value invented from
+    the quotation. Ambiguous evidence must fall through to the error."""
+
+    @pytest.mark.asyncio
+    async def test_well_formed_trailing_example_is_not_salvaged(self):
+        dispatcher, received = _make_decision_dispatcher()
+        description = (
+            "The model leaked tool syntax into the JSON string, like "
+            '<parameter name="confidence">0.9</parameter>'
+        )
+        result_text, is_error = await dispatcher.dispatch(
+            "record_decision",
+            {"description": description, "category": "process", "stakes": "low"},
+        )
+        assert is_error is True
+        assert "missing required argument" in result_text
+        assert not received  # nothing invented, nothing truncated
+
+    @pytest.mark.asyncio
+    async def test_unterminated_trailing_tag_is_still_salvaged(self):
+        """The real prod shape: the model stopped mid-emission, so the final
+        tag is never closed. That is the transition evidence."""
+        dispatcher, received = _make_decision_dispatcher()
+        _, is_error = await dispatcher.dispatch(
+            "record_decision",
+            {
+                "description": _OBSERVED_DESCRIPTION + _OBSERVED_TAIL,
+                "category": "architecture",
+                "stakes": "high",
+            },
+        )
+        assert is_error is False
+        assert received["confidence"] == 0.55
+        assert received["description"] == _OBSERVED_DESCRIPTION
+
+    @pytest.mark.asyncio
+    async def test_nan_is_not_accepted_as_a_salvaged_number(self):
+        """Every comparison against NaN is False, so a bare min/max check
+        would wave it through as in-range."""
+        dispatcher, received = _make_decision_dispatcher()
+        result_text, is_error = await dispatcher.dispatch(
+            "record_decision",
+            {
+                "description": (
+                    _OBSERVED_DESCRIPTION
+                    + '</description>\n<parameter name="confidence">NaN'
+                ),
+                "category": "architecture",
+                "stakes": "high",
+            },
+        )
+        assert is_error is True
+        assert "confidence" in result_text
+        assert "[input repaired]" not in result_text
+        assert not received
+
+    @pytest.mark.asyncio
+    async def test_infinity_is_not_accepted_either(self):
+        dispatcher, received = _make_decision_dispatcher()
+        _, is_error = await dispatcher.dispatch(
+            "record_decision",
+            {
+                "description": (
+                    _OBSERVED_DESCRIPTION
+                    + '</description>\n<parameter name="confidence">Infinity'
+                ),
+                "category": "architecture",
+                "stakes": "high",
+            },
+        )
+        assert is_error is True
+        assert not received
+
+
 class TestSettingsFlag:
     def test_salvage_flag_default_on(self):
         from nous.config import Settings

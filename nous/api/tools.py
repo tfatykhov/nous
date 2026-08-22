@@ -17,6 +17,7 @@ import copy
 import inspect
 import json
 import logging
+import math
 import re
 import sys
 import threading
@@ -57,8 +58,19 @@ _INITIATION_ONLY_TOOLS: frozenset[str] = frozenset(
 # string ended with '</description>\n<parameter name="confidence">0.55', so
 # the parsed input had no top-level confidence key). Anchored to end-of-string
 # so legitimate XML/HTML quoted mid-string is never touched.
+#
+# The run must END in an UNTERMINATED <parameter> tag. That is the actual
+# evidence of a syntax transition: the model stopped emitting JSON and never
+# closed what it started. A well-formed '<parameter name="x">v</parameter>' at
+# the end of a string is far more likely to be prose QUOTING the format --
+# a decision describing this very bug would otherwise have its text truncated
+# and a value invented from the example. When the evidence is ambiguous we do
+# not guess: salvage declines, and the missing-arg error tells the model to
+# re-emit. Being told beats being silently repaired from a quotation.
 _XML_PARAM_LEAK_TAIL = re.compile(
-    r'\s*(?:</\w+>\s*)?(?:<parameter\s+name="[^"]+">[^<]*(?:</parameter>)?\s*)+$'
+    r'\s*(?:</\w+>\s*)?'
+    r'(?:<parameter\s+name="[^"]+">[^<]*</parameter>\s*)*'
+    r'<parameter\s+name="[^"]+">[^<]*$'
 )
 _XML_PARAM_LEAK_PAIR = re.compile(r'<parameter\s+name="([^"]+)">\s*([^<]*)')
 
@@ -77,6 +89,11 @@ def _satisfies_schema_constraints(value: Any, prop_schema: dict[str, Any]) -> bo
     if isinstance(enum, list) and value not in enum:
         return False
     if isinstance(value, int | float) and not isinstance(value, bool):
+        # NaN/inf first: every comparison against NaN is False, so a bare
+        # range check would wave it through as "within bounds" and the
+        # handler's own validator would then reject it downstream.
+        if not math.isfinite(value):
+            return False
         minimum, maximum = prop_schema.get("minimum"), prop_schema.get("maximum")
         if isinstance(minimum, int | float) and value < minimum:
             return False
