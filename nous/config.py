@@ -1483,7 +1483,22 @@ class Settings(BaseSettings):
     # unauthenticated endpoint — a new CLASS of content for these tables
     # (context_log stores counts and ids, never message text).
     retrieval_telemetry_query_chars: int = 500
-    retrieval_telemetry_max_candidates: int = 300
+    # Raised 300 -> 600 by C1. The chunk leg's discard set is now registered,
+    # and it is the largest population on the path: the live config
+    # (NOUS_EPISODE_CHUNK_RECALL_LIMIT=30 with no NOUS_CHUNK_RRF_PENALTY_LIMIT)
+    # gives limit_expanded = 90 per leg, so up to 2*90 - 30 = 150 discards on
+    # top of the ~110-150 already registered. At 300 the cap would move from
+    # anomaly signal to steady state: `truncated` set on every sampled row, the
+    # dashboard's cap banner permanently lit, and — worst — a gold chunk cut at
+    # the merge but past the cap recorded nowhere, so it still reads
+    # `never_retrieved`, which is the exact miscount C1 exists to fix.
+    #
+    # This IS a config change, not a free one. It is stated rather than
+    # smuggled: raising it grows the sampled JSONB row (empty-snippet discard
+    # dicts are ~300 raw bytes each, TOAST-compressed well below that).
+    # `Leg.n_dropped` is exact regardless of this value, so truncation costs
+    # identity, never the count.
+    retrieval_telemetry_max_candidates: int = 600
     # Live-read fallback only; both dashboard endpoints read Postgres, so this
     # ring has no consumer today. Kept small deliberately — at sample_rate 1.0
     # a 100-deep ring pins 60-100 MB RSS holding candidate arrays nobody reads.

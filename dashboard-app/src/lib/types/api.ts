@@ -1230,6 +1230,13 @@ export interface RetrievalLeg {
   attempted: boolean;
   n_returned: number;
   n_deduped: number;
+  /**
+   * Rows this leg fetched then discarded internally before returning.
+   * EXACT and present on every retrieval — unlike `candidates`, which is
+   * sampled and capped. So an item missing from `candidates` may be a
+   * sampling artifact, but this count never overstates what survived.
+   */
+  n_dropped: number;
   score_min: number | null;
   score_max: number | null;
   error: string | null;

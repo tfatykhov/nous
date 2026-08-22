@@ -134,6 +134,18 @@ def _resolve_keyword_enabled() -> bool:
     return bool(getattr(settings, "hybrid_search_keyword_enabled", True))
 
 
+# C1: every stage name `hybrid_search` can write into a `dropped_out` sink.
+# Exported so a consumer's stage->disposition map can be asserted complete by
+# test — a stage added here without a mapping there must fail the build, not
+# silently degrade to an unattributed drop at runtime.
+HYBRID_DROP_STAGES = frozenset({
+    "rrf_merge",
+    "keyword_only_limit",
+    "keyword_filter",
+    "keyword_filter_limit",
+})
+
+
 def _rrf_merge(
     vector_ranked: list[tuple[UUID, float]],
     keyword_ranked: list[tuple[UUID, float]],
@@ -215,6 +227,7 @@ async def hybrid_search(
     active_filter: bool = True,
     penalty_limit: int | None = None,
     require_keyword_hit: bool = False,
+    dropped_out: list | None = None,
 ) -> list[tuple[UUID, float]]:
     """Hybrid vector + keyword search over a Heart table using RRF.
 
@@ -260,10 +273,91 @@ async def hybrid_search(
             absent from the leg entirely. Score invariance therefore holds
             while ``limit <= penalty_limit * 3``. ``None`` (default)
             preserves the coupled behaviour exactly.
+        dropped_out: C1/F091 write-only telemetry sink, mirroring
+            ``Heart.recall``'s parameter. When provided, every id fetched by
+            either leg but NOT returned is appended as
+            ``(id, vector_rank, keyword_rank, best_leg_score, stage)``.
+
+            The legs fetch ``limit_expanded`` (up to ``3x``) and the caller is
+            handed at most ``limit``, so most of what this function retrieves
+            dies here — invisibly, until now. Both leg lists are already
+            materialized in Python before the cut, so the capture costs no
+            extra query and no extra row.
+
+            Ranks are **1-based** positions within each leg's own ordering,
+            ``None`` where the id was absent from that leg. 1-based matches
+            every other rank in the trace. NOTE for interpretation: the RRF
+            penalty comparison is 0-based (``_rrf_merge`` builds its rank maps
+            with ``enumerate`` and uses ``penalty_rank = limit + 1``), so in
+            REPORTED terms "scored no better than being absent from this leg"
+            is ``rank >= penalty_limit + 2``, not ``+ 1``.
+
+            ``best_leg_score`` is the max of whichever raw leg scores exist.
+            The legs emit different scales (cosine vs normalized
+            ``ts_rank_cd``), so it is a diagnostic magnitude for eyeballing,
+            NOT a value comparable across legs or against the returned RRF
+            scores — do not sort mixed populations by it.
+
+            ``stage`` names the mechanism that actually dropped the row, since
+            this function discards at three different points:
+              ``keyword_only_limit`` — the ``embedding is None`` fallback's cut
+              ``rrf_merge``          — the ordinary merge slice
+              ``keyword_filter`` / ``keyword_filter_limit`` — under
+                ``require_keyword_hit`` only, where the merge performs NO slice
+                (``merge_limit`` is inflated past the candidate count) and the
+                real cuts are the keyword filter and the post-filter truncation.
+                Attributing those to ``rrf_merge`` would name a gate that never
+                fired.
+
+            Write-only: nothing here is read back, no returned value depends on
+            it, and the leg lists are never mutated. Callers prefix ``stage``
+            with their leg name — this helper is shared, so it names the
+            mechanism, not the leg.
+
+            Do NOT forward this through ``hybrid_search_multi``: it fans one
+            list across N per-variant calls, so an id dropped by one variant
+            and served by the fusion would be recorded as a drop that the
+            fusion then appears to "rescue", and ``_rrf_merge_n``'s own slice
+            would be invisible. A multi-query sink needs per-variant identity.
 
     Returns:
         List of (id, rrf_score) ordered by score DESC.
     """
+    def _record_dropped(
+        kept: "list[tuple[UUID, float]]",
+        stage: str,
+        population: "list[tuple[UUID, float]] | None" = None,
+    ) -> None:
+        """Append ``population − kept`` to the sink under ``stage``.
+
+        ``population`` defaults to ``vector ∪ keyword`` — everything fetched.
+        A caller reporting a SECOND gate must pass the first gate's survivors
+        instead, or the same row is emitted twice under two stages and the
+        counts double.
+        """
+        if dropped_out is None:
+            return
+        kept_ids = {doc_id for doc_id, _ in kept}
+        v_rank = {doc_id: i + 1 for i, (doc_id, _) in enumerate(vector_results)}
+        k_rank = {doc_id: i + 1 for i, (doc_id, _) in enumerate(keyword_results)}
+        v_score = dict(vector_results)
+        k_score = dict(keyword_results)
+        if population is None:
+            pool = list(v_rank) + [d for d in k_rank if d not in v_rank]
+        else:
+            pool = [doc_id for doc_id, _ in population]
+        for doc_id in pool:
+            if doc_id in kept_ids:
+                continue
+            scores = [s for s in (v_score.get(doc_id), k_score.get(doc_id)) if s is not None]
+            dropped_out.append((
+                doc_id,
+                v_rank.get(doc_id),
+                k_rank.get(doc_id),
+                max(scores) if scores else None,
+                stage,
+            ))
+
     if vector_weight is None:
         vector_weight = _resolve_vector_weight()
     rrf_k = _resolve_rrf_k()
@@ -336,7 +430,17 @@ async def hybrid_search(
 
     if embedding is None:
         # Keyword-only fallback — return keyword results directly
-        return keyword_results[:limit]
+        #
+        # C1: this cut is CLIENT-SIDE (the leg fetched limit_expanded), so it
+        # discards real rows and must be reported. Reporting only the merge
+        # exit would leave a no-embedder deployment reading "nothing was
+        # dropped" — the same silent zero this capture exists to prevent.
+        # `vector_results` is [] by construction on this branch (the vector
+        # query sits inside `if embedding is not None`), so every entry here
+        # carries a keyword rank and a null vector rank.
+        kept = keyword_results[:limit]
+        _record_dropped(kept, "keyword_only_limit")
+        return kept
 
     # Codex #574 r5: when filtering to keyword hits, merge WITHOUT truncation —
     # _rrf_merge slices to `limit` before the filter runs, and any fixed
@@ -370,8 +474,17 @@ async def hybrid_search(
         # domain facts only for domain turns) filter to docs the keyword leg
         # actually matched. No keyword hits => empty result, by design.
         allowed = {doc_id for doc_id, _ in keyword_results}
-        merged = [(doc_id, score) for doc_id, score in merged if doc_id in allowed]
-        merged = merged[:limit]
+        filtered = [(doc_id, score) for doc_id, score in merged if doc_id in allowed]
+        kept = filtered[:limit]
+        # C1: TWO distinct gates on this branch, and neither is the merge.
+        # `merge_limit` above is inflated to >= the candidate count, so
+        # `_rrf_merge` returned EVERYTHING and sliced nothing — the cuts are
+        # this keyword filter and the truncation after it. Reporting both as
+        # `rrf_merge` would name a gate that never fired.
+        _record_dropped(filtered, "keyword_filter")
+        _record_dropped(kept, "keyword_filter_limit", population=filtered)
+        return kept
+    _record_dropped(merged, "rrf_merge")
     return merged
 
 
