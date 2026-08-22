@@ -906,6 +906,11 @@
               <th class="num">Fired</th>
               <th class="num">Returned</th>
               <th class="num">Corroborated</th>
+              <!-- Summed over ALL retrievals in the window, not just sampled
+                   ones: leg counters are recorded unconditionally, so unlike
+                   the disposition funnel above this column has the full
+                   window as its denominator. -->
+              <th class="num">Dropped</th>
               <th class="num">Errors</th>
             </tr>
           </thead>
@@ -923,10 +928,11 @@
                   {/if}
                 </td>
                 <td class="num muted">{agg.deduped ? agg.deduped.toLocaleString() : '—'}</td>
+                <td class="num muted">{agg.dropped ? agg.dropped.toLocaleString() : '—'}</td>
                 <td class="num" class:err={agg.errors > 0}>{agg.errors || '—'}</td>
               </tr>
             {:else}
-              <tr><td colspan="5" class="empty-cell">No legs recorded yet</td></tr>
+              <tr><td colspan="6" class="empty-cell">No legs recorded yet</td></tr>
             {/each}
           </tbody>
         </table>
@@ -975,7 +981,7 @@
           <h3 class="phase-head">Legs</h3>
           <table class="data-table compact">
             <thead>
-              <tr><th>Leg</th><th class="num">Returned</th><th class="num">Corroborated</th><th>State</th></tr>
+              <tr><th>Leg</th><th class="num">Returned</th><th class="num">Corroborated</th><th class="num">Dropped</th><th>State</th></tr>
             </thead>
             <tbody>
               {#each detail.legs as leg, li (li)}
@@ -983,6 +989,10 @@
                   <td><code>{leg.name}</code></td>
                   <td class="num">{leg.n_returned}</td>
                   <td class="num muted">{leg.n_deduped || '—'}</td>
+                  <!-- Exact on every retrieval, unlike the sampled candidate
+                       array below: how many rows this leg fetched and then
+                       discarded internally before returning. -->
+                  <td class="num muted">{leg.n_dropped || '—'}</td>
                   <td>
                     {#if leg.error}
                       <span class="badge badge-bad">error</span>
@@ -994,6 +1004,15 @@
                       <span class="muted sm">ran, found nothing</span>
                     {:else}
                       <span class="muted sm">ok</span>
+                    {/if}
+                    <!-- A leg that RAN can still carry a skip_reason — it
+                         explains why something about it captured less than
+                         you'd expect (C1's vector-only chunk path reports no
+                         discard set because its cut is pushed into SQL).
+                         Rendering this only under !attempted, as before, meant
+                         that explanation was persisted and never shown. -->
+                    {#if leg.skip_reason && leg.attempted && !leg.error}
+                      <span class="muted sm">{leg.skip_reason}</span>
                     {/if}
                   </td>
                 </tr>

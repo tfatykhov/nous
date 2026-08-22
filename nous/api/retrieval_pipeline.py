@@ -46,6 +46,7 @@ from nous.observability.retrieval_trace import (
     SLICED_OFF,
     SUPERSEDED,
     TYPE_EXCLUDED,
+    UNACCOUNTED,
 )
 
 if TYPE_CHECKING:
@@ -57,6 +58,23 @@ if TYPE_CHECKING:
     from nous.heart.schemas import RecallResult
 
 logger = logging.getLogger(__name__)
+
+# C1: which disposition each `hybrid_search` discard stage maps to. The stage
+# strings are produced in `nous/heart/search.py`; `_CHUNK_DROP_STAGES` is
+# asserted against them by test so a stage added there without an entry here
+# is caught at build rather than absorbed at runtime.
+#
+# Read via `.get(..., UNACCOUNTED)`, never `[]`: the drain sits in the
+# retrieval hot path outside any try/except, and a KeyError there would kill
+# the whole recall for a telemetry gap — inverting F091's own rule that
+# telemetry must never break the thing it observes. UNACCOUNTED is the honest
+# fallback: it means precisely "no site claimed this", which is true.
+_CHUNK_DROP_DISPOSITIONS = {
+    "rrf_merge": SLICED_OFF,
+    "keyword_only_limit": SLICED_OFF,
+    "keyword_filter": FILTER_DROPPED,
+    "keyword_filter_limit": SLICED_OFF,
+}
 
 # F086: memory-referential interrogatives are NOT classification-shaped.
 # Deliberately narrow — trec-style classification queries ARE questions and
@@ -276,6 +294,19 @@ class _PipelineAccumulator:
     # F067 Stage 1.5: chunk-recall results
     # Shape: (id, content, score, episode_id) — see _search_episode_chunks.
     chunk_results: list[tuple[UUID, str, float, UUID]] = field(default_factory=list)
+
+    # C1/F091: the chunk leg's in-memory discard set, shape
+    # (id, vector_rank|None, keyword_rank|None, best_leg_score|None, stage).
+    #
+    # BUFFERED here rather than registered at Stage 1.5, because
+    # ``RetrievalTrace.add`` is first-wins against a SHARED ``max_candidates``
+    # budget. This is the largest population on the path (up to
+    # ``2 * limit_expanded - limit``, ~150 at the live config), so registering
+    # it at the stage would consume the budget ahead of keyed / keyed_r2 /
+    # exemplar / brain / graph_expanded and strip THEIR candidate detail. The
+    # drain runs at assembly, after every other leg has claimed its slots —
+    # losers last, globally, not just within this leg.
+    chunk_dropped: list = field(default_factory=list)
 
     # R3.3 Stage 1.6: keyed fact-leg rows (raw SQLAlchemy Row objects from
     # FactManager.fetch_by_entity_keys — id, content, learned_at,
@@ -734,6 +765,42 @@ async def run_recall_pipeline(
         else:
             tr.leg(_stage, attempted=True, error=f"{_n_err} error(s)")
 
+    # C1: drain the chunk leg's discard set LAST — after every other leg has
+    # claimed its slots against the shared `max_candidates` budget, and after
+    # `_tr_entries("chunk", ...)` has registered the SURVIVORS with their
+    # snippets (first-wins would otherwise leave them content-less).
+    #
+    # `n_dropped` is set unconditionally and is EXACT; the per-candidate rows
+    # below are sampled and capped. That split is what keeps an absence
+    # meaningful: a gold chunk missing from the array might be a sampling or
+    # cap artifact, but the count never lies about how many the leg cut.
+    if acc.chunk_dropped:
+        tr.leg("chunk", attempted=True, n_dropped=len(acc.chunk_dropped))
+        _served_keys = {(r.id, r.type) for r in results}
+    else:
+        _served_keys = frozenset()
+    for _cid, _vrank, _krank, _score, _stage in acc.chunk_dropped:
+        # Skip anything another leg already delivered. Stage 2b surfaces
+        # chunk-type neighbours when `heart_graph_all_types_enabled` is on
+        # (it is, in both env files), so a chunk the merge cut can still reach
+        # the model by a different road. Dropping it here would make
+        # `finalize` override to `rendered` with
+        # `restored_from="sliced_off@chunk_rrf_merge"` — a rescue badge naming
+        # a leg the item did not come back through. The cut still happened and
+        # `n_dropped` above still counts it; only the misattribution is
+        # suppressed.
+        if (_cid, "chunk") in _served_keys:
+            continue
+        tr.add(_cid, "chunk", "chunk", score=_score,
+               # Prefer the vector rank, fall back to keyword: on the
+               # keyword-only exit `vector_results` is empty by construction,
+               # so insisting on `_vrank` would record entry_rank=None for
+               # EVERY row that exit exists to capture. Both ranks survive in
+               # the tuple; this is only which one heads the candidate row.
+               rank=_vrank if _vrank is not None else _krank)
+        tr.drop(_cid, "chunk", _CHUNK_DROP_DISPOSITIONS.get(_stage, UNACCOUNTED),
+                f"chunk_{_stage}")
+
     tr.finalize(results, duration_ms=(time.monotonic() - _t0) * 1000.0)
 
     stats = PipelineStats(
@@ -906,8 +973,53 @@ async def _run_stages(
                 # The helper marks "chunk" only where it actually queries —
                 # the vector path returns early with no embedder/vector.
                 attempted=acc.attempted_legs,
+                # C1: gated on `tr.enabled`, NOT on candidate sampling.
+                #
+                # Gating this on `tr.capturing` (as an earlier revision did, to
+                # avoid building tuples the sampled `add` would discard) meant
+                # the sink stayed empty on the ~90% of unsampled retrievals —
+                # so `Leg.n_dropped` read 0 and every one of those rows
+                # asserted the chunk leg dropped NOTHING. That is the precise
+                # failure the count exists to prevent: an always-on exact
+                # number silently becoming a mostly-zero one, corrupting any
+                # window-level aggregate built on it.
+                #
+                # The count is the load-bearing property; the CPU is not. This
+                # is ~180 dict/set operations immediately after two SQL
+                # round-trips. `tr.add` still no-ops on unsampled rows, so only
+                # the tuples are wasted, and only briefly.
+                dropped_out=acc.chunk_dropped if tr.enabled else None,
             )
+            if not getattr(settings, "chunk_hybrid_search_enabled", False):
+                # C1: the vector-only branch's cut is pushed into SQL, so it
+                # has no in-memory surplus and captures nothing. Declare that,
+                # rather than letting an empty discard set read as "nothing
+                # was dropped" — the silent zero this capture exists to stop.
+                #
+                # attempted=False is REQUIRED, not cosmetic: `leg()` defaults
+                # it True and ORs it stickily, and the no-embedder path returns
+                # without ever querying. Passing True here would report the leg
+                # as attempted-and-silent on a run where it never ran — exactly
+                # what `_search_episode_chunks`'s docstring warns the call site
+                # not to do. The loop at the end of assembly ORs it back to
+                # True on runs where the helper really did mark it.
+                tr.leg(
+                    "chunk", attempted=False,
+                    skip_reason=(
+                        "vector-only path: cut pushed into SQL, "
+                        "no in-memory surplus"
+                    ),
+                )
         except Exception:
+            # C1: `dropped_out` is populated INSIDE hybrid_search, before the
+            # content fetch that may have just raised. Leaving it populated
+            # would report ~150 candidates as `sliced_off@chunk_rrf_merge` for
+            # a retrieval that actually died on a DB error filed under a
+            # DIFFERENT leg name — an operator reading the disposition
+            # histogram would raise the chunk allotment to fix a fetch failure.
+            # A bound that fabricates a confident wrong reading is worse than
+            # no bound.
+            acc.chunk_dropped.clear()
             # Match the sibling stages' pattern (spreading_activation,
             # decision_neighbors): log + count. Non-eval callers (recall_deep
             # tool) discard the stats counter, so the log is the operator's
@@ -2144,6 +2256,7 @@ async def _search_episode_chunks(
     limit: int,
     settings: "Settings | None" = None,
     attempted: "set[str] | None" = None,
+    dropped_out: list | None = None,
 ) -> list[tuple[UUID, str, float]]:
     """F067: search over heart.episode_chunks.
 
@@ -2172,6 +2285,19 @@ async def _search_episode_chunks(
     try/except surfaces them via ``acc.stage_errors`` AND a WARN log. Silent
     fall-through to ``[]`` on embedder failure would masquerade as "no
     matches" and hide real outages.
+
+    ``dropped_out`` (C1/F091) is forwarded to ``hybrid_search`` on the hybrid
+    branch only, and is left untouched on the vector-only branch: that path's
+    cut is ``ORDER BY ... LIMIT :k`` pushed into Postgres, so exactly ``limit``
+    rows come back and there is no in-memory surplus to report. An empty list
+    there is CORRECT but would read as "nothing was dropped", so the CALLER
+    declares it with a leg ``skip_reason`` — it knows the flag, and keeping
+    that knowledge there leaves this helper a pure forwarder.
+
+    NOTE the sink is populated by ``hybrid_search`` BEFORE the content fetch
+    below. If that fetch raises, the caller holds a full discard set for a
+    retrieval that returned nothing, and must clear it rather than report a
+    DB failure as a merge cut.
     """
     from sqlalchemy import text as sa_text
     embedder = getattr(heart, "_embeddings", None)
@@ -2200,6 +2326,7 @@ async def _search_episode_chunks(
                 # top-10 per query, with 0/60 of the added chunks reaching
                 # top-10). None = previous coupled behaviour.
                 penalty_limit=getattr(settings, "chunk_rrf_penalty_limit", None),
+                dropped_out=dropped_out,
             )
             if not ranked:
                 return []

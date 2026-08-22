@@ -137,6 +137,21 @@ class Leg:
     # Corroboration, NOT a drop — the item is still in the result set under
     # its first leg, so it must not be attributed as a loss.
     n_deduped: int = 0
+    # C1: how many candidates this leg fetched and then discarded internally,
+    # before returning. EXACT and recorded on every retrieval, unlike the
+    # per-candidate array which is sampled (`candidate_sample_rate`, 0.1 by
+    # default) and capped (`max_candidates`).
+    #
+    # The split is the point. "How many did the merge cut?" is one integer an
+    # operator wants on every row; "WHICH ones, and was the gold among them?"
+    # is an eval question worth an array on a sample. Answering the first with
+    # only the second means it is unanswerable on ~90% of retrievals, and
+    # unanswerable-but-plausible whenever the cap truncates.
+    #
+    # This is what keeps a truncated capture honest rather than lossy: the
+    # array degrades to a prefix, but the count stays true, so an absence in
+    # the array is never mistaken for an absence in the retrieval.
+    n_dropped: int = 0
     score_min: float | None = None
     score_max: float | None = None
     error: str | None = None
@@ -148,6 +163,7 @@ class Leg:
             "attempted": self.attempted,
             "n_returned": self.n_returned,
             "n_deduped": self.n_deduped,
+            "n_dropped": self.n_dropped,
             "score_min": _finite(self.score_min),
             "score_max": _finite(self.score_max),
             "error": self.error,
@@ -290,6 +306,7 @@ class RetrievalTrace:
         attempted: bool = True,
         n_returned: int | None = None,
         n_deduped: int | None = None,
+        n_dropped: int | None = None,
         error: str | None = None,
         skip_reason: str | None = None,
         scores: list[float] | None = None,
@@ -304,6 +321,8 @@ class RetrievalTrace:
             entry.n_returned = n_returned
         if n_deduped is not None:
             entry.n_deduped = n_deduped
+        if n_dropped is not None:
+            entry.n_dropped = n_dropped
         if error is not None:
             entry.error = error
         if skip_reason is not None:

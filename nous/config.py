@@ -1483,7 +1483,44 @@ class Settings(BaseSettings):
     # unauthenticated endpoint — a new CLASS of content for these tables
     # (context_log stores counts and ids, never message text).
     retrieval_telemetry_query_chars: int = 500
-    retrieval_telemetry_max_candidates: int = 300
+    # Raised 300 -> 600 by C1, which registers the chunk leg's discard set —
+    # the largest population on the path. The live config
+    # (NOUS_EPISODE_CHUNK_RECALL_LIMIT=30 with no NOUS_CHUNK_RRF_PENALTY_LIMIT
+    # in either .env) gives limit_expanded = 90 per leg, so up to
+    # 2*90 - 30 = 150 discards, and that number is CONSTANT because the chunk
+    # allotment is deliberately decoupled from the caller's `limit`.
+    #
+    # It does NOT breach at the default call. Counting real limits at
+    # recall_deep's default limit=10: heart survivors <=10, heart cut <=30
+    # (2 types x limit*2, since coherent_ranking_enabled strips censor +
+    # procedure), 30 served chunks, brain <=10, graph <=15 one-hop or <=40
+    # spreading, keyed/exemplar 0 while their flags are off — ~95 typical,
+    # ~135 worst. Plus 150 => ~245/~285, under 300.
+    #
+    # It breaches on three live paths, which is why the value still has to
+    # move:
+    #   1. `limit` is LLM-chosen over 1..50. Heart and brain scale with it
+    #      while the chunk 180 does not: limit=25 => ~300, limit=30 => ~345,
+    #      limit=50 => ~445. A model asking for 30 results is ordinary.
+    #   2. The C1 acceptance replay runs at candidate_sample_rate=1.0 — so the
+    #      instrument's own validation would run on a config that truncates.
+    #   3. Every land-dark leg this repo intends to flip: keyed (+8),
+    #      keyed_r2 (+8), exemplar (+25), heart_graph_all_types.
+    # 600 covers the limit=50 worst case with headroom.
+    #
+    # What a breach costs, precisely: served items are force-created past the
+    # cap by `finalize`, and C1 drains the discards LAST, so the discards are
+    # solely what truncates. The damage is that the capture silently becomes a
+    # prefix — a gold chunk cut at the merge but past the cap is recorded
+    # nowhere and still reads `never_retrieved`, the exact miscount C1 exists
+    # to fix — plus `truncated` degrading from anomaly signal to routine.
+    #
+    # This IS a config change, not a free one, and is stated rather than
+    # smuggled: raising it grows the sampled JSONB row (empty-snippet discard
+    # dicts are ~300 raw bytes each, TOAST-compressed well below that).
+    # `Leg.n_dropped` is exact regardless of this value, so truncation costs
+    # identity, never the count.
+    retrieval_telemetry_max_candidates: int = 600
     # Live-read fallback only; both dashboard endpoints read Postgres, so this
     # ring has no consumer today. Kept small deliberately — at sample_rate 1.0
     # a 100-deep ring pins 60-100 MB RSS holding candidate arrays nobody reads.

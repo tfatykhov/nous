@@ -2637,11 +2637,16 @@ async def get_retrieval_data(
             if not name:
                 continue
             agg = leg_totals.setdefault(
-                name, {"attempted": 0, "returned": 0, "deduped": 0, "errors": 0}
+                name,
+                {"attempted": 0, "returned": 0, "deduped": 0, "dropped": 0, "errors": 0},
             )
             agg["attempted"] += 1 if leg.get("attempted") else 0
             agg["returned"] += int(leg.get("n_returned") or 0)
             agg["deduped"] += int(leg.get("n_deduped") or 0)
+            # C1: summed over ALL rows in the window, not just sampled ones —
+            # leg summaries are recorded unconditionally, so this denominator
+            # is the full window while `totals` above covers `n_sampled` rows.
+            agg["dropped"] += int(leg.get("n_dropped") or 0)
             agg["errors"] += 1 if leg.get("error") else 0
 
         entries.append({
