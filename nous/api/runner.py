@@ -1347,8 +1347,20 @@ class AgentRunner:
                                 input_json = "".join(block["input_parts"])
                                 try:
                                     block["input"] = json.loads(input_json) if input_json else {}
-                                except json.JSONDecodeError:
+                                except json.JSONDecodeError as e:
+                                    logger.warning(
+                                        "Tool input JSON decode failed for %s: "
+                                        "%d bytes across %d streamed parts, error=%s at offset %d, "
+                                        "payload_head=%r",
+                                        block["name"], len(input_json), len(block["input_parts"]),
+                                        e.msg, e.pos, input_json[:500],
+                                    )
                                     block["input"] = {}
+                                    block["input_error"] = (
+                                        f"Tool input JSON was malformed and could not be parsed "
+                                        f"({len(input_json)} bytes, error at offset {e.pos}). "
+                                        f"The tool was not executed. Re-emit the call with valid JSON."
+                                    )
                                 tool_calls.append(block)
 
                         elif event.type == "done":
@@ -1420,6 +1432,27 @@ class AgentRunner:
                     # Execute tools (P1-2: all results in single user message)
                     tool_results_for_message: list[dict[str, Any]] = []
                     for tc in tool_calls:
+                        # Malformed tool-input JSON: never dispatch a blanked-args
+                        # call (it can only fail downstream with a misleading
+                        # TypeError). Still emit a tool_result so this tool_use
+                        # block is paired -- required or the next API call 400s.
+                        if tc.get("input_error"):
+                            tool_results_for_message.append({
+                                "type": "tool_result",
+                                "tool_use_id": tc["id"],
+                                "content": tc["input_error"],
+                                "is_error": True,
+                            })
+                            all_tool_results.append(ToolResult(
+                                tool_name=tc["name"],
+                                arguments=tc.get("input", {}),
+                                result=None,
+                                error=tc["input_error"],
+                                duration_ms=0,
+                            ))
+                            yield StreamEvent(type="tool_end", tool_name=tc["name"])
+                            continue
+
                         # F022: Auto-inject source_episode_id into learn_fact.
                         # Use a local variable (not tc["input"]) to avoid mutating the
                         # shared block dict that content_blocks already references.
