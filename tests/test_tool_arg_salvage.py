@@ -612,6 +612,46 @@ class TestSalvageRequiresEvidenceOfASyntaxTransition:
         assert not received
 
 
+class TestLeakLocatorIsLinear:
+    """codex P1: the single combined regex had to lead with `\\s*`, so the
+    engine retried that greedy run at every start position and rescanned the
+    suffix. Measured on the old form: 2k spaces 0.10s, 10k 2.50s, 20k 10.78s
+    -- synchronous CPU inside the async dispatcher, so one whitespace-heavy
+    argument on a call missing a required key stalled the event loop."""
+
+    def test_long_whitespace_run_returns_immediately(self):
+        import time
+
+        from nous.api.tools import _leak_tail_start
+
+        blob = " " * 20_000
+        start = time.perf_counter()
+        assert _leak_tail_start(blob) is None
+        elapsed = time.perf_counter() - start
+        # Old implementation: ~10.8s. New: microseconds. A 1s ceiling is far
+        # above any plausible CI jitter yet still catches a regression to
+        # quadratic behaviour by four orders of magnitude.
+        assert elapsed < 1.0, f"leak locator took {elapsed:.3f}s on 20k spaces"
+
+    def test_whitespace_heavy_host_with_a_real_leak_still_salvages(self):
+        from nous.api.tools import _leak_tail_start
+
+        blob = " " * 20_000 + '</description>\n<parameter name="confidence">0.55'
+        assert _leak_tail_start(blob) == 0
+
+    @pytest.mark.asyncio
+    async def test_dispatch_with_a_huge_arg_is_not_stalled(self):
+        dispatcher, received = _make_decision_dispatcher()
+        result_text, is_error = await dispatcher.dispatch(
+            "record_decision",
+            {"description": " " * 20_000, "category": "process", "stakes": "low"},
+        )
+        # No leak to salvage -> the honest missing-arg error, promptly.
+        assert is_error is True
+        assert "confidence" in result_text
+        assert not received
+
+
 class TestSettingsFlag:
     def test_salvage_flag_default_on(self):
         from nous.config import Settings
