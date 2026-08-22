@@ -874,6 +874,42 @@ class TestErrorReturnsAreMarked:
             "return them via _tool_error():\n  " + "\n  ".join(offenders)
         )
 
+    # Every raw `return {"content": ...}` still in tools.py that carries no
+    # is_error flag. Each has been read and judged a SUCCESS or empty-result
+    # path. The number is a ratchet, not a target: it may only go down.
+    #
+    # A ratchet rather than another prefix rule because the prefix allowlist
+    # was wrong three times running -- it missed "Validation error:", then
+    # every multi-line return, then "Subtask rejected by censor" / "[Subtask
+    # ...]" / "Exactly one of...". A heuristic that keeps being wrong should be
+    # inverted, not widened: this one cannot miss a new failure path, because
+    # it does not try to recognise one. Adding ANY unflagged MCP return fails
+    # here until it is classified via _tool_error() or counted in deliberately.
+    _UNFLAGGED_BASELINE = 43
+
+    def test_unflagged_mcp_returns_do_not_grow(self):
+        tree = ast.parse(Path("nous/api/tools.py").read_text(encoding="utf-8"))
+        unflagged = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Return) or not isinstance(node.value, ast.Dict):
+                continue
+            keys = [
+                k.value for k in node.value.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)
+            ]
+            if "content" in keys and "is_error" not in keys:
+                unflagged += 1
+        assert unflagged <= self._UNFLAGGED_BASELINE, (
+            f"{unflagged} unflagged MCP returns, baseline {self._UNFLAGGED_BASELINE}. "
+            "A failure returned this way is reported to the model as a success -- "
+            "route it through _tool_error(). If it is genuinely a success or an "
+            "empty result, lower nothing and say so in review."
+        )
+        assert unflagged == self._UNFLAGGED_BASELINE, (
+            f"{unflagged} unflagged MCP returns, below the {self._UNFLAGGED_BASELINE} "
+            "baseline -- good. Lower _UNFLAGGED_BASELINE to lock the gain in."
+        )
+
     def test_the_guard_sees_multiline_returns(self):
         """Mutation guard for the guard: the single-line regex this replaced
         would score the snippet below as clean."""

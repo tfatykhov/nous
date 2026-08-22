@@ -2880,7 +2880,7 @@ def create_subtask_tools(
                             msg = f"Subtask rejected by censor: {reason}"
                             if match.action_instruction:
                                 msg += f"\n{match.action_instruction}"
-                            return {"content": [{"type": "text", "text": msg}]}
+                            return _tool_error(msg)
                         # downgraded refuse -> treat as steer directive below
                         directive = match.action_instruction or match.reason
                         if directive:
@@ -3025,6 +3025,11 @@ def create_subtask_tools(
                             f"[Subtask {subtask.id.hex[:8]} {_result.outcome}: "
                             f"{_result.reason}]"
                         )
+                    # Mixed path: `body` is a completion OR a blocked/failed
+                    # outcome, so the flag follows _result.ok rather than being
+                    # set blanket either way.
+                    if not _result.ok:
+                        return _tool_error(body)
                     return {"content": [{"type": "text", "text": body}]}
                 except _asyncio.TimeoutError:
                     if not executed:
@@ -3035,14 +3040,10 @@ def create_subtask_tools(
                             error_msg=f"Timeout after {effective_timeout}s",
                             state=state,
                         )
-                    return {
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": f"[Subtask {subtask.id.hex[:8]} timed out after {effective_timeout}s]",
-                            }
-                        ]
-                    }
+                    return _tool_error(
+                        f"[Subtask {subtask.id.hex[:8]} timed out after "
+                        f"{effective_timeout}s]"
+                    )
                 except Exception as e:
                     if not executed:
                         await _persist_and_emit_inline_outcome(
@@ -3052,14 +3053,7 @@ def create_subtask_tools(
                             error_msg=str(e),
                             state=state,
                         )
-                    return {
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": f"[Subtask {subtask.id.hex[:8]} failed: {e}]",
-                            }
-                        ]
-                    }
+                    return _tool_error(f"[Subtask {subtask.id.hex[:8]} failed: {e}]")
 
             # Legacy inline path — bytewise unchanged from pre-F061.
             system_prefix = build_subtask_prefix(task, frame_type)
@@ -3151,14 +3145,9 @@ def create_subtask_tools(
         """
         try:
             if bool(when) == bool(every):
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Exactly one of 'when' or 'every' must be provided.",
-                        }
-                    ]
-                }
+                return _tool_error(
+                    "Exactly one of 'when' or 'every' must be provided."
+                )
 
             from nous.handlers.time_parser import parse_every, parse_when
 
