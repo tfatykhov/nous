@@ -10,6 +10,7 @@ Tests cover:
 
 import asyncio
 import json
+import logging
 import time
 from typing import Any, AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -640,6 +641,170 @@ class TestStreamChat:
         assert len(turn_result.tool_results) == 1
         assert turn_result.tool_results[0].tool_name == "web_search"
         assert turn_result.tool_results[0].duration_ms is not None
+
+    @pytest.mark.asyncio
+    async def test_malformed_tool_json_logs_warning_and_skips_dispatch(
+        self, runner, mock_cognitive, caplog
+    ):
+        """Malformed tool-input JSON is logged (tool name + payload size) and the
+        tool is never dispatched -- a call with blanked-out args can only fail
+        downstream with a misleading TypeError, so it must not reach the dispatcher.
+
+        The warning must stay structural: tool inputs carry commands, file bodies
+        and message text, so echoing the payload would turn every malformed call
+        into a disclosure at the prod default log level."""
+        cognitive, _ = mock_cognitive
+        call_count = 0
+
+        async def fake_stream(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield StreamEvent(
+                    type="tool_start", tool_name="record_decision", tool_id="t1", block_index=1
+                )
+                yield StreamEvent(
+                    type="tool_input_delta",
+                    text='{"decision": "do the thing", "reasoning": "sk-secret-xyz because...',
+                    block_index=1,
+                )
+                yield StreamEvent(type="block_stop", block_index=1)
+                yield StreamEvent(type="done", stop_reason="tool_use")
+            else:
+                yield StreamEvent(type="text_delta", text="Retrying")
+                yield StreamEvent(type="done", stop_reason="end_turn")
+
+        runner._call_api_stream = MagicMock(side_effect=fake_stream)
+
+        with caplog.at_level(logging.WARNING, logger="nous.api.runner"):
+            events = [e async for e in runner.stream_chat("s1", "Decide something")]
+
+        assert not runner._dispatcher.dispatch.called
+
+        matching = [r for r in caplog.records if "record_decision" in r.getMessage()]
+        assert matching, "expected a warning naming the tool whose input failed to parse"
+        message = matching[0].getMessage()
+        assert "bytes" in message
+        assert "offset" in message
+        # Structural diagnostics only -- no payload content, ever.
+        assert "sk-secret-xyz" not in message
+        assert "do the thing" not in message
+
+    @pytest.mark.asyncio
+    async def test_malformed_tool_json_produces_paired_error_result(
+        self, runner, mock_cognitive
+    ):
+        """Malformed tool-input JSON must still produce a tool_result paired to
+        its tool_use block (or the next API call 400s), and that result must tell
+        the model the call was not executed rather than surfacing a TypeError."""
+        cognitive, _ = mock_cognitive
+        call_count = 0
+
+        async def fake_stream(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield StreamEvent(
+                    type="tool_start", tool_name="record_decision", tool_id="t1", block_index=1
+                )
+                yield StreamEvent(type="tool_input_delta", text='{"broken', block_index=1)
+                yield StreamEvent(type="block_stop", block_index=1)
+                yield StreamEvent(type="done", stop_reason="tool_use")
+            else:
+                yield StreamEvent(type="text_delta", text="Retrying")
+                yield StreamEvent(type="done", stop_reason="end_turn")
+
+        runner._call_api_stream = MagicMock(side_effect=fake_stream)
+
+        events = [e async for e in runner.stream_chat("s1", "Decide something")]
+
+        # The second _call_api_stream invocation is the follow-up turn; its
+        # `messages` argument must include a tool_result paired to tool_use id "t1".
+        assert runner._call_api_stream.call_count == 2
+        second_call_messages = runner._call_api_stream.call_args_list[1][0][1]
+        tool_result_messages = [
+            m for m in second_call_messages
+            if m.get("role") == "user" and isinstance(m.get("content"), list)
+            and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in m["content"])
+        ]
+        assert len(tool_result_messages) == 1
+        results = tool_result_messages[0]["content"]
+        assert len(results) == 1  # exactly one result for the one tool_use block
+        assert results[0]["tool_use_id"] == "t1"
+        assert results[0]["is_error"] is True
+        assert "not executed" in results[0]["content"]
+        assert "Re-emit" in results[0]["content"]
+
+        # post_turn's TurnResult reflects the failure, never a dispatch attempt
+        cognitive.post_turn.assert_called_once()
+        turn_result = cognitive.post_turn.call_args[0][2]
+        assert len(turn_result.tool_results) == 1
+        assert turn_result.tool_results[0].tool_name == "record_decision"
+        assert turn_result.tool_results[0].result is None
+        assert turn_result.tool_results[0].error is not None
+        assert not runner._dispatcher.dispatch.called
+
+    @pytest.mark.asyncio
+    async def test_valid_tool_json_dispatch_unchanged(self, runner, mock_cognitive):
+        """Regression guard: well-formed tool input dispatches exactly as before
+        the malformed-JSON handling was added (success path byte-for-byte)."""
+        cognitive, _ = mock_cognitive
+        call_count = 0
+
+        async def fake_stream(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield StreamEvent(type="tool_start", tool_name="web_search", tool_id="t1", block_index=1)
+                yield StreamEvent(type="tool_input_delta", text='{"query": "test"}', block_index=1)
+                yield StreamEvent(type="block_stop", block_index=1)
+                yield StreamEvent(type="done", stop_reason="tool_use")
+            else:
+                yield StreamEvent(type="text_delta", text="Done")
+                yield StreamEvent(type="done", stop_reason="end_turn")
+
+        runner._call_api_stream = MagicMock(side_effect=fake_stream)
+
+        events = [e async for e in runner.stream_chat("s1", "Search for test")]
+
+        runner._dispatcher.dispatch.assert_called_once_with(
+            "web_search", {"query": "test"}, session_id="s1", turn_number=1,
+        )
+        cognitive.post_turn.assert_called_once()
+        turn_result = cognitive.post_turn.call_args[0][2]
+        assert len(turn_result.tool_results) == 1
+        assert turn_result.tool_results[0].tool_name == "web_search"
+        assert turn_result.tool_results[0].error is None
+        assert turn_result.tool_results[0].result == "search result"
+
+    @pytest.mark.asyncio
+    async def test_empty_tool_input_still_dispatches(self, runner, mock_cognitive):
+        """Empty input string is the legitimate no-arguments case: it must keep
+        parsing to {} and dispatching normally, not be treated as malformed."""
+        cognitive, _ = mock_cognitive
+        call_count = 0
+
+        async def fake_stream(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield StreamEvent(type="tool_start", tool_name="web_search", tool_id="t1", block_index=1)
+                yield StreamEvent(type="block_stop", block_index=1)
+                yield StreamEvent(type="done", stop_reason="tool_use")
+            else:
+                yield StreamEvent(type="text_delta", text="Done")
+                yield StreamEvent(type="done", stop_reason="end_turn")
+
+        runner._call_api_stream = MagicMock(side_effect=fake_stream)
+
+        events = [e async for e in runner.stream_chat("s1", "Search")]
+
+        runner._dispatcher.dispatch.assert_called_once_with(
+            "web_search", {}, session_id="s1", turn_number=1,
+        )
+        cognitive.post_turn.assert_called_once()
+        turn_result = cognitive.post_turn.call_args[0][2]
+        assert turn_result.tool_results[0].error is None
 
     @pytest.mark.asyncio
     async def test_safety_net_called(self, runner, mock_cognitive):

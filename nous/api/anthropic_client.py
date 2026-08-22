@@ -693,14 +693,21 @@ class HttpxAnthropicClient:
                             json.loads(joined) if joined else {}
                         )
                     except json.JSONDecodeError as e:
+                        # Structural only -- the payload fragment is deliberately
+                        # not logged (same reasoning as the streaming handler in
+                        # runner.py: tool inputs carry commands, file bodies and
+                        # message text, and this fires at the prod default level).
                         logger.warning(
                             "F048 aggregator: malformed tool_input JSON at block %d "
-                            "(tool=%s, id=%s): %s; fragment=%r",
+                            "(tool=%s, id=%s): %d bytes across %d streamed parts, "
+                            "error=%s at offset %d",
                             event.block_index,
                             blocks[event.block_index].get("name", "?"),
                             blocks[event.block_index].get("id", "?"),
-                            e,
-                            joined[:200],
+                            len(joined),
+                            len(frags),
+                            e.msg,
+                            e.pos,
                         )
                         blocks[event.block_index]["input"] = {}
                 # Finalize text / thinking block content on close
