@@ -1348,12 +1348,19 @@ class AgentRunner:
                                 try:
                                     block["input"] = json.loads(input_json) if input_json else {}
                                 except json.JSONDecodeError as e:
+                                    # Deliberately structural only -- never log the payload
+                                    # itself. Tool inputs carry bash commands, file bodies
+                                    # and message text, and this WARNING fires at the prod
+                                    # default level, so echoing them would make every
+                                    # malformed call a secret/PII disclosure. The truncation
+                                    # hypothesis is answered without them: a stream cut short
+                                    # gives an unterminated-token error with `offset` at or
+                                    # near `bytes`, while corruption errors land mid-payload.
                                     logger.warning(
                                         "Tool input JSON decode failed for %s: "
-                                        "%d bytes across %d streamed parts, error=%s at offset %d, "
-                                        "payload_head=%r",
+                                        "%d bytes across %d streamed parts, error=%s at offset %d",
                                         block["name"], len(input_json), len(block["input_parts"]),
-                                        e.msg, e.pos, input_json[:500],
+                                        e.msg, e.pos,
                                     )
                                     block["input"] = {}
                                     block["input_error"] = (

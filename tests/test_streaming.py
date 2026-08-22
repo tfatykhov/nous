@@ -648,7 +648,11 @@ class TestStreamChat:
     ):
         """Malformed tool-input JSON is logged (tool name + payload size) and the
         tool is never dispatched -- a call with blanked-out args can only fail
-        downstream with a misleading TypeError, so it must not reach the dispatcher."""
+        downstream with a misleading TypeError, so it must not reach the dispatcher.
+
+        The warning must stay structural: tool inputs carry commands, file bodies
+        and message text, so echoing the payload would turn every malformed call
+        into a disclosure at the prod default log level."""
         cognitive, _ = mock_cognitive
         call_count = 0
 
@@ -661,7 +665,7 @@ class TestStreamChat:
                 )
                 yield StreamEvent(
                     type="tool_input_delta",
-                    text='{"decision": "do the thing", "reasoning": "because...',
+                    text='{"decision": "do the thing", "reasoning": "sk-secret-xyz because...',
                     block_index=1,
                 )
                 yield StreamEvent(type="block_stop", block_index=1)
@@ -679,7 +683,12 @@ class TestStreamChat:
 
         matching = [r for r in caplog.records if "record_decision" in r.getMessage()]
         assert matching, "expected a warning naming the tool whose input failed to parse"
-        assert "bytes" in matching[0].getMessage()
+        message = matching[0].getMessage()
+        assert "bytes" in message
+        assert "offset" in message
+        # Structural diagnostics only -- no payload content, ever.
+        assert "sk-secret-xyz" not in message
+        assert "do the thing" not in message
 
     @pytest.mark.asyncio
     async def test_malformed_tool_json_produces_paired_error_result(

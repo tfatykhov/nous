@@ -308,7 +308,11 @@ async def test_httpx_aggregator_logs_warning_on_malformed_tool_input_json(monkey
             tool_id="toolu_bad",
             block_index=0,
         ),
-        StreamEvent(type="tool_input_delta", text='{"cmd": "ls"', block_index=0),
+        StreamEvent(
+            type="tool_input_delta",
+            text='{"cmd": "curl -H \'Authorization: sk-secret-xyz\'"',
+            block_index=0,
+        ),
         # Malformed — missing closing brace
         StreamEvent(type="block_stop", block_index=0),
         StreamEvent(type="done", stop_reason="tool_use", usage={"output_tokens": 5}),
@@ -325,6 +329,11 @@ async def test_httpx_aggregator_logs_warning_on_malformed_tool_input_json(monkey
     warned = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any("malformed tool_input" in r.getMessage() for r in warned), (
         f"expected malformed-tool-input warning; got: {[r.getMessage() for r in warned]}"
+    )
+    # Structural diagnostics only -- a bash command reaching the prod log at
+    # WARNING would make every malformed background call a disclosure.
+    assert not any("sk-secret-xyz" in r.getMessage() for r in warned), (
+        "the raw tool payload must never be logged"
     )
 
 
