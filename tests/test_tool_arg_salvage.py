@@ -639,6 +639,22 @@ class TestLeakLocatorIsLinear:
         blob = " " * 20_000 + '</description>\n<parameter name="confidence">0.55'
         assert _leak_tail_start(blob) == 0
 
+    def test_many_complete_tags_do_not_rescan_the_prefix(self):
+        """The backward walk must step tag-to-tag, not re-search from offset 0.
+        The first replacement for the quadratic regex was itself quadratic in
+        the TAG COUNT: 500 tags 0.015s, 1000 0.067s, 2500 0.40s, 5000 1.67s."""
+        import time
+
+        from nous.api.tools import _leak_tail_start
+
+        blob = "".join(
+            f'<parameter name="k{i}">v{i}</parameter>\n' for i in range(5_000)
+        ) + '<parameter name="confidence">0.55'
+        start = time.perf_counter()
+        assert _leak_tail_start(blob) == 0  # whole run is the tail
+        elapsed = time.perf_counter() - start
+        assert elapsed < 1.0, f"backward walk took {elapsed:.3f}s on 5k tags"
+
     @pytest.mark.asyncio
     async def test_dispatch_with_a_huge_arg_is_not_stalled(self):
         dispatcher, received = _make_decision_dispatcher()
@@ -650,6 +666,72 @@ class TestLeakLocatorIsLinear:
         assert is_error is True
         assert "confidence" in result_text
         assert not received
+
+
+class TestContainersAreNeverSalvaged:
+    """codex P2: an array cleared the outer type check while its ITEMS were
+    never validated -- a leaked nodes=[{"type":"bogus"}] reached the handler
+    and was rejected deep inside DAGNodeType. Knowing a container is usable
+    means validating items, nested required keys and nested enums, i.e. a real
+    schema validator. Salvage exists for one observed prod shape -- a SCALAR
+    leaking into a string -- so containers now decline and the model is told."""
+
+    @staticmethod
+    def _array_dispatcher() -> tuple[ToolDispatcher, dict]:
+        dispatcher = ToolDispatcher()
+        received: dict = {}
+
+        async def dag_create(name: str, nodes: list) -> dict:
+            received.update(name=name, nodes=nodes)
+            return {"content": [{"type": "text", "text": "created"}]}
+
+        dispatcher.register("dag_create", dag_create, {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "nodes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"type": {"enum": ["subtask", "check"]}},
+                        "required": ["type"],
+                    },
+                },
+            },
+            "required": ["name", "nodes"],
+        })
+        return dispatcher, received
+
+    @pytest.mark.asyncio
+    async def test_leaked_array_is_not_salvaged(self):
+        dispatcher, received = self._array_dispatcher()
+        leaked = (
+            'my dag</name>\n<parameter name="nodes">'
+            '[{"name": "a", "type": "bogus", "instructions": "x"}]'
+        )
+        result_text, is_error = await dispatcher.dispatch(
+            "dag_create", {"name": leaked},
+        )
+        assert is_error is True
+        assert "missing required argument" in result_text
+        assert "nodes" in result_text
+        assert "[input repaired]" not in result_text
+        assert not received
+
+    @pytest.mark.asyncio
+    async def test_scalar_salvage_still_works_alongside(self):
+        """Removing container salvage must not disturb the scalar path."""
+        dispatcher, received = _make_decision_dispatcher()
+        _, is_error = await dispatcher.dispatch(
+            "record_decision",
+            {
+                "description": _OBSERVED_DESCRIPTION + _OBSERVED_TAIL,
+                "category": "architecture",
+                "stakes": "high",
+            },
+        )
+        assert is_error is False
+        assert received["confidence"] == 0.55
 
 
 class TestVariadicSchemasMustBeHonest:

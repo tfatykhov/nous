@@ -93,8 +93,17 @@ def _leak_tail_start(value: str) -> int | None:
     if final is None:
         return None
     start = final.start()
-    while (prev := _XML_LEAK_COMPLETE.search(value, 0, start)) is not None:
-        start = prev.start()
+    # Step to each preceding tag via rfind rather than re-searching the whole
+    # prefix. `search(value, 0, start)` rescans from offset zero on every
+    # iteration, which is quadratic in the tag count -- measured on that form:
+    # 500 tags 0.015s, 1000 0.067s, 2500 0.40s, 5000 (202 KB) 1.67s. rfind
+    # walks backward over each gap exactly once, so the whole loop is linear.
+    # ("</parameter>" cannot false-match "<parameter" -- the slash is inside.)
+    while (cand := value.rfind("<parameter", 0, start)) != -1:
+        complete = _XML_LEAK_COMPLETE.match(value, cand, start)
+        if complete is None:
+            break
+        start = cand
     if (closer := _XML_LEAK_CLOSER.search(value, 0, start)) is not None:
         start = closer.start()
     while start > 0 and value[start - 1].isspace():
@@ -134,9 +143,20 @@ def _coerce_to_schema_type(raw: str, prop_schema: dict[str, Any]) -> Any:
 
     Returns None when coercion fails — the caller treats the key as still
     missing and falls through to the actionable error.
+
+    Containers are deliberately NOT salvaged. Accepting one would require
+    validating `items`, nested `required` and nested enums to know it is
+    usable, i.e. a real JSON-schema validator; without that, a leaked
+    ``nodes=[{"type":"bogus"}]`` clears the outer array check and is only
+    rejected deep inside the handler. The salvage path exists for one observed
+    prod failure — a SCALAR leaking into a string — and there is no evidence a
+    model emits nested JSON through XML tag text. Declining costs nothing: the
+    key stays missing and the model is told to re-emit it.
     """
     raw = raw.strip()
     prop_type = prop_schema.get("type")
+    if prop_type in ("array", "object"):
+        return None
     try:
         if prop_type == "number":
             value: Any = float(raw)
@@ -144,15 +164,12 @@ def _coerce_to_schema_type(raw: str, prop_schema: dict[str, Any]) -> Any:
             value = int(raw)
         elif prop_type == "boolean":
             value = {"true": True, "false": False}.get(raw.lower())
-        elif prop_type in ("array", "object"):
-            parsed = json.loads(raw)
-            value = parsed if isinstance(parsed, list | dict) else None
         else:
             value = raw  # string / untyped
         if value is None:
             return None
         return value if _satisfies_schema_constraints(value, prop_schema) else None
-    except (ValueError, json.JSONDecodeError):
+    except ValueError:
         return None
 
 
