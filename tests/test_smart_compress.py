@@ -343,3 +343,88 @@ class TestSmartCompressEntryPoint:
         assert result.was_compressed is True  # confirms the gap is real, not hypothetical
         assert result.text != text  # the model-facing text IS compressed
         assert result.original_text == text  # but the original survives, recoverable
+
+
+# --- Per-tool exemption: already-ranked output must not be re-ranked ---
+
+
+class TestExemptTools:
+    """`recall_deep` / `recall_recent` output is the curated result of RRF +
+    relevance floors + MMR + CE rerank + graph scoring. SmartCompress ranks by
+    ORIGINAL POSITION (30% head + 15% tail) and by `_score_line`, which scores a
+    line on digits / URLs / file paths / error words and never reads the
+    retrieval score — a second, cruder ranker overriding a careful one.
+
+    Measured on prod-shaped blocks: graph/spreading rows survived at 43.1%
+    against 92.0% for top-10 heart rows.
+    """
+
+    def _recall_block(self) -> str:
+        """A block that provably trips every gate, so a pass-through result
+        can only be the exemption and not an incidental miss."""
+        lines = [
+            f"- [fact] memory item {i} recorded during session {i // 5}"
+            for i in range(120)
+        ]
+        lines.append("- [fact] the deploy failed on the first attempt")
+        return "\n".join(lines)
+
+    def test_default_exempts_both_recall_tools(self):
+        s = Settings(_env_file=None)
+        assert "recall_deep" in s.smart_compress_exempt_tools
+        assert "recall_recent" in s.smart_compress_exempt_tools
+
+    @pytest.mark.parametrize("tool", ["recall_deep", "recall_recent"])
+    @pytest.mark.asyncio
+    async def test_recall_output_passes_through_untouched(self, tool):
+        settings = Settings(_env_file=None, smart_compress_enabled=True)
+        text = self._recall_block()
+        # The gates MUST hold, or this test would pass for the wrong reason.
+        assert len(text) >= settings.smart_compress_min_chars
+        assert is_crushable(text, min_chars=settings.smart_compress_min_chars)
+
+        result = await smart_compress(tool, {"query": "anything"}, text, settings)
+
+        assert result.was_compressed is False
+        assert result.text == text, "exempt output must be byte-identical"
+        assert result.original_text is None, "nothing cached: nothing was cut"
+
+    @pytest.mark.asyncio
+    async def test_identical_text_is_still_compressed_for_a_non_exempt_tool(self):
+        """The complement. Without it, the assertions above would also pass if
+        the block simply failed a gate — this pins that the ONLY difference is
+        the tool name."""
+        settings = Settings(_env_file=None, smart_compress_enabled=True)
+        text = self._recall_block()
+
+        result = await smart_compress("bash", {}, text, settings)
+
+        assert result.was_compressed is True
+        assert result.text != text
+
+    @pytest.mark.asyncio
+    async def test_empty_list_is_a_kill_switch(self):
+        """`[]` restores today's behaviour for every tool, so the change is
+        revertible by config rather than by deploy."""
+        settings = Settings(
+            _env_file=None, smart_compress_enabled=True,
+            smart_compress_exempt_tools=[],
+        )
+        text = self._recall_block()
+
+        result = await smart_compress("recall_deep", {}, text, settings)
+
+        assert result.was_compressed is True
+        assert result.text != text
+
+    @pytest.mark.asyncio
+    async def test_exemption_is_per_tool_not_global(self):
+        """An operator exempting one tool must not disable compression."""
+        settings = Settings(
+            _env_file=None, smart_compress_enabled=True,
+            smart_compress_exempt_tools=["recall_deep"],
+        )
+        text = self._recall_block()
+
+        assert (await smart_compress("recall_deep", {}, text, settings)).text == text
+        assert (await smart_compress("recall_recent", {}, text, settings)).text != text

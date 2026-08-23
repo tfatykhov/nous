@@ -313,6 +313,16 @@ async def smart_compress(
         return passthrough
     if is_error:
         return passthrough
+    # Per-tool exemption. Everything below this point ranks by original
+    # position and by `_score_line` — neither of which can see a retrieval
+    # score — so a tool whose output is ALREADY ranked must not be re-ranked
+    # here. `tool_name` was previously used only in a log message.
+    if tool_name in getattr(settings, "smart_compress_exempt_tools", ()):
+        logger.info(
+            "SmartCompress exempt %s: already-ranked output, passing through "
+            "(%d chars)", tool_name, len(result_text),
+        )
+        return passthrough
     if len(result_text) < settings.smart_compress_min_chars:
         return passthrough
 
