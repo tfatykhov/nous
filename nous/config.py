@@ -1178,11 +1178,38 @@ class Settings(BaseSettings):
     # F022 Phase 4: Spreading activation
     spreading_activation_enabled: str = "auto"  # "auto", "true", "false"
     spreading_activation_density_threshold: float = 3.0
-    spreading_activation_decay: float = 0.5
-    spreading_activation_max_depth: int = 2
-    spreading_activation_alpha: float = 0.5
-    spreading_activation_beta: float = 0.3
-    spreading_activation_gamma: float = 0.2
+    # A7: both of these were plain int/float with no bounds. `max_depth` is the
+    # EXPONENT of an exponential traversal, and `decay > 1.0` would AMPLIFY
+    # activation per hop — breaking the `activation <= seed_score <= 1` invariant
+    # that the CTE's MAX aggregation relies on to keep spreading rows on the
+    # candidates' score scale (see spreading_activation_search's docstring).
+    spreading_activation_decay: float = Field(
+        default=0.5, gt=0.0, le=1.0,
+        description=(
+            "F022: per-hop activation multiplier. Must be in (0, 1] — a value "
+            "above 1.0 amplifies activation per hop and breaks the bounded-path "
+            "invariant MAX aggregation depends on."
+        ),
+    )
+    spreading_activation_max_depth: int = Field(
+        default=2, ge=1, le=3,
+        description=(
+            "F022: max traversal hops. Bounded at 3 because the recursive CTE "
+            "fans out multiplicatively with node degree (prod p99 degree 55, "
+            "max 248), so each extra hop is an order-of-magnitude cost step."
+        ),
+    )
+    # A4: was a bare `activation > 0.1` literal at two sites in
+    # retrieval_pipeline.py — the filter and its F091 telemetry mirror. Hoisted
+    # so the floor becomes a config arm rather than a code change. Default is
+    # the prior constant, so this is an exact no-op.
+    spreading_activation_floor: float = Field(
+        default=0.1, ge=0.0, le=1.0,
+        description=(
+            "F022: minimum activation for a spreading result to survive. "
+            "Default 0.1 reproduces the previously-hardcoded literal exactly."
+        ),
+    )
 
     # F040: Graph densification — backfill
     # F044 tinyHippo-Lite v1 — STC state machine (telemetry-only slice).

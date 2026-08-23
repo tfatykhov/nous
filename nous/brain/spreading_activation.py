@@ -12,10 +12,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nous.brain.graph_constants import (
-    AUTOBEHAVIOR_EXCLUDED_RELATIONS,
-    autobehavior_exclusion_sql,
-)
+from nous.brain.graph_constants import autobehavior_exclusion_sql
 from nous.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -25,11 +22,20 @@ async def compute_graph_density(session: AsyncSession, agent_id: str) -> float:
     """Compute average edges per unique node for the given agent.
 
     F076: co-mention edges (``extraction_method='co_mention'``) are EXCLUDED from
-    the density count. The co-mention builder is default-on but its retrieval
-    consumers (Path A / adjacency / seed-score) default off, so its edges must not
-    silently push an agent over ``spreading_activation_density_threshold`` and flip
-    decision retrieval into spreading activation before that rollout is intentional.
+    the density count, because a BUILDER flag must never silently decide whether
+    auto-mode fires — flipping ``comention_linking_enabled`` would otherwise push
+    an agent over ``spreading_activation_density_threshold`` and switch decision
+    retrieval into spreading activation as a side effect.
     ``IS DISTINCT FROM`` keeps NULL/legacy ``extraction_method`` rows counted.
+
+    (The original note here justified the exclusion by saying the retrieval
+    consumers "default off". That is no longer true — Path A, adjacency boost and
+    seed-score are all ``true`` in prod — but the exclusion stands on the
+    builder-flag argument above, which does not depend on consumer state. This
+    is a DENSITY-GATE rule only: it decides whether the mechanism runs. The
+    traversal in ``spreading_activation_search`` is a different question, and
+    applying this same predicate there is what bars spreading from every
+    associative edge in the graph.)
 
     2026-06-13 audit: ``supersedes``, ``contradicts``, ``happened_before``, and
     ``co_occurred`` are likewise excluded — none are real associative
@@ -83,7 +89,7 @@ async def spreading_activation_search(
     settings: Settings,
     limit: int = 20,
     exclude_ids: set[UUID] | None = None,
-) -> list[tuple[UUID, str, float]]:
+) -> list[tuple[UUID, str, float, int]]:
     """Run spreading activation CTE and return activated nodes.
 
     Args:
@@ -98,7 +104,9 @@ async def spreading_activation_search(
             PR #556). Traversal still passes THROUGH excluded nodes.
 
     Returns:
-        List of (node_id, node_type, activation) sorted by activation desc.
+        List of ``(node_id, node_type, activation, depth)`` sorted by
+        activation desc.
+
         Aggregation across paths is MAX (bounded best-path), not SUM: each
         path's activation is seed_score × ∏(weight × decay) ≤ 1 when weights
         ≤ 1, so MAX keeps results on the seeds' [0,1] score scale and makes
@@ -107,6 +115,17 @@ async def spreading_activation_search(
         merge.) The per-hop weight term is clamped to 1.0 in the CTE:
         ``brain.graph_edges.weight`` has no DB CHECK, so the bound is
         enforced here rather than assumed of every writer.
+
+        A8: ``depth`` is the hop count of the WINNING path — the one whose
+        activation survived the MAX — not ``MIN(depth)``. Those differ when a
+        node is reachable both by a long strong path and a short weak one, and
+        the winning path is the one the returned score actually describes.
+        Implemented with ``ROW_NUMBER()`` rather than ``DISTINCT ON`` because
+        the suite's default backend is SQLite (same constraint that forced
+        ``CASE`` over ``LEAST`` below). Callers pass it to F091 as the real
+        hop; before this, ``retrieval_pipeline`` hardcoded ``hop=2`` for every
+        spreading expansion, so production telemetry could not separate a
+        one-hop neighbour from a two-hop one.
     """
     if not seed_nodes:
         return []
@@ -118,10 +137,48 @@ async def spreading_activation_search(
         "agent_id": agent_id,
         "result_limit": int(limit),
     }
-    exclude_clause = ""
+    conditions: list[str] = []
     if exclude_ids:
         params["excluded_ids"] = [str(x) for x in exclude_ids]
-        exclude_clause = "WHERE id != ALL(CAST(:excluded_ids AS uuid[]))"
+        conditions.append("act.id != ALL(CAST(:excluded_ids AS uuid[]))")
+
+    # A6: a decision whose outcome the resolver refuses can NEVER be rendered,
+    # but it still clears the activation floor and consumes a slot in the
+    # caller's result window — measured 251 of ~1,891 activated candidates on
+    # prod (24% of everything that survives the floor), from 309 such
+    # endpoints. Push the same outcome predicate
+    # `Brain._resolve_node_descriptions` applies (brain.py, the 2026-07-27
+    # decision_outcome_score_factors decision) down into the CTE so the window
+    # is spent on nodes that can actually reach the model.
+    #
+    # DELIBERATELY CONSERVATIVE — this excludes only rows the Python resolver
+    # would certainly drop. Agent-scoping, missing rows, inactive facts and any
+    # NULL-confidence edge case are left to fall through and be dropped there
+    # as they are today, so this can lose nothing that renders now. It is an
+    # optimisation of the window, not a second filtering policy.
+    demoted_outcomes = [
+        o for o, f in (
+            getattr(settings, "decision_outcome_score_factors", {}) or {}
+        ).items() if f < 1.0
+    ]
+    refusals = ["(d.outcome = 'failure' AND d.confidence = 0.0)"]
+    if demoted_outcomes:
+        placeholders = []
+        for i, outcome in enumerate(demoted_outcomes):
+            params[f"demoted_{i}"] = outcome
+            placeholders.append(f":demoted_{i}")
+        refusals.append(
+            f"COALESCE(d.outcome, 'pending') IN ({', '.join(placeholders)})"
+        )
+    conditions.append(
+        "NOT (act.node_type = 'decision' AND EXISTS ("
+        "  SELECT 1 FROM brain.decisions d"
+        "  WHERE d.id = act.id AND d.agent_id = :agent_id"
+        f"    AND ({' OR '.join(refusals)})"
+        "))"
+    )
+
+    where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     for i, (nid, ntype, score) in enumerate(seed_nodes):
         values_parts.append(f"(CAST(:id_{i} AS UUID), CAST(:type_{i} AS VARCHAR), CAST(:score_{i} AS FLOAT))")
         params[f"id_{i}"] = str(nid)
@@ -160,14 +217,30 @@ async def spreading_activation_search(
                 -- Single source of truth: graph_constants.autobehavior_exclusion_sql.
                 AND {excl_e}
                 AND e.agent_id = :agent_id
+        ),
+        -- A8: keep the winning path's depth alongside its activation.
+        -- ROW_NUMBER over (activation DESC, depth ASC) selects exactly the row
+        -- MAX(activation) used to return, so `total_activation` is unchanged;
+        -- the depth tie-break only decides which of two equally-activated
+        -- paths is reported, preferring the shorter.
+        ranked AS (
+            SELECT act.id, act.node_type, act.activation, act.depth,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY act.id, act.node_type
+                       ORDER BY act.activation DESC, act.depth ASC
+                   ) AS rn
+            FROM activation act
+            {where_clause}
         )
-        SELECT id, node_type, MAX(activation) AS total_activation
-        FROM activation
-        {exclude_clause}
-        GROUP BY id, node_type
+        SELECT id, node_type, activation AS total_activation, depth
+        FROM ranked
+        WHERE rn = 1
         ORDER BY total_activation DESC
         LIMIT :result_limit
     """)
 
     result = await session.execute(sql, params)
-    return [(row.id, row.node_type, float(row.total_activation)) for row in result.all()]
+    return [
+        (row.id, row.node_type, float(row.total_activation), int(row.depth))
+        for row in result.all()
+    ]
