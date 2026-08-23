@@ -25,9 +25,18 @@ Production wiring:
   - ``main.py`` constructs a ResidualActivator after Heart is built and
     sets it via ``Heart.set_residual_activator(...)``.
   - ``recall_deep`` reads ``_session_id`` (injected by F051.4 dispatcher),
-    calls ``compute_activations`` + ``seed_for_spreading`` (consumed by
-    F022 spreading_activation), and passes ``residual_activations`` into
+    calls ``compute_activations`` (``tools.py:1374``), and passes
+    ``residual_activations`` through ``run_recall_pipeline`` into
     ``Heart.recall``.
+  - ``seed_for_spreading`` has NO caller. It shapes residual activations into
+    F022 spreading seeds, but ``run_recall_pipeline``'s Stage 4 builds its seed
+    list only from the current query's decisions + top-3 facts, so cross-turn
+    context never reaches the graph walk. (This docstring previously claimed
+    ``recall_deep`` consumed it; it does not, and never has.) Wiring it is
+    gated on the activation floor, not on the score path: a residual seed
+    enters at ``activation * residual_seed_weight`` (<= 0.3), which needs an
+    edge weight > 0.67 to clear the default 0.1 floor at depth 1 — against a
+    dominant-relation average of 0.410. It would die inside the CTE.
   - ``Heart._recall`` calls ``boost_scores`` on merged candidates BEFORE
     F042 CE rerank (preserves CE sigmoid scoring on its own output).
   - After recall, ``recall_deep`` fires ``record_surfaced`` as

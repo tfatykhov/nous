@@ -828,7 +828,7 @@ class TestSpreadingContentResolution:
 
         with patch(
             "nous.brain.spreading_activation.spreading_activation_search",
-            AsyncMock(return_value=[(SPREAD_FACT_ID, "fact", 0.6)]),
+            AsyncMock(return_value=[(SPREAD_FACT_ID, "fact", 0.6, 1)]),
         ), patch(
             "nous.brain.spreading_activation.compute_graph_density",
             AsyncMock(return_value=5.0),
@@ -850,7 +850,7 @@ class TestSpreadingContentResolution:
 
         with patch(
             "nous.brain.spreading_activation.spreading_activation_search",
-            AsyncMock(return_value=[(SPREAD_FACT_ID, "fact", 0.6)]),
+            AsyncMock(return_value=[(SPREAD_FACT_ID, "fact", 0.6, 1)]),
         ), patch(
             "nous.brain.spreading_activation.compute_graph_density",
             AsyncMock(return_value=5.0),
@@ -875,10 +875,10 @@ class TestSpreadingContentResolution:
         must over-fetch (limit=40) and cap appended results at 20 AFTER
         resolution, so drops backfill from lower-ranked valid nodes."""
         # 30 resolvable hits: first 10 unresolvable (dropped), next 20 resolve.
-        hits = [(UUID(int=1000 + i), "fact", 0.9 - i * 0.01) for i in range(30)]
+        hits = [(UUID(int=1000 + i), "fact", 0.9 - i * 0.01, 1) for i in range(30)]
         resolved = {
             nid: (f"content {i}", datetime(2026, 1, 5, tzinfo=UTC))
-            for i, (nid, _t, _a) in enumerate(hits)
+            for i, (nid, _t, _a, _d) in enumerate(hits)
             if i >= 10
         }
         heart, brain = self._spreading_fixtures(resolved=resolved)
@@ -906,10 +906,10 @@ class TestSpreadingContentResolution:
     @pytest.mark.asyncio
     async def test_spreading_cap_bounds_appended_results(self):
         """Even when everything resolves, at most 20 spreading results append."""
-        hits = [(UUID(int=2000 + i), "fact", 0.9 - i * 0.01) for i in range(30)]
+        hits = [(UUID(int=2000 + i), "fact", 0.9 - i * 0.01, 1) for i in range(30)]
         resolved = {
             nid: (f"content {i}", datetime(2026, 1, 5, tzinfo=UTC))
-            for i, (nid, _t, _a) in enumerate(hits)
+            for i, (nid, _t, _a, _d) in enumerate(hits)
         }
         heart, brain = self._spreading_fixtures(resolved=resolved)
         settings = _make_settings(spreading_activation_enabled="true")
@@ -926,7 +926,7 @@ class TestSpreadingContentResolution:
         spread_ids = [r.id for r in results if r.source == "spreading_activation"]
         assert len(spread_ids) == 20
         # Highest-activation resolvable hits win the cap (order preserved).
-        assert spread_ids == [nid for nid, _t, _a in hits[:20]]
+        assert spread_ids == [nid for nid, _t, _a, _d in hits[:20]]
 
     @pytest.mark.asyncio
     async def test_spreading_zero_resolved_falls_back_to_one_hop(self):
@@ -948,7 +948,7 @@ class TestSpreadingContentResolution:
 
         with patch(
             "nous.brain.spreading_activation.spreading_activation_search",
-            AsyncMock(return_value=[(SPREAD_FACT_ID, "fact", 0.6)]),
+            AsyncMock(return_value=[(SPREAD_FACT_ID, "fact", 0.6, 1)]),
         ):
             results, stats = await run_recall_pipeline(
                 query="anything", heart=heart, brain=brain,
@@ -1046,7 +1046,7 @@ class TestSpreadingHeartSeeds:
         )
         settings = _make_settings(spreading_activation_enabled="true")
         search_mock = AsyncMock(
-            return_value=[(SPREAD_NEIGHBOR_ID, "fact", 0.5)]
+            return_value=[(SPREAD_NEIGHBOR_ID, "fact", 0.5, 1)]
         )
 
         with patch(
@@ -1079,7 +1079,7 @@ class TestSpreadingHeartSeeds:
         )
         settings = _make_settings(spreading_activation_enabled="true")
         search_mock = AsyncMock(
-            return_value=[(SPREAD_NEIGHBOR_ID, "fact", 0.5)]
+            return_value=[(SPREAD_NEIGHBOR_ID, "fact", 0.5, 1)]
         )
 
         with patch(
@@ -1118,8 +1118,8 @@ class TestSpreadingHeartSeeds:
         with patch(
             "nous.brain.spreading_activation.spreading_activation_search",
             AsyncMock(return_value=[
-                (SPREAD_NEIGHBOR_ID, "fact", 0.5),
-                (GRAPH_DECISION_ID, "decision", 0.4),
+                (SPREAD_NEIGHBOR_ID, "fact", 0.5, 1),
+                (GRAPH_DECISION_ID, "decision", 0.4, 2),
             ]),
         ):
             results, _stats = await run_recall_pipeline(
@@ -1207,7 +1207,7 @@ class TestSpreadingHeartSeeds:
 
         with patch(
             "nous.brain.spreading_activation.spreading_activation_search",
-            AsyncMock(return_value=[(HEART_GRAPH_DECISION_ID, "decision", 0.6)]),
+            AsyncMock(return_value=[(HEART_GRAPH_DECISION_ID, "decision", 0.6, 1)]),
         ):
             results, _stats = await run_recall_pipeline(
                 query="anything", heart=heart, brain=brain,
@@ -1232,7 +1232,7 @@ class TestSpreadingHeartSeeds:
 
         with patch(
             "nous.brain.spreading_activation.spreading_activation_search",
-            AsyncMock(return_value=[(EPISODE_ID, "episode", 0.7)]),
+            AsyncMock(return_value=[(EPISODE_ID, "episode", 0.7, 1)]),
         ):
             results, _stats = await run_recall_pipeline(
                 query="anything", heart=heart, brain=brain,

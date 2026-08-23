@@ -1607,13 +1607,20 @@ async def _run_stages(
                         limit=_SPREADING_OVERFETCH_LIMIT,
                         exclude_ids=seed_ids | seen_ids | candidate_ids,
                     )
+                    # A4: the floor was a bare `0.1` literal here and in the
+                    # F091 mirror below. Both now read the setting so a
+                    # relative-floor experiment is a config arm; the default
+                    # reproduces the literal exactly.
+                    _floor = float(
+                        getattr(settings, "spreading_activation_floor", 0.1)
+                    )
                     hits = [
-                        (nid, ntype, activation)
-                        for nid, ntype, activation in activated
+                        (nid, ntype, activation, depth)
+                        for nid, ntype, activation, depth in activated
                         if nid not in seed_ids
                         and nid not in seen_ids
                         and nid not in candidate_ids
-                        and activation > 0.1
+                        and activation > _floor
                     ]
                     # Resolve real content + created_at (shared with
                     # brain._neighbors). Ids the resolver omits —
@@ -1622,7 +1629,7 @@ async def _run_stages(
                     # placeholders that ship no information to the LLM
                     # yet consume ranking slots.
                     ids_by_type: dict[str, list[UUID]] = {}
-                    for nid, ntype, _activation in hits:
+                    for nid, ntype, _activation, _depth in hits:
                         ids_by_type.setdefault(ntype, []).append(nid)
                     descriptions = (
                         await brain._resolve_node_descriptions(
@@ -1635,13 +1642,13 @@ async def _run_stages(
                     # built, and the two gates below drop more. Register and
                     # attribute all three, or a spreading run reports only what
                     # survived and looks like it activated nothing else.
-                    for _nid, _ntype, _act in activated:
-                        if _act <= 0.1 and _nid not in seed_ids and _nid not in seen_ids:
+                    for _nid, _ntype, _act, _d in activated:
+                        if _act <= _floor and _nid not in seed_ids and _nid not in seen_ids:
                             tr.add(_nid, _ntype, "spreading_activation", score=_act)
                             tr.drop(_nid, _ntype, BELOW_FLOOR, "spreading_activation_floor")
 
                     n_appended = 0
-                    for nid, ntype, activation in hits:
+                    for nid, ntype, activation, depth in hits:
                         if n_appended >= _SPREADING_RESULT_CAP:
                             # Attribute the rest of the window rather than
                             # breaking — a cap that silently truncates is the
@@ -1671,14 +1678,20 @@ async def _run_stages(
                         # F091: spreading is multi-hop, so the CTE returns an
                         # activation rather than a single (seed, edge) pair —
                         # there is no one seed to attribute. Record the whole
-                        # seed set's origin as the stage and hop=2+ to mark it
-                        # as a traversal result, not a 1-hop neighbour.
+                        # seed set's origin as the stage.
+                        #
+                        # A8: `hop` is now the REAL depth of the winning path,
+                        # reported by the CTE. It was hardcoded 2 here, which
+                        # made every spreading expansion in prod telemetry look
+                        # two-hop and left the depth-1 vs depth-2 split — the
+                        # split the whole depth question turns on — answerable
+                        # only by running a max_depth=1 arm.
                         tr.expansion(
                             seed_id=seeds[0][0] if seeds else nid,
                             seed_type="multi",
                             seed_score=None,
                             neighbor_id=nid, neighbor_type=ntype,
-                            stage="stage4_spreading_activation", hop=2,
+                            stage="stage4_spreading_activation", hop=depth,
                             edge_relation="spreading_activation",
                             edge_weight=activation,
                             path_strength=activation,

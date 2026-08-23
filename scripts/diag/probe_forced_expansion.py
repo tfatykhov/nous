@@ -128,7 +128,7 @@ async def main() -> None:
                     activated = await spreading_activation_search(
                         sa_s, AGENT, [(UUID(str(row["new_id"])), "fact", 1.0)], scoped,
                     )
-                act_ids = [str(nid) for (nid, _t, _s) in activated]
+                act_ids = [str(nid) for (nid, _t, _s, _d) in activated]
                 sp_inactive = await _inactive_ids(eval_db, act_ids)
                 spread_inactive_total += len(sp_inactive)
                 if str(row["old_id"]) in sp_inactive:
