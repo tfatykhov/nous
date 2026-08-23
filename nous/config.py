@@ -923,6 +923,30 @@ class Settings(BaseSettings):
     smart_compress_elbow_threshold: float = Field(
         default=0.3, description="Score cliff threshold for adaptive K"
     )
+    smart_compress_exempt_tools: list[str] = Field(
+        default=["recall_deep", "recall_recent"],
+        description=(
+            "Tools whose output SmartCompress must pass through untouched. "
+            "SmartCompress ranks by ORIGINAL POSITION (30% head + 15% tail) and "
+            "by `_score_line`, a heuristic that scores a line on whether it "
+            "contains a digit, a URL, a file path or an error word — it never "
+            "reads the retrieval score. Applied to memory recall that is the "
+            "curated output of RRF + relevance floors + MMR + CE rerank + graph "
+            "scoring, that is a second and much cruder ranker overriding a "
+            "careful one. Measured on 25 prod-shaped blocks built from real prod "
+            "content: `is_crushable` fires 25/25 (via the uniqueness ratio on "
+            "all 25, via the error regex on 22), blocks are cut 225 -> 75 lines, "
+            "and graph/spreading rows survive at 43.1% against 92.0% for top-10 "
+            "heart rows — a 7x asymmetry against exactly the rows the ranking "
+            "work is meant to promote. "
+            "COST: exempting is +6.0k tokens per call at recall_deep's default "
+            "limit=10 and +8.3k at limit=50 (~72% of that is chunk content, "
+            "whose allotment is flat at NOUS_EPISODE_CHUNK_RECALL_LIMIT). Size "
+            "control for these tools belongs in the pipeline, where scores are "
+            "known — not in a downstream text cutter. "
+            "Set to `[]` to restore compression for every tool (kill switch)."
+        ),
+    )
 
     # F036: Prompt Cache Optimization
     cache_break_detection_enabled: bool = Field(
