@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator
 from uuid import UUID
 
 from nous.api.retrieval_pipeline import run_recall_pipeline
+from nous.api.tools import _format_pipeline_text
 from nous.brain.brain import Brain
 from nous.brain.embeddings import EmbeddingProvider
 from nous.config import Settings
@@ -129,6 +130,17 @@ class QrelResult:
     error: str | None = None
     gold_ids: list[UUID] = field(default_factory=list)
     retrieved_legs: list[str] = field(default_factory=list)
+    # The ids the FORMATTER reported emitting (`_format_pipeline_text`'s
+    # `emitted_out`) — what the agent actually receives, as opposed to
+    # `retrieved_ids`, which is what the pipeline returned. Deliberately a
+    # SEPARATE field rather than a correction to `retrieved_ids`, so any future
+    # divergence between the two is visible instead of silently reconciled.
+    # ``None`` means NOT COLLECTED (the errored-qrel path, or a caller that
+    # constructs QrelResult by hand). An empty LIST means collected and nothing
+    # was served — a real 0.0 for that qrel. codex P1: the first cut used a
+    # truthiness filter, which silently merged those two and both biased the
+    # mean upward and turned an all-empty run into "not measured".
+    served_ids: list[UUID] | None = None
     # N1/codex-P1: per-stage failure counts from PipelineStats.n_stage_errors,
     # including Heart's per-leg failures ("heart_recall_fact" etc). A non-empty
     # dict means this qrel's metrics are based on a PARTIAL retrieval — the
@@ -600,6 +612,34 @@ async def _run_one(
             {},
         )
 
+    # The harness scores `retrieved_ids` — what the PIPELINE returned. The agent
+    # sees the TEXT the formatter renders from it, which is a subset under a
+    # narrowed scope. Ask the formatter what it emitted rather than re-deriving
+    # its section rules (`metrics.py:49-55` records two attempts that overstated
+    # by doing exactly that).
+    #
+    # HONEST SCOPE: on a well-formed qrel this can never change a GOLD verdict.
+    # `memory_types` exists to route retrieval to where gold lives, so gold type
+    # is inside the scope, and the formatter only drops types OUTSIDE the scoped
+    # sections. `r_at_served` is therefore identically recall-over-retrieved on
+    # every qrel in the repo — it is a CONSERVATION TRIPWIRE for formatter,
+    # scope and collector drift, not a sharper measurement.
+    served: list = []
+    try:
+        _format_pipeline_text(
+            pipeline_results, stats,
+            # `memory_types or ["all"]`: None crashes on `"all" in None`, and
+            # `[]` would silently narrow every section to nothing.
+            memory_types or ["all"],
+            emitted_out=served,
+        )
+        served_ids = [i for i, _t in served]
+    except Exception:
+        # Never let a reporting side-channel fail a scored run.
+        logger.warning("F051: served-id collection failed for qrel %d", idx,
+                       exc_info=True)
+        served_ids = None  # not collected — must not score as 0.0
+
     retrieved_ids = [r.id for r in pipeline_results]
     retrieved_types = [r.type for r in pipeline_results]
     retrieved_legs = [_leg_of(r) for r in pipeline_results]
@@ -622,6 +662,7 @@ async def _run_one(
             retrieved_ids=retrieved_ids,
             retrieved_types=retrieved_types,
             retrieved_legs=retrieved_legs,
+            served_ids=served_ids,
             rank_of_first_gold=rank,
             n_gold_in_top_k=n_in_top,
             n_gold_total=len(qrel.gold_ids),

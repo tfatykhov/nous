@@ -352,8 +352,8 @@ def _metrics_table(run_results: list["RunResult"], top_k: int = 10) -> str:
     """
     header = (
         f"| config | n_qrels | n_errored | MRR | P@1 | P@{top_k} | R@{top_k} "
-        f"| nDCG@{top_k} |\n"
-        "|---|---:|---:|---:|---:|---:|---:|---:|"
+        f"| nDCG@{top_k} | R@served |\n"
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
     )
     rows = []
     for r in run_results:
@@ -361,7 +361,13 @@ def _metrics_table(run_results: list["RunResult"], top_k: int = 10) -> str:
         rows.append(
             f"| {r.config.name} | {m.n_qrels} | {m.n_errored} | "
             f"{m.mrr:.3f} | {m.p_at_1:.3f} | {m.p_at_10:.3f} | "
-            f"{m.r_at_10:.3f} | {m.ndcg_at_10:.3f} |"
+            f"{m.r_at_10:.3f} | {m.ndcg_at_10:.3f} | "
+            # "n/a" when uncollected — never 0.000, which would read as a
+            # conservation failure rather than an absent measurement.
+            # A trailing "*" marks a value averaged over a SUBSET, so a partial
+            # collection cannot read as a whole-run number.
+            f"{'n/a' if m.r_at_served is None else format(m.r_at_served, '.3f')}"
+            f"{'*' if m.n_served_uncollected else ''} |"
         )
     return header + "\n" + "\n".join(rows)
 
@@ -636,6 +642,11 @@ def _metrics_to_dict(m: MetricsResult) -> dict:
         "r_at_5": m.r_at_5,
         "r_at_10": m.r_at_10,
         "ndcg_at_10": m.ndcg_at_10,
+        # None (not 0.0) when uncollected — JSON null, so a consumer can tell
+        # "not measured" from "conservation broke".
+        "r_at_served": m.r_at_served,
+        # Non-zero => r_at_served covers only a subset of the run's qrels.
+        "n_served_uncollected": m.n_served_uncollected,
         "n_qrels": m.n_qrels,
         "n_errored": m.n_errored,
         # N7: the untruncated view. Keys are stringified because JSON object

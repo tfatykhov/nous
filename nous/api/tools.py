@@ -636,8 +636,36 @@ def _format_pipeline_text(
     search_types: list[str],
     parent_episodes: list[tuple[str, str]] | None = None,
     session_group_heart: bool = False,
+    emitted_out: list[tuple[Any, str]] | None = None,
 ) -> str:
     """Format ``run_recall_pipeline`` output into legacy ``recall_deep`` text.
+
+    ``emitted_out``: optional side-channel collector. When a list is passed,
+    every result this function actually WRITES INTO THE TEXT is appended as
+    ``(id, type)`` at its point of emission. ``None`` (default) collects
+    nothing, so the byte-identical ``recall_deep`` snapshot contract is
+    untouched — this is the same side-channel idiom as ``dropped_out`` on
+    ``heart.recall`` / chunk search (``retrieval_pipeline.py:910, 991``).
+
+    THE POINT IS THAT IT REPORTS RATHER THAN PREDICTS. Which results reach the
+    text depends on `search_types` section eligibility, and every attempt to
+    re-derive that rule elsewhere has been wrong in one direction or the other:
+    ``metrics.py:49-55`` records two harness attempts that OVERSTATED served
+    recall, and the F091 scope-filter block this replaces was incomplete under
+    ``search_types=["decision"]`` (a ``heart_graph_memory`` row was dropped by
+    the formatter yet read ``rendered``) after an earlier revision had inverted
+    the error in the opposite direction. Appending at the emission site is the
+    only version that cannot drift from what was written.
+
+    A ``(id, type)`` pair may legitimately appear TWICE — the same decision
+    renders in both "Graph-Connected Decisions" and "Brain Decisions" when it
+    was found by Stage 2 and by Stage 3, which do not cross-dedup. Consumers
+    must use multiset/set semantics, never a uniqueness assert.
+
+    Parent episodes are deliberately NOT collected: they are served content that
+    is not in ``results`` (they arrive via the ``parent_episodes`` argument), so
+    collecting them would break ``emitted_out ⊆ results`` for every consumer.
+    See ``test_parent_episodes_are_not_collected``.
 
     Byte-identical to the pre-F051 ``recall_deep`` text output for the same
     query + heart/brain state — except when ``parent_episodes`` is provided
@@ -651,6 +679,13 @@ def _format_pipeline_text(
     """
     search_all = "all" in search_types
     results_text: list[str] = []
+
+    def _emit(r: Any) -> None:
+        """Record that ``r`` was written into the text. Call at the emission
+        site, immediately alongside the ``results_text.append`` that renders it,
+        so the two cannot drift."""
+        if emitted_out is not None:
+            emitted_out.append((r.id, r.type))
 
     def _recency_tag(r: "Any") -> str:
         # §1: inline [current|superseded YYYY-MM] tag. Empty string when no
@@ -740,6 +775,7 @@ def _format_pipeline_text(
                             f"{i}. [{result.type}] {_via_tag(result)}{result.description}{_recency_tag(result)} "
                             f"(id: {result.id}, score: {result.score:.3f})"
                         )
+                        _emit(result)
                         i += 1
                 if no_session:
                     if session_buckets:
@@ -749,6 +785,7 @@ def _format_pipeline_text(
                             f"{i}. [{result.type}] {_via_tag(result)}{result.description}{_recency_tag(result)} "
                             f"(id: {result.id}, score: {result.score:.3f})"
                         )
+                        _emit(result)
                         i += 1
             else:
                 # Flat output (byte-identical to pre-P1.1 when no graph-memory neighbours
@@ -758,6 +795,7 @@ def _format_pipeline_text(
                         f"{i}. [{result.type}] {_via_tag(result)}{result.description}{_recency_tag(result)} "
                         f"(id: {result.id}, score: {result.score:.3f})"
                     )
+                    _emit(result)
         elif not exemplar_rows:
             # Codex r14: suppress the empty-section placeholder when the examples
             # block will render below — "No results found." would contradict it.
@@ -787,6 +825,7 @@ def _format_pipeline_text(
                 f"{i}. [via {n.edge_relation}] {n.description} "
                 f"(id: {n.id}, score: {n.score:.3f})"
             )
+            _emit(n)
 
     # NOTE: Path-A graph-memory neighbours (stage_origin == "heart_graph_memory") are no
     # longer a trailing section — they are interleaved into the ranked Heart Memory list
@@ -844,11 +883,13 @@ def _format_pipeline_text(
                     f"confidence: {confidence:.2f}{pattern_str} "
                     f"(id: {dec.id}{score_str})"
                 )
+                _emit(dec)
             for j, n in enumerate(brain_graph, len(decision_results) + 1):
                 results_text.append(
                     f"{j}. [via graph: {n.edge_relation}] {n.description} "
                     f"(id: {n.id}, score: {n.score:.3f})"
                 )
+                _emit(n)
         elif not exemplar_rows:
             # Codex r14: same as Heart Memory above — no empty placeholder when
             # the examples block will render. Byte-identical without exemplars.
@@ -906,6 +947,10 @@ def _format_pipeline_text(
                 results_text.append(f"{i}.{sim_s} {utterance[:500]}\nlabel: {label}")
             else:
                 results_text.append(f"{i}.{sim_s} {desc[:500]}")
+            # NB: this section prints no "(id: …)", so a test that verifies
+            # served-ness by regexing rendered ids is silently blind here.
+            # Collection works because the id comes from the row, not the text.
+            _emit(r)
 
     return "\n".join(results_text)
 
@@ -1495,31 +1540,6 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # them rendered, then commit — committing before this fetch left
             # them absent from n_candidates/n_rendered on the one retrieval
             # path where the flag makes them appear.
-            # F091: the formatter gates the Brain Decisions section on
-            # `search_all or "decision" in search_types` (see :455). Spreading
-            # activation seeded from fact results can put a DECISION into
-            # `results` on a memory_types=["fact"] call, where the pipeline
-            # marks it rendered but the formatter never emits it. Attribute
-            # that scope filter rather than counting it as delivered.
-            # (Raised in review round 1 and again independently; my earlier
-            # passes fixed other post-commit gaps and left this one.)
-            if _tr is not None:
-                _fmt_all = "all" in search_types
-                if not (_fmt_all or "decision" in search_types):
-                    for _r in results:
-                        # ONLY what the Brain Decisions section gates (:455):
-                        # source=="brain" plus its brain_graph bucket. The
-                        # Graph-Connected Decisions section (:440) emits
-                        # heart_graph decisions UNCONDITIONALLY, so downgrading
-                        # every decision-typed result — as this first did —
-                        # reported content that DID reach the model as filtered
-                        # out, inverting the error it was written to fix.
-                        _origin = _r.metadata.get("stage_origin")
-                        if _r.source == "brain" or _origin == "brain_graph":
-                            _tr.mark_not_delivered(
-                                _r.id, _r.type, SLICED_OFF,
-                                "formatter_scope_filter",
-                            )
             if _tr is not None and parent_episodes:
                 for _rank, (_ep_id, _summary) in enumerate(parent_episodes):
                     _tr.add(_ep_id, "episode", "parent_episode",
@@ -1533,10 +1553,46 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # was delivered while the tool returned only an error. Committing
             # first also let the exception handler attempt a SECOND insert on
             # the same trace id, which merely collided on the primary key.
+            _emitted: list[tuple[Any, str]] | None = [] if _tr is not None else None
             text = _format_pipeline_text(
                 results, stats, search_types, parent_episodes=parent_episodes,
                 session_group_heart=getattr(settings, "session_group_heart_section", False),
+                emitted_out=_emitted,
             )
+            # F091: attribute the formatter's scope filter from what it REPORTED
+            # emitting, not from a re-derivation of its section rules.
+            #
+            # The block this replaces predicted eligibility: it fired only when
+            # `decision` was absent from `search_types` and covered only
+            # `source=="brain"` / `stage_origin=="brain_graph"`. That was
+            # incomplete — under `search_types=["decision"]` a
+            # `heart_graph_memory` row is dropped by the formatter and still
+            # read `rendered` — and an earlier revision of the same block had
+            # the error inverted, downgrading rows that DID reach the model.
+            # Two failures in opposite directions from one predicate is the
+            # signature of predicting a rule instead of asking its owner.
+            #
+            # Set semantics, not a count: the same decision legitimately renders
+            # in BOTH the Graph-Connected and Brain sections (Stage 2 and Stage 3
+            # do not cross-dedup), so `_emitted` may hold a duplicate pair.
+            if _tr is not None and _emitted is not None:
+                _emitted_keys = set(_emitted)
+                # The parent-episode section (:1540-1550) renders UNCONDITIONALLY
+                # and is marked rendered above, but its ids are not collected —
+                # they arrive via `parent_episodes`, not `results`. An episode
+                # that is in BOTH (e.g. reached through heart_graph_memory on a
+                # decision-only recall) would otherwise be downgraded here after
+                # its summary genuinely reached the model, re-creating in a new
+                # place exactly the false-negative this block was written to end.
+                _parent_ids = {str(_e) for _e, _ in (parent_episodes or ())}
+                for _r in results:
+                    if (_r.id, _r.type) in _emitted_keys:
+                        continue
+                    if _r.type == "episode" and str(_r.id) in _parent_ids:
+                        continue
+                    _tr.mark_not_delivered(
+                        _r.id, _r.type, SLICED_OFF, "formatter_scope_filter",
+                    )
             if _rl is not None and _tr is not None:
                 try:
                     _rl.commit(_tr)

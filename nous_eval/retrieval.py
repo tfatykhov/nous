@@ -1102,6 +1102,14 @@ def _metrics_compact(run: "RunResult", top_k: int = 10) -> dict:
         "r_at_5": m.r_at_5,
         "r_at_10": m.r_at_10,
         "ndcg_at_10": m.ndcg_at_10,
+        # Persisted so historical run-history can detect formatter/collector
+        # drift after the fact; None when uncollected.
+        "r_at_served": m.r_at_served,
+        # MUST travel with the average. This payload is built independently of
+        # the report file, which is explicitly not guaranteed to survive — so
+        # without the gap count a historical consumer cannot tell a complete
+        # 1.0 from a partial one, and the tripwire silently becomes a claim.
+        "n_served_uncollected": m.n_served_uncollected,
         "n_qrels": m.n_qrels,
         "n_errored": m.n_errored,
         # N7: the untruncated view + the depth these numbers mean.
