@@ -2398,6 +2398,73 @@ def _f065_provenance_penalty(
     the penalty from double-applying.
     """
     if neighbor.edge_relation == "spreading_activation":
+        # C-S: correct an off-by-one in the decay exponent.
+        #
+        # The CTE multiplies by `spreading_activation_decay` on EVERY hop
+        # including the first, so `activation = seed * PROD(w) * decay^depth`.
+        # Its sibling — the 1-hop leg this branch REPLACES whenever spreading
+        # succeeds (Stage 4 is either/or) — scores the identical (seed, edge,
+        # neighbour) triple as `seed * w`, undecayed. Multiplying again by
+        # `graph_recall_decay` here made the gap 1/(0.5*0.7) = 2.857x.
+        #
+        # Dividing by one decay factor yields `seed * PROD(w) * decay^(depth-1)`:
+        # the first hop is undecayed (it is the same edge the 1-hop leg walks,
+        # so distance-1 is the baseline, not something to penalise) and each
+        # ADDITIONAL hop is still discounted. Depth-1 reaches exact parity with
+        # 1-hop; depth-2 keeps exactly one decay.
+        #
+        # The bound MAX aggregation relies on survives: at depth 1 the result is
+        # `seed * w` with w clamped to 1.0 in the CTE, so score <= seed <= 1.
+        #
+        # Measured counterfactual over 64 prod retrievals / 848 rendered
+        # spreading rows: today and the earlier "just drop graph_recall_decay"
+        # proposal (x1.43) BOTH put 0 spreading rows in the top 10 — 1.43x lifts
+        # the peak to 0.479, still under the 0.72-0.83 direct-hit cutline, so it
+        # is a measured no-op. Parity puts 2 there (peak 0.958) at 0.03 evictions
+        # per call. Small — depth-1 is 92% inferred edges averaging weight 0.41 —
+        # but non-zero, and it is a PREREQUISITE: while spreading rows cannot
+        # rank, no amount of C-R/C-W work upstream can show up.
+        # PARITY IS DEFINED RELATIVE TO A SCORING POLICY, so it is gated on the
+        # policy actually in force (codex P2). `seed * w` is what the 1-hop leg
+        # returns only on the seed-score branch with no provenance penalty —
+        # which is prod (`NOUS_GRAPH_NEIGHBOR_SEED_SCORE_ENABLED=true`,
+        # `NOUS_GRAPH_INFERRED_EDGE_PENALTY=1.0`). Measured at seed 0.8 / w 0.9:
+        #
+        #   seed_score=T, penalty=1.0 (prod)  1-hop 0.7200  spreading 0.7200  parity
+        #   seed_score=F                      1-hop 0.6300  spreading 0.7200  PROMOTION
+        #   penalty=0.7 (F065 on)             1-hop 0.5040  spreading 0.7200  PROMOTION
+        #
+        # Ungated, the C-S arm would measure parity, a mild promotion, or a large
+        # one depending on two unrelated settings — so it could not attribute its
+        # own result. The penalty cannot be mirrored onto a spreading row instead:
+        # an activation composes several edges of mixed provenance, so there is no
+        # single `extraction_method` to price. When the policy does not match, the
+        # flag goes INERT (today's scoring) rather than silently promoting.
+        #
+        # WHY NO PER-SEED PROVENANCE (codex P2 #2). Spreading is seeded by
+        # decisions AND heart facts, and the Stage 4 1-hop fallback expands only
+        # `decision_results` — so a fact-seeded row has no Stage 4 counterpart.
+        # But it does have an equivalent: Path A (Stage 2b) expands fact seeds and
+        # scores them through this same `_score_memory_neighbor` seed-score branch.
+        # Both equivalents therefore compute `seed * w` — measured 0.7200 each at
+        # seed 0.8 / w 0.9 — so the parity TARGET is identical whichever seed won
+        # the path, and a uniform correction is exact for both. That is what makes
+        # it safe that the CTE does not retain the winning seed's origin.
+        # `test_both_equivalent_legs_share_one_formula` pins the coincidence, so
+        # if Path A's scoring ever diverges from the 1-hop leg's, this argument
+        # fails loudly instead of silently.
+        # Caveat: with `heart_graph_all_types_enabled=false` (config default, but
+        # `true` in prod) Path A does not run, so a fact-seeded row has no live
+        # equivalent leg at all. NOT gated on it — that would also disable the
+        # well-defined decision-origin case for no benefit.
+        if (
+            getattr(settings, "spreading_score_depth1_parity", False)
+            and getattr(settings, "graph_neighbor_seed_score_enabled", False)
+            and float(getattr(settings, "graph_inferred_edge_penalty", 1.0)) >= 1.0
+        ):
+            sa_decay = float(getattr(settings, "spreading_activation_decay", 0.5))
+            if sa_decay > 0.0:
+                return base_score / sa_decay
         return base_score * decay
     method = neighbor.extraction_method or "heuristic"
     penalty = settings.graph_inferred_edge_penalty if method == "inferred" else 1.0
