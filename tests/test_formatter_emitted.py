@@ -308,3 +308,64 @@ class TestHarnessMetric:
         for row in data:
             assert row.count("|") == n, f"data row has {row.count('|')} cells, header {n}"
         assert "R@served" in header, "and the column must be named"
+
+    def test_partial_collection_is_visible_not_dissolved(self):
+        """codex P2 r3. One `_format_pipeline_text` raise leaves a single qrel
+        with `served_ids=None`. Excluding it silently presents a plausible number
+        computed over fewer qrels than the run — the reader cannot tell.
+        """
+        from nous_eval.metrics import compute_metrics
+        g = uuid4()
+        ok = self._qr(gold_ids=[g], retrieved_ids=[g], served_ids=[g],
+                      n_gold_in_top_k=1, rank_of_first_gold=1)
+        failed = self._qr(qrel_index=1, gold_ids=[g], retrieved_ids=[g],
+                          n_gold_in_top_k=1, rank_of_first_gold=1)  # served_ids=None
+        m = compute_metrics([ok, failed])
+        assert m.r_at_served == pytest.approx(1.0), "the collected qrel still scores"
+        assert m.n_served_uncollected == 1, "and the gap is reported, not hidden"
+
+    def test_partial_collection_is_flagged_in_the_operator_table(self):
+        from nous_eval.report import _metrics_table
+        from nous_eval.retrieval_runner import RetrievalConfig, RunResult
+        g = uuid4()
+        run = RunResult(
+            config=RetrievalConfig(name="cfg"),
+            per_qrel=[
+                self._qr(gold_ids=[g], retrieved_ids=[g], served_ids=[g],
+                         n_gold_in_top_k=1, rank_of_first_gold=1),
+                self._qr(qrel_index=1, gold_ids=[g], retrieved_ids=[g],
+                         n_gold_in_top_k=1, rank_of_first_gold=1),
+            ],
+            duration_seconds=0.0)
+        assert "*" in _metrics_table([run], top_k=10).splitlines()[-1]
+
+
+class TestParentEpisodesSurviveReconciliation:
+    """codex P2 r3 — a regression I introduced.
+
+    The parent-episode section renders UNCONDITIONALLY and is marked rendered
+    before the reconciliation loop, but its ids are not collected (they arrive
+    via `parent_episodes`, not `results`). An episode present in BOTH would be
+    downgraded to not-delivered after its summary genuinely reached the model —
+    re-creating, in a new place, the exact false negative the loop replaced.
+    """
+
+    def test_an_episode_rendered_as_a_parent_is_not_marked_dropped(self):
+        from uuid import uuid4 as _u
+        ep_id = _u()
+        # The row is scope-excluded (decision-only recall), but the SAME episode
+        # is delivered by the parent-episode section.
+        row = _row("episode", "graph_expanded", "heart_graph_memory",
+                   desc="UNIQUEPAR body", edge="related_to")
+        object.__setattr__(row, "id", ep_id)
+        out: list = []
+        text = _format_pipeline_text(
+            [row], PipelineStats(), ["decision"],
+            parent_episodes=[(str(ep_id), "the parent summary")],
+            emitted_out=out)
+        assert "UNIQUEPAR" not in text, "the row itself is scope-excluded"
+        assert "the parent summary" in text, "but the episode IS delivered"
+        assert (ep_id, "episode") not in set(out), "collector reports only rows"
+        # The reconciliation guard in tools.py keys on exactly this overlap.
+        parent_ids = {str(ep_id)}
+        assert row.type == "episode" and str(row.id) in parent_ids

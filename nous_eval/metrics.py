@@ -85,6 +85,13 @@ class MetricsResult:
     # Deliberately excluded from ``compute_delta`` and every gate metric list:
     # those do ``float(getattr(...))``, which raises TypeError on None.
     r_at_served: float | None = None
+    # How many otherwise-valid qrels had NO served collection. Non-zero means
+    # `r_at_served` was averaged over a SUBSET — codex P2: a single
+    # `_format_pipeline_text` raise leaves one qrel with `served_ids=None`, and
+    # silently excluding it presents a plausible number computed over fewer
+    # qrels than the run. Reported so partiality is visible rather than
+    # dissolved into the mean, mirroring `n_errored`.
+    n_served_uncollected: int = 0
 
 
 @dataclass(frozen=True)
@@ -267,6 +274,9 @@ def compute_metrics(
         n_errored=n_errored,
         recall_curve=curve,
         r_at_served=_recall_at_served(valid),
+        n_served_uncollected=sum(
+            1 for q in valid if getattr(q, "served_ids", None) is None
+        ),
     )
 
 

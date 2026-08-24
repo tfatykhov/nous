@@ -1577,11 +1577,22 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # do not cross-dedup), so `_emitted` may hold a duplicate pair.
             if _tr is not None and _emitted is not None:
                 _emitted_keys = set(_emitted)
+                # The parent-episode section (:1540-1550) renders UNCONDITIONALLY
+                # and is marked rendered above, but its ids are not collected —
+                # they arrive via `parent_episodes`, not `results`. An episode
+                # that is in BOTH (e.g. reached through heart_graph_memory on a
+                # decision-only recall) would otherwise be downgraded here after
+                # its summary genuinely reached the model, re-creating in a new
+                # place exactly the false-negative this block was written to end.
+                _parent_ids = {str(_e) for _e, _ in (parent_episodes or ())}
                 for _r in results:
-                    if (_r.id, _r.type) not in _emitted_keys:
-                        _tr.mark_not_delivered(
-                            _r.id, _r.type, SLICED_OFF, "formatter_scope_filter",
-                        )
+                    if (_r.id, _r.type) in _emitted_keys:
+                        continue
+                    if _r.type == "episode" and str(_r.id) in _parent_ids:
+                        continue
+                    _tr.mark_not_delivered(
+                        _r.id, _r.type, SLICED_OFF, "formatter_scope_filter",
+                    )
             if _rl is not None and _tr is not None:
                 try:
                     _rl.commit(_tr)
