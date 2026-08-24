@@ -2398,6 +2398,36 @@ def _f065_provenance_penalty(
     the penalty from double-applying.
     """
     if neighbor.edge_relation == "spreading_activation":
+        # C-S: correct an off-by-one in the decay exponent.
+        #
+        # The CTE multiplies by `spreading_activation_decay` on EVERY hop
+        # including the first, so `activation = seed * PROD(w) * decay^depth`.
+        # Its sibling — the 1-hop leg this branch REPLACES whenever spreading
+        # succeeds (Stage 4 is either/or) — scores the identical (seed, edge,
+        # neighbour) triple as `seed * w`, undecayed. Multiplying again by
+        # `graph_recall_decay` here made the gap 1/(0.5*0.7) = 2.857x.
+        #
+        # Dividing by one decay factor yields `seed * PROD(w) * decay^(depth-1)`:
+        # the first hop is undecayed (it is the same edge the 1-hop leg walks,
+        # so distance-1 is the baseline, not something to penalise) and each
+        # ADDITIONAL hop is still discounted. Depth-1 reaches exact parity with
+        # 1-hop; depth-2 keeps exactly one decay.
+        #
+        # The bound MAX aggregation relies on survives: at depth 1 the result is
+        # `seed * w` with w clamped to 1.0 in the CTE, so score <= seed <= 1.
+        #
+        # Measured counterfactual over 64 prod retrievals / 848 rendered
+        # spreading rows: today and the earlier "just drop graph_recall_decay"
+        # proposal (x1.43) BOTH put 0 spreading rows in the top 10 — 1.43x lifts
+        # the peak to 0.479, still under the 0.72-0.83 direct-hit cutline, so it
+        # is a measured no-op. Parity puts 2 there (peak 0.958) at 0.03 evictions
+        # per call. Small — depth-1 is 92% inferred edges averaging weight 0.41 —
+        # but non-zero, and it is a PREREQUISITE: while spreading rows cannot
+        # rank, no amount of C-R/C-W work upstream can show up.
+        if getattr(settings, "spreading_score_depth1_parity", False):
+            sa_decay = float(getattr(settings, "spreading_activation_decay", 0.5))
+            if sa_decay > 0.0:
+                return base_score / sa_decay
         return base_score * decay
     method = neighbor.extraction_method or "heuristic"
     penalty = settings.graph_inferred_edge_penalty if method == "inferred" else 1.0

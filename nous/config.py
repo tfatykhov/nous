@@ -1223,6 +1223,34 @@ class Settings(BaseSettings):
             "max 248), so each extra hop is an order-of-magnitude cost step."
         ),
     )
+    spreading_score_depth1_parity: bool = Field(
+        default=False,
+        description=(
+            "F022 C-S. When true, a spreading row scores "
+            "`activation / spreading_activation_decay` instead of "
+            "`activation * graph_recall_decay` — correcting an off-by-one in "
+            "the decay exponent. The CTE decays EVERY hop including the first "
+            "(`decay^depth`), while the 1-hop leg that spreading REPLACES "
+            "scores the identical (seed, edge, neighbour) triple as `seed * w` "
+            "undecayed; the extra `graph_recall_decay` made the gap 2.857x. "
+            "This yields `decay^(depth-1)`: depth-1 at exact parity with 1-hop, "
+            "each ADDITIONAL hop still discounted. The MAX-aggregation bound "
+            "holds (depth-1 = seed * w, w clamped to 1.0, so <= seed <= 1). "
+            "MEASURED over 64 prod retrievals / 848 rendered spreading rows: "
+            "today AND the weaker 'just drop graph_recall_decay' variant "
+            "(x1.43) both put ZERO spreading rows in the top 10 — 1.43x only "
+            "lifts the peak to 0.479 against a 0.72-0.83 cutline, so it is a "
+            "measured no-op. Parity puts 2 there (peak 0.958) at 0.03 evictions "
+            "per call. Modest, because depth-1 is 92% inferred edges averaging "
+            "weight 0.41 — but it is a PREREQUISITE: while spreading rows "
+            "cannot rank, upstream C-R/C-W work cannot show up. "
+            "Default OFF: this is a ranking change and no relevance oracle "
+            "exists yet to judge whether the 2 promoted rows beat what they "
+            "evict. Membership-invariant by construction — the floor and cap "
+            "act on `activation` BEFORE scoring — so recall@served cannot move; "
+            "if it does, the harness is wrong."
+        ),
+    )
     # A4: was a bare `activation > 0.1` literal at two sites in
     # retrieval_pipeline.py — the filter and its F091 telemetry mirror. Hoisted
     # so the floor becomes a config arm rather than a code change. Default is

@@ -365,3 +365,118 @@ async def test_cte_excludes_decisions_the_resolver_would_refuse(brain, session):
         session, brain.agent_id, [(seed.id, "decision", 0.9)], off,
     )
     assert demoted.id in {r[0] for r in without_filter}
+
+
+# ---------------------------------------------------------------------------
+# C-S — depth-1 parity with the 1-hop leg spreading replaces
+# ---------------------------------------------------------------------------
+
+
+class TestDepth1Parity:
+    """The CTE decays every hop INCLUDING the first, and the pipeline then
+    multiplied by `graph_recall_decay` again — so a spreading row scored 2.857x
+    below the identical (seed, edge, neighbour) triple reached by the 1-hop leg
+    that spreading suppresses. The fix divides out one decay factor, giving
+    `decay^(depth-1)`.
+    """
+
+    def _spread_row(self, activation):
+        from nous.brain.schemas import NeighborResult
+        return NeighborResult(
+            id=SPREAD_A, node_type="fact", description="n",
+            edge_relation="spreading_activation", edge_weight=activation,
+            created_at=RESOLVED_AT,
+        )
+
+    def _one_hop_row(self, seed_score, weight):
+        from nous.brain.schemas import NeighborResult
+        n = NeighborResult(
+            id=SPREAD_B, node_type="fact", description="n",
+            edge_relation="related_to", edge_weight=weight,
+            created_at=RESOLVED_AT, extraction_method="inferred",
+        )
+        n.seed_score = seed_score
+        return n
+
+    def test_flag_off_is_todays_behaviour(self):
+        from nous.api.retrieval_pipeline import _score_memory_neighbor
+        s = _make_settings(graph_recall_decay=0.7)
+        s.spreading_score_depth1_parity = False
+        s.spreading_activation_decay = 0.5
+        assert _score_memory_neighbor(self._spread_row(0.25), s) == pytest.approx(0.175)
+
+    def test_flag_on_divides_out_one_decay(self):
+        from nous.api.retrieval_pipeline import _score_memory_neighbor
+        s = _make_settings(graph_recall_decay=0.7)
+        s.spreading_score_depth1_parity = True
+        s.spreading_activation_decay = 0.5
+        # activation 0.25 = seed 0.5 * w 1.0 * decay 0.5 at depth 1
+        assert _score_memory_neighbor(self._spread_row(0.25), s) == pytest.approx(0.5)
+
+    def test_depth1_reaches_parity_with_the_one_hop_leg(self):
+        """The POINT of the change, not just its arithmetic.
+
+        Same seed, same edge weight, same neighbour — reached by spreading vs by
+        the 1-hop leg — must score the same. Before the fix the ratio is 2.857.
+        """
+        from nous.api.retrieval_pipeline import _score_memory_neighbor
+        seed, weight, sa_decay = 0.8, 0.9, 0.5
+        s = _make_settings(graph_recall_decay=0.7)
+        s.graph_neighbor_seed_score_enabled = True
+        s.graph_inferred_edge_penalty = 1.0
+        s.spreading_activation_decay = sa_decay
+
+        one_hop = _score_memory_neighbor(self._one_hop_row(seed, weight), s)
+
+        s.spreading_score_depth1_parity = False
+        before = _score_memory_neighbor(
+            self._spread_row(seed * weight * sa_decay), s)
+        s.spreading_score_depth1_parity = True
+        after = _score_memory_neighbor(
+            self._spread_row(seed * weight * sa_decay), s)
+
+        assert one_hop / before == pytest.approx(2.857, abs=0.01), "the measured gap"
+        assert after == pytest.approx(one_hop), "parity is the target"
+
+    def test_depth2_keeps_exactly_one_decay(self):
+        """Parity must not flatten depth — an extra hop is still discounted."""
+        from nous.api.retrieval_pipeline import _score_memory_neighbor
+        seed, w, d = 0.8, 1.0, 0.5
+        s = _make_settings(graph_recall_decay=0.7)
+        s.spreading_score_depth1_parity = True
+        s.spreading_activation_decay = d
+        depth1 = _score_memory_neighbor(self._spread_row(seed * w * d), s)
+        depth2 = _score_memory_neighbor(self._spread_row(seed * w * d * w * d), s)
+        assert depth2 == pytest.approx(depth1 * d)
+
+    def test_bound_holds_at_the_ceiling(self):
+        """MAX aggregation needs activation <= seed <= 1 to keep spreading on
+        the candidate score scale. Parity must not breach it."""
+        from nous.api.retrieval_pipeline import _score_memory_neighbor
+        s = _make_settings(graph_recall_decay=0.7)
+        s.spreading_score_depth1_parity = True
+        s.spreading_activation_decay = 0.5
+        # strongest possible depth-1: seed 1.0, weight 1.0
+        assert _score_memory_neighbor(self._spread_row(1.0 * 1.0 * 0.5), s) <= 1.0
+
+    def test_non_spreading_rows_are_untouched_by_the_flag(self):
+        from nous.api.retrieval_pipeline import _score_memory_neighbor
+        s = _make_settings(graph_recall_decay=0.7)
+        s.graph_neighbor_seed_score_enabled = False
+        s.graph_inferred_edge_penalty = 1.0
+        s.spreading_activation_decay = 0.5
+        row = self._one_hop_row(None, 0.9)
+        row.seed_score = None
+        s.spreading_score_depth1_parity = False
+        off = _score_memory_neighbor(row, s)
+        s.spreading_score_depth1_parity = True
+        assert _score_memory_neighbor(row, s) == pytest.approx(off)
+
+    def test_zero_decay_falls_back_rather_than_dividing(self):
+        """Defensive: config bounds decay to (0,1], but a SimpleNamespace in a
+        test could carry 0 — never raise ZeroDivisionError in the scorer."""
+        from nous.api.retrieval_pipeline import _score_memory_neighbor
+        s = _make_settings(graph_recall_decay=0.7)
+        s.spreading_score_depth1_parity = True
+        s.spreading_activation_decay = 0.0
+        assert _score_memory_neighbor(self._spread_row(0.25), s) == pytest.approx(0.175)
