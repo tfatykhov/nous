@@ -285,3 +285,26 @@ class TestHarnessMetric:
         from nous_eval import report, retrieval
         assert "r_at_served" in inspect.getsource(report._metrics_table)
         assert "r_at_served" in inspect.getsource(retrieval._metrics_compact)
+
+    def test_report_table_columns_line_up(self):
+        """codex P2 round 2. I appended a ninth data cell and the header edit
+        silently did not apply, so `r_at_served` rendered under an unnamed
+        column — a markdown table that is wrong in a way no assertion about
+        CONTENT would notice. Pin the shape, not just the presence.
+        """
+        from nous_eval.report import _metrics_table
+        from nous_eval.retrieval_runner import RetrievalConfig, RunResult
+        g = uuid4()
+        run = RunResult(
+            config=RetrievalConfig(name="cfg"),
+            per_qrel=[self._qr(gold_ids=[g], retrieved_ids=[g], served_ids=[g],
+                               n_gold_in_top_k=1, rank_of_first_gold=1)],
+            duration_seconds=0.0,
+        )
+        lines = _metrics_table([run], top_k=10).splitlines()
+        header, sep, *data = lines
+        n = header.count("|")
+        assert sep.count("|") == n, "separator must match the header"
+        for row in data:
+            assert row.count("|") == n, f"data row has {row.count('|')} cells, header {n}"
+        assert "R@served" in header, "and the column must be named"

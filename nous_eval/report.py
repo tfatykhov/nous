@@ -352,8 +352,8 @@ def _metrics_table(run_results: list["RunResult"], top_k: int = 10) -> str:
     """
     header = (
         f"| config | n_qrels | n_errored | MRR | P@1 | P@{top_k} | R@{top_k} "
-        f"| nDCG@{top_k} |\n"
-        "|---|---:|---:|---:|---:|---:|---:|---:|"
+        f"| nDCG@{top_k} | R@served |\n"
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
     )
     rows = []
     for r in run_results:
