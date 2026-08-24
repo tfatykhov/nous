@@ -325,6 +325,46 @@ _DEFAULT_CONFIGS: dict[str, RetrievalConfig] = {
             "to triangulate the right default."
         ),
     ),
+    "cs_depth1_parity": RetrievalConfig(
+        name="cs_depth1_parity",
+        flags={
+            "spreading_activation_enabled": "true",
+            "spreading_score_depth1_parity": True,
+            # PRECONDITIONS, not decoration. The parity branch is gated on the
+            # scoring policy that DEFINES parity — `seed * w` is what the 1-hop
+            # leg (and Path A) return only on the seed-score branch with no
+            # provenance penalty. Both hold in prod. Omit either and the flag
+            # goes inert, so this arm would silently measure the baseline.
+            "graph_neighbor_seed_score_enabled": True,
+            "graph_inferred_edge_penalty": 1.0,
+        },
+        description=(
+            "F022 C-S: spreading rows scored at depth-1 parity with the 1-hop "
+            "leg they replace (activation / spreading_activation_decay instead "
+            "of activation * graph_recall_decay), correcting an off-by-one in "
+            "the decay exponent. PAIR WITH `cs_baseline`, not with plain "
+            "`baseline` — both arms must pin the two preconditions or the "
+            "comparison also varies the scoring policy. Counterfactual on 64 "
+            "prod retrievals: 2 spreading rows reach top-10 vs 0 today, so "
+            "expect a SMALL effect; the value is that it unblocks C-R/C-W, "
+            "which cannot show up while spreading rows structurally cannot rank."
+        ),
+    ),
+    "cs_baseline": RetrievalConfig(
+        name="cs_baseline",
+        flags={
+            "spreading_activation_enabled": "true",
+            "spreading_score_depth1_parity": False,
+            "graph_neighbor_seed_score_enabled": True,
+            "graph_inferred_edge_penalty": 1.0,
+        },
+        description=(
+            "Control for `cs_depth1_parity`: identical policy, parity OFF. "
+            "Exists so the pair differs in exactly one variable — pairing "
+            "`cs_depth1_parity` against plain `baseline` would confound the "
+            "parity change with the seed-score/penalty settings it requires."
+        ),
+    ),
     # NOTE (2026-07-11): heart fact seeding is now DEFAULT spreading
     # behavior (unflagged, per owner directive + MAB no-harm A/B), so
     # `spread_force_on` exercises it — no separate heart-seeds config.

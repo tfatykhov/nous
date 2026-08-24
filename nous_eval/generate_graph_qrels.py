@@ -323,11 +323,26 @@ async def _validate_query(
     settings_off = settings.model_copy(update={"graph_recall_enabled": False})
     settings_on = settings.model_copy(update={"graph_recall_enabled": True})
 
+    # `rerank_by_score=True` is REQUIRED, not a tuning choice, and its absence
+    # made this whole function return False unconditionally.
+    #
+    # Under the default (False) `run_recall_pipeline` assembles in STAGE ORDER:
+    # heart (:463) -> heart-graph (:466,:472) -> decisions (:477) ->
+    # graph_expanded (:502). A graph-reached target is therefore appended AFTER
+    # the heart results, so with `limit` heart rows in hand it sits at index
+    # >= limit and `_rank_of`, which slices `results[:limit]`, can never see it.
+    # `on_rank` was always None, so `on_rank is not None and off_rank is None`
+    # was UNSATISFIABLE — the mine yielded 0 qrels by construction, on any
+    # corpus, which is the "0 qrels = harness bug" written off on 2026-07-01.
+    #
+    # It is also what prod runs: tools.py derives `rerank_by_score` from
+    # `NOUS_EPISODE_CHUNKS_ENABLED=true` for all/fact queries, so validating
+    # under False measured a configuration production does not use.
     off_results, _ = await run_recall_pipeline(
-        query, heart, brain, settings_off, limit=limit,
+        query, heart, brain, settings_off, limit=limit, rerank_by_score=True,
     )
     on_results, _ = await run_recall_pipeline(
-        query, heart, brain, settings_on, limit=limit,
+        query, heart, brain, settings_on, limit=limit, rerank_by_score=True,
     )
 
     off_rank = _rank_of(off_results, target_id, limit)
