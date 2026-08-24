@@ -369,3 +369,15 @@ class TestParentEpisodesSurviveReconciliation:
         # The reconciliation guard in tools.py keys on exactly this overlap.
         parent_ids = {str(ep_id)}
         assert row.type == "episode" and str(row.id) in parent_ids
+
+    def test_the_gap_count_travels_with_the_persisted_average(self):
+        """codex P2 r4. `_metrics_compact` is built independently of the report
+        file, which is explicitly not guaranteed to survive. Persisting
+        `r_at_served` without `n_served_uncollected` leaves a historical
+        consumer unable to tell a complete 1.0 from a partial one."""
+        import inspect
+
+        from nous_eval import retrieval
+        src = inspect.getsource(retrieval._metrics_compact)
+        assert "r_at_served" in src
+        assert "n_served_uncollected" in src, "the average must not travel alone"
