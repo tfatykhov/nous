@@ -2424,7 +2424,27 @@ def _f065_provenance_penalty(
         # per call. Small — depth-1 is 92% inferred edges averaging weight 0.41 —
         # but non-zero, and it is a PREREQUISITE: while spreading rows cannot
         # rank, no amount of C-R/C-W work upstream can show up.
-        if getattr(settings, "spreading_score_depth1_parity", False):
+        # PARITY IS DEFINED RELATIVE TO A SCORING POLICY, so it is gated on the
+        # policy actually in force (codex P2). `seed * w` is what the 1-hop leg
+        # returns only on the seed-score branch with no provenance penalty —
+        # which is prod (`NOUS_GRAPH_NEIGHBOR_SEED_SCORE_ENABLED=true`,
+        # `NOUS_GRAPH_INFERRED_EDGE_PENALTY=1.0`). Measured at seed 0.8 / w 0.9:
+        #
+        #   seed_score=T, penalty=1.0 (prod)  1-hop 0.7200  spreading 0.7200  parity
+        #   seed_score=F                      1-hop 0.6300  spreading 0.7200  PROMOTION
+        #   penalty=0.7 (F065 on)             1-hop 0.5040  spreading 0.7200  PROMOTION
+        #
+        # Ungated, the C-S arm would measure parity, a mild promotion, or a large
+        # one depending on two unrelated settings — so it could not attribute its
+        # own result. The penalty cannot be mirrored onto a spreading row instead:
+        # an activation composes several edges of mixed provenance, so there is no
+        # single `extraction_method` to price. When the policy does not match, the
+        # flag goes INERT (today's scoring) rather than silently promoting.
+        if (
+            getattr(settings, "spreading_score_depth1_parity", False)
+            and getattr(settings, "graph_neighbor_seed_score_enabled", False)
+            and float(getattr(settings, "graph_inferred_edge_penalty", 1.0)) >= 1.0
+        ):
             sa_decay = float(getattr(settings, "spreading_activation_decay", 0.5))
             if sa_decay > 0.0:
                 return base_score / sa_decay
