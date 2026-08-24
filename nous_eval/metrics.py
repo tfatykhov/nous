@@ -278,7 +278,9 @@ def _recall_at_served(valid: list[QrelResult]) -> float | None:
     must not be reported as 0.0. A qrel that genuinely served nothing (empty
     list while others are populated) still scores 0.0 for that qrel.
     """
-    scored = [q for q in valid if getattr(q, "served_ids", None)]
+    # `is not None`, NOT truthiness: a collected-but-empty list is a genuine
+    # 0.0 for that qrel and must stay in the mean (codex P1).
+    scored = [q for q in valid if getattr(q, "served_ids", None) is not None]
     if not scored:
         return None
     per: list[float] = []
@@ -286,7 +288,7 @@ def _recall_at_served(valid: list[QrelResult]) -> float | None:
         gold = set(q.gold_ids)
         if not gold:
             continue
-        per.append(len(gold & set(q.served_ids)) / len(gold))
+        per.append(len(gold & set(q.served_ids or ())) / len(gold))
     return mean(per) if per else None
 
 

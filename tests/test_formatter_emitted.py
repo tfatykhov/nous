@@ -237,3 +237,51 @@ class TestHarnessMetric:
                                       n_gold_in_top_k=1, rank_of_first_gold=1)])
         assert m.r_at_served is None
         compute_delta(m, m)  # must not raise
+
+    def test_collected_but_empty_scores_zero_and_stays_in_the_mean(self):
+        """codex P1. A qrel that was collected and served NOTHING is a real 0.0.
+
+        The first cut filtered on truthiness, which merged "collected, empty"
+        with "not collected" — biasing the mean upward whenever any qrel served
+        nothing, and turning an all-empty run into `None` ("not measured")
+        instead of 0.0 ("conservation broke").
+        """
+        from nous_eval.metrics import compute_metrics
+        g = uuid4()
+        served = self._qr(gold_ids=[g], retrieved_ids=[g], served_ids=[g],
+                          n_gold_in_top_k=1, rank_of_first_gold=1)
+        empty = self._qr(qrel_index=1, gold_ids=[g], retrieved_ids=[g],
+                         served_ids=[], n_gold_in_top_k=1, rank_of_first_gold=1)
+        m = compute_metrics([served, empty])
+        assert m.r_at_served == pytest.approx(0.5), "0.0 and 1.0 averaged, not 1.0"
+
+    def test_all_empty_is_zero_not_none(self):
+        from nous_eval.metrics import compute_metrics
+        g = uuid4()
+        m = compute_metrics([self._qr(gold_ids=[g], retrieved_ids=[g],
+                                      served_ids=[], n_gold_in_top_k=1,
+                                      rank_of_first_gold=1)])
+        assert m.r_at_served == pytest.approx(0.0), "measured, and it was zero"
+
+    def test_uncollected_is_still_none_alongside_collected(self):
+        """The complement: None must survive as 'not measured', not become 0.0."""
+        from nous_eval.metrics import compute_metrics
+        g = uuid4()
+        m = compute_metrics([self._qr(gold_ids=[g], retrieved_ids=[g],
+                                      n_gold_in_top_k=1, rank_of_first_gold=1)])
+        assert m.r_at_served is None
+
+    def test_it_is_surfaced_to_the_operator(self):
+        """codex P2. A tripwire nobody sees is not a tripwire — it must reach
+        the report table, the JSON, and the persisted run-history payload."""
+        from nous_eval.report import _metrics_to_dict
+        from nous_eval.metrics import compute_metrics
+        g = uuid4()
+        m = compute_metrics([self._qr(gold_ids=[g], retrieved_ids=[g],
+                                      served_ids=[], n_gold_in_top_k=1,
+                                      rank_of_first_gold=1)])
+        assert "r_at_served" in _metrics_to_dict(m)
+        import inspect
+        from nous_eval import report, retrieval
+        assert "r_at_served" in inspect.getsource(report._metrics_table)
+        assert "r_at_served" in inspect.getsource(retrieval._metrics_compact)

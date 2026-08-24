@@ -1102,6 +1102,9 @@ def _metrics_compact(run: "RunResult", top_k: int = 10) -> dict:
         "r_at_5": m.r_at_5,
         "r_at_10": m.r_at_10,
         "ndcg_at_10": m.ndcg_at_10,
+        # Persisted so historical run-history can detect formatter/collector
+        # drift after the fact; None when uncollected.
+        "r_at_served": m.r_at_served,
         "n_qrels": m.n_qrels,
         "n_errored": m.n_errored,
         # N7: the untruncated view + the depth these numbers mean.

@@ -135,9 +135,12 @@ class QrelResult:
     # `retrieved_ids`, which is what the pipeline returned. Deliberately a
     # SEPARATE field rather than a correction to `retrieved_ids`, so any future
     # divergence between the two is visible instead of silently reconciled.
-    # Empty means not collected (e.g. the errored-qrel path), NOT "nothing was
-    # served" — see `metrics.compute_metrics`, which reports None in that case.
-    served_ids: list[UUID] = field(default_factory=list)
+    # ``None`` means NOT COLLECTED (the errored-qrel path, or a caller that
+    # constructs QrelResult by hand). An empty LIST means collected and nothing
+    # was served — a real 0.0 for that qrel. codex P1: the first cut used a
+    # truthiness filter, which silently merged those two and both biased the
+    # mean upward and turned an all-empty run into "not measured".
+    served_ids: list[UUID] | None = None
     # N1/codex-P1: per-stage failure counts from PipelineStats.n_stage_errors,
     # including Heart's per-leg failures ("heart_recall_fact" etc). A non-empty
     # dict means this qrel's metrics are based on a PARTIAL retrieval — the
@@ -635,7 +638,7 @@ async def _run_one(
         # Never let a reporting side-channel fail a scored run.
         logger.warning("F051: served-id collection failed for qrel %d", idx,
                        exc_info=True)
-        served_ids = []
+        served_ids = None  # not collected — must not score as 0.0
 
     retrieved_ids = [r.id for r in pipeline_results]
     retrieved_types = [r.type for r in pipeline_results]
