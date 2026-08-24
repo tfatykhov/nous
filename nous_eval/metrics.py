@@ -67,6 +67,24 @@ class MetricsResult:
     n_errored: int = 0
     # N7: recall across k — shows where a fixed-k cutoff stops seeing things.
     recall_curve: dict[int, float] = field(default_factory=dict)
+    # Recall of gold over the ids the FORMATTER reported emitting — what the
+    # agent receives, rather than what the pipeline returned.
+    #
+    # ``None`` when no qrel carried ``served_ids``: an uncollected run must read
+    # as NOT MEASURED, never as recall of zero. Absence is not a value.
+    #
+    # HONEST SCOPE: on a well-formed qrel this is IDENTICALLY ``recall over
+    # retrieved_ids``, not an approximation of it. ``memory_types`` routes
+    # retrieval to where gold lives, so gold's type is inside the scope, and the
+    # formatter only drops types OUTSIDE the scoped sections — a gold row can
+    # never be in the dropped set. Its value is as a CONSERVATION TRIPWIRE for
+    # formatter / scope / collector drift, and as the correct retirement of the
+    # debt in this module's docstring above. Do NOT report it as a sharper
+    # recall number.
+    #
+    # Deliberately excluded from ``compute_delta`` and every gate metric list:
+    # those do ``float(getattr(...))``, which raises TypeError on None.
+    r_at_served: float | None = None
 
 
 @dataclass(frozen=True)
@@ -248,7 +266,28 @@ def compute_metrics(
         n_qrels=len(valid),
         n_errored=n_errored,
         recall_curve=curve,
+        r_at_served=_recall_at_served(valid),
     )
+
+
+def _recall_at_served(valid: list[QrelResult]) -> float | None:
+    """Mean recall of gold over each qrel's reported served ids.
+
+    Returns ``None`` when NO qrel carried ``served_ids`` — the collector was not
+    wired for that run, which is a different fact from "nothing was served" and
+    must not be reported as 0.0. A qrel that genuinely served nothing (empty
+    list while others are populated) still scores 0.0 for that qrel.
+    """
+    scored = [q for q in valid if getattr(q, "served_ids", None)]
+    if not scored:
+        return None
+    per: list[float] = []
+    for q in scored:
+        gold = set(q.gold_ids)
+        if not gold:
+            continue
+        per.append(len(gold & set(q.served_ids)) / len(gold))
+    return mean(per) if per else None
 
 
 def compute_delta(
