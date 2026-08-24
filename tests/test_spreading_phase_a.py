@@ -514,3 +514,33 @@ class TestDepth1Parity:
         s = self._parity_settings()
         s.spreading_activation_decay = 0.0
         assert _score_memory_neighbor(self._spread_row(0.25), s) == pytest.approx(0.175)
+
+    def test_both_equivalent_legs_share_one_formula(self):
+        """codex P2 #2. Spreading is seeded by decisions AND facts, and the
+        Stage 4 1-hop fallback expands only decisions — so a fact-seeded row has
+        no Stage 4 counterpart. Its equivalent is Path A (Stage 2b), which scores
+        fact-seeded neighbours through the same seed-score branch.
+
+        Because BOTH equivalents compute `seed * w`, the parity target is
+        identical whichever seed won the path — which is what makes it safe that
+        the CTE does not retain the winning seed's origin. If Path A's scoring
+        ever diverges from the 1-hop leg's, that argument fails, and this test is
+        what makes it fail loudly.
+        """
+        from nous.api.retrieval_pipeline import (
+            _heart_graph_memory_to_pipeline,
+            _score_memory_neighbor,
+        )
+        s = self._parity_settings()
+        seed, w = 0.8, 0.9
+
+        path_a = _heart_graph_memory_to_pipeline([self._one_hop_row(seed, w)], s)[0].score
+        one_hop = _score_memory_neighbor(self._one_hop_row(seed, w), s)
+        spread = _score_memory_neighbor(
+            self._spread_row(seed * w * s.spreading_activation_decay), s)
+
+        assert path_a == pytest.approx(one_hop), (
+            "Path A (fact-seeded) and Stage 4 1-hop (decision-seeded) must share "
+            "one formula, or the parity target depends on which seed won"
+        )
+        assert spread == pytest.approx(path_a)

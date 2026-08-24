@@ -2440,6 +2440,23 @@ def _f065_provenance_penalty(
         # an activation composes several edges of mixed provenance, so there is no
         # single `extraction_method` to price. When the policy does not match, the
         # flag goes INERT (today's scoring) rather than silently promoting.
+        #
+        # WHY NO PER-SEED PROVENANCE (codex P2 #2). Spreading is seeded by
+        # decisions AND heart facts, and the Stage 4 1-hop fallback expands only
+        # `decision_results` — so a fact-seeded row has no Stage 4 counterpart.
+        # But it does have an equivalent: Path A (Stage 2b) expands fact seeds and
+        # scores them through this same `_score_memory_neighbor` seed-score branch.
+        # Both equivalents therefore compute `seed * w` — measured 0.7200 each at
+        # seed 0.8 / w 0.9 — so the parity TARGET is identical whichever seed won
+        # the path, and a uniform correction is exact for both. That is what makes
+        # it safe that the CTE does not retain the winning seed's origin.
+        # `test_both_equivalent_legs_share_one_formula` pins the coincidence, so
+        # if Path A's scoring ever diverges from the 1-hop leg's, this argument
+        # fails loudly instead of silently.
+        # Caveat: with `heart_graph_all_types_enabled=false` (config default, but
+        # `true` in prod) Path A does not run, so a fact-seeded row has no live
+        # equivalent leg at all. NOT gated on it — that would also disable the
+        # well-defined decision-origin case for no benefit.
         if (
             getattr(settings, "spreading_score_depth1_parity", False)
             and getattr(settings, "graph_neighbor_seed_score_enabled", False)
