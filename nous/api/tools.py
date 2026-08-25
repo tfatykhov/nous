@@ -4090,14 +4090,30 @@ def create_programmatic_tools(
                 """
                 if _tr is None:
                     return
+                # Off for the duration of cleanup, then RESTORED unless the
+                # script is already dead. An ordinary Exception here is
+                # catchable: a script doing `try: recall_deep(...) except
+                # Exception: pass` carries on running, and leaving the tracer
+                # off would hand it a thread with no deadline enforcement at all
+                # — reopening the `while True: pass` hole the tracer exists to
+                # close, holding a worker and a concurrency slot indefinitely.
+                # Only ScriptDeadlineExceeded means the script cannot continue.
+                _is_deadline = isinstance(exc, ScriptDeadlineExceeded)
                 try:
                     _original_settrace(None)
                 except Exception:  # pragma: no cover - defensive
                     pass
-                _tr.undeliver_all(SLICED_OFF, "script_recall_failed")
-                _tr.leg("script_recall", attempted=True, error=str(exc)[:200])
-                _tr.finalize([])
-                _commit(_tr)
+                try:
+                    _tr.undeliver_all(SLICED_OFF, "script_recall_failed")
+                    _tr.leg("script_recall", attempted=True, error=str(exc)[:200])
+                    _tr.finalize([])
+                    _commit(_tr)
+                finally:
+                    if not _is_deadline:
+                        try:
+                            _original_settrace(_tracer)
+                        except Exception:  # pragma: no cover - defensive
+                            pass
 
             # EVERYTHING that decides what the script receives sits inside this
             # try, and the success trace is committed only after `out` exists.
@@ -4305,7 +4321,18 @@ def create_programmatic_tools(
             if limit is None or limit <= 0 or len(out) <= limit:
                 return out
             if tr is not None:
+                # A candidate is keyed on (id, type) and the pipeline can emit
+                # the same one twice — a decision reached through BOTH the graph
+                # and Brain legs, which deliberately do not cross-dedup. If one
+                # copy lands in the delivered prefix and the other in the tail,
+                # marking the tail copy downgrades the SHARED candidate, and the
+                # caller's `undeliver_all` cannot undo it because that only
+                # rewrites candidates still `rendered`. The script did receive
+                # that memory, so reporting a drop would be false.
+                _delivered = {(r.id, r.type) for r in results[:limit]}
                 for r in results[limit:]:
+                    if (r.id, r.type) in _delivered:
+                        continue
                     tr.mark_not_delivered(r.id, r.type, SLICED_OFF, "script_limit")
             return out[:limit]
 

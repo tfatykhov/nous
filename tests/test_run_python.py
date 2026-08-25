@@ -1051,6 +1051,110 @@ class TestRunPythonMemoryWrappers:
         )
 
     @pytest.mark.asyncio
+    async def test_deadline_enforcement_survives_a_caught_recall_error(
+        self, mock_brain, mock_heart
+    ):
+        """An ordinary recall failure must not disarm the deadline tracer.
+
+        `_fail_trace` turns tracing off so cleanup cannot be interrupted. But an
+        ordinary Exception is catchable — a script doing
+        `try: recall_deep(...) except Exception: pass` keeps running — and
+        leaving the tracer off would hand it a thread with no deadline
+        enforcement, reopening the `while True: pass` hole that holds a worker
+        and a concurrency slot indefinitely.
+        """
+        from nous.api.retrieval_pipeline import PipelineStats  # noqa: F401
+        from nous.api.tools import create_programmatic_tools
+
+        class _Rec:
+            def start(self, **kw):  # noqa: ARG002
+                from nous.observability.retrieval_trace import RetrievalTrace
+
+                return RetrievalTrace(query="q", path="script", agent_id="a")
+
+            def commit(self, trace):  # noqa: ARG002
+                pass
+
+        s = Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=2)
+        tool = create_programmatic_tools(mock_brain, mock_heart, s)["run_python"]
+        with patch("nous.api.tools.get_active_retrieval_logger", _Rec), patch(
+            "nous.api.retrieval_pipeline.run_recall_pipeline",
+            AsyncMock(side_effect=RuntimeError("recall boom")),
+        ):
+            # Bounded. Verified by reverting the restore: without it this call
+            # never returns — the spin loop owns the worker thread forever. A
+            # bare await would wedge the whole suite instead of failing, so the
+            # bound converts a hang into a clean, readable failure.
+            out = await asyncio.wait_for(
+                tool(code=(
+                    'try:\n'
+                    '    recall_deep("q")\n'
+                    'except Exception:\n'
+                    '    pass\n'
+                    'while True:\n'
+                    '    pass\n'
+                )),
+                timeout=30,
+            )
+
+        # The spin loop must be interrupted by the in-thread deadline, not left
+        # running until the outer wait_for gives up on it.
+        assert out.get("is_error")
+        assert "timed out" in out["content"][0]["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_duplicate_across_the_limit_is_not_reported_dropped(
+        self, mock_brain, mock_heart
+    ):
+        """A memory delivered in the prefix stays delivered.
+
+        Candidates are keyed on (id, type) and the graph and Brain legs
+        deliberately do not cross-dedup, so the same decision can appear twice.
+        Marking the tail copy would downgrade the shared candidate, and
+        `undeliver_all` cannot undo it — it only rewrites `rendered` ones.
+        """
+        from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
+        from nous.api.tools import create_programmatic_tools
+
+        dup = uuid4()
+        results = [
+            PipelineResult(id=dup, type="decision", description="d", score=0.9,
+                           source="brain", metadata={}),
+            PipelineResult(id=uuid4(), type="fact", description="f", score=0.8,
+                           source="heart", metadata={"active": True}),
+            PipelineResult(id=dup, type="decision", description="d", score=0.7,
+                           source="graph_expanded", metadata={}),
+        ]
+        marked: list = []
+
+        class _Trace:
+            id = "t"
+            enabled = True
+
+            def mark_not_delivered(self, item_id, item_type, disp, stage):
+                marked.append((item_id, item_type))
+
+            def __getattr__(self, _name):
+                return lambda *a, **k: None
+
+        class _Rec:
+            def start(self, **kw):  # noqa: ARG002
+                return _Trace()
+
+            def commit(self, trace):  # noqa: ARG002
+                pass
+
+        s = Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=5)
+        tool = create_programmatic_tools(mock_brain, mock_heart, s)["run_python"]
+        with patch("nous.api.tools.get_active_retrieval_logger", _Rec), patch(
+            "nous.api.retrieval_pipeline.run_recall_pipeline",
+            AsyncMock(return_value=(results, PipelineStats())),
+        ):
+            await tool(code='recall_deep("q", limit=2)')
+
+        assert marked == [], "the duplicate was delivered in the prefix"
+
+    @pytest.mark.asyncio
     async def test_legacy_python_types_are_preserved(
         self, mock_brain, mock_heart
     ):
