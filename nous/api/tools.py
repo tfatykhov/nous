@@ -23,7 +23,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from typing import Any
 from uuid import UUID
@@ -4078,14 +4078,20 @@ def create_programmatic_tools(
                 re-arms after each raise, so on a genuine timeout it would raise
                 AGAIN partway through `undeliver_all`/`finalize` — which walk
                 every captured candidate — and the timeout row would be lost
-                despite this handler existing to save it. `sys.settrace` is
-                per-thread, and `_run`'s finally clears it regardless, so
-                clearing it here is local and safe.
+                despite this handler existing to save it.
+
+                Uses `_original_settrace`, NOT `sys.settrace`: `_run` rebinds
+                `sys.settrace` to `_settrace_shim`, which discards its argument
+                and reinstalls `_tracer`. Calling `sys.settrace(None)` here
+                therefore RE-ARMS the deadline instead of clearing it, which is
+                what the first version of this fix did — inert, and looking
+                exactly like a fix. Per-thread, and `_run`'s finally restores
+                the real hook regardless, so this stays local.
                 """
                 if _tr is None:
                     return
                 try:
-                    sys.settrace(None)
+                    _original_settrace(None)
                 except Exception:  # pragma: no cover - defensive
                     pass
                 _tr.undeliver_all(SLICED_OFF, "script_recall_failed")
@@ -4145,13 +4151,20 @@ def create_programmatic_tools(
             # is one edit away from disagreeing with it.
             if _residual_on:
                 try:
+                    # Only what the script ACTUALLY received. `results` may be
+                    # longer than `out` after the script limit, and recording
+                    # the excess would boost memories the interpreter never saw
+                    # on later turns — telemetry saying "excluded" while ranking
+                    # state says "delivered". Index-aligned, since
+                    # `_build_script_results` emits one dict per result in order
+                    # and the limit only truncates the tail.
                     _surfaced = [
                         (
                             r.id, r.type,
                             float(r.score) if r.score is not None else 0.0,
                             (r.description or "")[:160],
                         )
-                        for r in results
+                        for r in results[:len(out)]
                     ]
                     loop.call_soon_threadsafe(
                         lambda: asyncio.ensure_future(
@@ -4207,7 +4220,14 @@ def create_programmatic_tools(
             out: list[dict] = []
             for r in results:
                 d = {
-                    "id": str(r.id),
+                    # UUID, not str. The old return was
+                    # `FactSummary.model_dump()` in python mode, whose `id` is a
+                    # UUID, and `recall_recent` still returns python-mode values
+                    # — so stringifying here both breaks `f["id"].hex` / UUID
+                    # comparisons in stored scripts AND makes the two wrappers
+                    # disagree. `str()` would be friendlier to `json.dumps`, but
+                    # that was never the contract.
+                    "id": r.id,
                     "type": r.type,
                     "description": r.description,
                     # Alias: the old return was a `FactSummary`, whose body lived
@@ -4247,6 +4267,19 @@ def create_programmatic_tools(
                         # ONE `tags` list and a script appending to one row
                         # silently mutates the whole batch.
                         d[_k] = list(_default) if isinstance(_default, list) else _default
+                # `event_date` was a `datetime.date` on FactSummary, so scripts
+                # do `f["event_date"].year` or compare it with a date. The
+                # PIPELINE standardises on an ISO string (F075 isoformats it
+                # into metadata), which is fine for its own consumers but is a
+                # silent type change at this boundary — a comparison against a
+                # date stops matching instead of failing. Coerce back here only;
+                # `metadata` keeps the pipeline's string.
+                _ed = d.get("event_date")
+                if isinstance(_ed, str):
+                    try:
+                        d["event_date"] = date.fromisoformat(_ed)
+                    except ValueError:
+                        pass  # unparseable — leave it rather than invent a date
                 out.append(d)
             return out
 

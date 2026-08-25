@@ -1051,6 +1051,85 @@ class TestRunPythonMemoryWrappers:
         )
 
     @pytest.mark.asyncio
+    async def test_legacy_python_types_are_preserved(
+        self, mock_brain, mock_heart
+    ):
+        """`id` stays a UUID and `event_date` a date, as model_dump() gave.
+
+        `str(uuid)` and an ISO string would both be friendlier to json.dumps,
+        but the old return was `FactSummary.model_dump()` in python mode, and
+        `recall_recent` still returns python-mode values — so converting here
+        breaks `f["id"].hex`, breaks date arithmetic, and makes the two wrappers
+        disagree. A date comparison against a string does not raise; it silently
+        stops matching, which is the worse failure.
+        """
+        from datetime import date as _date
+
+        from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
+        from nous.api.tools import create_programmatic_tools
+
+        fid = uuid4()
+        results = [PipelineResult(
+            id=fid, type="fact", description="d", score=0.5, source="heart",
+            metadata={"active": True, "event_date": "2026-03-04"},
+        )]
+        s = Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=5)
+        tool = create_programmatic_tools(mock_brain, mock_heart, s)["run_python"]
+        with patch(
+            "nous.api.retrieval_pipeline.run_recall_pipeline",
+            AsyncMock(return_value=(results, PipelineStats())),
+        ):
+            out = await tool(code=(
+                'f = recall_deep("q")[0]\n'
+                'result = json.dumps([str(type(f["id"]).__name__), '
+                'str(type(f["event_date"]).__name__), f["event_date"].year])'
+            ))
+        assert out["content"][0]["text"] == '["UUID", "date", 2026]'
+        assert _date(2026, 3, 4)  # sanity: the fixture date is well-formed
+
+    @pytest.mark.asyncio
+    async def test_limit_does_not_surface_excess_to_residual_activation(
+        self, mock_brain, mock_heart
+    ):
+        """F055 must record only what the script actually received.
+
+        Recording the rows the limit removed would boost memories the
+        interpreter never saw on later turns — the telemetry saying "excluded"
+        while ranking state says "delivered".
+        """
+        from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
+        from nous.api.tools import create_programmatic_tools
+
+        activator = MagicMock()
+        activator.current_turn = AsyncMock(return_value=1)
+        activator.compute_activations = AsyncMock(return_value={})
+        activator.record_surfaced = AsyncMock(return_value=None)
+        mock_heart._residual_activator = activator
+
+        many = [
+            PipelineResult(
+                id=uuid4(), type="fact", description=f"f{i}", score=1.0 - i / 100,
+                source="heart", metadata={"active": True},
+            )
+            for i in range(6)
+        ]
+        s = Settings(
+            programmatic_tools_enabled=True, programmatic_tools_timeout=5,
+            residual_activation_enabled=True,
+        )
+        tool = create_programmatic_tools(mock_brain, mock_heart, s)["run_python"]
+        with patch(
+            "nous.api.retrieval_pipeline.run_recall_pipeline",
+            AsyncMock(return_value=(many, PipelineStats())),
+        ):
+            await tool(code='recall_deep("q", limit=2)', _session_id="s1")
+
+        await asyncio.sleep(0)
+        activator.record_surfaced.assert_called_once()
+        surfaced = activator.record_surfaced.call_args.kwargs["surfaced"]
+        assert len(surfaced) == 2, "recorded rows the script never received"
+
+    @pytest.mark.asyncio
     async def test_limit_caps_what_the_script_receives(
         self, mock_brain, mock_heart
     ):
