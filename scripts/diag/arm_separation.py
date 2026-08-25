@@ -44,8 +44,8 @@ environment, so a run labelled "pinned" was not — the leak moved baseline MRR 
 a config change large enough to move the absolutes that much.
 
 CORROBORATION, independent of this qrel set: scripts/diag/qrel_generator_baseline.py
-reports graph-ON and graph-OFF hitting the target in the SAME 20/57 queries, so
-graph expansion changed top-10 membership in zero of 57 cases — on ground where
+reports graph-ON hitting the target in 18/56 queries and graph-OFF in 19/56, so
+graph expansion moved zero targets INTO the top-10 — on ground where
 every target is the endpoint of the edge its query was written from.
 
 The null is on FAVOURABLE ground: gold are decision-targets of inferred edges,
@@ -217,11 +217,20 @@ async def run(args) -> int:
     comparable = len(qrels) - cskipped
     print(f"POSITIVE CONTROL moved {moved}/{comparable} comparable queries "
           f"(dMRR {cd:+.4f})")
-    if not moved:
-        print("\nCONTROL DID NOT SEPARATE — arm results withheld.")
-        print("An arm known to change retrieval grossly produced no movement, so")
-        print("these queries cannot discriminate and any null below would be an")
-        print("ABSENCE OF MEASUREMENT, not a result. Fix the qrel set first.")
+    # The threshold is NOISE_FLOOR+1, not 1 (codex P2). This script measured its
+    # own floor at one query — the identical command gave spread_off 57/57 ties
+    # on one run and 56/57 on the next — so a control that moves exactly one
+    # query has not been shown to separate anything, and blessing a null on it
+    # would launder noise into a validity claim. Documenting a floor and then
+    # gating above zero is the same instrument-shaped error the module's
+    # opening paragraph is about.
+    if moved <= args.noise_floor:
+        print(f"\nCONTROL DID NOT SEPARATE (moved {moved} <= noise floor "
+              f"{args.noise_floor}) — arm results withheld.")
+        print("An arm known to change retrieval grossly failed to move more")
+        print("queries than repeated identical runs do, so these queries cannot")
+        print("discriminate and any null below would be an ABSENCE OF")
+        print("MEASUREMENT, not a result. Fix the qrel set first.")
         print("=" * 62)
         return 3
     print("Set discriminates => a null on the arms below is a RESULT.")
@@ -272,6 +281,10 @@ def main() -> int:
     p.add_argument("--port", type=int, default=5433)
     p.add_argument("--user", default="nous")
     p.add_argument("--top-k", type=int, default=10)
+    p.add_argument("--noise-floor", type=int, default=1,
+                   help="Control must move MORE than this many queries to bless "
+                        "the run. Default 1 = the measured repeated-run floor "
+                        "on this corpus; raise it if your corpus is noisier.")
     p.add_argument("--defaults", action="store_true",
                    help="Measure CODE-DEFAULT config instead of the pinned prod "
                         "shape. Results are not comparable across the two.")

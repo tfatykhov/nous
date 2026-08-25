@@ -38,6 +38,11 @@ _HIDDEN_PREFIXES = ("NOUS_", "DB_")
 # are this one and bare code defaults, and they are not interchangeable.
 # Measured 2026-08-24: the difference moved a baseline MRR by 79%.
 PROD_SHAPE: dict[str, Any] = {
+    # NOT optional. The code default is `text-embedding-3-small`, prod-shaped
+    # corpora are embedded with `-large`, and querying 1536-dim vectors written
+    # by one model with vectors from the other returns plausible-looking
+    # nonsense rather than an error.
+    "embedding_model": "text-embedding-3-large",
     "episode_chunks_enabled": True,
     "chunk_hybrid_search_enabled": True,
     "episode_chunk_recall_limit": 30,

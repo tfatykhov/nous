@@ -52,7 +52,12 @@ from nous.brain.brain import Brain
 from nous.config import Settings
 from nous.heart.heart import Heart
 from nous_eval.config import EvalSettings
-from nous_eval.retrieval_runner import _build_heart_for_eval, _settings_for_eval_db
+from nous_eval.retrieval_runner import (
+    _build_brain_for_eval,
+    _build_heart_for_eval,
+    _settings_for_eval_db,
+    make_eval_embedding_provider,
+)
 from nous.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -413,7 +418,17 @@ async def _run_async(args: argparse.Namespace) -> int:
         try:
             kept: list[GeneratedQrel] = []
             async with _build_heart_for_eval(db, main_settings) as heart:
-                brain = Brain(database=db, settings=main_settings)
+                # codex P1: a bare `Brain(db, settings)` has NO embedding
+                # provider, so `Brain` falls back to keyword-only decision
+                # search — while the Heart beside it runs vector search, and
+                # `fetch_edge_candidates` restricts targets to `decision`. The
+                # validator was therefore gating every qrel on a decision-search
+                # path neither prod nor `retrieval_runner` uses. Build it the
+                # same way the harness does.
+                brain = _build_brain_for_eval(
+                    db, main_settings,
+                    make_eval_embedding_provider(main_settings),
+                )
                 for i, cand in enumerate(candidates, 1):
                     try:
                         gen = await generate_query(cand, api_client, args.model)
@@ -429,9 +444,9 @@ async def _run_async(args: argparse.Namespace) -> int:
                         # graph-on HITS. Measured on this corpus by
                         # scripts/diag/qrel_generator_baseline.py (2026-08-24,
                         # 58 queries from 60 edges): graph-off hits top-10 for
-                        # 20/57, so the ceiling is 64.9% — the generator is NOT
-                        # the constraint. graph-ON hits for the SAME 20/57, so
-                        # 0/57 rows pass. Graph expansion changed top-10
+                        # 19/56, so the ceiling is 66.1% — the generator is NOT
+                        # the constraint. graph-ON hits 18/56 (equal within noise), so
+                        # 0/56 rows pass. Graph expansion moved zero targets into top-10
                         # membership in zero cases.
                         #
                         # So skipping the gate here is not a workaround for a
@@ -512,8 +527,8 @@ def main(argv: list[str] | None = None) -> int:
         "--no-reachability-gate", action="store_true",
         help="Keep every generated query instead of requiring graph-off MISS + "
              "graph-on HIT. Measured on a prod-shaped corpus (2026-08-24): the "
-             "gate yields 0/57, not because the generator is biased (ceiling "
-             "64.9%%) but because graph-on hits the SAME 20/57 as graph-off — "
+             "gate yields 0/56, not because the generator is biased (ceiling "
+             "66.1%%) but because graph-on hits 18/56 vs graph-off 19/56 — "
              "expansion changes nothing. A paired A/B does not need graph-only "
              "qrels; ties cost n, not correctness. Run "
              "scripts/diag/qrel_generator_baseline.py to see which half of the "

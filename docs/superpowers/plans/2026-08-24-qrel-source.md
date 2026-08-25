@@ -147,27 +147,42 @@ gate runs `run_recall_pipeline` at **top-10**, so a target at raw vector rank
 same and one is not a proxy for the other. Found by codex on PR #607, not by me,
 after the number had already been written into three files and a decision record.
 
-Re-measured through the validator's own call under PROD_SHAPE, `n=57` from 60 edges on
+Re-measured through the validator's own call, under `PROD_SHAPE` and with the
+miner's `Brain` wiring fixed (see below), `n=56` from 60 edges on
 `nous_prod_20260801`:
 
 | gate half | result |
 |---|---|
-| 1 — graph-OFF hits top-10 | 20/57 (35.1%) → **ceiling 64.9%** |
-| 2 — graph-ON hits top-10 | 20/57 (35.1%) |
-| **kept** (off miss ∧ on hit) | **0/57** |
-| *diagnostic* — raw vector top-50 | 58/58, median rank 3 |
+| 1 — graph-OFF hits top-10 | 19/56 (33.9%) → **ceiling 66.1%** |
+| 2 — graph-ON hits top-10 | 18/56 (32.1%) |
+| **kept** (off miss ∧ on hit) | **0/56** |
+| *diagnostic* — raw vector top-50 | 94.7%, median rank 2 |
 
-So the generator was never the constraint: a 64.9% ceiling is ample. The mine
-yields zero because **half 2 never fires**. graph-ON and graph-OFF hit the *same*
-25 queries — identical at every checkpoint (2/2, 8/8, 13/13, 15/15, 21/21,
-25/25). Graph expansion changed top-10 membership in **zero of 58** cases, on the
-most favourable ground obtainable: every target is the endpoint of the very edge
-its query was generated from.
+So the generator was never the constraint: a 66.1% ceiling is ample. The mine
+yields zero because **half 2 never fires**. The two halves are equal to within
+the instrument's noise floor (~1 query at this n), and graph-ON is if anything
+the *lower* of the two. Graph expansion moved **zero targets into the top-10**,
+on the most favourable ground obtainable: every target is the endpoint of the
+very edge its query was generated from.
+
+Stable across all three configurations measured while correcting the probe —
+code defaults (25/58 vs 25/58), prod shape with the miner's keyword-only `Brain`
+(20/57 vs 20/57), and prod shape with `Brain` wired correctly (19/56 vs 18/56).
+The ceiling moves with the shape (56.9% → 64.9% → 66.1%); **kept is 0 in every
+one.**
+
+**A real defect surfaced on the way.** `generate_graph_qrels` constructed
+`Brain(database=db, settings=…)` with **no embedding provider**, so `Brain` fell
+back to keyword-only decision search — while the `Heart` beside it ran vector
+search, and `fetch_edge_candidates` restricts targets to `decision`. Every
+graph-targeted qrel was being validated against a decision-search path neither
+prod nor `retrieval_runner` uses. Fixed in the miner (`_build_brain_for_eval` +
+a single `make_eval_embedding_provider`), not worked around in the probe.
 
 **This reverses where the blame sits.** The 0-yield is not generator bias (B),
 not the unsatisfiable criterion (A, genuinely fixed in #605), and not a harness
 bug — the reading recorded on 2026-07-01. It is a measurement *about the graph*,
-i.e. about the thing under test. It independently replicates the 57/57 arm null
+i.e. about the thing under test. It independently replicates the arm null
 from P1 without sharing its qrel set, its metric, or its ranking assumptions.
 
 Consequences for the rest of this plan:
@@ -179,7 +194,7 @@ Consequences for the rest of this plan:
   stronger: F091 gold comes from what the agent actually retrieved, so it does
   not depend on graph expansion working in order to exist.
 - **Do not tune edge selection against the ceiling.** The lever P0 was meant to
-  find does exist (64.9%), but pulling it cannot help while half 2 reads zero.
+  find does exist (66.1%), but pulling it cannot help while half 2 reads zero.
 - The risk table's last row was the right worry aimed at the wrong claim:
   reproducing B would not have vindicated the miner — and B did not reproduce.
 

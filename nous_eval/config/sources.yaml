@@ -61,12 +61,12 @@ sources:
     path: "${NOUS_EVAL_FIXTURES_DIR}/qrels_graph_nogate.jsonl"
     # Same generator as graph_targeted with the reachability gate OFF.
     #
-    # WHY the gate is skipped, measured 2026-08-24 on a prod clone (n=57 from 60
+    # WHY the gate is skipped, measured 2026-08-24 on a prod clone (n=56 from 60
     # edges, scripts/diag/qrel_generator_baseline.py): NOT generator bias. The
-    # generator's ceiling is 64.9% — ample. The gate yields nothing because its
-    # two halves are identical: graph-OFF finds the target in top-10 for 20/57
-    # and graph-ON finds it for the SAME 20/57, so 0 rows pass. Graph expansion
-    # changed top-10 membership in zero cases.
+    # generator's ceiling is 66.1% — ample. The gate yields nothing because its
+    # two halves are equal within noise: graph-OFF finds the target in top-10 for
+    # 19/56 and graph-ON for 18/56, so 0 rows pass. Graph expansion
+    # moved zero targets INTO the top-10.
     #
     # (An earlier revision of this comment blamed a ~5% ceiling from 94.8%
     # raw-vector top-50 findability. That was wrong by ~11x — the gate runs the

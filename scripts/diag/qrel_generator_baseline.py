@@ -15,30 +15,36 @@ Attributing a yield to the wrong half has produced wrong verdicts twice
 (decisions 7b29cf7f, 004641d7) — and a third time from this very script, see
 below.
 
-MEASURED 2026-08-24, `nous_prod_20260801`, PROD_SHAPE, n=57 from 60 edges:
+MEASURED 2026-08-24, `nous_prod_20260801`, PROD_SHAPE, n=56 from 60 edges:
 
-    half 1  graph-OFF hits top-10 : 20/57 (35.1%)  => ceiling 64.9%
-    half 2  graph-ON  hits top-10 : 20/57 (35.1%)
-    KEPT (off miss AND on hit)    : 0/57  (0.0%)
-    [diagnostic] raw vector top-50: 54/57 (94.7%), median rank 2
+    half 1  graph-OFF hits top-10 : 19/56 (33.9%)  => ceiling 66.1%
+    half 2  graph-ON  hits top-10 : 18/56 (32.1%)
+    KEPT (off miss AND on hit)    : 0/56  (0.0%)
+    [diagnostic] raw vector top-50: 94.7%, median rank 2
 
-The two halves are IDENTICAL. Graph expansion changed top-10 membership for the
-target in ZERO of 57 cases, on the most favourable ground available: every
-target is the endpoint of the very edge its query was written from. That is why
-the mine yields 0, and it is a measurement about the graph, not a bug.
+The halves are equal to within the instrument's noise floor (~1 query at this
+n — see arm_separation.py), and graph-ON is if anything the LOWER of the two.
+Graph expansion did not move a single target INTO the top-10, on the most
+favourable ground available: every target is the endpoint of the very edge its
+query was written from. That is why the mine yields 0, and it is a measurement
+about the graph, not a bug.
 
-Robust to configuration: the same run at CODE DEFAULTS (`--defaults`) gave
-ceiling 56.9%, halves identical at 25/58, KEPT 0/58. The ceiling moves with the
-shape; the identity of the two halves does not.
+Robust across three configurations measured while fixing this probe — code
+defaults (25/58 vs 25/58), prod shape with a keyword-only Brain (20/57 vs
+20/57), and prod shape with the Brain wired correctly (19/56 vs 18/56). The
+CEILING moves with the shape (56.9% → 64.9% → 66.1%); KEPT is 0 in every one.
 
-CORRECTION, twice over. An earlier revision derived the ceiling from a raw
-vector top-50 union query and reported ~5%, concluding the generator was the
-blocker — wrong by ~11x, because the gate runs `run_recall_pipeline` at top-10
-and a target at raw vector rank 11-50 misses the gate yet still yields a qrel.
-Note the diagnostic row above still reads 94.7%: that figure was never wrong,
-it simply was not the gate. A second revision then pinned settings so hard it
-measured code defaults, which the miner never runs — it builds from a bare
-`Settings()` that reads prod's .env. Both found by codex, not by me.
+CORRECTED THREE TIMES, all found by codex, none by me:
+  1. The ceiling came from a raw vector top-50 union query — wrong by ~11x,
+     because the gate runs `run_recall_pipeline` at top-10 and a target at raw
+     rank 11-50 misses the gate yet still yields a qrel. (The 94.7% diagnostic
+     was never wrong; it simply was not the gate.)
+  2. Settings were then pinned so hard the probe measured code defaults, which
+     the miner never runs — it builds from a bare `Settings()` reading prod .env.
+  3. The probe gave `Brain` an embedding provider and the miner did not, so the
+     miner was gating on keyword-only decision search while every sampled target
+     IS a decision. Fixed in the MINER (it was the wrong one), not worked around
+     here; both now build through `retrieval_runner`'s constructors.
 
     python scripts/diag/qrel_generator_baseline.py \
         --db nous_prod_20260801 --agent nous-default -n 60 --allow-inferred
@@ -60,9 +66,6 @@ from sqlalchemy import text  # noqa: E402
 
 from nous.api.anthropic_client import create_client  # noqa: E402
 from nous.api.retrieval_pipeline import run_recall_pipeline  # noqa: E402
-from nous.brain.brain import Brain  # noqa: E402
-from nous.brain.embeddings import EmbeddingProvider  # noqa: E402
-from nous.heart.heart import Heart  # noqa: E402
 from nous.storage.database import Database  # noqa: E402
 from nous_eval.env_pin import (  # noqa: E402
     PROD_SHAPE,
@@ -72,6 +75,11 @@ from nous_eval.env_pin import (  # noqa: E402
 from nous_eval.generate_graph_qrels import (  # noqa: E402
     fetch_edge_candidates,
     generate_query,
+)
+from nous_eval.retrieval_runner import (  # noqa: E402
+    _build_brain_for_eval,
+    _build_heart_for_eval,
+    make_eval_embedding_provider,
 )
 
 _NODE_UNION = """
@@ -122,13 +130,16 @@ async def run(args) -> int:
     s_on = s.model_copy(update={"graph_recall_enabled": True})
     db = Database(settings=s)
     await db.connect()
-    emb = EmbeddingProvider(api_key=s.openai_api_key,
-                            model=args.embed_model, dimensions=1536)
-    heart = Heart(database=db, settings=s, embedding_provider=emb)
-    brain = Brain(database=db, settings=s, embedding_provider=emb)
+    # Built through the harness's OWN constructors (codex P1). Hand-rolling
+    # these is how the probe and the miner drifted apart in the first place —
+    # the provider's model must match the corpus's vectors, and `Brain`
+    # silently degrades to keyword-only decision search without one.
+    emb = make_eval_embedding_provider(s)
     client = create_client(s)
     await client.start()
     try:
+      async with _build_heart_for_eval(db, s) as heart:
+        brain = _build_brain_for_eval(db, s, emb)
         cands = await fetch_edge_candidates(
             db, agent_id=s.agent_id, sample_size=args.n,
             min_weight=args.min_weight, allow_inferred=args.allow_inferred)
@@ -238,7 +249,8 @@ async def run(args) -> int:
         return 0
     finally:
         await client.close()
-        await brain.close()
+        if emb is not None:
+            await emb.close()
         await db.disconnect()
 
 
@@ -266,7 +278,6 @@ def main() -> int:
                         "the miner actually runs. Results are not comparable "
                         "across the two.")
     p.add_argument("--model", default="claude-haiku-4-5-20251001")
-    p.add_argument("--embed-model", default="text-embedding-3-large")
     args = p.parse_args()
     if "EVAL_DB_PASSWORD" not in os.environ:
         print("set EVAL_DB_PASSWORD", file=sys.stderr)
