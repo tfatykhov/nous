@@ -57,6 +57,31 @@ sources:
     requires_fixtures_dir: true
     description: "Graph-only-reachable queries — opt-in via --sources graph_targeted once the corpus has inferred-tier edges (see nous_eval.generate_graph_qrels)"
 
+  - name: graph_bridge_ungated
+    path: "${NOUS_EVAL_FIXTURES_DIR}/qrels_graph_nogate.jsonl"
+    # Same generator as graph_targeted with the reachability gate OFF.
+    #
+    # WHY the gate is skipped, measured 2026-08-24 on a prod clone (n=56 from 60
+    # edges, scripts/diag/qrel_generator_baseline.py): NOT generator bias. The
+    # generator's ceiling is 66.1% — ample. The gate yields nothing because its
+    # two halves are equal within noise: graph-OFF finds the target in top-10 for
+    # 19/56 and graph-ON for 18/56, so 0 rows pass. Graph expansion
+    # moved zero targets INTO the top-10.
+    #
+    # (An earlier revision of this comment blamed a ~5% ceiling from 94.8%
+    # raw-vector top-50 findability. That was wrong by ~11x — the gate runs the
+    # pipeline at top-10, not raw vector at top-50 — and it attributed the empty
+    # source to the wrong half of the gate.)
+    #
+    # These rows are usable for PAIRED A/B — ties cost n, not correctness — and
+    # are NOT evidence that graph expansion reached anything.
+    # gate_eligible stays false: gold here are decision-targets of inferred
+    # edges, i.e. favourable ground for the graph mechanisms under test.
+    enabled_by_default: false
+    gate_eligible: false
+    requires_fixtures_dir: true
+    description: "Graph-bridge queries, UNVALIDATED reachability — paired-A/B only, never graph-only evidence (see nous_eval.generate_graph_qrels --no-reachability-gate)"
+
   - name: nous_prod
     path: "tests/fixtures/qrels_nous_prod.jsonl"
     enabled_by_default: false

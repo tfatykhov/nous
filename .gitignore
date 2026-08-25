@@ -19,6 +19,12 @@ nous.db
 # gen_nous_procedure_qrels.py against your own nous-prod-snapshot.
 tests/fixtures/qrels_nous_prod*.jsonl
 tests/fixtures/qrels_longmemeval.jsonl
+# Same rule, second location: generated qrels also land under reports/ when a
+# probe writes there. Verified 2026-08-24 that these carry prod content
+# verbatim (a mined query opened "Given that France has right-hand drive
+# roads... while Malta has left-hand drive"). Curated sets belong in the
+# nous-eval-fixtures clone (NOUS_EVAL_FIXTURES_DIR), never here.
+reports/*qrels*.jsonl
 
 # F074: BEAM harness — sibling clone of mohammadtavakoli78/BEAM
 tools/beam/

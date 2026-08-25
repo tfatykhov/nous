@@ -52,7 +52,11 @@ from nous.brain.brain import Brain
 from nous.config import Settings
 from nous.heart.heart import Heart
 from nous_eval.config import EvalSettings
-from nous_eval.retrieval_runner import _build_heart_for_eval, _settings_for_eval_db
+from nous_eval.retrieval_runner import (
+    _build_brain_for_eval,
+    _build_heart_for_eval,
+    _settings_for_eval_db,
+)
 from nous.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -355,7 +359,7 @@ async def _validate_query(
     return on_rank is not None and off_rank is None
 
 
-def _qrel_to_jsonl(qrel: GeneratedQrel) -> str:
+def _qrel_to_jsonl(qrel: GeneratedQrel, *, gated: bool = True) -> str:
     # Codex P1 (2026-05-23): memory_types MUST include the full pipeline
     # surface, not just the gold's type. The retrieval harness routes
     # `qrel.memory_types` into `run_recall_pipeline(memory_types=...)`,
@@ -373,7 +377,10 @@ def _qrel_to_jsonl(qrel: GeneratedQrel) -> str:
         "query": qrel.query,
         "gold_ids": [str(qrel.gold_id)],
         "memory_types": ["fact", "decision", "episode", "procedure", "censor"],
-        "source": "graph_targeted",
+        # codex P1: ungated rows get their OWN source. `graph_targeted` means
+        # graph-off-miss + graph-on-hit was VERIFIED; a row that skipped that
+        # check must not inherit the claim.
+        "source": "graph_targeted" if gated else "graph_bridge_ungated",
         "notes": {
             "bridge_via": str(qrel.source_id),
             "bridge_source_type": qrel.source_type,
@@ -410,7 +417,22 @@ async def _run_async(args: argparse.Namespace) -> int:
         try:
             kept: list[GeneratedQrel] = []
             async with _build_heart_for_eval(db, main_settings) as heart:
-                brain = Brain(database=db, settings=main_settings)
+                # codex P1: a bare `Brain(db, settings)` has NO embedding
+                # provider, so `Brain` falls back to keyword-only decision
+                # search — while the Heart beside it runs vector search, and
+                # `fetch_edge_candidates` restricts targets to `decision`. The
+                # validator was therefore gating every qrel on a decision-search
+                # path neither prod nor `retrieval_runner` uses. Build it the
+                # same way the harness does.
+                # Reuse HEART's provider rather than building a second one
+                # (codex P2): the Heart context owns its lifecycle and closes
+                # it, the LRU cache is shared so a query embedded for the heart
+                # legs is not embedded again for the decision leg, and a
+                # provider built here would never be closed — the miner never
+                # calls `brain.close()`.
+                brain = _build_brain_for_eval(
+                    db, main_settings, heart._embeddings,
+                )
                 for i, cand in enumerate(candidates, 1):
                     try:
                         gen = await generate_query(cand, api_client, args.model)
@@ -421,13 +443,44 @@ async def _run_async(args: argparse.Namespace) -> int:
                     if gen is None:
                         continue
                     query, rationale = gen
-                    try:
-                        ok = await _validate_query(
-                            query, cand.target_id, heart, brain, main_settings, args.top_k,
-                        )
-                    except Exception as exc:
-                        logger.warning("Validation failed for %s: %s", query[:60], exc)
-                        continue
+                    if args.no_reachability_gate:
+                        # The gate keeps a qrel only when graph-off MISSES and
+                        # graph-on HITS. Measured on this corpus by
+                        # scripts/diag/qrel_generator_baseline.py (2026-08-24,
+                        # 58 queries from 60 edges): graph-off hits top-10 for
+                        # 19/56, so the ceiling is 66.1% — the generator is NOT
+                        # the constraint. graph-ON hits 18/56 (equal within noise), so
+                        # 0/56 rows pass. Graph expansion moved zero targets into top-10
+                        # membership in zero cases.
+                        #
+                        # So skipping the gate here is not a workaround for a
+                        # biased generator (an earlier revision of this comment
+                        # claimed a ~5% ceiling from a raw-vector measurement;
+                        # it was wrong by ~11x). It is the only way to obtain a
+                        # usable set on a corpus where the gate's second half
+                        # never fires — which is itself the finding.
+                        #
+                        # A paired A/B does not need graph-only qrels — it needs
+                        # qrels on which arms CAN differ. Ties cost n, not
+                        # correctness. Skipping the gate trades a contract the
+                        # measurement never required for a set that actually
+                        # yields, and the resulting set DID discriminate: a
+                        # positive control (graph_recall_enabled=False) moved
+                        # 23/57 queries at dMRR +0.0640.
+                        #
+                        # The cost is real and must travel with the file: rows
+                        # kept here are NOT graph-only, so this output must not
+                        # be loaded as `QrelSource.graph_targeted` without
+                        # saying so.
+                        ok = True
+                    else:
+                        try:
+                            ok = await _validate_query(
+                                query, cand.target_id, heart, brain, main_settings, args.top_k,
+                            )
+                        except Exception as exc:
+                            logger.warning("Validation failed for %s: %s", query[:60], exc)
+                            continue
                     if not ok:
                         continue
                     kept.append(GeneratedQrel(
@@ -451,7 +504,7 @@ async def _run_async(args: argparse.Namespace) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
         for q in kept:
-            f.write(_qrel_to_jsonl(q) + "\n")
+            f.write(_qrel_to_jsonl(q, gated=not args.no_reachability_gate) + "\n")
     print(f"Wrote {len(kept)} qrels to {out_path}")
     return 0
 
@@ -474,6 +527,17 @@ def main(argv: list[str] | None = None) -> int:
                         help="LLM for query generation.")
     parser.add_argument("--out", required=True,
                         help="Output JSONL path (typically inside the fixtures dir).")
+    parser.add_argument(
+        "--no-reachability-gate", action="store_true",
+        help="Keep every generated query instead of requiring graph-off MISS + "
+             "graph-on HIT. Measured on a prod-shaped corpus (2026-08-24): the "
+             "gate yields 0/56, not because the generator is biased (ceiling "
+             "66.1%%) but because graph-on hits 18/56 vs graph-off 19/56 — "
+             "expansion changes nothing. A paired A/B does not need graph-only "
+             "qrels; ties cost n, not correctness. Run "
+             "scripts/diag/qrel_generator_baseline.py to see which half of the "
+             "gate is failing on YOUR corpus before using this. Output is NOT "
+             "graph-only; do not label it as such.")
     parser.add_argument("--log-level", default="info")
     args = parser.parse_args(argv)
 

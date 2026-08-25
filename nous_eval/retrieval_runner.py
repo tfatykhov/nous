@@ -368,6 +368,27 @@ def _settings_for_eval_db(
 # ---------------------------------------------------------------------------
 
 
+def make_eval_embedding_provider(
+    settings: Settings,
+) -> EmbeddingProvider | None:
+    """The ONE place an eval path builds an embedding provider.
+
+    Every consumer must go through this: the model and dimensions have to match
+    the vectors already in the corpus, and a caller that hardcodes its own (or
+    passes `None`) silently measures a different retrieval system. That is not
+    hypothetical — `generate_graph_qrels` built its Brain with no provider at
+    all, so `Brain` fell back to keyword-only decision search while Heart ran
+    vector search, on a mine whose targets are ALL decisions.
+    """
+    if not settings.openai_api_key:
+        return None
+    return EmbeddingProvider(
+        api_key=settings.openai_api_key,
+        model=settings.embedding_model,
+        dimensions=settings.embedding_dimensions,
+    )
+
+
 @asynccontextmanager
 async def _build_heart_for_eval(
     db: Database, settings: Settings
@@ -388,13 +409,7 @@ async def _build_heart_for_eval(
     from nous_eval.schema_preflight import assert_eval_db_schema_matches_orm
     await assert_eval_db_schema_matches_orm(db)
 
-    embedding_provider: EmbeddingProvider | None = None
-    if settings.openai_api_key:
-        embedding_provider = EmbeddingProvider(
-            api_key=settings.openai_api_key,
-            model=settings.embedding_model,
-            dimensions=settings.embedding_dimensions,
-        )
+    embedding_provider = make_eval_embedding_provider(settings)
     heart = Heart(
         database=db,
         settings=settings,
