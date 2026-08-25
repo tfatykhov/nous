@@ -4133,6 +4133,31 @@ def create_programmatic_tools(
                         exc_info=True,
                     )
 
+            # Backfill legacy fields for fact rows whose leg did not carry them.
+            # Only the primary Heart leg populates them in metadata; the keyed,
+            # keyed_r2, exemplar and graph-expansion legs build their own
+            # metadata from narrower SELECTs — and all four are ENABLED in prod,
+            # so without this a script filtering on `active` or `confidence`
+            # silently misclassifies a fact based on which leg happened to find
+            # it. Keyed off the MISSING FIELD, not the leg, so a leg added later
+            # is covered for free. One batched query, and it fetches nothing
+            # when every fact already arrived complete.
+            _needs = [
+                r.id for r in results
+                if r.type == "fact" and "active" not in r.metadata
+            ]
+            _filled: dict = {}
+            if _needs:
+                try:
+                    _filled = _schedule(heart.facts.fetch_legacy_fields(_needs))
+                except Exception:
+                    # Better to fall through to the None defaults than to fail
+                    # the whole recall over a compatibility backfill.
+                    logger.warning(
+                        "run_python: legacy fact field backfill failed",
+                        exc_info=True,
+                    )
+
             out: list[dict] = []
             for r in results:
                 d = {
@@ -4163,15 +4188,19 @@ def create_programmatic_tools(
                 # data. A None makes a sort fail loudly instead, which is the
                 # honest outcome for a list that genuinely is no longer
                 # all-facts. Canonical keys are never overwritten.
+                _extra = _filled.get(r.id, {}) if r.type == "fact" else {}
                 for _k, _default in _LEGACY_FACT_KEYS.items():
-                    if _k not in d:
+                    if _k in d:
+                        continue
+                    if _k in r.metadata:
+                        d[_k] = r.metadata[_k]
+                    elif _k in _extra:
+                        d[_k] = _extra[_k]
+                    else:
                         # Copy a mutable default — otherwise every result shares
                         # ONE `tags` list and a script appending to one row
                         # silently mutates the whole batch.
-                        if _k not in r.metadata:
-                            d[_k] = list(_default) if isinstance(_default, list) else _default
-                        else:
-                            d[_k] = r.metadata[_k]
+                        d[_k] = list(_default) if isinstance(_default, list) else _default
                 out.append(d)
             return out
 

@@ -4209,3 +4209,48 @@ class FactManager:
         if gen == self._exemplar_exists_gen:
             self._exemplar_exists_cache = (exists, now)
         return exists
+
+    # Persisted FactSummary fields that only the primary Heart leg carries in
+    # RecallResult.metadata. The keyed, keyed_r2, exemplar and graph-expansion
+    # legs each build their own metadata dict from their own narrower SELECT, so
+    # a fact found by one of those reaches a consumer without them. All four
+    # legs are ENABLED in prod, so this is a live divergence, not a latent one.
+    LEGACY_SUMMARY_FIELDS = (
+        "category", "subject", "confidence", "active", "tags",
+        "superseded_by", "actionable", "actionable_confidence",
+        "overrides_prior",
+    )
+
+    async def fetch_legacy_fields(
+        self, fact_ids: Sequence[UUID], session: AsyncSession | None = None,
+    ) -> dict[UUID, dict[str, Any]]:
+        """One SELECT returning ``LEGACY_SUMMARY_FIELDS`` per id.
+
+        Keyed off which fields a row is MISSING rather than off which leg
+        produced it, so a leg added later is covered without touching this —
+        the per-leg alternative is four metadata dicts that have to be kept in
+        step, which is precisely the shape that drifted three times in one
+        review cycle.
+        """
+        if not fact_ids:
+            return {}
+        if session is None:
+            async with self.db.session() as session:
+                return await self._fetch_legacy_fields(fact_ids, session)
+        return await self._fetch_legacy_fields(fact_ids, session)
+
+    async def _fetch_legacy_fields(
+        self, fact_ids: Sequence[UUID], session: AsyncSession,
+    ) -> dict[UUID, dict[str, Any]]:
+        cols = [getattr(Fact, f) for f in self.LEGACY_SUMMARY_FIELDS]
+        result = await session.execute(
+            select(Fact.id, *cols).where(Fact.id.in_(list(fact_ids)))
+        )
+        out: dict[UUID, dict[str, Any]] = {}
+        for row in result.all():
+            vals = dict(zip(self.LEGACY_SUMMARY_FIELDS, row[1:], strict=True))
+            # `tags` is a nullable ARRAY; normalise NULL to [] so a consumer can
+            # iterate without a None check, and copy so rows never share a list.
+            vals["tags"] = list(vals["tags"] or [])
+            out[row[0]] = vals
+        return out

@@ -54,6 +54,12 @@ def mock_heart():
     }
     heart.search_facts = AsyncMock(return_value=[fact1, fact2])
 
+    # Default: the compatibility backfill finds nothing extra. Configured here
+    # rather than per-test because an UNconfigured AsyncMock attribute returns a
+    # coroutine, which surfaces as an opaque "argument of type 'coroutine'"
+    # TypeError from inside the executed script rather than as a mock error.
+    heart.facts.fetch_legacy_fields = AsyncMock(return_value={})
+
     # list_episodes returns EpisodeSummary-like objects
     episode = MagicMock()
     episode.model_dump.return_value = {
@@ -108,21 +114,27 @@ def patched_pipeline():
     """
     from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
 
-    # metadata mirrors `Heart._to_recall_result` for a FactSummary: category,
-    # subject and confidence live under `metadata`, which is exactly why the
-    # tool has to flatten them back to the top level.
+    # metadata mirrors what `Heart._to_recall_result` actually emits for a
+    # FactSummary — the persisted fields live under `metadata`, which is exactly
+    # why the tool has to flatten them back to the top level. Carrying `active`
+    # matters: its ABSENCE is what triggers the non-primary-leg backfill, so a
+    # fixture missing it would silently exercise the wrong path.
+    def _meta(conf: float) -> dict:
+        return {
+            "category": "technical", "subject": "cache", "confidence": conf,
+            "active": True, "tags": [], "superseded_by": None,
+            "actionable": None, "actionable_confidence": None,
+            "overrides_prior": False,
+        }
+
     results = [
         PipelineResult(
             id=uuid4(), type="fact", description="caching uses Redis",
-            score=0.85, source="heart",
-            metadata={"category": "technical", "subject": "cache",
-                      "confidence": 0.9},
+            score=0.85, source="heart", metadata=_meta(0.9),
         ),
         PipelineResult(
             id=uuid4(), type="fact", description="cache TTL is 300s",
-            score=0.60, source="heart",
-            metadata={"category": "technical", "subject": "cache",
-                      "confidence": 0.7},
+            score=0.60, source="heart", metadata=_meta(0.7),
         ),
     ]
     mock = AsyncMock(return_value=(results, PipelineStats()))
@@ -654,6 +666,64 @@ class TestRunPythonMemoryWrappers:
 
         activator.current_turn.assert_not_called()
         activator.compute_activations.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_primary_leg_facts_are_backfilled(
+        self, mock_brain, mock_heart
+    ):
+        """A keyed/exemplar/graph fact gets its REAL values, not the defaults.
+
+        Only the primary Heart leg populates these in metadata; the keyed,
+        keyed_r2, exemplar and graph-expansion legs build their own metadata
+        from narrower SELECTs — and all four are ENABLED in prod. Without the
+        backfill a script filtering on `active` would silently misclassify a
+        fact based on which leg happened to find it.
+
+        The trigger is the MISSING FIELD, not the leg name, so a leg added later
+        is covered without touching this.
+        """
+        from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
+        from nous.api.tools import create_programmatic_tools
+
+        fid = uuid4()
+        # Shaped like `_keyed_to_pipeline` output: no `active`/`confidence`.
+        results = [PipelineResult(
+            id=fid, type="fact", description="keyed hit", score=0.55,
+            source="heart", metadata={"retrieval_leg": "keyed", "subject": "s"},
+        )]
+        mock_heart.facts.fetch_legacy_fields = AsyncMock(return_value={
+            fid: {"active": True, "confidence": 0.91, "tags": ["t"],
+                  "category": "technical"},
+        })
+
+        s = Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=5)
+        tool = create_programmatic_tools(mock_brain, mock_heart, s)["run_python"]
+        with patch(
+            "nous.api.retrieval_pipeline.run_recall_pipeline",
+            AsyncMock(return_value=(results, PipelineStats())),
+        ):
+            out = await tool(code=(
+                'f = recall_deep("q")[0]\n'
+                'result = json.dumps([f["active"], f["confidence"], f["tags"]])'
+            ))
+        assert out["content"][0]["text"] == '[true, 0.91, ["t"]]'
+        mock_heart.facts.fetch_legacy_fields.assert_called_once_with([fid])
+
+    @pytest.mark.asyncio
+    async def test_complete_facts_trigger_no_backfill_query(
+        self, mock_brain, mock_heart, patched_pipeline
+    ):
+        """The extra query must not fire when the primary leg already filled in."""
+        from nous.api.tools import create_programmatic_tools
+
+        mock_heart.facts.fetch_legacy_fields = AsyncMock(return_value={})
+        # `patched_pipeline`'s rows already mirror the primary Heart leg, which
+        # carries `active` — so the backfill has nothing to look up.
+        s = Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=5)
+        tool = create_programmatic_tools(mock_brain, mock_heart, s)["run_python"]
+        await tool(code='recall_deep("caching")')
+
+        mock_heart.facts.fetch_legacy_fields.assert_not_called()
 
     def test_fact_rows_carry_real_values_not_defaults(self):
         """`Heart._to_recall_result` must propagate the persisted fact fields.
