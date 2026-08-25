@@ -214,20 +214,25 @@
   // legend are rendered in this order always, and colour only confirms.
   const DISPOSITION_META: Record<string, { color: string; family: string; order: number }> = {
     rendered:           { color: '#34d399', family: 'delivered',  order: 0 },
+    // Also delivered — but to a run_python script, not to the model. Sits in
+    // `delivered` because the retrieval succeeded and handed its results over;
+    // separate from `rendered` because the script, not the pipeline, decides
+    // what the model actually sees.
+    returned_to_script: { color: '#22d3ee', family: 'delivered',  order: 1 },
     // capacity — a cut or budget removed it; the remedy is a bigger budget
-    sliced_off:         { color: '#f59e0b', family: 'capacity',   order: 1 },
-    budget_truncated:   { color: '#fcd34d', family: 'capacity',   order: 2 },
+    sliced_off:         { color: '#f59e0b', family: 'capacity',   order: 2 },
+    budget_truncated:   { color: '#fcd34d', family: 'capacity',   order: 3 },
     // quality — a score or filter judged it; a bigger budget changes nothing
-    below_floor:        { color: '#a78bfa', family: 'quality',    order: 3 },
-    filter_dropped:     { color: '#c4b5fd', family: 'quality',    order: 4 },
+    below_floor:        { color: '#a78bfa', family: 'quality',    order: 4 },
+    filter_dropped:     { color: '#c4b5fd', family: 'quality',    order: 5 },
     // redundancy/scope — deliberately not included, nothing is wrong
-    deduped:            { color: '#94a3b8', family: 'redundancy', order: 5 },
-    superseded:         { color: '#cbd5e1', family: 'redundancy', order: 6 },
-    replaced_at_merge:  { color: '#64748b', family: 'redundancy', order: 7 },
-    f071_excluded:      { color: '#7c8da3', family: 'redundancy', order: 8 },
-    type_excluded:      { color: '#475569', family: 'redundancy', order: 9 },
+    deduped:            { color: '#94a3b8', family: 'redundancy', order: 6 },
+    superseded:         { color: '#cbd5e1', family: 'redundancy', order: 7 },
+    replaced_at_merge:  { color: '#64748b', family: 'redundancy', order: 8 },
+    f071_excluded:      { color: '#7c8da3', family: 'redundancy', order: 9 },
+    type_excluded:      { color: '#475569', family: 'redundancy', order: 10 },
     // anomaly — reserved, never reused
-    unaccounted:        { color: '#f472b6', family: 'anomaly',    order: 10 },
+    unaccounted:        { color: '#f472b6', family: 'anomaly',    order: 11 },
   };
 
   function dispositionColor(d: string): string {
@@ -240,6 +245,7 @@
 
   const DISPOSITION_HELP: Record<string, string> = {
     rendered: 'Reached the model',
+    returned_to_script: 'Returned to a run_python script — the script decides what the model sees',
     sliced_off: 'Fell outside a top-K or max-K cut',
     below_floor: 'Failed a similarity or score floor',
     filter_dropped: 'Removed by a named filter',

@@ -35,7 +35,7 @@ from nous.heart.exemplars import parse_label
 from nous.heart.heart import Heart
 from nous.heart.schemas import CensorInput, FactInput, FactRejected, ProcedureInput
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
-from nous.observability.retrieval_trace import SLICED_OFF
+from nous.observability.retrieval_trace import RETURNED_TO_SCRIPT, SLICED_OFF
 from nous.skills.parser import SkillParser
 
 logger = logging.getLogger(__name__)
@@ -3922,6 +3922,28 @@ def create_programmatic_tools(
                 _rl.start(query=query, path="script", session_id=_session_id)
                 if _rl is not None else None
             )
+            def _commit(tr) -> None:
+                """Commit from the MAIN loop, never from this worker thread.
+
+                `RetrievalLogger.commit` schedules the DB write via
+                `_schedule_bg`, which calls `asyncio.get_running_loop()` — in an
+                executor thread that raises, and the except branch calls
+                `coro.close()`. The write would be silently discarded and the
+                trace would survive only in the in-memory ring, which has no
+                reader (both dashboard endpoints query Postgres). Every script
+                retrieval would therefore be recorded nowhere — the exact
+                invisibility this change exists to end. `call_soon_threadsafe`
+                marshals it back, mirroring what `_schedule` does for coroutines.
+                """
+                if _rl is None or tr is None:
+                    return
+                try:
+                    loop.call_soon_threadsafe(_rl.commit, tr)
+                except Exception:
+                    logger.debug(
+                        "F091: script retrieval trace commit failed", exc_info=True,
+                    )
+
             try:
                 results, _stats = _schedule(run_recall_pipeline(
                     query=query, heart=heart, brain=brain, settings=settings,
@@ -3930,47 +3952,49 @@ def create_programmatic_tools(
             except Exception as e:
                 # Commit the PARTIAL trace, matching the tool's error path: a
                 # crashed retrieval must not look like one that never happened.
-                if _rl is not None and _tr is not None:
-                    try:
-                        _tr.undeliver_all(SLICED_OFF, "script_recall_failed")
-                        _tr.leg("script_recall", attempted=True, error=str(e)[:200])
-                        _tr.finalize([])
-                        _rl.commit(_tr)
-                    except Exception:
-                        logger.debug(
-                            "F091: failed to commit partial script trace",
-                            exc_info=True,
-                        )
+                if _tr is not None:
+                    _tr.undeliver_all(SLICED_OFF, "script_recall_failed")
+                    _tr.leg("script_recall", attempted=True, error=str(e)[:200])
+                    _tr.finalize([])
+                    _commit(_tr)
                 raise
-            # `run_recall_pipeline` already called `finalize`, and unlike the
-            # tool path there is no formatter scope filter to reconcile — every
-            # result here is handed back to the script verbatim, so what the
-            # pipeline marked `rendered` is exactly what was delivered.
-            if _rl is not None and _tr is not None:
-                try:
-                    _rl.commit(_tr)
-                except Exception:
-                    logger.debug(
-                        "F091: script retrieval trace commit failed", exc_info=True,
-                    )
+            # `run_recall_pipeline` has already called `finalize`, which marks its
+            # survivors RENDERED — a claim that is true on the tool path and FALSE
+            # here. These results were delivered to the Python interpreter, and
+            # the script decides what (if anything) the model ever sees; filtering
+            # and aggregating is the entire purpose of run_python. Leaving them
+            # `rendered` would inflate n_rendered and every disposition rollup
+            # with a population the model may never have seen. We cannot know what
+            # the script emits, so we record what IS true: returned to the script.
+            if _tr is not None:
+                _tr.undeliver_all(RETURNED_TO_SCRIPT, "run_python")
+            _commit(_tr)
 
-            return [
-                {
+            out: list[dict] = []
+            for r in results:
+                d = {
                     "id": str(r.id),
                     "type": r.type,
                     "description": r.description,
-                    # Deliberate alias. The old return was a `FactSummary`, whose
-                    # body lived under "content"; any stored skill or procedure
-                    # carrying a script template would otherwise start raising a
-                    # silent KeyError the moment this shipped.
+                    # Alias: the old return was a `FactSummary`, whose body lived
+                    # under "content".
                     "content": r.description,
                     "score": r.score,
                     "source": r.source,
                     "edge_relation": r.edge_relation,
                     "metadata": r.metadata,
                 }
-                for r in results
-            ]
+                # Flatten the legacy FactSummary keys back to the top level.
+                # `Heart._to_recall_result` puts category/subject/confidence in
+                # `metadata`, so a script doing `f["confidence"]` — which the
+                # pre-change tests did, and stored skill/procedure templates may
+                # still do — would raise KeyError against a dict that in fact
+                # holds the value one level down. Never overwrite a canonical key.
+                for _k in ("category", "subject", "confidence"):
+                    if _k in r.metadata and _k not in d:
+                        d[_k] = r.metadata[_k]
+                out.append(d)
+            return out
 
         def _recall_recent(hours: int = 24, limit: int = 5) -> list[dict]:
             results = _schedule(heart.list_episodes(limit=limit, hours=hours))

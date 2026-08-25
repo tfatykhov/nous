@@ -2498,6 +2498,30 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _validate_programmatic_tools_timeout(self) -> "Settings":
+        """run_python's own deadline must expire before the dispatcher's.
+
+        `_dispatch_with_keepalive` wraps EVERY tool in
+        `asyncio.wait_for(..., tool_timeout)`. If the inner deadline is not
+        strictly smaller, the outer cancel fires first: the model gets a generic
+        tool timeout instead of the script's own error, the F091 partial-trace
+        commit never runs, and the executor thread keeps its concurrency slot
+        until the inner deadline finally elapses.
+
+        A cross-field validator, not a test on the defaults — the defaults are
+        90 and 120, but an operator setting only `NOUS_TOOL_TIMEOUT=60` would
+        otherwise invert the pair with no error anywhere. Mirrors
+        `_validate_keepalive` directly above, which guards the same ceiling.
+        """
+        if self.programmatic_tools_timeout >= self.tool_timeout:
+            raise ValueError(
+                f"programmatic_tools_timeout ({self.programmatic_tools_timeout}) "
+                f"must be < tool_timeout ({self.tool_timeout}); otherwise the "
+                "dispatcher cancels run_python before its own deadline fires"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_compaction(self) -> "Settings":
         if self.tool_soft_trim_head + self.tool_soft_trim_tail >= self.tool_soft_trim_chars:
             raise ValueError(

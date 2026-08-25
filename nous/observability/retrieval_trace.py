@@ -55,12 +55,21 @@ DEDUPED = "deduped"
 SUPERSEDED = "superseded"
 REPLACED_AT_MERGE = "replaced_at_merge"
 TYPE_EXCLUDED = "type_excluded"
+# Returned to a `run_python` script rather than to the model. `finalize` treats
+# its `results` as authoritative about what REACHED THE MODEL, which is true on
+# the tool path and false on the script path: the script is what decides whether
+# any of it is printed or returned, and filtering/aggregating is the whole point
+# of the tool. Counting these `rendered` would inflate `n_rendered` and every
+# disposition rollup by a population the model may never have seen. This is
+# NOT a drop — the retrieval succeeded and delivered — so it is its own value
+# rather than being folded into `sliced_off`.
+RETURNED_TO_SCRIPT = "returned_to_script"
 UNACCOUNTED = "unaccounted"
 
 DISPOSITIONS = frozenset({
     RENDERED, SLICED_OFF, BELOW_FLOOR, FILTER_DROPPED, BUDGET_TRUNCATED,
     F071_EXCLUDED, DEDUPED, SUPERSEDED, REPLACED_AT_MERGE, TYPE_EXCLUDED,
-    UNACCOUNTED,
+    RETURNED_TO_SCRIPT, UNACCOUNTED,
 })
 
 _DEFAULT_SNIPPET_CHARS = 200
@@ -650,5 +659,5 @@ __all__ = [
     "NULL_TRACE", "NullTrace", "RetrievalTrace",
     "DISPOSITIONS", "RENDERED", "SLICED_OFF", "BELOW_FLOOR", "FILTER_DROPPED",
     "BUDGET_TRUNCATED", "F071_EXCLUDED", "DEDUPED", "SUPERSEDED",
-    "REPLACED_AT_MERGE", "TYPE_EXCLUDED", "UNACCOUNTED",
+    "REPLACED_AT_MERGE", "TYPE_EXCLUDED", "RETURNED_TO_SCRIPT", "UNACCOUNTED",
 ]

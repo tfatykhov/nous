@@ -108,14 +108,21 @@ def patched_pipeline():
     """
     from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
 
+    # metadata mirrors `Heart._to_recall_result` for a FactSummary: category,
+    # subject and confidence live under `metadata`, which is exactly why the
+    # tool has to flatten them back to the top level.
     results = [
         PipelineResult(
             id=uuid4(), type="fact", description="caching uses Redis",
             score=0.85, source="heart",
+            metadata={"category": "technical", "subject": "cache",
+                      "confidence": 0.9},
         ),
         PipelineResult(
             id=uuid4(), type="fact", description="cache TTL is 300s",
             score=0.60, source="heart",
+            metadata={"category": "technical", "subject": "cache",
+                      "confidence": 0.7},
         ),
     ]
     mock = AsyncMock(return_value=(results, PipelineStats()))
@@ -157,6 +164,30 @@ class TestRunPythonConfig:
         """
         s = Settings()
         assert s.programmatic_tools_timeout < s.tool_timeout
+
+    def test_timeout_inversion_is_rejected_at_construction(self):
+        """The invariant is enforced for OVERRIDES, not just the defaults.
+
+        Asserting only the shipped pair (90 < 120) would pass while an operator
+        setting `NOUS_TOOL_TIMEOUT=60` silently inverts it — the failure mode is
+        a config combination, so the guard has to live in config.
+        """
+        # NOTE: `tool_timeout` carries `validation_alias="NOUS_TOOL_TIMEOUT"`,
+        # so it can ONLY be set by that alias. `Settings(tool_timeout=60)` is
+        # treated as an extra field and, under `extra="ignore"`, silently
+        # dropped — the first draft of this test passed a plain kwarg and
+        # "failed to raise" against a Settings still holding the default 120.
+        with pytest.raises(ValueError, match="must be < tool_timeout"):
+            Settings(programmatic_tools_timeout=90, NOUS_TOOL_TIMEOUT=60)
+
+        # Equal is also wrong: the two deadlines would race.
+        with pytest.raises(ValueError, match="must be < tool_timeout"):
+            Settings(programmatic_tools_timeout=60, NOUS_TOOL_TIMEOUT=60)
+
+        # And the guard must not fire on a valid override.
+        assert Settings(
+            programmatic_tools_timeout=30, NOUS_TOOL_TIMEOUT=60
+        ).programmatic_tools_timeout == 30
 
     def test_custom_values(self):
         """Can override via constructor."""
@@ -502,15 +533,62 @@ class TestRunPythonMemoryWrappers:
 
     @pytest.mark.asyncio
     async def test_recall_deep_returns_dicts(self, run_python_tool, patched_pipeline):
-        """recall_deep results are dicts accessible with bracket notation."""
+        """recall_deep results are dicts accessible with bracket notation.
+
+        Deliberately still sorts on `f["confidence"]` and reads `f["content"]`,
+        exactly as before the pipeline swap. Those are FactSummary keys that the
+        pipeline nests under `metadata`; rewriting this test to the new shape
+        would have been bending the test to the implementation and silently
+        conceding a contract break to every stored script template.
+        """
         result = await run_python_tool(
             code=(
                 'facts = recall_deep("caching")\n'
-                'top = sorted(facts, key=lambda f: f["score"], reverse=True)\n'
-                'result = json.dumps(top[0]["description"])'
+                'top = sorted(facts, key=lambda f: f["confidence"], reverse=True)\n'
+                'result = json.dumps(top[0]["content"])'
             )
         )
         assert "caching uses Redis" in result["content"][0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_recall_deep_flattens_legacy_fact_keys(
+        self, run_python_tool, patched_pipeline
+    ):
+        """category/subject/confidence stay reachable at the top level."""
+        result = await run_python_tool(
+            code=(
+                'f = recall_deep("caching")[0]\n'
+                'result = json.dumps([f["category"], f["subject"], f["confidence"]])'
+            )
+        )
+        assert result["content"][0]["text"] == '["technical", "cache", 0.9]'
+
+    @pytest.mark.asyncio
+    async def test_recall_deep_does_not_let_metadata_shadow_canonical_keys(
+        self, run_python_tool
+    ):
+        """A metadata key never overwrites id/type/score/source/description."""
+        from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
+
+        rid = uuid4()
+        results = [PipelineResult(
+            id=rid, type="fact", description="real body", score=0.5,
+            source="heart",
+            metadata={"score": 999, "type": "bogus", "content": "hijacked",
+                      "confidence": 0.4},
+        )]
+        with patch(
+            "nous.api.retrieval_pipeline.run_recall_pipeline",
+            AsyncMock(return_value=(results, PipelineStats())),
+        ):
+            out = await run_python_tool(
+                code=(
+                    'f = recall_deep("q")[0]\n'
+                    'result = json.dumps([f["score"], f["type"], f["content"], '
+                    'f["confidence"]])'
+                )
+            )
+        assert out["content"][0]["text"] == '[0.5, "fact", "real body", 0.4]'
 
     @pytest.mark.asyncio
     async def test_recall_deep_keeps_content_alias(
@@ -565,6 +643,81 @@ class TestRunPythonMemoryWrappers:
         assert started and started[0]["path"] == "script"
         assert started[0]["query"] == "caching"
         assert started[0]["path"] in RETRIEVAL_PATHS
+
+    @pytest.mark.asyncio
+    async def test_trace_is_committed_on_the_main_loop(
+        self, run_python_tool, patched_pipeline
+    ):
+        """commit() must not run on run_python's worker thread.
+
+        `RetrievalLogger.commit` schedules the DB write through `_schedule_bg`,
+        which calls `asyncio.get_running_loop()`; off-loop that raises and the
+        except branch calls `coro.close()`, discarding the write silently. The
+        trace would then exist only in the in-memory ring, which has no reader —
+        so every script retrieval would be persisted nowhere, which is the exact
+        invisibility this change exists to end. Asserting the THREAD, because
+        that is the property that actually broke.
+        """
+        import threading
+
+        from nous.observability.retrieval_trace import NULL_TRACE
+
+        main_thread = threading.get_ident()
+        commit_threads: list[int] = []
+
+        class _Rec:
+            def start(self, **kw):  # noqa: ARG002
+                return NULL_TRACE
+
+            def commit(self, trace):  # noqa: ARG002
+                commit_threads.append(threading.get_ident())
+
+        with patch("nous.api.tools.get_active_retrieval_logger", _Rec):
+            await run_python_tool(code='recall_deep("caching")')
+
+        assert commit_threads, "trace was never committed"
+        assert commit_threads == [main_thread], (
+            "commit ran off the main loop; the DB write would be dropped"
+        )
+
+    @pytest.mark.asyncio
+    async def test_results_are_returned_to_script_not_rendered(
+        self, run_python_tool, patched_pipeline
+    ):
+        """Script results must not be counted as having reached the model.
+
+        `run_recall_pipeline` calls `finalize`, whose contract is that results
+        are authoritative about what REACHED THE MODEL. That holds on the tool
+        path and not here: the script decides what it prints or returns, and
+        filtering is the whole purpose of run_python. Left as `rendered`, every
+        disposition rollup would be inflated by a population the model may never
+        have seen.
+        """
+        from nous.observability.retrieval_trace import RETURNED_TO_SCRIPT
+
+        calls: list[tuple] = []
+
+        class _Trace:
+            id = "t"
+            enabled = True
+
+            def undeliver_all(self, disposition, stage):
+                calls.append((disposition, stage))
+
+            def __getattr__(self, _name):
+                return lambda *a, **k: None
+
+        class _Rec:
+            def start(self, **kw):  # noqa: ARG002
+                return _Trace()
+
+            def commit(self, trace):  # noqa: ARG002
+                pass
+
+        with patch("nous.api.tools.get_active_retrieval_logger", _Rec):
+            await run_python_tool(code='recall_deep("caching")')
+
+        assert calls == [(RETURNED_TO_SCRIPT, "run_python")]
 
 
 # ---------------------------------------------------------------------------
