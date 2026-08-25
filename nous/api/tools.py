@@ -4072,9 +4072,22 @@ def create_programmatic_tools(
 
             def _fail_trace(exc: BaseException) -> None:
                 """Commit the PARTIAL trace: a crashed retrieval must not look
-                like one that never happened. Mirrors the tool's error path."""
+                like one that never happened. Mirrors the tool's error path.
+
+                Runs with the deadline tracer OFF. The tracer fires per line and
+                re-arms after each raise, so on a genuine timeout it would raise
+                AGAIN partway through `undeliver_all`/`finalize` — which walk
+                every captured candidate — and the timeout row would be lost
+                despite this handler existing to save it. `sys.settrace` is
+                per-thread, and `_run`'s finally clears it regardless, so
+                clearing it here is local and safe.
+                """
                 if _tr is None:
                     return
+                try:
+                    sys.settrace(None)
+                except Exception:  # pragma: no cover - defensive
+                    pass
                 _tr.undeliver_all(SLICED_OFF, "script_recall_failed")
                 _tr.leg("script_recall", attempted=True, error=str(exc)[:200])
                 _tr.finalize([])
@@ -4095,7 +4108,9 @@ def create_programmatic_tools(
                     residual_activations=_residual_state["acts"] or None,  # F055
                     exclude_ids=_script_exclude_ids,  # F071
                 ))
-                out = _build_script_results(results)
+                out = _apply_script_limit(
+                    results, _build_script_results(results), limit, _tr,
+                )
             except (Exception, ScriptDeadlineExceeded) as e:
                 # ScriptDeadlineExceeded derives from BaseException ON PURPOSE,
                 # so agent code cannot swallow its own timeout with
@@ -4234,6 +4249,32 @@ def create_programmatic_tools(
                         d[_k] = list(_default) if isinstance(_default, list) else _default
                 out.append(d)
             return out
+
+        def _apply_script_limit(
+            results: list, out: list[dict], limit: int, tr,
+        ) -> list[dict]:
+            """Honour `limit` as a cap on what the SCRIPT receives.
+
+            `heart.search_facts(..., limit=limit)` returned at most that many
+            items, and scripts pass `limit` to bound their own processing. The
+            pipeline treats it as the core Heart/Brain allotment only: chunks
+            use `episode_chunk_recall_limit` (30 in prod), the keyed and
+            exemplar legs use their own K, and graph rows are appended
+            independently — so `recall_deep(q, limit=4)` could hand back dozens
+            of rows. Restoring the cap keeps the documented contract.
+
+            The trace is corrected to match: rows cut here reach the script no
+            more than a row cut at a gate does, so leaving them
+            `returned_to_script` would make the telemetry claim a delivery that
+            did not happen. Marked BEFORE the caller's `undeliver_all`, which
+            only touches candidates still `RENDERED`.
+            """
+            if limit is None or limit <= 0 or len(out) <= limit:
+                return out
+            if tr is not None:
+                for r in results[limit:]:
+                    tr.mark_not_delivered(r.id, r.type, SLICED_OFF, "script_limit")
+            return out[:limit]
 
         def _recall_recent(hours: int = 24, limit: int = 5) -> list[dict]:
             results = _schedule(heart.list_episodes(limit=limit, hours=hours))
@@ -4412,8 +4453,8 @@ _RUN_PYTHON_SCHEMA: dict[str, Any] = {
         "Full Python: import, try/except, class and function definitions, open() all work. "
         "Memory functions: recall_deep(query, limit=5) — the SAME full retrieval "
         "as the recall_deep tool (facts, episodes, decisions, chunks, graph), "
-        "returning dicts with id/type/description/score/source, and costing about "
-        "5s per call, so budget a handful per script, not dozens; "
+        "returning at most `limit` dicts with id/type/description/score/source, "
+        "and costing about 5s per call, so budget a handful per script, not dozens; "
         "recall_recent(hours=24, limit=5), "
         "list_tasks(status=None), learn_fact(content, category, subject, confidence). "
         "Pre-imported for convenience (no import needed): json, re, math, datetime, "

@@ -1051,6 +1051,89 @@ class TestRunPythonMemoryWrappers:
         )
 
     @pytest.mark.asyncio
+    async def test_limit_caps_what_the_script_receives(
+        self, mock_brain, mock_heart
+    ):
+        """`limit` bounds the returned list, as `search_facts` always did.
+
+        The pipeline treats `limit` as the core Heart/Brain allotment only —
+        chunks use `episode_chunk_recall_limit` (30 in prod), keyed/exemplar use
+        their own K, graph rows append independently — so without a cap
+        `recall_deep(q, limit=2)` could hand back dozens of rows and blow the
+        processing bound a stored script relies on.
+        """
+        from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
+        from nous.api.tools import create_programmatic_tools
+
+        many = [
+            PipelineResult(
+                id=uuid4(), type="fact", description=f"f{i}", score=1.0 - i / 100,
+                source="heart", metadata={"active": True},
+            )
+            for i in range(12)
+        ]
+        s = Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=5)
+        tool = create_programmatic_tools(mock_brain, mock_heart, s)["run_python"]
+        with patch(
+            "nous.api.retrieval_pipeline.run_recall_pipeline",
+            AsyncMock(return_value=(many, PipelineStats())),
+        ):
+            out = await tool(code=(
+                'rs = recall_deep("q", limit=2)\n'
+                'result = json.dumps([len(rs), rs[0]["description"]])'
+            ))
+        assert out["content"][0]["text"] == '[2, "f0"]'
+
+    @pytest.mark.asyncio
+    async def test_rows_cut_by_the_limit_are_not_marked_delivered(
+        self, mock_brain, mock_heart
+    ):
+        """Telemetry must not claim a delivery the script never received.
+
+        A row cut by the script limit reaches the script no more than a row cut
+        at a gate does, so it has to leave `returned_to_script` behind.
+        """
+        from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
+        from nous.api.tools import create_programmatic_tools
+        from nous.observability.retrieval_trace import SLICED_OFF
+
+        marked: list[tuple] = []
+
+        class _Trace:
+            id = "t"
+            enabled = True
+
+            def mark_not_delivered(self, item_id, item_type, disp, stage):
+                marked.append((item_type, disp, stage))
+
+            def __getattr__(self, _name):
+                return lambda *a, **k: None
+
+        class _Rec:
+            def start(self, **kw):  # noqa: ARG002
+                return _Trace()
+
+            def commit(self, trace):  # noqa: ARG002
+                pass
+
+        many = [
+            PipelineResult(
+                id=uuid4(), type="fact", description=f"f{i}", score=1.0 - i / 100,
+                source="heart", metadata={"active": True},
+            )
+            for i in range(5)
+        ]
+        s = Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=5)
+        tool = create_programmatic_tools(mock_brain, mock_heart, s)["run_python"]
+        with patch("nous.api.tools.get_active_retrieval_logger", _Rec), patch(
+            "nous.api.retrieval_pipeline.run_recall_pipeline",
+            AsyncMock(return_value=(many, PipelineStats())),
+        ):
+            await tool(code='recall_deep("q", limit=2)')
+
+        assert marked == [("fact", SLICED_OFF, "script_limit")] * 3
+
+    @pytest.mark.asyncio
     async def test_post_pipeline_failure_takes_the_error_path(
         self, mock_brain, mock_heart, patched_pipeline
     ):
