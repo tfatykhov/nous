@@ -355,7 +355,7 @@ async def _validate_query(
     return on_rank is not None and off_rank is None
 
 
-def _qrel_to_jsonl(qrel: GeneratedQrel) -> str:
+def _qrel_to_jsonl(qrel: GeneratedQrel, *, gated: bool = True) -> str:
     # Codex P1 (2026-05-23): memory_types MUST include the full pipeline
     # surface, not just the gold's type. The retrieval harness routes
     # `qrel.memory_types` into `run_recall_pipeline(memory_types=...)`,
@@ -373,7 +373,10 @@ def _qrel_to_jsonl(qrel: GeneratedQrel) -> str:
         "query": qrel.query,
         "gold_ids": [str(qrel.gold_id)],
         "memory_types": ["fact", "decision", "episode", "procedure", "censor"],
-        "source": "graph_targeted",
+        # codex P1: ungated rows get their OWN source. `graph_targeted` means
+        # graph-off-miss + graph-on-hit was VERIFIED; a row that skipped that
+        # check must not inherit the claim.
+        "source": "graph_targeted" if gated else "graph_bridge_ungated",
         "notes": {
             "bridge_via": str(qrel.source_id),
             "bridge_source_type": qrel.source_type,

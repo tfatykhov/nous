@@ -57,6 +57,21 @@ sources:
     requires_fixtures_dir: true
     description: "Graph-only-reachable queries — opt-in via --sources graph_targeted once the corpus has inferred-tier edges (see nous_eval.generate_graph_qrels)"
 
+  - name: graph_bridge_ungated
+    path: "${NOUS_EVAL_FIXTURES_DIR}/qrels_graph_nogate.jsonl"
+    # Same generator as graph_targeted with the reachability gate OFF. The
+    # strict gate is capped near 5% yield on prod-shaped corpora because the
+    # LLM generator writes vector-findable questions (measured 94.8% in vector
+    # top-50, median rank 2), so it produces an empty source rather than a
+    # selective one. These rows are usable for PAIRED A/B — ties cost n, not
+    # correctness — and are NOT evidence that graph expansion reached anything.
+    # gate_eligible stays false: gold here are decision-targets of inferred
+    # edges, i.e. favourable ground for the graph mechanisms under test.
+    enabled_by_default: false
+    gate_eligible: false
+    requires_fixtures_dir: true
+    description: "Graph-bridge queries, UNVALIDATED reachability — paired-A/B only, never graph-only evidence (see nous_eval.generate_graph_qrels --no-reachability-gate)"
+
   - name: nous_prod
     path: "tests/fixtures/qrels_nous_prod.jsonl"
     enabled_by_default: false

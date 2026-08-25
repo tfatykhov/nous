@@ -42,6 +42,14 @@ class QrelSource(str, Enum):
     # configs (F065 penalty, F022 spreading activation) produce non-zero
     # deltas where probes' all-vector-findable gold IDs cannot.
     GRAPH_TARGETED = "graph_targeted"
+    # Same generator, NO double-pass validation (--no-reachability-gate).
+    # A DISTINCT tag is load-bearing: `graph_targeted` is defined above as
+    # graph-only-reachable, and emitting ungated rows under it would silently
+    # represent vector-findable gold as graph-only evidence — the exact
+    # contamination the strict contract exists to prevent. These rows are valid
+    # for paired A/B (ties cost n, not correctness) and invalid as evidence that
+    # graph expansion reached anything.
+    GRAPH_BRIDGE_UNGATED = "graph_bridge_ungated"
 
 
 # Literal set for memory_types — full Heart memory taxonomy plus brain.decisions.
