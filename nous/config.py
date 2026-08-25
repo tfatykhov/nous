@@ -1083,7 +1083,21 @@ class Settings(BaseSettings):
 
     # 012.3: Programmatic tool calling
     programmatic_tools_enabled: bool = True
-    programmatic_tools_timeout: int = 10
+    programmatic_tools_timeout: int = Field(
+        90,
+        ge=1,
+        description=(
+            "Wall-clock deadline for a run_python execution. Raised 10 -> 90 when "
+            "the in-script `recall_deep` stopped being a facts-only search and "
+            "became the real `run_recall_pipeline`: measured on prod "
+            "`nous_system.retrieval_log` (n=104), a pipeline retrieval runs "
+            "p50 5.3s / p95 14.7s, so the old 10s budget could not fit even ONE "
+            "call reliably, and the whole point of the tool is batching several. "
+            "90s fits ~6 calls at p95. Must stay below `tool_timeout` (120s), "
+            "which wraps every tool in `_dispatch_with_keepalive` and would "
+            "otherwise cancel the call before this deadline ever fired."
+        ),
+    )
     programmatic_tools_max_concurrent: int = Field(
         4,
         ge=1,

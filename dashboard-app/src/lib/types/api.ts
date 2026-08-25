@@ -1273,7 +1273,7 @@ export interface RetrievalEntry {
   turn_number: number | null;
   trace_id: string | null;
   timestamp: string;
-  path: 'pipeline' | 'context';
+  path: 'pipeline' | 'context' | 'script';
   query: string | null;
   duration_ms: number | null;
   legs: RetrievalLeg[];

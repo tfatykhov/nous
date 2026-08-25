@@ -3889,8 +3889,88 @@ def create_programmatic_tools(
             return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=remaining)
 
         def _recall_deep(query: str, limit: int = 5) -> list[dict]:
-            results = _schedule(heart.search_facts(query, limit=limit))
-            return [r.model_dump() if hasattr(r, "model_dump") else r for r in results]
+            """The same retrieval the `recall_deep` TOOL runs — not a fact search.
+
+            Until 2026-08-25 this was `heart.search_facts`, i.e. a hybrid search
+            over `heart.facts` alone: no episodes, procedures or decisions, no
+            F067 chunk leg, no graph expansion, no spreading activation, no
+            relevance floor, no recency resolution. It shared a name with the
+            tool and almost nothing else, so a script that "batched memory
+            lookups" — precisely what this tool's description recommends — got a
+            quietly weaker answer than the same query issued as a tool call,
+            with nothing in the output to signal the downgrade.
+
+            That is also why script recalls never appeared on the F091 retrieval
+            dashboard: telemetry instruments `run_recall_pipeline`, and this
+            never reached it. The rows were not dropped; there was no retrieval
+            to log.
+            """
+            from nous.api.retrieval_pipeline import run_recall_pipeline
+
+            # Mirrors the tool's `chunks_rerank`. A script passes no
+            # memory_types, so the tool's `search_all` branch is always taken and
+            # the condition collapses to the chunk flag alone.
+            rerank = getattr(settings, "episode_chunks_enabled", False)
+
+            _rl = get_active_retrieval_logger()
+            # path="script", not "pipeline": being able to tell script recalls
+            # apart from tool recalls is the whole reason this gap was noticed,
+            # and blending them would destroy that the moment it was fixed.
+            # turn_number is None — a script runs wholly inside one tool call and
+            # has no turn of its own to attribute to.
+            _tr = (
+                _rl.start(query=query, path="script", session_id=_session_id)
+                if _rl is not None else None
+            )
+            try:
+                results, _stats = _schedule(run_recall_pipeline(
+                    query=query, heart=heart, brain=brain, settings=settings,
+                    limit=limit, rerank_by_score=rerank, trace=_tr,
+                ))
+            except Exception as e:
+                # Commit the PARTIAL trace, matching the tool's error path: a
+                # crashed retrieval must not look like one that never happened.
+                if _rl is not None and _tr is not None:
+                    try:
+                        _tr.undeliver_all(SLICED_OFF, "script_recall_failed")
+                        _tr.leg("script_recall", attempted=True, error=str(e)[:200])
+                        _tr.finalize([])
+                        _rl.commit(_tr)
+                    except Exception:
+                        logger.debug(
+                            "F091: failed to commit partial script trace",
+                            exc_info=True,
+                        )
+                raise
+            # `run_recall_pipeline` already called `finalize`, and unlike the
+            # tool path there is no formatter scope filter to reconcile — every
+            # result here is handed back to the script verbatim, so what the
+            # pipeline marked `rendered` is exactly what was delivered.
+            if _rl is not None and _tr is not None:
+                try:
+                    _rl.commit(_tr)
+                except Exception:
+                    logger.debug(
+                        "F091: script retrieval trace commit failed", exc_info=True,
+                    )
+
+            return [
+                {
+                    "id": str(r.id),
+                    "type": r.type,
+                    "description": r.description,
+                    # Deliberate alias. The old return was a `FactSummary`, whose
+                    # body lived under "content"; any stored skill or procedure
+                    # carrying a script template would otherwise start raising a
+                    # silent KeyError the moment this shipped.
+                    "content": r.description,
+                    "score": r.score,
+                    "source": r.source,
+                    "edge_relation": r.edge_relation,
+                    "metadata": r.metadata,
+                }
+                for r in results
+            ]
 
         def _recall_recent(hours: int = 24, limit: int = 5) -> list[dict]:
             results = _schedule(heart.list_episodes(limit=limit, hours=hours))
@@ -4067,14 +4147,18 @@ _RUN_PYTHON_SCHEMA: dict[str, Any] = {
     "description": (
         "Execute Python code with Nous memory functions in scope. "
         "Full Python: import, try/except, class and function definitions, open() all work. "
-        "Memory functions: recall_deep(query, limit=5), recall_recent(hours=24, limit=5), "
+        "Memory functions: recall_deep(query, limit=5) — the SAME full retrieval "
+        "as the recall_deep tool (facts, episodes, decisions, chunks, graph), "
+        "returning dicts with id/type/description/score/source, and costing about "
+        "5s per call, so budget a handful per script, not dozens; "
+        "recall_recent(hours=24, limit=5), "
         "list_tasks(status=None), learn_fact(content, category, subject, confidence). "
         "Pre-imported for convenience (no import needed): json, re, math, datetime, "
         "collections, itertools, functools, statistics — anything else, just import it. "
         "Use this to batch multiple memory lookups, filter results, and return only what's needed — "
         "reducing token usage compared to separate tool calls. "
         "Set result = <value> to return structured data. Use print() to emit text output. "
-        "Runs in-process on a worker thread with a wall-clock deadline (default 10s): "
+        "Runs in-process on a worker thread with a wall-clock deadline (default 90s): "
         "Python-level code is interrupted when it expires and the call returns a timeout error, "
         "so keep work short and shell out to `bash` for anything long-running. "
         "Max 5 learn_fact calls per execution."

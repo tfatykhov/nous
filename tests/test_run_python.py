@@ -10,11 +10,13 @@ token consumption compared to separate tool calls.
 import asyncio
 import threading
 import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
 from nous.config import Settings
+from nous.observability.retrieval_logger import RETRIEVAL_PATHS
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -95,6 +97,32 @@ def run_python_tool(mock_brain, mock_heart, settings):
     return tools["run_python"]
 
 
+@pytest.fixture
+def patched_pipeline():
+    """Stub `run_recall_pipeline` — what in-script recall_deep now calls.
+
+    Patched on the DEFINING module rather than on `nous.api.tools`, because
+    `_recall_deep` imports it lazily inside the function body (mirroring the
+    real tool at tools.py:1389), so the lookup happens per call and resolves
+    against `nous.api.retrieval_pipeline` every time.
+    """
+    from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
+
+    results = [
+        PipelineResult(
+            id=uuid4(), type="fact", description="caching uses Redis",
+            score=0.85, source="heart",
+        ),
+        PipelineResult(
+            id=uuid4(), type="fact", description="cache TTL is 300s",
+            score=0.60, source="heart",
+        ),
+    ]
+    mock = AsyncMock(return_value=(results, PipelineStats()))
+    with patch("nous.api.retrieval_pipeline.run_recall_pipeline", mock):
+        yield mock
+
+
 # ---------------------------------------------------------------------------
 # Config tests
 # ---------------------------------------------------------------------------
@@ -109,9 +137,26 @@ class TestRunPythonConfig:
         assert s.programmatic_tools_enabled is True
 
     def test_default_timeout(self):
-        """programmatic_tools_timeout defaults to 10."""
+        """programmatic_tools_timeout defaults to 90.
+
+        Raised from 10 when in-script recall_deep became the real pipeline:
+        prod `retrieval_log` (n=104) puts a pipeline retrieval at p50 5.3s /
+        p95 14.7s, so 10s could not fit even one call reliably.
+        """
         s = Settings()
-        assert s.programmatic_tools_timeout == 10
+        assert s.programmatic_tools_timeout == 90
+
+    def test_timeout_leaves_headroom_under_tool_timeout(self):
+        """The inner deadline must expire before the dispatcher's outer one.
+
+        `_dispatch_with_keepalive` wraps EVERY tool in
+        `asyncio.wait_for(..., tool_timeout)`. If run_python's own deadline
+        ever met or exceeded that, the outer cancel would fire first and the
+        script would surface as a generic tool timeout — losing the per-script
+        error message, and losing the partial trace commit with it.
+        """
+        s = Settings()
+        assert s.programmatic_tools_timeout < s.tool_timeout
 
     def test_custom_values(self):
         """Can override via constructor."""
@@ -407,12 +452,25 @@ class TestRunPythonMemoryWrappers:
     """Test that memory functions call Heart/Brain correctly."""
 
     @pytest.mark.asyncio
-    async def test_recall_deep_calls_search_facts(self, run_python_tool, mock_heart):
-        """recall_deep calls heart.search_facts with correct args."""
+    async def test_recall_deep_runs_the_full_pipeline(
+        self, run_python_tool, mock_heart, patched_pipeline
+    ):
+        """In-script recall_deep runs run_recall_pipeline, NOT a fact search.
+
+        This is the regression lock. Until 2026-08-25 the in-script function was
+        `heart.search_facts` — the facts table alone, with no episodes,
+        decisions, chunks or graph expansion — under a name that promised the
+        tool's full retrieval. Asserting `search_facts` is NOT called is the
+        point: a future refactor that "simplifies" this back to a fact search
+        would otherwise look green.
+        """
         result = await run_python_tool(
             code='facts = recall_deep("caching", limit=3)\nresult = json.dumps(len(facts))'
         )
-        mock_heart.search_facts.assert_called_once_with("caching", limit=3)
+        patched_pipeline.assert_called_once()
+        assert patched_pipeline.call_args.kwargs["query"] == "caching"
+        assert patched_pipeline.call_args.kwargs["limit"] == 3
+        mock_heart.search_facts.assert_not_called()
         assert result["content"][0]["text"] == "2"
 
     @pytest.mark.asyncio
@@ -443,16 +501,70 @@ class TestRunPythonMemoryWrappers:
         assert "stored" in result["content"][0]["text"]
 
     @pytest.mark.asyncio
-    async def test_recall_deep_returns_dicts(self, run_python_tool):
+    async def test_recall_deep_returns_dicts(self, run_python_tool, patched_pipeline):
         """recall_deep results are dicts accessible with bracket notation."""
         result = await run_python_tool(
             code=(
                 'facts = recall_deep("caching")\n'
-                'top = sorted(facts, key=lambda f: f["confidence"], reverse=True)\n'
-                'result = json.dumps(top[0]["content"])'
+                'top = sorted(facts, key=lambda f: f["score"], reverse=True)\n'
+                'result = json.dumps(top[0]["description"])'
             )
         )
         assert "caching uses Redis" in result["content"][0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_recall_deep_keeps_content_alias(
+        self, run_python_tool, patched_pipeline
+    ):
+        """`content` still resolves after the FactSummary -> PipelineResult swap.
+
+        PipelineResult calls the body `description`. Scripts written against the
+        old FactSummary shape read `content`, and script templates can live
+        inside stored skills and procedures, so dropping the key would surface
+        as a KeyError from agent-authored code rather than anywhere in the tree.
+        """
+        result = await run_python_tool(
+            code=(
+                'facts = recall_deep("caching")\n'
+                'result = json.dumps(facts[0]["content"] == facts[0]["description"])'
+            )
+        )
+        assert result["content"][0]["text"] == "true"
+
+    @pytest.mark.asyncio
+    async def test_recall_deep_traces_under_script_path(
+        self, run_python_tool, patched_pipeline
+    ):
+        """The trace handed to the pipeline is opened with path='script'.
+
+        Script recalls were absent from the F091 dashboard because they never
+        reached an instrumented function. Tagging them 'script' rather than
+        'pipeline' keeps them attributable: a single tool call can issue several,
+        so folding them into the tool's rows would make per-turn counts wrong.
+        """
+        from nous.observability.retrieval_trace import NULL_TRACE
+
+        started: list[dict] = []
+
+        class _Rec:
+            def start(self, **kw):
+                started.append(kw)
+                return NULL_TRACE
+
+            def commit(self, trace):  # noqa: ARG002
+                pass
+
+        # Patch the name bound INSIDE tools.py, not the one in the observability
+        # module: tools.py does `from ... import get_active as
+        # get_active_retrieval_logger` at import time, so rebinding the source
+        # module would leave the already-resolved reference untouched and the
+        # test would pass against an unpatched call.
+        with patch("nous.api.tools.get_active_retrieval_logger", _Rec):
+            await run_python_tool(code='recall_deep("caching")')
+
+        assert started and started[0]["path"] == "script"
+        assert started[0]["query"] == "caching"
+        assert started[0]["path"] in RETRIEVAL_PATHS
 
 
 # ---------------------------------------------------------------------------

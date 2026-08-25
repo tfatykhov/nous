@@ -14,11 +14,11 @@
   // fires every turn while recall_deep is occasional, so the recent-50 window
   // is routinely 100% context — filtering locally showed an empty table while
   // pipeline rows sat pages back. Refetch on change so the rollups match too.
-  let pathFilter = $state<'' | 'pipeline' | 'context'>('');
+  let pathFilter = $state<'' | 'pipeline' | 'context' | 'script'>('');
   // Which path the data currently in the store was actually fetched for.
   // Stamped when a request STARTS, so it always describes the in-flight or
   // most-recent fetch rather than the selection.
-  let appliedPath: '' | 'pipeline' | 'context' = '';
+  let appliedPath: '' | 'pipeline' | 'context' | 'script' = '';
   // Heartbeat turns are machine chatter, not questions anyone asked. They
   // dominate the window (17 of 21 on the instance this was designed against),
   // so an operator debugging their own question wades through noise. Filtered
@@ -60,7 +60,18 @@
     void store.refresh();
   }
 
-  function setPath(p: '' | 'pipeline' | 'context') {
+  // A lookup, not a ternary. This was `path === 'context' ? 'pre-turn' :
+  // 'recall_deep'`, so the moment a third path existed its rows silently
+  // rendered as recall_deep — mislabelled, not merely unlabelled. Anything
+  // unrecognised now shows its raw value, which is ugly on purpose.
+  const PATH_LABELS: Record<string, string> = {
+    pipeline: 'recall_deep',
+    context: 'pre-turn',
+    script: 'in-script',
+  };
+  const pathLabel = (p: string) => PATH_LABELS[p] ?? p;
+
+  function setPath(p: '' | 'pipeline' | 'context' | 'script') {
     if (p === pathFilter) return;
     pathFilter = p;
     void store.refresh();
@@ -772,6 +783,12 @@
           <button class="chip-btn" class:on={pathFilter === 'context'} onclick={() => setPath('context')}>
             pre-turn
           </button>
+          <!-- recall_deep() called inside run_python. Separate from the tool
+               chip on purpose: one tool call can issue several of these, so
+               counting them as recall_deep rows would misstate per-turn totals. -->
+          <button class="chip-btn" class:on={pathFilter === 'script'} onclick={() => setPath('script')}>
+            in-script
+          </button>
           <button
             class="chip-btn"
             class:on={hideAutomated}
@@ -849,7 +866,7 @@
                 {/if}
               </div>
               <div class="rrow-meta">
-                <span class="chip sm">{e.path === 'context' ? 'pre-turn' : 'recall_deep'}</span>
+                <span class="chip sm">{pathLabel(e.path)}</span>
                 <!-- turn_number is populated on every row by the correlation
                      fix and was never surfaced; it is what joins a retrieval to
                      its context_log entry. -->
