@@ -108,3 +108,24 @@ def test_pinned_runtime_reaches_the_real_resolver(monkeypatch):
     s = pinned_settings(rrf_k=30)
     with pinned_runtime(s):
         assert search._resolver_settings().rrf_k == 30
+
+
+def test_published_vars_do_not_escape_the_context(monkeypatch):
+    """The regression that turned four unrelated suites red: `pinned_runtime`
+    sets NOUS_* inside `hidden_env`, whose finally only restored what it had
+    saved — so the published values escaped into the pytest process."""
+    monkeypatch.delenv("NOUS_HYBRID_SEARCH_KEYWORD_ENABLED", raising=False)
+    monkeypatch.delenv("NOUS_RRF_K", raising=False)
+    with pinned_runtime(pinned_settings(hybrid_search_keyword_enabled=False)):
+        assert os.environ["NOUS_HYBRID_SEARCH_KEYWORD_ENABLED"] == "false"
+    assert "NOUS_HYBRID_SEARCH_KEYWORD_ENABLED" not in os.environ
+    assert "NOUS_RRF_K" not in os.environ
+
+
+def test_environment_restored_exactly(monkeypatch):
+    monkeypatch.setenv("NOUS_RRF_K", "77")
+    before = {k: v for k, v in os.environ.items() if k.startswith("NOUS_")}
+    with pinned_runtime(pinned_settings(rrf_k=30)):
+        pass
+    after = {k: v for k, v in os.environ.items() if k.startswith("NOUS_")}
+    assert before == after

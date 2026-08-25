@@ -88,6 +88,15 @@ def hidden_env():
     try:
         yield
     finally:
+        # Restore EXACTLY, which means first dropping anything set INSIDE the
+        # block — `pinned_runtime` publishes NOUS_RRF_K and friends in here, and
+        # a finally that only re-adds `saved` leaves those behind. That is not a
+        # tidiness point: it leaked `NOUS_HYBRID_SEARCH_KEYWORD_ENABLED=false`
+        # out of one unit test into the whole pytest process and turned four
+        # unrelated suites red on CI.
+        for k in [k for k in os.environ
+                  if k.upper().startswith(_HIDDEN_PREFIXES)]:
+            del os.environ[k]
         os.environ.update(saved)
 
 
