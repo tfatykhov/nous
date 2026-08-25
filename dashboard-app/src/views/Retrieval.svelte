@@ -665,12 +665,17 @@
     {:else}
       {@const rendered = $store.data.disposition_totals['rendered'] ?? 0}
       {@const unaccounted = $store.data.disposition_totals['unaccounted'] ?? 0}
+      <!-- Also NOT a gate drop: these were returned to a run_python script, so
+           the retrieval delivered. Leaving them in the subtraction would report
+           successful in-script deliveries as "dropped at a gate" — and would do
+           it silently, since the count only appears inside a total. -->
+      {@const toScript = $store.data.disposition_totals['returned_to_script'] ?? 0}
       <!-- `unaccounted` is BY DEFINITION "no stage claimed this drop" — the
            drift alarm. Summing it into "dropped at a gate" would bury the one
            number that says the instrumentation itself is incomplete inside an
            ordinary total, which is the class of error this whole feature
            exists to prevent. -->
-      {@const dropped = totals.sum - rendered - unaccounted}
+      {@const dropped = totals.sum - rendered - unaccounted - toScript}
       <!-- One element, one job: the bar IS the figure. The old version stated
            each number three times — headline, bar, then a legend column. -->
       <div class="funnel">

@@ -30,7 +30,7 @@ from uuid import UUID
 
 from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
-from nous.config import Settings
+from nous.config import PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS, Settings
 from nous.heart.exemplars import parse_label
 from nous.heart.heart import Heart
 from nous.heart.schemas import CensorInput, FactInput, FactRejected, ProcedureInput
@@ -450,7 +450,13 @@ class ToolDispatcher:
                 # no substrate. Consumers: Brain.get_session_decisions and
                 # the optional filter in Brain._query.
                 args = {**args, "_session_id": session_id}
-            if turn_number is not None and name == "recall_deep":
+            if turn_number is not None and name in ("recall_deep", "run_python"):
+                # `run_python` included because its in-script `recall_deep()`
+                # opens its own F091 trace; without this those rows store
+                # turn_number NULL and cannot be joined to the turn that caused
+                # them on the (session_id, turn_number) index — which is most of
+                # the value of giving them their own `script` path. Several
+                # script recalls legitimately SHARE one turn_number.
                 # F091: threaded EXPLICITLY, not via ContextVar. stream_chat is
                 # an async generator whose every resume runs in a fresh copied
                 # context (see the KNOWN LIMITATION at runner.py:1231), so a
@@ -3790,7 +3796,24 @@ _MAX_WRITES = 5
 # up on the worker thread. The in-thread trace hook normally raises at the
 # deadline, so this grace only matters when the thread is stuck below Python
 # level (a blocking C call), which no in-process mechanism can interrupt.
-_TIMEOUT_GRACE = 2.0
+_TIMEOUT_GRACE = PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS
+
+# Keys the pre-2026-08-25 in-script `recall_deep` returned, via
+# `FactSummary.model_dump()`, mapped to the value used when the field does not
+# apply to a result type. Facts get real values out of `metadata`; episodes,
+# chunks, procedures and decisions get the default, so key ACCESS never raises
+# on a mixed list. `tags` defaults to an empty list because "no tags" is true
+# for a non-fact; everything else defaults to None rather than a plausible
+# stand-in, so nothing fabricated can reach a sort or a comparison.
+_LEGACY_FACT_KEYS: dict[str, Any] = {
+    "category": None,
+    "subject": None,
+    "confidence": None,
+    "active": None,
+    "superseded_by": None,
+    "event_date": None,
+    "tags": [],
+}
 
 # Trace-hook check interval — number of traced events between deadline checks.
 # Keeps the per-line overhead down without letting an overrun go unnoticed.
@@ -3859,7 +3882,11 @@ def create_programmatic_tools(
     import re
     import statistics
 
-    async def run_python(code: str, _session_id: str | None = None) -> dict[str, Any]:
+    async def run_python(
+        code: str,
+        _session_id: str | None = None,
+        _turn_number: int | None = None,
+    ) -> dict[str, Any]:
         """Execute Python code with Nous memory functions in scope."""
         write_count = {"n": 0}
         output_buf = io.StringIO()
@@ -3884,9 +3911,25 @@ def create_programmatic_tools(
 
             Uses deadline-relative timeout so per-call budget tracks remaining
             wall time — prevents thread from outliving the main asyncio.wait_for.
+
+            CANCELS the future on timeout. `Future.result(timeout=...)` only
+            stops waiting; without the cancel the coroutine keeps running on the
+            main loop after the worker has reported an error and released its
+            concurrency slot — so stalled work accumulates OUTSIDE
+            `programmatic_tools_max_concurrent`, and a still-running
+            `run_recall_pipeline` can go on doing DB work and mutating a trace
+            that has already been committed. Latent before, and much likelier
+            now that a single call is a ~5s retrieval rather than a fact lookup.
             """
             remaining = max(0.1, deadline - time.monotonic())
-            return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=remaining)
+            fut = asyncio.run_coroutine_threadsafe(coro, loop)
+            try:
+                return fut.result(timeout=remaining)
+            except TimeoutError:
+                # Since 3.11 `concurrent.futures.TimeoutError` IS the builtin
+                # `TimeoutError`, so this one clause covers both.
+                fut.cancel()
+                raise
 
         def _recall_deep(query: str, limit: int = 5) -> list[dict]:
             """The same retrieval the `recall_deep` TOOL runs — not a fact search.
@@ -3919,7 +3962,11 @@ def create_programmatic_tools(
             # turn_number is None — a script runs wholly inside one tool call and
             # has no turn of its own to attribute to.
             _tr = (
-                _rl.start(query=query, path="script", session_id=_session_id)
+                _rl.start(
+                    query=query, path="script", session_id=_session_id,
+                    # Several in-script recalls legitimately share one turn.
+                    turn_number=_turn_number,
+                )
                 if _rl is not None else None
             )
             def _commit(tr) -> None:
@@ -3984,15 +4031,31 @@ def create_programmatic_tools(
                     "edge_relation": r.edge_relation,
                     "metadata": r.metadata,
                 }
-                # Flatten the legacy FactSummary keys back to the top level.
-                # `Heart._to_recall_result` puts category/subject/confidence in
-                # `metadata`, so a script doing `f["confidence"]` — which the
-                # pre-change tests did, and stored skill/procedure templates may
-                # still do — would raise KeyError against a dict that in fact
-                # holds the value one level down. Never overwrite a canonical key.
-                for _k in ("category", "subject", "confidence"):
-                    if _k in r.metadata and _k not in d:
-                        d[_k] = r.metadata[_k]
+                # Legacy FactSummary keys, present on EVERY item.
+                #
+                # `Heart._to_recall_result` nests category/subject/confidence
+                # under `metadata`, so `f["confidence"]` would raise KeyError
+                # against a dict holding the value one level down. Populating
+                # them only when present is not enough either: the old function
+                # returned FACTS ONLY, so `sorted(recall_deep(q), key=lambda f:
+                # f["confidence"])` was valid — and the pipeline returns mixed
+                # types, so the first episode or procedure in the list would
+                # raise. The keys are therefore always present.
+                #
+                # `None` where a field does not apply, never a stand-in value: a
+                # fabricated `confidence` of 0.0 would sort and compare as real
+                # data. A None makes a sort fail loudly instead, which is the
+                # honest outcome for a list that genuinely is no longer
+                # all-facts. Canonical keys are never overwritten.
+                for _k, _default in _LEGACY_FACT_KEYS.items():
+                    if _k not in d:
+                        # Copy a mutable default — otherwise every result shares
+                        # ONE `tags` list and a script appending to one row
+                        # silently mutates the whole batch.
+                        if _k not in r.metadata:
+                            d[_k] = list(_default) if isinstance(_default, list) else _default
+                        else:
+                            d[_k] = r.metadata[_k]
                 out.append(d)
             return out
 

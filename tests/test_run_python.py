@@ -15,7 +15,7 @@ from uuid import uuid4
 
 import pytest
 
-from nous.config import Settings
+from nous.config import PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS, Settings
 from nous.observability.retrieval_logger import RETRIEVAL_PATHS
 
 # ---------------------------------------------------------------------------
@@ -189,6 +189,30 @@ class TestRunPythonConfig:
             programmatic_tools_timeout=30, NOUS_TOOL_TIMEOUT=60
         ).programmatic_tools_timeout == 30
 
+    def test_validator_accounts_for_the_dispatch_grace(self):
+        """The real inner wait is `timeout + GRACE`, so the guard must use it.
+
+        `run_python` awaits its worker on
+        `asyncio.wait_for(..., timeout + PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS)`.
+        Checking the nominal value alone would accept 119 against 120 while the
+        inner wait actually runs to 121s — the outer cancel still wins, which is
+        the exact failure the guard exists to prevent.
+        """
+        with pytest.raises(ValueError, match="dispatch grace"):
+            Settings(programmatic_tools_timeout=119, NOUS_TOOL_TIMEOUT=120)
+
+        s = Settings(programmatic_tools_timeout=117, NOUS_TOOL_TIMEOUT=120)
+        assert (
+            s.programmatic_tools_timeout + PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS
+            < s.tool_timeout
+        )
+
+    def test_timeout_grace_is_shared(self):
+        """config and tools must not drift on the grace value."""
+        from nous.api import tools as tools_mod
+
+        assert tools_mod._TIMEOUT_GRACE == PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS
+
     def test_lowering_tool_timeout_alone_clamps_instead_of_refusing_to_boot(self):
         """An operator who set only NOUS_TOOL_TIMEOUT must still start.
 
@@ -199,8 +223,11 @@ class TestRunPythonConfig:
         `test_streaming_keepalive` sets 60 and 10.
         """
         s = Settings(NOUS_TOOL_TIMEOUT=60)
-        assert s.programmatic_tools_timeout == 59
-        assert s.programmatic_tools_timeout < s.tool_timeout
+        assert s.programmatic_tools_timeout == 57  # 60 - 2s grace - 1
+        assert (
+            s.programmatic_tools_timeout + PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS
+            < s.tool_timeout
+        )
 
         # Clamping must never produce a value that still breaks the invariant.
         # With tool_timeout=1 and a ge=1 floor no such value exists, so this
@@ -584,6 +611,69 @@ class TestRunPythonMemoryWrappers:
             )
         )
         assert result["content"][0]["text"] == '["technical", "cache", 0.9]'
+
+    @pytest.mark.asyncio
+    async def test_legacy_keys_present_on_non_fact_results(self, run_python_tool):
+        """Mixed result types must not raise KeyError on fact-only fields.
+
+        The old function returned FACTS ONLY, so
+        `sorted(recall_deep(q), key=lambda f: f["confidence"])` was valid. The
+        pipeline returns episodes, chunks, procedures and decisions too, so
+        populating these keys only when metadata carries them would still raise
+        on the first episode. Values are None, never a stand-in — a fabricated
+        0.0 confidence would sort and compare as if it were real.
+        """
+        from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
+
+        results = [
+            PipelineResult(id=uuid4(), type="episode", description="an episode",
+                           score=0.7, source="heart", metadata={"title": "t"}),
+            PipelineResult(id=uuid4(), type="procedure", description="a proc",
+                           score=0.6, source="heart", metadata={}),
+        ]
+        with patch(
+            "nous.api.retrieval_pipeline.run_recall_pipeline",
+            AsyncMock(return_value=(results, PipelineStats())),
+        ):
+            out = await run_python_tool(
+                code=(
+                    'rs = recall_deep("q")\n'
+                    'ok = all("confidence" in r and "category" in r and '
+                    '"subject" in r and "tags" in r for r in rs)\n'
+                    'result = json.dumps([ok, rs[0]["confidence"], rs[0]["tags"]])'
+                )
+            )
+        assert out["content"][0]["text"] == "[true, null, []]"
+
+    @pytest.mark.asyncio
+    async def test_legacy_tags_default_is_not_shared_between_rows(
+        self, run_python_tool
+    ):
+        """Each row gets its OWN default list.
+
+        A single shared `[]` would mean a script appending to one row's tags
+        silently mutated every other row in the batch.
+        """
+        from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
+
+        results = [
+            PipelineResult(id=uuid4(), type="episode", description="a", score=0.7,
+                           source="heart", metadata={}),
+            PipelineResult(id=uuid4(), type="episode", description="b", score=0.6,
+                           source="heart", metadata={}),
+        ]
+        with patch(
+            "nous.api.retrieval_pipeline.run_recall_pipeline",
+            AsyncMock(return_value=(results, PipelineStats())),
+        ):
+            out = await run_python_tool(
+                code=(
+                    'rs = recall_deep("q")\n'
+                    'rs[0]["tags"].append("x")\n'
+                    'result = json.dumps([rs[0]["tags"], rs[1]["tags"]])'
+                )
+            )
+        assert out["content"][0]["text"] == '[["x"], []]'
 
     @pytest.mark.asyncio
     async def test_recall_deep_does_not_let_metadata_shadow_canonical_keys(

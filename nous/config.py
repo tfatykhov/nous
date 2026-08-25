@@ -14,6 +14,15 @@ from typing import Annotated, Literal
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+# Slack `run_python` adds on top of `programmatic_tools_timeout` when awaiting
+# its worker thread (`asyncio.wait_for(..., timeout + GRACE)` in
+# `nous/api/tools.py`), so the thread's own `sys.settrace` deadline gets a chance
+# to raise a useful per-script error before the outer wait gives up. Lives HERE,
+# not in `tools.py`, so `_validate_programmatic_tools_timeout` can account for it
+# without config importing the tool layer; `tools.py` imports this name, and
+# `test_timeout_grace_is_shared` asserts the two never drift apart.
+PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS = 2.0
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -2526,17 +2535,25 @@ class Settings(BaseSettings):
         Clamping degrades to LESS script budget, never to a wrong reading, and
         says so at WARNING.
         """
-        if self.programmatic_tools_timeout < self.tool_timeout:
+        # The real inner wait is `timeout + GRACE` — `run_python` awaits its
+        # worker on `asyncio.wait_for(..., timeout + PROGRAMMATIC_TOOLS_TIMEOUT_
+        # GRACE_SECONDS)`. Validating the nominal value alone would pass
+        # `programmatic_tools_timeout=119, tool_timeout=120` while the inner wait
+        # actually runs to 121s, so the outer cancel still wins — the exact
+        # failure this guard exists to prevent, just two seconds later.
+        grace = PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS
+        if self.programmatic_tools_timeout + grace < self.tool_timeout:
             return self
 
         if "programmatic_tools_timeout" in self.model_fields_set:
             raise ValueError(
                 f"programmatic_tools_timeout ({self.programmatic_tools_timeout}) "
-                f"must be < tool_timeout ({self.tool_timeout}); otherwise the "
-                "dispatcher cancels run_python before its own deadline fires"
+                f"plus the {grace}s dispatch grace must be < tool_timeout "
+                f"({self.tool_timeout}); otherwise the dispatcher cancels "
+                "run_python before its own deadline fires"
             )
 
-        clamped = self.tool_timeout - 1
+        clamped = int(self.tool_timeout - grace - 1)
         if clamped < 1:
             # Degenerate: the field floor is ge=1, so with tool_timeout <= 1
             # there is no value satisfying both bounds. Refuse rather than
@@ -2545,8 +2562,8 @@ class Settings(BaseSettings):
             # an error, because everything downstream then trusts it.
             raise ValueError(
                 f"tool_timeout ({self.tool_timeout}) leaves no room for "
-                "programmatic_tools_timeout, which must be >= 1 and strictly "
-                "less than tool_timeout"
+                f"programmatic_tools_timeout, which must be >= 1 and, with the "
+                f"{grace}s dispatch grace, strictly less than tool_timeout"
             )
         logging.getLogger(__name__).warning(
             "programmatic_tools_timeout default (%d) >= tool_timeout (%d); "
