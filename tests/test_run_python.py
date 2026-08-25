@@ -764,6 +764,38 @@ class TestRunPythonMemoryWrappers:
         assert rr.metadata["actionable"] is True
         assert rr.metadata["overrides_prior"] is True
 
+    def test_legacy_summary_fields_are_columns(self):
+        """Every backfilled name must be a real `Fact` column.
+
+        `LEGACY_SUMMARY_FIELDS` is derived from FactSummary, so a field added
+        there that is NOT persisted would otherwise reach `getattr(Fact, f)` and
+        blow up the SELECT at runtime. Fail here instead.
+        """
+        from nous.heart.facts import FactManager
+        from nous.storage.models import Fact
+
+        assert FactManager.LEGACY_SUMMARY_FIELDS
+        missing = [
+            f for f in FactManager.LEGACY_SUMMARY_FIELDS if not hasattr(Fact, f)
+        ]
+        assert not missing, f"not Fact columns: {missing}"
+
+    def test_backfill_and_key_map_agree(self):
+        """The two derived lists must not drift apart.
+
+        They were hand-written once and immediately disagreed: the backfill
+        omitted `event_date`, so a dated fact arriving via the exemplar or graph
+        leg was filled with None and silently misclassified by any script
+        filtering on date. Both are now derived; this asserts they stay aligned.
+        """
+        from nous.api.tools import _LEGACY_FACT_KEYS
+        from nous.heart.facts import FactManager
+
+        transient = {"recency_status", "recency_date"}
+        assert set(FactManager.LEGACY_SUMMARY_FIELDS) == (
+            set(_LEGACY_FACT_KEYS) - transient
+        )
+
     def test_legacy_key_map_covers_every_fact_summary_field(self):
         """The compat map is DERIVED from FactSummary, so it cannot drift.
 

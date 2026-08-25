@@ -156,6 +156,15 @@ class ExemplarHit(NamedTuple):
     similarity: float
 
 
+# FactSummary fields that are NOT columns on the `Fact` ORM, so
+# `FactManager.LEGACY_SUMMARY_FIELDS` must exclude them: `id`/`content` the
+# caller already holds, `score` is search-time, and `recency_status`/
+# `recency_date` are transient verdicts the recency resolver writes downstream.
+_NOT_PERSISTED_FACT_FIELDS = frozenset(
+    {"id", "content", "score", "recency_status", "recency_date"}
+)
+
+
 class FactManager:
     """Manages semantic memory — what we know."""
 
@@ -4215,10 +4224,24 @@ class FactManager:
     # legs each build their own metadata dict from their own narrower SELECT, so
     # a fact found by one of those reaches a consumer without them. All four
     # legs are ENABLED in prod, so this is a live divergence, not a latent one.
-    LEGACY_SUMMARY_FIELDS = (
-        "category", "subject", "confidence", "active", "tags",
-        "superseded_by", "actionable", "actionable_confidence",
-        "overrides_prior",
+    #
+    # DERIVED from FactSummary, like `tools._LEGACY_FACT_KEYS`. The first version
+    # was a hand-written tuple and immediately drifted from its sibling — it
+    # omitted `event_date`, so a dated fact arriving via the exemplar or graph
+    # leg was backfilled with None and silently misclassified by any script
+    # filtering on date. Two hand-maintained lists claiming to mirror one model
+    # is the same failure twice.
+    #
+    # Excluded: `id`/`content` (the caller already has them), `score`
+    # (search-time, not persisted), and `recency_status`/`recency_date`
+    # (transient verdicts the recency resolver writes downstream — absent there
+    # genuinely means "no verdict"). `test_legacy_summary_fields_are_columns`
+    # asserts every remaining name is a real `Fact` column, so a FactSummary
+    # field that is NOT persisted fails a test instead of a SELECT at runtime.
+    # (the exclusion set lives at module level — a genexpr in a class body
+    # cannot see sibling class attributes)
+    LEGACY_SUMMARY_FIELDS: tuple[str, ...] = tuple(
+        f for f in FactSummary.model_fields if f not in _NOT_PERSISTED_FACT_FIELDS
     )
 
     async def fetch_legacy_fields(
@@ -4252,5 +4275,12 @@ class FactManager:
             # `tags` is a nullable ARRAY; normalise NULL to [] so a consumer can
             # iterate without a None check, and copy so rows never share a list.
             vals["tags"] = list(vals["tags"] or [])
+            # Match the primary leg's TYPE, not just its presence:
+            # `Heart._to_recall_result` emits `event_date` as an isoformat
+            # string, so returning a `date` here would make the same field a
+            # different type depending on which leg found the fact — a subtler
+            # version of the bug this backfill exists to fix.
+            if vals.get("event_date") is not None:
+                vals["event_date"] = vals["event_date"].isoformat()
             out[row[0]] = vals
         return out
