@@ -6,6 +6,7 @@ env vars (DB_PASSWORD, DB_PORT, etc.) that docker-compose uses, so a single
 """
 
 import json
+import logging
 import tempfile
 from pathlib import Path
 from typing import Annotated, Literal
@@ -2510,15 +2511,51 @@ class Settings(BaseSettings):
 
         A cross-field validator, not a test on the defaults — the defaults are
         90 and 120, but an operator setting only `NOUS_TOOL_TIMEOUT=60` would
-        otherwise invert the pair with no error anywhere. Mirrors
-        `_validate_keepalive` directly above, which guards the same ceiling.
+        otherwise invert the pair with no error anywhere.
+
+        Raises ONLY when the operator explicitly asked for both values, i.e.
+        asked for something incoherent. When `programmatic_tools_timeout` is
+        still the default it is CLAMPED instead, because raising would turn
+        `NOUS_TOOL_TIMEOUT=60` — a valid setting before this field ever grew a
+        90s default, and one nobody paired with a run_python override — into a
+        refusal to boot on upgrade. A hard startup break is far worse than the
+        silent inversion this guard exists to prevent. Deliberately unlike
+        `_validate_keepalive` above, whose default (10) sits below any plausible
+        `tool_timeout` and so cannot trip accidentally; 90 can.
+
+        Clamping degrades to LESS script budget, never to a wrong reading, and
+        says so at WARNING.
         """
-        if self.programmatic_tools_timeout >= self.tool_timeout:
+        if self.programmatic_tools_timeout < self.tool_timeout:
+            return self
+
+        if "programmatic_tools_timeout" in self.model_fields_set:
             raise ValueError(
                 f"programmatic_tools_timeout ({self.programmatic_tools_timeout}) "
                 f"must be < tool_timeout ({self.tool_timeout}); otherwise the "
                 "dispatcher cancels run_python before its own deadline fires"
             )
+
+        clamped = self.tool_timeout - 1
+        if clamped < 1:
+            # Degenerate: the field floor is ge=1, so with tool_timeout <= 1
+            # there is no value satisfying both bounds. Refuse rather than
+            # clamp to a value that still violates the invariant — a clamp that
+            # does not restore the property it exists to enforce is worse than
+            # an error, because everything downstream then trusts it.
+            raise ValueError(
+                f"tool_timeout ({self.tool_timeout}) leaves no room for "
+                "programmatic_tools_timeout, which must be >= 1 and strictly "
+                "less than tool_timeout"
+            )
+        logging.getLogger(__name__).warning(
+            "programmatic_tools_timeout default (%d) >= tool_timeout (%d); "
+            "clamping to %d so the dispatcher cannot cancel run_python before "
+            "its own deadline. Set NOUS_PROGRAMMATIC_TOOLS_TIMEOUT explicitly "
+            "to silence this, or raise NOUS_TOOL_TIMEOUT.",
+            self.programmatic_tools_timeout, self.tool_timeout, clamped,
+        )
+        object.__setattr__(self, "programmatic_tools_timeout", clamped)
         return self
 
     @model_validator(mode="after")

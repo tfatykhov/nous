@@ -189,6 +189,28 @@ class TestRunPythonConfig:
             programmatic_tools_timeout=30, NOUS_TOOL_TIMEOUT=60
         ).programmatic_tools_timeout == 30
 
+    def test_lowering_tool_timeout_alone_clamps_instead_of_refusing_to_boot(self):
+        """An operator who set only NOUS_TOOL_TIMEOUT must still start.
+
+        `NOUS_TOOL_TIMEOUT=60` was valid before this field grew a 90s default
+        and is not paired with any run_python override. Raising there would
+        convert an existing deployment into a boot failure on upgrade — a worse
+        outcome than the inversion the guard exists to prevent. CI caught this:
+        `test_streaming_keepalive` sets 60 and 10.
+        """
+        s = Settings(NOUS_TOOL_TIMEOUT=60)
+        assert s.programmatic_tools_timeout == 59
+        assert s.programmatic_tools_timeout < s.tool_timeout
+
+        # Clamping must never produce a value that still breaks the invariant.
+        # With tool_timeout=1 and a ge=1 floor no such value exists, so this
+        # refuses rather than clamping to 1 and reporting success.
+        # keepalive_interval=0 is required to reach this branch at all —
+        # `_validate_keepalive` guards the same ceiling and rejects the default
+        # 10 first.
+        with pytest.raises(ValueError, match="leaves no room"):
+            Settings(NOUS_TOOL_TIMEOUT=1, NOUS_KEEPALIVE_INTERVAL=0)
+
     def test_custom_values(self):
         """Can override via constructor."""
         s = Settings(programmatic_tools_enabled=False, programmatic_tools_timeout=30)
