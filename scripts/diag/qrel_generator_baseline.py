@@ -79,7 +79,6 @@ from nous_eval.generate_graph_qrels import (  # noqa: E402
 from nous_eval.retrieval_runner import (  # noqa: E402
     _build_brain_for_eval,
     _build_heart_for_eval,
-    make_eval_embedding_provider,
 )
 
 _NODE_UNION = """
@@ -134,11 +133,13 @@ async def run(args) -> int:
     # these is how the probe and the miner drifted apart in the first place —
     # the provider's model must match the corpus's vectors, and `Brain`
     # silently degrades to keyword-only decision search without one.
-    emb = make_eval_embedding_provider(s)
     client = create_client(s)
     await client.start()
     try:
       async with _build_heart_for_eval(db, s) as heart:
+        # Heart's provider, not a second one — same reasoning as the miner:
+        # shared LRU cache, and the Heart context owns closing it.
+        emb = heart._embeddings
         brain = _build_brain_for_eval(db, s, emb)
         cands = await fetch_edge_candidates(
             db, agent_id=s.agent_id, sample_size=args.n,
@@ -249,8 +250,6 @@ async def run(args) -> int:
         return 0
     finally:
         await client.close()
-        if emb is not None:
-            await emb.close()
         await db.disconnect()
 
 

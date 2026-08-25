@@ -56,7 +56,6 @@ from nous_eval.retrieval_runner import (
     _build_brain_for_eval,
     _build_heart_for_eval,
     _settings_for_eval_db,
-    make_eval_embedding_provider,
 )
 from nous.storage.database import Database
 
@@ -425,9 +424,14 @@ async def _run_async(args: argparse.Namespace) -> int:
                 # validator was therefore gating every qrel on a decision-search
                 # path neither prod nor `retrieval_runner` uses. Build it the
                 # same way the harness does.
+                # Reuse HEART's provider rather than building a second one
+                # (codex P2): the Heart context owns its lifecycle and closes
+                # it, the LRU cache is shared so a query embedded for the heart
+                # legs is not embedded again for the decision leg, and a
+                # provider built here would never be closed — the miner never
+                # calls `brain.close()`.
                 brain = _build_brain_for_eval(
-                    db, main_settings,
-                    make_eval_embedding_provider(main_settings),
+                    db, main_settings, heart._embeddings,
                 )
                 for i, cand in enumerate(candidates, 1):
                     try:

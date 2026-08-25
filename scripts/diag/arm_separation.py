@@ -65,13 +65,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from nous.api.retrieval_pipeline import run_recall_pipeline  # noqa: E402
 from nous.brain.brain import Brain  # noqa: E402
-from nous.brain.embeddings import EmbeddingProvider  # noqa: E402
 from nous.heart.heart import Heart  # noqa: E402
 from nous.storage.database import Database  # noqa: E402
 from nous_eval.env_pin import (  # noqa: E402
     PROD_SHAPE,
     eval_off,
     pinned_settings,
+)
+from nous_eval.retrieval_runner import (  # noqa: E402
+    make_eval_embedding_provider,
 )
 
 CONTROL = "POSCTRL_graph_off"
@@ -117,8 +119,13 @@ async def run_arm(flags, qrels, base, top_k):
     s = base.model_copy(update=flags)
     db = Database(settings=s)
     await db.connect()
-    emb = EmbeddingProvider(api_key=s.openai_api_key,
-                            model="text-embedding-3-large", dimensions=1536)
+    # From `s`, never hardcoded (codex P2). Pinning the model to prod's here
+    # meant `--defaults` embedded queries with `-large` while claiming to
+    # measure the `-small` code default — comparing vectors from two embedding
+    # spaces, which returns plausible nonsense rather than an error. This is the
+    # same defect fixed in the P0 probe last commit; I fixed it there and left
+    # this instance standing.
+    emb = make_eval_embedding_provider(s)
     heart = Heart(database=db, settings=s, embedding_provider=emb)
     brain = Brain(database=db, settings=s, embedding_provider=emb)
     # All three are INDEX-ALIGNED with `qrels`, carrying None where the query
@@ -156,6 +163,8 @@ async def run_arm(flags, qrels, base, top_k):
             served.append(len(ids))
     finally:
         await brain.close()
+        if emb is not None:
+            await emb.close()
         await db.disconnect()
     return {"rr": rr, "hit": hit, "served": served, "errors": errors}
 
