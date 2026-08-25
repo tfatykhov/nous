@@ -127,7 +127,7 @@ exclude it from `compute_delta` / gate metric lists — `float(getattr(...))` at
 ## 6. Non-goals / known gaps
 
 - Not solving the qrel-source problem. (Update 2026-08-24: the "generator bias,
-  ~12% ceiling" framing turned out to be false — the real ceiling is 56.9% and
+  ~12% ceiling" framing turned out to be false — the real ceiling is 64.9% and
   the mine's 0-yield is caused by graph-ON hitting exactly the same rows as
   graph-OFF. See `2026-08-24-qrel-source.md` §7. That makes R@served *more*
   valuable, not less: F091 gold does not require graph expansion to work in

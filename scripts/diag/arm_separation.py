@@ -13,19 +13,28 @@ inert qrel set is not a null, it is an absence of measurement, and the differenc
 has produced wrong verdicts before (decisions 7b29cf7f, ac40336b).
 
 Measured 2026-08-24 on qrels_graph_nogate.jsonl (57 qrels, nous_prod_20260801),
-PINNED PROD SHAPE (see _PROD_SHAPE; the pin is enforced by nous_eval.env_pin):
+PINNED PROD SHAPE (nous_eval.env_pin.PROD_SHAPE, enforced by pinned_settings):
 
     baseline           MRR@10 0.1620   recall@served 0.5614   served 81.1
     POSCTRL_graph_off  MRR@10 0.2260   recall@served 0.5614   served 54.6
-    spread_off         MRR@10 0.1620   recall@served 0.5614   served 72.6
+    spread_off         MRR@10 0.1620   recall@served 0.5614   served 72.6  (see NOISE FLOOR)
     spread_on          MRR@10 0.1620   recall@served 0.5614   served 81.1
     cs_parity          MRR@10 0.1620   recall@served 0.5614   served 81.1
     cs_baseline        MRR@10 0.1620   recall@served 0.5614   served 81.1
 
-Control moved 23/57 (dMRR +0.0640) => the set discriminates. All three spreading
-arms were 57/57 ties at dMRR exactly 0.0000 — a measured null — while spread_off
-serves 8.5 FEWER rows, so spreading changes the served set and changes no measured
-outcome. recall@served is identical across every arm INCLUDING graph_off.
+Control moved 23/57 (dMRR +0.0640) => the set discriminates. The spreading arms
+are a measured null — while spread_off serves 8.5 FEWER rows, so spreading
+changes the served set and changes no measured outcome. recall@served is
+identical across every arm INCLUDING graph_off.
+
+NOISE FLOOR — read this before believing any small delta here. Repeating the
+IDENTICAL command gave spread_off 57/57 ties (dMRR 0.0000) on one run and 56/57
+with one query better (dMRR +0.0044) on the next. Same qrels, same corpus, same
+pinned config: one query's ranking is not deterministic, presumably a score tie
+broken by ordering. So **a delta of one query is indistinguishable from noise**,
+and the instrument's resolution is ~±0.005 dMRR at n=57. Both spread_on and
+cs_parity returned exactly 0.0000 with 57/57 ties on every run — those are ties
+by identity, not by rounding, which is a stronger statement than spread_off's.
 
 These absolute values SUPERSEDE an earlier run of the same command that recorded
 baseline 0.0906 / control 24-57. That run was launched from a shell with prod's
@@ -35,8 +44,8 @@ environment, so a run labelled "pinned" was not — the leak moved baseline MRR 
 a config change large enough to move the absolutes that much.
 
 CORROBORATION, independent of this qrel set: scripts/diag/qrel_generator_baseline.py
-reports graph-ON and graph-OFF hitting the target in the SAME 25/58 queries, so
-graph expansion changed top-10 membership in zero of 58 cases — on ground where
+reports graph-ON and graph-OFF hitting the target in the SAME 20/57 queries, so
+graph expansion changed top-10 membership in zero of 57 cases — on ground where
 every target is the endpoint of the edge its query was written from.
 
 The null is on FAVOURABLE ground: gold are decision-targets of inferred edges,
@@ -59,7 +68,11 @@ from nous.brain.brain import Brain  # noqa: E402
 from nous.brain.embeddings import EmbeddingProvider  # noqa: E402
 from nous.heart.heart import Heart  # noqa: E402
 from nous.storage.database import Database  # noqa: E402
-from nous_eval.env_pin import pinned_settings  # noqa: E402
+from nous_eval.env_pin import (  # noqa: E402
+    PROD_SHAPE,
+    eval_off,
+    pinned_settings,
+)
 
 CONTROL = "POSCTRL_graph_off"
 
@@ -91,37 +104,13 @@ ARMS: dict[str, dict] = {
 # Arms compared against something other than plain `baseline`.
 MATCHED_CONTROL = {"cs_parity": "cs_baseline"}
 
-# PROD SHAPE — pinned explicitly, NOT inherited from an ambient .env.
-#
-# Measured the hard way 2026-08-24: run from a checkout with prod's .env the
-# control moved 23/57 (served 86.5); run from a worktree WITHOUT it, every arm
-# tied and the control moved 0/57 (served 37.7). Same script, same qrels, same
-# corpus — different system. A probe whose result depends on which directory it
-# is launched from is not an instrument.
-#
-# These are the flags that are `true` in prod and `false` by code default, i.e.
-# exactly the ones an ambient-.env run would silently flip. Override with
-# --defaults to measure code-default behaviour deliberately instead.
-_PROD_SHAPE = {
-    "episode_chunks_enabled": True,
-    "chunk_hybrid_search_enabled": True,
-    "episode_chunk_recall_limit": 30,
-    "heart_graph_all_types_enabled": True,
-    "graph_neighbor_seed_score_enabled": True,
-    "graph_adjacency_boost_enabled": True,
-    "graph_inferred_edge_penalty": 1.0,
-    "keyed_fact_leg_enabled": True,
-    "exemplar_mode_enabled": True,
-}
-
-_EVAL_OFF = {
-    "event_bus_enabled": False, "fact_extraction_enabled": False,
-    "episode_summary_enabled": False, "sleep_enabled": False,
-    "heartbeat_enabled": False, "schedule_enabled": False,
-    "subtask_enabled": False, "dag_enabled": False,
-    "query_expansion_enabled": False,
-    "actionability_backfill_on_startup": False,
-}
+# PROD_SHAPE / EVAL_OFF live in nous_eval.env_pin so every probe selects the
+# SAME shape. Measured the hard way 2026-08-24: run from a checkout with prod's
+# .env the control moved 23/57 (served 86.5); run from a worktree WITHOUT it,
+# every arm tied and the control moved 0/57 (served 37.7). Same script, same
+# qrels, same corpus — different system. A probe whose result depends on which
+# directory it is launched from is not an instrument. Use --defaults to measure
+# code-default behaviour deliberately instead.
 
 
 async def run_arm(flags, qrels, base, top_k):
@@ -183,7 +172,7 @@ async def run(args) -> int:
         # The embedding key is the one input that MUST come from the process
         # environment, so it is read here and injected explicitly.
         openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
-        **({} if args.defaults else _PROD_SHAPE), **_EVAL_OFF)
+        **({} if args.defaults else PROD_SHAPE), **eval_off())
     shape = "CODE DEFAULTS" if args.defaults else "PROD SHAPE (pinned)"
     print(f"config: {shape}   (.env and NOUS_*/DB_* env NOT read)")
 
@@ -194,16 +183,26 @@ async def run(args) -> int:
         print(f"  ran {name}")
 
 
+    # The ONE population every number below is computed on: indices that
+    # succeeded in EVERY arm. codex P1 — deriving the control's movement from a
+    # baseline∩control intersection while reporting metrics over the all-arm
+    # intersection lets the guard bless a null on a set the control was never
+    # shown to move. The validity claim and the results must describe the same
+    # queries or the guard is decorative.
+    shared = [i for i in range(len(qrels))
+              if all(r["rr"][i] is not None for r in out.values())]
+    dropped = len(qrels) - len(shared)
+
     def paired(name, against="baseline"):
-        """Paired deltas over indices valid in BOTH arms. A query that raised in
-        either arm is excluded, never zero-scored — see run_arm."""
+        """Paired deltas over `shared`. A query that raised in ANY arm is
+        excluded everywhere, never zero-scored — see run_arm."""
         a, c = out[name]["rr"], out[against]["rr"]
-        d = [x - y for x, y in zip(a, c) if x is not None and y is not None]
+        d = [a[i] - c[i] for i in shared]
         if not d:
-            return (0.0, 0, 0, 0, 0)
+            return (0.0, 0, 0, 0, dropped)
         return (statistics.mean(d), sum(1 for x in d if x > 1e-9),
                 sum(1 for x in d if x < -1e-9), sum(1 for x in d if abs(x) <= 1e-9),
-                len(a) - len(d))
+                dropped)
 
     cd, cb, cw, _ct, cskipped = paired(CONTROL)
     moved = cb + cw
@@ -234,15 +233,9 @@ async def run(args) -> int:
     # reader could draw the exact "all arms tie" conclusion the control exists
     # to forbid. Observed for real: a broken-embedding run showed six arms at
     # 0.0000 above a message claiming nothing had been reported.
-    # codex P2: aggregate over the intersection of indices that succeeded in
-    # EVERY arm. Per-arm `ok` lists let one arm's exception shrink only that
-    # arm's population, so the table would compare different query sets and an
-    # asymmetric failure would surface as an arm-specific metric change — the
-    # same artefact the paired deltas already avoid pairwise, and directly
-    # contrary to the "excluded from every comparison" line printed above.
-    shared = [i for i in range(len(qrels))
-              if all(r["rr"][i] is not None for r in out.values())]
-    dropped = len(qrels) - len(shared)
+    # Same `shared` population the control was judged on (codex P2): per-arm
+    # `ok` lists would let one arm's exception shrink only that arm's set, so
+    # an asymmetric failure surfaces as an arm-specific metric change.
     print(f"\n--- per-arm metrics over {len(shared)} queries valid in ALL arms"
           + (f" ({dropped} dropped)" if dropped else "") + " ---")
     for name in ARMS:

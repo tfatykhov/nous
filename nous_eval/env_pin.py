@@ -32,12 +32,49 @@ from nous.config import Settings
 # connection vars, which are shared with docker-compose.
 _HIDDEN_PREFIXES = ("NOUS_", "DB_")
 
+# Flags that are `true` in prod and `false` by code default — i.e. exactly the
+# ones an ambient-.env run silently flips. A probe that claims to reproduce a
+# production code path MUST select a shape explicitly; the two available shapes
+# are this one and bare code defaults, and they are not interchangeable.
+# Measured 2026-08-24: the difference moved a baseline MRR by 79%.
+PROD_SHAPE: dict[str, Any] = {
+    "episode_chunks_enabled": True,
+    "chunk_hybrid_search_enabled": True,
+    "episode_chunk_recall_limit": 30,
+    "heart_graph_all_types_enabled": True,
+    "graph_neighbor_seed_score_enabled": True,
+    "graph_adjacency_boost_enabled": True,
+    "graph_inferred_edge_penalty": 1.0,
+    "keyed_fact_leg_enabled": True,
+    "exemplar_mode_enabled": True,
+}
+
+def eval_off() -> dict[str, Any]:
+    """The harness's OWN disable list, not a copy of it.
+
+    `nous_eval.retrieval_runner._EVAL_DISABLE_FIELDS` is what every real eval
+    path applies. A probe maintaining its own parallel list drifts silently —
+    and a probe that claims to reproduce the harness while disabling a
+    different set of handlers is measuring a different system, which is the
+    exact failure this module exists to prevent. Imported lazily to keep
+    `env_pin` free of a cycle.
+    """
+    from nous_eval.retrieval_runner import _EVAL_DISABLE_FIELDS
+
+    return dict(_EVAL_DISABLE_FIELDS)
+
 
 @contextlib.contextmanager
 def hidden_env():
-    """Temporarily remove NOUS_*/DB_* from `os.environ`."""
+    """Temporarily remove NOUS_*/DB_* from `os.environ`.
+
+    Matching is CASE-INSENSITIVE: `Settings` inherits pydantic-settings'
+    `case_sensitive=False`, so on a case-sensitive filesystem an exported
+    `nous_spreading_activation_decay` is still consumed while sailing past a
+    `startswith("NOUS_")` filter.
+    """
     saved = {k: v for k, v in os.environ.items()
-             if k.startswith(_HIDDEN_PREFIXES)}
+             if k.upper().startswith(_HIDDEN_PREFIXES)}
     for k in saved:
         del os.environ[k]
     try:

@@ -60,3 +60,17 @@ def test_hidden_env_restores_on_exception(_decay_env):
         with hidden_env():
             raise RuntimeError("boom")
     assert os.environ["NOUS_SPREADING_ACTIVATION_DECAY"] == "0.99"
+
+
+def test_lowercase_env_is_also_hidden(monkeypatch):
+    """pydantic-settings matches env names case-insensitively, so a
+    case-sensitive filter leaves a live override in place."""
+    monkeypatch.setenv("nous_spreading_activation_decay", "0.99")
+    assert pinned_settings().spreading_activation_decay == 0.5
+
+
+def test_lowercase_env_restored(monkeypatch):
+    monkeypatch.setenv("nous_spreading_activation_decay", "0.99")
+    with hidden_env():
+        pass
+    assert os.environ["nous_spreading_activation_decay"] == "0.99"

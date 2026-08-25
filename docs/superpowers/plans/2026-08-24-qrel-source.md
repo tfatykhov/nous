@@ -147,17 +147,17 @@ gate runs `run_recall_pipeline` at **top-10**, so a target at raw vector rank
 same and one is not a proxy for the other. Found by codex on PR #607, not by me,
 after the number had already been written into three files and a decision record.
 
-Re-measured through the validator's own call, `n=58` from 60 edges on
+Re-measured through the validator's own call under PROD_SHAPE, `n=57` from 60 edges on
 `nous_prod_20260801`:
 
 | gate half | result |
 |---|---|
-| 1 — graph-OFF hits top-10 | 25/58 (43.1%) → **ceiling 56.9%** |
-| 2 — graph-ON hits top-10 | 25/58 (43.1%) |
-| **kept** (off miss ∧ on hit) | **0/58** |
+| 1 — graph-OFF hits top-10 | 20/57 (35.1%) → **ceiling 64.9%** |
+| 2 — graph-ON hits top-10 | 20/57 (35.1%) |
+| **kept** (off miss ∧ on hit) | **0/57** |
 | *diagnostic* — raw vector top-50 | 58/58, median rank 3 |
 
-So the generator was never the constraint: a 56.9% ceiling is ample. The mine
+So the generator was never the constraint: a 64.9% ceiling is ample. The mine
 yields zero because **half 2 never fires**. graph-ON and graph-OFF hit the *same*
 25 queries — identical at every checkpoint (2/2, 8/8, 13/13, 15/15, 21/21,
 25/25). Graph expansion changed top-10 membership in **zero of 58** cases, on the
@@ -179,7 +179,7 @@ Consequences for the rest of this plan:
   stronger: F091 gold comes from what the agent actually retrieved, so it does
   not depend on graph expansion working in order to exist.
 - **Do not tune edge selection against the ceiling.** The lever P0 was meant to
-  find does exist (56.9%), but pulling it cannot help while half 2 reads zero.
+  find does exist (64.9%), but pulling it cannot help while half 2 reads zero.
 - The risk table's last row was the right worry aimed at the wrong claim:
   reproducing B would not have vindicated the miner — and B did not reproduce.
 

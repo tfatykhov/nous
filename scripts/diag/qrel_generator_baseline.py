@@ -15,25 +15,30 @@ Attributing a yield to the wrong half has produced wrong verdicts twice
 (decisions 7b29cf7f, 004641d7) — and a third time from this very script, see
 below.
 
-MEASURED 2026-08-24, `nous_prod_20260801`, n=58 generated from 60 edges:
+MEASURED 2026-08-24, `nous_prod_20260801`, PROD_SHAPE, n=57 from 60 edges:
 
-    half 1  graph-OFF hits top-10 : 25/58 (43.1%)  => ceiling 56.9%
-    half 2  graph-ON  hits top-10 : 25/58 (43.1%)
-    KEPT (off miss AND on hit)    : 0/58  (0.0%)
-    [diagnostic] raw vector top-50: 58/58, median rank 3
+    half 1  graph-OFF hits top-10 : 20/57 (35.1%)  => ceiling 64.9%
+    half 2  graph-ON  hits top-10 : 20/57 (35.1%)
+    KEPT (off miss AND on hit)    : 0/57  (0.0%)
+    [diagnostic] raw vector top-50: 54/57 (94.7%), median rank 2
 
-The two halves are IDENTICAL — 2/2, 8/8, 13/13, 15/15, 21/21, 25/25 at every
-checkpoint. Graph expansion changed top-10 membership for the target in ZERO of
-58 cases, on the most favourable ground available: every target is the endpoint
-of the very edge its query was written from. That is why the mine yields 0, and
-it is a measurement about the graph, not a bug.
+The two halves are IDENTICAL. Graph expansion changed top-10 membership for the
+target in ZERO of 57 cases, on the most favourable ground available: every
+target is the endpoint of the very edge its query was written from. That is why
+the mine yields 0, and it is a measurement about the graph, not a bug.
 
-CORRECTION. An earlier revision of this script derived the ceiling from a raw
+Robust to configuration: the same run at CODE DEFAULTS (`--defaults`) gave
+ceiling 56.9%, halves identical at 25/58, KEPT 0/58. The ceiling moves with the
+shape; the identity of the two halves does not.
+
+CORRECTION, twice over. An earlier revision derived the ceiling from a raw
 vector top-50 union query and reported ~5%, concluding the generator was the
-blocker. That was wrong by ~11x (real: 56.9%), because the gate runs
-`run_recall_pipeline` at top-10 — a target at raw vector rank 11-50 misses the
-gate and still yields a qrel. Found by codex, not by me. The measurement now
-runs the validator's own call.
+blocker — wrong by ~11x, because the gate runs `run_recall_pipeline` at top-10
+and a target at raw vector rank 11-50 misses the gate yet still yields a qrel.
+Note the diagnostic row above still reads 94.7%: that figure was never wrong,
+it simply was not the gate. A second revision then pinned settings so hard it
+measured code defaults, which the miner never runs — it builds from a bare
+`Settings()` that reads prod's .env. Both found by codex, not by me.
 
     python scripts/diag/qrel_generator_baseline.py \
         --db nous_prod_20260801 --agent nous-default -n 60 --allow-inferred
@@ -59,7 +64,11 @@ from nous.brain.brain import Brain  # noqa: E402
 from nous.brain.embeddings import EmbeddingProvider  # noqa: E402
 from nous.heart.heart import Heart  # noqa: E402
 from nous.storage.database import Database  # noqa: E402
-from nous_eval.env_pin import pinned_settings  # noqa: E402
+from nous_eval.env_pin import (  # noqa: E402
+    PROD_SHAPE,
+    eval_off,
+    pinned_settings,
+)
 from nous_eval.generate_graph_qrels import (  # noqa: E402
     fetch_edge_candidates,
     generate_query,
@@ -82,10 +91,18 @@ _NODE_UNION = """
 async def run(args) -> int:
     # Pinned: no .env, no NOUS_*/DB_* process env. A ceiling that moves with the
     # launch directory is not a ceiling. See nous_eval.env_pin.
+    #
+    # PROD_SHAPE is applied by default because this probe's whole claim is that
+    # it reproduces the miner's gate — and the miner builds its settings from a
+    # bare `Settings()`, which DOES read prod's .env (codex P1). Pinning to bare
+    # code defaults would have measured a configuration the miner never runs,
+    # and the same shape difference already moved a baseline MRR by 79%. Pass
+    # --defaults to measure code-default behaviour deliberately instead.
     s = pinned_settings(
         db_host=args.host, db_port=args.port, db_name=args.db,
         db_user=args.user, db_password=os.environ["EVAL_DB_PASSWORD"],
         agent_id=args.agent,
+        **({} if args.defaults else PROD_SHAPE),
         # CREDENTIALS are the deliberate exception to the pin — they are
         # inputs, not configuration, and hiding them just breaks the run.
         # `anthropic_auth_token` is NOT optional here: prod authenticates with
@@ -95,11 +112,7 @@ async def run(args) -> int:
         openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         anthropic_auth_token=os.environ.get("ANTHROPIC_AUTH_TOKEN", ""),
-        event_bus_enabled=False, fact_extraction_enabled=False,
-        episode_summary_enabled=False, sleep_enabled=False,
-        heartbeat_enabled=False, schedule_enabled=False,
-        subtask_enabled=False, dag_enabled=False,
-        actionability_backfill_on_startup=False,
+        **eval_off(),
     )
     # BOTH halves of `_validate_query`, reproduced exactly. Measuring only the
     # graph-off half attributes the whole yield to the generator, which is how
@@ -218,7 +231,10 @@ async def run(args) -> int:
               "Measure the ceiling through run_recall_pipeline at the validator's\n"
               "top_k, never a raw vector top-50: a target at raw rank 11-50 still\n"
               "misses the pipeline top-10 and still yields a qrel. That error\n"
-              "understated the ceiling by ~11x here (codex P1).")
+              "understated the ceiling by ~11x here (codex P1).\n\n"
+              "And match the MINER's config shape: it builds from a bare\n"
+              "Settings() that reads prod's .env, so a probe pinned to bare code\n"
+              "defaults measures a system the miner never runs.")
         return 0
     finally:
         await client.close()
@@ -245,6 +261,10 @@ def main() -> int:
                    help="Required on corpora whose decision-targeting edges are "
                         "all inferred. Circular for F065 penalty work; fine for "
                         "spreading arms, where the penalty is pinned at 1.0.")
+    p.add_argument("--defaults", action="store_true",
+                   help="Measure CODE-DEFAULT config instead of the prod shape "
+                        "the miner actually runs. Results are not comparable "
+                        "across the two.")
     p.add_argument("--model", default="claude-haiku-4-5-20251001")
     p.add_argument("--embed-model", default="text-embedding-3-large")
     args = p.parse_args()

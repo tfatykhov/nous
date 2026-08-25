@@ -429,9 +429,9 @@ async def _run_async(args: argparse.Namespace) -> int:
                         # graph-on HITS. Measured on this corpus by
                         # scripts/diag/qrel_generator_baseline.py (2026-08-24,
                         # 58 queries from 60 edges): graph-off hits top-10 for
-                        # 25/58, so the ceiling is 56.9% — the generator is NOT
-                        # the constraint. graph-ON hits for the SAME 25/58, so
-                        # 0/58 rows pass. Graph expansion changed top-10
+                        # 20/57, so the ceiling is 64.9% — the generator is NOT
+                        # the constraint. graph-ON hits for the SAME 20/57, so
+                        # 0/57 rows pass. Graph expansion changed top-10
                         # membership in zero cases.
                         #
                         # So skipping the gate here is not a workaround for a
@@ -512,8 +512,8 @@ def main(argv: list[str] | None = None) -> int:
         "--no-reachability-gate", action="store_true",
         help="Keep every generated query instead of requiring graph-off MISS + "
              "graph-on HIT. Measured on a prod-shaped corpus (2026-08-24): the "
-             "gate yields 0/58, not because the generator is biased (ceiling "
-             "56.9%%) but because graph-on hits the SAME 25/58 as graph-off — "
+             "gate yields 0/57, not because the generator is biased (ceiling "
+             "64.9%%) but because graph-on hits the SAME 20/57 as graph-off — "
              "expansion changes nothing. A paired A/B does not need graph-only "
              "qrels; ties cost n, not correctness. Run "
              "scripts/diag/qrel_generator_baseline.py to see which half of the "

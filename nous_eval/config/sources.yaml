@@ -59,12 +59,22 @@ sources:
 
   - name: graph_bridge_ungated
     path: "${NOUS_EVAL_FIXTURES_DIR}/qrels_graph_nogate.jsonl"
-    # Same generator as graph_targeted with the reachability gate OFF. The
-    # strict gate is capped near 5% yield on prod-shaped corpora because the
-    # LLM generator writes vector-findable questions (measured 94.8% in vector
-    # top-50, median rank 2), so it produces an empty source rather than a
-    # selective one. These rows are usable for PAIRED A/B — ties cost n, not
-    # correctness — and are NOT evidence that graph expansion reached anything.
+    # Same generator as graph_targeted with the reachability gate OFF.
+    #
+    # WHY the gate is skipped, measured 2026-08-24 on a prod clone (n=57 from 60
+    # edges, scripts/diag/qrel_generator_baseline.py): NOT generator bias. The
+    # generator's ceiling is 64.9% — ample. The gate yields nothing because its
+    # two halves are identical: graph-OFF finds the target in top-10 for 20/57
+    # and graph-ON finds it for the SAME 20/57, so 0 rows pass. Graph expansion
+    # changed top-10 membership in zero cases.
+    #
+    # (An earlier revision of this comment blamed a ~5% ceiling from 94.8%
+    # raw-vector top-50 findability. That was wrong by ~11x — the gate runs the
+    # pipeline at top-10, not raw vector at top-50 — and it attributed the empty
+    # source to the wrong half of the gate.)
+    #
+    # These rows are usable for PAIRED A/B — ties cost n, not correctness — and
+    # are NOT evidence that graph expansion reached anything.
     # gate_eligible stays false: gold here are decision-targets of inferred
     # edges, i.e. favourable ground for the graph mechanisms under test.
     enabled_by_default: false
