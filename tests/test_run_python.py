@@ -655,6 +655,45 @@ class TestRunPythonMemoryWrappers:
         activator.current_turn.assert_not_called()
         activator.compute_activations.assert_not_called()
 
+    def test_fact_rows_carry_real_values_not_defaults(self):
+        """`Heart._to_recall_result` must propagate the persisted fact fields.
+
+        This is the load-bearing half of the compatibility story. Without it the
+        default map stops scripts raising KeyError only to have them silently
+        decide from fabricated values instead — strictly worse than the crash: a
+        script filtering `[f for f in facts if f["active"]]` would drop every
+        fact and look like it merely found nothing.
+
+        Asserts against `_LEGACY_FACT_KEYS` rather than a second hand-written
+        list, minus the two transient recency verdicts the resolver owns
+        downstream, where absent genuinely means "no verdict".
+        """
+        from uuid import uuid4 as _uuid4
+
+        from nous.api.tools import _LEGACY_FACT_KEYS
+        from nous.heart.heart import Heart
+        from nous.heart.schemas import FactSummary
+
+        sup = _uuid4()
+        fact = FactSummary(
+            id=_uuid4(), content="c", category="technical", subject="s",
+            confidence=0.9, active=True, tags=["a"], superseded_by=sup,
+            actionable=True, actionable_confidence=0.7, overrides_prior=True,
+        )
+        # Unbound call: the conversion reads nothing off `self`.
+        rr = Heart._to_recall_result(None, "fact", fact, 0.5)
+
+        transient = {"recency_status", "recency_date"}
+        for key in set(_LEGACY_FACT_KEYS) - transient:
+            assert key in rr.metadata, f"fact metadata is missing {key!r}"
+
+        # And the values are the fact's own, not the fallbacks.
+        assert rr.metadata["active"] is True
+        assert rr.metadata["tags"] == ["a"]
+        assert rr.metadata["superseded_by"] == sup
+        assert rr.metadata["actionable"] is True
+        assert rr.metadata["overrides_prior"] is True
+
     def test_legacy_key_map_covers_every_fact_summary_field(self):
         """The compat map is DERIVED from FactSummary, so it cannot drift.
 

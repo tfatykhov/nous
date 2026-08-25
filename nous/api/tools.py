@@ -3819,6 +3819,16 @@ _TIMEOUT_GRACE = PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS
 # `id`/`content`/`score` are excluded: the result dict already owns those, and
 # they must never be overwritten by a metadata value.
 #
+# These are FALLBACKS FOR NON-FACT ROWS ONLY. Fact rows carry their real values:
+# `Heart._to_recall_result` propagates the persisted FactSummary fields into
+# metadata, so a fact reaching this map already has `active`, `tags`,
+# `actionable`, `superseded_by` and friends populated and the default is never
+# consulted. That propagation is the load-bearing half — without it these
+# defaults would stop scripts raising KeyError only to have them silently decide
+# from fabricated values instead, which is strictly worse than the crash: a
+# script filtering `[f for f in facts if f["active"]]` would drop every fact and
+# look like it simply found nothing.
+#
 # Default policy is deliberately NOT the model's own defaults: `overrides_prior`
 # defaults to False on FactSummary, but asserting False about an episode is
 # fabricating an answer to a question that does not apply to it. None means "not
