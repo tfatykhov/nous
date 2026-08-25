@@ -4070,6 +4070,24 @@ def create_programmatic_tools(
                         "F091: script retrieval trace commit failed", exc_info=True,
                     )
 
+            def _fail_trace(exc: Exception) -> None:
+                """Commit the PARTIAL trace: a crashed retrieval must not look
+                like one that never happened. Mirrors the tool's error path."""
+                if _tr is None:
+                    return
+                _tr.undeliver_all(SLICED_OFF, "script_recall_failed")
+                _tr.leg("script_recall", attempted=True, error=str(exc)[:200])
+                _tr.finalize([])
+                _commit(_tr)
+
+            # EVERYTHING that decides what the script receives sits inside this
+            # try, and the success trace is committed only after `out` exists.
+            # The `_schedule` deadline can expire during the backfill or the
+            # dict construction, and a trace committed before those would assert
+            # `returned_to_script` for every survivor while the script actually
+            # received a timeout error and nothing at all. The tool commits late
+            # for the same reason (see the note at its own commit site: the
+            # parent-episode fetch still changes what reaches the model).
             try:
                 results, _stats = _schedule(run_recall_pipeline(
                     query=query, heart=heart, brain=brain, settings=settings,
@@ -4077,15 +4095,11 @@ def create_programmatic_tools(
                     residual_activations=_residual_state["acts"] or None,  # F055
                     exclude_ids=_script_exclude_ids,  # F071
                 ))
+                out = _build_script_results(results)
             except Exception as e:
-                # Commit the PARTIAL trace, matching the tool's error path: a
-                # crashed retrieval must not look like one that never happened.
-                if _tr is not None:
-                    _tr.undeliver_all(SLICED_OFF, "script_recall_failed")
-                    _tr.leg("script_recall", attempted=True, error=str(e)[:200])
-                    _tr.finalize([])
-                    _commit(_tr)
+                _fail_trace(e)
                 raise
+
             # `run_recall_pipeline` has already called `finalize`, which marks its
             # survivors RENDERED — a claim that is true on the tool path and FALSE
             # here. These results were delivered to the Python interpreter, and
@@ -4133,6 +4147,16 @@ def create_programmatic_tools(
                         exc_info=True,
                     )
 
+            return out
+
+        def _build_script_results(results: list) -> list[dict]:
+            """Convert pipeline results into the dicts the script receives.
+
+            Separated so it runs INSIDE the caller's try: the `_schedule`
+            deadline can expire in here, and a success trace committed before
+            this returns would claim `returned_to_script` for rows the script
+            never got.
+            """
             # Backfill legacy fields for fact rows whose leg did not carry them.
             # Only the primary Heart leg populates them in metadata; the keyed,
             # keyed_r2, exemplar and graph-expansion legs build their own

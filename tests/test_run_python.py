@@ -1051,6 +1051,72 @@ class TestRunPythonMemoryWrappers:
         )
 
     @pytest.mark.asyncio
+    async def test_post_pipeline_failure_takes_the_error_path(
+        self, mock_brain, mock_heart, patched_pipeline
+    ):
+        """A failure AFTER the pipeline must not commit a success trace.
+
+        The success trace used to be committed before the legacy backfill and
+        the dict construction. The `_schedule` deadline can expire in either, so
+        the persisted row would assert `returned_to_script` for every survivor
+        while the script actually received a timeout and nothing at all.
+        """
+        from nous.api.tools import create_programmatic_tools
+        from nous.observability.retrieval_trace import (
+            RETURNED_TO_SCRIPT,
+            SLICED_OFF,
+        )
+
+        calls: list[tuple] = []
+
+        class _Trace:
+            id = "t"
+            enabled = True
+
+            def undeliver_all(self, disposition, stage):
+                calls.append((disposition, stage))
+
+            def __getattr__(self, _name):
+                return lambda *a, **k: None
+
+        class _Rec:
+            def start(self, **kw):  # noqa: ARG002
+                return _Trace()
+
+            def commit(self, trace):  # noqa: ARG002
+                pass
+
+        # A result whose construction raises AFTER the pipeline has returned —
+        # standing in for the deadline tracer firing mid-conversion.
+        class _Boom:
+            id = uuid4()
+            type = "fact"
+            description = "d"
+            score = 0.5
+            source = "heart"
+            edge_relation = None
+
+            @property
+            def metadata(self):
+                raise RuntimeError("boom")
+
+        from nous.api.retrieval_pipeline import PipelineStats
+
+        s = Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=5)
+        tool = create_programmatic_tools(mock_brain, mock_heart, s)["run_python"]
+        with patch("nous.api.tools.get_active_retrieval_logger", _Rec), patch(
+            "nous.api.retrieval_pipeline.run_recall_pipeline",
+            AsyncMock(return_value=([_Boom()], PipelineStats())),
+        ):
+            out = await tool(code='recall_deep("caching")')
+
+        assert out.get("is_error"), "the script should have surfaced the failure"
+        assert (SLICED_OFF, "script_recall_failed") in calls
+        assert (RETURNED_TO_SCRIPT, "run_python") not in calls, (
+            "a post-pipeline failure must not persist a success disposition"
+        )
+
+    @pytest.mark.asyncio
     async def test_results_are_returned_to_script_not_rendered(
         self, run_python_tool, patched_pipeline
     ):
