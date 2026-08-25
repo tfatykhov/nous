@@ -1086,8 +1086,14 @@ class TestRunPythonMemoryWrappers:
             def commit(self, trace):  # noqa: ARG002
                 pass
 
-        # A result whose construction raises AFTER the pipeline has returned —
-        # standing in for the deadline tracer firing mid-conversion.
+        # Raises the REAL deadline exception, not a stand-in. An earlier version
+        # of this test used RuntimeError and passed against an `except
+        # Exception` that could never catch the actual failure:
+        # ScriptDeadlineExceeded derives from BaseException on purpose, so agent
+        # code cannot swallow its own timeout — and the deadline firing
+        # mid-conversion is the likeliest way this block fails.
+        from nous.api.tools import ScriptDeadlineExceeded
+
         class _Boom:
             id = uuid4()
             type = "fact"
@@ -1098,7 +1104,7 @@ class TestRunPythonMemoryWrappers:
 
             @property
             def metadata(self):
-                raise RuntimeError("boom")
+                raise ScriptDeadlineExceeded("execution timed out (5s)")
 
         from nous.api.retrieval_pipeline import PipelineStats
 

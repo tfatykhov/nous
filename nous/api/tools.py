@@ -4070,7 +4070,7 @@ def create_programmatic_tools(
                         "F091: script retrieval trace commit failed", exc_info=True,
                     )
 
-            def _fail_trace(exc: Exception) -> None:
+            def _fail_trace(exc: BaseException) -> None:
                 """Commit the PARTIAL trace: a crashed retrieval must not look
                 like one that never happened. Mirrors the tool's error path."""
                 if _tr is None:
@@ -4096,7 +4096,14 @@ def create_programmatic_tools(
                     exclude_ids=_script_exclude_ids,  # F071
                 ))
                 out = _build_script_results(results)
-            except Exception as e:
+            except (Exception, ScriptDeadlineExceeded) as e:
+                # ScriptDeadlineExceeded derives from BaseException ON PURPOSE,
+                # so agent code cannot swallow its own timeout with
+                # `except Exception` — which means a bare `except Exception`
+                # here misses the single likeliest failure in this block. The
+                # deadline firing mid-conversion is exactly the case this
+                # error path exists for, and it would otherwise commit no trace
+                # at all.
                 _fail_trace(e)
                 raise
 
