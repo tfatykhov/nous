@@ -627,6 +627,52 @@ class TestRunPythonMemoryWrappers:
         assert result["content"][0]["text"] == '["technical", "cache", 0.9]'
 
     @pytest.mark.asyncio
+    async def test_residual_state_is_not_read_when_no_recall_happens(
+        self, mock_brain, mock_heart
+    ):
+        """A script that never calls recall_deep pays nothing for F055.
+
+        Reading it eagerly charged every run_python call two DB reads — outside
+        both the run slot and the script deadline, so a slow activation read
+        could consume the dispatcher's remaining timeout before the script's own
+        deadline even started.
+        """
+        from nous.api.tools import create_programmatic_tools
+
+        activator = MagicMock()
+        activator.current_turn = AsyncMock(return_value=3)
+        activator.compute_activations = AsyncMock(return_value={})
+        mock_heart._residual_activator = activator
+
+        s = Settings(
+            programmatic_tools_enabled=True,
+            programmatic_tools_timeout=5,
+            residual_activation_enabled=True,
+        )
+        tool = create_programmatic_tools(mock_brain, mock_heart, s)["run_python"]
+        await tool(code="result = 1 + 1", _session_id="sess-1")
+
+        activator.current_turn.assert_not_called()
+        activator.compute_activations.assert_not_called()
+
+    def test_legacy_key_map_covers_every_fact_summary_field(self):
+        """The compat map is DERIVED from FactSummary, so it cannot drift.
+
+        A hand-written list drifted twice in one review cycle. This asserts the
+        property directly rather than re-listing the fields, which would just
+        create a third list to drift.
+        """
+        from nous.api.tools import _LEGACY_FACT_KEYS
+        from nous.heart.schemas import FactSummary
+
+        owned = {"id", "content", "score"}  # the result dict supplies these
+        assert set(_LEGACY_FACT_KEYS) == set(FactSummary.model_fields) - owned
+        # None everywhere except tags: a fabricated value would sort/compare
+        # as though it were real data.
+        assert _LEGACY_FACT_KEYS["tags"] == []
+        assert all(v is None for k, v in _LEGACY_FACT_KEYS.items() if k != "tags")
+
+    @pytest.mark.asyncio
     async def test_recall_deep_forwards_f071_exclusions(
         self, run_python_tool, patched_pipeline
     ):

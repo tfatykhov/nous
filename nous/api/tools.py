@@ -33,7 +33,13 @@ from nous.brain.schemas import ReasonInput, RecordInput
 from nous.config import PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS, Settings
 from nous.heart.exemplars import parse_label
 from nous.heart.heart import Heart
-from nous.heart.schemas import CensorInput, FactInput, FactRejected, ProcedureInput
+from nous.heart.schemas import (
+    CensorInput,
+    FactInput,
+    FactRejected,
+    FactSummary,
+    ProcedureInput,
+)
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
 from nous.observability.retrieval_trace import RETURNED_TO_SCRIPT, SLICED_OFF
 from nous.skills.parser import SkillParser
@@ -3802,17 +3808,26 @@ _TIMEOUT_GRACE = PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS
 # `FactSummary.model_dump()`, mapped to the value used when the field does not
 # apply to a result type. Facts get real values out of `metadata`; episodes,
 # chunks, procedures and decisions get the default, so key ACCESS never raises
-# on a mixed list. `tags` defaults to an empty list because "no tags" is true
-# for a non-fact; everything else defaults to None rather than a plausible
-# stand-in, so nothing fabricated can reach a sort or a comparison.
+# on a mixed list.
+#
+# DERIVED from FactSummary rather than hand-listed. A hand-written list drifted
+# twice in one review cycle — first missing active/tags/superseded_by, then
+# actionable/actionable_confidence/overrides_prior/recency_status/recency_date —
+# because nothing tied it to the model it claims to reproduce. Now a new field on
+# FactSummary joins this map automatically.
+#
+# `id`/`content`/`score` are excluded: the result dict already owns those, and
+# they must never be overwritten by a metadata value.
+#
+# Default policy is deliberately NOT the model's own defaults: `overrides_prior`
+# defaults to False on FactSummary, but asserting False about an episode is
+# fabricating an answer to a question that does not apply to it. None means "not
+# applicable", which is the truth. `tags` is the one exception — an empty list is
+# genuinely true for a non-fact and keeps iteration safe.
 _LEGACY_FACT_KEYS: dict[str, Any] = {
-    "category": None,
-    "subject": None,
-    "confidence": None,
-    "active": None,
-    "superseded_by": None,
-    "event_date": None,
-    "tags": [],
+    _name: ([] if _name == "tags" else None)
+    for _name in FactSummary.model_fields
+    if _name not in ("id", "content", "score")
 }
 
 # Trace-hook check interval — number of traced events between deadline checks.
@@ -3911,28 +3926,18 @@ def create_programmatic_tools(
         from nous.api.runner import CURRENT_TURN_EXCLUDE_IDS
         _script_exclude_ids = CURRENT_TURN_EXCLUDE_IDS.get()
 
-        _script_residual: dict[UUID, float] = {}
-        _script_turn = 0
-        if (
+        # F055 state is resolved LAZILY, on the first in-script recall — see
+        # `_load_residual` below. Doing it here would charge every run_python
+        # call two DB reads even when the script never calls recall_deep, and
+        # would do it OUTSIDE both the run slot and the script deadline, so a
+        # slow activation read could eat the dispatcher's remaining timeout
+        # before the script's own deadline had started.
+        _residual_state: dict[str, Any] = {"loaded": False, "turn": 0, "acts": {}}
+        _residual_on = (
             getattr(settings, "residual_activation_enabled", False)
-            and _session_id
+            and bool(_session_id)
             and getattr(heart, "_residual_activator", None) is not None
-        ):
-            try:
-                _activator = heart._residual_activator
-                _script_turn = await _activator.current_turn(
-                    brain.agent_id, _session_id,
-                )
-                _script_residual = await _activator.compute_activations(
-                    brain.agent_id, _session_id, _script_turn,
-                )
-            except Exception:
-                # Fail-open to cold recall, exactly as the tool does.
-                logger.warning(
-                    "F055: compute_activations failed for %s/%s in run_python, "
-                    "continuing cold", brain.agent_id, _session_id, exc_info=True,
-                )
-                _script_residual = {}
+        )
 
         # Get the running event loop so threads can schedule DB coroutines back on it.
         # Using run_coroutine_threadsafe instead of asyncio.run() prevents deadlocks:
@@ -3968,6 +3973,31 @@ def create_programmatic_tools(
                 fut.cancel()
                 raise
 
+        def _load_residual() -> None:
+            """Resolve F055 state on first use, inside the script's deadline.
+
+            Runs on the worker thread, so the activator's coroutines go through
+            `_schedule` — which means these reads are bounded by the script
+            deadline and charged to a held run slot, unlike an eager read before
+            the executor. Fails open to cold recall, exactly as the tool does.
+            """
+            if _residual_state["loaded"] or not _residual_on:
+                return
+            _residual_state["loaded"] = True
+            try:
+                act = heart._residual_activator
+                turn = _schedule(act.current_turn(brain.agent_id, _session_id))
+                _residual_state["turn"] = turn
+                _residual_state["acts"] = _schedule(
+                    act.compute_activations(brain.agent_id, _session_id, turn)
+                )
+            except Exception:
+                logger.warning(
+                    "F055: compute_activations failed for %s/%s in run_python, "
+                    "continuing cold", brain.agent_id, _session_id, exc_info=True,
+                )
+                _residual_state["acts"] = {}
+
         def _recall_deep(query: str, limit: int = 5) -> list[dict]:
             """The same retrieval the `recall_deep` TOOL runs — not a fact search.
 
@@ -3986,6 +4016,8 @@ def create_programmatic_tools(
             to log.
             """
             from nous.api.retrieval_pipeline import run_recall_pipeline
+
+            _load_residual()
 
             # Mirrors the tool's `chunks_rerank`. A script passes no
             # memory_types, so the tool's `search_all` branch is always taken and
@@ -4032,7 +4064,7 @@ def create_programmatic_tools(
                 results, _stats = _schedule(run_recall_pipeline(
                     query=query, heart=heart, brain=brain, settings=settings,
                     limit=limit, rerank_by_score=rerank, trace=_tr,
-                    residual_activations=_script_residual or None,  # F055
+                    residual_activations=_residual_state["acts"] or None,  # F055
                     exclude_ids=_script_exclude_ids,  # F071
                 ))
             except Exception as e:
@@ -4062,11 +4094,10 @@ def create_programmatic_tools(
             # Scheduled onto the main loop (the activator is async and this is a
             # worker thread) and never awaited — matching the tool, where it is
             # deliberately fire-and-forget so the request returns immediately.
-            if (
-                _session_id
-                and getattr(settings, "residual_activation_enabled", False)
-                and getattr(heart, "_residual_activator", None) is not None
-            ):
+            # Same predicate as the read side, by reference rather than
+            # restated: a consumer that re-derives its producer's control flow
+            # is one edit away from disagreeing with it.
+            if _residual_on:
                 try:
                     _surfaced = [
                         (
@@ -4081,7 +4112,7 @@ def create_programmatic_tools(
                             heart._residual_activator.record_surfaced(
                                 agent_id=brain.agent_id,
                                 session_id=_session_id,
-                                current_turn=_script_turn + 1,
+                                current_turn=_residual_state["turn"] + 1,
                                 surfaced=_surfaced,
                             )
                         )
