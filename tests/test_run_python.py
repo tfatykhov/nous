@@ -1051,6 +1051,60 @@ class TestRunPythonMemoryWrappers:
         )
 
     @pytest.mark.asyncio
+    async def test_limit_zero_returns_nothing(self, mock_brain, mock_heart):
+        """`limit=0` is the tightest bound, not "no cap".
+
+        A falsy guard lumped 0 in with None and handed back every additive
+        pipeline row — turning a dynamically computed zero budget from the
+        strictest limit into an unbounded one, against a tool description that
+        promises at most `limit` dicts.
+        """
+        from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
+        from nous.api.tools import create_programmatic_tools
+
+        many = [
+            PipelineResult(id=uuid4(), type="fact", description=f"f{i}",
+                           score=0.5, source="heart", metadata={"active": True})
+            for i in range(4)
+        ]
+        s = Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=5)
+        tool = create_programmatic_tools(mock_brain, mock_heart, s)["run_python"]
+        with patch(
+            "nous.api.retrieval_pipeline.run_recall_pipeline",
+            AsyncMock(return_value=(many, PipelineStats())),
+        ):
+            out = await tool(code='result = json.dumps(len(recall_deep("q", limit=0)))')
+        assert out["content"][0]["text"] == "0"
+
+    def test_backfill_matches_primary_path_normalisation(self):
+        """A NULL-heavy row must read the same through either leg.
+
+        `_to_summary` normalises null confidence -> 1.0, null active -> True and
+        null overrides_prior -> False. Migration 064 leaves `overrides_prior`
+        NULL on existing rows and non-override facts are stored NULL, so a raw
+        ORM copy in the backfill would make the identical fact read differently
+        depending on which leg found it — the exact defect the backfill exists
+        to close.
+        """
+        from nous.heart.facts import FactManager
+
+        fid = uuid4()
+        # One row, every nullable column NULL — the shape migration 064 leaves.
+        row = (fid, *[None] * len(FactManager.LEGACY_SUMMARY_FIELDS))
+        result = MagicMock()
+        result.all.return_value = [row]
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=result)
+
+        mgr = FactManager.__new__(FactManager)  # no DB needed for this path
+        got = asyncio.run(mgr._fetch_legacy_fields([fid], session))[fid]
+
+        assert got["confidence"] == 1.0
+        assert got["active"] is True
+        assert got["overrides_prior"] is False
+        assert got["tags"] == []
+
+    @pytest.mark.asyncio
     async def test_deadline_enforcement_survives_a_caught_recall_error(
         self, mock_brain, mock_heart
     ):

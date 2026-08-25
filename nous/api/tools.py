@@ -4318,7 +4318,15 @@ def create_programmatic_tools(
             did not happen. Marked BEFORE the caller's `undeliver_all`, which
             only touches candidates still `RENDERED`.
             """
-            if limit is None or limit <= 0 or len(out) <= limit:
+            # `limit=0` means ZERO rows, not "no cap". The old path passed it to
+            # SQL as `LIMIT 0`, and this tool's own description promises at most
+            # `limit` dicts — so lumping it in with None turned the tightest
+            # possible bound into an unbounded one, which is what a dynamically
+            # computed budget of 0 would hit. Only None means uncapped.
+            if limit is None:
+                return out
+            limit = max(0, limit)
+            if len(out) <= limit:
                 return out
             if tr is not None:
                 # A candidate is keyed on (id, type) and the pipeline can emit

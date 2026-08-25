@@ -4274,7 +4274,21 @@ class FactManager:
             vals = dict(zip(self.LEGACY_SUMMARY_FIELDS, row[1:], strict=True))
             # `tags` is a nullable ARRAY; normalise NULL to [] so a consumer can
             # iterate without a None check, and copy so rows never share a list.
+            # Apply the SAME null-normalisations `_to_summary` applies when it
+            # builds a FactSummary, or the identical fact reads differently
+            # depending on which leg found it — which is the whole defect this
+            # backfill exists to close. Migration 064 leaves `overrides_prior`
+            # NULL on existing rows and non-override facts are stored NULL, so
+            # this is the common case, not an edge one.
+            #
+            # Mirrored EXACTLY, including `confidence or 1.0` mapping a genuine
+            # 0.0 to 1.0. That is odd, but it is what the primary path does;
+            # "fixing" it here would manufacture the very cross-leg discrepancy
+            # being removed. If it is wrong it is wrong in one place, upstream.
             vals["tags"] = list(vals["tags"] or [])
+            vals["confidence"] = vals["confidence"] or 1.0
+            vals["active"] = vals["active"] if vals["active"] is not None else True
+            vals["overrides_prior"] = bool(vals["overrides_prior"] or False)
             # Match the primary leg's TYPE, not just its presence:
             # `Heart._to_recall_result` emits `event_date` as an isoformat
             # string, so returning a `date` here would make the same field a
