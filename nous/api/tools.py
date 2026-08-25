@@ -3897,6 +3897,43 @@ def create_programmatic_tools(
         if _session_id and episode_id_resolver is not None:
             _active_episode_id = episode_id_resolver(_session_id)
 
+        # F071 + F055 parity, resolved HERE on the main loop.
+        #
+        # Both are read from state the worker thread cannot see:
+        # `CURRENT_TURN_EXCLUDE_IDS` is a ContextVar (not propagated into an
+        # executor thread), and the activator calls are coroutines. Without
+        # these, in-script recall ranks against cold state and can return
+        # memories already in the system prompt — i.e. the "same retrieval as
+        # the tool" claim would be false in exactly the way that is hardest to
+        # notice, since the results still look plausible.
+        # `NOUS_RESIDUAL_ACTIVATION_ENABLED=true` in prod, so this is live, not
+        # theoretical.
+        from nous.api.runner import CURRENT_TURN_EXCLUDE_IDS
+        _script_exclude_ids = CURRENT_TURN_EXCLUDE_IDS.get()
+
+        _script_residual: dict[UUID, float] = {}
+        _script_turn = 0
+        if (
+            getattr(settings, "residual_activation_enabled", False)
+            and _session_id
+            and getattr(heart, "_residual_activator", None) is not None
+        ):
+            try:
+                _activator = heart._residual_activator
+                _script_turn = await _activator.current_turn(
+                    brain.agent_id, _session_id,
+                )
+                _script_residual = await _activator.compute_activations(
+                    brain.agent_id, _session_id, _script_turn,
+                )
+            except Exception:
+                # Fail-open to cold recall, exactly as the tool does.
+                logger.warning(
+                    "F055: compute_activations failed for %s/%s in run_python, "
+                    "continuing cold", brain.agent_id, _session_id, exc_info=True,
+                )
+                _script_residual = {}
+
         # Get the running event loop so threads can schedule DB coroutines back on it.
         # Using run_coroutine_threadsafe instead of asyncio.run() prevents deadlocks:
         # asyncio.run() creates a NEW loop in the thread, which can't access the
@@ -3995,6 +4032,8 @@ def create_programmatic_tools(
                 results, _stats = _schedule(run_recall_pipeline(
                     query=query, heart=heart, brain=brain, settings=settings,
                     limit=limit, rerank_by_score=rerank, trace=_tr,
+                    residual_activations=_script_residual or None,  # F055
+                    exclude_ids=_script_exclude_ids,  # F071
                 ))
             except Exception as e:
                 # Commit the PARTIAL trace, matching the tool's error path: a
@@ -4016,6 +4055,42 @@ def create_programmatic_tools(
             if _tr is not None:
                 _tr.undeliver_all(RETURNED_TO_SCRIPT, "run_python")
             _commit(_tr)
+
+            # F055: advance activation for later turns. Without this a scripted
+            # recall reads residual state but never contributes to it, so the
+            # session's activation depends on which calling path was used.
+            # Scheduled onto the main loop (the activator is async and this is a
+            # worker thread) and never awaited — matching the tool, where it is
+            # deliberately fire-and-forget so the request returns immediately.
+            if (
+                _session_id
+                and getattr(settings, "residual_activation_enabled", False)
+                and getattr(heart, "_residual_activator", None) is not None
+            ):
+                try:
+                    _surfaced = [
+                        (
+                            r.id, r.type,
+                            float(r.score) if r.score is not None else 0.0,
+                            (r.description or "")[:160],
+                        )
+                        for r in results
+                    ]
+                    loop.call_soon_threadsafe(
+                        lambda: asyncio.ensure_future(
+                            heart._residual_activator.record_surfaced(
+                                agent_id=brain.agent_id,
+                                session_id=_session_id,
+                                current_turn=_script_turn + 1,
+                                surfaced=_surfaced,
+                            )
+                        )
+                    )
+                except Exception:
+                    logger.warning(
+                        "F055: failed to schedule record_surfaced from run_python",
+                        exc_info=True,
+                    )
 
             out: list[dict] = []
             for r in results:

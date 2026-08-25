@@ -2541,6 +2541,12 @@ class Settings(BaseSettings):
         # `programmatic_tools_timeout=119, tool_timeout=120` while the inner wait
         # actually runs to 121s, so the outer cancel still wins — the exact
         # failure this guard exists to prevent, just two seconds later.
+        # With run_python disabled the invariant has no runtime consumer, so
+        # enforcing it would refuse startup — or clamp — over a dormant field.
+        # A guard is only worth a boot failure where the thing it guards runs.
+        if not self.programmatic_tools_enabled:
+            return self
+
         grace = PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS
         if self.programmatic_tools_timeout + grace < self.tool_timeout:
             return self

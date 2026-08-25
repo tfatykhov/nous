@@ -207,6 +207,20 @@ class TestRunPythonConfig:
             < s.tool_timeout
         )
 
+    def test_disabled_programmatic_tools_skip_the_coupling(self):
+        """A dormant field must not refuse startup.
+
+        With run_python disabled the invariant has no runtime consumer, so a
+        deployment that turned the tool off and lowered tool_timeout should
+        still boot with whatever timeout it had configured.
+        """
+        s = Settings(
+            programmatic_tools_enabled=False,
+            programmatic_tools_timeout=90,
+            NOUS_TOOL_TIMEOUT=60,
+        )
+        assert s.programmatic_tools_timeout == 90  # untouched, not clamped
+
     def test_timeout_grace_is_shared(self):
         """config and tools must not drift on the grace value."""
         from nous.api import tools as tools_mod
@@ -611,6 +625,63 @@ class TestRunPythonMemoryWrappers:
             )
         )
         assert result["content"][0]["text"] == '["technical", "cache", 0.9]'
+
+    @pytest.mark.asyncio
+    async def test_recall_deep_forwards_f071_exclusions(
+        self, run_python_tool, patched_pipeline
+    ):
+        """The F071 exclusion set must reach the scripted pipeline call.
+
+        `CURRENT_TURN_EXCLUDE_IDS` is a ContextVar and is NOT propagated into
+        run_python's executor thread, so it has to be read on the main loop and
+        passed down. Without it, in-script recall can return memories already
+        in the system prompt while the advertised-equivalent tool filters them.
+        """
+        from nous.api.runner import CURRENT_TURN_EXCLUDE_IDS
+
+        ids = {"fact": {uuid4()}}
+        token = CURRENT_TURN_EXCLUDE_IDS.set(ids)
+        try:
+            await run_python_tool(code='recall_deep("caching")')
+        finally:
+            CURRENT_TURN_EXCLUDE_IDS.reset(token)
+
+        assert patched_pipeline.call_args.kwargs["exclude_ids"] == ids
+
+    @pytest.mark.asyncio
+    async def test_recall_deep_carries_residual_activation(
+        self, mock_brain, mock_heart, patched_pipeline
+    ):
+        """F055 state must flow BOTH ways on the scripted path.
+
+        `NOUS_RESIDUAL_ACTIVATION_ENABLED=true` in prod, so without this a
+        scripted recall ranks against cold state AND never advances activation
+        for later turns — results diverging purely by which calling path was
+        used, which is the divergence this whole PR exists to remove.
+        """
+        from nous.api.tools import create_programmatic_tools
+
+        fid = uuid4()
+        activator = MagicMock()
+        activator.current_turn = AsyncMock(return_value=3)
+        activator.compute_activations = AsyncMock(return_value={fid: 0.8})
+        activator.record_surfaced = AsyncMock(return_value=None)
+        mock_heart._residual_activator = activator
+
+        s = Settings(
+            programmatic_tools_enabled=True,
+            programmatic_tools_timeout=5,
+            residual_activation_enabled=True,
+        )
+        tool = create_programmatic_tools(mock_brain, mock_heart, s)["run_python"]
+        await tool(code='recall_deep("caching")', _session_id="sess-1")
+
+        # Read: the pipeline ranked with the session's activations.
+        assert patched_pipeline.call_args.kwargs["residual_activations"] == {fid: 0.8}
+        # Write: the surfaced set advanced the session for the next turn.
+        await asyncio.sleep(0)  # let the call_soon_threadsafe callback run
+        activator.record_surfaced.assert_called_once()
+        assert activator.record_surfaced.call_args.kwargs["current_turn"] == 4
 
     @pytest.mark.asyncio
     async def test_legacy_keys_present_on_non_fact_results(self, run_python_tool):
