@@ -6,12 +6,22 @@ env vars (DB_PASSWORD, DB_PORT, etc.) that docker-compose uses, so a single
 """
 
 import json
+import logging
 import tempfile
 from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+# Slack `run_python` adds on top of `programmatic_tools_timeout` when awaiting
+# its worker thread (`asyncio.wait_for(..., timeout + GRACE)` in
+# `nous/api/tools.py`), so the thread's own `sys.settrace` deadline gets a chance
+# to raise a useful per-script error before the outer wait gives up. Lives HERE,
+# not in `tools.py`, so `_validate_programmatic_tools_timeout` can account for it
+# without config importing the tool layer; `tools.py` imports this name, and
+# `test_timeout_grace_is_shared` asserts the two never drift apart.
+PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS = 2.0
 
 
 class Settings(BaseSettings):
@@ -1083,7 +1093,21 @@ class Settings(BaseSettings):
 
     # 012.3: Programmatic tool calling
     programmatic_tools_enabled: bool = True
-    programmatic_tools_timeout: int = 10
+    programmatic_tools_timeout: int = Field(
+        90,
+        ge=1,
+        description=(
+            "Wall-clock deadline for a run_python execution. Raised 10 -> 90 when "
+            "the in-script `recall_deep` stopped being a facts-only search and "
+            "became the real `run_recall_pipeline`: measured on prod "
+            "`nous_system.retrieval_log` (n=104), a pipeline retrieval runs "
+            "p50 5.3s / p95 14.7s, so the old 10s budget could not fit even ONE "
+            "call reliably, and the whole point of the tool is batching several. "
+            "90s fits ~6 calls at p95. Must stay below `tool_timeout` (120s), "
+            "which wraps every tool in `_dispatch_with_keepalive` and would "
+            "otherwise cancel the call before this deadline ever fired."
+        ),
+    )
     programmatic_tools_max_concurrent: int = Field(
         4,
         ge=1,
@@ -2481,6 +2505,80 @@ class Settings(BaseSettings):
                 f"keepalive_interval ({self.keepalive_interval}) must be < "
                 f"tool_timeout ({self.tool_timeout})"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_programmatic_tools_timeout(self) -> "Settings":
+        """run_python's own deadline must expire before the dispatcher's.
+
+        `_dispatch_with_keepalive` wraps EVERY tool in
+        `asyncio.wait_for(..., tool_timeout)`. If the inner deadline is not
+        strictly smaller, the outer cancel fires first: the model gets a generic
+        tool timeout instead of the script's own error, the F091 partial-trace
+        commit never runs, and the executor thread keeps its concurrency slot
+        until the inner deadline finally elapses.
+
+        A cross-field validator, not a test on the defaults — the defaults are
+        90 and 120, but an operator setting only `NOUS_TOOL_TIMEOUT=60` would
+        otherwise invert the pair with no error anywhere.
+
+        Raises ONLY when the operator explicitly asked for both values, i.e.
+        asked for something incoherent. When `programmatic_tools_timeout` is
+        still the default it is CLAMPED instead, because raising would turn
+        `NOUS_TOOL_TIMEOUT=60` — a valid setting before this field ever grew a
+        90s default, and one nobody paired with a run_python override — into a
+        refusal to boot on upgrade. A hard startup break is far worse than the
+        silent inversion this guard exists to prevent. Deliberately unlike
+        `_validate_keepalive` above, whose default (10) sits below any plausible
+        `tool_timeout` and so cannot trip accidentally; 90 can.
+
+        Clamping degrades to LESS script budget, never to a wrong reading, and
+        says so at WARNING.
+        """
+        # The real inner wait is `timeout + GRACE` — `run_python` awaits its
+        # worker on `asyncio.wait_for(..., timeout + PROGRAMMATIC_TOOLS_TIMEOUT_
+        # GRACE_SECONDS)`. Validating the nominal value alone would pass
+        # `programmatic_tools_timeout=119, tool_timeout=120` while the inner wait
+        # actually runs to 121s, so the outer cancel still wins — the exact
+        # failure this guard exists to prevent, just two seconds later.
+        # With run_python disabled the invariant has no runtime consumer, so
+        # enforcing it would refuse startup — or clamp — over a dormant field.
+        # A guard is only worth a boot failure where the thing it guards runs.
+        if not self.programmatic_tools_enabled:
+            return self
+
+        grace = PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS
+        if self.programmatic_tools_timeout + grace < self.tool_timeout:
+            return self
+
+        if "programmatic_tools_timeout" in self.model_fields_set:
+            raise ValueError(
+                f"programmatic_tools_timeout ({self.programmatic_tools_timeout}) "
+                f"plus the {grace}s dispatch grace must be < tool_timeout "
+                f"({self.tool_timeout}); otherwise the dispatcher cancels "
+                "run_python before its own deadline fires"
+            )
+
+        clamped = int(self.tool_timeout - grace - 1)
+        if clamped < 1:
+            # Degenerate: the field floor is ge=1, so with tool_timeout <= 1
+            # there is no value satisfying both bounds. Refuse rather than
+            # clamp to a value that still violates the invariant — a clamp that
+            # does not restore the property it exists to enforce is worse than
+            # an error, because everything downstream then trusts it.
+            raise ValueError(
+                f"tool_timeout ({self.tool_timeout}) leaves no room for "
+                f"programmatic_tools_timeout, which must be >= 1 and, with the "
+                f"{grace}s dispatch grace, strictly less than tool_timeout"
+            )
+        logging.getLogger(__name__).warning(
+            "programmatic_tools_timeout default (%d) >= tool_timeout (%d); "
+            "clamping to %d so the dispatcher cannot cancel run_python before "
+            "its own deadline. Set NOUS_PROGRAMMATIC_TOOLS_TIMEOUT explicitly "
+            "to silence this, or raise NOUS_TOOL_TIMEOUT.",
+            self.programmatic_tools_timeout, self.tool_timeout, clamped,
+        )
+        object.__setattr__(self, "programmatic_tools_timeout", clamped)
         return self
 
     @model_validator(mode="after")

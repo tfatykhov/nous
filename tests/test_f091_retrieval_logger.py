@@ -217,3 +217,51 @@ async def test_drain_is_bounded_by_its_timeout():
 
     for t in list(rl._pending_tasks):
         t.cancel()
+
+
+def test_retrieval_paths_are_registered():
+    """Every `path=` literal handed to `.start()` must be in RETRIEVAL_PATHS.
+
+    `/dashboard/retrieval` validates its `path` filter against that tuple, so a
+    producer emitting a value the API rejects writes rows nobody can filter to
+    — the precise failure this telemetry exists to catch. It is not
+    hypothetical: in-script `recall_deep` retrievals were unobservable until
+    2026-08-25, and the first fix attempt could have shipped a fourth path with
+    the validator still hardcoded to two.
+
+    AST, not a line regex: a regex reports clean over a call split across lines,
+    which is worse than no guard because it stops anyone looking.
+    """
+    import ast
+    from pathlib import Path
+
+    from nous.observability.retrieval_logger import RETRIEVAL_PATHS
+
+    root = Path(__file__).resolve().parents[1] / "nous"
+    found: dict[str, str] = {}
+
+    for py in root.rglob("*.py"):
+        tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if not (isinstance(fn, ast.Attribute) and fn.attr == "start"):
+                continue
+            for kw in node.keywords:
+                if kw.arg == "path" and isinstance(kw.value, ast.Constant):
+                    if isinstance(kw.value.value, str):
+                        found[kw.value.value] = f"{py.name}:{node.lineno}"
+
+    assert found, "no instrumented .start(path=...) call sites found — scan broke"
+    unregistered = {p: loc for p, loc in found.items() if p not in RETRIEVAL_PATHS}
+    assert not unregistered, (
+        f"path(s) emitted but not in RETRIEVAL_PATHS: {unregistered}. "
+        "Add them there, or /dashboard/retrieval will 400 on the filter."
+    )
+    # Both directions: a stale entry means the dashboard advertises a filter
+    # that can only ever return nothing.
+    assert set(RETRIEVAL_PATHS) == set(found), (
+        f"RETRIEVAL_PATHS has entries no call site emits: "
+        f"{set(RETRIEVAL_PATHS) - set(found)}"
+    )

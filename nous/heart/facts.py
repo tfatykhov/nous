@@ -156,6 +156,15 @@ class ExemplarHit(NamedTuple):
     similarity: float
 
 
+# FactSummary fields that are NOT columns on the `Fact` ORM, so
+# `FactManager.LEGACY_SUMMARY_FIELDS` must exclude them: `id`/`content` the
+# caller already holds, `score` is search-time, and `recency_status`/
+# `recency_date` are transient verdicts the recency resolver writes downstream.
+_NOT_PERSISTED_FACT_FIELDS = frozenset(
+    {"id", "content", "score", "recency_status", "recency_date"}
+)
+
+
 class FactManager:
     """Manages semantic memory — what we know."""
 
@@ -4209,3 +4218,83 @@ class FactManager:
         if gen == self._exemplar_exists_gen:
             self._exemplar_exists_cache = (exists, now)
         return exists
+
+    # Persisted FactSummary fields that only the primary Heart leg carries in
+    # RecallResult.metadata. The keyed, keyed_r2, exemplar and graph-expansion
+    # legs each build their own metadata dict from their own narrower SELECT, so
+    # a fact found by one of those reaches a consumer without them. All four
+    # legs are ENABLED in prod, so this is a live divergence, not a latent one.
+    #
+    # DERIVED from FactSummary, like `tools._LEGACY_FACT_KEYS`. The first version
+    # was a hand-written tuple and immediately drifted from its sibling — it
+    # omitted `event_date`, so a dated fact arriving via the exemplar or graph
+    # leg was backfilled with None and silently misclassified by any script
+    # filtering on date. Two hand-maintained lists claiming to mirror one model
+    # is the same failure twice.
+    #
+    # Excluded: `id`/`content` (the caller already has them), `score`
+    # (search-time, not persisted), and `recency_status`/`recency_date`
+    # (transient verdicts the recency resolver writes downstream — absent there
+    # genuinely means "no verdict"). `test_legacy_summary_fields_are_columns`
+    # asserts every remaining name is a real `Fact` column, so a FactSummary
+    # field that is NOT persisted fails a test instead of a SELECT at runtime.
+    # (the exclusion set lives at module level — a genexpr in a class body
+    # cannot see sibling class attributes)
+    LEGACY_SUMMARY_FIELDS: tuple[str, ...] = tuple(
+        f for f in FactSummary.model_fields if f not in _NOT_PERSISTED_FACT_FIELDS
+    )
+
+    async def fetch_legacy_fields(
+        self, fact_ids: Sequence[UUID], session: AsyncSession | None = None,
+    ) -> dict[UUID, dict[str, Any]]:
+        """One SELECT returning ``LEGACY_SUMMARY_FIELDS`` per id.
+
+        Keyed off which fields a row is MISSING rather than off which leg
+        produced it, so a leg added later is covered without touching this —
+        the per-leg alternative is four metadata dicts that have to be kept in
+        step, which is precisely the shape that drifted three times in one
+        review cycle.
+        """
+        if not fact_ids:
+            return {}
+        if session is None:
+            async with self.db.session() as session:
+                return await self._fetch_legacy_fields(fact_ids, session)
+        return await self._fetch_legacy_fields(fact_ids, session)
+
+    async def _fetch_legacy_fields(
+        self, fact_ids: Sequence[UUID], session: AsyncSession,
+    ) -> dict[UUID, dict[str, Any]]:
+        cols = [getattr(Fact, f) for f in self.LEGACY_SUMMARY_FIELDS]
+        result = await session.execute(
+            select(Fact.id, *cols).where(Fact.id.in_(list(fact_ids)))
+        )
+        out: dict[UUID, dict[str, Any]] = {}
+        for row in result.all():
+            vals = dict(zip(self.LEGACY_SUMMARY_FIELDS, row[1:], strict=True))
+            # `tags` is a nullable ARRAY; normalise NULL to [] so a consumer can
+            # iterate without a None check, and copy so rows never share a list.
+            # Apply the SAME null-normalisations `_to_summary` applies when it
+            # builds a FactSummary, or the identical fact reads differently
+            # depending on which leg found it — which is the whole defect this
+            # backfill exists to close. Migration 064 leaves `overrides_prior`
+            # NULL on existing rows and non-override facts are stored NULL, so
+            # this is the common case, not an edge one.
+            #
+            # Mirrored EXACTLY, including `confidence or 1.0` mapping a genuine
+            # 0.0 to 1.0. That is odd, but it is what the primary path does;
+            # "fixing" it here would manufacture the very cross-leg discrepancy
+            # being removed. If it is wrong it is wrong in one place, upstream.
+            vals["tags"] = list(vals["tags"] or [])
+            vals["confidence"] = vals["confidence"] or 1.0
+            vals["active"] = vals["active"] if vals["active"] is not None else True
+            vals["overrides_prior"] = bool(vals["overrides_prior"] or False)
+            # Match the primary leg's TYPE, not just its presence:
+            # `Heart._to_recall_result` emits `event_date` as an isoformat
+            # string, so returning a `date` here would make the same field a
+            # different type depending on which leg found the fact — a subtler
+            # version of the bug this backfill exists to fix.
+            if vals.get("event_date") is not None:
+                vals["event_date"] = vals["event_date"].isoformat()
+            out[row[0]] = vals
+        return out

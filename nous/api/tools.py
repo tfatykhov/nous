@@ -23,19 +23,25 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from typing import Any
 from uuid import UUID
 
 from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
-from nous.config import Settings
+from nous.config import PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS, Settings
 from nous.heart.exemplars import parse_label
 from nous.heart.heart import Heart
-from nous.heart.schemas import CensorInput, FactInput, FactRejected, ProcedureInput
+from nous.heart.schemas import (
+    CensorInput,
+    FactInput,
+    FactRejected,
+    FactSummary,
+    ProcedureInput,
+)
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
-from nous.observability.retrieval_trace import SLICED_OFF
+from nous.observability.retrieval_trace import RETURNED_TO_SCRIPT, SLICED_OFF
 from nous.skills.parser import SkillParser
 
 logger = logging.getLogger(__name__)
@@ -450,7 +456,13 @@ class ToolDispatcher:
                 # no substrate. Consumers: Brain.get_session_decisions and
                 # the optional filter in Brain._query.
                 args = {**args, "_session_id": session_id}
-            if turn_number is not None and name == "recall_deep":
+            if turn_number is not None and name in ("recall_deep", "run_python"):
+                # `run_python` included because its in-script `recall_deep()`
+                # opens its own F091 trace; without this those rows store
+                # turn_number NULL and cannot be joined to the turn that caused
+                # them on the (session_id, turn_number) index — which is most of
+                # the value of giving them their own `script` path. Several
+                # script recalls legitimately SHARE one turn_number.
                 # F091: threaded EXPLICITLY, not via ContextVar. stream_chat is
                 # an async generator whose every resume runs in a fresh copied
                 # context (see the KNOWN LIMITATION at runner.py:1231), so a
@@ -3790,7 +3802,43 @@ _MAX_WRITES = 5
 # up on the worker thread. The in-thread trace hook normally raises at the
 # deadline, so this grace only matters when the thread is stuck below Python
 # level (a blocking C call), which no in-process mechanism can interrupt.
-_TIMEOUT_GRACE = 2.0
+_TIMEOUT_GRACE = PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS
+
+# Keys the pre-2026-08-25 in-script `recall_deep` returned, via
+# `FactSummary.model_dump()`, mapped to the value used when the field does not
+# apply to a result type. Facts get real values out of `metadata`; episodes,
+# chunks, procedures and decisions get the default, so key ACCESS never raises
+# on a mixed list.
+#
+# DERIVED from FactSummary rather than hand-listed. A hand-written list drifted
+# twice in one review cycle — first missing active/tags/superseded_by, then
+# actionable/actionable_confidence/overrides_prior/recency_status/recency_date —
+# because nothing tied it to the model it claims to reproduce. Now a new field on
+# FactSummary joins this map automatically.
+#
+# `id`/`content`/`score` are excluded: the result dict already owns those, and
+# they must never be overwritten by a metadata value.
+#
+# These are FALLBACKS FOR NON-FACT ROWS ONLY. Fact rows carry their real values:
+# `Heart._to_recall_result` propagates the persisted FactSummary fields into
+# metadata, so a fact reaching this map already has `active`, `tags`,
+# `actionable`, `superseded_by` and friends populated and the default is never
+# consulted. That propagation is the load-bearing half — without it these
+# defaults would stop scripts raising KeyError only to have them silently decide
+# from fabricated values instead, which is strictly worse than the crash: a
+# script filtering `[f for f in facts if f["active"]]` would drop every fact and
+# look like it simply found nothing.
+#
+# Default policy is deliberately NOT the model's own defaults: `overrides_prior`
+# defaults to False on FactSummary, but asserting False about an episode is
+# fabricating an answer to a question that does not apply to it. None means "not
+# applicable", which is the truth. `tags` is the one exception — an empty list is
+# genuinely true for a non-fact and keeps iteration safe.
+_LEGACY_FACT_KEYS: dict[str, Any] = {
+    _name: ([] if _name == "tags" else None)
+    for _name in FactSummary.model_fields
+    if _name not in ("id", "content", "score")
+}
 
 # Trace-hook check interval — number of traced events between deadline checks.
 # Keeps the per-line overhead down without letting an overrun go unnoticed.
@@ -3859,7 +3907,11 @@ def create_programmatic_tools(
     import re
     import statistics
 
-    async def run_python(code: str, _session_id: str | None = None) -> dict[str, Any]:
+    async def run_python(
+        code: str,
+        _session_id: str | None = None,
+        _turn_number: int | None = None,
+    ) -> dict[str, Any]:
         """Execute Python code with Nous memory functions in scope."""
         write_count = {"n": 0}
         output_buf = io.StringIO()
@@ -3869,6 +3921,33 @@ def create_programmatic_tools(
         _active_episode_id: str | None = None
         if _session_id and episode_id_resolver is not None:
             _active_episode_id = episode_id_resolver(_session_id)
+
+        # F071 + F055 parity, resolved HERE on the main loop.
+        #
+        # Both are read from state the worker thread cannot see:
+        # `CURRENT_TURN_EXCLUDE_IDS` is a ContextVar (not propagated into an
+        # executor thread), and the activator calls are coroutines. Without
+        # these, in-script recall ranks against cold state and can return
+        # memories already in the system prompt — i.e. the "same retrieval as
+        # the tool" claim would be false in exactly the way that is hardest to
+        # notice, since the results still look plausible.
+        # `NOUS_RESIDUAL_ACTIVATION_ENABLED=true` in prod, so this is live, not
+        # theoretical.
+        from nous.api.runner import CURRENT_TURN_EXCLUDE_IDS
+        _script_exclude_ids = CURRENT_TURN_EXCLUDE_IDS.get()
+
+        # F055 state is resolved LAZILY, on the first in-script recall — see
+        # `_load_residual` below. Doing it here would charge every run_python
+        # call two DB reads even when the script never calls recall_deep, and
+        # would do it OUTSIDE both the run slot and the script deadline, so a
+        # slow activation read could eat the dispatcher's remaining timeout
+        # before the script's own deadline had started.
+        _residual_state: dict[str, Any] = {"loaded": False, "turn": 0, "acts": {}}
+        _residual_on = (
+            getattr(settings, "residual_activation_enabled", False)
+            and bool(_session_id)
+            and getattr(heart, "_residual_activator", None) is not None
+        )
 
         # Get the running event loop so threads can schedule DB coroutines back on it.
         # Using run_coroutine_threadsafe instead of asyncio.run() prevents deadlocks:
@@ -3884,13 +3963,386 @@ def create_programmatic_tools(
 
             Uses deadline-relative timeout so per-call budget tracks remaining
             wall time — prevents thread from outliving the main asyncio.wait_for.
+
+            CANCELS the future on timeout. `Future.result(timeout=...)` only
+            stops waiting; without the cancel the coroutine keeps running on the
+            main loop after the worker has reported an error and released its
+            concurrency slot — so stalled work accumulates OUTSIDE
+            `programmatic_tools_max_concurrent`, and a still-running
+            `run_recall_pipeline` can go on doing DB work and mutating a trace
+            that has already been committed. Latent before, and much likelier
+            now that a single call is a ~5s retrieval rather than a fact lookup.
             """
             remaining = max(0.1, deadline - time.monotonic())
-            return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=remaining)
+            fut = asyncio.run_coroutine_threadsafe(coro, loop)
+            try:
+                return fut.result(timeout=remaining)
+            except TimeoutError:
+                # Since 3.11 `concurrent.futures.TimeoutError` IS the builtin
+                # `TimeoutError`, so this one clause covers both.
+                fut.cancel()
+                raise
+
+        def _load_residual() -> None:
+            """Resolve F055 state on first use, inside the script's deadline.
+
+            Runs on the worker thread, so the activator's coroutines go through
+            `_schedule` — which means these reads are bounded by the script
+            deadline and charged to a held run slot, unlike an eager read before
+            the executor. Fails open to cold recall, exactly as the tool does.
+            """
+            if _residual_state["loaded"] or not _residual_on:
+                return
+            _residual_state["loaded"] = True
+            try:
+                act = heart._residual_activator
+                turn = _schedule(act.current_turn(brain.agent_id, _session_id))
+                _residual_state["turn"] = turn
+                _residual_state["acts"] = _schedule(
+                    act.compute_activations(brain.agent_id, _session_id, turn)
+                )
+            except Exception:
+                logger.warning(
+                    "F055: compute_activations failed for %s/%s in run_python, "
+                    "continuing cold", brain.agent_id, _session_id, exc_info=True,
+                )
+                _residual_state["acts"] = {}
 
         def _recall_deep(query: str, limit: int = 5) -> list[dict]:
-            results = _schedule(heart.search_facts(query, limit=limit))
-            return [r.model_dump() if hasattr(r, "model_dump") else r for r in results]
+            """The same retrieval the `recall_deep` TOOL runs — not a fact search.
+
+            Until 2026-08-25 this was `heart.search_facts`, i.e. a hybrid search
+            over `heart.facts` alone: no episodes, procedures or decisions, no
+            F067 chunk leg, no graph expansion, no spreading activation, no
+            relevance floor, no recency resolution. It shared a name with the
+            tool and almost nothing else, so a script that "batched memory
+            lookups" — precisely what this tool's description recommends — got a
+            quietly weaker answer than the same query issued as a tool call,
+            with nothing in the output to signal the downgrade.
+
+            That is also why script recalls never appeared on the F091 retrieval
+            dashboard: telemetry instruments `run_recall_pipeline`, and this
+            never reached it. The rows were not dropped; there was no retrieval
+            to log.
+            """
+            from nous.api.retrieval_pipeline import run_recall_pipeline
+
+            _load_residual()
+
+            # Mirrors the tool's `chunks_rerank`. A script passes no
+            # memory_types, so the tool's `search_all` branch is always taken and
+            # the condition collapses to the chunk flag alone.
+            rerank = getattr(settings, "episode_chunks_enabled", False)
+
+            _rl = get_active_retrieval_logger()
+            # path="script", not "pipeline": being able to tell script recalls
+            # apart from tool recalls is the whole reason this gap was noticed,
+            # and blending them would destroy that the moment it was fixed.
+            # turn_number is None — a script runs wholly inside one tool call and
+            # has no turn of its own to attribute to.
+            _tr = (
+                _rl.start(
+                    query=query, path="script", session_id=_session_id,
+                    # Several in-script recalls legitimately share one turn.
+                    turn_number=_turn_number,
+                )
+                if _rl is not None else None
+            )
+            def _commit(tr) -> None:
+                """Commit from the MAIN loop, never from this worker thread.
+
+                `RetrievalLogger.commit` schedules the DB write via
+                `_schedule_bg`, which calls `asyncio.get_running_loop()` — in an
+                executor thread that raises, and the except branch calls
+                `coro.close()`. The write would be silently discarded and the
+                trace would survive only in the in-memory ring, which has no
+                reader (both dashboard endpoints query Postgres). Every script
+                retrieval would therefore be recorded nowhere — the exact
+                invisibility this change exists to end. `call_soon_threadsafe`
+                marshals it back, mirroring what `_schedule` does for coroutines.
+                """
+                if _rl is None or tr is None:
+                    return
+                try:
+                    loop.call_soon_threadsafe(_rl.commit, tr)
+                except Exception:
+                    logger.debug(
+                        "F091: script retrieval trace commit failed", exc_info=True,
+                    )
+
+            def _fail_trace(exc: BaseException) -> None:
+                """Commit the PARTIAL trace: a crashed retrieval must not look
+                like one that never happened. Mirrors the tool's error path.
+
+                Runs with the deadline tracer OFF. The tracer fires per line and
+                re-arms after each raise, so on a genuine timeout it would raise
+                AGAIN partway through `undeliver_all`/`finalize` — which walk
+                every captured candidate — and the timeout row would be lost
+                despite this handler existing to save it.
+
+                Uses `_original_settrace`, NOT `sys.settrace`: `_run` rebinds
+                `sys.settrace` to `_settrace_shim`, which discards its argument
+                and reinstalls `_tracer`. Calling `sys.settrace(None)` here
+                therefore RE-ARMS the deadline instead of clearing it, which is
+                what the first version of this fix did — inert, and looking
+                exactly like a fix. Per-thread, and `_run`'s finally restores
+                the real hook regardless, so this stays local.
+                """
+                if _tr is None:
+                    return
+                # Off for the duration of cleanup, then RESTORED unless the
+                # script is already dead. An ordinary Exception here is
+                # catchable: a script doing `try: recall_deep(...) except
+                # Exception: pass` carries on running, and leaving the tracer
+                # off would hand it a thread with no deadline enforcement at all
+                # — reopening the `while True: pass` hole the tracer exists to
+                # close, holding a worker and a concurrency slot indefinitely.
+                # Only ScriptDeadlineExceeded means the script cannot continue.
+                _is_deadline = isinstance(exc, ScriptDeadlineExceeded)
+                try:
+                    _original_settrace(None)
+                except Exception:  # pragma: no cover - defensive
+                    pass
+                try:
+                    _tr.undeliver_all(SLICED_OFF, "script_recall_failed")
+                    _tr.leg("script_recall", attempted=True, error=str(exc)[:200])
+                    _tr.finalize([])
+                    _commit(_tr)
+                finally:
+                    if not _is_deadline:
+                        try:
+                            _original_settrace(_tracer)
+                        except Exception:  # pragma: no cover - defensive
+                            pass
+
+            # EVERYTHING that decides what the script receives sits inside this
+            # try, and the success trace is committed only after `out` exists.
+            # The `_schedule` deadline can expire during the backfill or the
+            # dict construction, and a trace committed before those would assert
+            # `returned_to_script` for every survivor while the script actually
+            # received a timeout error and nothing at all. The tool commits late
+            # for the same reason (see the note at its own commit site: the
+            # parent-episode fetch still changes what reaches the model).
+            try:
+                results, _stats = _schedule(run_recall_pipeline(
+                    query=query, heart=heart, brain=brain, settings=settings,
+                    limit=limit, rerank_by_score=rerank, trace=_tr,
+                    residual_activations=_residual_state["acts"] or None,  # F055
+                    exclude_ids=_script_exclude_ids,  # F071
+                ))
+                out = _apply_script_limit(
+                    results, _build_script_results(results), limit, _tr,
+                )
+            except (Exception, ScriptDeadlineExceeded) as e:
+                # ScriptDeadlineExceeded derives from BaseException ON PURPOSE,
+                # so agent code cannot swallow its own timeout with
+                # `except Exception` — which means a bare `except Exception`
+                # here misses the single likeliest failure in this block. The
+                # deadline firing mid-conversion is exactly the case this
+                # error path exists for, and it would otherwise commit no trace
+                # at all.
+                _fail_trace(e)
+                raise
+
+            # `run_recall_pipeline` has already called `finalize`, which marks its
+            # survivors RENDERED — a claim that is true on the tool path and FALSE
+            # here. These results were delivered to the Python interpreter, and
+            # the script decides what (if anything) the model ever sees; filtering
+            # and aggregating is the entire purpose of run_python. Leaving them
+            # `rendered` would inflate n_rendered and every disposition rollup
+            # with a population the model may never have seen. We cannot know what
+            # the script emits, so we record what IS true: returned to the script.
+            if _tr is not None:
+                _tr.undeliver_all(RETURNED_TO_SCRIPT, "run_python")
+            _commit(_tr)
+
+            # F055: advance activation for later turns. Without this a scripted
+            # recall reads residual state but never contributes to it, so the
+            # session's activation depends on which calling path was used.
+            # Scheduled onto the main loop (the activator is async and this is a
+            # worker thread) and never awaited — matching the tool, where it is
+            # deliberately fire-and-forget so the request returns immediately.
+            # Same predicate as the read side, by reference rather than
+            # restated: a consumer that re-derives its producer's control flow
+            # is one edit away from disagreeing with it.
+            if _residual_on:
+                try:
+                    # Only what the script ACTUALLY received. `results` may be
+                    # longer than `out` after the script limit, and recording
+                    # the excess would boost memories the interpreter never saw
+                    # on later turns — telemetry saying "excluded" while ranking
+                    # state says "delivered". Index-aligned, since
+                    # `_build_script_results` emits one dict per result in order
+                    # and the limit only truncates the tail.
+                    _surfaced = [
+                        (
+                            r.id, r.type,
+                            float(r.score) if r.score is not None else 0.0,
+                            (r.description or "")[:160],
+                        )
+                        for r in results[:len(out)]
+                    ]
+                    loop.call_soon_threadsafe(
+                        lambda: asyncio.ensure_future(
+                            heart._residual_activator.record_surfaced(
+                                agent_id=brain.agent_id,
+                                session_id=_session_id,
+                                current_turn=_residual_state["turn"] + 1,
+                                surfaced=_surfaced,
+                            )
+                        )
+                    )
+                except Exception:
+                    logger.warning(
+                        "F055: failed to schedule record_surfaced from run_python",
+                        exc_info=True,
+                    )
+
+            return out
+
+        def _build_script_results(results: list) -> list[dict]:
+            """Convert pipeline results into the dicts the script receives.
+
+            Separated so it runs INSIDE the caller's try: the `_schedule`
+            deadline can expire in here, and a success trace committed before
+            this returns would claim `returned_to_script` for rows the script
+            never got.
+            """
+            # Backfill legacy fields for fact rows whose leg did not carry them.
+            # Only the primary Heart leg populates them in metadata; the keyed,
+            # keyed_r2, exemplar and graph-expansion legs build their own
+            # metadata from narrower SELECTs — and all four are ENABLED in prod,
+            # so without this a script filtering on `active` or `confidence`
+            # silently misclassifies a fact based on which leg happened to find
+            # it. Keyed off the MISSING FIELD, not the leg, so a leg added later
+            # is covered for free. One batched query, and it fetches nothing
+            # when every fact already arrived complete.
+            _needs = [
+                r.id for r in results
+                if r.type == "fact" and "active" not in r.metadata
+            ]
+            _filled: dict = {}
+            if _needs:
+                try:
+                    _filled = _schedule(heart.facts.fetch_legacy_fields(_needs))
+                except Exception:
+                    # Better to fall through to the None defaults than to fail
+                    # the whole recall over a compatibility backfill.
+                    logger.warning(
+                        "run_python: legacy fact field backfill failed",
+                        exc_info=True,
+                    )
+
+            out: list[dict] = []
+            for r in results:
+                d = {
+                    # UUID, not str. The old return was
+                    # `FactSummary.model_dump()` in python mode, whose `id` is a
+                    # UUID, and `recall_recent` still returns python-mode values
+                    # — so stringifying here both breaks `f["id"].hex` / UUID
+                    # comparisons in stored scripts AND makes the two wrappers
+                    # disagree. `str()` would be friendlier to `json.dumps`, but
+                    # that was never the contract.
+                    "id": r.id,
+                    "type": r.type,
+                    "description": r.description,
+                    # Alias: the old return was a `FactSummary`, whose body lived
+                    # under "content".
+                    "content": r.description,
+                    "score": r.score,
+                    "source": r.source,
+                    "edge_relation": r.edge_relation,
+                    "metadata": r.metadata,
+                }
+                # Legacy FactSummary keys, present on EVERY item.
+                #
+                # `Heart._to_recall_result` nests category/subject/confidence
+                # under `metadata`, so `f["confidence"]` would raise KeyError
+                # against a dict holding the value one level down. Populating
+                # them only when present is not enough either: the old function
+                # returned FACTS ONLY, so `sorted(recall_deep(q), key=lambda f:
+                # f["confidence"])` was valid — and the pipeline returns mixed
+                # types, so the first episode or procedure in the list would
+                # raise. The keys are therefore always present.
+                #
+                # `None` where a field does not apply, never a stand-in value: a
+                # fabricated `confidence` of 0.0 would sort and compare as real
+                # data. A None makes a sort fail loudly instead, which is the
+                # honest outcome for a list that genuinely is no longer
+                # all-facts. Canonical keys are never overwritten.
+                _extra = _filled.get(r.id, {}) if r.type == "fact" else {}
+                for _k, _default in _LEGACY_FACT_KEYS.items():
+                    if _k in d:
+                        continue
+                    if _k in r.metadata:
+                        d[_k] = r.metadata[_k]
+                    elif _k in _extra:
+                        d[_k] = _extra[_k]
+                    else:
+                        # Copy a mutable default — otherwise every result shares
+                        # ONE `tags` list and a script appending to one row
+                        # silently mutates the whole batch.
+                        d[_k] = list(_default) if isinstance(_default, list) else _default
+                # `event_date` was a `datetime.date` on FactSummary, so scripts
+                # do `f["event_date"].year` or compare it with a date. The
+                # PIPELINE standardises on an ISO string (F075 isoformats it
+                # into metadata), which is fine for its own consumers but is a
+                # silent type change at this boundary — a comparison against a
+                # date stops matching instead of failing. Coerce back here only;
+                # `metadata` keeps the pipeline's string.
+                _ed = d.get("event_date")
+                if isinstance(_ed, str):
+                    try:
+                        d["event_date"] = date.fromisoformat(_ed)
+                    except ValueError:
+                        pass  # unparseable — leave it rather than invent a date
+                out.append(d)
+            return out
+
+        def _apply_script_limit(
+            results: list, out: list[dict], limit: int, tr,
+        ) -> list[dict]:
+            """Honour `limit` as a cap on what the SCRIPT receives.
+
+            `heart.search_facts(..., limit=limit)` returned at most that many
+            items, and scripts pass `limit` to bound their own processing. The
+            pipeline treats it as the core Heart/Brain allotment only: chunks
+            use `episode_chunk_recall_limit` (30 in prod), the keyed and
+            exemplar legs use their own K, and graph rows are appended
+            independently — so `recall_deep(q, limit=4)` could hand back dozens
+            of rows. Restoring the cap keeps the documented contract.
+
+            The trace is corrected to match: rows cut here reach the script no
+            more than a row cut at a gate does, so leaving them
+            `returned_to_script` would make the telemetry claim a delivery that
+            did not happen. Marked BEFORE the caller's `undeliver_all`, which
+            only touches candidates still `RENDERED`.
+            """
+            # `limit=0` means ZERO rows, not "no cap". The old path passed it to
+            # SQL as `LIMIT 0`, and this tool's own description promises at most
+            # `limit` dicts — so lumping it in with None turned the tightest
+            # possible bound into an unbounded one, which is what a dynamically
+            # computed budget of 0 would hit. Only None means uncapped.
+            if limit is None:
+                return out
+            limit = max(0, limit)
+            if len(out) <= limit:
+                return out
+            if tr is not None:
+                # A candidate is keyed on (id, type) and the pipeline can emit
+                # the same one twice — a decision reached through BOTH the graph
+                # and Brain legs, which deliberately do not cross-dedup. If one
+                # copy lands in the delivered prefix and the other in the tail,
+                # marking the tail copy downgrades the SHARED candidate, and the
+                # caller's `undeliver_all` cannot undo it because that only
+                # rewrites candidates still `rendered`. The script did receive
+                # that memory, so reporting a drop would be false.
+                _delivered = {(r.id, r.type) for r in results[:limit]}
+                for r in results[limit:]:
+                    if (r.id, r.type) in _delivered:
+                        continue
+                    tr.mark_not_delivered(r.id, r.type, SLICED_OFF, "script_limit")
+            return out[:limit]
 
         def _recall_recent(hours: int = 24, limit: int = 5) -> list[dict]:
             results = _schedule(heart.list_episodes(limit=limit, hours=hours))
@@ -4067,14 +4519,18 @@ _RUN_PYTHON_SCHEMA: dict[str, Any] = {
     "description": (
         "Execute Python code with Nous memory functions in scope. "
         "Full Python: import, try/except, class and function definitions, open() all work. "
-        "Memory functions: recall_deep(query, limit=5), recall_recent(hours=24, limit=5), "
+        "Memory functions: recall_deep(query, limit=5) — the SAME full retrieval "
+        "as the recall_deep tool (facts, episodes, decisions, chunks, graph), "
+        "returning at most `limit` dicts with id/type/description/score/source, "
+        "and costing about 5s per call, so budget a handful per script, not dozens; "
+        "recall_recent(hours=24, limit=5), "
         "list_tasks(status=None), learn_fact(content, category, subject, confidence). "
         "Pre-imported for convenience (no import needed): json, re, math, datetime, "
         "collections, itertools, functools, statistics — anything else, just import it. "
         "Use this to batch multiple memory lookups, filter results, and return only what's needed — "
         "reducing token usage compared to separate tool calls. "
         "Set result = <value> to return structured data. Use print() to emit text output. "
-        "Runs in-process on a worker thread with a wall-clock deadline (default 10s): "
+        "Runs in-process on a worker thread with a wall-clock deadline (default 90s): "
         "Python-level code is interrupted when it expires and the call returns a timeout error, "
         "so keep work short and shell out to `bash` for anything long-running. "
         "Max 5 learn_fact calls per execution."

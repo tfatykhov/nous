@@ -18,6 +18,21 @@ from nous.observability.retrieval_trace import NULL_TRACE, NullTrace, RetrievalT
 
 logger = logging.getLogger(__name__)
 
+# Every value `RetrievalLogger.start(path=...)` is called with, and the single
+# source of truth the `/dashboard/retrieval` filter validates against. Kept here
+# rather than in `rest.py` because a path the producer emits but the API rejects
+# is invisible in exactly the way this telemetry exists to prevent — and that is
+# not hypothetical: "script" retrievals were unobservable for months.
+# `test_retrieval_paths_are_registered` asserts every literal in the tree is
+# listed, so adding a path without widening this fails a test instead of
+# silently producing rows nobody can filter to.
+#
+#   pipeline - the recall_deep tool
+#   context  - ContextEngine.build, once per turn
+#   script   - recall_deep() called inside run_python; may fire several times
+#              within a single tool call, which is why it is not "pipeline"
+RETRIEVAL_PATHS: tuple[str, ...] = ("pipeline", "context", "script")
+
 
 class RetrievalLogger:
     """Creates traces, keeps a live ring for the dashboard, persists in background."""

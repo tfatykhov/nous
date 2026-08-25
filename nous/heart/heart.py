@@ -1288,6 +1288,24 @@ class Heart:
                     # _heart_results_to_pipeline) + downstream consumers
                     # see the iso string. None for stable facts.
                     "event_date": item.event_date.isoformat() if item.event_date else None,
+                    # The remaining persisted FactSummary fields. Carried so a
+                    # consumer holding a fact-derived result can read the fact's
+                    # REAL values instead of a default standing in for them —
+                    # `run_python`'s recall_deep returns these to scripts, and a
+                    # script filtering on `active` or `actionable` against a
+                    # fabricated None silently decides from data that was never
+                    # true. Purely additive: every metadata consumer reads
+                    # specific keys via `.get`, nothing iterates or renders the
+                    # dict, so recall_deep's text output is unchanged.
+                    # `recency_status`/`recency_date` are deliberately NOT seeded
+                    # here — they are transient verdicts the recency resolver
+                    # writes downstream, and absent genuinely means "no verdict".
+                    "active": item.active,
+                    "tags": list(item.tags or []),
+                    "superseded_by": item.superseded_by,
+                    "actionable": item.actionable,
+                    "actionable_confidence": item.actionable_confidence,
+                    "overrides_prior": item.overrides_prior,
                 },
             )
         elif isinstance(item, ProcedureSummary):

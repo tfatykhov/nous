@@ -14,11 +14,11 @@
   // fires every turn while recall_deep is occasional, so the recent-50 window
   // is routinely 100% context — filtering locally showed an empty table while
   // pipeline rows sat pages back. Refetch on change so the rollups match too.
-  let pathFilter = $state<'' | 'pipeline' | 'context'>('');
+  let pathFilter = $state<'' | 'pipeline' | 'context' | 'script'>('');
   // Which path the data currently in the store was actually fetched for.
   // Stamped when a request STARTS, so it always describes the in-flight or
   // most-recent fetch rather than the selection.
-  let appliedPath: '' | 'pipeline' | 'context' = '';
+  let appliedPath: '' | 'pipeline' | 'context' | 'script' = '';
   // Heartbeat turns are machine chatter, not questions anyone asked. They
   // dominate the window (17 of 21 on the instance this was designed against),
   // so an operator debugging their own question wades through noise. Filtered
@@ -60,7 +60,18 @@
     void store.refresh();
   }
 
-  function setPath(p: '' | 'pipeline' | 'context') {
+  // A lookup, not a ternary. This was `path === 'context' ? 'pre-turn' :
+  // 'recall_deep'`, so the moment a third path existed its rows silently
+  // rendered as recall_deep — mislabelled, not merely unlabelled. Anything
+  // unrecognised now shows its raw value, which is ugly on purpose.
+  const PATH_LABELS: Record<string, string> = {
+    pipeline: 'recall_deep',
+    context: 'pre-turn',
+    script: 'in-script',
+  };
+  const pathLabel = (p: string) => PATH_LABELS[p] ?? p;
+
+  function setPath(p: '' | 'pipeline' | 'context' | 'script') {
     if (p === pathFilter) return;
     pathFilter = p;
     void store.refresh();
@@ -203,20 +214,25 @@
   // legend are rendered in this order always, and colour only confirms.
   const DISPOSITION_META: Record<string, { color: string; family: string; order: number }> = {
     rendered:           { color: '#34d399', family: 'delivered',  order: 0 },
+    // Also delivered — but to a run_python script, not to the model. Sits in
+    // `delivered` because the retrieval succeeded and handed its results over;
+    // separate from `rendered` because the script, not the pipeline, decides
+    // what the model actually sees.
+    returned_to_script: { color: '#22d3ee', family: 'delivered',  order: 1 },
     // capacity — a cut or budget removed it; the remedy is a bigger budget
-    sliced_off:         { color: '#f59e0b', family: 'capacity',   order: 1 },
-    budget_truncated:   { color: '#fcd34d', family: 'capacity',   order: 2 },
+    sliced_off:         { color: '#f59e0b', family: 'capacity',   order: 2 },
+    budget_truncated:   { color: '#fcd34d', family: 'capacity',   order: 3 },
     // quality — a score or filter judged it; a bigger budget changes nothing
-    below_floor:        { color: '#a78bfa', family: 'quality',    order: 3 },
-    filter_dropped:     { color: '#c4b5fd', family: 'quality',    order: 4 },
+    below_floor:        { color: '#a78bfa', family: 'quality',    order: 4 },
+    filter_dropped:     { color: '#c4b5fd', family: 'quality',    order: 5 },
     // redundancy/scope — deliberately not included, nothing is wrong
-    deduped:            { color: '#94a3b8', family: 'redundancy', order: 5 },
-    superseded:         { color: '#cbd5e1', family: 'redundancy', order: 6 },
-    replaced_at_merge:  { color: '#64748b', family: 'redundancy', order: 7 },
-    f071_excluded:      { color: '#7c8da3', family: 'redundancy', order: 8 },
-    type_excluded:      { color: '#475569', family: 'redundancy', order: 9 },
+    deduped:            { color: '#94a3b8', family: 'redundancy', order: 6 },
+    superseded:         { color: '#cbd5e1', family: 'redundancy', order: 7 },
+    replaced_at_merge:  { color: '#64748b', family: 'redundancy', order: 8 },
+    f071_excluded:      { color: '#7c8da3', family: 'redundancy', order: 9 },
+    type_excluded:      { color: '#475569', family: 'redundancy', order: 10 },
     // anomaly — reserved, never reused
-    unaccounted:        { color: '#f472b6', family: 'anomaly',    order: 10 },
+    unaccounted:        { color: '#f472b6', family: 'anomaly',    order: 11 },
   };
 
   function dispositionColor(d: string): string {
@@ -229,6 +245,7 @@
 
   const DISPOSITION_HELP: Record<string, string> = {
     rendered: 'Reached the model',
+    returned_to_script: 'Returned to a run_python script — the script decides what the model sees',
     sliced_off: 'Fell outside a top-K or max-K cut',
     below_floor: 'Failed a similarity or score floor',
     filter_dropped: 'Removed by a named filter',
@@ -648,12 +665,17 @@
     {:else}
       {@const rendered = $store.data.disposition_totals['rendered'] ?? 0}
       {@const unaccounted = $store.data.disposition_totals['unaccounted'] ?? 0}
+      <!-- Also NOT a gate drop: these were returned to a run_python script, so
+           the retrieval delivered. Leaving them in the subtraction would report
+           successful in-script deliveries as "dropped at a gate" — and would do
+           it silently, since the count only appears inside a total. -->
+      {@const toScript = $store.data.disposition_totals['returned_to_script'] ?? 0}
       <!-- `unaccounted` is BY DEFINITION "no stage claimed this drop" — the
            drift alarm. Summing it into "dropped at a gate" would bury the one
            number that says the instrumentation itself is incomplete inside an
            ordinary total, which is the class of error this whole feature
            exists to prevent. -->
-      {@const dropped = totals.sum - rendered - unaccounted}
+      {@const dropped = totals.sum - rendered - unaccounted - toScript}
       <!-- One element, one job: the bar IS the figure. The old version stated
            each number three times — headline, bar, then a legend column. -->
       <div class="funnel">
@@ -772,6 +794,12 @@
           <button class="chip-btn" class:on={pathFilter === 'context'} onclick={() => setPath('context')}>
             pre-turn
           </button>
+          <!-- recall_deep() called inside run_python. Separate from the tool
+               chip on purpose: one tool call can issue several of these, so
+               counting them as recall_deep rows would misstate per-turn totals. -->
+          <button class="chip-btn" class:on={pathFilter === 'script'} onclick={() => setPath('script')}>
+            in-script
+          </button>
           <button
             class="chip-btn"
             class:on={hideAutomated}
@@ -849,7 +877,7 @@
                 {/if}
               </div>
               <div class="rrow-meta">
-                <span class="chip sm">{e.path === 'context' ? 'pre-turn' : 'recall_deep'}</span>
+                <span class="chip sm">{pathLabel(e.path)}</span>
                 <!-- turn_number is populated on every row by the correlation
                      fix and was never surfaced; it is what joins a retrieval to
                      its context_log entry. -->

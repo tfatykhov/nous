@@ -59,6 +59,7 @@ from nous.cognitive.context import PROFILE_CORE_TAG, TIER1_FACT_CATEGORIES
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
+from nous.observability.retrieval_logger import RETRIEVAL_PATHS as _RETRIEVAL_PATHS
 from nous.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -1984,9 +1985,14 @@ def create_app(
         except ValueError:
             return JSONResponse({"error": "limit must be an integer"}, status_code=400)
         path_filter = request.query_params.get("path")
-        if path_filter and path_filter not in ("pipeline", "context"):
+        # "script" is run_python's in-script recall_deep. It is a THIRD path, not
+        # a flavour of "pipeline": both run run_recall_pipeline, but only this one
+        # can fire several times inside a single tool call, so blending them would
+        # make per-turn retrieval counts silently wrong.
+        if path_filter and path_filter not in _RETRIEVAL_PATHS:
             return JSONResponse(
-                {"error": "path must be 'pipeline' or 'context'"}, status_code=400
+                {"error": f"path must be one of {', '.join(sorted(_RETRIEVAL_PATHS))}"},
+                status_code=400,
             )
 
         try:
