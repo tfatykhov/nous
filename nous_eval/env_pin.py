@@ -43,6 +43,9 @@ PROD_SHAPE: dict[str, Any] = {
     # by one model with vectors from the other returns plausible-looking
     # nonsense rather than an error.
     "embedding_model": "text-embedding-3-large",
+    # Prod runs `NOUS_RRF_K=30`; the code default is 60. Omitting it made a
+    # "PROD SHAPE" run fuse ranks with a constant prod does not use.
+    "rrf_k": 30,
     "episode_chunks_enabled": True,
     "chunk_hybrid_search_enabled": True,
     "episode_chunk_recall_limit": 30,
@@ -88,12 +91,54 @@ def hidden_env():
         os.environ.update(saved)
 
 
+# The env vars `nous.heart.search._resolver_settings()` reads LIVE at query
+# time, mapped to the `Settings` fields they shadow. It builds its own bare
+# `Settings()`, so a pinned Settings object cannot reach it — the only channel
+# is the environment, which is why the pin has to PUBLISH these rather than
+# merely hide them. Hiding alone silently swaps in code defaults: prod runs
+# `NOUS_RRF_K=30` against a default of 60, and that difference moved a measured
+# baseline MRR from 0.1620 to 0.0950.
+_RESOLVER_VARS = {
+    "NOUS_RRF_K": "rrf_k",
+    "NOUS_VECTOR_WEIGHT": "vector_weight",
+    "NOUS_HYBRID_SEARCH_KEYWORD_ENABLED": "hybrid_search_keyword_enabled",
+}
+
+
+@contextlib.contextmanager
+def pinned_runtime(settings: Settings):
+    """Hide ambient config, then publish `settings`' fusion params to the env.
+
+    Wrap the WHOLE probe in this — not just `Settings` construction. Rank
+    fusion is resolved per query from `os.environ`, so a probe that only pins
+    its `Settings` object still runs someone else's RRF constant.
+    """
+    with hidden_env():
+        for var, field in _RESOLVER_VARS.items():
+            value = getattr(settings, field)
+            os.environ[var] = (
+                str(value).lower() if isinstance(value, bool) else str(value)
+            )
+        yield
+
+
 def pinned_settings(**overrides: Any) -> Settings:
     """`Settings` built from code defaults + `overrides`, and nothing else.
 
     Read anything you need out of `os.environ` (API keys, an eval DB password)
     BEFORE calling, and pass it in as an override — inside the call the
     environment is not visible to `Settings`.
+
+    NOT SUFFICIENT ON ITS OWN. Pinning the `Settings` OBJECT does not pin the
+    run: `nous.heart.search._resolver_settings()` builds a fresh bare
+    `Settings()` at QUERY time, from three call sites in hybrid search, keyed on
+    a fingerprint it reads straight out of `os.environ` —
+
+        NOUS_RRF_K, NOUS_VECTOR_WEIGHT, NOUS_HYBRID_SEARCH_KEYWORD_ENABLED
+
+    — so rank fusion still varies by shell even when every `Settings` field the
+    caller passes is pinned. Hold `hidden_env()` around the WHOLE probe, not
+    just around construction. Both diagnostic scripts do.
     """
     with hidden_env():
         return Settings(_env_file=None).model_copy(update=overrides)

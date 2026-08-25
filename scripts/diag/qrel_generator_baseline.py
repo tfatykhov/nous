@@ -70,6 +70,7 @@ from nous.storage.database import Database  # noqa: E402
 from nous_eval.env_pin import (  # noqa: E402
     PROD_SHAPE,
     eval_off,
+    pinned_runtime,
     pinned_settings,
 )
 from nous_eval.generate_graph_qrels import (  # noqa: E402
@@ -95,17 +96,20 @@ _NODE_UNION = """
 """
 
 
-async def run(args) -> int:
-    # Pinned: no .env, no NOUS_*/DB_* process env. A ceiling that moves with the
-    # launch directory is not a ceiling. See nous_eval.env_pin.
-    #
-    # PROD_SHAPE is applied by default because this probe's whole claim is that
-    # it reproduces the miner's gate — and the miner builds its settings from a
-    # bare `Settings()`, which DOES read prod's .env (codex P1). Pinning to bare
-    # code defaults would have measured a configuration the miner never runs,
-    # and the same shape difference already moved a baseline MRR by 79%. Pass
-    # --defaults to measure code-default behaviour deliberately instead.
-    s = pinned_settings(
+def build_settings(args):
+    """Built in `main` so `pinned_runtime` can wrap the ENTIRE run.
+
+    Pinned: no .env, no NOUS_*/DB_* process env. A ceiling that moves with the
+    launch directory is not a ceiling. See nous_eval.env_pin.
+
+    PROD_SHAPE is applied by default because this probe's whole claim is that
+    it reproduces the miner's gate — and the miner builds its settings from a
+    bare `Settings()`, which DOES read prod's .env (codex P1). Pinning to bare
+    code defaults would have measured a configuration the miner never runs, and
+    the same shape difference already moved a baseline MRR by 79%. Pass
+    --defaults to measure code-default behaviour deliberately instead.
+    """
+    return pinned_settings(
         db_host=args.host, db_port=args.port, db_name=args.db,
         db_user=args.user, db_password=os.environ["EVAL_DB_PASSWORD"],
         agent_id=args.agent,
@@ -121,10 +125,21 @@ async def run(args) -> int:
         anthropic_auth_token=os.environ.get("ANTHROPIC_AUTH_TOKEN", ""),
         **eval_off(),
     )
+
+
+async def run(args, s) -> int:
     # BOTH halves of `_validate_query`, reproduced exactly. Measuring only the
     # graph-off half attributes the whole yield to the generator, which is how
     # a 5.2% "ceiling" got published; the mine keeps a row only when graph-off
     # MISSES *and* graph-on HITS, so both must be observed to explain a yield.
+    #
+    # Same fail-fast as arm_separation: no key => keyword-only Heart AND Brain,
+    # and a ceiling measured without vector search describes nothing.
+    if not s.openai_api_key:
+        print("OPENAI_API_KEY is not set in the PROCESS environment (this "
+              "script ignores .env by design). Both halves of the gate would "
+              "be measured on keyword-only retrieval.", file=sys.stderr)
+        return 2
     s_off = s.model_copy(update={"graph_recall_enabled": False})
     s_on = s.model_copy(update={"graph_recall_enabled": True})
     db = Database(settings=s)
@@ -281,7 +296,13 @@ def main() -> int:
     if "EVAL_DB_PASSWORD" not in os.environ:
         print("set EVAL_DB_PASSWORD", file=sys.stderr)
         return 1
-    return asyncio.run(run(args))
+    # Held for the WHOLE run — see arm_separation.main and env_pin's docstring:
+    # hybrid search re-reads NOUS_RRF_K / NOUS_VECTOR_WEIGHT /
+    # NOUS_HYBRID_SEARCH_KEYWORD_ENABLED from os.environ at query time, so the
+    # pinned values must be PUBLISHED there, not merely hidden.
+    settings = build_settings(args)
+    with pinned_runtime(settings):
+        return asyncio.run(run(args, settings))
 
 
 if __name__ == "__main__":

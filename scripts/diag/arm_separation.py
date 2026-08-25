@@ -36,12 +36,19 @@ and the instrument's resolution is ~±0.005 dMRR at n=57. Both spread_on and
 cs_parity returned exactly 0.0000 with 57/57 ties on every run — those are ties
 by identity, not by rounding, which is a stronger statement than spread_off's.
 
-These absolute values SUPERSEDE an earlier run of the same command that recorded
-baseline 0.0906 / control 24-57. That run was launched from a shell with prod's
-`.env` exported and `Settings(_env_file=None)` does not block the process
-environment, so a run labelled "pinned" was not — the leak moved baseline MRR by
-79%. Every arm delta was unaffected, which is the useful part: the null survived
-a config change large enough to move the absolutes that much.
+REPRODUCIBLE WITHOUT `.env`, and that took three attempts. An early run recorded
+baseline 0.0906 from a shell with prod's `.env` exported, because
+`Settings(_env_file=None)` does not block the process environment — the leak
+moved baseline MRR by 79%. Hiding the environment then swung it the other way:
+prod runs `NOUS_RRF_K=30` and hybrid search resolves that per query from
+`os.environ`, so a "pinned" run silently fused ranks with the code default 60
+and read 0.0950. `PROD_SHAPE` now carries `rrf_k=30` and `pinned_runtime`
+PUBLISHES it where `nous.heart.search._resolver_settings` looks. The numbers
+above are the same ones the ambient run produced — now by declaration rather
+than by accident, and identical from any directory.
+
+Every arm delta was 0.0000 through all three configurations, which is the useful
+part: the null survived config changes large enough to move the absolutes 79%.
 
 CORROBORATION, independent of this qrel set: scripts/diag/qrel_generator_baseline.py
 reports graph-ON hitting the target in 18/56 queries and graph-OFF in 19/56, so
@@ -70,6 +77,7 @@ from nous.storage.database import Database  # noqa: E402
 from nous_eval.env_pin import (  # noqa: E402
     PROD_SHAPE,
     eval_off,
+    pinned_runtime,
     pinned_settings,
 )
 from nous_eval.retrieval_runner import (  # noqa: E402
@@ -169,12 +177,13 @@ async def run_arm(flags, qrels, base, top_k):
     return {"rr": rr, "hit": hit, "served": served, "errors": errors}
 
 
-async def run(args) -> int:
-    qrels = [json.loads(x) for x in Path(args.qrels).read_text(
-        encoding="utf-8").splitlines() if x.strip()]
-    # Both settings sources must be shut off, not just the dotenv one — see
-    # nous_eval.env_pin. `--defaults` pinned nothing at all before this.
-    base = pinned_settings(
+def build_settings(args):
+    """Built in `main` so `pinned_runtime` can wrap the ENTIRE run.
+
+    Both settings sources must be shut off, not just the dotenv one — see
+    nous_eval.env_pin. `--defaults` pinned nothing at all before this.
+    """
+    return pinned_settings(
         db_host=args.host, db_port=args.port, db_name=args.db,
         db_user=args.user, db_password=os.environ["EVAL_DB_PASSWORD"],
         agent_id=args.agent,
@@ -182,6 +191,26 @@ async def run(args) -> int:
         # environment, so it is read here and injected explicitly.
         openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
         **({} if args.defaults else PROD_SHAPE), **eval_off())
+
+
+async def run(args, base) -> int:
+    qrels = [json.loads(x) for x in Path(args.qrels).read_text(
+        encoding="utf-8").splitlines() if x.strip()]
+    # FAIL, do not degrade (codex P1). With no key `make_eval_embedding_provider`
+    # returns None and Heart+Brain fall back to KEYWORD-ONLY retrieval — the
+    # probe still runs, still passes its control, and still prints metrics
+    # labelled PROD SHAPE, having never queried the corpus in its embedding
+    # space. This script exists to distinguish "measured zero" from "could not
+    # measure"; silently measuring a different retriever is the latter wearing
+    # the former's label. The key is also the one input `.env` normally supplies,
+    # and this script deliberately ignores `.env`, so absence is the likely case.
+    if not base.openai_api_key:
+        print("OPENAI_API_KEY is not set in the PROCESS environment.\n"
+              "This script ignores .env by design, so exporting it there is not\n"
+              "enough. Without it Heart and Brain degrade to keyword-only\n"
+              "retrieval and every number below would describe a different\n"
+              "retriever than the one you meant to measure.", file=sys.stderr)
+        return 2
     shape = "CODE DEFAULTS" if args.defaults else "PROD SHAPE (pinned)"
     print(f"config: {shape}   (.env and NOUS_*/DB_* env NOT read)")
 
@@ -301,7 +330,16 @@ def main() -> int:
     if "EVAL_DB_PASSWORD" not in os.environ:
         print("set EVAL_DB_PASSWORD", file=sys.stderr)
         return 1
-    return asyncio.run(run(args))
+    # Held for the WHOLE run, not just around Settings construction (codex P1).
+    # `nous.heart.search._resolver_settings()` rebuilds a bare `Settings()` at
+    # QUERY time from NOUS_RRF_K / NOUS_VECTOR_WEIGHT /
+    # NOUS_HYBRID_SEARCH_KEYWORD_ENABLED read live from os.environ, so rank
+    # fusion leaked even with every Settings field pinned. `pinned_runtime`
+    # PUBLISHES the pinned values there — merely hiding them would substitute
+    # code defaults, which is a different wrong answer (prod runs RRF_K=30).
+    settings = build_settings(args)
+    with pinned_runtime(settings):
+        return asyncio.run(run(args, settings))
 
 
 if __name__ == "__main__":

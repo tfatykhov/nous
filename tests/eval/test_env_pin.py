@@ -13,7 +13,7 @@ import os
 import pytest
 
 from nous.config import Settings
-from nous_eval.env_pin import hidden_env, pinned_settings
+from nous_eval.env_pin import hidden_env, pinned_runtime, pinned_settings
 
 
 @pytest.fixture
@@ -74,3 +74,37 @@ def test_lowercase_env_restored(monkeypatch):
     with hidden_env():
         pass
     assert os.environ["nous_spreading_activation_decay"] == "0.99"
+
+
+def test_hides_the_search_resolver_fingerprint_vars(monkeypatch):
+    """`nous.heart.search._resolver_settings` reads these live from os.environ
+    at QUERY time, so pinning the Settings object alone does not pin fusion."""
+    for name in ("NOUS_RRF_K", "NOUS_VECTOR_WEIGHT", "NOUS_HYBRID_SEARCH_KEYWORD_ENABLED"):
+        monkeypatch.setenv(name, "999")
+    with hidden_env():
+        for name in ("NOUS_RRF_K", "NOUS_VECTOR_WEIGHT", "NOUS_HYBRID_SEARCH_KEYWORD_ENABLED"):
+            assert name not in os.environ
+
+
+def test_pinned_runtime_publishes_fusion_params(monkeypatch):
+    """Hiding alone is NOT enough: `_resolver_settings` builds its own Settings
+    from these env vars, so removing them substitutes code defaults instead of
+    the pinned shape."""
+    monkeypatch.setenv("NOUS_RRF_K", "999")
+    s = pinned_settings(rrf_k=30, vector_weight=0.5, hybrid_search_keyword_enabled=False)
+    with pinned_runtime(s):
+        assert os.environ["NOUS_RRF_K"] == "30"
+        assert os.environ["NOUS_VECTOR_WEIGHT"] == "0.5"
+        # Booleans must be env-parseable, not Python's "False".
+        assert os.environ["NOUS_HYBRID_SEARCH_KEYWORD_ENABLED"] == "false"
+    assert os.environ["NOUS_RRF_K"] == "999"
+
+
+def test_pinned_runtime_reaches_the_real_resolver(monkeypatch):
+    """End-to-end: the value the search layer actually resolves."""
+    from nous.heart import search
+
+    monkeypatch.setenv("NOUS_RRF_K", "999")
+    s = pinned_settings(rrf_k=30)
+    with pinned_runtime(s):
+        assert search._resolver_settings().rrf_k == 30
