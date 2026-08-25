@@ -478,7 +478,7 @@ async def _run_async(args: argparse.Namespace) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
         for q in kept:
-            f.write(_qrel_to_jsonl(q) + "\n")
+            f.write(_qrel_to_jsonl(q, gated=not args.no_reachability_gate) + "\n")
     print(f"Wrote {len(kept)} qrels to {out_path}")
     return 0
 

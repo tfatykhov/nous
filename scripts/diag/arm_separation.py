@@ -138,7 +138,10 @@ async def run_arm(flags, qrels, base, top_k):
                 # (see `_valid` below) and reported.
                 errors.append((idx, f"{type(exc).__name__}: {exc}"))
                 rr.append(None)
-                served.append(0)
+                # codex P2: do NOT append 0 to `served`. Averaging a failure as
+                # "served nothing" depresses this arm's candidate count and can
+                # masquerade as an arm-specific set change — the same wrong
+                # conclusion the rank-0 handling produced, one metric over.
                 continue
             ids = [str(r.id) for r in res]
             served.append(len(ids))
@@ -159,22 +162,26 @@ async def run_arm(flags, qrels, base, top_k):
 async def run(args) -> int:
     qrels = [json.loads(x) for x in Path(args.qrels).read_text(
         encoding="utf-8").splitlines() if x.strip()]
-    base = Settings().model_copy(update={
+    # `_env_file=None` is load-bearing (codex P1): pinning nine flags via
+    # model_copy still lets Settings() read an ambient .env FIRST, so any other
+    # retrieval override sitting next to the script — NOUS_SPREADING_ACTIVATION_
+    # DECAY, an RRF knob, a floor — silently varies the run by launch directory.
+    # `--defaults` was worse still: it pinned nothing at all.
+    base = Settings(_env_file=None).model_copy(update={
         "db_host": args.host, "db_port": args.port, "db_name": args.db,
         "db_user": args.user, "db_password": os.environ["EVAL_DB_PASSWORD"],
         "agent_id": args.agent,
+        # The embedding key is the one thing that MUST come from the environment.
+        "openai_api_key": os.environ.get("OPENAI_API_KEY", ""),
         **({} if args.defaults else _PROD_SHAPE), **_EVAL_OFF})
     shape = "CODE DEFAULTS" if args.defaults else "PROD SHAPE (pinned)"
-    print(f"config: {shape}")
+    print(f"config: {shape}   (.env NOT read)")
 
     print(f"qrels: {len(qrels)}   top_k={args.top_k}   db={args.db}\n")
     out = {}
     for name, flags in ARMS.items():
         out[name] = await run_arm(flags, qrels, base, args.top_k)
-        r = out[name]
-        print(f"{name:<20} MRR@{args.top_k}={r['mrr']:.4f}  "
-              f"recall@served={r['recall_at_served']:.4f}  "
-              f"avg_served={r['avg_served']:.1f}")
+        print(f"  ran {name}")
 
 
     def paired(name, against="baseline"):
@@ -210,6 +217,19 @@ async def run(args) -> int:
         return 3
     print("Set discriminates => a null on the arms below is a RESULT.")
     print("=" * 62)
+
+    # Per-arm metrics are printed HERE, after the control passes — never before
+    # (codex P1). Printing them during the run meant every MRR was already on
+    # screen when the guard fired, so "arm results withheld" was false and a
+    # reader could draw the exact "all arms tie" conclusion the control exists
+    # to forbid. Observed for real: a broken-embedding run showed six arms at
+    # 0.0000 above a message claiming nothing had been reported.
+    print("\n--- per-arm metrics ---")
+    for name in ARMS:
+        r = out[name]
+        print(f"{name:<20} MRR@{args.top_k}={r['mrr']:.4f}  "
+              f"recall@served={r['recall_at_served']:.4f}  "
+              f"avg_served={r['avg_served']:.1f}")
 
     print("\n--- paired vs baseline (per-query reciprocal rank) ---")
     for name in ARMS:
