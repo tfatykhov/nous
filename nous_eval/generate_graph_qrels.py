@@ -426,13 +426,20 @@ async def _run_async(args: argparse.Namespace) -> int:
                     query, rationale = gen
                     if args.no_reachability_gate:
                         # The gate keeps a qrel only when graph-off MISSES and
-                        # graph-on HITS. Measured on this corpus (2026-08-24,
-                        # 58 generated queries): the target is already in the
-                        # query's VECTOR top-50 for 55 of them (94.8%), at
-                        # median rank 2, 52/58 in the top 10. The generator
-                        # writes questions semantic search answers, so the
-                        # graph-ONLY criterion is capped near 5% for ANY edge
-                        # family and no edge-selection tuning moves it.
+                        # graph-on HITS. Measured on this corpus by
+                        # scripts/diag/qrel_generator_baseline.py (2026-08-24,
+                        # 58 queries from 60 edges): graph-off hits top-10 for
+                        # 25/58, so the ceiling is 56.9% — the generator is NOT
+                        # the constraint. graph-ON hits for the SAME 25/58, so
+                        # 0/58 rows pass. Graph expansion changed top-10
+                        # membership in zero cases.
+                        #
+                        # So skipping the gate here is not a workaround for a
+                        # biased generator (an earlier revision of this comment
+                        # claimed a ~5% ceiling from a raw-vector measurement;
+                        # it was wrong by ~11x). It is the only way to obtain a
+                        # usable set on a corpus where the gate's second half
+                        # never fires — which is itself the finding.
                         #
                         # A paired A/B does not need graph-only qrels — it needs
                         # qrels on which arms CAN differ. Ties cost n, not
@@ -504,11 +511,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--no-reachability-gate", action="store_true",
         help="Keep every generated query instead of requiring graph-off MISS + "
-             "graph-on HIT. The gate is capped near 5%% yield on prod-shaped "
-             "corpora because the generator writes vector-findable questions "
-             "(measured 94.8%% in vector top-50, median rank 2). A paired A/B "
-             "does not need graph-only qrels — ties cost n, not correctness. "
-             "Output is NOT graph-only; do not label it as such.")
+             "graph-on HIT. Measured on a prod-shaped corpus (2026-08-24): the "
+             "gate yields 0/58, not because the generator is biased (ceiling "
+             "56.9%%) but because graph-on hits the SAME 25/58 as graph-off — "
+             "expansion changes nothing. A paired A/B does not need graph-only "
+             "qrels; ties cost n, not correctness. Run "
+             "scripts/diag/qrel_generator_baseline.py to see which half of the "
+             "gate is failing on YOUR corpus before using this. Output is NOT "
+             "graph-only; do not label it as such.")
     parser.add_argument("--log-level", default="info")
     args = parser.parse_args(argv)
 

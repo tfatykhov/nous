@@ -13,19 +13,31 @@ inert qrel set is not a null, it is an absence of measurement, and the differenc
 has produced wrong verdicts before (decisions 7b29cf7f, ac40336b).
 
 Measured 2026-08-24 on qrels_graph_nogate.jsonl (57 qrels, nous_prod_20260801),
-PINNED PROD SHAPE (see _PROD_SHAPE — these numbers are not reproducible without it):
+PINNED PROD SHAPE (see _PROD_SHAPE; the pin is enforced by nous_eval.env_pin):
 
-    baseline           MRR@10 0.0906   recall@served 0.5614   served 77.6
-    POSCTRL_graph_off  MRR@10 0.1527   recall@served 0.5614   served 54.6
-    spread_off         MRR@10 0.0906   recall@served 0.5614   served 68.9
-    spread_on          MRR@10 0.0906   recall@served 0.5614   served 77.6
-    cs_parity          MRR@10 0.0906   recall@served 0.5614   served 77.6
-    cs_baseline        MRR@10 0.0906   recall@served 0.5614   served 77.6
+    baseline           MRR@10 0.1620   recall@served 0.5614   served 81.1
+    POSCTRL_graph_off  MRR@10 0.2260   recall@served 0.5614   served 54.6
+    spread_off         MRR@10 0.1620   recall@served 0.5614   served 72.6
+    spread_on          MRR@10 0.1620   recall@served 0.5614   served 81.1
+    cs_parity          MRR@10 0.1620   recall@served 0.5614   served 81.1
+    cs_baseline        MRR@10 0.1620   recall@served 0.5614   served 81.1
 
-Control moved 24/57 (dMRR +0.0621) => the set discriminates. All three spreading
+Control moved 23/57 (dMRR +0.0640) => the set discriminates. All three spreading
 arms were 57/57 ties at dMRR exactly 0.0000 — a measured null — while spread_off
-serves 8.7 FEWER rows, so spreading changes the served set and changes no measured
+serves 8.5 FEWER rows, so spreading changes the served set and changes no measured
 outcome. recall@served is identical across every arm INCLUDING graph_off.
+
+These absolute values SUPERSEDE an earlier run of the same command that recorded
+baseline 0.0906 / control 24-57. That run was launched from a shell with prod's
+`.env` exported and `Settings(_env_file=None)` does not block the process
+environment, so a run labelled "pinned" was not — the leak moved baseline MRR by
+79%. Every arm delta was unaffected, which is the useful part: the null survived
+a config change large enough to move the absolutes that much.
+
+CORROBORATION, independent of this qrel set: scripts/diag/qrel_generator_baseline.py
+reports graph-ON and graph-OFF hitting the target in the SAME 25/58 queries, so
+graph expansion changed top-10 membership in zero of 58 cases — on ground where
+every target is the endpoint of the edge its query was written from.
 
 The null is on FAVOURABLE ground: gold are decision-targets of inferred edges,
 precisely what spreading depth-1 traverses.
@@ -45,9 +57,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from nous.api.retrieval_pipeline import run_recall_pipeline  # noqa: E402
 from nous.brain.brain import Brain  # noqa: E402
 from nous.brain.embeddings import EmbeddingProvider  # noqa: E402
-from nous.config import Settings  # noqa: E402
 from nous.heart.heart import Heart  # noqa: E402
 from nous.storage.database import Database  # noqa: E402
+from nous_eval.env_pin import pinned_settings  # noqa: E402
 
 CONTROL = "POSCTRL_graph_off"
 
@@ -120,7 +132,9 @@ async def run_arm(flags, qrels, base, top_k):
                             model="text-embedding-3-large", dimensions=1536)
     heart = Heart(database=db, settings=s, embedding_provider=emb)
     brain = Brain(database=db, settings=s, embedding_provider=emb)
-    rr, hits, served, errors = [], 0, [], []
+    # All three are INDEX-ALIGNED with `qrels`, carrying None where the query
+    # raised. Aggregation happens later, over a population shared by every arm.
+    rr, hit, served, errors = [], [], [], []
     try:
         for idx, q in enumerate(qrels):
             try:
@@ -134,48 +148,44 @@ async def run_arm(flags, qrels, base, top_k):
                 # paired movement — and could make the positive control appear
                 # to separate on nothing but exceptions, manufacturing the very
                 # validity signal this script gates on. Symmetric failures would
-                # manufacture ties instead. The query is EXCLUDED from every arm
-                # (see `_valid` below) and reported.
+                # manufacture ties instead.
+                #
+                # codex P2, same principle one metric over: a failure must not
+                # append 0 to `served` either — that reads as "this arm served
+                # fewer candidates", an arm-specific set change, which is
+                # precisely the conclusion this probe draws from served deltas.
                 errors.append((idx, f"{type(exc).__name__}: {exc}"))
                 rr.append(None)
-                # codex P2: do NOT append 0 to `served`. Averaging a failure as
-                # "served nothing" depresses this arm's candidate count and can
-                # masquerade as an arm-specific set change — the same wrong
-                # conclusion the rank-0 handling produced, one metric over.
+                hit.append(None)
+                served.append(None)
                 continue
             ids = [str(r.id) for r in res]
-            served.append(len(ids))
             gold = set(q["gold_ids"])
             rank = next((i + 1 for i, x in enumerate(ids[:top_k]) if x in gold), None)
             rr.append(1.0 / rank if rank else 0.0)
-            hits += any(x in gold for x in ids)
+            hit.append(any(x in gold for x in ids))
+            served.append(len(ids))
     finally:
         await brain.close()
         await db.disconnect()
-    ok = [x for x in rr if x is not None]
-    return {"mrr": statistics.mean(ok) if ok else 0.0, "rr": rr,
-            "recall_at_served": hits / max(len(ok), 1),
-            "avg_served": statistics.mean(served) if served else 0.0,
-            "errors": errors}
+    return {"rr": rr, "hit": hit, "served": served, "errors": errors}
 
 
 async def run(args) -> int:
     qrels = [json.loads(x) for x in Path(args.qrels).read_text(
         encoding="utf-8").splitlines() if x.strip()]
-    # `_env_file=None` is load-bearing (codex P1): pinning nine flags via
-    # model_copy still lets Settings() read an ambient .env FIRST, so any other
-    # retrieval override sitting next to the script — NOUS_SPREADING_ACTIVATION_
-    # DECAY, an RRF knob, a floor — silently varies the run by launch directory.
-    # `--defaults` was worse still: it pinned nothing at all.
-    base = Settings(_env_file=None).model_copy(update={
-        "db_host": args.host, "db_port": args.port, "db_name": args.db,
-        "db_user": args.user, "db_password": os.environ["EVAL_DB_PASSWORD"],
-        "agent_id": args.agent,
-        # The embedding key is the one thing that MUST come from the environment.
-        "openai_api_key": os.environ.get("OPENAI_API_KEY", ""),
-        **({} if args.defaults else _PROD_SHAPE), **_EVAL_OFF})
+    # Both settings sources must be shut off, not just the dotenv one — see
+    # nous_eval.env_pin. `--defaults` pinned nothing at all before this.
+    base = pinned_settings(
+        db_host=args.host, db_port=args.port, db_name=args.db,
+        db_user=args.user, db_password=os.environ["EVAL_DB_PASSWORD"],
+        agent_id=args.agent,
+        # The embedding key is the one input that MUST come from the process
+        # environment, so it is read here and injected explicitly.
+        openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
+        **({} if args.defaults else _PROD_SHAPE), **_EVAL_OFF)
     shape = "CODE DEFAULTS" if args.defaults else "PROD SHAPE (pinned)"
-    print(f"config: {shape}   (.env NOT read)")
+    print(f"config: {shape}   (.env and NOUS_*/DB_* env NOT read)")
 
     print(f"qrels: {len(qrels)}   top_k={args.top_k}   db={args.db}\n")
     out = {}
@@ -224,12 +234,24 @@ async def run(args) -> int:
     # reader could draw the exact "all arms tie" conclusion the control exists
     # to forbid. Observed for real: a broken-embedding run showed six arms at
     # 0.0000 above a message claiming nothing had been reported.
-    print("\n--- per-arm metrics ---")
+    # codex P2: aggregate over the intersection of indices that succeeded in
+    # EVERY arm. Per-arm `ok` lists let one arm's exception shrink only that
+    # arm's population, so the table would compare different query sets and an
+    # asymmetric failure would surface as an arm-specific metric change — the
+    # same artefact the paired deltas already avoid pairwise, and directly
+    # contrary to the "excluded from every comparison" line printed above.
+    shared = [i for i in range(len(qrels))
+              if all(r["rr"][i] is not None for r in out.values())]
+    dropped = len(qrels) - len(shared)
+    print(f"\n--- per-arm metrics over {len(shared)} queries valid in ALL arms"
+          + (f" ({dropped} dropped)" if dropped else "") + " ---")
     for name in ARMS:
         r = out[name]
-        print(f"{name:<20} MRR@{args.top_k}={r['mrr']:.4f}  "
-              f"recall@served={r['recall_at_served']:.4f}  "
-              f"avg_served={r['avg_served']:.1f}")
+        mrr = statistics.mean([r["rr"][i] for i in shared]) if shared else 0.0
+        rec = (sum(1 for i in shared if r["hit"][i]) / len(shared)) if shared else 0.0
+        srv = statistics.mean([r["served"][i] for i in shared]) if shared else 0.0
+        print(f"{name:<20} MRR@{args.top_k}={mrr:.4f}  "
+              f"recall@served={rec:.4f}  avg_served={srv:.1f}")
 
     print("\n--- paired vs baseline (per-query reciprocal rank) ---")
     for name in ARMS:

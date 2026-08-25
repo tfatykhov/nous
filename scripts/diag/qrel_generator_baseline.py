@@ -1,21 +1,42 @@
-"""Measure the qrel GENERATOR's unconditional baseline — run this before
-attributing a low mine yield to any mechanism.
+"""Explain a qrel mine's yield by measuring BOTH halves of its gate separately.
 
-One arm, one question: for a query `generate_graph_qrels` writes from an edge,
-is the TARGET already in that query's vector top-50, with no graph involved?
+`_validate_query` keeps a row only when graph-off MISSES top-K and graph-on
+HITS top-K. A yield of zero therefore has two completely different causes, and
+they call for opposite responses:
 
-WHY THIS EXISTS. `_validate_query` keeps a qrel only when graph-off MISSES and
-graph-on HITS. If the generator writes questions semantic search already answers,
-that criterion is capped no matter which edges you feed it — and the cap is a
-property of the GENERATOR, not of the edge family. Attributing a low yield to
-cosine edges, or to co-occurrence edges, without this number has produced two
-wrong verdicts already (decisions 7b29cf7f, 004641d7).
+  * half 1 fails — the generator writes questions retrieval already answers.
+    A property of the GENERATOR; no edge family can beat it. Workaround:
+    `generate_graph_qrels --no-reachability-gate`.
+  * half 2 fails — graph expansion cannot reach the target. A property of the
+    GRAPH, i.e. the thing under test. NOT a harness problem, and emphatically
+    not something to work around.
 
-Measured 2026-08-24 on `nous_prod_20260801`: 55/58 (94.8%) in vector top-50, at
-median rank 2, 52/58 in the top 10 => graph-only ceiling ~5%.
+Attributing a yield to the wrong half has produced wrong verdicts twice
+(decisions 7b29cf7f, 004641d7) — and a third time from this very script, see
+below.
+
+MEASURED 2026-08-24, `nous_prod_20260801`, n=58 generated from 60 edges:
+
+    half 1  graph-OFF hits top-10 : 25/58 (43.1%)  => ceiling 56.9%
+    half 2  graph-ON  hits top-10 : 25/58 (43.1%)
+    KEPT (off miss AND on hit)    : 0/58  (0.0%)
+    [diagnostic] raw vector top-50: 58/58, median rank 3
+
+The two halves are IDENTICAL — 2/2, 8/8, 13/13, 15/15, 21/21, 25/25 at every
+checkpoint. Graph expansion changed top-10 membership for the target in ZERO of
+58 cases, on the most favourable ground available: every target is the endpoint
+of the very edge its query was written from. That is why the mine yields 0, and
+it is a measurement about the graph, not a bug.
+
+CORRECTION. An earlier revision of this script derived the ceiling from a raw
+vector top-50 union query and reported ~5%, concluding the generator was the
+blocker. That was wrong by ~11x (real: 56.9%), because the gate runs
+`run_recall_pipeline` at top-10 — a target at raw vector rank 11-50 misses the
+gate and still yields a qrel. Found by codex, not by me. The measurement now
+runs the validator's own call.
 
     python scripts/diag/qrel_generator_baseline.py \
-        --db nous_prod_20260801 --agent nous-default -n 60
+        --db nous_prod_20260801 --agent nous-default -n 60 --allow-inferred
 
 Reuses the miner's own `fetch_edge_candidates` / `generate_query`, so this
 measures the real generator rather than an approximation of it.
@@ -33,9 +54,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from sqlalchemy import text  # noqa: E402
 
 from nous.api.anthropic_client import create_client  # noqa: E402
+from nous.api.retrieval_pipeline import run_recall_pipeline  # noqa: E402
+from nous.brain.brain import Brain  # noqa: E402
 from nous.brain.embeddings import EmbeddingProvider  # noqa: E402
-from nous.config import Settings  # noqa: E402
+from nous.heart.heart import Heart  # noqa: E402
 from nous.storage.database import Database  # noqa: E402
+from nous_eval.env_pin import pinned_settings  # noqa: E402
 from nous_eval.generate_graph_qrels import (  # noqa: E402
     fetch_edge_candidates,
     generate_query,
@@ -56,15 +80,39 @@ _NODE_UNION = """
 
 
 async def run(args) -> int:
-    s = Settings().model_copy(update={
-        "db_host": args.host, "db_port": args.port, "db_name": args.db,
-        "db_user": args.user, "db_password": os.environ["EVAL_DB_PASSWORD"],
-        "agent_id": args.agent,
-    })
+    # Pinned: no .env, no NOUS_*/DB_* process env. A ceiling that moves with the
+    # launch directory is not a ceiling. See nous_eval.env_pin.
+    s = pinned_settings(
+        db_host=args.host, db_port=args.port, db_name=args.db,
+        db_user=args.user, db_password=os.environ["EVAL_DB_PASSWORD"],
+        agent_id=args.agent,
+        # CREDENTIALS are the deliberate exception to the pin — they are
+        # inputs, not configuration, and hiding them just breaks the run.
+        # `anthropic_auth_token` is NOT optional here: prod authenticates with
+        # a Max-subscription OAT and leaves `ANTHROPIC_API_KEY` unset, so
+        # passing only the api_key made every generate_query raise (observed
+        # 2026-08-24 — 60/60 RuntimeError on the first pinned run).
+        openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
+        anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
+        anthropic_auth_token=os.environ.get("ANTHROPIC_AUTH_TOKEN", ""),
+        event_bus_enabled=False, fact_extraction_enabled=False,
+        episode_summary_enabled=False, sleep_enabled=False,
+        heartbeat_enabled=False, schedule_enabled=False,
+        subtask_enabled=False, dag_enabled=False,
+        actionability_backfill_on_startup=False,
+    )
+    # BOTH halves of `_validate_query`, reproduced exactly. Measuring only the
+    # graph-off half attributes the whole yield to the generator, which is how
+    # a 5.2% "ceiling" got published; the mine keeps a row only when graph-off
+    # MISSES *and* graph-on HITS, so both must be observed to explain a yield.
+    s_off = s.model_copy(update={"graph_recall_enabled": False})
+    s_on = s.model_copy(update={"graph_recall_enabled": True})
     db = Database(settings=s)
     await db.connect()
     emb = EmbeddingProvider(api_key=s.openai_api_key,
                             model=args.embed_model, dimensions=1536)
+    heart = Heart(database=db, settings=s, embedding_provider=emb)
+    brain = Brain(database=db, settings=s, embedding_provider=emb)
     client = create_client(s)
     await client.start()
     try:
@@ -83,54 +131,98 @@ async def run(args) -> int:
                   "FROM brain.graph_edges WHERE agent_id=... GROUP BY 1,2;")
             return 2
 
-        generated = declined = in_topk = 0
-        ranks: list[int] = []
+        generated = declined = gate_excluded = 0
+        on_hits = kept = vec_found = 0
+        vec_ranks: list[int] = []
         for i, c in enumerate(cands, 1):
             try:
                 gen = await generate_query(c, client, args.model)
             except Exception as exc:
-                print(f"  [{i}] generator error: {type(exc).__name__}")
+                # Print the MESSAGE, not just the class. A bare "RuntimeError"
+                # 60 times says nothing about whether the corpus, the model or
+                # the credentials are at fault — it cost a full run to find out.
+                print(f"  [{i}] generator error: {type(exc).__name__}: "
+                      f"{str(exc)[:120]}")
                 continue
             if gen is None:
                 declined += 1
                 continue
             generated += 1
+
+            # THE GATE, both halves.
+            try:
+                off_results, _ = await run_recall_pipeline(
+                    gen[0], heart, brain, s_off, limit=args.top_k,
+                    rerank_by_score=True)
+                on_results, _ = await run_recall_pipeline(
+                    gen[0], heart, brain, s_on, limit=args.top_k,
+                    rerank_by_score=True)
+            except Exception as exc:
+                print(f"  [{i}] pipeline error: {type(exc).__name__}: "
+                      f"{str(exc)[:120]}")
+                generated -= 1
+                continue
+            tgt = str(c.target_id)
+            off_hit = tgt in [str(r.id) for r in off_results[:args.top_k]]
+            on_hit = tgt in [str(r.id) for r in on_results[:args.top_k]]
+            if off_hit:
+                gate_excluded += 1
+            if on_hit:
+                on_hits += 1
+            if not off_hit and on_hit:
+                kept += 1
+
+            # Secondary diagnostic ONLY. Raw vector findability describes how
+            # semantically easy the generator's questions are; it is NOT the
+            # gate and no ceiling is derived from it.
             vec = await emb.embed(gen[0])
             async with db.session() as sess:
                 rows = await sess.execute(text(_NODE_UNION),
                                           {"a": s.agent_id, "v": str(vec),
-                                           "k": args.top_k})
-                ids = [str(r.id) for r in rows.all()]
-            rank = next((j + 1 for j, rid in enumerate(ids)
-                         if rid == str(c.target_id)), None)
-            if rank is not None:
-                in_topk += 1
-                ranks.append(rank)
+                                           "k": args.vector_k})
+                vids = [str(r.id) for r in rows.all()]
+            vrank = next((j + 1 for j, rid in enumerate(vids)
+                          if rid == str(c.target_id)), None)
+            if vrank is not None:
+                vec_found += 1
+                vec_ranks.append(vrank)
             if i % 10 == 0:
                 print(f"  [{i}/{len(cands)}] generated={generated} "
-                      f"in_top{args.top_k}={in_topk}")
+                      f"off_hit={gate_excluded} on_hit={on_hits} kept={kept}")
 
-        print("\n" + "=" * 60)
-        print(f"queries generated          : {generated}  (declined {declined})")
+        print("\n" + "=" * 68)
+        print(f"queries generated            : {generated}  (declined {declined})")
         if not generated:
             print("no queries generated — nothing to report")
             return 2
-        pct = 100.0 * in_topk / generated
-        print(f"target in VECTOR top-{args.top_k}    : {in_topk}/{generated} ({pct:.1f}%)")
-        print(f"  => graph-ONLY ceiling    : {100 - pct:.1f}%")
-        if ranks:
-            ranks.sort()
-            print(f"  median rank when found   : {ranks[len(ranks) // 2]}")
-            print(f"  in top-10                : {sum(1 for r in ranks if r <= 10)}"
-                  f"/{generated}")
-        print("=" * 60)
-        print("A high number here means the graph-only criterion is capped for "
-              "EVERY edge family. Do not tune edge selection against it; use\n"
-              "`generate_graph_qrels --no-reachability-gate` instead, and pair\n"
-              "the resulting set with a positive control (arm_separation.py).")
+        off_pct = 100.0 * gate_excluded / generated
+        on_pct = 100.0 * on_hits / generated
+        print(f"\nGATE, half 1 — graph-OFF finds target in top-{args.top_k}:")
+        print(f"    {gate_excluded}/{generated} ({off_pct:.1f}%) excluded  "
+              f"=> ceiling {100 - off_pct:.1f}%")
+        print(f"GATE, half 2 — graph-ON finds target in top-{args.top_k}:")
+        print(f"    {on_hits}/{generated} ({on_pct:.1f}%)")
+        print(f"\nKEPT (off MISS and on HIT)   : {kept}/{generated} "
+              f"({100.0 * kept / generated:.1f}%)")
+        vpct = 100.0 * vec_found / generated
+        print(f"\n[diagnostic, NOT the gate] target in raw vector top-"
+              f"{args.vector_k}: {vec_found}/{generated} ({vpct:.1f}%)"
+              + (f", median rank {sorted(vec_ranks)[len(vec_ranks) // 2]}"
+                 if vec_ranks else ""))
+        print("=" * 68)
+        print("READ THE TWO HALVES SEPARATELY — that is the point of this probe.\n"
+              "A low KEPT with a HIGH ceiling is not generator bias; it means\n"
+              "graph expansion cannot reach the target, which is a finding about\n"
+              "the GRAPH, not about the mine. Only a low ceiling indicts the\n"
+              "generator, and then `--no-reachability-gate` is the workaround.\n\n"
+              "Measure the ceiling through run_recall_pipeline at the validator's\n"
+              "top_k, never a raw vector top-50: a target at raw rank 11-50 still\n"
+              "misses the pipeline top-10 and still yields a qrel. That error\n"
+              "understated the ceiling by ~11x here (codex P1).")
         return 0
     finally:
         await client.close()
+        await brain.close()
         await db.disconnect()
 
 
@@ -142,7 +234,12 @@ def main() -> int:
     p.add_argument("--port", type=int, default=5433)
     p.add_argument("--user", default="nous")
     p.add_argument("-n", type=int, default=60, help="edges to sample")
-    p.add_argument("--top-k", type=int, default=50)
+    # Defaults to the validator's own limit — the gate is measured at the same
+    # top_k `generate_graph_qrels` validates at, or the number means nothing.
+    p.add_argument("--top-k", type=int, default=10,
+                   help="pipeline top-K for the gate (match the miner's --limit)")
+    p.add_argument("--vector-k", type=int, default=50,
+                   help="raw-vector K for the secondary diagnostic only")
     p.add_argument("--min-weight", type=float, default=0.7)
     p.add_argument("--allow-inferred", action="store_true",
                    help="Required on corpora whose decision-targeting edges are "

@@ -133,3 +133,55 @@ shipping one would manufacture nulls for every phase that follows.
 | P2 labelling drifts self-referential under time pressure | Gold search is corpus-wide by construction; a candidate-only shortcut is the `ac40336b` failure and must fail review. |
 | 92 queries is thin | It grows daily, and P2 only runs if P1's control fails. Report `n` with every result. |
 | Reproducing 88% is taken as vindicating the miner | It is not — it caps the graph-ONLY criterion, which P1 abandons anyway. |
+
+---
+
+## 7. Outcome (2026-08-24) — claim B is FALSE, and the blocker was misattributed
+
+**Claim B does not reproduce, and the first attempt to test it was measured wrong.**
+
+P0's first revision derived the ceiling from a raw vector top-50 union query and
+reported ~5%, apparently confirming B emphatically. That was wrong by ~11×. The
+gate runs `run_recall_pipeline` at **top-10**, so a target at raw vector rank
+11–50 misses the gate and still yields a qrel — the two populations are not the
+same and one is not a proxy for the other. Found by codex on PR #607, not by me,
+after the number had already been written into three files and a decision record.
+
+Re-measured through the validator's own call, `n=58` from 60 edges on
+`nous_prod_20260801`:
+
+| gate half | result |
+|---|---|
+| 1 — graph-OFF hits top-10 | 25/58 (43.1%) → **ceiling 56.9%** |
+| 2 — graph-ON hits top-10 | 25/58 (43.1%) |
+| **kept** (off miss ∧ on hit) | **0/58** |
+| *diagnostic* — raw vector top-50 | 58/58, median rank 3 |
+
+So the generator was never the constraint: a 56.9% ceiling is ample. The mine
+yields zero because **half 2 never fires**. graph-ON and graph-OFF hit the *same*
+25 queries — identical at every checkpoint (2/2, 8/8, 13/13, 15/15, 21/21,
+25/25). Graph expansion changed top-10 membership in **zero of 58** cases, on the
+most favourable ground obtainable: every target is the endpoint of the very edge
+its query was generated from.
+
+**This reverses where the blame sits.** The 0-yield is not generator bias (B),
+not the unsatisfiable criterion (A, genuinely fixed in #605), and not a harness
+bug — the reading recorded on 2026-07-01. It is a measurement *about the graph*,
+i.e. about the thing under test. It independently replicates the 57/57 arm null
+from P1 without sharing its qrel set, its metric, or its ranking assumptions.
+
+Consequences for the rest of this plan:
+
+- **§2 survives, for a different reason.** `--no-reachability-gate` is still
+  right, but not as a workaround for a biased generator. It is the only way to
+  get a usable set on a corpus where the gate's second half cannot fire.
+- **P2 (real-traffic qrels) is now the priority**, and its motivation is
+  stronger: F091 gold comes from what the agent actually retrieved, so it does
+  not depend on graph expansion working in order to exist.
+- **Do not tune edge selection against the ceiling.** The lever P0 was meant to
+  find does exist (56.9%), but pulling it cannot help while half 2 reads zero.
+- The risk table's last row was the right worry aimed at the wrong claim:
+  reproducing B would not have vindicated the miner — and B did not reproduce.
+
+`scripts/diag/qrel_generator_baseline.py` now reports **both halves separately**,
+because a single-half measurement is exactly what produced this error.
