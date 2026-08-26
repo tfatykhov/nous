@@ -194,6 +194,10 @@ class _EmailDOMWalker(HTMLParser):
       bodies and HTML comments are excluded — comments are never rendered and
       comment-hidden tags like ``<!-- <h1/> -->`` must not satisfy structural
       checks).
+    - content_parts: visible text outside structural chrome (h1 and footer-class
+      elements). Used by ``content_text()`` for the stub-body-with-attachment
+      check so that a verbose h1 title and standard footer cannot substitute for
+      the missing message body (F1, codex P1 on #609).
     - rendered_tags: tag names that appear as start tags in the rendered tree.
       Tags inside comments or _SKIP_TAGS bodies are excluded, so a
       commented-out or ``<template>``-wrapped ``<h1>`` does not count.
@@ -203,7 +207,13 @@ class _EmailDOMWalker(HTMLParser):
       never scanned (fixes the P2 false positive).
     - insecure_hrefs: list of href attribute values starting with ``http://``.
       HTMLParser decodes character references in attributes, so
-      ``href="http&#58;//x"`` arrives already decoded as ``http://x``.
+      ``href="http&#58;//x"`` arrives already decoded as ``http://x``. Leading
+      URL whitespace is stripped before the scheme check so ``href="  http://x"``
+      is caught (F2, codex P2 on #609).
+    - has_footer_element: True when at least one rendered element carries a CSS
+      class of ``footer`` — used to derive footer presence from the parsed DOM
+      instead of the raw source so commented-out footers do not satisfy the
+      check (F3, codex P2 on #609).
     """
 
     def __init__(self) -> None:
@@ -211,9 +221,14 @@ class _EmailDOMWalker(HTMLParser):
         self._skip_depth = 0
         self._skip_tag_stack: list[str] = []
         self.visible_parts: list[str] = []
+        self.content_parts: list[str] = []  # F1: non-chrome visible text
         self.rendered_tags: set[str] = set()
         self.hidden_detected: bool = False
         self.insecure_hrefs: list[str] = []
+        self.has_footer_element: bool = False  # F3: a rendered element has class "footer"
+        self._h1_depth: int = 0               # F1: depth inside <h1> elements
+        self._footer_tag_stack: list[str] = [] # F1: LIFO for footer-class elements
+        self._footer_depth: int = 0            # F1: depth inside footer-class elements
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag_lower = tag.lower()
@@ -246,10 +261,23 @@ class _EmailDOMWalker(HTMLParser):
                 if _CSS_HIDDEN_RE.search(stripped_css):
                     self.hidden_detected = True
 
-            # Insecure http:// href (character refs already decoded by parser).
-            href = attrs_dict.get("href", "")
+            # Insecure http:// href — strip leading URL whitespace before checking
+            # the scheme: browsers normalize leading whitespace in href values before
+            # navigation, so ``href="  http://x"`` reaches the recipient as http:// (F2).
+            href = attrs_dict.get("href", "").lstrip(" \t\n\r\f")
             if href and href.lower().startswith("http://"):
                 self.insecure_hrefs.append(href)
+
+            # F1/F3: track structural chrome — h1 and footer-class elements.
+            # Text inside these is required frame, not the message body, so it
+            # must not count toward the stub-body content threshold (F1).
+            if tag_lower == "h1":
+                self._h1_depth += 1
+            cls = attrs_dict.get("class", "")
+            if "footer" in cls.split():
+                self._footer_tag_stack.append(tag_lower)
+                self._footer_depth += 1
+                self.has_footer_element = True  # F3: footer found in rendered DOM
 
         else:
             # Inside a skip-tag body — only track nested skip tags for correct
@@ -267,10 +295,25 @@ class _EmailDOMWalker(HTMLParser):
         ):
             self._skip_depth -= 1
             self._skip_tag_stack.pop()
+        elif self._skip_depth == 0:
+            # F1: maintain chrome-depth counters for rendered end tags.
+            if tag_lower == "h1" and self._h1_depth > 0:
+                self._h1_depth -= 1
+            if (
+                self._footer_tag_stack
+                and self._footer_tag_stack[-1] == tag_lower
+                and self._footer_depth > 0
+            ):
+                self._footer_tag_stack.pop()
+                self._footer_depth -= 1
 
     def handle_data(self, data: str) -> None:
         if self._skip_depth == 0:
             self.visible_parts.append(data)
+            # F1: accumulate only non-chrome text in content_parts so the
+            # stub-body check can measure the substantive message region.
+            if self._h1_depth == 0 and self._footer_depth == 0:
+                self.content_parts.append(data)
 
     def handle_comment(self, data: str) -> None:
         # Comments are never rendered; drop them entirely.  A body that is
@@ -281,6 +324,10 @@ class _EmailDOMWalker(HTMLParser):
     def visible_text(self) -> str:
         """Whitespace-collapsed visible text (what the recipient reads)."""
         return re.sub(r"\s+", " ", "".join(self.visible_parts)).strip()
+
+    def content_text(self) -> str:
+        """F1: visible text excluding structural chrome (h1 and footer elements)."""
+        return re.sub(r"\s+", " ", "".join(self.content_parts)).strip()
 
 
 def _parse_html_email(html_body: str) -> _EmailDOMWalker:
@@ -361,14 +408,19 @@ def _check_content_completeness(
         walker = _parse_html_email(html_body)
         rendered = walker.visible_text()
 
-    # Stub-body-with-attachment: attachments present but visible text too short.
+    # Stub-body-with-attachment: attachments present but substantive content too short.
+    # For HTML emails, measure content_text() (chrome-excluded) not rendered (full
+    # visible text): a descriptive h1 title and standard footer can push rendered
+    # past the threshold even with an empty content region (F1, codex P1 on #609).
     if attachments:
-        # Plain-text branch gets the same collapse — a body of newlines is not
-        # content either (sibling of the codex html finding).
-        visible = rendered if html_body else re.sub(r"\s+", " ", body).strip()
-        if len(visible) < _STUB_BODY_MIN_CHARS:
+        if html_body and walker is not None:
+            content = walker.content_text()
+        else:
+            # Plain-text: same whitespace-collapse — newlines are not content.
+            content = re.sub(r"\s+", " ", body).strip()
+        if len(content) < _STUB_BODY_MIN_CHARS:
             problems.append(
-                f"attachments present but visible body is only {len(visible)} chars "
+                f"attachments present but visible body is only {len(content)} chars "
                 f"(must be \u2265{_STUB_BODY_MIN_CHARS}) \u2014 this is the documented "
                 "stub-body-with-attachment failure pattern; include the actual content "
                 "in body/html_body rather than a short stub"
@@ -411,11 +463,15 @@ def _check_content_completeness(
                 "canonical table-based email layout was bypassed"
             )
 
-        html_lower = html_body.lower()
-        if "sent by" not in html_lower and "footer" not in html_lower:
+        # Footer check: derive from the parsed rendered tree, not raw source (F3).
+        # ``<!-- Sent by Nous -->`` or ``<!-- footer -->`` satisfies a raw-source
+        # search but renders nothing — recipients see no footer.
+        rendered_lower = rendered.lower()
+        if not walker.has_footer_element and "sent by" not in rendered_lower:
             problems.append(
                 'html_body is missing a footer: '
-                'neither "Sent by" nor "footer" found in html_body'
+                'no rendered element with class "footer" and '
+                '"Sent by" not found in the rendered text'
             )
 
         if walker.insecure_hrefs:
@@ -501,6 +557,27 @@ def _build_message(
     if cc_list:
         msg["Cc"] = ", ".join(cc_list)
     return msg, None
+
+
+def _validate_attachments(settings: Settings, attachments: list[str]) -> str | None:
+    """Stat-only attachment validation: check existence and total size without reading.
+
+    Returns an error string on failure, None on success. Called before the content gate
+    and rate limiter so cheap rejections surface fast and multi-MB file reads are deferred
+    until after all lightweight checks pass (F4, codex P2 on #609).
+    """
+    cap = settings.email_max_attachment_mb * 1024 * 1024
+    total = 0
+    for path in attachments:
+        if not os.path.isfile(path):
+            return f"attachment not found or not a regular file: {path}"
+        try:
+            total += os.path.getsize(path)
+        except OSError:
+            return f"attachment unreadable: {path}"
+        if total > cap:
+            return f"attachments exceed the {settings.email_max_attachment_mb}MB total limit"
+    return None
 
 
 def _send_email_sync(
@@ -605,16 +682,14 @@ def create_send_email_tool(settings: Settings):
         # the same list without computing it twice.
         attach_list = _normalize_paths(attachments)
 
-        # 4. Build the message first — this validates attachments (existence,
-        # size, readability) before the content gate runs. Without this ordering
-        # a missing attachment combined with a short body would surface the
-        # content-gate error ("pad your content") instead of the real problem.
-        msg, build_err = _build_message(
-            settings, subject, body, settings.email or settings.email_user,
-            to_list, cc_list, attach_list, html_body=html_body or None,
-        )
-        if build_err:
-            return _error(build_err)
+        # 4. Lightweight attachment validation (stat-only: existence + total size, no
+        # file reads). Surfaces attachment-not-found before the content gate so the
+        # real problem is reported; file contents are deferred until after all cheap
+        # rejections pass (F4, codex P2 on #609).
+        if attach_list:
+            attach_err = _validate_attachments(settings, attach_list)
+            if attach_err:
+                return _error(attach_err)
         all_recipients = to_list + cc_list
 
         # 5. Content-completeness gate — runs BEFORE the rate limiter so a refused
@@ -649,10 +724,20 @@ def create_send_email_tool(settings: Settings):
                 "try again later."
             )
 
+        # 7. Build the MIME message (reads attachment file contents) — deferred until
+        # after the content gate and rate limiter so a cheap rejection never blocks on
+        # multi-MB attachment reads (F4, codex P2 on #609).
+        msg, build_err = _build_message(
+            settings, subject, body, settings.email or settings.email_user,
+            to_list, cc_list, attach_list, html_body=html_body or None,
+        )
+        if build_err:
+            return _error(build_err)
+
         try:
             await asyncio.to_thread(_send_email_sync, settings, all_recipients, msg)
         except Exception as e:  # noqa: BLE001 — sanitize: never leak smtplib/creds detail
-            # 6. Sanitize exceptions: log full server-side, return generic to the model.
+            # Sanitize exceptions: log full server-side, return generic to the model.
             logger.error(
                 "send_email failed (to=%s): %s: %s",
                 to_list,

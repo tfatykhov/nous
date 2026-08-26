@@ -1105,3 +1105,121 @@ def test_malformed_html_does_not_raise_in_content_gate(no_real_send):
         assert "content" in _text(resp).lower() or "Error" in _text(resp)
     except Exception as exc:
         pytest.fail(f"content gate raised on malformed HTML: {exc}")
+
+# ---------------------------------------------------------------------------
+# Regression tests for codex review findings on commit 9d96157 (PR #609)
+# ---------------------------------------------------------------------------
+
+def test_chrome_inflated_stub_body_with_attachment_refused(no_real_send, tmp_path):
+    """F1: verbose h1 + footer chrome must not substitute for content.
+
+    A descriptive h1 title (66 chars) + standard footer (76 chars) = 142 rendered
+    chars — enough to exceed the 120-char stub threshold when chrome is naively
+    counted toward it.  The fix measures the content region (excluding chrome).
+    """
+    f = tmp_path / "report.pdf"
+    f.write_bytes(b"%PDF-1.4 fake")
+    h1_text = "Q3 2026 Monthly Financial Performance and Analytics Summary Report"
+    footer_text = (
+        "Sent by Nous Cognitive Engine · Company Name Inc "
+        "· Unsubscribe · View Online"
+    )
+    # Sanity: chrome alone exceeds the stub threshold.
+    assert len(h1_text) + len(footer_text) > 120
+    long_style = (
+        "padding:12px 16px;font-family:Helvetica,Arial,sans-serif;"
+        "font-size:15px;color:#111827;line-height:1.6;"
+        "border-bottom:1px solid #e5e7eb;"
+    )
+    # Shell with verbose chrome but an EMPTY content cell.
+    shell = (
+        '<html><body style="margin:0;background-color:#f4f4f7;">'
+        f'<h1 style="color:#111;margin:0 0 16px;font-size:22px;">{h1_text}</h1>'
+        '<table role="presentation" cellpadding="0" cellspacing="0" '
+        'style="width:100%;max-width:640px;border-collapse:collapse;background:#ffffff;">'
+        f'<tr><td style="{long_style}"></td></tr></table>'
+        f'<div class="footer" style="font-size:12px;color:#6b7280;">{footer_text}</div>'
+        '</body></html>'
+    )
+    assert len(shell) >= 600  # raw-length floor must be cleared
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="Q3 Report", body="see attached",
+             html_body=shell, attachments=str(f))
+    )
+    assert "visible body" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_whitespace_prefixed_insecure_href_detected(no_real_send):
+    """F2: leading whitespace in an href value does not bypass the http:// check.
+
+    Browsers strip leading whitespace from href values before navigating;
+    the old startswith() check on the raw value let '  http://evil' through.
+    """
+    doc = _shell("Real content. " * 30 + '<a href="  http://evil.example.com">click</a>')
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="hi", body="plain body", html_body=doc)
+    )
+    assert "insecure" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_footer_in_html_comment_not_accepted(no_real_send):
+    """F3: 'footer'/'Sent by' inside an HTML comment must not satisfy the footer check.
+
+    The old check searched raw HTML source, so a commented-out footer bypassed it.
+    The DOM-derived check uses parsed rendered elements only — comments are dropped.
+    """
+    html_comment_footer = _GOOD_HTML.replace(
+        '<div class="footer">Sent by Nous · <a href="https://example.com">unsubscribe</a></div>',
+        "<!-- Sent by Nous footer --><p>End of message.</p>",
+    )
+    # The raw source still contains "footer" and "sent by" (in the comment) —
+    # the old raw-search check would have passed this.
+    assert "footer" in html_comment_footer.lower()
+    assert "sent by" in html_comment_footer.lower()
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="hi", body="plain", html_body=html_comment_footer)
+    )
+    assert "footer" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_mime_construction_deferred_past_rate_limit(no_real_send, tmp_path, monkeypatch):
+    """F4: _build_message is not called when the rate limit is already exhausted.
+
+    Previously _build_message (which reads all attachment bytes) ran before the rate
+    limiter, so an exhausted rate limit still triggered multi-MB file reads.  Now MIME
+    construction is deferred until both the content gate and rate limiter pass.
+    """
+    from nous.api.email_tools import _build_message as _real_build
+
+    build_calls: list[bool] = []
+
+    def tracking_build(*args, **kwargs):
+        build_calls.append(True)
+        return _real_build(*args, **kwargs)
+
+    monkeypatch.setattr("nous.api.email_tools._build_message", tracking_build)
+
+    f = tmp_path / "data.bin"
+    f.write_bytes(b"x" * 65536)  # 64 KB — non-trivial if read unnecessarily
+    long_body = "Real content. " * 20
+
+    tool = create_send_email_tool(_make_settings(email_max_per_hour=1))
+
+    async def run():
+        r1 = await tool(to="tim@example.com", subject="hi", body=long_body)
+        build_calls.clear()  # discard the legitimate first build
+        r2 = await tool(
+            to="tim@example.com", subject="hi", body=long_body, attachments=str(f)
+        )
+        return r1, r2
+
+    r1, r2 = asyncio.run(run())
+    assert "Email sent" in _text(r1)
+    assert "rate limit" in _text(r2).lower()
+    assert not build_calls, "_build_message was called despite rate limit being exhausted"
