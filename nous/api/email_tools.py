@@ -190,6 +190,13 @@ _HTML_HIDDEN_RE = re.compile(
     r"|opacity\s*:\s*0(?!\.\d*[1-9]))",
     re.IGNORECASE,
 )
+# The HTML ``hidden`` boolean attribute does the same job without any CSS, e.g.
+# ``<div hidden>...</div>`` (codex P1 on b2bcee2). Requiring whitespace before
+# and a tag/attribute boundary after keeps ``data-hidden`` and ``class="x hidden"``
+# from matching; a class named exactly ``hidden`` is display:none anyway.
+# ``=`` is included in the boundary because ``<span hidden="">`` is valid HTML —
+# a boolean attribute is true whenever present, whatever its value.
+_HTML_HIDDEN_ATTR_RE = re.compile(r"<[a-zA-Z][^>]*\shidden(?=[\s>=])")
 
 # Minimum visible-text length when attachments are present (stub-body guard).
 # Applied to WHITESPACE-COLLAPSED rendered text, not raw markup: a pretty-printed
@@ -273,10 +280,11 @@ def _check_content_completeness(
                 "the message is empty; put the actual content inside the template"
             )
 
-        if _HTML_HIDDEN_RE.search(html_body):
+        if _HTML_HIDDEN_RE.search(html_body) or _HTML_HIDDEN_ATTR_RE.search(html_body):
             problems.append(
                 "hidden content detected (display:none / visibility:hidden / "
-                "zero font-size or opacity) — hidden text is invisible to the "
+                "zero font-size or opacity / the hidden attribute) — "
+                "hidden text is invisible to the "
                 "recipient and cannot substitute for message content"
             )
 
@@ -301,7 +309,11 @@ def _check_content_completeness(
                 'neither "Sent by" nor "footer" found in html_body'
             )
 
-        if _HTML_INSECURE_HREF_RE.search(html_body):
+        # Clients resolve ``href="http&#58;//x"`` as http://, so the raw source
+        # view alone misses it — scan the decoded view too (#484 precedent).
+        if _HTML_INSECURE_HREF_RE.search(html_body) or _HTML_INSECURE_HREF_RE.search(
+            html.unescape(html_body)
+        ):
             problems.append(
                 "insecure http:// link in an href attribute — use https:// only"
             )

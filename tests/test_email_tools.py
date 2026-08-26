@@ -900,3 +900,42 @@ def test_near_zero_css_values_are_not_treated_as_hidden(no_real_send, style):
     )
     assert "Email sent" in _text(resp)
     assert len(no_real_send) == 1
+
+
+# --- Codex re-review of b2bcee2 ---
+
+@pytest.mark.parametrize("node", ["<div hidden>{pad}</div>", '<span hidden="">{pad}</span>'])
+def test_hidden_attribute_content_refused(no_real_send, node):
+    """P1: the HTML `hidden` boolean attribute hides content with no CSS at all."""
+    pad = "Padding the recipient never sees. " * 4
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="Q3", body="Q3",
+             html_body=_shell(node.format(pad=pad)))
+    )
+    assert "hidden content" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_data_hidden_attribute_is_not_hidden_content(no_real_send):
+    """False-positive guard: `data-hidden` hides nothing."""
+    doc = _shell('<div data-hidden="1">Fully visible content. </div>' + "Real content. " * 12)
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="Status", body="Status", html_body=doc)
+    )
+    assert "Email sent" in _text(resp)
+    assert len(no_real_send) == 1
+
+
+@pytest.mark.parametrize("enc", ["http&#58;//evil.example.com", "http&#x3A;//evil.example.com"])
+def test_entity_encoded_insecure_href_detected(no_real_send, enc):
+    """P2: clients resolve `href="http&#58;//x"` as http://, so the raw-source
+    regex alone missed it — the decoded view is scanned too (#484 precedent)."""
+    doc = _shell("Real content. " * 12 + f'<a href="{enc}">x</a>')
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="hi", body="plain body", html_body=doc)
+    )
+    assert "insecure" in _text(resp).lower()
+    assert len(no_real_send) == 0
