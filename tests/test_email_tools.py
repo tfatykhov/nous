@@ -983,3 +983,125 @@ def test_scriptural_prose_is_not_stripped_as_a_script_tag(no_real_send):
     )
     assert "Email sent" in _text(resp)
     assert len(no_real_send) == 1
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for DOM-parser refactor (codex P1/P2 on this PR)
+# ---------------------------------------------------------------------------
+
+def test_comment_hidden_h1_and_table_refused(no_real_send):
+    """P1: structural tags inside HTML comments render nothing — must be refused.
+
+    The old regex matched ``<!-- <h1></h1><table></table> -->`` as if the tags
+    were real.  The DOM parser drops comments before tracking rendered_tags.
+    """
+    # Body >= 600 chars (raw-length gate) + >= 80 chars visible prose (content
+    # gate), but ALL h1/table are inside a comment.
+    visible_prose = "This is real visible prose content for the recipient. " * 3
+    doc = (
+        "<html><body>"
+        "<!-- <h1>Title hidden in comment</h1>"
+        "<table><tr><td>Table hidden in comment</td></tr></table> -->"
+        f"<p>{visible_prose}</p>"
+        '<div class="footer">Sent by Nous</div>'
+        "</body></html>"
+        + "<!-- padding " + "x" * 700 + " -->"
+    )
+    assert len(doc) >= 600
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="hi", body="plain", html_body=doc)
+    )
+    text = _text(resp)
+    assert "h1" in text.lower() or "table" in text.lower(), (
+        "expected h1/table missing error but got: " + text
+    )
+    assert len(no_real_send) == 0
+
+
+def test_prose_mentioning_display_none_is_allowed(no_real_send):
+    """P2 false-positive fix: visible prose mentioning display:none must NOT refuse.
+
+    The old regex scanned raw source, so an email *explaining* the gate
+    (e.g. a status report about display:none checks) was refused in strict mode.
+    The DOM parser checks only style ATTRIBUTE VALUES, not text nodes.
+    """
+    doc = _shell(
+        "The content gate checks element style attributes for display:none and "
+        "visibility:hidden declarations to prevent invisible padding. "
+        "It also detects opacity:0 and font-size:0 as hidden-content markers. "
+        "These checks are scoped to CSS attribute values only, not body text. "
+        + "More real content. " * 8
+    )
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="Gate status", body="Status update.", html_body=doc)
+    )
+    assert "Email sent" in _text(resp), "prose mentioning display:none was wrongly refused"
+    assert len(no_real_send) == 1
+
+
+@pytest.mark.parametrize("style", [
+    "display:none",
+    "display/**/:none",
+    "display: none",
+])
+def test_style_attr_hidden_css_refused(no_real_send, style):
+    """P2 regression guard: CSS hiding in a style *attribute* still refused.
+
+    Also covers the CSS-comment bypass (display/**/:none) which the DOM parser
+    strips before checking.
+    """
+    pad = "Content the recipient never sees. " * 4
+    doc = _shell(f'<div style="{style}">{pad}</div>')
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="Q3", body="Q3", html_body=doc)
+    )
+    assert "hidden content" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_attachment_error_surfaces_before_content_gate(no_real_send, tmp_path):
+    """P2 ordering fix: a missing attachment error must precede the content gate.
+
+    Previously _build_message ran AFTER the content gate, so a missing/oversized
+    attachment combined with a short body surfaced the content-gate error
+    ("pad your content") instead of the real problem.
+    """
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(
+            to="tim@example.com",
+            subject="report",
+            body="Short.",
+            attachments=str(tmp_path / "nonexistent_file_xyz.pdf"),
+        )
+    )
+    text = _text(resp)
+    assert "not found" in text.lower(), (
+        "expected attachment-not-found error but got: " + text
+    )
+    # Must NOT surface the content-gate short-body problem instead.
+    assert "visible body" not in text.lower()
+    assert len(no_real_send) == 0
+
+
+def test_malformed_html_does_not_raise_in_content_gate(no_real_send):
+    """Parse failure policy: malformed HTML must not raise; gate stays lenient.
+
+    HTMLParser is generally robust, but truly broken input (e.g. bare angle
+    brackets with no matching close) should never propagate an exception out
+    to the async send handler.  The documented policy is partial-parse + leniency.
+    """
+    malformed = "<<<<" + "x>" * 50 + "<not-a-tag attr='>"
+    tool = create_send_email_tool(_make_settings())
+    # Should not raise — any response (Error or Email sent) is acceptable.
+    try:
+        resp = asyncio.run(
+            tool(to="tim@example.com", subject="hi", body="plain", html_body=malformed)
+        )
+        # Got a response — no exception propagated.
+        assert "content" in _text(resp).lower() or "Error" in _text(resp)
+    except Exception as exc:
+        pytest.fail(f"content gate raised on malformed HTML: {exc}")
