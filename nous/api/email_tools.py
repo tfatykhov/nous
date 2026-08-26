@@ -141,6 +141,132 @@ def _html_to_text(s: str) -> str:
     return html.unescape(_strip_tags(s))
 
 
+# ---------------------------------------------------------------------------
+# Content-completeness gate helpers
+# ---------------------------------------------------------------------------
+
+# Placeholder / stub markers: (label, pattern) pairs.
+# Applied to subject, body, and raw html_body.
+# TBD / XXX are case-sensitive acronyms to avoid false positives like "tbdx"
+# or "xxxl"; all others are case-insensitive.
+_PLACEHOLDER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("PLACEHOLDER", re.compile(r"\bPLACEHOLDER\b", re.IGNORECASE)),
+    ("TODO:", re.compile(r"\bTODO\s*:", re.IGNORECASE)),
+    ("TBD", re.compile(r"\bTBD\b")),
+    ("lorem ipsum", re.compile(r"\blorem\s+ipsum\b", re.IGNORECASE)),
+    ("{{...}} template braces", re.compile(r"\{\{")),
+    ("<insert", re.compile(r"<insert\s", re.IGNORECASE)),
+    ("XXX", re.compile(r"\bXXX\b")),
+    ("FIXME", re.compile(r"\bFIXME\b", re.IGNORECASE)),
+    ("see attached rendering", re.compile(r"\bsee\s+attached\s+rendering\b", re.IGNORECASE)),
+    ("see attachment for", re.compile(r"\bsee\s+attachment\s+for\b", re.IGNORECASE)),
+    ("content in the attached", re.compile(r"\bcontent\s+in\s+the\s+attached\b", re.IGNORECASE)),
+)
+
+# HTML-only structural check patterns
+_HTML_STYLE_TAG_RE = re.compile(r"<style[\s>]", re.IGNORECASE)
+_HTML_H1_RE = re.compile(r"<h1[\s>]", re.IGNORECASE)
+_HTML_TABLE_RE = re.compile(r"<table[\s>]", re.IGNORECASE)
+_HTML_INSECURE_HREF_RE = re.compile(r'href=["\']http://', re.IGNORECASE)
+_HTML_LEAKED_TAG_RE = re.compile(
+    r'&lt;/?(a|b|strong|em|i|br|p|ul|li|span|div|table)\b', re.IGNORECASE
+)
+_HTML_LEAKED_ENTITY_RE = re.compile(r'&amp;[a-zA-Z]{2,8};')
+
+# Minimum visible-text length when attachments are present (stub-body guard).
+_STUB_BODY_MIN_CHARS = 200
+# Minimum html_body length for a real HTML email.
+_HTML_MIN_CHARS = 600
+
+
+def _check_content_completeness(
+    subject: str, body: str, html_body: str | None, attachments: list[str]
+) -> list[str]:
+    """Return a list of human-readable problems; empty list == send is allowed."""
+    problems: list[str] = []
+
+    # --- Checks for all sends ---
+
+    # Empty/whitespace-only body when no html_body supplied.
+    if not html_body and not body.strip():
+        problems.append("plain-text body is empty or whitespace-only")
+
+    # Placeholder / stub markers in subject, body, or html_body (raw).
+    for field_name, field_value in (
+        ("subject", subject),
+        ("body", body),
+        ("html_body", html_body or ""),
+    ):
+        if not field_value:
+            continue
+        for label, pat in _PLACEHOLDER_PATTERNS:
+            if pat.search(field_value):
+                problems.append(
+                    f"placeholder/stub marker {label!r} detected in {field_name}"
+                )
+                break  # one report per field — first match is enough
+
+    # Stub-body-with-attachment: attachments present but visible text too short.
+    if attachments:
+        visible = _html_to_text(html_body).strip() if html_body else body.strip()
+        if len(visible) < _STUB_BODY_MIN_CHARS:
+            problems.append(
+                f"attachments present but visible body is only {len(visible)} chars "
+                f"(must be ≥{_STUB_BODY_MIN_CHARS}) — this is the documented "
+                "stub-body-with-attachment failure pattern; include the actual content "
+                "in body/html_body rather than a short stub"
+            )
+
+    # --- Checks that apply only when html_body is provided ---
+    if html_body:
+        if len(html_body) < _HTML_MIN_CHARS:
+            problems.append(
+                f"html_body is only {len(html_body)} chars "
+                f"(must be ≥{_HTML_MIN_CHARS}) — likely a placeholder or empty send"
+            )
+
+        if _HTML_STYLE_TAG_RE.search(html_body):
+            problems.append(
+                "<style> block present — Gmail strips <style>; use inline styles only"
+            )
+
+        if not _HTML_H1_RE.search(html_body):
+            problems.append("no <h1> element found in html_body — email header is missing")
+
+        if not _HTML_TABLE_RE.search(html_body):
+            problems.append(
+                "no <table> element found in html_body — "
+                "canonical table-based email layout was bypassed"
+            )
+
+        html_lower = html_body.lower()
+        if "sent by" not in html_lower and "footer" not in html_lower:
+            problems.append(
+                'html_body is missing a footer: '
+                'neither "Sent by" nor "footer" found in html_body'
+            )
+
+        if _HTML_INSECURE_HREF_RE.search(html_body):
+            problems.append(
+                "insecure http:// link in an href attribute — use https:// only"
+            )
+
+        if _HTML_LEAKED_TAG_RE.search(html_body):
+            problems.append(
+                "HTML-escaped markup detected (e.g. &lt;a&gt;) — "
+                "a renderer helper was called with esc=True on HTML content; "
+                "the model sees raw tag text rather than formatted elements"
+            )
+
+        if _HTML_LEAKED_ENTITY_RE.search(html_body):
+            problems.append(
+                "double-encoded HTML entity detected (e.g. &amp;mdash;) — "
+                "renders as literal &mdash; instead of — in the email client"
+            )
+
+    return problems
+
+
 def _normalize_paths(value: Any) -> list[str]:
     """Coerce an attachments field (str or list) into a list of stripped paths."""
     if value is None:
@@ -304,7 +430,33 @@ def create_send_email_tool(settings: Settings):
                 "refusing to send."
             )
 
-        # 4. Rate limit — in-process sliding window over the last hour.
+        # Normalize attachments here so both the content gate and the builder use
+        # the same list without computing it twice.
+        attach_list = _normalize_paths(attachments)
+
+        # 4. Content-completeness gate — runs BEFORE the rate limiter so a refused
+        # send never consumes rate-limit budget. Set email_content_gate="warn" to
+        # log problems without refusing, or "off" to skip entirely. There is no
+        # per-call bypass: the model must not be able to talk its way past the gate.
+        if settings.email_content_gate != "off":
+            problems = _check_content_completeness(
+                subject, body, html_body or None, attach_list
+            )
+            if problems:
+                lines = ["email content failed completeness check:"]
+                for p in problems:
+                    lines.append(f"  • {p}")
+                lines.append(
+                    "Fix every issue listed above and resend. "
+                    "Do not pass placeholder text or a stub body when attachments are present."
+                )
+                gate_msg = "\n".join(lines)
+                if settings.email_content_gate == "warn":
+                    logger.warning("send_email content gate: %s", gate_msg)
+                else:  # "strict"
+                    return _error(gate_msg)
+
+        # 5. Rate limit — in-process sliding window over the last hour.
         now = time.monotonic()
         cutoff = now - 3600.0
         _send_times[:] = [t for t in _send_times if t > cutoff]
@@ -314,8 +466,7 @@ def create_send_email_tool(settings: Settings):
                 "try again later."
             )
 
-        # 5. Build the message (validates attachments) + send (smtplib blocks → worker thread).
-        attach_list = _normalize_paths(attachments)
+        # 6. Build the message (validates attachments) + send (smtplib blocks → worker thread).
         msg, build_err = _build_message(
             settings, subject, body, settings.email or settings.email_user,
             to_list, cc_list, attach_list, html_body=html_body or None,

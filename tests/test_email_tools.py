@@ -26,6 +26,7 @@ def _make_settings(**overrides) -> Settings:
         email_max_per_hour=5,
         email_smtp_host="smtp.example.com",
         email_smtp_port=587,
+        email_content_gate="strict",
     )
     defaults.update(overrides)
     return Settings(**defaults)
@@ -240,7 +241,8 @@ def test_allowlist_file_missing_falls_back_to_env(no_real_send, tmp_path):
 def test_attachment_sends_multipart(no_real_send, tmp_path):
     f = tmp_path / "report.docx"
     f.write_bytes(b"PK\x03\x04 fake docx bytes")
-    tool = create_send_email_tool(_make_settings())
+    # Gate off: this test checks MIME structure, not content completeness.
+    tool = create_send_email_tool(_make_settings(email_content_gate="off"))
     resp = asyncio.run(tool(to="tim@example.com", subject="report", body="see attached", attachments=str(f)))
     assert "Email sent" in _text(resp)
     assert "1 attachment" in _text(resp)
@@ -254,14 +256,16 @@ def test_attachment_sends_multipart(no_real_send, tmp_path):
 def test_attachment_list(no_real_send, tmp_path):
     f1 = tmp_path / "a.pdf"; f1.write_bytes(b"%PDF-1.4 x")
     f2 = tmp_path / "b.csv"; f2.write_text("a,b\n1,2\n")
-    tool = create_send_email_tool(_make_settings())
+    # Gate off: this test checks MIME structure, not content completeness.
+    tool = create_send_email_tool(_make_settings(email_content_gate="off"))
     resp = asyncio.run(tool(to="tim@example.com", subject="s", body="b", attachments=[str(f1), str(f2)]))
     assert "2 attachment" in _text(resp)
     assert len(no_real_send) == 1
 
 
 def test_attachment_missing_rejects_no_send(no_real_send, tmp_path):
-    tool = create_send_email_tool(_make_settings())
+    # Gate off: this test checks attachment-not-found rejection, not content gate.
+    tool = create_send_email_tool(_make_settings(email_content_gate="off"))
     resp = asyncio.run(tool(to="tim@example.com", subject="s", body="b", attachments=str(tmp_path / "nope.docx")))
     assert "not found" in _text(resp).lower()
     assert len(no_real_send) == 0
@@ -269,7 +273,8 @@ def test_attachment_missing_rejects_no_send(no_real_send, tmp_path):
 
 def test_attachment_oversize_rejects_no_send(no_real_send, tmp_path):
     f = tmp_path / "big.bin"; f.write_bytes(b"x" * 10)
-    tool = create_send_email_tool(_make_settings(email_max_attachment_mb=0))  # cap 0 => any file too big
+    # Gate off: this test checks oversize rejection, not content gate.
+    tool = create_send_email_tool(_make_settings(email_max_attachment_mb=0, email_content_gate="off"))
     resp = asyncio.run(tool(to="tim@example.com", subject="s", body="b", attachments=str(f)))
     assert "exceed" in _text(resp).lower()
     assert len(no_real_send) == 0
@@ -300,7 +305,8 @@ def test_html_body_none_plain_text(no_real_send):
 def test_html_body_set_no_attachments(no_real_send):
     """html_body set, no attachments → top-level multipart/alternative with two
     parts: text/plain first, text/html second."""
-    tool = create_send_email_tool(_make_settings())
+    # Gate off: this test checks MIME structure, not content completeness.
+    tool = create_send_email_tool(_make_settings(email_content_gate="off"))
     asyncio.run(
         tool(
             to="tim@example.com",
@@ -323,7 +329,8 @@ def test_html_body_set_with_attachment(no_real_send, tmp_path):
     multipart/alternative, plus the attachment part."""
     f = tmp_path / "report.pdf"
     f.write_bytes(b"%PDF-1.4 fake")
-    tool = create_send_email_tool(_make_settings())
+    # Gate off: this test checks MIME structure, not content completeness.
+    tool = create_send_email_tool(_make_settings(email_content_gate="off"))
     asyncio.run(
         tool(
             to="tim@example.com",
@@ -429,3 +436,298 @@ def test_html_body_attribute_secret_still_rejected(no_real_send):
     )
     assert "secret" in _text(resp).lower()
     assert len(no_real_send) == 0
+
+
+# ---------------------------------------------------------------------------
+# Content-completeness gate tests
+# ---------------------------------------------------------------------------
+
+# A minimal valid HTML email body that passes all structural checks.
+# Must be ≥600 chars so the length gate passes; all structural markers present.
+_GOOD_HTML = (
+    "<html><body>"
+    "<table><tr><td>"
+    "<h1>Monthly Report — Q3 2026</h1>"
+    "<p>Here is a detailed summary of this month's activity covering all the key "
+    "metrics, trends, and observations that you need to review before the next "
+    "board meeting scheduled for early next month. The data has been carefully "
+    "compiled from all available sources and verified for accuracy.</p>"
+    "<p>Key highlights: revenue grew 12% quarter-over-quarter, new user "
+    "registrations are up 8%, and customer satisfaction scores remain at an "
+    "all-time high of 94%. Infrastructure costs decreased by 3% due to "
+    "optimization work completed in July.</p>"
+    "<p>Please let us know if you have any questions or need additional data. "
+    "We are available for a follow-up call at your convenience.</p>"
+    "</td></tr></table>"
+    '<div class="footer">Sent by Nous · <a href="https://example.com">unsubscribe</a></div>'
+    "</body></html>"
+)
+
+
+def _gate_tool(no_real_send, **overrides):
+    """Return a tool pre-wired with a full stub body and strict gate."""
+    defaults = dict(email_content_gate="strict")
+    defaults.update(overrides)
+    return create_send_email_tool(_make_settings(**defaults))
+
+
+# --- Placeholder markers ---
+
+@pytest.mark.parametrize("field,value", [
+    ("subject", "PLACEHOLDER subject"),
+    ("body",    "body with PLACEHOLDER text"),
+    ("subject", "Report TODO: fill this in"),
+    ("body",    "TBD details here"),
+    ("body",    "lorem ipsum dolor sit amet"),
+    ("body",    "Use {{user_name}} here"),
+    ("body",    "Please <insert your content> here."),
+    ("body",    "Review the XXX section"),
+    ("body",    "FIXME: write actual content"),
+    ("body",    "see attached rendering for details"),
+    ("body",    "see attachment for the report"),
+    ("body",    "content in the attached file"),
+])
+def test_placeholder_marker_caught(no_real_send, field, value):
+    """Each placeholder/stub marker class is rejected by the gate."""
+    tool = create_send_email_tool(_make_settings())
+    kwargs = {"to": "tim@example.com", "subject": "hi", "body": "clean body"}
+    kwargs[field] = value
+    resp = asyncio.run(tool(**kwargs))
+    assert "completeness" in _text(resp).lower() or "placeholder" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_no_false_positive_extbd_xxxi(no_real_send):
+    """TBD and XXX must not fire on ordinary substrings ('extbd', 'xxxi')."""
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(
+            to="tim@example.com",
+            subject="Chapter xxxii update",
+            body="The extbd index grew by 3.2 points. The exxtbd metric is stable. "
+                 "Section xxxiv shows improvement across all measured dimensions and "
+                 "we have verified the results carefully.",
+        )
+    )
+    assert "Email sent" in _text(resp)
+    assert len(no_real_send) == 1
+
+
+# --- Stub-body-with-attachment ---
+
+def test_stub_body_with_attachment_caught(no_real_send, tmp_path):
+    """Attachment + visible body < 200 chars is the documented failure shape."""
+    f = tmp_path / "report.pdf"
+    f.write_bytes(b"%PDF-1.4 fake")
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(
+            to="tim@example.com",
+            subject="report",
+            body="Short body.",
+            attachments=str(f),
+        )
+    )
+    assert "stub" in _text(resp).lower() or "200" in _text(resp)
+    assert len(no_real_send) == 0
+
+
+def test_long_body_with_attachment_passes(no_real_send, tmp_path):
+    """A body of ≥200 chars with an attachment is allowed."""
+    f = tmp_path / "report.pdf"
+    f.write_bytes(b"%PDF-1.4 fake")
+    tool = create_send_email_tool(_make_settings())
+    long_body = (
+        "This report covers the quarterly financial results and includes all the "
+        "relevant data and analysis for Q3. Please review the attached PDF for "
+        "the full breakdown with charts, tables, and detailed commentary included "
+        "across multiple sections as described in the executive summary on page 1."
+    )
+    assert len(long_body) >= 200
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="Q3 report", body=long_body, attachments=str(f))
+    )
+    assert "Email sent" in _text(resp)
+    assert len(no_real_send) == 1
+
+
+# --- HTML structural checks ---
+
+def test_html_too_short_caught(no_real_send):
+    """html_body shorter than 600 chars is rejected."""
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(
+            to="tim@example.com",
+            subject="hi",
+            body="plain fallback",
+            html_body="<h1>Short</h1><table><tr><td>x</td></tr></table>"
+                      '<div class="footer">Sent by Nous</div>',
+        )
+    )
+    assert "600" in _text(resp) or "placeholder" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_html_style_block_caught(no_real_send):
+    """<style> block is rejected (Gmail strips it)."""
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="hi", body="plain", html_body=_GOOD_HTML + "<style>body{}</style>")
+    )
+    assert "<style>" in _text(resp) or "style" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_html_missing_h1_caught(no_real_send):
+    """Missing <h1> is caught."""
+    tool = create_send_email_tool(_make_settings())
+    html_no_h1 = _GOOD_HTML.replace("<h1>", "<h2>").replace("</h1>", "</h2>")
+    assert "<h1" not in html_no_h1  # confirm the replacement worked
+    resp = asyncio.run(tool(to="tim@example.com", subject="hi", body="plain", html_body=html_no_h1))
+    assert "h1" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_html_missing_table_caught(no_real_send):
+    """Missing <table> is caught."""
+    tool = create_send_email_tool(_make_settings())
+    html_no_table = _GOOD_HTML.replace("<table>", "<div>").replace("</table>", "</div>").replace(
+        "<tr><td>", "<p>"
+    ).replace("</td></tr>", "</p>")
+    resp = asyncio.run(tool(to="tim@example.com", subject="hi", body="plain", html_body=html_no_table))
+    assert "table" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_html_missing_footer_caught(no_real_send):
+    """Missing footer text is caught."""
+    tool = create_send_email_tool(_make_settings())
+    html_no_footer = _GOOD_HTML.replace(
+        '<div class="footer">Sent by Nous · <a href="https://example.com">unsubscribe</a></div>',
+        "<p>End of message.</p>",
+    )
+    assert "footer" not in html_no_footer and "sent by" not in html_no_footer.lower()
+    resp = asyncio.run(tool(to="tim@example.com", subject="hi", body="plain", html_body=html_no_footer))
+    assert "footer" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_html_insecure_href_caught(no_real_send):
+    """http:// href is rejected."""
+    tool = create_send_email_tool(_make_settings())
+    html_http = _GOOD_HTML.replace('href="https://example.com"', 'href="http://example.com"')
+    resp = asyncio.run(tool(to="tim@example.com", subject="hi", body="plain", html_body=html_http))
+    assert "http://" in _text(resp) or "insecure" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_html_leaked_escaped_tag_caught(no_real_send):
+    """HTML-escaped markup (e.g. &lt;a&gt;) in html_body is caught."""
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(
+            to="tim@example.com",
+            subject="hi",
+            body="plain",
+            html_body=_GOOD_HTML + " &lt;a href='x'&gt;click&lt;/a&gt;",
+        )
+    )
+    assert "escaped" in _text(resp).lower() or "&lt;" in _text(resp)
+    assert len(no_real_send) == 0
+
+
+def test_html_leaked_double_encoded_entity_caught(no_real_send):
+    """Double-encoded entity (e.g. &amp;mdash;) in html_body is caught."""
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(
+            to="tim@example.com",
+            subject="hi",
+            body="plain",
+            html_body=_GOOD_HTML + " This is a good email &amp;mdash; really.",
+        )
+    )
+    assert "entity" in _text(resp).lower() or "&amp;" in _text(resp)
+    assert len(no_real_send) == 0
+
+
+def test_good_html_email_passes(no_real_send):
+    """A well-formed, complete HTML email passes all gate checks."""
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="Monthly Report", body="See HTML version.", html_body=_GOOD_HTML)
+    )
+    assert "Email sent" in _text(resp)
+    assert len(no_real_send) == 1
+
+
+# --- Plain-text (no html_body, no attachments) ---
+
+def test_short_plain_text_no_attachments_passes(no_real_send):
+    """A short plain-text email with no attachments passes (no HTML/stub checks)."""
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="Quick note", body="Your package shipped!")
+    )
+    assert "Email sent" in _text(resp)
+    assert len(no_real_send) == 1
+
+
+def test_empty_body_no_html_caught(no_real_send):
+    """Empty plain-text body with no html_body is rejected."""
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(tool(to="tim@example.com", subject="hi", body="   "))
+    assert "empty" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+# --- Mode: warn ---
+
+def test_gate_warn_logs_but_sends(no_real_send, caplog):
+    """email_content_gate=warn logs a warning but does not block the send."""
+    import logging as _logging
+
+    tool = create_send_email_tool(_make_settings(email_content_gate="warn"))
+    with caplog.at_level(_logging.WARNING, logger="nous.api.email_tools"):
+        resp = asyncio.run(
+            tool(to="tim@example.com", subject="Report TODO: fill in", body="hello")
+        )
+    assert "Email sent" in _text(resp)
+    assert len(no_real_send) == 1
+    assert any("content gate" in r.message.lower() for r in caplog.records)
+
+
+# --- Mode: off ---
+
+def test_gate_off_skips_entirely(no_real_send):
+    """email_content_gate=off lets a clearly stub email through."""
+    tool = create_send_email_tool(_make_settings(email_content_gate="off"))
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="PLACEHOLDER", body="   ")
+    )
+    assert "Email sent" in _text(resp)
+    assert len(no_real_send) == 1
+
+
+# --- Gate runs before rate limiter ---
+
+def test_gate_refused_send_does_not_consume_rate_limit(no_real_send):
+    """A gate-refused send must not increment the rate-limit counter."""
+    # max_per_hour=2: one slot for the valid send, one for a second valid send.
+    tool = create_send_email_tool(_make_settings(email_max_per_hour=2))
+
+    async def run():
+        # Send 1: valid → succeeds (consumes slot 1).
+        r1 = await tool(to="tim@example.com", subject="hi", body="hello")
+        # Send 2: gate refuses (PLACEHOLDER body) → must NOT consume slot 2.
+        r2 = await tool(to="tim@example.com", subject="PLACEHOLDER", body="test")
+        # Send 3: valid → should succeed (slot 2 still available).
+        r3 = await tool(to="tim@example.com", subject="hi", body="hello again")
+        return r1, r2, r3
+
+    r1, r2, r3 = asyncio.run(run())
+    assert "Email sent" in _text(r1)
+    assert "completeness" in _text(r2).lower() or "placeholder" in _text(r2).lower()
+    assert "Email sent" in _text(r3)  # not rate-limited — gate refusal didn't count
+    assert len(no_real_send) == 2  # only the two successful sends touched SMTP
