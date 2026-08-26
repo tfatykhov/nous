@@ -731,3 +731,113 @@ def test_gate_refused_send_does_not_consume_rate_limit(no_real_send):
     assert "completeness" in _text(r2).lower() or "placeholder" in _text(r2).lower()
     assert "Email sent" in _text(r3)  # not rate-limited — gate refusal didn't count
     assert len(no_real_send) == 2  # only the two successful sends touched SMTP
+
+
+# --- Codex #609 review: measure rendered content, not raw markup ---
+
+def _shell(inner: str) -> str:
+    """Canonical-shaped shell: inline-styled like real renderer output (~1.4KB raw)
+    so the raw-length floor is cleared and only the check under test can fire."""
+    td = ('padding:12px 16px;font-family:Helvetica,Arial,sans-serif;font-size:15px;'
+          'color:#111827;line-height:1.6;border-bottom:1px solid #e5e7eb;')
+    return (
+        '<html><body style="margin:0;background-color:#f4f4f7;">'
+        '<h1 style="color:#ffffff;margin:0;font-size:22px;font-weight:600;">Report</h1>'
+        '<table role="presentation" cellpadding="0" cellspacing="0" '
+        'style="width:100%;max-width:640px;border-collapse:collapse;background:#ffffff;">'
+        f'<tr><td style="{td}">{inner}</td></tr></table>'
+        '<div class="footer" style="font-size:12px;color:#6b7280;text-align:center;">'
+        'Sent by Nous \u00b7 cognition-engines.ai</div></body></html>'
+    )
+
+
+def test_whitespace_inflated_body_with_attachment_refused(no_real_send, tmp_path):
+    """P1: pretty-print indentation is not message content (codex, PR #609).
+
+    `.strip()` only trims the ends, so a template whose tags are separated by
+    newlines/indentation previously cleared the attachment threshold with a
+    near-empty message.
+    """
+    f = tmp_path / "report.pdf"
+    f.write_bytes(b"%PDF-1.4 fake")
+    padded = "<html>\n  <body>\n    <h1>Q3</h1>\n    <table>\n" + \
+             "      <tr>\n        <td>\n        </td>\n      </tr>\n" * 20 + \
+             '    </table>\n    <div class="footer">Sent by Nous</div>\n  </body>\n</html>'
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="Q3", body="", html_body=padded, attachments=str(f))
+    )
+    assert "visible body" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_whitespace_only_plain_body_with_attachment_refused(no_real_send, tmp_path):
+    """Sibling of the above on the plain-text branch: newlines are not content."""
+    f = tmp_path / "report.pdf"
+    f.write_bytes(b"%PDF-1.4 fake")
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="report",
+             body="Hi\n" + "\n" * 250 + "\nT", attachments=str(f))
+    )
+    assert "visible body" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_verbose_empty_template_refused(no_real_send):
+    """P1: raw length counts tags + inline styles, so an empty styled template
+    cleared the 600-char floor with zero rendered content (codex, PR #609)."""
+    cell = ('<td style="padding:12px 16px;font-family:Helvetica,Arial,sans-serif;'
+            'font-size:15px;color:#111827;line-height:1.6;border-bottom:1px solid #e5e7eb;"></td>')
+    empty = ('<html><body><h1 style="font-family:Helvetica;font-size:24px;color:#111;'
+             'margin:0 0 16px;"></h1><table role="presentation" cellpadding="0" '
+             f'cellspacing="0" style="width:100%;border-collapse:collapse;">{cell * 3}</table>'
+             '<div class="footer" style="font-size:12px;color:#6b7280;">x</div></body></html>')
+    assert len(empty) > 600  # clears the raw floor — that was the bypass
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="Q3 Report", body="Q3 Report", html_body=empty)
+    )
+    assert "visible text" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+@pytest.mark.parametrize(
+    "anchor",
+    [
+        '<a href = "http://evil.example.com">x</a>',
+        "<a href= 'http://evil.example.com'>x</a>",
+        "<a href =\t'http://evil.example.com'>x</a>",
+        "<a href=http://evil.example.com>x</a>",
+        '<a href="http://evil.example.com">x</a>',
+    ],
+)
+def test_insecure_href_detected_across_attribute_spacing(no_real_send, anchor):
+    """P2: HTML permits whitespace around '=' and unquoted values, so the
+    HTTPS-only rule was trivially evaded (codex, PR #609)."""
+    doc = _shell("Real content. " * 30 + anchor)
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="hi", body="plain body", html_body=doc)
+    )
+    assert "insecure" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_real_short_canonical_email_still_passes(no_real_send):
+    """Guard against over-tightening: a genuine short email must not be refused.
+
+    Canonical renderer output measures ~158-210 chars of rendered text, so the
+    thresholds are calibrated below that floor, not above it.
+    """
+    doc = _shell(
+        "Deploy finished. All 56 tests pass and CI is green on the merge commit. "
+        "No action needed from you; the rollback path is still armed if anything "
+        "regresses overnight."
+    )
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="Deploy status", body="Deploy finished.", html_body=doc)
+    )
+    assert "Email sent" in _text(resp)
+    assert len(no_real_send) == 1

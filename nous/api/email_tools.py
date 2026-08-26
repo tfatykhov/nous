@@ -167,16 +167,36 @@ _PLACEHOLDER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 _HTML_STYLE_TAG_RE = re.compile(r"<style[\s>]", re.IGNORECASE)
 _HTML_H1_RE = re.compile(r"<h1[\s>]", re.IGNORECASE)
 _HTML_TABLE_RE = re.compile(r"<table[\s>]", re.IGNORECASE)
-_HTML_INSECURE_HREF_RE = re.compile(r'href=["\']http://', re.IGNORECASE)
+_HTML_INSECURE_HREF_RE = re.compile(r'href\s*=\s*["\']?\s*http://', re.IGNORECASE)
 _HTML_LEAKED_TAG_RE = re.compile(
     r'&lt;/?(a|b|strong|em|i|br|p|ul|li|span|div|table)\b', re.IGNORECASE
 )
 _HTML_LEAKED_ENTITY_RE = re.compile(r'&amp;[a-zA-Z]{2,8};')
 
 # Minimum visible-text length when attachments are present (stub-body guard).
-_STUB_BODY_MIN_CHARS = 200
-# Minimum html_body length for a real HTML email.
+# Applied to WHITESPACE-COLLAPSED rendered text, not raw markup: a pretty-printed
+# template's indentation is not message content (codex P1 on #609). Calibrated
+# against canonical renderer output — real emails measure 158-210 collapsed chars,
+# an empty styled template measures 0.
+_STUB_BODY_MIN_CHARS = 120
+# Minimum raw html_body length for a real HTML email (structural floor).
 _HTML_MIN_CHARS = 600
+# Minimum RENDERED content length for a real HTML email. The raw floor above
+# counts tags and inline-style attributes, so a verbose empty template clears it
+# with zero content (codex P1 on #609). Set well below the smallest observed
+# canonical email (158) and far above an empty template (0).
+_HTML_MIN_VISIBLE_CHARS = 80
+
+
+def _visible_text(s: str) -> str:
+    """Rendered message text with whitespace runs collapsed to a single space.
+
+    Length checks must measure what the recipient actually reads. Raw length
+    counts markup; ``_html_to_text`` alone still counts a template's newlines
+    and indentation. Collapsing runs leaves normal prose ~unchanged while
+    removing formatting whitespace from the count.
+    """
+    return re.sub(r"\s+", " ", _html_to_text(s)).strip()
 
 
 def _check_content_completeness(
@@ -208,7 +228,9 @@ def _check_content_completeness(
 
     # Stub-body-with-attachment: attachments present but visible text too short.
     if attachments:
-        visible = _html_to_text(html_body).strip() if html_body else body.strip()
+        # Plain-text branch gets the same collapse — a body of newlines is not
+        # content either (sibling of the codex html finding).
+        visible = _visible_text(html_body) if html_body else re.sub(r"\s+", " ", body).strip()
         if len(visible) < _STUB_BODY_MIN_CHARS:
             problems.append(
                 f"attachments present but visible body is only {len(visible)} chars "
@@ -223,6 +245,14 @@ def _check_content_completeness(
             problems.append(
                 f"html_body is only {len(html_body)} chars "
                 f"(must be ≥{_HTML_MIN_CHARS}) — likely a placeholder or empty send"
+            )
+
+        rendered = _visible_text(html_body)
+        if len(rendered) < _HTML_MIN_VISIBLE_CHARS:
+            problems.append(
+                f"html_body renders to only {len(rendered)} chars of visible text "
+                f"(must be \u2265{_HTML_MIN_VISIBLE_CHARS}) \u2014 the markup is present but "
+                "the message is empty; put the actual content inside the template"
             )
 
         if _HTML_STYLE_TAG_RE.search(html_body):
