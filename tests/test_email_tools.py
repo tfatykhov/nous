@@ -881,3 +881,22 @@ def test_inline_hidden_content_refused(no_real_send, style):
     )
     assert "hidden content" in _text(resp).lower()
     assert len(no_real_send) == 0
+
+
+@pytest.mark.parametrize("style", ["opacity:0.9", "opacity: 0.85", "font-size:0.9em"])
+def test_near_zero_css_values_are_not_treated_as_hidden(no_real_send, style):
+    """Guard the hidden-marker regex against its own false-positive shape.
+
+    A bare ``0`` prefix would also match ordinary ``opacity:0.9``, refusing
+    legitimate mail — the failure mode this gate must not have.
+    """
+    doc = _shell(
+        f'<span style="{style}">Real, fully visible content that the recipient '
+        f"reads in the message body.</span> " + "More real content. " * 6
+    )
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="Status", body="Status update", html_body=doc)
+    )
+    assert "Email sent" in _text(resp)
+    assert len(no_real_send) == 1

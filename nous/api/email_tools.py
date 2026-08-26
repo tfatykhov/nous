@@ -182,7 +182,12 @@ _HTML_NON_RENDERED_RE = re.compile(
 # balanced nesting, and an early stop would leave the bypass open) the gate
 # refuses the markers outright.
 _HTML_HIDDEN_RE = re.compile(
-    r"(display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0|opacity\s*:\s*0)",
+    # The zero-value lookaheads matter: a bare ``0`` prefix would also match the
+    # perfectly ordinary ``opacity:0.9`` / ``font-size:0.9em`` and refuse real mail.
+    r"(display\s*:\s*none"
+    r"|visibility\s*:\s*hidden"
+    r"|font-size\s*:\s*0(?![.\d])"
+    r"|opacity\s*:\s*0(?!\.\d*[1-9]))",
     re.IGNORECASE,
 )
 
