@@ -227,8 +227,7 @@ class _EmailDOMWalker(HTMLParser):
         self.insecure_hrefs: list[str] = []
         self.has_footer_element: bool = False  # F3: a rendered element has class "footer"
         self._h1_depth: int = 0               # F1: depth inside <h1> elements
-        self._footer_tag_stack: list[str] = [] # F1: LIFO for footer-class elements
-        self._footer_depth: int = 0            # F1: depth inside footer-class elements
+        self._footer_depth: int = 0  # F1: nesting depth inside footer region (counts ALL elements)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag_lower = tag.lower()
@@ -261,10 +260,12 @@ class _EmailDOMWalker(HTMLParser):
                 if _CSS_HIDDEN_RE.search(stripped_css):
                     self.hidden_detected = True
 
-            # Insecure http:// href — strip leading URL whitespace before checking
-            # the scheme: browsers normalize leading whitespace in href values before
-            # navigation, so ``href="  http://x"`` reaches the recipient as http:// (F2).
-            href = attrs_dict.get("href", "").lstrip(" \t\n\r\f")
+            # Insecure http:// href — apply WHATWG URL normalization before checking
+            # the scheme: strip leading whitespace and remove embedded ASCII
+            # tab/newline/CR/FF characters that browsers strip before following
+            # a link, so ``href="  http://x"`` and ``href="ht&#9;tp://x"``
+            # (decoded to ``ht\ttp://x``) are both caught (F2).
+            href = re.sub(r"[\t\n\r\f]", "", attrs_dict.get("href", "")).lstrip(" ")
             if href and href.lower().startswith("http://"):
                 self.insecure_hrefs.append(href)
 
@@ -273,11 +274,18 @@ class _EmailDOMWalker(HTMLParser):
             # must not count toward the stub-body content threshold (F1).
             if tag_lower == "h1":
                 self._h1_depth += 1
-            cls = attrs_dict.get("class", "")
-            if "footer" in cls.split():
-                self._footer_tag_stack.append(tag_lower)
+            if self._footer_depth > 0:
+                # Inside a footer region: count every element to maintain the
+                # correct nesting depth.  Only decrementing on the tag that
+                # entered the footer would prematurely clear depth when a nested
+                # element shares the same tag name (e.g. inner <div> inside
+                # <div class="footer">) (F1, codex P1 re-review).
                 self._footer_depth += 1
-                self.has_footer_element = True  # F3: footer found in rendered DOM
+            else:
+                cls = attrs_dict.get("class", "")
+                if "footer" in cls.split():
+                    self._footer_depth += 1
+                    self.has_footer_element = True  # F3: footer found in rendered DOM
 
         else:
             # Inside a skip-tag body — only track nested skip tags for correct
@@ -299,12 +307,7 @@ class _EmailDOMWalker(HTMLParser):
             # F1: maintain chrome-depth counters for rendered end tags.
             if tag_lower == "h1" and self._h1_depth > 0:
                 self._h1_depth -= 1
-            if (
-                self._footer_tag_stack
-                and self._footer_tag_stack[-1] == tag_lower
-                and self._footer_depth > 0
-            ):
-                self._footer_tag_stack.pop()
+            if self._footer_depth > 0:
                 self._footer_depth -= 1
 
     def handle_data(self, data: str) -> None:

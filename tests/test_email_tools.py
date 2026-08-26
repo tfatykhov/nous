@@ -1223,3 +1223,75 @@ def test_mime_construction_deferred_past_rate_limit(no_real_send, tmp_path, monk
     assert "Email sent" in _text(r1)
     assert "rate limit" in _text(r2).lower()
     assert not build_calls, "_build_message was called despite rate limit being exhausted"
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for codex re-review findings (PR #609 follow-up)
+# ---------------------------------------------------------------------------
+
+def test_nested_div_inside_footer_not_leaked_to_content(no_real_send, tmp_path):
+    """Finding 1 regression: nested element inside a footer-class div must not
+    prematurely clear _footer_depth and let footer text escape into content_parts.
+
+    Before the fix, <div class="footer"><div>…inner…</div>more footer</div>
+    caused the inner </div> to match the footer root on the _footer_tag_stack and
+    decrement _footer_depth to 0, so "more footer" was added to content_parts and
+    inflated the stub-body check beyond _STUB_BODY_MIN_CHARS.
+    """
+    f = tmp_path / "report.pdf"
+    f.write_bytes(b"%PDF-1.4 fake")
+    # Inner text alone exceeds _STUB_BODY_MIN_CHARS (120). If it leaks out of
+    # the footer region into content_parts, the stub gate will not fire.
+    inner_text = "Inner nested footer text that must stay inside the footer. " * 3  # ~177 chars
+    nested_footer = (
+        '<div class="footer">'
+        f"<div>{inner_text}</div>"
+        "Sent by Nous"
+        "</div>"
+    )
+    assert len(inner_text) > 120  # leaking this would suppress the gate
+
+    doc = (
+        "<html><body>"
+        "<h1>Monthly Report</h1>"
+        "<table><tr><td> </td></tr></table>"
+        + nested_footer
+        # Pad raw length past _HTML_MIN_CHARS=600 using a comment so the text
+        # doesn't land in content_parts (comments are dropped by handle_comment).
+        + f"<!-- pad: {'x' * 700} -->"
+        + "</body></html>"
+    )
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(
+            to="tim@example.com",
+            subject="Report",
+            body="see attached",
+            html_body=doc,
+            attachments=str(f),
+        )
+    )
+    # With the bug: inner_text leaks into content_parts → len > 120 → gate passes
+    # With the fix: content_parts is empty (no real body) → stub gate fires
+    assert "visible body" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_embedded_tab_in_href_scheme_rejected(no_real_send):
+    """Finding 2 regression: `ht&#9;tp://evil.example` decodes via HTMLParser
+    to `ht\\ttp://evil.example`; lstrip alone cannot remove the embedded tab
+    mid-scheme, so the HTTPS gate was bypassed.
+
+    Per the WHATWG URL standard, embedded ASCII tab/LF/CR characters must be
+    stripped throughout the URL value before scheme checking.
+    """
+    # &#9; is TAB (U+0009); HTMLParser with convert_charrefs=True decodes this
+    # to a literal '\t' in the attribute value, not as leading whitespace.
+    href_with_embedded_tab = "ht&#9;tp://evil.example.com"
+    doc = _shell("Real content. " * 12 + f'<a href="{href_with_embedded_tab}">click here</a>')
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="hi", body="plain body", html_body=doc)
+    )
+    assert "insecure" in _text(resp).lower()
+    assert len(no_real_send) == 0
