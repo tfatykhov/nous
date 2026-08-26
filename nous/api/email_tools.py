@@ -174,9 +174,43 @@ _HTML_LEAKED_TAG_RE = re.compile(
 _HTML_LEAKED_ENTITY_RE = re.compile(r'&amp;[a-zA-Z]{2,8};')
 # Non-rendered element bodies: their text is never shown to the recipient, so it
 # must not count toward the content floors (codex P1 on 9d72871).
-_HTML_NON_RENDERED_RE = re.compile(
-    r"<(script|style|head|title)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL
-)
+_NON_RENDERED_TAGS = ("script", "style", "head", "title", "template")
+
+
+def _remove_non_rendered(s: str) -> str:
+    """Drop the bodies of elements whose text is never shown to the recipient.
+
+    One forward pass, no backtracking. The obvious regex
+    (``<(script|...)\b[^>]*>.*?</\1>``) is quadratic on malformed input: each
+    unclosed opener rescans the remaining suffix, and 10k openers in 86KB took
+    10.2s locally — enough to stall the event loop from inside the async send
+    handler, before the message is even rejected (codex P2 on 318bc56).
+    """
+    low, out, i = s.lower(), [], 0
+    while i < len(s):
+        nxt = None
+        for tag in _NON_RENDERED_TAGS:
+            j = low.find("<" + tag, i)
+            # Require a tag-name boundary so <scriptural> is not treated as <script>.
+            while j != -1 and j + 1 + len(tag) < len(low) and low[j + 1 + len(tag)] not in " \t\n\r>/":
+                j = low.find("<" + tag, j + 1)
+            if j != -1 and (nxt is None or j < nxt[0]):
+                nxt = (j, tag)
+        if nxt is None:
+            break
+        j, tag = nxt
+        gt = low.find(">", j)
+        if gt == -1:
+            break
+        close = low.find("</" + tag, gt)
+        end = len(s) if close == -1 else low.find(">", close) + 1
+        if close != -1 and end == 0:
+            end = len(s)
+        out.append(s[i:j])
+        out.append(" ")
+        i = end
+    out.append(s[i:])
+    return "".join(out)
 # Inline-hidden nodes. The canonical renderer never emits hidden content, so
 # rather than parsing the DOM to find each node's extent (regex cannot match
 # balanced nesting, and an early stop would leave the bypass open) the gate
@@ -221,7 +255,7 @@ def _visible_text(s: str) -> str:
     and indentation. Collapsing runs leaves normal prose ~unchanged while
     removing formatting whitespace from the count.
     """
-    return re.sub(r"\s+", " ", _html_to_text(_HTML_NON_RENDERED_RE.sub(" ", s))).strip()
+    return re.sub(r"\s+", " ", _html_to_text(_remove_non_rendered(s))).strip()
 
 
 def _check_content_completeness(

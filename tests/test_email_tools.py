@@ -939,3 +939,47 @@ def test_entity_encoded_insecure_href_detected(no_real_send, enc):
     )
     assert "insecure" in _text(resp).lower()
     assert len(no_real_send) == 0
+
+
+def test_template_element_text_does_not_satisfy_content_floor(no_real_send):
+    """`<template>` content is inert and never rendered (codex, 318bc56)."""
+    pad = "Padding the recipient never sees. " * 4
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="Q3", body="Q3",
+             html_body=_shell(f"<template>{pad}</template>"))
+    )
+    assert "visible text" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_malformed_unclosed_tags_do_not_stall_the_handler(no_real_send):
+    """Non-rendered stripping must be linear.
+
+    The lazy-regex form was quadratic: 10k unclosed `<script>` starts in 86KB
+    took 10.2s, stalling the event loop inside the async send handler before the
+    message was even rejected (codex P2 on 318bc56).
+    """
+    import time
+
+    payload = "<script>" * 10000 + "x" * 8000
+    tool = create_send_email_tool(_make_settings())
+    start = time.monotonic()
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="Q3", body="Q3", html_body=payload)
+    )
+    elapsed = time.monotonic() - start
+    assert elapsed < 1.0, f"content gate took {elapsed:.2f}s on malformed input"
+    assert len(no_real_send) == 0  # refused on completeness, not hung
+    assert "Error" in _text(resp)
+
+
+def test_scriptural_prose_is_not_stripped_as_a_script_tag(no_real_send):
+    """Boundary guard: a tag-name prefix inside prose must survive stripping."""
+    doc = _shell("Scriptural analysis of the headings. " * 8)
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="Notes", body="Notes", html_body=doc)
+    )
+    assert "Email sent" in _text(resp)
+    assert len(no_real_send) == 1
