@@ -172,6 +172,19 @@ _HTML_LEAKED_TAG_RE = re.compile(
     r'&lt;/?(a|b|strong|em|i|br|p|ul|li|span|div|table)\b', re.IGNORECASE
 )
 _HTML_LEAKED_ENTITY_RE = re.compile(r'&amp;[a-zA-Z]{2,8};')
+# Non-rendered element bodies: their text is never shown to the recipient, so it
+# must not count toward the content floors (codex P1 on 9d72871).
+_HTML_NON_RENDERED_RE = re.compile(
+    r"<(script|style|head|title)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL
+)
+# Inline-hidden nodes. The canonical renderer never emits hidden content, so
+# rather than parsing the DOM to find each node's extent (regex cannot match
+# balanced nesting, and an early stop would leave the bypass open) the gate
+# refuses the markers outright.
+_HTML_HIDDEN_RE = re.compile(
+    r"(display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0|opacity\s*:\s*0)",
+    re.IGNORECASE,
+)
 
 # Minimum visible-text length when attachments are present (stub-body guard).
 # Applied to WHITESPACE-COLLAPSED rendered text, not raw markup: a pretty-printed
@@ -196,7 +209,7 @@ def _visible_text(s: str) -> str:
     and indentation. Collapsing runs leaves normal prose ~unchanged while
     removing formatting whitespace from the count.
     """
-    return re.sub(r"\s+", " ", _html_to_text(s)).strip()
+    return re.sub(r"\s+", " ", _html_to_text(_HTML_NON_RENDERED_RE.sub(" ", s))).strip()
 
 
 def _check_content_completeness(
@@ -253,6 +266,13 @@ def _check_content_completeness(
                 f"html_body renders to only {len(rendered)} chars of visible text "
                 f"(must be \u2265{_HTML_MIN_VISIBLE_CHARS}) \u2014 the markup is present but "
                 "the message is empty; put the actual content inside the template"
+            )
+
+        if _HTML_HIDDEN_RE.search(html_body):
+            problems.append(
+                "hidden content detected (display:none / visibility:hidden / "
+                "zero font-size or opacity) — hidden text is invisible to the "
+                "recipient and cannot substitute for message content"
             )
 
         if _HTML_STYLE_TAG_RE.search(html_body):

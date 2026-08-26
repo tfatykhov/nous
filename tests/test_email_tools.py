@@ -841,3 +841,43 @@ def test_real_short_canonical_email_still_passes(no_real_send):
     )
     assert "Email sent" in _text(resp)
     assert len(no_real_send) == 1
+
+
+# --- Codex re-review of 9d72871: hidden nodes are not visible content ---
+
+@pytest.mark.parametrize(
+    "hidden_node",
+    [
+        '<script>var x = "{pad}";</script>',
+        "<head><title>{pad}</title></head>",
+    ],
+)
+def test_non_rendered_node_text_does_not_satisfy_content_floor(no_real_send, hidden_node):
+    """P1: text inside script/head is never shown, so it must not count."""
+    pad = "Padding text the recipient never sees. " * 4
+    doc = _shell("").replace("<h1", hidden_node.format(pad=pad) + "<h1", 1)
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="Q3", body="Q3", html_body=doc)
+    )
+    assert "visible text" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+@pytest.mark.parametrize(
+    "style", ["display:none", "visibility: hidden", "font-size:0", "opacity:0"]
+)
+def test_inline_hidden_content_refused(no_real_send, style):
+    """P1: hidden padding could clear the content floors invisibly.
+
+    Regex cannot match balanced nesting to find a hidden node's extent, so the
+    gate refuses the markers outright — the canonical renderer never emits them.
+    """
+    pad = "Padding text the recipient never sees. " * 4
+    doc = _shell(f'<div style="{style}">{pad}</div>')
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(to="tim@example.com", subject="Q3", body="Q3", html_body=doc)
+    )
+    assert "hidden content" in _text(resp).lower()
+    assert len(no_real_send) == 0
