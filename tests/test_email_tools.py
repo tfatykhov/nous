@@ -902,6 +902,26 @@ def test_near_zero_css_values_are_not_treated_as_hidden(no_real_send, style):
     assert len(no_real_send) == 1
 
 
+def test_unterminated_css_comment_linear_time(no_real_send):
+    """P1 regression: _CSS_COMMENT_RE must be O(n), not O(n²).
+
+    A style attribute with 10 000 unclosed /* openers previously caused
+    catastrophic backtracking (~8.5 s for 60 KB).  The non-backtracking
+    pattern completes in well under 1 second for any input.
+    """
+    # 10 000 unclosed openers — the pathological input for the old lazy .*? regex.
+    bad_style = "/*a" * 10_000
+    doc = _shell(f'<p style="{bad_style}">Real visible content here. ' + "words " * 30 + "</p>")
+    tool = create_send_email_tool(_make_settings())
+    t0 = time.monotonic()
+    # Run synchronously through asyncio to exercise the full parse path.
+    asyncio.run(
+        tool(to="tim@example.com", subject="hi", body="plain", html_body=doc)
+    )
+    elapsed = time.monotonic() - t0
+    assert elapsed < 1.0, f"CSS comment stripping took {elapsed:.2f}s — likely O(n²) regression"
+
+
 # --- Codex re-review of b2bcee2 ---
 
 @pytest.mark.parametrize("node", ["<div hidden>{pad}</div>", '<span hidden="">{pad}</span>'])

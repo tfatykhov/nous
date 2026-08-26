@@ -183,7 +183,30 @@ _CSS_HIDDEN_RE = re.compile(
 )
 # CSS comments inside a property declaration (e.g. ``display/**/:none``) are
 # stripped before applying ``_CSS_HIDDEN_RE`` so both spellings are caught.
-_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+def _strip_css_comments(s: str) -> str:
+    """Remove CSS block comments from *s* in O(n).
+
+    A regex with lazy quantifiers (``/\\*.*?\\*/`` + DOTALL) backtracks
+    catastrophically on unterminated ``/*`` openers, taking O(n²) time.
+    This single-pass scanner never backtracks.
+    """
+    result: list[str] = []
+    i = 0
+    n = len(s)
+    while i < n:
+        if s[i] == "/" and i + 1 < n and s[i + 1] == "*":
+            # Skip everything until the matching */ (or end of string).
+            i += 2
+            while i < n:
+                if i + 1 < n and s[i] == "*" and s[i + 1] == "/":
+                    i += 2
+                    break
+                i += 1
+        else:
+            result.append(s[i])
+            i += 1
+    return "".join(result)
+
 
 
 class _EmailDOMWalker(HTMLParser):
@@ -256,7 +279,7 @@ class _EmailDOMWalker(HTMLParser):
             # CSS hiding via inline style (attribute value only, not text).
             style_val = attrs_dict.get("style", "")
             if style_val:
-                stripped_css = _CSS_COMMENT_RE.sub("", style_val)
+                stripped_css = _strip_css_comments(style_val)
                 if _CSS_HIDDEN_RE.search(stripped_css):
                     self.hidden_detected = True
 
