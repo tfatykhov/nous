@@ -779,8 +779,8 @@ def test_grammar_rejects_non_stattile_statrow_children() -> None:
 async def test_background_compose_persists_agent_origin(fake_composer) -> None:
     """Codex round 3: a heartbeat/schedule compose must be origin='agent'
     or push apps are indistinguishable from pull apps."""
-    from nous.api.tools import ToolDispatcher
     from nous.a2ui.tools import register_a2ui_tools
+    from nous.api.tools import ToolDispatcher
 
     captured: dict[str, str] = {}
 
