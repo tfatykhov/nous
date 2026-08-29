@@ -1,5 +1,6 @@
 <script lang="ts">
   import Renderer from '../Renderer.svelte';
+  import { flexGrow } from '../functions';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
 
@@ -18,7 +19,7 @@
   } = $props();
 </script>
 
-<div class="card" style:flex-grow={comp.weight ?? null}>
+<div class="card" style:flex-grow={flexGrow(comp.weight)}>
   {#if typeof comp.child === 'string'}
     <Renderer {surfaceId} componentId={comp.child} {scope} {depth} {ancestors} />
   {/if}

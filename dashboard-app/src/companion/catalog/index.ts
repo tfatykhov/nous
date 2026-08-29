@@ -2,9 +2,11 @@
 //
 // Registered by NAME, deliberately not keyed by catalogId: the server
 // validates catalog membership, and the renderer supports exactly the two
-// catalogs this deployment serves (basic subset + nous-core). Wave 2 adds:
-// Image, Icon, CheckBox, ChoicePicker, Slider, DateTimeInput, Tabs, Modal,
-// StatTile, KeyValueTable.
+// catalogs this deployment serves (basic subset + nous-core).
+//
+// Video and AudioPlayer are the only basic-catalog components left
+// unimplemented — deliberately out of scope (plan §4, spec §8.1). They fall
+// through to the Renderer's unknown-component placeholder.
 import type { Component } from 'svelte';
 
 import Text from './Text.svelte';
@@ -15,19 +17,41 @@ import CardView from './CardView.svelte';
 import DividerView from './DividerView.svelte';
 import ButtonView from './ButtonView.svelte';
 import TextFieldView from './TextFieldView.svelte';
+import ImageView from './ImageView.svelte';
+import IconView from './IconView.svelte';
+import CheckBoxView from './CheckBoxView.svelte';
+import ChoicePickerView from './ChoicePickerView.svelte';
+import SliderView from './SliderView.svelte';
+import DateTimeInputView from './DateTimeInputView.svelte';
+import TabsView from './TabsView.svelte';
+import ModalView from './ModalView.svelte';
 import ApprovalPanelView from './ApprovalPanelView.svelte';
 import ActionReviewCardView from './ActionReviewCardView.svelte';
+import StatTileView from './StatTileView.svelte';
+import KeyValueTableView from './KeyValueTableView.svelte';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const registry: Record<string, Component<any>> = {
+  // basic catalog
   Text,
-  Column,
+  Image: ImageView,
+  Icon: IconView,
   Row,
+  Column,
   List: ListView,
   Card: CardView,
+  Tabs: TabsView,
+  Modal: ModalView,
   Divider: DividerView,
   Button: ButtonView,
+  CheckBox: CheckBoxView,
   TextField: TextFieldView,
+  DateTimeInput: DateTimeInputView,
+  ChoicePicker: ChoicePickerView,
+  Slider: SliderView,
+  // nous-core catalog
   ApprovalPanel: ApprovalPanelView,
   ActionReviewCard: ActionReviewCardView,
+  StatTile: StatTileView,
+  KeyValueTable: KeyValueTableView,
 };

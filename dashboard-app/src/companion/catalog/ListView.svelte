@@ -2,6 +2,7 @@
   // Basic catalog List — scrollable container; template expansion is the
   // common case (Children handles both forms).
   import Children from './Children.svelte';
+  import { flexGrow } from '../functions';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
 
@@ -23,7 +24,7 @@
 <div
   class="list"
   class:horizontal={comp.direction === 'horizontal'}
-  style:flex-grow={comp.weight ?? null}
+  style:flex-grow={flexGrow(comp.weight)}
 >
   <Children {surfaceId} children={comp.children} {scope} {depth} {ancestors} />
 </div>

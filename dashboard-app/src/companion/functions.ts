@@ -168,6 +168,19 @@ export function callFunction(
   }
 }
 
+/**
+ * `weight` -> flex-grow, narrowed to what a style directive accepts.
+ *
+ * Every property on A2uiComponent is `unknown` (index signature), so the
+ * obvious `comp.weight ?? null` types as `{} | null` and fails svelte-check
+ * at every call site. Narrowing here also drops non-numeric weights, which
+ * the catalog forbids and which would otherwise reach CSS verbatim. A weight
+ * of 0 is preserved — it is a meaningful flex-grow.
+ */
+export function flexGrow(weight: unknown): number | null {
+  return typeof weight === 'number' && Number.isFinite(weight) ? weight : null;
+}
+
 /** Scheme allowlist shared with the markdown renderer (XSS control). */
 export function isSafeUrl(url: string): boolean {
   return /^(https?:|mailto:)/i.test(url.trim());

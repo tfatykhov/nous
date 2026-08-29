@@ -1,5 +1,6 @@
 <script lang="ts">
   import Children from './Children.svelte';
+  import { flexGrow } from '../functions';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
 
@@ -32,7 +33,7 @@
   class="col"
   style:justify-content={JUSTIFY[comp.justify as string] ?? null}
   style:align-items={JUSTIFY[comp.align as string] ?? null}
-  style:flex-grow={comp.weight ?? null}
+  style:flex-grow={flexGrow(comp.weight)}
 >
   <Children {surfaceId} children={comp.children} {scope} {depth} {ancestors} />
 </div>

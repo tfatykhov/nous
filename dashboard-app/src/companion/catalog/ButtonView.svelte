@@ -6,7 +6,7 @@
   import Renderer from '../Renderer.svelte';
   import { store } from '../store.svelte';
   import { transport } from '../transport';
-  import { resolveDynamic, runChecks, callFunction, type CheckRule } from '../functions';
+  import { flexGrow, resolveDynamic, runChecks, callFunction, type CheckRule } from '../functions';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
 
@@ -60,7 +60,7 @@
   }
 </script>
 
-<span class="wrap" style:flex-grow={comp.weight ?? null}>
+<span class="wrap" style:flex-grow={flexGrow(comp.weight)}>
   <button
     class="btn {variant}"
     disabled={busy || failures.length > 0}
