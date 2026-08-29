@@ -110,8 +110,16 @@ def test_builder_output_validates(template: str, params: dict) -> None:
     assert any(c["id"] == "root" for c in built.components)
 
 
-def test_templates_registry_covers_the_three_v1_builders() -> None:
-    assert set(TEMPLATES) == {"approval_gate", "action_review", "heartbeat_findings"}
+def test_templates_registry_covers_all_builders() -> None:
+    assert set(TEMPLATES) == {
+        "approval_gate",
+        "action_review",
+        "heartbeat_findings",
+        # Phase 2
+        "decision_sweep",
+        "memory_graph",
+        "dag_monitor",
+    }
 
 
 # ---------------------------------------------------------------------------

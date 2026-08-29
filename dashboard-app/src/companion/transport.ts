@@ -194,6 +194,46 @@ export class Transport {
       return { ok: false, message: err instanceof Error ? err.message : 'network error' };
     }
   }
+
+  /**
+   * POST a callAgentFunction RPC. Spec's HTTP request-response pattern: the
+   * agentFunctionResponse envelope rides back in the HTTP response body, so
+   * there is no functionCallId correlation over SSE. Errors resolve (not
+   * throw) so callers paint them inline.
+   */
+  async callAgentFunction(
+    surfaceId: string,
+    call: string,
+    args: Record<string, unknown>,
+  ): Promise<{ ok: boolean; value?: unknown; message: string }> {
+    const surface = store.surfaces[surfaceId];
+    const body = {
+      version: 'v1.0',
+      callAgentFunction: {
+        surfaceId,
+        functionCallId: `fc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        callFunction: { call, args },
+      },
+      metadata: { extensions: { com_nous_nonce: surface?.nonce ?? '' } },
+    };
+    try {
+      const res = await this.fetchImpl('/a2ui/call', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const payload = (await res.json()) as {
+        agentFunctionResponse?: { value?: unknown; error?: { message?: string } };
+      };
+      const afr = payload.agentFunctionResponse;
+      if (!res.ok || afr?.error) {
+        return { ok: false, message: afr?.error?.message ?? `HTTP ${res.status}` };
+      }
+      return { ok: true, value: afr?.value, message: '' };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : 'network error' };
+    }
+  }
 }
 
 export const transport = new Transport();

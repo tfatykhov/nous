@@ -206,3 +206,41 @@ def StatTile(id: str, *, label: Any, value: Any, delta: Any = None, intent: str 
 
 def KeyValueTable(id: str, *, rows: Any) -> dict:
     return {"id": id, "component": "KeyValueTable", "rows": rows}
+
+
+def DecisionCard(
+    id: str,
+    *,
+    decisionId: Any,
+    description: Any,
+    confidence: Any = None,
+    stakes: Any = None,
+    category: Any = None,
+    outcome: Any = None,
+) -> dict:
+    return _clean(
+        {
+            "id": id,
+            "component": "DecisionCard",
+            "decisionId": decisionId,
+            "description": description,
+            "confidence": confidence,
+            "stakes": stakes,
+            "category": category,
+            "outcome": outcome,
+        }
+    )
+
+
+def ConfidenceMeter(id: str, *, value: Any) -> dict:
+    return {"id": id, "component": "ConfidenceMeter", "value": value}
+
+
+def MemoryGraph(id: str, *, nodes: Any, edges: Any, focusNodeId: Any = None) -> dict:
+    return _clean(
+        {"id": id, "component": "MemoryGraph", "nodes": nodes, "edges": edges, "focusNodeId": focusNodeId}
+    )
+
+
+def DagGraph(id: str, *, nodes: Any, edges: Any) -> dict:
+    return _clean({"id": id, "component": "DagGraph", "nodes": nodes, "edges": edges})

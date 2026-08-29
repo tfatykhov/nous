@@ -911,6 +911,7 @@ async def create_components(settings: Settings) -> dict:
 
     # F038: DAG Orchestration
     dag_orchestrator = None
+    dag_store = None
     if settings.dag_enabled:
         try:
             from nous.dag.store import DAGStore
@@ -1019,8 +1020,9 @@ async def create_components(settings: Settings) -> dict:
             heart=heart,
             brain=brain,
             heartbeat_runner=heartbeat_runner,
+            dag_orchestrator=dag_orchestrator,
         )
-        register_a2ui_tools(dispatcher, surface_service)
+        register_a2ui_tools(dispatcher, surface_service, brain=brain, dag_store=dag_store)
 
         async def _a2ui_sweep_loop():
             # Sweep once at startup, then periodically. The sweep must run

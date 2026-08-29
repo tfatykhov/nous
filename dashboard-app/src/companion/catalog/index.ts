@@ -29,6 +29,10 @@ import ApprovalPanelView from './ApprovalPanelView.svelte';
 import ActionReviewCardView from './ActionReviewCardView.svelte';
 import StatTileView from './StatTileView.svelte';
 import KeyValueTableView from './KeyValueTableView.svelte';
+import DecisionCardView from './DecisionCardView.svelte';
+import ConfidenceMeterView from './ConfidenceMeterView.svelte';
+import MemoryGraphView from './MemoryGraphView.svelte';
+import DagGraphView from './DagGraphView.svelte';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const registry: Record<string, Component<any>> = {
@@ -54,4 +58,8 @@ export const registry: Record<string, Component<any>> = {
   ActionReviewCard: ActionReviewCardView,
   StatTile: StatTileView,
   KeyValueTable: KeyValueTableView,
+  DecisionCard: DecisionCardView,
+  ConfidenceMeter: ConfidenceMeterView,
+  MemoryGraph: MemoryGraphView,
+  DagGraph: DagGraphView,
 };

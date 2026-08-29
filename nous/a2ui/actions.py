@@ -65,6 +65,7 @@ class ActionRouter:
         heart: Any = None,
         brain: Any = None,
         heartbeat_runner: Any = None,
+        dag_orchestrator: Any = None,
     ):
         self._db = database
         self._settings = settings
@@ -72,13 +73,90 @@ class ActionRouter:
         self._heart = heart
         self._brain = brain
         self._heartbeat = heartbeat_runner
+        self._dag_orchestrator = dag_orchestrator
         self._handlers: dict[str, _HandlerMeta] = {}
+        # Phase 2: agent-side functions callable by the renderer over
+        # POST /a2ui/call (spec's HTTP request-response pattern — the
+        # agentFunctionResponse rides back in the HTTP response, so there is
+        # no functionCallId-over-SSE correlation). Same trust pipeline as
+        # actions: a read RPC is still a probe surface.
+        self._functions: dict[str, Callable[[ActionContext], Awaitable[Any]]] = {}
         self._recent: list[float] = []
         self._rate_lock = asyncio.Lock()
         _register_default_handlers(self)
+        _register_phase2_handlers(self)
+        _register_default_functions(self)
 
     def register(self, name: str, fn: Handler, *, mutating: bool, irreversible: bool = False) -> None:
         self._handlers[name] = _HandlerMeta(fn=fn, mutating=mutating, irreversible=irreversible)
+
+    def register_function(self, name: str, fn: Callable[[ActionContext], Awaitable[Any]]) -> None:
+        """Register an agent-side function for renderer RPC (read-only)."""
+        self._functions[name] = fn
+
+    # ------------------------------------------------------------- functions
+
+    async def handle_call(
+        self, body: dict, *, content_type: str, actor: str = "unattributed"
+    ) -> tuple[int, dict]:
+        """POST /a2ui/call — renderer-initiated agent function (spec pattern 1).
+
+        Returns (status, agentFunctionResponse envelope). Functions are
+        READ-ONLY by contract (mutations go through actions with their
+        audit/censor pipeline), so calls are rate-limited and gated but not
+        individually audited.
+        """
+        if "application/json" not in (content_type or ""):
+            return 415, _fn_err("", "INVALID_FUNCTION_CALL", "Content-Type must be application/json")
+
+        call = body.get("callAgentFunction") or {}
+        surface_id = call.get("surfaceId") or ""
+        function_call_id = call.get("functionCallId") or ""
+        call_function = call.get("callFunction") or {}
+        name = call_function.get("call") or ""
+        args = call_function.get("args") or {}
+        if not surface_id or not function_call_id or not name:
+            return 400, _fn_err(
+                function_call_id,
+                "INVALID_FUNCTION_CALL",
+                "callAgentFunction requires surfaceId, functionCallId and callFunction.call",
+            )
+
+        async with self._db.session() as session:
+            surface = (
+                await session.execute(
+                    select(A2uiSurface).where(
+                        A2uiSurface.surface_id == surface_id,
+                        A2uiSurface.agent_id == self._settings.agent_id,
+                    )
+                )
+            ).scalar_one_or_none()
+        if surface is None or surface.status != "live":
+            return 404, _fn_err(function_call_id, "INVALID_FUNCTION_CALL", "surface not found or not live")
+
+        nonce = ((body.get("metadata") or {}).get("extensions") or {}).get("com_nous_nonce")
+        if nonce != surface.nonce:
+            return 403, _fn_err(function_call_id, "INVALID_FUNCTION_CALL", "surface nonce missing or stale")
+
+        if not await self._rate_ok():
+            return 429, _fn_err(function_call_id, "RATE_LIMITED", "too many calls; slow down")
+
+        fn = self._functions.get(name)
+        if fn is None:
+            return 404, _fn_err(function_call_id, "UNKNOWN_FUNCTION", f"no agent function {name!r}")
+
+        ctx = ActionContext(surface=surface, name=name, context=args, data_model=None, services=self)
+        try:
+            value = await fn(ctx)
+        except ValueError as exc:
+            return 422, _fn_err(function_call_id, "INVALID_FUNCTION_CALL", str(exc))
+        except Exception:
+            logger.exception("F092 agent function %s failed", name)
+            return 500, _fn_err(function_call_id, "EXECUTION_FAILED", f"function {name!r} failed")
+        return 200, {
+            "version": "v1.0",
+            "agentFunctionResponse": {"functionCallId": function_call_id, "value": value},
+        }
 
     # ------------------------------------------------------------------ gate
 
@@ -164,6 +242,16 @@ class ActionRouter:
 
         if name not in (surface.allowed_actions or []):
             return await reject(403, "ACTION_NOT_ALLOWED", f"action {name!r} not offered by this surface")
+
+        # Phase 2, spec §10.9: a form submit ships the whole client data
+        # model, from a client we do not trust. Re-validate its SHAPE against
+        # the authoritative model before any handler reads it: unknown keys
+        # and primitive-type flips are rejected (client-side `checks` are a
+        # UX affordance, not a control).
+        if data_model is not None:
+            shape_error = _submitted_model_error(surface.data_model or {}, data_model)
+            if shape_error:
+                return await reject(422, "VALIDATION_FAILED", f"submitted data model rejected: {shape_error}")
 
         nonce = ((action.get("metadata") or {}).get("extensions") or {}).get("com_nous_nonce") or context.get(
             "surfaceNonce"
@@ -304,6 +392,17 @@ class ActionRouter:
             await session.commit()
 
 
+def _fn_err(function_call_id: str, code: str, message: str) -> dict:
+    """agentFunctionResponse error envelope (spec: value XOR error)."""
+    return {
+        "version": "v1.0",
+        "agentFunctionResponse": {
+            "functionCallId": function_call_id,
+            "error": {"code": code, "message": message},
+        },
+    }
+
+
 def _err(code: str, surface_id: str, message: str) -> dict:
     return {"error": {"code": code, "surfaceId": surface_id, "message": message}}
 
@@ -438,3 +537,176 @@ def _register_default_handlers(router: ActionRouter) -> None:
 
 def _escape_pointer(token: str) -> str:
     return token.replace("~", "~0").replace("/", "~1")
+
+
+_DECISION_OUTCOMES = frozenset({"success", "partial", "failure", "noise", "superseded"})
+
+
+def _register_phase2_handlers(router: ActionRouter) -> None:
+    """Phase 2: decision sweep + DAG monitor verbs."""
+
+    async def decision_resolve(ctx: ActionContext) -> ActionResult:
+        if router._brain is None:
+            return ActionResult(ok=False, message="brain unavailable")
+        decision_id = str(ctx.context.get("decisionId") or "")
+        outcome = str(ctx.context.get("outcome") or "")
+        # Both validated against SERVER truth (the approval.choose lesson):
+        # the surface's own data model lists which decisions it offered, and
+        # the outcome set is ReviewInput's Literal (migration 062).
+        offered = (ctx.surface.data_model or {}).get("decisions", {})
+        if decision_id not in offered:
+            return ActionResult(ok=False, message=f"decision {decision_id!r} is not on this surface")
+        if outcome not in _DECISION_OUTCOMES:
+            return ActionResult(
+                ok=False, message=f"outcome must be one of {sorted(_DECISION_OUTCOMES)}"
+            )
+        note = str(ctx.context.get("note") or "").strip()
+        try:
+            await router._brain.review(
+                UUID(decision_id),
+                outcome=outcome,
+                result=f"resolved via companion sweep{': ' + note[:400] if note else ''}",
+                reviewer="a2ui",
+            )
+        except Exception:
+            logger.warning("F092 decision.resolve: brain.review failed", exc_info=True)
+            return ActionResult(ok=False, message="could not record the outcome — try again")
+        remaining = sum(1 for status in offered.values() if status == "pending") - 1
+        return ActionResult(
+            message=f"{outcome} recorded",
+            data_patches=[(f"/decisions/{_escape_pointer(decision_id)}", outcome)],
+            resolve_surface=remaining <= 0,
+        )
+
+    async def _dag_verb(ctx: ActionContext, verb: str) -> ActionResult:
+        orchestrator = router._dag_orchestrator
+        if orchestrator is None:
+            return ActionResult(ok=False, message="DAG orchestration unavailable")
+        dag_id = str((ctx.surface.data_model or {}).get("dag_id") or "")
+        if not dag_id:
+            return ActionResult(ok=False, message="surface carries no dag_id")
+        try:
+            if verb == "retry":
+                node = str(ctx.context.get("node") or "")
+                offered = {n["name"] for n in (ctx.surface.data_model or {}).get("nodes", [])}
+                if node not in offered:
+                    return ActionResult(ok=False, message=f"node {node!r} is not on this surface")
+                await orchestrator.retry_node(UUID(dag_id), node)
+                return ActionResult(
+                    message=f"retrying {node}",
+                    data_patches=[("/banner", f"Retry requested for {node}.")],
+                )
+            await orchestrator.cancel_dag(UUID(dag_id), reason="cancelled via companion")
+            return ActionResult(message="DAG cancelled", resolve_surface=True)
+        except Exception as exc:
+            logger.warning("F092 dag.%s failed", verb, exc_info=True)
+            return ActionResult(ok=False, message=f"dag {verb} failed: {exc}")
+
+    async def dag_retry(ctx: ActionContext) -> ActionResult:
+        return await _dag_verb(ctx, "retry")
+
+    async def dag_cancel(ctx: ActionContext) -> ActionResult:
+        return await _dag_verb(ctx, "cancel")
+
+    router.register("decision.resolve", decision_resolve, mutating=True)
+    router.register("dag.retry", dag_retry, mutating=True)
+    router.register("dag.cancel", dag_cancel, mutating=True, irreversible=True)
+
+
+def _register_default_functions(router: ActionRouter) -> None:
+    """Agent-side functions callable over POST /a2ui/call. READ-ONLY."""
+
+    async def expand_graph_node(ctx: ActionContext) -> Any:
+        if router._brain is None:
+            raise ValueError("brain unavailable")
+        node_id = str(ctx.context.get("nodeId") or "")
+        node_type = str(ctx.context.get("nodeType") or "fact")
+        if node_type not in ("fact", "decision", "episode", "procedure", "chunk"):
+            raise ValueError(f"unknown nodeType {node_type!r}")
+        try:
+            uid = UUID(node_id)
+        except ValueError as exc:
+            raise ValueError("nodeId must be a UUID") from exc
+        limit = min(int(ctx.context.get("limit") or 8), 20)
+        neighbors = await router._brain.neighbors(uid, node_type=node_type, limit=limit)
+        return {
+            "nodes": [
+                {
+                    "id": str(n.id),
+                    "type": n.node_type,
+                    "label": (n.description or "")[:120],
+                }
+                for n in neighbors
+            ],
+            "edges": [
+                {
+                    "source": node_id,
+                    "target": str(n.id),
+                    "relation": n.edge_relation,
+                    "weight": n.edge_weight,
+                }
+                for n in neighbors
+            ],
+        }
+
+    async def load_decision_detail(ctx: ActionContext) -> Any:
+        if router._brain is None:
+            raise ValueError("brain unavailable")
+        try:
+            uid = UUID(str(ctx.context.get("decisionId") or ""))
+        except ValueError as exc:
+            raise ValueError("decisionId must be a UUID") from exc
+        detail = await router._brain.get(uid)
+        if detail is None:
+            raise ValueError("decision not found")
+        return {
+            "id": str(detail.id),
+            "description": detail.description,
+            "confidence": detail.confidence,
+            "stakes": detail.stakes,
+            "category": detail.category,
+            "outcome": detail.outcome,
+            "reasons": [
+                {"type": r.type, "text": r.text} for r in (detail.reasons or [])
+            ][:10],
+        }
+
+    router.register_function("expandGraphNode", expand_graph_node)
+    router.register_function("loadDecisionDetail", load_decision_detail)
+
+
+def _submitted_model_error(authoritative: dict, submitted: Any, path: str = "") -> str | None:
+    """Shape-check a client-submitted data model against the server's copy.
+
+    Keys must be a subset of the authoritative model's at every object
+    level, and a primitive may not change JSON type (str/number/bool are
+    each locked; int<->float is allowed). Values themselves are the point
+    of a form submit and are NOT compared. Lists are treated as opaque
+    values — their length and element shape are input, not structure.
+    Returns an error string, or None when acceptable.
+    """
+    if not isinstance(submitted, dict):
+        return f"expected an object at {path or '/'}"
+    for key, sub_value in submitted.items():
+        if key not in authoritative:
+            return f"unknown key {path}/{key}"
+        auth_value = authoritative[key]
+        if isinstance(auth_value, dict):
+            if not isinstance(sub_value, dict):
+                return f"expected an object at {path}/{key}"
+            nested = _submitted_model_error(auth_value, sub_value, f"{path}/{key}")
+            if nested:
+                return nested
+        elif isinstance(auth_value, bool):
+            if not isinstance(sub_value, bool):
+                return f"expected a boolean at {path}/{key}"
+        elif isinstance(auth_value, (int, float)):
+            if isinstance(sub_value, bool) or not isinstance(sub_value, (int, float)):
+                return f"expected a number at {path}/{key}"
+        elif isinstance(auth_value, str):
+            if not isinstance(sub_value, str):
+                return f"expected a string at {path}/{key}"
+        elif isinstance(auth_value, list):
+            if not isinstance(sub_value, list):
+                return f"expected an array at {path}/{key}"
+    return None
