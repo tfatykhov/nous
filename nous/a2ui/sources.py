@@ -18,6 +18,7 @@ Every fetcher returns plain JSON-serializable data.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -26,6 +27,14 @@ from uuid import UUID
 logger = logging.getLogger(__name__)
 
 Fetcher = Callable[[dict], Awaitable[Any]]
+
+# The push censor gate FAILS CLOSED above 20,000 flattened chars, surfacing
+# as an opaque "Surface blocked" (rev-arch #9). Sources bound rows but not
+# characters — ten episode summaries can clear 20k on their own — so
+# resolve() enforces a serialized budget well under the gate, trimming list
+# tails with an EXPLICIT marker rather than a silent cut.
+_TOTAL_BUDGET_CHARS = 12_000
+_PER_SOURCE_BUDGET_CHARS = 6_000
 
 
 class UnknownSourceError(ValueError):
@@ -56,6 +65,7 @@ class SourceRegistry:
         swallowing it here would render a confident empty section.
         """
         model: dict[str, Any] = {}
+        spent = 0
         for decl in data_sources:
             key = str(decl.get("key") or "")
             name = str(decl.get("source") or "")
@@ -66,8 +76,31 @@ class SourceRegistry:
                 raise UnknownSourceError(
                     f"unknown data source {name!r}; available: {self.names()}"
                 )
-            model[key] = await fetcher(dict(decl.get("params") or {}))
+            value = await fetcher(dict(decl.get("params") or {}))
+            value, size = _bound(value, min(_PER_SOURCE_BUDGET_CHARS, _TOTAL_BUDGET_CHARS - spent))
+            spent += size
+            model[key] = value
         return model
+
+
+def _bound(value: Any, budget: int) -> tuple[Any, int]:
+    """Trim a fetched value to the char budget with an explicit marker.
+
+    Lists lose tail entries (with a trailing truncation marker); anything
+    else that overflows is replaced by a marker object. Never a silent cut.
+    """
+    size = len(json.dumps(value, default=str))
+    if size <= budget:
+        return value, size
+    if isinstance(value, list):
+        trimmed = list(value)
+        while trimmed and len(json.dumps(trimmed, default=str)) > max(budget - 80, 0):
+            trimmed.pop()
+        omitted = len(value) - len(trimmed)
+        trimmed.append({"_truncated": True, "omitted": omitted})
+        return trimmed, len(json.dumps(trimmed, default=str))
+    marker = {"_truncated": True, "reason": f"value exceeded {budget} chars"}
+    return marker, len(json.dumps(marker))
 
 
 def build_default_registry(

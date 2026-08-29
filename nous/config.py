@@ -2586,6 +2586,27 @@ class Settings(BaseSettings):
             "back to NOUS_BACKGROUND_MODEL."
         ),
     )
+    a2ui_compose_timeout_seconds: int = Field(
+        default=60,
+        ge=5,
+        description=(
+            "F092.1: per-round timeout on the compose LLM call. A round runs "
+            "inside a synchronous /a2ui/call or tool dispatch bounded by "
+            "NOUS_TOOL_TIMEOUT — keep (repairs+1)*this under that, or the "
+            "outer cancel swallows the real error. Timeout is terminal "
+            "(markdown fallback), never a repair round."
+        ),
+    )
+    a2ui_compose_max_per_hour: int = Field(
+        default=60,
+        ge=1,
+        description=(
+            "F092.1: hourly in-process cap on compose LLM rounds (initial "
+            "compose + repairs + every app.refine). Breach is the caller's "
+            "error (422/tool error), not a silent fallback. Mirrors the "
+            "F050 budget pattern."
+        ),
+    )
     a2ui_app_stale_after_s: int = Field(
         default=3600,
         ge=60,

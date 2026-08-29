@@ -564,16 +564,36 @@ class TestExpirySweep:
 
         assert await _outbox(db, a2ui_agent_id) == []
 
-    async def test_sweep_keeps_outbox_rows_for_live_surfaces(
+    async def test_sweep_keeps_young_outbox_rows_for_live_surfaces(
         self, service: SurfaceService, db, a2ui_agent_id: str
     ) -> None:
-        """Age alone is not a reason to prune — a live surface can be old."""
+        """Rows inside the retention window survive regardless of status.
+
+        F092.1 AMENDED the other half of this invariant: rows OLDER than
+        ``a2ui_outbox_nonlive_retention_hours`` are now pruned even for
+        LIVE surfaces — micro-apps never expire (expires_at NULL), so a
+        long-lived refreshed app previously grew the outbox without bound
+        and forced full resyncs once the agent-wide gap cleared the replay
+        window. Safe because reconnect is hydration-first: snapshots, not
+        replay, are the source of truth, and a replay that hits the gap
+        returns the resync control (the hydration path).
+        """
+        await service.push_built(approval_gate(APPROVAL_PARAMS))
+        await _backdate_outbox(db, a2ui_agent_id, hours=12)  # inside 24h window
+
+        await service.expire_sweep()
+
+        assert len(await _outbox(db, a2ui_agent_id)) == 1
+
+    async def test_sweep_prunes_aged_outbox_rows_even_for_live_surfaces(
+        self, service: SurfaceService, db, a2ui_agent_id: str
+    ) -> None:
         await service.push_built(approval_gate(APPROVAL_PARAMS))
         await _backdate_outbox(db, a2ui_agent_id, hours=48)
 
         await service.expire_sweep()
 
-        assert len(await _outbox(db, a2ui_agent_id)) == 1
+        assert await _outbox(db, a2ui_agent_id) == []
 
 
 # ---------------------------------------------------------------------------

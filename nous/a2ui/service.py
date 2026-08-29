@@ -337,12 +337,30 @@ class SurfaceService:
         against is what gets matched. abort/refuse block the push; steer
         passes (guidance belongs to the agent's turn, not the surface).
         """
+        await self.censor_built(built, where="push")
+
+    async def censor_built(self, built: BuiltSurface, *, where: str = "push") -> None:
+        """The push gate, callable by other writers of surface prose.
+
+        F092.1 app.refine recomposes a surface's whole content and delivers
+        it via update_components/update_data, which are transport, not
+        policy — an app censored on the initial push must not be uncensored
+        on every refine after (rev-arch P1). Raises PermissionError on a
+        blocking match.
+        """
         if self._heart is None:
             return
         prose = built.title + " " + _flatten_strings(built.data_model) + " " + _flatten_strings(built.components)
-        blocking = await check_censors_chunked(self._heart, prose, where="push")
+        blocking = await check_censors_chunked(self._heart, prose, where=where)
         if blocking is not None:
             raise PermissionError(f"surface blocked by censor: {blocking}")
+
+    async def censor_prose(self, text_in: str, *, where: str) -> str | None:
+        """Censor arbitrary prose headed for a live surface (app.refresh's
+        re-fetched source data). Returns the blocking reason or None."""
+        if self._heart is None:
+            return None
+        return await check_censors_chunked(self._heart, text_in, where=where)
 
     # ------------------------------------------------------------- mutations
 
@@ -413,6 +431,13 @@ class SurfaceService:
             surface = await self._get_own(session, surface_id)
             if surface is None or surface.status != "live":
                 raise KeyError(surface_id)
+            if surface.kind == "micro_app":
+                # Same fail-closed grammar as push_built: a recomposition is
+                # a creation as far as the renderer is concerned. (The
+                # composer lints its own output; this guards future callers.)
+                lint = lint_micro_app(components)
+                if lint:
+                    raise SurfaceValidationError(lint)
             surface.components = deepcopy(components)
             if app_spec is not None:
                 # A refine recomposition carries a fresh spec (new refine
@@ -573,11 +598,22 @@ class SurfaceService:
                 expired += 1
 
         async with self._db.session() as session:
+            # F092.1 amendment to the retention invariant (rev-arch #3):
+            # the age cutoff now applies to LIVE surfaces' rows too.
+            # Micro-apps are the first surfaces that never expire
+            # (expires_at NULL), so an app left open and refreshed on a
+            # loop previously grew the outbox without bound — and once the
+            # agent-wide gap cleared a2ui_outbox_replay_window, every
+            # reconnect forced a full resync. Deleting old live-surface
+            # rows is safe by construction: reconnect is hydration-first
+            # (snapshots, not replay, are the source of truth) and the
+            # per-surface upto watermark means a client never asks for
+            # rows this old — a replay that does hit the gap returns the
+            # resync control, which is exactly the hydration path.
             await session.execute(
                 delete(A2uiOutbox).where(
                     A2uiOutbox.agent_id == agent_id,
                     A2uiOutbox.created_at < now - timedelta(hours=self._settings.a2ui_outbox_nonlive_retention_hours),
-                    A2uiOutbox.surface_id.in_(select(A2uiSurface.surface_id).where(A2uiSurface.status != "live")),
                 )
             )
             retention_days = self._settings.a2ui_surface_retention_days

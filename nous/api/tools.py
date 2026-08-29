@@ -478,7 +478,7 @@ class ToolDispatcher:
                 # silently accepts the kwarg (added by F051.4) and ignores
                 # it — fail-open contract.
                 args = {**args, "_session_id": session_id}
-            if session_id is not None and name == "push_surface":
+            if session_id is not None and name in ("push_surface", "compose_surface"):
                 # F092: surfaces record the chat session that pushed them so
                 # a companion card can be traced back to its conversation.
                 args = {**args, "_session_id": session_id}

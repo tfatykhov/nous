@@ -23,9 +23,11 @@ silent — and Phase 5 measures the unsourced fraction.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -108,6 +110,11 @@ class SurfaceComposer:
         self._client = llm_client
         self._settings = settings
         self._sources = sources
+        # LLM discipline (every LLM feature carries both — F050, epistemic
+        # gate): a per-round timeout and an hourly budget, serialized by an
+        # in-process lock like the F050 counter.
+        self._recent_calls: list[float] = []
+        self._budget_lock = asyncio.Lock()
 
     async def compose(
         self,
@@ -139,20 +146,13 @@ class SurfaceComposer:
                 + "\n- ".join(errors)
                 + (f"\n\nYour previous attempt:\n{raw}" if raw else "")
             )
-            raw = await call_background_llm(
-                self._client,
-                self._model(),
-                "You compose A2UI micro-app surfaces for the Nous companion. "
-                "You emit only valid JSON.",
-                user_message,
-                # A full status app (≤40 components + dataModel) can run well
-                # past 4k output tokens; a truncated response reads as
-                # "not parseable JSON" and burns a repair round on nothing.
-                max_tokens=8000,
-            )
+            raw = await self._call_llm(user_message)
             if raw is None:
-                errors = ["LLM call failed"]
-                continue
+                # Transport failure or timeout — a TERMINAL condition, not a
+                # repair case: retrying an unreachable model burns the repair
+                # budget on nothing the model can fix (rev-arch 7b).
+                errors = ["LLM unavailable (transport failure or timeout)"]
+                break
             parsed = _parse_json_object(raw)
             if parsed is None:
                 errors = ["response was not a parseable JSON object"]
@@ -207,6 +207,45 @@ class SurfaceComposer:
         return source_data
 
     # ---------------------------------------------------------------- internals
+
+    async def _call_llm(self, user_message: str) -> str | None:
+        """One LLM round under the budget cap and per-round timeout.
+
+        Raises ValueError on budget exhaustion (the caller's error — a 422,
+        not a fallback). Returns None on timeout/transport failure, which
+        the compose loop treats as terminal. NOTE: rounds run inside a tool
+        dispatch bounded by NOUS_TOOL_TIMEOUT — keep
+        (repairs+1) * a2ui_compose_timeout_seconds under it or the outer
+        cancel swallows the real error (prod runs NOUS_TOOL_TIMEOUT=2000).
+        """
+        async with self._budget_lock:
+            now = time.monotonic()
+            self._recent_calls = [t for t in self._recent_calls if now - t < 3600.0]
+            if len(self._recent_calls) >= self._settings.a2ui_compose_max_per_hour:
+                raise ValueError(
+                    "compose budget exhausted "
+                    f"({self._settings.a2ui_compose_max_per_hour}/hour) — try later"
+                )
+            self._recent_calls.append(now)
+        try:
+            return await asyncio.wait_for(
+                call_background_llm(
+                    self._client,
+                    self._model(),
+                    "You compose A2UI micro-app surfaces for the Nous companion. "
+                    "You emit only valid JSON.",
+                    user_message,
+                    # A full status app (≤40 components + dataModel) can run
+                    # well past 4k output tokens; a truncated response reads
+                    # as "not parseable JSON" and burns a repair round on
+                    # nothing.
+                    max_tokens=8000,
+                ),
+                timeout=float(self._settings.a2ui_compose_timeout_seconds),
+            )
+        except TimeoutError:
+            logger.warning("F092.1 compose LLM round timed out")
+            return None
 
     def _model(self) -> str:
         return self._settings.a2ui_compose_model or self._settings.background_model

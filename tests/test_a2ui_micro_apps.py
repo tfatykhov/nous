@@ -578,6 +578,166 @@ async def test_app_refine_recomposes_the_same_surface(
     assert row.nonce == nonce, "no nonce rotation on refine (updateComponents path)"
 
 
+async def test_refine_and_refresh_write_audit_rows(
+    router, service, db, a2ui_agent_id: str
+) -> None:
+    """Mutating functions are audited (rev-arch #2b) — a function that
+    rewrites a surface is exactly what the evidence tier exists for."""
+    surface_id = await service.push_built(_micro_app())
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    await router.handle_call(
+        _call_body(surface_id, nonce, "app.refresh"), content_type=JSON_CT
+    )
+    await router.handle_call(
+        _call_body(surface_id, nonce, "app.refine", {"id": "blockers"}),
+        content_type=JSON_CT,
+    )
+    # Read-only functions stay unaudited.
+    await router.handle_call(
+        _call_body(surface_id, nonce, "loadDecisionDetail", {"decisionId": "x"}),
+        content_type=JSON_CT,
+    )
+
+    async with db.session() as session:
+        audits = (
+            await session.execute(
+                select(A2uiAction)
+                .where(A2uiAction.agent_id == a2ui_agent_id)
+                .order_by(A2uiAction.created_at)
+            )
+        ).scalars().all()
+    assert [(a.action_name, a.status) for a in audits] == [
+        ("app.refresh", "completed"),
+        ("app.refine", "completed"),
+    ]
+
+
+class _BlockingHeart:
+    async def check_censors(self, text: str):
+        from types import SimpleNamespace
+
+        return [SimpleNamespace(action="abort", reason="blocked prose", trigger_pattern="x")]
+
+
+async def test_refine_is_censored_like_the_initial_push(
+    router, service, db, a2ui_agent_id: str
+) -> None:
+    """rev-arch P1: an app censored on turn 1 must not be uncensored on
+    every refine after — the recomposed content passes the same gate."""
+    surface_id = await service.push_built(_micro_app())
+    nonce = (await _surface_row(db, surface_id)).nonce
+    service._heart = _BlockingHeart()  # attach AFTER push so creation passes
+
+    status, payload = await router.handle_call(
+        _call_body(surface_id, nonce, "app.refine", {"id": "blockers"}),
+        content_type=JSON_CT,
+    )
+
+    assert status == 422
+    assert "censor" in payload["agentFunctionResponse"]["error"]["message"]
+    row = await _surface_row(db, surface_id)
+    assert row.components[4]["title"] == "Flights", "blocked refine changes nothing"
+
+
+async def test_refresh_is_censored(router, service, db) -> None:
+    surface_id = await service.push_built(_micro_app())
+    nonce = (await _surface_row(db, surface_id)).nonce
+    service._heart = _BlockingHeart()
+
+    status, payload = await router.handle_call(
+        _call_body(surface_id, nonce, "app.refresh"), content_type=JSON_CT
+    )
+
+    assert status == 422
+    assert "censor" in payload["agentFunctionResponse"]["error"]["message"]
+
+
+async def test_update_components_lints_micro_apps(service, db) -> None:
+    """The service-level guard for future callers — the composer lints its
+    own output, but update_components must not trust its caller."""
+    surface_id = await service.push_built(_micro_app())
+    bad = _valid_components()
+    bad[5] = {"id": "kv", "component": "TextField", "label": "x"}
+
+    with pytest.raises(SurfaceValidationError):
+        await service.update_components(surface_id, bad)
+
+
+async def test_outbox_prunes_old_rows_of_live_surfaces(
+    service, db, a2ui_agent_id: str
+) -> None:
+    """rev-arch #3: micro-apps never expire, so the age cutoff must apply
+    to live surfaces' outbox rows too or a long-lived app grows the outbox
+    without bound. Safe: reconnect is hydration-first."""
+    from datetime import UTC, datetime, timedelta
+
+    surface_id = await service.push_built(_micro_app())
+    async with db.session() as session:
+        from sqlalchemy import update as sa_update
+
+        await session.execute(
+            sa_update(A2uiOutbox)
+            .where(A2uiOutbox.surface_id == surface_id)
+            .values(created_at=datetime.now(UTC) - timedelta(hours=999))
+        )
+        await session.commit()
+
+    await service.expire_sweep()
+
+    assert (await _surface_row(db, surface_id)).status == "live", "surface untouched"
+    async with db.session() as session:
+        remaining = (
+            await session.execute(
+                select(A2uiOutbox).where(A2uiOutbox.surface_id == surface_id)
+            )
+        ).scalars().all()
+    assert remaining == [], "aged rows of a LIVE surface are pruned"
+
+
+async def test_compose_budget_exhaustion_is_the_callers_error(
+    a2ui_settings, sources: SourceRegistry, scripted_llm
+) -> None:
+    throttled = a2ui_settings.model_copy(update={"a2ui_compose_max_per_hour": 1})
+    composer = SurfaceComposer(object(), throttled, sources)
+    scripted_llm([_llm_response(), _llm_response()])
+
+    await composer.compose("first app")
+    with pytest.raises(ValueError, match="budget exhausted"):
+        await composer.compose("second app")
+
+
+async def test_llm_transport_failure_is_terminal_not_a_repair_round(
+    composer: SurfaceComposer, scripted_llm
+) -> None:
+    """A None return (transport failure/timeout) must fall back immediately
+    — retrying an unreachable model burns the repair budget on nothing."""
+    llm = scripted_llm([None, _llm_response()])
+
+    composed = await composer.compose("vacation")
+
+    assert composed.fallback
+    assert len(llm.calls) == 1, "no repair round after a transport failure"
+
+
+async def test_source_resolve_bounds_oversized_values() -> None:
+    registry = SourceRegistry()
+
+    async def huge(params: dict) -> list[dict]:
+        return [{"i": i, "text": "x" * 200} for i in range(200)]
+
+    registry.register("huge", huge)
+
+    model = await registry.resolve([{"key": "big", "source": "huge"}])
+
+    rows = model["big"]
+    assert rows[-1].get("_truncated") is True, "the cut is explicit, never silent"
+    assert rows[-1]["omitted"] > 0
+    import json as _json
+
+    assert len(_json.dumps(model, default=str)) < 13_000
+
+
 async def test_micro_app_functions_report_unavailable_without_composer(
     db, a2ui_settings, service
 ) -> None:
