@@ -55,6 +55,10 @@ async def test_all_tables_exist(db):
         ("nous_system", "consolidation_actions"),
         # F091: retrieval telemetry (migration 070)
         ("nous_system", "retrieval_log"),
+        # F092: A2UI companion (migration 071)
+        ("nous_system", "a2ui_surfaces"),
+        ("nous_system", "a2ui_outbox"),
+        ("nous_system", "a2ui_actions"),
         # brain (8)
         ("brain", "decisions"),
         ("brain", "decision_tags"),
