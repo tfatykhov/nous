@@ -369,6 +369,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_A2UI_OUTBOX_NONLIVE_RETENTION_HOURS` | `24` | F092 — hours outbox rows for non-live surfaces are kept (undeliverable by construction: reconnect is hydration-first and only live surfaces replay). |
 | `NOUS_A2UI_SWEEP_INTERVAL_SECONDS` | `900` | F092 — seconds between surface expiry sweeps (a lifecycle task in main.py; sweep-at-startup then periodic). Runs unobserved on purpose: expiry writes `no_objection` evidence ("silence counts") even if no client ever connects. |
 | `NOUS_A2UI_PUBLIC_BASE_URL` | `""` | F092 — externally reachable base URL prefixed to companion deep links in Telegram pings. Empty = the link is sent as a relative path (readable, not tappable). |
+| `NOUS_A2UI_TRUST_FORWARDED_IDENTITY` | `false` | F092 — record `X-Forwarded-User`/`-Email` as the audit actor. Default OFF: on a directly reachable port any caller can set those headers and forge attribution, which is worse than `unattributed`. Flip only behind an authenticating proxy that strips client-supplied forwarding headers. |
 | `NOUS_EVAL_DB_HOST` | `localhost` | F051 — eval DB host (separate container on port 5433) |
 | `NOUS_EVAL_DB_PORT` | `5433` | F051 — eval DB port (127.0.0.1 bind; separate from main :5432) |
 | `NOUS_EVAL_DB_USER` | `nous` | F051 — eval DB user |

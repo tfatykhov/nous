@@ -2558,6 +2558,17 @@ class Settings(BaseSettings):
             "= links sent as a relative path (visible but not tappable)."
         ),
     )
+    a2ui_trust_forwarded_identity: bool = Field(
+        default=False,
+        description=(
+            "F092: record X-Forwarded-User/-Email as the audit actor. Default "
+            "OFF — on a directly reachable port ANY caller can set those "
+            "headers and forge attribution, which is worse than "
+            "'unattributed'. Flip ONLY when an authenticating proxy "
+            "(oauth2-proxy) fronts the port and strips client-supplied "
+            "forwarding headers."
+        ),
+    )
 
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":

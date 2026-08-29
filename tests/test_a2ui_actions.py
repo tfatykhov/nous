@@ -702,3 +702,50 @@ async def test_defer_keeps_the_surface_live(
     assert status == 200
     assert payload["resolved"] is False
     assert (await _surface_row(db, surface_id)).status == "live"
+
+
+async def test_censor_sees_prohibited_text_past_the_first_chunk(
+    db, a2ui_settings, service: SurfaceService, a2ui_agent_id: str
+) -> None:
+    """The censor gate scans the FULL mutating-action content in overlapping
+
+    chunks (codex P1): a single truncated slice let prohibited text bypass
+    an abort censor by sitting past the cut while the handler consumed all
+    of it.
+    """
+
+    class TailCensorHeart:
+        def __init__(self) -> None:
+            self.chunks: list[str] = []
+
+        async def check_censors(self, text: str) -> list[Any]:
+            self.chunks.append(text)
+            if "FORBIDDEN-TAIL" in text:
+                return [
+                    SimpleNamespace(
+                        action="abort", reason="prohibited phrase", trigger_pattern="forbidden"
+                    )
+                ]
+            return []
+
+    heart = TailCensorHeart()
+    router = ActionRouter(db, a2ui_settings, service, heart=heart)
+    surface_id = await service.push_built(
+        action_review({"title": "Did a thing", "did": "something"})
+    )
+    nonce = (await _surface_row(db, surface_id)).nonce
+    long_correction = ("x" * 5000) + " FORBIDDEN-TAIL"
+
+    status, payload = await router.handle(
+        _body(
+            "review.course_correct",
+            surface_id,
+            nonce=nonce,
+            context={"correction": long_correction},
+        ),
+        content_type=JSON,
+    )
+
+    assert status == 403
+    assert payload["error"]["code"] == "CENSORED"
+    assert len(heart.chunks) > 1

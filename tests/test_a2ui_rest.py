@@ -380,14 +380,44 @@ async def test_malformed_json_body_is_a_400(client: AsyncClient, fake_router) ->
 
 
 @pytest.mark.parametrize("header", ["x-forwarded-user", "x-forwarded-email"])
-async def test_actor_is_taken_from_the_proxy_identity_header(
+async def test_forwarded_identity_headers_are_IGNORED_by_default(
     client: AsyncClient, fake_router: FakeActionRouter, header: str
 ) -> None:
-    """oauth2-proxy fronts this deployment; its identity header is the only
+    """Default posture (codex P2): on a directly reachable port ANY caller
 
-    evidence of who acted. The audit row records it verbatim.
+    can set forwarding headers, and a forged actor in the audit is worse
+    than 'unattributed'. Headers count only behind a configured proxy.
     """
-    await client.post("/a2ui/action", json={"action": {}}, headers={header: "tim@example.com"})
+    await client.post("/a2ui/action", json={"action": {}}, headers={header: "mallory@evil"})
+
+    assert fake_router.calls[0]["actor"] == "unattributed"
+
+
+@pytest.mark.parametrize("header", ["x-forwarded-user", "x-forwarded-email"])
+async def test_actor_is_taken_from_the_proxy_header_when_trusted(
+    brain, heart, cognitive, db, settings, fake_service, fake_router, header: str
+) -> None:
+    """With NOUS_A2UI_TRUST_FORWARDED_IDENTITY=true (an authenticating proxy
+
+    fronts the port and strips client-supplied headers), the identity header
+    is the evidence of who acted and is recorded verbatim.
+    """
+    trusting = settings.model_copy(update={"a2ui_trust_forwarded_identity": True})
+    app = create_app(
+        MockAgentRunner(),
+        brain,
+        heart,
+        cognitive,
+        db,
+        trusting,
+        surface_service=fake_service,
+        action_router=fake_router,
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as trusted_client:
+        await trusted_client.post(
+            "/a2ui/action", json={"action": {}}, headers={header: "tim@example.com"}
+        )
 
     assert fake_router.calls[0]["actor"] == "tim@example.com"
 

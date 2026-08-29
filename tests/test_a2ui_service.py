@@ -578,20 +578,22 @@ class TestExpirySweep:
 
 @pytest.mark.postgres_only
 class TestReplay:
-    async def test_fresh_rows_are_invisible_inside_the_lag_window(
+    async def test_fresh_rows_are_invisible_to_replay_but_counted_by_latest_seq(
         self, service: SurfaceService
     ) -> None:
-        """A just-committed row is deliberately NOT replayed yet.
+        """A just-committed row is deliberately NOT replayed yet — but
 
-        BIGSERIAL allocates seq at INSERT but publishes it at COMMIT, so a
-        reader that advanced its watermark past a concurrent, later-committing
-        row would skip that row forever. The lag window is what makes the
-        watermark safe; without it this returns rows and the skip is possible.
+        ``latest_seq`` DOES count it (codex P2): hydration snapshots read
+        current committed state, so the watermark handed to a fresh client
+        must cover everything the snapshots already contain, or the young
+        row gets REPLAYED once it ages and a redelivered createSurface
+        clobbers input typed in that window. The lag window guards only
+        replay's reads (BIGSERIAL commit-visibility skew).
         """
         await service.push_built(approval_gate(APPROVAL_PARAMS))
 
         assert await service.replay(0) == []
-        assert await service.latest_seq() == 0
+        assert await service.latest_seq() > 0
 
     async def test_rows_replay_once_past_the_lag_window(
         self, service: SurfaceService, db, a2ui_agent_id: str

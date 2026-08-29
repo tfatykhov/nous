@@ -249,14 +249,9 @@ class SurfaceService:
         if self._heart is None:
             return
         prose = built.title + " " + _flatten_strings(built.data_model) + " " + _flatten_strings(built.components)
-        try:
-            matches = await self._heart.check_censors(prose[:2000])
-        except Exception:
-            logger.warning("F092 censor check failed open on push", exc_info=True)
-            return
-        blocking = [m for m in matches if m.action in ("abort", "refuse")]
-        if blocking:
-            raise PermissionError(f"surface blocked by censor: {blocking[0].reason or blocking[0].trigger_pattern}")
+        blocking = await check_censors_chunked(self._heart, prose, where="push")
+        if blocking is not None:
+            raise PermissionError(f"surface blocked by censor: {blocking}")
 
     # ------------------------------------------------------------- mutations
 
@@ -545,19 +540,25 @@ class SurfaceService:
         return [(seq, env) for seq, env in rows]
 
     async def latest_seq(self) -> int:
-        """Latest lag-window-visible outbox seq (SSE tail starting point)."""
+        """Snapshot-consistent watermark: the TRUE max committed seq.
+
+        Deliberately NOT lag-windowed (codex P2): hydration snapshots read
+        current committed state, so every committed envelope's effect is
+        already in what the client just fetched. A lag-windowed watermark
+        excluded rows younger than 2s, and when those aged in they were
+        REPLAYED — a redelivered createSurface replaced the local data model
+        and destroyed input typed in that window. The lag window remains
+        where it belongs: inside ``replay``'s reads, guarding the poll
+        against out-of-order stragglers.
+        """
         async with self._db.session() as session:
             return await self._latest_visible_seq(session)
 
     async def _latest_visible_seq(self, session: Any) -> int:
-        cutoff = datetime.now(UTC) - timedelta(seconds=_LAG_WINDOW_SECONDS)
         latest = (
             await session.execute(
-                text(
-                    "SELECT coalesce(max(seq), 0) FROM nous_system.a2ui_outbox "
-                    "WHERE agent_id = :agent AND created_at <= :cutoff"
-                ),
-                {"agent": self._settings.agent_id, "cutoff": cutoff},
+                text("SELECT coalesce(max(seq), 0) FROM nous_system.a2ui_outbox WHERE agent_id = :agent"),
+                {"agent": self._settings.agent_id},
             )
         ).scalar_one()
         return int(latest)
@@ -621,6 +622,44 @@ class SurfaceService:
                 )
         except Exception:
             logger.warning("F092 Telegram notification failed")
+
+
+_CENSOR_CHUNK_CHARS = 1800
+_CENSOR_CHUNK_OVERLAP = 200
+_CENSOR_MAX_CHARS = 20_000
+
+
+async def check_censors_chunked(heart: Any, text_in: str, *, where: str) -> str | None:
+    """Run the censor check over the FULL text in overlapping chunks.
+
+    A single ``[:2000]`` slice let prohibited text bypass an abort censor by
+    sitting past the cut (codex P1) while handlers consumed the whole thing.
+    Chunks overlap so a phrase straddling a boundary still matches. Text
+    beyond the hard cap FAILS CLOSED — silently skipping a tail is exactly
+    the bypass this exists to prevent.
+
+    Returns the blocking reason, or None when the text passes. Shared by the
+    push gate (SurfaceService) and the action gate (ActionRouter).
+    """
+    text_in = text_in.strip()
+    if not text_in:
+        return None
+    if len(text_in) > _CENSOR_MAX_CHARS:
+        return f"content too large to censor-check ({len(text_in)} chars; cap {_CENSOR_MAX_CHARS})"
+    step = _CENSOR_CHUNK_CHARS - _CENSOR_CHUNK_OVERLAP
+    for start in range(0, len(text_in), step):
+        chunk = text_in[start : start + _CENSOR_CHUNK_CHARS]
+        try:
+            matches = await heart.check_censors(chunk)
+        except Exception:
+            logger.warning("F092 censor check failed open on %s", where, exc_info=True)
+            return None
+        blocking = [m for m in matches if m.action in ("abort", "refuse")]
+        if blocking:
+            return blocking[0].reason or blocking[0].trigger_pattern
+        if start + _CENSOR_CHUNK_CHARS >= len(text_in):
+            break
+    return None
 
 
 def _flatten_strings(node: Any, depth: int = 0) -> str:

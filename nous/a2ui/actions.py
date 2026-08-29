@@ -200,15 +200,14 @@ class ActionRouter:
             return await reject(501, "NO_HANDLER", f"no handler registered for {name!r}")
 
         if meta.mutating and self._heart is not None:
+            from nous.a2ui.service import check_censors_chunked
+
+            # Full content, chunked (codex P1): handlers consume the ENTIRE
+            # context, so a single truncated slice let prohibited text bypass
+            # an abort censor by sitting past the cut.
             match_text = f"{surface.title} {name} {context}"
-            try:
-                censor_hits = await self._heart.check_censors(match_text[:2000])
-            except Exception:
-                logger.warning("F092 censor check failed open on action", exc_info=True)
-                censor_hits = []
-            blocking = [m for m in censor_hits if m.action in ("abort", "refuse")]
-            if blocking:
-                reason = blocking[0].reason or blocking[0].trigger_pattern
+            reason = await check_censors_chunked(self._heart, match_text, where="action")
+            if reason is not None:
                 return await reject(403, "CENSORED", f"blocked by censor: {reason}")
 
         audit_id = await self._audit(

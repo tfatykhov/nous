@@ -87,8 +87,7 @@ def create_app(
     """Create the Starlette ASGI app with all routes."""
 
     def _parse_attachments(body: dict) -> list[Attachment]:
-        from nous.api.attachments import (
-            sanitize_filename, classify_attachment, validate_base64_size)
+        from nous.api.attachments import classify_attachment, sanitize_filename, validate_base64_size
         out: list[Attachment] = []
         raw = body.get("attachments") if isinstance(body, dict) else None
         for a in (raw or [])[: settings.attachments_max_per_message]:
@@ -2841,8 +2840,8 @@ def create_app(
         return JSONResponse({"snapshot": {"timestamp": row.timestamp.isoformat(), "metrics": row.metrics, "anomalies": row.anomalies or []}})
 
     async def behavior_trends(request: Request) -> JSONResponse:
-        from datetime import UTC, datetime, timedelta
         import statistics as st
+        from datetime import UTC, datetime, timedelta
         metric = request.query_params.get("metric", "fact_count_delta")
         hours = int(request.query_params.get("hours", "168"))
         async with database.session() as session:
@@ -2999,13 +2998,17 @@ def create_app(
             body = await request.json()
         except Exception:
             return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-        # oauth2-proxy identity when fronted; 'unattributed' otherwise. The
-        # audit row records who acted — never implied consent.
-        actor = (
-            request.headers.get("x-forwarded-user")
-            or request.headers.get("x-forwarded-email")
-            or "unattributed"
-        )
+        # Forwarded identity is trusted ONLY when configured (codex P2): on a
+        # directly reachable port any caller can set these headers, and a
+        # forged actor in the audit is worse than 'unattributed'. The audit
+        # row records who acted — never implied consent.
+        actor = "unattributed"
+        if settings.a2ui_trust_forwarded_identity:
+            actor = (
+                request.headers.get("x-forwarded-user")
+                or request.headers.get("x-forwarded-email")
+                or "unattributed"
+            )
         status_code, payload = await router.handle(
             body, content_type=request.headers.get("content-type", ""), actor=actor
         )
