@@ -756,14 +756,19 @@ def _register_micro_app_functions(router: ActionRouter) -> None:
     declared at compose time.
     """
 
-    async def _assert_same_epoch(surface_id: str, snapshot_nonce: str) -> None:
-        """Re-read under the lock and compare nonces (codex round 5).
+    async def _assert_same_epoch(surface_id: str, snapshot: Any) -> None:
+        """Re-read under the lock and compare the mutation epoch (codex
+        rounds 5+6).
 
         Both functions do slow work (source fetches, an LLM recompose)
-        against a PRE-lock snapshot. A dedup replacement can commit in that
-        window — it rotates the nonce — and the write would then land
-        stale content on the NEW app. The nonce is the epoch marker: a
-        mismatch means the snapshot's app no longer exists as such.
+        against a PRE-lock snapshot, so anything that mutated the surface
+        in that window makes the pending write stale. The nonce catches
+        dedup replacement (it rotates there), but refine/refresh/patches do
+        NOT rotate it — two overlapping calls would both pass a nonce-only
+        check and the slower one would overwrite the newer work. The
+        COMPLETE revision is ``updated_at``: every mutation path (dedup
+        replacement, update_components, update_data) bumps it, so equality
+        with the snapshot proves nothing intervened.
         """
         async with router._db.session() as session:
             row = (
@@ -776,8 +781,8 @@ def _register_micro_app_functions(router: ActionRouter) -> None:
             ).scalar_one_or_none()
         if row is None or row.status != "live":
             raise KeyError(surface_id)
-        if row.nonce != snapshot_nonce:
-            raise ValueError("the app was replaced while this call was in flight — try again")
+        if row.nonce != snapshot.nonce or row.updated_at != snapshot.updated_at:
+            raise ValueError("the app changed while this call was in flight — try again")
 
     async def app_refresh(ctx: ActionContext) -> Any:
         if router._composer is None:
@@ -801,7 +806,7 @@ def _register_micro_app_functions(router: ActionRouter) -> None:
         # surface presentation state), so they take the per-surface lock
         # THEMSELVES to serialize with app.close and LRU eviction.
         async with router._service.surface_lock(ctx.surface.surface_id):
-            await _assert_same_epoch(ctx.surface.surface_id, ctx.surface.nonce)
+            await _assert_same_epoch(ctx.surface.surface_id, ctx.surface)
             for key, value in patches.items():
                 await router._service.update_data(ctx.surface.surface_id, f"/{key}", value)
         return {"refreshed": sorted(patches)}
@@ -849,7 +854,7 @@ def _register_micro_app_functions(router: ActionRouter) -> None:
         # against a concurrent app.close: without it, close could land
         # between them and strand components without their data model.
         async with router._service.surface_lock(ctx.surface.surface_id):
-            await _assert_same_epoch(ctx.surface.surface_id, ctx.surface.nonce)
+            await _assert_same_epoch(ctx.surface.surface_id, ctx.surface)
             await router._service.update_components(
                 ctx.surface.surface_id,
                 composed.built.components,

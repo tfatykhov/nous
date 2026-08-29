@@ -881,6 +881,43 @@ async def test_refresh_rejects_a_mid_flight_dedup_replacement(
     assert row.data_model["trip"] == {"flights": []}, "stale patches never landed"
 
 
+async def test_refresh_rejects_an_overlapping_mutation_same_nonce(
+    db, a2ui_settings, service
+) -> None:
+    """Codex round 6: refine/refresh/patches do NOT rotate the nonce, so a
+    nonce-only epoch check let two overlapping calls interleave and the
+    slower one overwrite newer work. updated_at is the complete revision."""
+
+    class _MutatingComposer(_FakeComposer):
+        def __init__(self, svc) -> None:
+            super().__init__()
+            self._svc = svc
+            self.surface_id = ""
+
+        async def refresh_data(self, app_spec: dict) -> dict:
+            # A concurrent mutation commits during the slow fetch — it bumps
+            # updated_at but leaves the nonce alone.
+            await self._svc.update_data(self.surface_id, "/trip", {"flights": ["newer work"]})
+            return await super().refresh_data(app_spec)
+
+    composer = _MutatingComposer(service)
+    router = ActionRouter(db, a2ui_settings, service, composer=composer)
+    surface_id = await service.push_built(_micro_app(title="original"))
+    composer.surface_id = surface_id
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, payload = await router.handle_call(
+        _call_body(surface_id, nonce, "app.refresh"), content_type=JSON_CT
+    )
+
+    assert status == 422
+    assert "changed while" in payload["agentFunctionResponse"]["error"]["message"]
+    row = await _surface_row(db, surface_id)
+    assert row.data_model["trip"] == {"flights": ["newer work"]}, (
+        "the newer mutation survives; the stale refresh never lands"
+    )
+
+
 async def test_refine_rejects_a_mid_flight_dedup_replacement(
     db, a2ui_settings, service
 ) -> None:
