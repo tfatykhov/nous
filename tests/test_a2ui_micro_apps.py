@@ -350,6 +350,30 @@ async def test_refresh_data_reruns_sources_and_restamps(
     assert patches["meta"]["composedAt"]
 
 
+async def test_refresh_refuses_an_unsourced_app(composer: SurfaceComposer) -> None:
+    """Codex P2: a restamp with nothing re-read would advance the header
+    over content that did not move."""
+    with pytest.raises(ValueError, match="nothing to refresh"):
+        await composer.refresh_data({"data_sources": []})
+
+
+async def test_unsourced_compose_withholds_the_refresh_control(
+    composer: SurfaceComposer, scripted_llm
+) -> None:
+    scripted_llm([_llm_response(), _llm_response()])
+
+    unsourced = await composer.compose("vacation")
+    sourced = await composer.compose(
+        "vacation", data_sources=[{"key": "status", "source": "trip_status"}]
+    )
+
+    def footer(c):
+        return next(x for x in c.built.components if x["id"] == "footer")
+
+    assert footer(unsourced)["showRefresh"] is False
+    assert footer(sourced)["showRefresh"] is True
+
+
 # ---------------------------------------------------------------------------
 # Service gates: fail-closed creation + cap/LRU
 # ---------------------------------------------------------------------------

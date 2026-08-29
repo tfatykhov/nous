@@ -180,7 +180,9 @@ class SurfaceComposer:
             title=str(parsed.get("title") or intent)[:200],
             priority=min(int(priority), 1),
             allowed_actions=["app.close"],
-            components=self._with_footer_options(parsed["components"], refine_options),
+            components=self._with_footer_options(
+                parsed["components"], refine_options, has_sources=bool(data_sources)
+            ),
             data_model=data_model,
             expires_in=None,
         )
@@ -199,8 +201,23 @@ class SurfaceComposer:
 
     async def refresh_data(self, app_spec: dict) -> dict:
         """Re-run the app's declared sources ONLY — no LLM. Returns the
-        patches for update_data: sourced keys + the new /meta/composedAt."""
-        source_data = await self._sources.resolve(list(app_spec.get("data_sources") or []))
+        patches for update_data: sourced keys + the new /meta/composedAt.
+
+        An app with NO sources has nothing refresh can honestly do — a
+        restamp would advance the header over content that did not move
+        (codex P2), so it is refused (422) and compose withholds the
+        refresh control from unsourced apps entirely. Mixed apps restamp
+        legitimately: the sourced portions were genuinely re-read, and the
+        model-supplied sections render amber REGARDLESS of the stamp
+        (spec §3.6) — the amber treatment, not the timestamp, is what
+        marks that content's age as unknown.
+        """
+        data_sources = list(app_spec.get("data_sources") or [])
+        if not data_sources:
+            raise ValueError(
+                "this app has no registered data sources — nothing to refresh"
+            )
+        source_data = await self._sources.resolve(data_sources)
         source_data[_META_KEY] = {
             "composedAt": datetime.now(UTC).isoformat(timespec="seconds")
         }
@@ -339,15 +356,22 @@ class SurfaceComposer:
         return model
 
     def _with_footer_options(
-        self, components: list[dict], refine_options: list[dict]
+        self,
+        components: list[dict],
+        refine_options: list[dict],
+        *,
+        has_sources: bool,
     ) -> list[dict]:
         """The footer renders what the SERVER validated, not what the model
         drew: refineOptions is overwritten from the cleaned list so the
-        buttons and the app_spec allowlist cannot diverge."""
+        buttons and the app_spec allowlist cannot diverge, and the refresh
+        control is withheld from apps with no sources — refresh on an
+        unsourced app could only restamp content that did not move
+        (codex P2)."""
         out = []
         for comp in components:
             if comp.get("id") == "footer":
-                comp = {**comp, "refineOptions": refine_options}
+                comp = {**comp, "refineOptions": refine_options, "showRefresh": has_sources}
             out.append(comp)
         return out
 
@@ -387,7 +411,12 @@ class SurfaceComposer:
                 },
                 {"id": "sec_body", "component": "Section", "title": "Content", "child": "body", "provenance": "model"},
                 {"id": "body", "component": "Text", "text": body},
-                {"id": "footer", "component": "AppFooter", "refineOptions": [], "showRefresh": True},
+                {
+                    "id": "footer",
+                    "component": "AppFooter",
+                    "refineOptions": [],
+                    "showRefresh": bool(data_sources),
+                },
             ],
             data_model={_META_KEY: {"composedAt": composed_at}, **source_data},
             expires_in=None,
