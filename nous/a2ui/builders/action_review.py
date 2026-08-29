@@ -1,9 +1,10 @@
 """F092: advisory Action Review surface (spec Appendix A2, Q5-advisory).
 
 Nous already acted; the card is a reviewable record. The verb set is
-Acknowledge / Course-correct / Make-it-a-rule, plus Revert ONLY when
-``compensation.revertible`` is true — a Revert button that silently fails
-is worse than no button.
+Acknowledge / Course-correct / Make-it-a-rule. Revert is withheld until a
+revert executor exists (see the comment at the allowlist) — a Revert button
+that silently fails is worse than no button, and 501-on-click IS silent
+failure from the user's chair.
 """
 
 from __future__ import annotations
@@ -19,11 +20,14 @@ def action_review(params: dict[str, Any]) -> Any:
     title = params["title"]
     trace_id = _validated_trace_id(params.get("trace_id"))
     compensation = params.get("compensation") or {"revertible": False, "handler": None, "note": ""}
-    revertible = bool(compensation.get("revertible"))
 
+    # Revert is deliberately NOT offered in this phase even when
+    # compensation.revertible is true: no revert executor exists yet, so a
+    # Revert button would 501 on click — the exact "silently failing Revert"
+    # this builder's rationale forbids. The card still STATES revertibility
+    # via the compensation block; the verb ships with the escalation
+    # integration that brings compensation.handler execution.
     allowed = ["review.acknowledge", "review.course_correct", "review.make_rule"]
-    if revertible:
-        allowed.append("review.revert")
 
     s = Surface(
         kind="action_review",
@@ -58,13 +62,6 @@ def action_review(params: dict[str, Any]) -> Any:
         Button("rule", child="rule_l", variant="borderless", action=event("review.make_rule", ctx)),
         Text("rule_l", "Make this a standing rule"),
     ]
-    if revertible:
-        verbs.append("revert")
-        components += [
-            Button("revert", child="revert_l", action=event("review.revert", ctx)),
-            Text("revert_l", "Revert"),
-        ]
-
     s.add(
         Column("root", children=["card", "correction_field", "acts"], align="stretch"),
         ActionReviewCard(

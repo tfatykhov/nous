@@ -24,6 +24,7 @@ import asyncio
 import logging
 import secrets
 import uuid
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -216,7 +217,14 @@ class SurfaceService:
             surface = await session.get(A2uiSurface, surface_id)
             if surface is None or surface.status != "live":
                 raise KeyError(surface_id)
-            model = dict(surface.data_model)
+            # Deep copy, not dict(): a shallow copy shares its nested objects
+            # with SQLAlchemy's committed-state snapshot, so an in-place
+            # _pointer_set mutates BOTH. The flush then compares new == old,
+            # finds them equal, and emits no UPDATE — the outbox envelope
+            # still ships, so live clients update while the authoritative row
+            # silently keeps the stale value. Top-level paths happened to
+            # work; every nested path (all heartbeat.* patches) was lost.
+            model = deepcopy(surface.data_model)
             if path in (None, "", "/"):
                 if not isinstance(value, dict):
                     raise ValueError("whole-model replace requires an object")
@@ -299,6 +307,7 @@ class SurfaceService:
         async with self._db.session() as session:
             await session.execute(
                 delete(A2uiOutbox).where(
+                    A2uiOutbox.agent_id == agent_id,
                     A2uiOutbox.created_at < now - timedelta(hours=self._settings.a2ui_outbox_nonlive_retention_hours),
                     A2uiOutbox.surface_id.in_(select(A2uiSurface.surface_id).where(A2uiSurface.status != "live")),
                 )
