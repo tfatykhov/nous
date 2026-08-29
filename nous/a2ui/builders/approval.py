@@ -38,6 +38,11 @@ def approval_gate(params: dict[str, Any]) -> Any:
             "summary": params.get("summary", ""),
             "risk": params.get("risk", ""),
             "recommendation": recommendation,
+            # Authoritative record of what was offered — the approval.choose
+            # handler validates the submitted optionId against THIS (the
+            # buttons carry literal ids, but the server must not trust the
+            # client's copy of anything).
+            "options": [{"id": o["id"], "label": o["label"]} for o in options],
         }
     )
 

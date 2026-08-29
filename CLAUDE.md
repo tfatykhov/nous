@@ -367,6 +367,8 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_A2UI_ACTION_RATE_PER_MINUTE` | `30` | F092 — in-process sliding-window cap on `POST /a2ui/action`, keyed on agent_id (single-user deployment, effectively global). Beyond it: 429. |
 | `NOUS_A2UI_SURFACE_RETENTION_DAYS` | `30` | F092 — days a resolved/expired surface row survives before the sweep deletes it (presentation tier; the `a2ui_actions` audit rows are permanent per spec §6.2 — `no_objection` is written BEFORE a surface expires). `0` disables deletion. |
 | `NOUS_A2UI_OUTBOX_NONLIVE_RETENTION_HOURS` | `24` | F092 — hours outbox rows for non-live surfaces are kept (undeliverable by construction: reconnect is hydration-first and only live surfaces replay). |
+| `NOUS_A2UI_SWEEP_INTERVAL_SECONDS` | `900` | F092 — seconds between surface expiry sweeps (a lifecycle task in main.py; sweep-at-startup then periodic). Runs unobserved on purpose: expiry writes `no_objection` evidence ("silence counts") even if no client ever connects. |
+| `NOUS_A2UI_PUBLIC_BASE_URL` | `""` | F092 — externally reachable base URL prefixed to companion deep links in Telegram pings. Empty = the link is sent as a relative path (readable, not tappable). |
 | `NOUS_EVAL_DB_HOST` | `localhost` | F051 — eval DB host (separate container on port 5433) |
 | `NOUS_EVAL_DB_PORT` | `5433` | F051 — eval DB port (127.0.0.1 bind; separate from main :5432) |
 | `NOUS_EVAL_DB_USER` | `nous` | F051 — eval DB user |

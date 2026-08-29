@@ -2540,6 +2540,24 @@ class Settings(BaseSettings):
             "hydration-first and only live surfaces replay)."
         ),
     )
+    a2ui_sweep_interval_seconds: int = Field(
+        default=900,
+        ge=60,
+        description=(
+            "F092: seconds between surface expiry sweeps (writes no_objection "
+            "evidence, expires overdue surfaces, prunes old rows). The sweep "
+            "must run unobserved — 'silence counts' is an audit fact even when "
+            "no client ever connects."
+        ),
+    )
+    a2ui_public_base_url: str = Field(
+        default="",
+        description=(
+            "F092: externally reachable base URL (e.g. https://nous.example.com) "
+            "prefixed to companion deep links in Telegram notifications. Empty "
+            "= links sent as a relative path (visible but not tappable)."
+        ),
+    )
 
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":

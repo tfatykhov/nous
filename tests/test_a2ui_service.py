@@ -621,13 +621,16 @@ class TestReplay:
         assert surface_ids == [second]
         assert first not in surface_ids
 
-    async def test_replay_skips_non_live_surfaces(
+    async def test_replay_skips_non_live_content_but_replays_teardowns(
         self, service: SurfaceService, db, a2ui_agent_id: str, no_lag: None
     ) -> None:
-        """Replay is live-only; the teardown a client missed is handled by the
+        """Content deltas replay live-only, but deleteSurface replays
 
-        hydration-first reconnect (fetch the live index, drop what is absent),
-        which is why dropping these rows cannot strand a zombie surface.
+        REGARDLESS of status (codex P2): a surface can resolve between the
+        client's snapshot fetch and its SSE subscribe, and the teardown row
+        is then the only event that removes the stale card. Hydration-first
+        covers reconnects; this covers the subscribe race. Applying a
+        teardown for an unknown surface is a client-side no-op.
         """
         resolved_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
         await service.resolve(resolved_id)
@@ -636,7 +639,14 @@ class TestReplay:
         replayed = await service.replay(0)
 
         assert replayed is not None
-        assert [env["createSurface"]["surfaceId"] for _, env in replayed] == [live_id]
+        creates = [
+            env["createSurface"]["surfaceId"] for _, env in replayed if "createSurface" in env
+        ]
+        deletes = [
+            env["deleteSurface"]["surfaceId"] for _, env in replayed if "deleteSurface" in env
+        ]
+        assert creates == [live_id]
+        assert deletes == [resolved_id]
 
     async def test_replay_returns_none_when_the_gap_exceeds_the_window(
         self, db, settings, a2ui_agent_id: str, no_lag: None

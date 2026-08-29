@@ -167,8 +167,9 @@ def _body(
         "context": dict(context or {}),
     }
     if source_component_id is not None:
+        # Top-level only — the wire shape. The renderer does NOT duplicate it
+        # into context, and the audit must read it from the action object.
         action["sourceComponentId"] = source_component_id
-        action["context"]["sourceComponentId"] = source_component_id
     if nonce is not None:
         if nonce_in_context:
             action["context"]["surfaceNonce"] = nonce
@@ -575,3 +576,91 @@ async def test_review_revert_is_not_offered_and_forging_it_is_rejected(
     assert status == 403
     assert payload["error"]["code"] == "ACTION_NOT_ALLOWED"
     assert [a.status for a in await _audits(db, a2ui_agent_id)] == ["rejected"]
+
+
+async def test_approval_choose_rejects_an_option_that_was_never_offered(
+    db, a2ui_settings, service: SurfaceService, a2ui_agent_id: str
+) -> None:
+    """A client with the nonce still cannot invent options (codex P2): the
+
+    handler validates the submitted optionId against the surface's
+    AUTHORITATIVE data model, not the client's copy — and a rejected choice
+    must leave the surface live and undecided.
+    """
+    router = ActionRouter(db, a2ui_settings, service)
+    surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, payload = await router.handle(
+        _body(
+            "approval.choose",
+            surface_id,
+            nonce=nonce,
+            context={"optionId": "rm_-rf_everything"},
+        ),
+        content_type=JSON,
+    )
+
+    assert status == 422
+    assert "not offered" in payload["error"]["message"]
+    assert (await _surface_row(db, surface_id)).status == "live"
+
+
+async def test_audit_reads_source_component_id_from_the_action_object(
+    db, a2ui_settings, service: SurfaceService, a2ui_agent_id: str
+) -> None:
+    """sourceComponentId lives at action.sourceComponentId on the wire; the
+
+    audit must read it there (codex P2 — it was read from context, which the
+    renderer never populates, so every audit row stored NULL).
+    """
+    router = ActionRouter(db, a2ui_settings, service)
+    surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, _ = await router.handle(
+        _body(
+            "approval.choose",
+            surface_id,
+            nonce=nonce,
+            context={"optionId": APPROVAL_PARAMS["options"][0]["id"]},
+            source_component_id="opt_0",
+        ),
+        content_type=JSON,
+    )
+
+    assert status == 200
+    audits = await _audits(db, a2ui_agent_id)
+    assert audits and audits[-1].source_component_id == "opt_0"
+
+
+async def test_overlapping_terminal_actions_dispatch_exactly_once(
+    db, a2ui_settings, service: SurfaceService, a2ui_agent_id: str
+) -> None:
+    """Two concurrent POSTs for the same terminal action must not both
+
+    execute (codex P2): the per-surface lock serializes them and the status
+    re-read inside it turns the loser into a 404, so a surface is never
+    answered twice.
+    """
+    import asyncio
+
+    router = ActionRouter(db, a2ui_settings, service)
+    surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+    body = _body(
+        "approval.choose",
+        surface_id,
+        nonce=nonce,
+        context={"optionId": APPROVAL_PARAMS["options"][0]["id"]},
+    )
+
+    results = await asyncio.gather(
+        router.handle(body, content_type=JSON),
+        router.handle(body, content_type=JSON),
+    )
+    statuses = sorted(status for status, _ in results)
+
+    assert statuses == [200, 404]
+    completed = [a for a in await _audits(db, a2ui_agent_id) if a.status == "completed"]
+    assert len(completed) == 1

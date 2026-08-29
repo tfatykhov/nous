@@ -75,6 +75,11 @@ class ActionRouter:
         self._handlers: dict[str, _HandlerMeta] = {}
         self._recent: list[float] = []
         self._rate_lock = asyncio.Lock()
+        # Per-surface serialization (codex P2): two overlapping POSTs for the
+        # same terminal action would both read the surface as live and both
+        # dispatch. In-process lock + a status re-read inside it closes the
+        # race for this single-process server; entries are pruned on release.
+        self._surface_locks: dict[str, asyncio.Lock] = {}
         _register_default_handlers(self)
 
     def register(self, name: str, fn: Handler, *, mutating: bool, irreversible: bool = False) -> None:
@@ -108,6 +113,25 @@ class ActionRouter:
         if surface_id in surfaces_meta:
             data_model = surfaces_meta[surface_id]
 
+        lock = self._surface_locks.setdefault(surface_id, asyncio.Lock())
+        try:
+            async with lock:
+                return await self._handle_locked(surface_id, name, context, data_model, action, actor)
+        finally:
+            if not lock.locked() and self._surface_locks.get(surface_id) is lock:
+                self._surface_locks.pop(surface_id, None)
+
+    async def _handle_locked(
+        self,
+        surface_id: str,
+        name: str,
+        context: dict,
+        data_model: dict | None,
+        action: dict,
+        actor: str,
+    ) -> tuple[int, dict]:
+        # Status is read INSIDE the surface lock — a terminal action that
+        # just resolved this surface makes the second request 404 here.
         async with self._db.session() as session:
             surface = await session.get(A2uiSurface, surface_id)
 
@@ -115,7 +139,16 @@ class ActionRouter:
             return 404, _err("SURFACE_NOT_LIVE", surface_id, "surface not found or not live")
 
         async def reject(status: int, code: str, message: str) -> tuple[int, dict]:
-            await self._audit(surface, name, context, data_model, "rejected", message, actor)
+            await self._audit(
+                surface,
+                name,
+                context,
+                data_model,
+                "rejected",
+                message,
+                actor,
+                source_component_id=action.get("sourceComponentId"),
+            )
             return status, _err(code, surface_id, message)
 
         if name not in (surface.allowed_actions or []):
@@ -146,7 +179,16 @@ class ActionRouter:
                 reason = blocking[0].reason or blocking[0].trigger_pattern
                 return await reject(403, "CENSORED", f"blocked by censor: {reason}")
 
-        audit_id = await self._audit(surface, name, context, data_model, "dispatched", None, actor)
+        audit_id = await self._audit(
+            surface,
+            name,
+            context,
+            data_model,
+            "dispatched",
+            None,
+            actor,
+            source_component_id=action.get("sourceComponentId"),
+        )
 
         ctx = ActionContext(surface=surface, name=name, context=context, data_model=data_model, services=self)
         try:
@@ -189,6 +231,7 @@ class ActionRouter:
         status: str,
         rejection_reason: str | None,
         actor: str = "unattributed",
+        source_component_id: str | None = None,
     ) -> Any:
         async with self._db.session() as session:
             row = A2uiAction(
@@ -196,7 +239,9 @@ class ActionRouter:
                 surface_id=surface.surface_id,
                 action_name=name,
                 actor=actor,
-                source_component_id=context.get("sourceComponentId"),
+                # From action.sourceComponentId (the wire shape), NOT context —
+                # the renderer never duplicates it into context (codex P2).
+                source_component_id=source_component_id,
                 context=context,
                 data_model=data_model,
                 status=status,
@@ -229,7 +274,13 @@ def _err(code: str, surface_id: str, message: str) -> dict:
 
 def _register_default_handlers(router: ActionRouter) -> None:
     async def approval_choose(ctx: ActionContext) -> ActionResult:
-        option = ctx.context.get("optionId", "")
+        option = str(ctx.context.get("optionId", ""))
+        # Validate against the surface's AUTHORITATIVE options (server-side
+        # data model, not the client copy): a client with the nonce could
+        # otherwise submit an optionId no button ever offered (codex P2).
+        offered = {str(o.get("id")) for o in (ctx.surface.data_model or {}).get("options", []) if isinstance(o, dict)}
+        if option not in offered:
+            return ActionResult(ok=False, message=f"option {option!r} was not offered by this surface")
         return ActionResult(
             message=f"chose {option}",
             resolve_surface=True,

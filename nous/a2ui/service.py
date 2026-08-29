@@ -377,7 +377,14 @@ class SurfaceService:
         )
 
     async def replay(self, since: int) -> list[tuple[int, dict]] | None:
-        """Outbox rows after ``since`` for live surfaces, lag-windowed.
+        """Outbox rows after ``since``, lag-windowed.
+
+        Content deltas replay only for live surfaces, but ``deleteSurface``
+        teardowns replay REGARDLESS of surface status: a surface can resolve
+        in the gap between the client's snapshot fetch and its SSE subscribe,
+        and a live-only filter would drop the only event that removes the
+        stale card (codex P2). Applying a teardown for an unknown surface is
+        a no-op client-side.
 
         Returns None when the gap exceeds the replay window — the caller
         must tell the client to resync (hydration-first) instead.
@@ -403,7 +410,7 @@ class SurfaceService:
                         A2uiOutbox.seq > since,
                         A2uiOutbox.agent_id == self._settings.agent_id,
                         A2uiOutbox.created_at <= cutoff,
-                        A2uiSurface.status == "live",
+                        (A2uiSurface.status == "live") | A2uiOutbox.envelope.has_key("deleteSurface"),
                     )
                     .order_by(A2uiOutbox.seq)
                 )
@@ -469,7 +476,7 @@ class SurfaceService:
         chat_id = self._settings.telegram_chat_id
         if not token or not chat_id:
             return
-        base = getattr(self._settings, "a2ui_public_base_url", "") or ""
+        base = (self._settings.a2ui_public_base_url or "").rstrip("/")
         link = f"{base}/companion#/s/{surface_id}" if base else f"/companion#/s/{surface_id}"
         try:
             async with httpx.AsyncClient() as client:
