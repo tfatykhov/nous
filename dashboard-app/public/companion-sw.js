@@ -77,11 +77,25 @@ async function warmCache() {
           /* skip — the index below will not list it */
         }
       }
+      // A PARTIAL index must not keep the full watermark (codex P1):
+      // latest_seq covers the omitted surfaces' create events, so a
+      // hydration that fell back to this index followed by a healthy
+      // stream open would tail right past them — a live approval invisible
+      // until the next stream failure. Zeroing the watermark makes the
+      // first successful stream open hit the replay-window gap, which
+      // returns the resync control — the full online re-hydration path
+      // that already exists for exactly this.
+      const partial = stored.length < (data.surfaces ?? []).length;
       await cache.put(
         '/a2ui/surfaces',
-        new Response(JSON.stringify({ ...data, surfaces: stored }), {
-          headers: { 'Content-Type': 'application/json' },
-        }),
+        new Response(
+          JSON.stringify({
+            ...data,
+            surfaces: stored,
+            latest_seq: partial ? 0 : data.latest_seq,
+          }),
+          { headers: { 'Content-Type': 'application/json' } },
+        ),
       );
     }
   } catch {
