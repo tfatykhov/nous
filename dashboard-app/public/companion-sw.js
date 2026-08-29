@@ -19,11 +19,59 @@
 
 const CACHE = 'nous-companion-v1';
 
+async function warmCache() {
+  // Seed the offline cache AT INSTALL (codex P1): registration happens
+  // after `load`, so the first visit's own fetches were uncontrolled — a
+  // user who installs the PWA on visit one and next opens it offline
+  // would otherwise find an empty cache and no shell at all. The hashed
+  // asset URLs are discovered by parsing the entry HTML, so this static
+  // worker needs no build-time precache manifest. Best-effort throughout:
+  // a failed warm must never fail installation (runtime caching recovers
+  // on the next online visit).
+  const cache = await caches.open(CACHE);
+
+  async function put(url) {
+    try {
+      const response = await fetch(url);
+      if (response.ok) await cache.put(url, response);
+    } catch {
+      /* offline mid-install or transient failure — runtime caching recovers */
+    }
+  }
+
+  try {
+    const shellResponse = await fetch('/dashboard/v2/companion.html');
+    if (shellResponse.ok) {
+      await cache.put('/dashboard/v2/companion.html', shellResponse.clone());
+      const html = await shellResponse.text();
+      const assetUrls = new Set(
+        [...html.matchAll(/(?:src|href)="(\/dashboard\/v2\/[^"]+)"/g)].map((m) => m[1]),
+      );
+      for (const url of assetUrls) await put(url);
+    }
+  } catch {
+    /* best-effort */
+  }
+  await put('/dashboard/v2/companion.webmanifest');
+
+  // Warm the surface snapshots so the offline feed exists from visit one.
+  try {
+    const index = await fetch('/a2ui/surfaces');
+    if (index.ok) {
+      await cache.put('/a2ui/surfaces', index.clone());
+      const data = await index.json();
+      for (const surface of data.surfaces ?? []) {
+        await put('/a2ui/surfaces/' + encodeURIComponent(surface.surface_id));
+      }
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+
 self.addEventListener('install', (event) => {
-  // Activate the new worker immediately — the shell is network-first, so
-  // there is no stale-precache handoff to protect.
   self.skipWaiting();
-  event.waitUntil(Promise.resolve());
+  event.waitUntil(warmCache());
 });
 
 self.addEventListener('activate', (event) => {
