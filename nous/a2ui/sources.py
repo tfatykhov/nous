@@ -36,6 +36,19 @@ Fetcher = Callable[[dict], Awaitable[Any]]
 _TOTAL_BUDGET_CHARS = 12_000
 _PER_SOURCE_BUDGET_CHARS = 6_000
 
+# Server-owned ceiling on any caller/model-supplied limit (codex P2): the
+# char budget trims AFTER materialization, so a prompted limit in the
+# millions would still do the database work. Clamp before the query.
+_MAX_ROWS = 50
+
+
+def _limit(params: dict, default: int) -> int:
+    try:
+        requested = int(params.get("limit", default))
+    except (TypeError, ValueError):
+        requested = default
+    return max(1, min(requested, _MAX_ROWS))
+
 
 class UnknownSourceError(ValueError):
     """Raised when a declared source name is not registered.
@@ -132,7 +145,7 @@ def build_default_registry(
                     "stakes": d.stakes,
                     "category": d.category,
                 }
-                for d in rows[: int(params.get("limit", 20))]
+                for d in rows[: _limit(params, 20)]
             ]
 
         registry.register("unreviewed_decisions", unreviewed_decisions)
@@ -175,7 +188,7 @@ def build_default_registry(
                     "check": t.finding.check_name,
                     "state": str(t.state.value if hasattr(t.state, "value") else t.state),
                 }
-                for t in items[: int(params.get("limit", 20))]
+                for t in items[: _limit(params, 20)]
             ]
 
         registry.register("heartbeat_findings", heartbeat_findings)
@@ -186,14 +199,14 @@ def build_default_registry(
             query = str(params.get("q") or params.get("query") or "")
             if not query:
                 raise ValueError("facts_search requires params.q")
-            rows = await heart.search_facts(query, limit=int(params.get("limit", 10)))
+            rows = await heart.search_facts(query, limit=_limit(params, 10))
             return [
                 {"id": str(f.id), "content": f.content, "category": f.category}
                 for f in rows
             ]
 
         async def recent_episodes(params: dict) -> list[dict]:
-            rows = await heart.episodes.list_recent(limit=int(params.get("limit", 10)))
+            rows = await heart.episodes.list_recent(limit=_limit(params, 10))
             return [
                 {
                     "id": str(e.id),
@@ -206,7 +219,7 @@ def build_default_registry(
 
         async def subtasks(params: dict) -> list[dict]:
             rows = await heart.subtasks.list(
-                status=params.get("status"), limit=int(params.get("limit", 20))
+                status=params.get("status"), limit=_limit(params, 20)
             )
             return [
                 {
@@ -219,7 +232,7 @@ def build_default_registry(
             ]
 
         async def schedules(params: dict) -> list[dict]:
-            rows = await heart.schedules.list(limit=int(params.get("limit", 20)))
+            rows = await heart.schedules.list(limit=_limit(params, 20))
             return [
                 {
                     "id": str(s.id),

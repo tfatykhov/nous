@@ -744,6 +744,38 @@ async def test_llm_transport_failure_is_terminal_not_a_repair_round(
     assert len(llm.calls) == 1, "no repair round after a transport failure"
 
 
+async def test_compose_repairs_non_object_component_entries(
+    composer: SurfaceComposer, scripted_llm
+) -> None:
+    """Codex P2: a stray null in components must be a REPAIR error — the
+    old filter-then-consume-unfiltered path raised AttributeError past both
+    the repair loop and the fallback."""
+    llm = scripted_llm(
+        [
+            _llm_response(components=[*_valid_components(), None]),
+            _llm_response(),
+        ]
+    )
+
+    composed = await composer.compose("vacation")
+
+    assert not composed.fallback
+    assert composed.repairs == 1
+    assert "non-object" in llm.calls[1]
+
+
+async def test_source_limits_are_clamped_before_the_query() -> None:
+    """Codex P2: the char budget trims AFTER materialization, so a prompted
+    limit in the millions must be clamped before it reaches the fetcher."""
+    from nous.a2ui.sources import _limit
+
+    assert _limit({"limit": 10_000_000}, 10) == 50
+    assert _limit({"limit": 5}, 10) == 5
+    assert _limit({"limit": 0}, 10) == 1
+    assert _limit({"limit": "junk"}, 10) == 10
+    assert _limit({}, 10) == 10
+
+
 async def test_source_resolve_bounds_oversized_values() -> None:
     registry = SourceRegistry()
 
@@ -805,8 +837,18 @@ async def test_compose_surface_tool_defaults_the_dedup_key(fake_composer) -> Non
 
     assert not is_error, text
     _, dedup_key = service.pushed[0]
-    assert dedup_key == "app:show-me-my-vacation-plans"
+    assert dedup_key.startswith("app:show-me-my-vacation-plans-")
     assert json.loads(text)["url"].startswith("/companion#/s/")
+
+
+def test_intent_slug_is_collision_resistant() -> None:
+    """Codex P2: 'C++ status' and 'C status' slug identically — without the
+    digest, composing the second would replace the first live app."""
+    from nous.a2ui.tools import _intent_slug
+
+    assert _intent_slug("C++ status") != _intent_slug("C status")
+    assert _intent_slug("x" * 100) != _intent_slug("x" * 100 + "y")
+    assert _intent_slug("same intent") == _intent_slug("same intent")
 
 
 async def test_compose_surface_tool_rejects_blocking_priority(fake_composer) -> None:

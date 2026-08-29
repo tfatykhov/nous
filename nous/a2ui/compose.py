@@ -294,6 +294,13 @@ class SurfaceComposer:
         components = parsed.get("components")
         if not isinstance(components, list) or not components:
             return ["components must be a non-empty array"]
+        # Reject non-object entries OUTRIGHT (codex P2): the checks below
+        # filter them out to survive, but the accepted array is consumed
+        # unfiltered downstream — a stray null must be a repair error, not
+        # an AttributeError that skips both the repair loop and the fallback.
+        bad = sum(1 for c in components if not isinstance(c, dict))
+        if bad:
+            return [f"components contains {bad} non-object entr{'y' if bad == 1 else 'ies'}"]
         model_supplied = parsed.get("dataModel")
         if model_supplied is not None and not isinstance(model_supplied, dict):
             return ["dataModel must be an object"]

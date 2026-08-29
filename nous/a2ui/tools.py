@@ -156,9 +156,17 @@ _COMPOSE_SURFACE_SCHEMA = {
 
 
 def _intent_slug(intent: str) -> str:
+    """Readable slug + a digest of the FULL intent (codex P2): slugging
+    alone maps 'C++ status' and 'C status' — or any two long intents
+    sharing a 40-char prefix — onto one dedup key, and push_built would
+    then replace an unrelated live app. Same intent → same key (stable
+    update-in-place); different intent → different key, guaranteed."""
+    import hashlib
+
     slug = "".join(c if c.isalnum() else "-" for c in intent.lower())
     slug = "-".join(part for part in slug.split("-") if part)
-    return slug[:40] or "app"
+    digest = hashlib.sha256(intent.encode()).hexdigest()[:8]
+    return f"{slug[:40] or 'app'}-{digest}"
 
 
 def register_a2ui_tools(
