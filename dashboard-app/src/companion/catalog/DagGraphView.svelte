@@ -38,9 +38,20 @@
   const edges = $derived.by(() => {
     const raw = resolveDynamic(comp.edges, ctx);
     const names = new Set(nodes.map((n) => n.name));
-    return Array.isArray(raw)
-      ? (raw as DEdge[]).filter((e) => e && names.has(e.from) && names.has(e.to))
-      : [];
+    if (!Array.isArray(raw)) return [];
+    // Dedupe on the render key (codex P2): parallel edges between the same
+    // pair are legal in the store, but a keyed each with duplicate keys is
+    // a Svelte crash — and the pairs render identically anyway.
+    const seen = new Set<string>();
+    const out: DEdge[] = [];
+    for (const e of raw as DEdge[]) {
+      if (!e || !names.has(e.from) || !names.has(e.to)) continue;
+      const key = `${e.from}→${e.to}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(e);
+    }
+    return out;
   });
 
   // Longest-path depth via relaxation. Bounded by |nodes| passes, so a

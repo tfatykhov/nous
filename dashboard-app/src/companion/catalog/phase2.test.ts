@@ -146,6 +146,32 @@ describe('DagGraphView', () => {
     expect(container.textContent).toContain('analyze');
   });
 
+  it('dedupes parallel edges between the same pair (duplicate keyed-each crash)', () => {
+    seedSurface({
+      nodes: [
+        { name: 'a', status: 'completed' },
+        { name: 'b', status: 'running' },
+      ],
+      edges: [
+        { from: 'a', to: 'b' },
+        { from: 'a', to: 'b' },
+      ],
+    });
+    const { container } = render(DagGraphView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: {
+          id: 'g',
+          component: 'DagGraph',
+          nodes: { path: '/nodes' },
+          edges: { path: '/edges' },
+        },
+      },
+    });
+
+    expect(container.querySelectorAll('line').length).toBe(1);
+  });
+
   it('drops edges that reference unknown nodes instead of crashing', () => {
     seedSurface({
       nodes: [{ name: 'only', status: 'running' }],

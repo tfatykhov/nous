@@ -50,7 +50,19 @@
   });
   const edges = $derived.by(() => {
     const raw = resolveDynamic(comp.edges, ctx);
-    return Array.isArray(raw) ? (raw as GEdge[]).filter((e) => e && e.source && e.target) : [];
+    if (!Array.isArray(raw)) return [];
+    // Same duplicate-render-key guard as DagGraphView: the expand merge
+    // dedupes what IT adds, but seed edges arrive from params unchecked.
+    const seen = new Set<string>();
+    const out: GEdge[] = [];
+    for (const e of raw as GEdge[]) {
+      if (!e || !e.source || !e.target) continue;
+      const key = `${e.source}→${e.target}:${e.relation ?? ''}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(e);
+    }
+    return out;
   });
   const focusId = $derived(
     typeof comp.focusNodeId === 'string' && comp.focusNodeId ? comp.focusNodeId : (nodes[0]?.id ?? ''),

@@ -46,15 +46,15 @@ _PUSH_SURFACE_SCHEMA = {
                 "handler,note}, trace_id). "
                 "heartbeat_findings: triage list (params: findings=[{"
                 "fingerprint,message,urgency,check}], title). "
-                "decision_sweep: unreviewed-decision review cards; pass "
-                "params={} to self-source from the brain (optional: "
-                "max_age_days, max_decisions, title). "
+                "decision_sweep: unreviewed-decision review cards, ALWAYS "
+                "self-sourced from the brain — decision rows in params are "
+                "ignored (optional: max_age_days, max_decisions, title). "
                 "memory_graph: interactive graph explorer seeded on one "
                 "node (params: node_id UUID, node_type, label; tap-to-"
                 "expand happens client-side). "
                 "dag_monitor: DAG node/status graph with retry+cancel; "
-                "pass params={dag_id} to self-source nodes/edges from the "
-                "store."
+                "params={dag_id} — nodes/edges/name/status are ALWAYS "
+                "fetched from the store, supplied values are ignored."
             ),
         },
         "params": {
@@ -105,9 +105,14 @@ def register_a2ui_tools(
             # default rather than bouncing the model.
             dedup_key = "heartbeat:findings"
 
-        # Self-sourcing templates: fetch authoritative data server-side so
-        # the model cannot hand the surface a stale or invented list.
-        if template == "decision_sweep" and "decisions" not in params:
+        # Self-sourcing templates — ALWAYS, not as a fallback (codex P1 x2):
+        # the DB is the only source of truth for actionable rows. A caller-
+        # supplied list was previously honored when present, which let the
+        # model render fabricated text over a REAL decision/DAG id — the user
+        # reads the fabrication, but their click records against the id.
+        # Caller-supplied rows are therefore overwritten unconditionally;
+        # callers control filters and display options only.
+        if template == "decision_sweep":
             if brain is None:
                 return _tool_error("decision_sweep needs the brain wired to self-source")
             try:
@@ -127,7 +132,7 @@ def register_a2ui_tools(
                 for d in unreviewed[: int(params.get("max_decisions", 15))]
             ]
             dedup_key = dedup_key or "sweep:decisions"
-        if template == "dag_monitor" and "nodes" not in params:
+        if template == "dag_monitor":
             if dag_store is None:
                 return _tool_error("dag_monitor needs the dag_store wired to self-source")
             from uuid import UUID as _UUID
@@ -140,6 +145,18 @@ def register_a2ui_tools(
                 return _tool_error(f"Could not fetch DAG: {exc}")
             if dag is None:
                 return _tool_error("DAG not found")
+            # Distinct (from, to) name pairs only: DAGEdge uniqueness includes
+            # edge_type, so a stored DAG can carry parallel edges that project
+            # to the same pair — and the renderer keys edges by that pair.
+            name_by_id = {n.id: n.name for n in dag.nodes}
+            seen_pairs: set[tuple[str, str]] = set()
+            edges = []
+            for e in dag.edges:
+                pair = (name_by_id.get(e.from_node_id, ""), name_by_id.get(e.to_node_id, ""))
+                if not pair[0] or not pair[1] or pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                edges.append({"from": pair[0], "to": pair[1]})
             params.update(
                 {
                     "dag_id": str(dag.id),
@@ -149,13 +166,7 @@ def register_a2ui_tools(
                         {"name": n.name, "status": n.status, "node_type": n.node_type}
                         for n in dag.nodes
                     ],
-                    "edges": [
-                        {
-                            "from": next((n.name for n in dag.nodes if n.id == e.from_node_id), ""),
-                            "to": next((n.name for n in dag.nodes if n.id == e.to_node_id), ""),
-                        }
-                        for e in dag.edges
-                    ],
+                    "edges": edges,
                 }
             )
             dedup_key = dedup_key or f"dag:{dag.id}"

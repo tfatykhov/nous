@@ -732,7 +732,13 @@ class _FakeDagStore:
                 SimpleNamespace(id=1, name="collect", status="completed", node_type="subtask"),
                 SimpleNamespace(id=2, name="analyze", status="failed", node_type="subtask"),
             ],
-            edges=[SimpleNamespace(from_node_id=1, to_node_id=2)],
+            # Parallel edges between the same pair are legal in the store
+            # (DAGEdge uniqueness includes edge_type) — the projection must
+            # emit the pair ONCE or the renderer's keyed each crashes.
+            edges=[
+                SimpleNamespace(from_node_id=1, to_node_id=2),
+                SimpleNamespace(from_node_id=1, to_node_id=2),
+            ],
         )
 
 
@@ -772,8 +778,67 @@ async def test_push_surface_self_sources_the_dag_monitor(dispatcher_env) -> None
     built, dedup_key = service.pushed[0]
     assert dedup_key == f"dag:{dag_id}"
     assert {n["name"] for n in built.data_model["nodes"]} == {"collect", "analyze"}
-    assert built.data_model["edges"] == [{"from": "collect", "to": "analyze"}]
+    assert built.data_model["edges"] == [
+        {"from": "collect", "to": "analyze"}
+    ], "parallel store edges project to ONE distinct pair"
     assert "dag.retry" in built.allowed_actions, "the failed node makes retry available"
+
+
+async def test_push_surface_overwrites_caller_supplied_decisions(dispatcher_env) -> None:
+    """Codex P1: the brain is the ONLY source of decision rows. A caller-
+    supplied list — fabricated text over a real id — must be discarded, or
+    the user's click records an outcome for something they never read."""
+    dispatcher, service = dispatcher_env
+
+    _, is_error = await dispatcher.dispatch(
+        "push_surface",
+        {
+            "template": "decision_sweep",
+            "params": {
+                "decisions": [
+                    {
+                        "id": DECISION_B,
+                        "description": "FABRICATED: totally harmless decision",
+                        "confidence": 0.99,
+                    }
+                ]
+            },
+        },
+    )
+
+    assert not is_error
+    built, _ = service.pushed[0]
+    assert built.data_model["decisions"] == {DECISION_A: "pending"}, (
+        "the surface must carry the brain's rows, not the caller's"
+    )
+    assert "FABRICATED" not in str(built.components)
+
+
+async def test_push_surface_overwrites_caller_supplied_dag_nodes(dispatcher_env) -> None:
+    """Codex P1: same class as the sweep — a fabricated monitor over a real
+    dag_id would let a user click cancel a DAG they never actually saw."""
+    dispatcher, service = dispatcher_env
+    dag_id = "0e9d8c7b-6a5f-4e3d-8c2b-1a0f9e8d7c6b"
+
+    _, is_error = await dispatcher.dispatch(
+        "push_surface",
+        {
+            "template": "dag_monitor",
+            "params": {
+                "dag_id": dag_id,
+                "name": "FABRICATED-harmless-dag",
+                "status": "completed",
+                "nodes": [{"name": "fake", "status": "completed"}],
+                "edges": [],
+            },
+        },
+    )
+
+    assert not is_error
+    built, _ = service.pushed[0]
+    assert {n["name"] for n in built.data_model["nodes"]} == {"collect", "analyze"}
+    assert "FABRICATED" not in built.title
+    assert built.data_model["dag_id"] == dag_id
 
 
 async def test_push_surface_dag_monitor_requires_a_uuid(dispatcher_env) -> None:
