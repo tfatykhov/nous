@@ -319,6 +319,56 @@ describe('Transport — postAction', () => {
   });
 });
 
+describe('Transport — partial offline-warm index (F092 Phase 4)', () => {
+  it('re-hydrates once from the live index after a partial one connects', async () => {
+    // First index is the SW's degraded warm (partial, one surface); once
+    // the stream opens the transport must refresh and pick up the surface
+    // the warm omitted.
+    const stream = fakeStream();
+    let indexCalls = 0;
+    const { impl } = fakeFetch((url) => {
+      if (url === '/a2ui/surfaces') {
+        indexCalls += 1;
+        if (indexCalls === 1) {
+          return response({ latest_seq: 0, partial: true, surfaces: [{ surface_id: 'a' }] });
+        }
+        return response({
+          latest_seq: 9,
+          surfaces: [{ surface_id: 'a' }, { surface_id: 'b' }],
+        });
+      }
+      if (url === '/a2ui/surfaces/a') return response(createEnvelope('a'));
+      if (url === '/a2ui/surfaces/b') return response(createEnvelope('b'));
+      throw new Error('unexpected url ' + url);
+    });
+    active = new Transport({ streamFactory: stream.factory, fetchImpl: impl });
+    await active.connect();
+    await flush();
+
+    expect(indexCalls).toBe(2);
+    expect(Object.keys(store.surfaces).sort()).toEqual(['a', 'b']);
+    expect(store.connection).toBe('live');
+  });
+
+  it('does not loop when the refreshed index is partial again', async () => {
+    const stream = fakeStream();
+    let indexCalls = 0;
+    const { impl } = fakeFetch((url) => {
+      if (url === '/a2ui/surfaces') {
+        indexCalls += 1;
+        return response({ latest_seq: 0, partial: true, surfaces: [{ surface_id: 'a' }] });
+      }
+      if (url === '/a2ui/surfaces/a') return response(createEnvelope('a'));
+      throw new Error('unexpected url ' + url);
+    });
+    active = new Transport({ streamFactory: stream.factory, fetchImpl: impl });
+    await active.connect();
+    await flush();
+
+    expect(indexCalls).toBe(2, 'exactly one partial-triggered refresh, never a loop');
+  });
+});
+
 describe('Transport — callAgentFunction', () => {
   // Phase 2 RPC: the agentFunctionResponse envelope rides back in the HTTP
   // response, and the surface nonce travels in metadata.extensions exactly

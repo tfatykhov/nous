@@ -77,14 +77,17 @@ async function warmCache() {
           /* skip — the index below will not list it */
         }
       }
-      // A PARTIAL index must not keep the full watermark (codex P1):
-      // latest_seq covers the omitted surfaces' create events, so a
-      // hydration that fell back to this index followed by a healthy
-      // stream open would tail right past them — a live approval invisible
-      // until the next stream failure. Zeroing the watermark makes the
-      // first successful stream open hit the replay-window gap, which
-      // returns the resync control — the full online re-hydration path
-      // that already exists for exactly this.
+      // A PARTIAL index must not masquerade as a complete one (codex P1
+      // rounds 3+4): its latest_seq covers the omitted surfaces' create
+      // events, and a zeroed watermark alone is NOT a guaranteed resync —
+      // the outbox age-prune deletes old rows even for live surfaces, so
+      // on a low-traffic agent the remaining rows can fit the replay
+      // window and a healthy stream opens without ever replaying the
+      // omission. Two defenses, layered for version skew: an explicit
+      // `partial` marker the transport acts on (it re-hydrates from the
+      // network the moment the stream proves connectivity), and the
+      // zeroed watermark as the best-effort fallback for a stale client
+      // bundle that predates the marker.
       const partial = stored.length < (data.surfaces ?? []).length;
       await cache.put(
         '/a2ui/surfaces',
@@ -92,6 +95,7 @@ async function warmCache() {
           JSON.stringify({
             ...data,
             surfaces: stored,
+            partial,
             latest_seq: partial ? 0 : data.latest_seq,
           }),
           { headers: { 'Content-Type': 'application/json' } },

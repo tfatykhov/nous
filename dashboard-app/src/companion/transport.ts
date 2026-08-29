@@ -53,6 +53,11 @@ export class Transport {
   private stream: A2uiStream | null = null;
   private stopped = false;
   private attempt = 0;
+  // One partial-triggered refresh at a time: a partial index means the SW
+  // served its degraded offline warm, and the stream opening proves the
+  // network is back — but if the refreshed index is somehow partial again,
+  // looping cycles would hammer the server for nothing.
+  private partialRetried = false;
 
   constructor(opts: TransportOptions = {}) {
     this.streamFactory = opts.streamFactory ?? defaultStreamFactory;
@@ -80,6 +85,10 @@ export class Transport {
       // 1. Hydrate the live index; prune anything the server no longer lists.
       const index = (await this.getJson('/a2ui/surfaces')) as {
         latest_seq: number;
+        // Set by the service worker's install warmer when its offline warm
+        // could not store every snapshot — the index deliberately lists
+        // only what IS cached (F092 Phase 4, codex rounds 2-4).
+        partial?: boolean;
         surfaces: { surface_id: string }[];
       };
       const liveIds = new Set(index.surfaces.map((s) => s.surface_id));
@@ -128,6 +137,17 @@ export class Transport {
       });
       store.connection = 'live';
       this.attempt = 0;
+      if (index.partial && !this.partialRetried) {
+        // The index came from the SW's degraded offline warm, but the
+        // stream just opened — the network is back. Re-hydrate once from
+        // the live index (network-first wins now) so the surfaces the
+        // warm omitted appear; relying on a replay-window overflow is not
+        // deterministic on a low-traffic agent (codex round 4).
+        this.partialRetried = true;
+        void this.cycle();
+        return;
+      }
+      this.partialRetried = false;
     } catch {
       store.connection = 'error';
       this.attempt += 1;
