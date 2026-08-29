@@ -73,6 +73,23 @@ class _Delivered:
             self.overflowed = True
         return True
 
+    def advance_floor(self, seq: int) -> None:
+        """Authoritative floor advance from a completed lag-windowed poll.
+
+        The outbox BIGSERIAL is GLOBAL while replay filters by agent, so
+        another agent's rows leave holes contiguity can never fill (codex
+        P2) — without this, a healthy multi-agent stream would overflow
+        into a needless resync. A poll that returned everything for this
+        agent above ``poll_since`` proves the unseen gaps below it are
+        foreign (or lag-covered), so the floor may jump.
+        """
+        if seq <= self.floor:
+            return
+        self.floor = seq
+        self._seen = {s for s in self._seen if s > seq}
+        if len(self._seen) <= _SEEN_MAX:
+            self.overflowed = False
+
 
 async def stream_events(
     service: Any,
@@ -99,6 +116,7 @@ async def stream_events(
                 yield _frame(seq, "a2ui", envelope)
                 last_byte = time.monotonic()
             poll_since = max(poll_since, seq)
+        delivered.advance_floor(poll_since)
         if delivered.overflowed:
             yield _frame(None, "control", {"type": "resync"})
             return
@@ -133,6 +151,7 @@ async def stream_events(
                     yield _frame(seq, "a2ui", envelope)
                     last_byte = time.monotonic()
                 poll_since = max(poll_since, seq)
+            delivered.advance_floor(poll_since)
             if delivered.overflowed:
                 yield _frame(None, "control", {"type": "resync"})
                 return

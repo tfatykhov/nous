@@ -52,6 +52,11 @@ export class SurfaceStore {
    * the floor everything at/below which counts as seen. */
   private seenFloor = 0;
   private seen = new Set<number>();
+  /** Per-surface snapshot watermarks: an envelope for surface S at
+   * seq <= surfaceUpto[S] is already reflected in S's hydrated state
+   * (the server reads state + watermark in one statement), so replaying
+   * it would clobber input typed since hydration. */
+  private surfaceUpto: Record<string, number> = {};
 
   private markSeen(seq: number): boolean {
     if (seq <= this.seenFloor || this.seen.has(seq)) return false;
@@ -68,11 +73,33 @@ export class SurfaceStore {
     return true;
   }
 
+  /** Record a surface's snapshot watermark (from X-A2UI-Upto-Seq). */
+  setSurfaceUpto(surfaceId: string, uptoSeq: number): void {
+    this.surfaceUpto[surfaceId] = Math.max(this.surfaceUpto[surfaceId] ?? 0, uptoSeq);
+    this.lastSeq = Math.max(this.lastSeq, uptoSeq);
+  }
+
+  private targetOf(envelope: Envelope): string | null {
+    return (
+      envelope.createSurface?.surfaceId ??
+      envelope.updateComponents?.surfaceId ??
+      envelope.updateDataModel?.surfaceId ??
+      envelope.deleteSurface?.surfaceId ??
+      null
+    );
+  }
+
   /** Apply one envelope; seq=null bypasses dedupe (snapshot hydration). */
   apply(seq: number | null, envelope: Envelope): void {
     if (seq !== null) {
       if (!this.markSeen(seq)) return;
       this.lastSeq = Math.max(this.lastSeq, seq);
+      const target = this.targetOf(envelope);
+      if (target !== null && seq <= (this.surfaceUpto[target] ?? 0)) {
+        // Already reflected in this surface's snapshot — applying it again
+        // would clobber local edits made since hydration (codex P2).
+        return;
+      }
     }
     if (envelope.createSurface) {
       const cs = envelope.createSurface;
@@ -109,7 +136,10 @@ export class SurfaceStore {
   /** Hydration-first reconnect: drop local surfaces the index no longer lists. */
   pruneAbsent(liveIds: Set<string>): void {
     for (const id of Object.keys(this.surfaces)) {
-      if (!liveIds.has(id)) delete this.surfaces[id];
+      if (!liveIds.has(id)) {
+        delete this.surfaces[id];
+        delete this.surfaceUpto[id];
+      }
     }
   }
 
@@ -132,6 +162,7 @@ export class SurfaceStore {
     this.lastSeq = 0;
     this.seenFloor = 0;
     this.seen = new Set();
+    this.surfaceUpto = {};
   }
 
   /** Feed order: priority desc, then surface age via insertion order. */

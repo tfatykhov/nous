@@ -301,8 +301,12 @@ class TestPush:
         assert surfaces[0].title == "Heartbeat findings (2)"
         assert set(surfaces[0].data_model["findings"]) == {"aaa111", "bbb222"}
 
+        # A replacement is always delivered as deleteSurface + createSurface:
+        # the nonce ROTATES on every replacement (codex P1 — a stale click
+        # must not be accepted against the new occurrence), and nonce +
+        # priority travel only in createSurface metadata.
         kinds = [_envelope_kind(row.envelope) for row in await _outbox(db, a2ui_agent_id)]
-        assert kinds == ["createSurface", "updateComponents", "updateDataModel"]
+        assert kinds == ["createSurface", "deleteSurface", "createSurface"]
 
     async def test_different_dedup_keys_create_separate_surfaces(
         self, service: SurfaceService, db, a2ui_agent_id: str
@@ -423,7 +427,8 @@ class TestMutations:
 
         snapshot = await service.snapshot(surface_id)
         assert snapshot is not None
-        assert snapshot["createSurface"]["dataModel"]["findings"]["fp-one"] == "resolve"
+        envelope, _upto = snapshot
+        assert envelope["createSurface"]["dataModel"]["findings"]["fp-one"] == "resolve"
 
     async def test_update_data_without_a_path_replaces_the_whole_model(
         self, service: SurfaceService, db, a2ui_agent_id: str
@@ -746,7 +751,10 @@ class TestReads:
         snapshot = await service.snapshot(surface_id)
 
         assert snapshot is not None
-        create = snapshot["createSurface"]
+        envelope, upto = snapshot
+        # The per-surface watermark covers the create envelope itself.
+        assert upto >= 1
+        create = envelope["createSurface"]
         assert create["surfaceId"] == surface_id
         assert create["metadata"]["extensions"]["com_nous_nonce"] == surface.nonce
         assert create["components"] == surface.components
@@ -908,13 +916,15 @@ async def test_concurrent_same_dedup_key_pushes_yield_one_surface(
 
 
 @pytest.mark.postgres_only
-async def test_dedup_priority_change_reissues_create_surface(
+async def test_dedup_replacement_rotates_the_nonce_and_reissues_create(
     service: SurfaceService, db, a2ui_agent_id: str, no_lag: None
 ) -> None:
-    """Priority lives in createSurface metadata and the client reads it only
+    """Every dedup replacement mints a NEW nonce (codex P1): option ids like
 
-    there — a dedup update that changes priority must re-deliver it via
-    deleteSurface + createSurface, keeping the nonce stable (codex P2).
+    'approve' recur across occurrences, so a stale client's old click would
+    otherwise be accepted against the new occurrence. The rotated nonce and
+    any priority change travel in createSurface metadata via the
+    deleteSurface + createSurface pair.
     """
     await service.push_built(heartbeat_findings(FINDINGS_LOW), dedup_key="hb:demo")
     first_nonce = (await _surfaces(db, a2ui_agent_id))[0].nonce
@@ -925,10 +935,12 @@ async def test_dedup_priority_change_reissues_create_surface(
 
     kinds = [_envelope_kind(row.envelope) for row in await _outbox(db, a2ui_agent_id)]
     assert kinds == ["createSurface", "deleteSurface", "createSurface"]
+    row = (await _surfaces(db, a2ui_agent_id))[0]
     last_create = (await _outbox(db, a2ui_agent_id))[-1].envelope["createSurface"]
     ext = last_create["metadata"]["extensions"]
     assert ext["com_nous_priority"] == 2
-    assert ext["com_nous_nonce"] == first_nonce
+    assert ext["com_nous_nonce"] == row.nonce
+    assert row.nonce != first_nonce
 
 
 @pytest.mark.postgres_only

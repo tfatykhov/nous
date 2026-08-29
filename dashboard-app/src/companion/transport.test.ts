@@ -12,10 +12,16 @@ interface FakeResponse {
   ok: boolean;
   status: number;
   json: () => Promise<unknown>;
+  headers: { get: (name: string) => string | null };
 }
 
-function response(body: unknown, status = 200): FakeResponse {
-  return { ok: status >= 200 && status < 300, status, json: async () => body };
+function response(body: unknown, status = 200, headers: Record<string, string> = {}): FakeResponse {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+    headers: { get: (name: string) => headers[name.toLowerCase()] ?? null },
+  };
 }
 
 function fakeFetch(handler: (url: string, init?: RequestInit) => FakeResponse) {

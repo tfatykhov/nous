@@ -2986,7 +2986,10 @@ def create_app(
         snapshot = await service.snapshot(request.path_params["surface_id"])
         if snapshot is None:
             return JSONResponse({"error": "surface not found or not live"}, status_code=404)
-        return JSONResponse(snapshot)
+        envelope, upto_seq = snapshot
+        # Per-surface watermark: everything at/below this seq is already
+        # reflected in the returned state (read in the same statement).
+        return JSONResponse(envelope, headers={"X-A2UI-Upto-Seq": str(upto_seq)})
 
     async def a2ui_action(request: Request) -> JSONResponse:
         """POST /a2ui/action — renderer->agent user action."""

@@ -87,13 +87,14 @@ class FakeSurfaceService:
             ],
         }
 
-    async def snapshot(self, surface_id: str) -> dict | None:
+    async def snapshot(self, surface_id: str) -> tuple[dict, int] | None:
         if surface_id != "nous:escalation:approval_gate:abc123":
             return None
-        return {
+        envelope = {
             "version": "v1.0",
             "createSurface": {"surfaceId": surface_id, "catalogId": "x", "components": []},
         }
+        return envelope, 7
 
 
 class FakeActionRouter:

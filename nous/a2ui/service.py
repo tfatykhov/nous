@@ -31,7 +31,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from nous.storage.database import Database
@@ -179,7 +179,6 @@ class SurfaceService:
 
             if existing is not None:
                 surface_id = existing.surface_id
-                priority_changed = existing.priority != built.priority
                 existing.components = built.components
                 existing.data_model = built.data_model
                 existing.title = built.title
@@ -194,40 +193,25 @@ class SurfaceService:
                     existing.session_id = session_id
                 existing.updated_at = now
                 existing.expires_at = expires_at
-                if priority_changed:
-                    # Priority lives in createSurface metadata and the client
-                    # reads it only there (codex P2: plain updates left a
-                    # connected companion ordering the card by the OLD
-                    # priority until a full reconnect). deleteSurface then
-                    # createSurface re-delivers the metadata atomically.
-                    envelopes = [
-                        {"version": "v1.0", "deleteSurface": {"surfaceId": surface_id}},
-                        self._create_envelope(
-                            surface_id,
-                            built.catalog_id,
-                            built.components,
-                            built.data_model,
-                            existing.nonce,
-                            built.priority,
-                        ),
-                    ]
-                else:
-                    envelopes = [
-                        {
-                            "version": "v1.0",
-                            "updateComponents": {
-                                "surfaceId": surface_id,
-                                "components": built.components,
-                            },
-                        },
-                        {
-                            "version": "v1.0",
-                            "updateDataModel": {
-                                "surfaceId": surface_id,
-                                "value": built.data_model,
-                            },
-                        },
-                    ]
+                # Every replacement ROTATES the nonce (codex P1): a stale
+                # client holding the old card could otherwise submit an old
+                # click that is accepted against the NEW occurrence (option
+                # ids like 'approve' recur across occurrences). Rotation
+                # forces the stale action to NONCE_MISMATCH. The new nonce +
+                # priority travel in createSurface metadata, so replacement
+                # is always delivered as deleteSurface + createSurface.
+                existing.nonce = secrets.token_urlsafe(16)
+                envelopes = [
+                    {"version": "v1.0", "deleteSurface": {"surfaceId": surface_id}},
+                    self._create_envelope(
+                        surface_id,
+                        built.catalog_id,
+                        built.components,
+                        built.data_model,
+                        existing.nonce,
+                        built.priority,
+                    ),
+                ]
                 created = False
             else:
                 surface_id = f"nous:{built.origin}:{built.kind}:{uuid.uuid4().hex[:6]}"
@@ -604,13 +588,37 @@ class SurfaceService:
             ],
         }
 
-    async def snapshot(self, surface_id: str) -> dict | None:
-        """Full surface as a single createSurface envelope (v1.0 inline)."""
+    async def snapshot(self, surface_id: str) -> tuple[dict, int] | None:
+        """Full surface as a single createSurface envelope + its watermark.
+
+        Returns ``(envelope, upto_seq)`` where ``upto_seq`` is the max outbox
+        seq of THIS surface, read in the SAME statement as the row (a scalar
+        subquery — one statement is one snapshot under READ COMMITTED). The
+        client floors this surface at ``upto_seq`` (codex P2): an envelope
+        committed after the index watermark but before this snapshot is
+        already reflected in the returned state, and replaying it later
+        would clobber input typed in the meantime.
+        """
+        upto_subq = (
+            select(func.coalesce(func.max(A2uiOutbox.seq), 0))
+            .where(A2uiOutbox.surface_id == surface_id)
+            .scalar_subquery()
+        )
         async with self._db.session() as session:
-            surface = await self._get_own(session, surface_id)
-        if surface is None or surface.status != "live":
+            row = (
+                await session.execute(
+                    select(A2uiSurface, upto_subq).where(
+                        A2uiSurface.surface_id == surface_id,
+                        A2uiSurface.agent_id == self._settings.agent_id,
+                    )
+                )
+            ).one_or_none()
+        if row is None:
             return None
-        return self._create_envelope(
+        surface, upto_seq = row
+        if surface.status != "live":
+            return None
+        envelope = self._create_envelope(
             surface.surface_id,
             surface.catalog_id,
             surface.components,
@@ -618,6 +626,7 @@ class SurfaceService:
             surface.nonce,
             surface.priority,
         )
+        return envelope, int(upto_seq)
 
     async def replay(self, since: int) -> list[tuple[int, dict]] | None:
         """Outbox rows after ``since``, lag-windowed.

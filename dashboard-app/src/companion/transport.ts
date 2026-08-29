@@ -84,12 +84,19 @@ export class Transport {
       };
       const liveIds = new Set(index.surfaces.map((s) => s.surface_id));
       store.pruneAbsent(liveIds);
-      // 2. Snapshot every live surface (full createSurface envelopes).
+      // 2. Snapshot every live surface (full createSurface envelopes). The
+      //    X-A2UI-Upto-Seq header is the surface's own watermark, read in
+      //    the same DB statement as its state — envelopes at/below it must
+      //    never be re-applied over local edits (codex P2).
       for (const { surface_id } of index.surfaces) {
-        const snapshot = await this.getJson(`/a2ui/surfaces/${encodeURIComponent(surface_id)}`);
+        const res = await this.fetchImpl(`/a2ui/surfaces/${encodeURIComponent(surface_id)}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status} for surface ${surface_id}`);
+        const snapshot = await res.json();
+        const upto = Number(res.headers.get('x-a2ui-upto-seq') ?? 0);
         // Re-applying createSurface for an existing surface replaces it —
         // idempotent by construction.
         store.apply(null, snapshot as never);
+        if (upto > 0) store.setSurfaceUpto(surface_id, upto);
       }
       store.setDeliveredFloor(index.latest_seq);
       // 3. Tail the stream from the index watermark.
