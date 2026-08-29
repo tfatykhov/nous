@@ -211,8 +211,12 @@ def register_a2ui_tools(
             if brain is None:
                 return _tool_error("decision_sweep needs the brain wired to self-source")
             try:
+                # Bound pushed into SQL (same class as codex round 3 on the
+                # sources registry): a Python slice after the fetch still
+                # materializes the whole age window.
                 unreviewed = await brain.get_unreviewed(
-                    max_age_days=int(params.get("max_age_days", 30))
+                    max_age_days=int(params.get("max_age_days", 30)),
+                    limit=max(1, min(int(params.get("max_decisions", 15)), 50)),
                 )
             except Exception as exc:
                 return _tool_error(f"Could not fetch unreviewed decisions: {exc}")
@@ -224,7 +228,7 @@ def register_a2ui_tools(
                     "stakes": d.stakes,
                     "category": d.category,
                 }
-                for d in unreviewed[: int(params.get("max_decisions", 15))]
+                for d in unreviewed
             ]
             dedup_key = dedup_key or "sweep:decisions"
         if template == "dag_monitor":
@@ -311,12 +315,17 @@ def register_a2ui_tools(
         priority = int(kwargs.get("priority") or 0)
         if priority > 1:
             return _tool_error("micro-apps are never blocking: priority must be 0 or 1")
+        # Origin is SERVER-derived, never caller-supplied (codex round 3):
+        # a heartbeat/schedule turn dispatches with _is_background=True, and
+        # its apps must persist as origin="agent" or the push path and the
+        # Phase 5 origin-based measurement cannot distinguish push from pull.
+        origin = "agent" if kwargs.get("_is_background") else "chat"
         try:
             composed = await composer.compose(
                 intent,
                 archetype=kwargs.get("archetype"),
                 data_sources=kwargs.get("data_sources") or [],
-                origin="chat",
+                origin=origin,
                 priority=priority,
             )
         except Exception as exc:

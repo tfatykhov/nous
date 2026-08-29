@@ -134,8 +134,11 @@ def build_default_registry(
     if brain is not None:
 
         async def unreviewed_decisions(params: dict) -> list[dict]:
+            # Bound pushed into SQL (codex round 3): a Python slice after
+            # .all() still materializes the whole age window.
             rows = await brain.get_unreviewed(
-                max_age_days=int(params.get("max_age_days", 30))
+                max_age_days=int(params.get("max_age_days", 30)),
+                limit=_limit(params, 20),
             )
             return [
                 {
@@ -145,7 +148,7 @@ def build_default_registry(
                     "stakes": d.stakes,
                     "category": d.category,
                 }
-                for d in rows[: _limit(params, 20)]
+                for d in rows
             ]
 
         registry.register("unreviewed_decisions", unreviewed_decisions)

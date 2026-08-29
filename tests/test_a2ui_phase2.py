@@ -104,7 +104,9 @@ class FakeBrain:
     async def get(self, decision_id):
         return self._detail if str(decision_id) == DECISION_A else None
 
-    async def get_unreviewed(self, max_age_days=30, stakes=None):
+    async def get_unreviewed(self, max_age_days=30, stakes=None, limit=None):
+        self.unreviewed_limits = getattr(self, "unreviewed_limits", [])
+        self.unreviewed_limits.append(limit)
         return [
             SimpleNamespace(
                 id=uuid.UUID(DECISION_A),

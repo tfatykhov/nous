@@ -764,6 +764,40 @@ async def test_compose_repairs_non_object_component_entries(
     assert "non-object" in llm.calls[1]
 
 
+def test_grammar_rejects_non_stattile_statrow_children() -> None:
+    """Codex round 3: the catalog only bounds StatRow children to <=4
+    strings — a Text ref would render arbitrary content in the grid."""
+    comps = _valid_components()
+    comps.append({"id": "rogue", "component": "Text", "text": "not a stat"})
+    comps[2] = {"id": "stats", "component": "StatRow", "children": ["t1", "rogue"]}
+
+    errors = lint_micro_app(comps)
+
+    assert any("StatTiles only" in e for e in errors)
+
+
+async def test_background_compose_persists_agent_origin(fake_composer) -> None:
+    """Codex round 3: a heartbeat/schedule compose must be origin='agent'
+    or push apps are indistinguishable from pull apps."""
+    from nous.api.tools import ToolDispatcher
+    from nous.a2ui.tools import register_a2ui_tools
+
+    captured: dict[str, str] = {}
+
+    class _OriginComposer(_FakeComposer):
+        async def compose(self, intent: str, **kwargs: Any) -> ComposedApp:
+            captured["origin"] = kwargs.get("origin", "")
+            return await super().compose(intent, **kwargs)
+
+    dispatcher = ToolDispatcher()
+    register_a2ui_tools(dispatcher, _CapturingService(), composer=_OriginComposer())
+
+    await dispatcher.dispatch("compose_surface", {"intent": "x"}, is_background=True)
+    assert captured["origin"] == "agent"
+    await dispatcher.dispatch("compose_surface", {"intent": "x"})
+    assert captured["origin"] == "chat"
+
+
 async def test_source_limits_are_clamped_before_the_query() -> None:
     """Codex P2: the char budget trims AFTER materialization, so a prompted
     limit in the millions must be clamped before it reaches the fetcher."""

@@ -124,6 +124,17 @@ def lint_micro_app(components: list[dict[str, Any]]) -> list[str]:
                 errors.append(f"Section {comp.get('id')!r} has no title — no anonymous blocks")
         if ctype == "AppHeader" and not comp.get("composedAt"):
             errors.append("AppHeader is missing composedAt — the freshness stamp is mandatory")
+        if ctype == "StatRow":
+            # Type-check the children (codex round 3): the catalog schema
+            # only bounds children to <=4 strings, so a Text or Card ref
+            # would otherwise render arbitrary content in the summary grid.
+            for kid in comp.get("children") or []:
+                kid_type = (by_id.get(kid) or {}).get("component")
+                if kid_type is not None and kid_type != "StatTile":
+                    errors.append(
+                        f"StatRow {comp.get('id')!r} child {kid!r} is a "
+                        f"{kid_type} — StatRow holds StatTiles only"
+                    )
 
     # --- duplicate refs (rev-ui #4) ----------------------------------------
     # A repeated id inside one children array, or one component referenced by
