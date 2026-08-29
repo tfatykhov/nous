@@ -756,6 +756,7 @@ The dashboard is a Svelte SPA under `dashboard-app/`. Build with `cd dashboard-a
 | POST | `/a2ui/action` | F092: renderer→agent user action (allowlist/nonce/rate/censor gated, audited) |
 | GET | `/a2ui/catalog/{name}` | F092: serve a vendored catalog by short name (basic, nous-core) |
 | GET | `/companion` | F092: redirect to the built companion entry (fragment deep links survive) |
+| GET | `/companion/a/{surface_id}` | F092.1 Phase 4: shareable path-form per-app deep link — redirects into the hash router (`#/a/<id>`, alias of `#/s/`) |
 
 ### Agent Tools
 
