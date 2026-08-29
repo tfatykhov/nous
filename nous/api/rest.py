@@ -2999,8 +2999,15 @@ def create_app(
             body = await request.json()
         except Exception:
             return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        # oauth2-proxy identity when fronted; 'unattributed' otherwise. The
+        # audit row records who acted — never implied consent.
+        actor = (
+            request.headers.get("x-forwarded-user")
+            or request.headers.get("x-forwarded-email")
+            or "unattributed"
+        )
         status_code, payload = await router.handle(
-            body, content_type=request.headers.get("content-type", "")
+            body, content_type=request.headers.get("content-type", ""), actor=actor
         )
         return JSONResponse(payload, status_code=status_code)
 

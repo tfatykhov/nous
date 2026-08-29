@@ -13,6 +13,7 @@ from datetime import timedelta
 from typing import Any
 
 from ..dsl import ApprovalPanel, Button, Column, Surface, Text, event
+from ._shared import _validated_trace_id
 
 
 def approval_gate(params: dict[str, Any]) -> Any:
@@ -20,7 +21,7 @@ def approval_gate(params: dict[str, Any]) -> Any:
     options = params["options"]
     if not options:
         raise ValueError("approval_gate requires at least one option")
-    trace_id = params.get("trace_id")
+    trace_id = _validated_trace_id(params.get("trace_id"))
     recommendation = params.get("recommendation") or options[0]["id"]
 
     s = Surface(

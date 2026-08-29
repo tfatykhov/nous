@@ -1357,6 +1357,10 @@ class A2uiAction(Base):
     agent_id: Mapped[str] = mapped_column(Text, nullable=False)
     surface_id: Mapped[str] = mapped_column(Text, nullable=False)
     action_name: Mapped[str] = mapped_column(Text, nullable=False)
+    # Who acted: oauth2-proxy X-Forwarded-User/-Email when fronted, else
+    # 'unattributed' — an audit row must never imply human consent the
+    # server cannot demonstrate. Sweep-written rows use 'system:expiry'.
+    actor: Mapped[str] = mapped_column(Text, nullable=False, default="unattributed")
     source_component_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     context: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     data_model: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

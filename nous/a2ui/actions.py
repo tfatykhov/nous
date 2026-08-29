@@ -82,8 +82,14 @@ class ActionRouter:
 
     # ------------------------------------------------------------------ gate
 
-    async def handle(self, body: dict, *, content_type: str) -> tuple[int, dict]:
-        """Returns (http_status, response_body)."""
+    async def handle(self, body: dict, *, content_type: str, actor: str = "unattributed") -> tuple[int, dict]:
+        """Returns (http_status, response_body).
+
+        ``actor`` is the oauth2-proxy identity header when fronted, else
+        'unattributed' — audit rows must never imply human consent the
+        server cannot demonstrate (review finding: on a LAN-exposed port a
+        forged action would otherwise corrupt the evidence tier).
+        """
         # Content-Type is the CSRF control here: no CORS middleware exists and
         # Request.json() never checks it, but a cross-origin simple request
         # cannot carry application/json without a preflight.
@@ -109,7 +115,7 @@ class ActionRouter:
             return 404, _err("SURFACE_NOT_LIVE", surface_id, "surface not found or not live")
 
         async def reject(status: int, code: str, message: str) -> tuple[int, dict]:
-            await self._audit(surface, name, context, data_model, "rejected", message)
+            await self._audit(surface, name, context, data_model, "rejected", message, actor)
             return status, _err(code, surface_id, message)
 
         if name not in (surface.allowed_actions or []):
@@ -140,7 +146,7 @@ class ActionRouter:
                 reason = blocking[0].reason or blocking[0].trigger_pattern
                 return await reject(403, "CENSORED", f"blocked by censor: {reason}")
 
-        audit_id = await self._audit(surface, name, context, data_model, "dispatched", None)
+        audit_id = await self._audit(surface, name, context, data_model, "dispatched", None, actor)
 
         ctx = ActionContext(surface=surface, name=name, context=context, data_model=data_model, services=self)
         try:
@@ -182,12 +188,14 @@ class ActionRouter:
         data_model: dict | None,
         status: str,
         rejection_reason: str | None,
+        actor: str = "unattributed",
     ) -> Any:
         async with self._db.session() as session:
             row = A2uiAction(
                 agent_id=surface.agent_id,
                 surface_id=surface.surface_id,
                 action_name=name,
+                actor=actor,
                 source_component_id=context.get("sourceComponentId"),
                 context=context,
                 data_model=data_model,

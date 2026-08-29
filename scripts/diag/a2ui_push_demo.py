@@ -76,6 +76,165 @@ DEMOS = {
 }
 
 
+def _gallery_surface():
+    """Inline gallery exercising every renderer adapter (browser-gate aid).
+
+    Built directly through the DSL — deliberately NOT a registered
+    push_surface template, so the agent-facing template set stays curated.
+    """
+    from datetime import timedelta
+
+    from nous.a2ui.dsl import BuiltSurface
+
+    components = [
+        {
+            "id": "root",
+            "component": "Column",
+            "children": [
+                "md",
+                "tiles",
+                "kv",
+                "div1",
+                "tf_short",
+                "tf_long",
+                "cb",
+                "picker",
+                "slider",
+                "dt",
+                "tabs",
+                "modal",
+                "icon_row",
+                "img",
+                "submit",
+            ],
+            "align": "stretch",
+        },
+        {
+            "id": "md",
+            "component": "Text",
+            "text": (
+                "# Adapter gallery\n\nRenders **every** wave-2 adapter: *inputs*, "
+                "`code`, a [link](https://a2ui.org) and\n\n- one list item\n- another"
+            ),
+        },
+        {"id": "tiles", "component": "Row", "children": ["t1", "t2"]},
+        {
+            "id": "t1",
+            "component": "StatTile",
+            "label": "Facts",
+            "value": "12,431",
+            "delta": "+38 today",
+            "intent": "good",
+        },
+        {"id": "t2", "component": "StatTile", "label": "Brier", "value": "0.022", "intent": "neutral"},
+        {"id": "kv", "component": "KeyValueTable", "rows": {"path": "/kv"}},
+        {"id": "div1", "component": "Divider"},
+        {"id": "tf_short", "component": "TextField", "label": "Short text", "value": {"path": "/form/name"}},
+        {
+            "id": "tf_long",
+            "component": "TextField",
+            "label": "Long text",
+            "variant": "longText",
+            "value": {"path": "/form/notes"},
+        },
+        {"id": "cb", "component": "CheckBox", "label": "Subscribe", "value": {"path": "/form/subscribe"}},
+        {
+            "id": "picker",
+            "component": "ChoicePicker",
+            "label": "Contact method",
+            "variant": "mutuallyExclusive",
+            "options": [
+                {"label": "Email", "value": "email"},
+                {"label": "Phone", "value": "phone"},
+                {"label": "SMS", "value": "sms"},
+            ],
+            "value": {"path": "/form/preference"},
+        },
+        {
+            "id": "slider",
+            "component": "Slider",
+            "label": "Confidence",
+            "min": 0,
+            "max": 100,
+            "steps": 20,
+            "value": {"path": "/form/confidence"},
+        },
+        {
+            "id": "dt",
+            "component": "DateTimeInput",
+            "enableDate": True,
+            "label": "Due date",
+            "value": {"path": "/form/due"},
+        },
+        {
+            "id": "tabs",
+            "component": "Tabs",
+            "tabs": [
+                {"title": "First", "child": "tab_a"},
+                {"title": "Second", "child": "tab_b"},
+            ],
+        },
+        {"id": "tab_a", "component": "Text", "text": "Tab A content"},
+        {"id": "tab_b", "component": "Text", "text": "Tab B content"},
+        {"id": "modal", "component": "Modal", "trigger": "modal_t", "content": "modal_c"},
+        {"id": "modal_t", "component": "Text", "text": "Open modal"},
+        {"id": "modal_c", "component": "Text", "text": "Hello from the modal."},
+        {"id": "icon_row", "component": "Row", "children": ["i1", "i2", "i3"]},
+        {"id": "i1", "component": "Icon", "name": "check"},
+        {"id": "i2", "component": "Icon", "name": "warning"},
+        {"id": "i3", "component": "Icon", "name": "mail"},
+        {
+            "id": "img",
+            "component": "Image",
+            "url": "/dashboard/v2/favicon.svg",
+            "description": "Nous favicon",
+            "variant": "icon",
+        },
+        {
+            "id": "submit",
+            "component": "Button",
+            "child": "submit_l",
+            "variant": "primary",
+            "action": {
+                "event": {
+                    "name": "gallery.submit",
+                    "context": {
+                        "name": {"path": "/form/name"},
+                        "subscribe": {"path": "/form/subscribe"},
+                        "preference": {"path": "/form/preference"},
+                        "confidence": {"path": "/form/confidence"},
+                    },
+                }
+            },
+        },
+        {"id": "submit_l", "component": "Text", "text": "Submit (will 501 — no handler)"},
+    ]
+    return BuiltSurface(
+        kind="gallery",
+        origin="manual",
+        title="Adapter gallery",
+        catalog_id="https://nous.fatykhov.us/a2ui/v1.0/nous-core/catalog.json",
+        priority=0,
+        allowed_actions=["gallery.submit"],
+        components=components,
+        data_model={
+            "kv": [
+                {"key": "branch", "value": "feat/f092-a2ui-companion"},
+                {"key": "migration", "value": "071"},
+            ],
+            "form": {
+                "name": "",
+                "notes": "",
+                "subscribe": True,
+                "preference": ["email"],
+                "confidence": 60,
+                "due": "",
+            },
+        },
+        expires_in=timedelta(hours=12),
+    )
+
+
 async def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     settings = Settings()
@@ -86,6 +245,12 @@ async def main() -> None:
         if which == "resolve":
             await service.resolve(sys.argv[2])
             print(f"resolved {sys.argv[2]}")
+            return
+        if which == "gallery":
+            built = _gallery_surface()
+            built.validate()
+            surface_id = await service.push_built(built, dedup_key="demo:gallery", notify=False)
+            print(f"pushed gallery: {surface_id}  ->  /companion#/s/{surface_id}")
             return
         names = list(DEMOS) if which == "all" else [which]
         for name in names:

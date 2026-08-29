@@ -53,6 +53,7 @@ export class Transport {
   private stream: A2uiStream | null = null;
   private stopped = false;
   private attempt = 0;
+  private streamErrors = 0;
 
   constructor(opts: TransportOptions = {}) {
     this.streamFactory = opts.streamFactory ?? defaultStreamFactory;
@@ -95,16 +96,29 @@ export class Transport {
       // 3. Tail the stream from the index watermark.
       this.stream = this.streamFactory(`/a2ui/stream?since=${store.lastSeq}`, {
         onA2ui: (seq, envelope) => {
+          this.streamErrors = 0;
           store.apply(seq, envelope as never);
         },
         onControl: (data) => {
+          this.streamErrors = 0;
           if (data.type === 'resync') void this.reconnect();
         },
         onError: () => {
-          // EventSource auto-reconnects with Last-Event-ID for short gaps;
-          // only mark state so the UI can show it. A dead server eventually
-          // surfaces as repeated onError; the pill stays amber.
+          // EventSource auto-reconnects with Last-Event-ID for short gaps.
+          // But behind oauth2-proxy an expired session 302s the reconnect to
+          // a login page — EventSource then errors and retries FOREVER. After
+          // several consecutive errors with no event in between, stop the
+          // stream and fall back to the full hydration cycle with backoff.
           store.connection = 'error';
+          this.streamErrors += 1;
+          if (this.streamErrors >= 5) {
+            this.streamErrors = 0;
+            this.stream?.close();
+            this.stream = null;
+            this.attempt += 1;
+            const delay = Math.min(this.backoffMs * 2 ** Math.min(this.attempt, 4), 30000);
+            if (!this.stopped) setTimeout(() => void this.cycle(), delay);
+          }
         },
       });
       store.connection = 'live';

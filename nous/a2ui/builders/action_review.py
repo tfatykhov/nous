@@ -12,11 +12,12 @@ from datetime import timedelta
 from typing import Any
 
 from ..dsl import ActionReviewCard, Button, Column, Row, Surface, Text, TextField, event
+from ._shared import _validated_trace_id
 
 
 def action_review(params: dict[str, Any]) -> Any:
     title = params["title"]
-    trace_id = params.get("trace_id")
+    trace_id = _validated_trace_id(params.get("trace_id"))
     compensation = params.get("compensation") or {"revertible": False, "handler": None, "note": ""}
     revertible = bool(compensation.get("revertible"))
 

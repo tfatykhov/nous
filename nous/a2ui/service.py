@@ -284,6 +284,7 @@ class SurfaceService:
                         agent_id=agent_id,
                         surface_id=surface.surface_id,
                         action_name="no_objection",
+                        actor="system:expiry",
                         context={"expired_at": now.isoformat()},
                         status="completed",
                         completed_at=now,

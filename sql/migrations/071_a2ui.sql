@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS nous_system.a2ui_actions (
     agent_id             TEXT NOT NULL,
     surface_id           TEXT NOT NULL,
     action_name          TEXT NOT NULL,
+    actor                TEXT NOT NULL DEFAULT 'unattributed',
     source_component_id  TEXT,
     context              JSONB NOT NULL DEFAULT '{}'::jsonb,
     data_model           JSONB,
