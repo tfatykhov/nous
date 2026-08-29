@@ -91,7 +91,7 @@ export class Transport {
         // idempotent by construction.
         store.apply(null, snapshot as never);
       }
-      store.lastSeq = Math.max(store.lastSeq, index.latest_seq);
+      store.setDeliveredFloor(index.latest_seq);
       // 3. Tail the stream from the index watermark.
       this.stream = this.streamFactory(`/a2ui/stream?since=${store.lastSeq}`, {
         onA2ui: (seq, envelope) => {

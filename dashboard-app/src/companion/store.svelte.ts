@@ -113,6 +113,20 @@ export class SurfaceStore {
     }
   }
 
+  /**
+   * Mark everything at/below the hydration watermark as delivered (codex
+   * P2): snapshots already contain those envelopes' effects. Without this,
+   * a long-lived connection to a DB with history sits above a permanent
+   * hole — the contiguous-prefix loop can never advance and `seen` grows
+   * with every future event.
+   */
+  setDeliveredFloor(seq: number): void {
+    if (seq <= this.seenFloor) return;
+    this.seenFloor = seq;
+    this.lastSeq = Math.max(this.lastSeq, seq);
+    this.seen = new Set([...this.seen].filter((s) => s > seq));
+  }
+
   reset(): void {
     this.surfaces = {};
     this.lastSeq = 0;

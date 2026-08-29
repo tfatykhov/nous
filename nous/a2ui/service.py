@@ -113,6 +113,57 @@ class SurfaceService:
         now = datetime.now(UTC)
         expires_at = (now + built.expires_in) if built.expires_in else None
 
+        # A dedup REPLACEMENT must serialize with in-flight actions on the
+        # existing surface (codex P1): without the lock, an action validated
+        # against the old components could patch or resolve the freshly
+        # committed replacement. Resolve the target id first, then re-run the
+        # lookup INSIDE the same per-surface lock the ActionRouter holds.
+        if dedup_key:
+            async with self._db.session() as session:
+                existing_id = (
+                    await session.execute(
+                        select(A2uiSurface.surface_id).where(
+                            A2uiSurface.agent_id == agent_id,
+                            A2uiSurface.dedup_key == dedup_key,
+                            A2uiSurface.status == "live",
+                        )
+                    )
+                ).scalar_one_or_none()
+            if existing_id is not None:
+                async with self.surface_lock(existing_id):
+                    return await self._push_transaction(
+                        built,
+                        dedup_key=dedup_key,
+                        session_id=session_id,
+                        notify=notify,
+                        _dedup_retry=_dedup_retry,
+                        agent_id=agent_id,
+                        now=now,
+                        expires_at=expires_at,
+                    )
+        return await self._push_transaction(
+            built,
+            dedup_key=dedup_key,
+            session_id=session_id,
+            notify=notify,
+            _dedup_retry=_dedup_retry,
+            agent_id=agent_id,
+            now=now,
+            expires_at=expires_at,
+        )
+
+    async def _push_transaction(
+        self,
+        built: BuiltSurface,
+        *,
+        dedup_key: str | None,
+        session_id: str | None,
+        notify: bool | None,
+        _dedup_retry: bool,
+        agent_id: str,
+        now: datetime,
+        expires_at: datetime | None,
+    ) -> str:
         async with self._db.session() as session:
             existing = None
             if dedup_key:
@@ -733,6 +784,9 @@ def _flatten_strings(node: Any) -> str:
             parts.append(current)
             total += len(current) + 1
         elif isinstance(current, dict):
+            # Keys too (codex P1): toDisplayString JSON-serializes bound
+            # objects, so a prohibited phrase used as a KEY is rendered.
+            stack.extend(k for k in current.keys() if isinstance(k, str))
             stack.extend(current.values())
         elif isinstance(current, list):
             stack.extend(current)
