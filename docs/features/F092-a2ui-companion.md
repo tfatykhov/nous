@@ -521,8 +521,8 @@ Findings grouped by fingerprint; acknowledge / resolve / dismiss buttons wired t
 **5. DAG Monitor** — `origin: dag`, `priority: 1` on failure
 Live node status via `updateDataModel` patches at `/nodes/{i}/status`. Retry and cancel actions. Node result drill-down via `Modal`.
 
-**6. Ad-hoc Composed** — `origin: chat`
-The `compose_surface` output. Charts, comparison tables, forms.
+**6. Micro-app** — `origin: chat | agent` — **REVISED by F092.1**
+An ephemeral, navigable, read-only app composed on demand for one intent (vacation status, sailing briefing, project ledger). Grammar-constrained, `navigable-readonly` actions only, lives until closed. See **F092.1 §3–§6**. *(This replaces the original "Ad-hoc Composed — charts, comparison tables, forms" scope; forms and free text belong to surface 7.)*
 
 **7. Conversation** — `origin: chat`, always present
 The persistent surface (Q4, decided). Transcript rendered from `event: message` — *including Telegram turns* — with a composer at the bottom. Not a separate app mode: it is **surface zero**, and every other surface stacks above it in the same timeline, so a card always appears in the conversational context that produced it.
@@ -613,6 +613,8 @@ When a surface resolves, Nous posts a short confirmation to Telegram so the chat
 
 ## 14. Phasing
 
+> **Phases 0–2 are unchanged.** Phase 3 and onward are revised by **F092.1 — Ephemeral Micro-Apps** (`docs/features/F092.1-ephemeral-micro-apps.md`), which reframes composed surfaces as disposable on-demand apps. Read that addendum alongside this section.
+
 **Phase 0 — Spike (~1 day).**
 Vendor schemas, wire a JSON Schema validator into CI, render one hardcoded surface end-to-end in Svelte with no persistence. Proves the adjacency-list walker and data binding. *Kill criterion: if the walker + binding engine isn't working in a day, reconsider wrapping the Lit renderer at v0.9.1 instead.*
 
@@ -622,11 +624,17 @@ Migrations, `SurfaceService`, outbox, SSE transport with resume, renderer core, 
 **Phase 2 — Catalog + surfaces (~1 week).**
 `nous-core` catalog with lint rules, `DecisionCard` / `MemoryGraph` / `DagGraph` / `Timeline`, surfaces 2–6. `callAgentFunction` for graph expansion. Server-side form-submit validation.
 
-**Phase 3 — LLM composition (~3 days).**
-`compose_surface`, validate→repair loop, catalog summary prompt, markdown fallback.
+**Phase 3 — Ephemeral micro-apps (~1 week).** — **REVISED by F092.1 §7**
+`compose_surface`, validate→repair loop, catalog summary prompt, markdown fallback — **plus** the micro-app grammar lint rules, the `navigable-readonly` action class, `AppHeader`/`AppFooter`/`Section`/`StatRow`, freshness stamp, `origin: agent` push path, and the live-app concurrency cap.
 
-**Phase 4 — Polish (~3 days).**
-PWA manifest + service worker, Web Push, offline snapshot cache, Telegram deep links.
+**Phase 4 — Polish (~5 days).** — **EXTENDED by F092.1 §7**
+PWA manifest + service worker, Web Push, offline snapshot cache, Telegram deep links, **plus** the multi-app switcher, per-app deep links `/companion/a/<id>`, and close-all.
+
+**Phase 5 — Measurement (~3 days).** — **NEW, F092.1 §7**
+Archetype-stability metric, compose success/repair/fallback rates, app open/refresh/close-unused telemetry. Gates the Phase 6 decision.
+
+**Phase 6 — Mutating micro-apps (deferred, unsized).** — **NEW, F092.1 §7**
+Only if Phase 5 shows recurring apps whose users want to act. One verb at a time through the §10 registry with compensation metadata.
 
 Phases 1 and 2 are independently useful. If it stops after Phase 1, Action Review plus a working conversation view already justifies the build.
 
