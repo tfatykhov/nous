@@ -49,11 +49,45 @@
   );
   const boundPath = $derived(isDataBinding(comp.value) ? absolute(comp.value.path, scope) : null);
 
+  /**
+   * Normalize an incoming ISO value to what the native control accepts
+   * (codex P2): agents legitimately send true instants like
+   * "2025-12-15T17:00:00Z" (the vendored fixtures do), but datetime-local
+   * rejects any timezone designator and renders an EMPTY field. Values with
+   * an explicit zone are converted to the local wall clock for display;
+   * zone-less values pass through untouched. The write side keeps the
+   * documented zone-less local policy above.
+   */
+  function normalizeForControl(raw: string): string {
+    if (!raw) return '';
+    const hasZone = /[zZ]$|[+-]\d{2}:\d{2}$/.test(raw);
+    if (type === 'time') {
+      return raw.includes('T') ? normalizeDateTime(raw, hasZone).slice(11, 16) : raw.slice(0, 5);
+    }
+    if (type === 'date') {
+      return raw.includes('T') ? normalizeDateTime(raw, hasZone).slice(0, 10) : raw.slice(0, 10);
+    }
+    return normalizeDateTime(raw, hasZone);
+  }
+
+  function normalizeDateTime(raw: string, hasZone: boolean): string {
+    if (!hasZone) return raw.slice(0, 16);
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return '';
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return (
+      `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())}` +
+      `T${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`
+    );
+  }
+
   function read(): string {
     const surface = store.surfaces[surfaceId];
     if (!surface) return '';
-    if (boundPath) return toDisplayString(getPointer(surface.dataModel, boundPath));
-    return toDisplayString(resolveDynamic(comp.value, ctx));
+    const raw = boundPath
+      ? toDisplayString(getPointer(surface.dataModel, boundPath))
+      : toDisplayString(resolveDynamic(comp.value, ctx));
+    return normalizeForControl(raw);
   }
 
   function write(v: string) {

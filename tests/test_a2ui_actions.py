@@ -512,18 +512,32 @@ async def test_unknown_fingerprint_fails_the_action_and_audits_it(
     surface_id = await service.push_built(heartbeat_findings(FINDINGS_PARAMS))
     nonce = (await _surface_row(db, surface_id)).nonce
 
+    # Layer 1 (codex P1): a fingerprint this surface never rendered is
+    # refused before the global store is touched — one surface's nonce must
+    # not triage arbitrary findings.
     status, payload = await router.handle(
         _body("heartbeat.resolve", surface_id, nonce=nonce, context={"fingerprint": "ghost"}),
         content_type=JSON,
     )
-
     assert status == 422
     assert payload["error"]["code"] == "ACTION_FAILED"
+    assert "not on this surface" in payload["error"]["message"]
+
+    # Layer 2: a fingerprint the surface DID render but the store no longer
+    # knows (restart, pruned) fails loudly too.
+    status, payload = await router.handle(
+        _body(
+            "heartbeat.resolve", surface_id, nonce=nonce, context={"fingerprint": "fp-abc-123"}
+        ),
+        content_type=JSON,
+    )
+    assert status == 422
     assert "not found" in payload["error"]["message"]
 
     audits = await _audits(db, a2ui_agent_id)
-    assert [a.status for a in audits] == ["rejected"]
-    assert "not found" in audits[0].rejection_reason
+    assert [a.status for a in audits] == ["rejected", "rejected"]
+    assert "not on this surface" in audits[0].rejection_reason
+    assert "not found" in audits[1].rejection_reason
 
 
 async def test_handler_exception_is_a_500_not_a_silent_success(

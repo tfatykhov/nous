@@ -127,10 +127,15 @@ describe('SurfaceStore — seq dedupe', () => {
     expect(store.lastSeq).toBe(2);
   });
 
-  it('drops out-of-order lower seqs', () => {
+  it('applies unseen lower seqs (out-of-order commits) exactly once', () => {
+    // Two overlapping server transactions can commit seq 12 before seq 11,
+    // so an unseen LOWER seq is legitimate and must apply (codex P1: a
+    // monotonic watermark dropped it forever). Only true redeliveries drop.
     store.apply(5, createSurface());
-    store.apply(3, { deleteSurface: { surfaceId: 's1' } });
-    expect(store.surfaces.s1).toBeDefined();
+    store.apply(3, { updateDataModel: { surfaceId: 's1', path: '/count', value: 1 } });
+    expect(store.surfaces.s1.dataModel.count).toBe(1);
+    store.apply(3, { updateDataModel: { surfaceId: 's1', path: '/count', value: 99 } });
+    expect(store.surfaces.s1.dataModel.count).toBe(1);
     expect(store.lastSeq).toBe(5);
   });
 

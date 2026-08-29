@@ -59,7 +59,15 @@ def action_review(params: dict[str, Any]) -> Any:
             action=event("review.course_correct", {**ctx, "correction": {"path": "/correction"}}),
         ),
         Text("correct_l", "Wrong call — noted below"),
-        Button("rule", child="rule_l", variant="borderless", action=event("review.make_rule", ctx)),
+        Button(
+            "rule",
+            child="rule_l",
+            variant="borderless",
+            # Bind the typed correction like course-correct does — without it
+            # the handler only ever stored the generic fallback rule and the
+            # user's text was silently discarded (codex P2).
+            action=event("review.make_rule", {**ctx, "correction": {"path": "/correction"}}),
+        ),
         Text("rule_l", "Make this a standing rule"),
     ]
     s.add(

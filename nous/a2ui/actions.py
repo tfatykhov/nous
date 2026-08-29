@@ -323,7 +323,13 @@ def _register_default_handlers(router: ActionRouter) -> None:
 
     async def review_course_correct(ctx: ActionContext) -> ActionResult:
         correction = str(ctx.context.get("correction") or "").strip()
-        trace_id = ctx.context.get("traceId")
+        # The surface row is the AUTHORITY on which decision this review is
+        # about (codex P1): trusting context.traceId would let a client with
+        # this surface's nonce mark any other decision as failed.
+        trace_id = ctx.surface.trace_id
+        client_trace = ctx.context.get("traceId")
+        if client_trace and str(client_trace) != str(trace_id or ""):
+            return ActionResult(ok=False, message="traceId does not match this surface's decision")
         noted = False
         if trace_id and router._brain is not None:
             try:
@@ -363,6 +369,13 @@ def _register_default_handlers(router: ActionRouter) -> None:
         if store is None:
             return ActionResult(ok=False, message="finding store unavailable")
         fingerprint = str(ctx.context.get("fingerprint") or "")
+        # Only fingerprints this surface actually rendered may be acted on
+        # (codex P1): the store is global, so an unvalidated fingerprint
+        # would let one surface's nonce triage ANY finding — and corrupt the
+        # outcome signals the heartbeat tuner learns from.
+        offered = (ctx.surface.data_model or {}).get("findings", {})
+        if fingerprint not in offered:
+            return ActionResult(ok=False, message=f"finding {fingerprint!r} is not on this surface")
         ok = getattr(store, verb)(fingerprint)
         if not ok:
             return ActionResult(ok=False, message=f"finding {fingerprint!r} not found")

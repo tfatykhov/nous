@@ -44,13 +44,30 @@ interface Envelope {
 export class SurfaceStore {
   surfaces = $state<Record<string, SurfaceState>>({});
   connection = $state<Connection>('connecting');
+  /** Highest seq seen — the resume point, NOT the dedupe test. */
   lastSeq = 0;
+  /** Membership dedupe: seqs can legitimately arrive OUT OF ORDER (two
+   * overlapping server transactions can commit 12 before 11), so a
+   * monotonic watermark would drop 11 forever. Bounded by pruning below
+   * the floor everything at/below which counts as seen. */
+  private seenFloor = 0;
+  private seen = new Set<number>();
+
+  private markSeen(seq: number): boolean {
+    if (seq <= this.seenFloor || this.seen.has(seq)) return false;
+    this.seen.add(seq);
+    if (this.seen.size > 4096) {
+      this.seenFloor = Math.max(this.seenFloor, Math.min(...this.seen));
+      this.seen = new Set([...this.seen].filter((s) => s > this.seenFloor));
+    }
+    return true;
+  }
 
   /** Apply one envelope; seq=null bypasses dedupe (snapshot hydration). */
   apply(seq: number | null, envelope: Envelope): void {
     if (seq !== null) {
-      if (seq <= this.lastSeq) return;
-      this.lastSeq = seq;
+      if (!this.markSeen(seq)) return;
+      this.lastSeq = Math.max(this.lastSeq, seq);
     }
     if (envelope.createSurface) {
       const cs = envelope.createSurface;
@@ -94,6 +111,8 @@ export class SurfaceStore {
   reset(): void {
     this.surfaces = {};
     this.lastSeq = 0;
+    this.seenFloor = 0;
+    this.seen = new Set();
   }
 
   /** Feed order: priority desc, then surface age via insertion order. */
