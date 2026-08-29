@@ -13,6 +13,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -1270,3 +1271,107 @@ class WorkQueueItem(Base):
     )
     terminal_state: Mapped[str | None] = mapped_column(Text, nullable=True)
     payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+class A2uiSurface(Base):
+    """F092: authoritative current state of an A2UI companion surface.
+
+    `components` + `data_model` are the snapshot a client hydrates from;
+    the outbox (A2uiOutbox) is only the delta log for connected SSE
+    streams. See migration 071 for column semantics.
+    """
+
+    __tablename__ = "a2ui_surfaces"
+    __table_args__ = (
+        CheckConstraint("priority BETWEEN 0 AND 2", name="ck_a2ui_priority"),
+        {"schema": "nous_system"},
+    )
+
+    surface_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    origin: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    catalog_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="live")
+    priority: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    components: Mapped[list] = mapped_column(JSONB, nullable=False)
+    data_model: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    allowed_actions: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, default=list
+    )
+    dedup_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    nonce: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class A2uiOutbox(Base):
+    """F092: per-envelope delta log consumed by the companion SSE stream.
+
+    `seq` is the SSE event id; BIGSERIAL allocation is visible only at
+    commit, so readers must use the lag-window watermark (service.py),
+    never a bare `seq > watermark` scan.
+    """
+
+    __tablename__ = "a2ui_outbox"
+    __table_args__ = ({"schema": "nous_system"},)
+
+    seq: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    surface_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("nous_system.a2ui_surfaces.surface_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    envelope: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class A2uiAction(Base):
+    """F092: durable audit record of a companion user action.
+
+    This table IS the audit trail (the F032 ledger is in-memory and
+    session-scoped); `ledger_entry_id` is reserved. See migration 071.
+    """
+
+    __tablename__ = "a2ui_actions"
+    __table_args__ = ({"schema": "nous_system"},)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    surface_id: Mapped[str] = mapped_column(Text, nullable=False)
+    action_name: Mapped[str] = mapped_column(Text, nullable=False)
+    # Who acted: oauth2-proxy X-Forwarded-User/-Email when fronted, else
+    # 'unattributed' — an audit row must never imply human consent the
+    # server cannot demonstrate. Sweep-written rows use 'system:expiry'.
+    actor: Mapped[str] = mapped_column(Text, nullable=False, default="unattributed")
+    source_component_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    context: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    data_model: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ledger_entry_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

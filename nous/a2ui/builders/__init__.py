@@ -1,0 +1,18 @@
+"""F092: template builders — one per surface kind.
+
+Every builder returns a validated ``BuiltSurface``; a builder that emits
+invalid A2UI raises in its unit test, not in production. Registered in
+``TEMPLATES`` for the ``push_surface`` tool.
+"""
+
+from .action_review import action_review
+from .approval import approval_gate
+from .heartbeat_findings import heartbeat_findings
+
+TEMPLATES = {
+    "approval_gate": approval_gate,
+    "action_review": action_review,
+    "heartbeat_findings": heartbeat_findings,
+}
+
+__all__ = ["TEMPLATES", "approval_gate", "action_review", "heartbeat_findings"]

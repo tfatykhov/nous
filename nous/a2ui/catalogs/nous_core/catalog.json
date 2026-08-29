@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nous.fatykhov.us/a2ui/v1.0/nous-core/catalog.json",
+  "protocolVersion": "1.0",
+  "title": "Nous Core Catalog",
+  "description": "Nous domain components for the F092 companion app. v1 subset: approval gates, action review, stat tiles, key-value tables. Mixed per-surface with the A2UI basic catalog.",
+  "catalogId": "https://nous.fatykhov.us/a2ui/v1.0/nous-core/catalog.json",
+  "instructions": "Use ApprovalPanel for pre-execution escalations and ActionReviewCard for post-hoc action review. Pair them with basic-catalog Buttons for the verbs. Bind long prose through the data model, not literals, so updates can patch it.",
+  "components": {
+    "ApprovalPanel": {
+      "type": "object",
+      "description": "Escalation panel: what is being asked, the risk, and the recommendation. Options render as separate basic-catalog Buttons below the panel.",
+      "properties": {
+        "component": {
+          "const": "ApprovalPanel"
+        },
+        "title": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Short headline for the escalation."
+        },
+        "summary": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "What is being proposed and why."
+        },
+        "risk": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Plainly stated risk, including irreversibility."
+        },
+        "recommendation": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "The option id the agent recommends."
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": ["component", "title"]
+    },
+    "ActionReviewCard": {
+      "type": "object",
+      "description": "Post-hoc review of an action Nous already took: what it did, why, what it cost, and whether it can still be undone.",
+      "properties": {
+        "component": {
+          "const": "ActionReviewCard"
+        },
+        "title": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "One-line description of the action taken."
+        },
+        "did": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "What was executed."
+        },
+        "why": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "The reasoning that led to the action."
+        },
+        "cost": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Resources spent and external effects."
+        },
+        "compensation": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicValue",
+          "description": "Object with revertible (boolean), handler (string or null), note (string). Drives whether a Revert affordance is rendered."
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": ["component", "title", "did"]
+    },
+    "StatTile": {
+      "type": "object",
+      "description": "A single labeled statistic with optional delta and intent coloring.",
+      "properties": {
+        "component": {
+          "const": "StatTile"
+        },
+        "label": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "What the number measures."
+        },
+        "value": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "The headline value, preformatted."
+        },
+        "delta": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Change indicator, preformatted."
+        },
+        "intent": {
+          "type": "string",
+          "description": "Visual intent of the tile.",
+          "enum": ["neutral", "good", "bad", "warn"],
+          "default": "neutral"
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": ["component", "label", "value"]
+    },
+    "KeyValueTable": {
+      "type": "object",
+      "description": "Two-column key/value table bound to a data model array of {key, value} objects.",
+      "properties": {
+        "component": {
+          "const": "KeyValueTable"
+        },
+        "rows": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicValue",
+          "description": "Path to an array of objects with string properties key and value."
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": ["component", "rows"]
+    }
+  },
+  "functions": {},
+  "$defs": {
+    "anyComponent": {
+      "oneOf": [
+        {
+          "$ref": "#/components/ApprovalPanel"
+        },
+        {
+          "$ref": "#/components/ActionReviewCard"
+        },
+        {
+          "$ref": "#/components/StatTile"
+        },
+        {
+          "$ref": "#/components/KeyValueTable"
+        }
+      ],
+      "discriminator": {
+        "propertyName": "component"
+      }
+    },
+    "anyFunction": {
+      "oneOf": []
+    }
+  }
+}

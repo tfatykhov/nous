@@ -12,21 +12,18 @@ import json
 import logging
 import time
 from collections import OrderedDict
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextvars import ContextVar
-from typing import Any, Callable
+from typing import Any
 from uuid import UUID
 
+from nous.api import attachment_store
 from nous.api.anthropic_client import (
     AnthropicClient,
     StreamEvent,
     _parse_sse_event,  # noqa: F401 — re-exported for backward compat (tests)
     create_client,
 )
-from nous.api.cache_optimizer import CacheBreakDetector, _hash as cache_hash
-from nous.api.compaction import ConversationCompactor
-from nous.api.smart_compress import smart_compress
-from nous.api.models import ApiResponse, Attachment, Conversation, Message  # noqa: F401 — re-exported for backward compat
 from nous.api.attachments import (
     MAX_TOTAL_TEXT_FILE_SIZE,
     build_content_blocks,
@@ -34,7 +31,16 @@ from nous.api.attachments import (
     sanitize_blocks_for_storage,
     validate_attachment,
 )
-from nous.api import attachment_store
+from nous.api.cache_optimizer import CacheBreakDetector
+from nous.api.cache_optimizer import _hash as cache_hash
+from nous.api.compaction import ConversationCompactor
+from nous.api.models import (  # noqa: F401 — re-exported for backward compat
+    ApiResponse,
+    Attachment,
+    Conversation,
+    Message,
+)
+from nous.api.smart_compress import smart_compress
 from nous.brain.brain import Brain
 from nous.cognitive.action_gate import ActionGate
 from nous.cognitive.claim_verifier import ClaimVerifier, IntentTracker
@@ -106,12 +112,12 @@ def _build_exclude_ids(
 
 # Frame-gated tool access (D5)
 FRAME_TOOLS: dict[str, list[str]] = {
-    "conversation": ["record_decision", "resolve_decision", "resolve_decisions", "list_decisions", "learn_fact", "learn_skill", "recall_deep", "recall_recent", "recall_hubs", "get_procedure", "create_censor", "bash", "read_file", "write_file", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "spawn_sync", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file", "send_email", "heartbeat_check_create", "heartbeat_check_manage", "dag_create", "dag_manage", "ingest_document"],
+    "conversation": ["record_decision", "resolve_decision", "resolve_decisions", "list_decisions", "learn_fact", "learn_skill", "recall_deep", "recall_recent", "recall_hubs", "get_procedure", "create_censor", "bash", "read_file", "write_file", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "spawn_sync", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file", "send_email", "heartbeat_check_create", "heartbeat_check_manage", "dag_create", "dag_manage", "ingest_document", "push_surface"],
     "question": ["recall_deep", "recall_recent", "recall_hubs", "get_procedure", "bash", "read_file", "write_file", "record_decision", "resolve_decision", "resolve_decisions", "list_decisions", "learn_fact", "learn_skill", "create_censor", "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task", "run_python", "dag_manage", "ingest_document"],
-    "decision": ["record_decision", "resolve_decision", "resolve_decisions", "list_decisions", "recall_deep", "recall_recent", "recall_hubs", "get_procedure", "create_censor", "bash", "read_file", "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task", "dag_manage"],
+    "decision": ["record_decision", "resolve_decision", "resolve_decisions", "list_decisions", "recall_deep", "recall_recent", "recall_hubs", "get_procedure", "create_censor", "bash", "read_file", "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task", "dag_manage", "push_surface"],
     "creative": ["learn_fact", "recall_deep", "recall_recent", "recall_hubs", "get_procedure", "write_file", "web_search", "cache_retrieve"],
     "task": ["*"],  # All tools
-    "debug": ["record_decision", "recall_deep", "recall_recent", "recall_hubs", "get_procedure", "bash", "read_file", "learn_fact", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "spawn_sync", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file", "send_email", "heartbeat_check_create", "heartbeat_check_manage", "dag_create", "dag_manage", "ingest_document"],
+    "debug": ["record_decision", "recall_deep", "recall_recent", "recall_hubs", "get_procedure", "bash", "read_file", "learn_fact", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "spawn_sync", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file", "send_email", "heartbeat_check_create", "heartbeat_check_manage", "dag_create", "dag_manage", "ingest_document", "push_surface"],
     "initiation": ["store_identity", "complete_initiation"],
 }
 
@@ -296,7 +302,7 @@ class AgentRunner:
             self._api = create_client(self._settings)
             await self._api.start()
 
-    def fork(self, api_client: "AnthropicClient") -> "AgentRunner":
+    def fork(self, api_client: AnthropicClient) -> AgentRunner:
         """Create a sibling runner sharing cognitive layer and dispatcher.
 
         The forked runner uses its own API client (isolated connection pool)
@@ -2391,7 +2397,7 @@ Rules:
 
     def _start_activity_heartbeat(
         self, dag_node_id: UUID
-    ) -> "asyncio.Task | None":
+    ) -> asyncio.Task | None:
         """Start the background heartbeat for a tool dispatch. Returns the
         task so the caller's try/finally can cancel it. Returns None when
         stall detection is disabled or no store wired."""
@@ -2431,7 +2437,7 @@ Rules:
         return loop.create_task(_bootstrap())
 
     @staticmethod
-    async def _stop_activity_heartbeat(task: "asyncio.Task | None") -> None:
+    async def _stop_activity_heartbeat(task: asyncio.Task | None) -> None:
         """Cancel + drain a heartbeat task. Idempotent on None."""
         if task is None:
             return

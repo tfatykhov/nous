@@ -1002,6 +1002,56 @@ async def create_components(settings: Settings) -> dict:
         except ImportError:
             logger.debug("F038: DAG module not available yet")
 
+    # F092: A2UI companion surfaces
+    surface_service = None
+    action_router = None
+    a2ui_sweep_task = None
+    if settings.a2ui_enabled:
+        from nous.a2ui.actions import ActionRouter
+        from nous.a2ui.service import SurfaceService
+        from nous.a2ui.tools import register_a2ui_tools
+
+        surface_service = SurfaceService(database, settings, heart=heart)
+        action_router = ActionRouter(
+            database,
+            settings,
+            surface_service,
+            heart=heart,
+            brain=brain,
+            heartbeat_runner=heartbeat_runner,
+        )
+        register_a2ui_tools(dispatcher, surface_service)
+
+        async def _a2ui_sweep_loop():
+            # Sweep once at startup, then periodically. The sweep must run
+            # unobserved: expiry writes no_objection evidence ("silence
+            # counts", spec 6.2) even if no client ever connects, so it
+            # cannot be piggybacked on client activity.
+            first = True
+            while True:
+                try:
+                    if first:
+                        first = False
+                        # Restart invalidation: live heartbeat surfaces
+                        # reference an in-memory finding store that no longer
+                        # exists — every button on them is dead. Expire them
+                        # up front instead of serving 72h of "not found".
+                        stale = await surface_service.invalidate_heartbeat_surfaces()
+                        if stale:
+                            logger.info("F092: invalidated %d stale heartbeat surface(s)", stale)
+                    else:
+                        await asyncio.sleep(settings.a2ui_sweep_interval_seconds)
+                    expired = await surface_service.expire_sweep()
+                    if expired:
+                        logger.info("F092: expiry sweep expired %d surface(s)", expired)
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    logger.warning("F092: expiry sweep failed", exc_info=True)
+
+        a2ui_sweep_task = asyncio.create_task(_a2ui_sweep_loop())
+        logger.info("F092: A2UI companion enabled (push_surface + /a2ui routes + sweep)")
+
     return {
         "database": database,
         "brain": brain,
@@ -1028,6 +1078,9 @@ async def create_components(settings: Settings) -> dict:
         "context_log_retention_task": context_log_retention_task,
         "retrieval_log_retention_task": retrieval_log_retention_task,
         "retrieval_logger": retrieval_logger,
+        "surface_service": surface_service,
+        "action_router": action_router,
+        "a2ui_sweep_task": a2ui_sweep_task,
     }
 
 
@@ -1056,6 +1109,15 @@ async def shutdown_components(components: dict) -> None:
             )
         except Exception:
             logger.warning("F087: error draining DAG delivery", exc_info=True)
+
+    # F092: stop the surface expiry sweep
+    a2ui_sweep = components.get("a2ui_sweep_task")
+    if a2ui_sweep:
+        a2ui_sweep.cancel()
+        try:
+            await a2ui_sweep
+        except (asyncio.CancelledError, Exception):
+            pass
 
     # OB-1: stop the context-log retention sweep
     retention_task = components.get("context_log_retention_task")
@@ -1198,6 +1260,8 @@ def build_app(settings: Settings) -> Starlette:
         heartbeat_runner=_lazy_component(components, "heartbeat_runner"),
         session_monitor=_lazy_component(components, "session_monitor"),
         context_logger=_lazy_component(components, "context_logger"),
+        surface_service=_lazy_component(components, "surface_service"),
+        action_router=_lazy_component(components, "action_router"),
     )
 
     if settings.mcp_enabled:

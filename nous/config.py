@@ -2491,6 +2491,85 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- F092 A2UI Companion ---
+    # Master flag ships ON, deviating from land-dark convention deliberately:
+    # the surface is purely additive (new tables, new routes, one new tool) on
+    # a REST layer that is already unauthenticated-behind-oauth2-proxy, and a
+    # push surface that lands dark demonstrates nothing — there is no
+    # measurement to gate a flip on. Kill switch only.
+    a2ui_enabled: bool = Field(
+        default=True,
+        description=(
+            "F092 master switch. Gates the /a2ui routes, the SSE stream, and "
+            "push_surface tool registration. When false the routes return 503 "
+            "and the tool is not registered."
+        ),
+    )
+    a2ui_outbox_replay_window: int = Field(
+        default=500,
+        ge=1,
+        description=(
+            "F092: max outbox rows replayed on SSE reconnect before the server "
+            "gives up and sends a resync control event (client then re-hydrates "
+            "from snapshots)."
+        ),
+    )
+    a2ui_action_rate_per_minute: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "F092: in-process sliding-window cap on POST /a2ui/action, keyed on "
+            "agent_id (single-user deployment — effectively global). Beyond it: 429."
+        ),
+    )
+    a2ui_surface_retention_days: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "F092: days a resolved/expired surface row is kept before the sweep "
+            "deletes it (presentation tier — evidence rows are permanent per "
+            "spec 6.2). 0 disables deletion."
+        ),
+    )
+    a2ui_outbox_nonlive_retention_hours: int = Field(
+        default=24,
+        ge=1,
+        description=(
+            "F092: hours outbox rows for non-live surfaces are kept before the "
+            "sweep deletes them (they are undeliverable — reconnect is "
+            "hydration-first and only live surfaces replay)."
+        ),
+    )
+    a2ui_sweep_interval_seconds: int = Field(
+        default=900,
+        ge=60,
+        description=(
+            "F092: seconds between surface expiry sweeps (writes no_objection "
+            "evidence, expires overdue surfaces, prunes old rows). The sweep "
+            "must run unobserved — 'silence counts' is an audit fact even when "
+            "no client ever connects."
+        ),
+    )
+    a2ui_public_base_url: str = Field(
+        default="",
+        description=(
+            "F092: externally reachable base URL (e.g. https://nous.example.com) "
+            "prefixed to companion deep links in Telegram notifications. Empty "
+            "= links sent as a relative path (visible but not tappable)."
+        ),
+    )
+    a2ui_trust_forwarded_identity: bool = Field(
+        default=False,
+        description=(
+            "F092: record X-Forwarded-User/-Email as the audit actor. Default "
+            "OFF — on a directly reachable port ANY caller can set those "
+            "headers and forge attribution, which is worse than "
+            "'unattributed'. Flip ONLY when an authenticating proxy "
+            "(oauth2-proxy) fronts the port and strips client-supplied "
+            "forwarding headers."
+        ),
+    )
+
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":
         object.__setattr__(self, '_compaction_threshold_explicit',

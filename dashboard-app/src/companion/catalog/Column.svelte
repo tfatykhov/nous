@@ -1,0 +1,47 @@
+<script lang="ts">
+  import Children from './Children.svelte';
+  import { flexGrow } from '../functions';
+  import type { Scope } from '../pointer';
+  import type { A2uiComponent } from '../store.svelte';
+
+  let {
+    surfaceId,
+    comp,
+    scope = null,
+    depth = 0,
+    ancestors = [],
+  }: {
+    surfaceId: string;
+    comp: A2uiComponent;
+    scope?: Scope | null;
+    depth?: number;
+    ancestors?: readonly string[];
+  } = $props();
+
+  const JUSTIFY: Record<string, string> = {
+    start: 'flex-start',
+    center: 'center',
+    end: 'flex-end',
+    spaceBetween: 'space-between',
+    spaceAround: 'space-around',
+    spaceEvenly: 'space-evenly',
+    stretch: 'stretch',
+  };
+</script>
+
+<div
+  class="col"
+  style:justify-content={JUSTIFY[comp.justify as string] ?? null}
+  style:align-items={JUSTIFY[comp.align as string] ?? null}
+  style:flex-grow={flexGrow(comp.weight)}
+>
+  <Children {surfaceId} children={comp.children} {scope} {depth} {ancestors} />
+</div>
+
+<style>
+  .col {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+</style>
