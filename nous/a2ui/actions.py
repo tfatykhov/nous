@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from nous.storage.models import A2uiAction, A2uiSurface
 
@@ -56,6 +56,16 @@ class _HandlerMeta:
     irreversible: bool
 
 
+class _LockEntry:
+    """A per-surface lock plus the count of tasks holding or awaiting it."""
+
+    __slots__ = ("lock", "refs")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.refs = 0
+
+
 class ActionRouter:
     def __init__(
         self,
@@ -78,8 +88,9 @@ class ActionRouter:
         # Per-surface serialization (codex P2): two overlapping POSTs for the
         # same terminal action would both read the surface as live and both
         # dispatch. In-process lock + a status re-read inside it closes the
-        # race for this single-process server; entries are pruned on release.
-        self._surface_locks: dict[str, asyncio.Lock] = {}
+        # race for this single-process server; entries are refcounted so the
+        # last user removes them (see handle()).
+        self._surface_locks: dict[str, _LockEntry] = {}
         _register_default_handlers(self)
 
     def register(self, name: str, fn: Handler, *, mutating: bool, irreversible: bool = False) -> None:
@@ -113,12 +124,20 @@ class ActionRouter:
         if surface_id in surfaces_meta:
             data_model = surfaces_meta[surface_id]
 
-        lock = self._surface_locks.setdefault(surface_id, asyncio.Lock())
+        # Refcounted lock entry (codex P2 on the previous cleanup): pruning on
+        # `not lock.locked()` raced the released-but-not-yet-reacquired window
+        # between waiters, letting a third request mint a fresh lock and run
+        # concurrently with the second. The refcount mutations sit on either
+        # side of the await with no await between check and delete, so they
+        # are atomic under the event loop.
+        entry = self._surface_locks.setdefault(surface_id, _LockEntry())
+        entry.refs += 1
         try:
-            async with lock:
+            async with entry.lock:
                 return await self._handle_locked(surface_id, name, context, data_model, action, actor)
         finally:
-            if not lock.locked() and self._surface_locks.get(surface_id) is lock:
+            entry.refs -= 1
+            if entry.refs == 0 and self._surface_locks.get(surface_id) is entry:
                 self._surface_locks.pop(surface_id, None)
 
     async def _handle_locked(
@@ -132,8 +151,17 @@ class ActionRouter:
     ) -> tuple[int, dict]:
         # Status is read INSIDE the surface lock — a terminal action that
         # just resolved this surface makes the second request 404 here.
+        # Agent-scoped (codex P1): a bare PK lookup would accept another
+        # agent's surface id + nonce.
         async with self._db.session() as session:
-            surface = await session.get(A2uiSurface, surface_id)
+            surface = (
+                await session.execute(
+                    select(A2uiSurface).where(
+                        A2uiSurface.surface_id == surface_id,
+                        A2uiSurface.agent_id == self._settings.agent_id,
+                    )
+                )
+            ).scalar_one_or_none()
 
         if surface is None or surface.status != "live":
             return 404, _err("SURFACE_NOT_LIVE", surface_id, "surface not found or not live")

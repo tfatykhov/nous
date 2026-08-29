@@ -1032,6 +1032,13 @@ async def create_components(settings: Settings) -> dict:
                 try:
                     if first:
                         first = False
+                        # Restart invalidation: live heartbeat surfaces
+                        # reference an in-memory finding store that no longer
+                        # exists — every button on them is dead. Expire them
+                        # up front instead of serving 72h of "not found".
+                        stale = await surface_service.invalidate_heartbeat_surfaces()
+                        if stale:
+                            logger.info("F092: invalidated %d stale heartbeat surface(s)", stale)
                     else:
                         await asyncio.sleep(settings.a2ui_sweep_interval_seconds)
                     expired = await surface_service.expire_sweep()

@@ -29,7 +29,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select, text, update
+from sqlalchemy.exc import IntegrityError
 
 from nous.storage.database import Database
 from nous.storage.models import A2uiAction, A2uiOutbox, A2uiSurface
@@ -59,12 +60,16 @@ class SurfaceService:
         dedup_key: str | None = None,
         session_id: str | None = None,
         notify: bool | None = None,
+        _dedup_retry: bool = False,
     ) -> str:
         """Persist a built surface and broadcast it. Returns the surface_id.
 
         With a ``dedup_key`` matching a live surface, the existing surface is
         updated in place (components + data model replaced) instead of a new
         card being created — a hourly heartbeat check must not stack 24 cards.
+        Two producers racing the same key are serialized by the partial
+        UNIQUE index on (agent_id, dedup_key) WHERE live (codex P2): the
+        loser's insert raises and retries once down the update path.
         """
         built.validate()
         await self._censor_gate(built)
@@ -88,6 +93,7 @@ class SurfaceService:
 
             if existing is not None:
                 surface_id = existing.surface_id
+                priority_changed = existing.priority != built.priority
                 existing.components = built.components
                 existing.data_model = built.data_model
                 existing.title = built.title
@@ -95,22 +101,40 @@ class SurfaceService:
                 existing.allowed_actions = built.allowed_actions
                 existing.updated_at = now
                 existing.expires_at = expires_at
-                envelopes = [
-                    {
-                        "version": "v1.0",
-                        "updateComponents": {
-                            "surfaceId": surface_id,
-                            "components": built.components,
+                if priority_changed:
+                    # Priority lives in createSurface metadata and the client
+                    # reads it only there (codex P2: plain updates left a
+                    # connected companion ordering the card by the OLD
+                    # priority until a full reconnect). deleteSurface then
+                    # createSurface re-delivers the metadata atomically.
+                    envelopes = [
+                        {"version": "v1.0", "deleteSurface": {"surfaceId": surface_id}},
+                        self._create_envelope(
+                            surface_id,
+                            built.catalog_id,
+                            built.components,
+                            built.data_model,
+                            existing.nonce,
+                            built.priority,
+                        ),
+                    ]
+                else:
+                    envelopes = [
+                        {
+                            "version": "v1.0",
+                            "updateComponents": {
+                                "surfaceId": surface_id,
+                                "components": built.components,
+                            },
                         },
-                    },
-                    {
-                        "version": "v1.0",
-                        "updateDataModel": {
-                            "surfaceId": surface_id,
-                            "value": built.data_model,
+                        {
+                            "version": "v1.0",
+                            "updateDataModel": {
+                                "surfaceId": surface_id,
+                                "value": built.data_model,
+                            },
                         },
-                    },
-                ]
+                    ]
                 created = False
             else:
                 surface_id = f"nous:{built.origin}:{built.kind}:{uuid.uuid4().hex[:6]}"
@@ -150,10 +174,25 @@ class SurfaceService:
             # Explicit flush so the surface row exists before the outbox FK
             # references it — unit-of-work ordering alone proved unreliable
             # here (observed FK violation with add() + add_all() unflushed).
-            await session.flush()
-            rows = [A2uiOutbox(agent_id=agent_id, surface_id=surface_id, envelope=env) for env in envelopes]
-            session.add_all(rows)
-            await session.commit()
+            try:
+                await session.flush()
+                rows = [A2uiOutbox(agent_id=agent_id, surface_id=surface_id, envelope=env) for env in envelopes]
+                session.add_all(rows)
+                await session.commit()
+            except IntegrityError:
+                # Lost the dedup race: another producer inserted the same
+                # live (agent_id, dedup_key) first. Retry once — the lookup
+                # now finds the winner and takes the update-in-place path.
+                await session.rollback()
+                if _dedup_retry or not dedup_key:
+                    raise
+                return await self.push_built(
+                    built,
+                    dedup_key=dedup_key,
+                    session_id=session_id,
+                    notify=notify,
+                    _dedup_retry=True,
+                )
             seqs = [row.seq for row in rows]
 
         for seq, env in zip(seqs, envelopes):
@@ -211,10 +250,26 @@ class SurfaceService:
 
     # ------------------------------------------------------------- mutations
 
+    async def _get_own(self, session: Any, surface_id: str) -> A2uiSurface | None:
+        """Agent-scoped surface lookup.
+
+        Every read must carry the agent filter (codex P1): a bare primary-key
+        get would let one agent's surface id disclose another agent's
+        components, data model, and action nonce.
+        """
+        return (
+            await session.execute(
+                select(A2uiSurface).where(
+                    A2uiSurface.surface_id == surface_id,
+                    A2uiSurface.agent_id == self._settings.agent_id,
+                )
+            )
+        ).scalar_one_or_none()
+
     async def update_data(self, surface_id: str, path: str | None, value: Any) -> None:
         """Patch the data model (authoritative row + outbox + broadcast)."""
         async with self._db.session() as session:
-            surface = await session.get(A2uiSurface, surface_id)
+            surface = await self._get_own(session, surface_id)
             if surface is None or surface.status != "live":
                 raise KeyError(surface_id)
             # Deep copy, not dict(): a shallow copy shares its nested objects
@@ -247,7 +302,7 @@ class SurfaceService:
         """Terminal transition + teardown envelope."""
         envelope = {"version": "v1.0", "deleteSurface": {"surfaceId": surface_id}}
         async with self._db.session() as session:
-            surface = await session.get(A2uiSurface, surface_id)
+            surface = await self._get_own(session, surface_id)
             if surface is None:
                 raise KeyError(surface_id)
             if surface.status != "live":
@@ -270,27 +325,34 @@ class SurfaceService:
         """
         now = datetime.now(UTC)
         agent_id = self._settings.agent_id
-        expired = 0
         async with self._db.session() as session:
-            overdue = (
+            # Atomic claim (codex P1): only rows this UPDATE flips from live
+            # get a no_objection row, in the SAME transaction — so a user
+            # action that resolved the surface first can never coexist with
+            # a permanent silence claim, and vice versa.
+            claimed = (
                 (
                     await session.execute(
-                        select(A2uiSurface).where(
+                        update(A2uiSurface)
+                        .where(
                             A2uiSurface.agent_id == agent_id,
                             A2uiSurface.status == "live",
                             A2uiSurface.expires_at.is_not(None),
                             A2uiSurface.expires_at <= now,
                         )
+                        .values(status="expired", resolved_at=now)
+                        .returning(A2uiSurface.surface_id)
                     )
                 )
                 .scalars()
                 .all()
             )
-            for surface in overdue:
+            teardowns = []
+            for surface_id in claimed:
                 session.add(
                     A2uiAction(
                         agent_id=agent_id,
-                        surface_id=surface.surface_id,
+                        surface_id=surface_id,
                         action_name="no_objection",
                         actor="system:expiry",
                         context={"expired_at": now.isoformat()},
@@ -298,11 +360,15 @@ class SurfaceService:
                         completed_at=now,
                     )
                 )
+                envelope = {"version": "v1.0", "deleteSurface": {"surfaceId": surface_id}}
+                row = A2uiOutbox(agent_id=agent_id, surface_id=surface_id, envelope=envelope)
+                session.add(row)
+                teardowns.append((row, envelope))
             await session.commit()
+            expired = len(claimed)
 
-        for surface in overdue:
-            await self.resolve(surface.surface_id, status="expired")
-            expired += 1
+        for row, envelope in teardowns:
+            self._broadcast(row.seq, envelope)
 
         async with self._db.session() as session:
             await session.execute(
@@ -324,6 +390,57 @@ class SurfaceService:
                 )
             await session.commit()
         return expired
+
+    async def invalidate_heartbeat_surfaces(self) -> int:
+        """Expire live heartbeat surfaces at process start (codex P2).
+
+        The finding store is in-memory: after a restart every fingerprint a
+        durable heartbeat surface references is gone, so each of its buttons
+        would return "finding not found" for up to 72h. The surfaces are
+        provably dead — expire them with an ``invalidated`` audit row (NOT
+        ``no_objection``: this is process loss, not user silence).
+        """
+        now = datetime.now(UTC)
+        agent_id = self._settings.agent_id
+        async with self._db.session() as session:
+            claimed = (
+                (
+                    await session.execute(
+                        update(A2uiSurface)
+                        .where(
+                            A2uiSurface.agent_id == agent_id,
+                            A2uiSurface.status == "live",
+                            A2uiSurface.origin == "heartbeat",
+                        )
+                        .values(status="expired", resolved_at=now)
+                        .returning(A2uiSurface.surface_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            teardowns = []
+            for surface_id in claimed:
+                session.add(
+                    A2uiAction(
+                        agent_id=agent_id,
+                        surface_id=surface_id,
+                        action_name="invalidated",
+                        actor="system:restart",
+                        context={"reason": "finding store reset by process restart"},
+                        status="completed",
+                        completed_at=now,
+                    )
+                )
+                envelope = {"version": "v1.0", "deleteSurface": {"surfaceId": surface_id}}
+                row = A2uiOutbox(agent_id=agent_id, surface_id=surface_id, envelope=envelope)
+                session.add(row)
+                teardowns.append((row, envelope))
+            await session.commit()
+
+        for row, envelope in teardowns:
+            self._broadcast(row.seq, envelope)
+        return len(claimed)
 
     # ---------------------------------------------------------------- reads
 
@@ -364,7 +481,7 @@ class SurfaceService:
     async def snapshot(self, surface_id: str) -> dict | None:
         """Full surface as a single createSurface envelope (v1.0 inline)."""
         async with self._db.session() as session:
-            surface = await session.get(A2uiSurface, surface_id)
+            surface = await self._get_own(session, surface_id)
         if surface is None or surface.status != "live":
             return None
         return self._create_envelope(

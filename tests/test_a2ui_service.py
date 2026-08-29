@@ -823,3 +823,139 @@ async def test_push_validates_before_writing(service: SurfaceService, db, a2ui_a
         await service.push_built(broken)
 
     assert await _surfaces(db, a2ui_agent_id) == []
+
+
+# ---------------------------------------------------------------------------
+# Codex round-2/3 regressions (postgres_only: DB-backed like the classes above)
+# ---------------------------------------------------------------------------
+
+FINDINGS_LOW = {
+    "findings": [{"fingerprint": "fp-restart-1", "message": "Disk at 91%.", "urgency": "high"}],
+    "priority": 1,
+}
+
+
+@pytest.mark.postgres_only
+async def test_snapshot_is_agent_scoped(
+    service: SurfaceService, db, a2ui_settings, a2ui_agent_id: str
+) -> None:
+    """Another agent's surface id must not disclose its snapshot — the
+
+    envelope carries the nonce, so a cross-agent read would also hand over
+    action authorization (codex P1).
+    """
+    surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
+
+    stranger = SurfaceService(
+        db, a2ui_settings.model_copy(update={"agent_id": f"other-{a2ui_agent_id}"})
+    )
+    assert await stranger.snapshot(surface_id) is None
+    assert await service.snapshot(surface_id) is not None
+
+
+@pytest.mark.postgres_only
+async def test_expire_sweep_claims_atomically_never_after_an_action(
+    service: SurfaceService, db, a2ui_agent_id: str
+) -> None:
+    """A surface resolved by a user action before the sweep runs must NOT
+
+    get a no_objection row: the sweep's UPDATE-claim only flips still-live
+    rows, and evidence is written in the same transaction (codex P1).
+    """
+    from datetime import timedelta as _td
+
+    built = approval_gate({**APPROVAL_PARAMS, "expires_hours": 0.000001})
+    built.expires_in = _td(seconds=-5)
+    surface_id = await service.push_built(built)
+    await service.resolve(surface_id)
+
+    expired = await service.expire_sweep()
+
+    assert expired == 0
+    async with db.session() as session:
+        rows = (
+            await session.execute(
+                select(A2uiAction).where(
+                    A2uiAction.agent_id == a2ui_agent_id,
+                    A2uiAction.action_name == "no_objection",
+                )
+            )
+        ).scalars().all()
+    assert rows == []
+
+
+@pytest.mark.postgres_only
+async def test_concurrent_same_dedup_key_pushes_yield_one_surface(
+    service: SurfaceService, db, a2ui_agent_id: str
+) -> None:
+    """The partial UNIQUE index serializes racing producers; the loser
+
+    retries down the update path instead of stacking a second live card
+    (codex P2).
+    """
+    import asyncio as _asyncio
+
+    results = await _asyncio.gather(
+        service.push_built(approval_gate(APPROVAL_PARAMS), dedup_key="race:key"),
+        service.push_built(approval_gate(APPROVAL_PARAMS), dedup_key="race:key"),
+    )
+
+    live = [s for s in await _surfaces(db, a2ui_agent_id) if s.status == "live"]
+    assert len(live) == 1
+    assert set(results) == {live[0].surface_id}
+
+
+@pytest.mark.postgres_only
+async def test_dedup_priority_change_reissues_create_surface(
+    service: SurfaceService, db, a2ui_agent_id: str, no_lag: None
+) -> None:
+    """Priority lives in createSurface metadata and the client reads it only
+
+    there — a dedup update that changes priority must re-deliver it via
+    deleteSurface + createSurface, keeping the nonce stable (codex P2).
+    """
+    await service.push_built(heartbeat_findings(FINDINGS_LOW), dedup_key="hb:demo")
+    first_nonce = (await _surfaces(db, a2ui_agent_id))[0].nonce
+
+    await service.push_built(
+        heartbeat_findings({**FINDINGS_LOW, "priority": 2}), dedup_key="hb:demo"
+    )
+
+    kinds = [_envelope_kind(row.envelope) for row in await _outbox(db, a2ui_agent_id)]
+    assert kinds == ["createSurface", "deleteSurface", "createSurface"]
+    last_create = (await _outbox(db, a2ui_agent_id))[-1].envelope["createSurface"]
+    ext = last_create["metadata"]["extensions"]
+    assert ext["com_nous_priority"] == 2
+    assert ext["com_nous_nonce"] == first_nonce
+
+
+@pytest.mark.postgres_only
+async def test_startup_invalidation_expires_only_heartbeat_surfaces(
+    service: SurfaceService, db, a2ui_agent_id: str
+) -> None:
+    """After a restart the in-memory finding store is empty, so every live
+
+    heartbeat surface is provably dead — expired with an `invalidated`
+    audit row (NOT no_objection: process loss is not user silence). Other
+    origins stay live (codex P2).
+    """
+    hb_id = await service.push_built(heartbeat_findings(FINDINGS_LOW))
+    approval_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
+
+    stale = await service.invalidate_heartbeat_surfaces()
+
+    assert stale == 1
+    by_id = {s.surface_id: s.status for s in await _surfaces(db, a2ui_agent_id)}
+    assert by_id[hb_id] == "expired"
+    assert by_id[approval_id] == "live"
+    async with db.session() as session:
+        audit = (
+            await session.execute(
+                select(A2uiAction).where(
+                    A2uiAction.agent_id == a2ui_agent_id,
+                    A2uiAction.surface_id == hb_id,
+                )
+            )
+        ).scalars().all()
+    assert [a.action_name for a in audit] == ["invalidated"]
+    assert audit[0].actor == "system:restart"

@@ -126,12 +126,19 @@ export function callFunction(
       return !toBool(resolveArg(args, 'value', ctx));
     }
     case 'formatString': {
-      return formatString(String(args.value ?? ''), ctx);
+      // value is DynamicString — a binding or nested call must resolve to
+      // the template BEFORE interpolation (codex P2: it stringified the
+      // descriptor object to "[object Object]").
+      return formatString(toDisplayString(resolveArg(args, 'value', ctx)), ctx);
     }
     case 'formatNumber': {
+      // Catalog args are `decimals` + `grouping` (codex P2: the previous
+      // `fractionDigits` key does not exist in the catalog).
       const v = Number(resolveArg(args, 'value', ctx));
-      const digits = args.fractionDigits !== undefined ? Number(resolveArg(args, 'fractionDigits', ctx)) : undefined;
+      const digits = args.decimals !== undefined ? Number(resolveArg(args, 'decimals', ctx)) : undefined;
+      const grouping = args.grouping !== undefined ? Boolean(resolveArg(args, 'grouping', ctx)) : true;
       return new Intl.NumberFormat(undefined, {
+        useGrouping: grouping,
         maximumFractionDigits: digits,
         minimumFractionDigits: digits,
       }).format(v);
@@ -151,10 +158,16 @@ export function callFunction(
       return formatDateCldr(v, format);
     }
     case 'pluralize': {
-      const count = Number(resolveArg(args, 'count', ctx));
-      const one = toDisplayString(resolveArg(args, 'one', ctx));
-      const other = toDisplayString(resolveArg(args, 'other', ctx));
-      return count === 1 ? one : other;
+      // The count arrives as `value` (codex P2: `count` is not a catalog
+      // key, so every count was NaN and singular rendered as plural).
+      // Category selection is CLDR via Intl.PluralRules, so the catalog's
+      // zero/two/few/many forms work in locales that have them.
+      const count = Number(resolveArg(args, 'value', ctx));
+      const category = Number.isFinite(count)
+        ? new Intl.PluralRules().select(count)
+        : 'other';
+      const chosen = args[category] !== undefined ? args[category] : args.other;
+      return toDisplayString(resolveDynamic(chosen, ctx));
     }
     case 'openUrl': {
       const url = toDisplayString(resolveArg(args, 'url', ctx));

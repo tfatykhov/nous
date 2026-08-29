@@ -46,8 +46,9 @@ CREATE INDEX IF NOT EXISTS idx_a2ui_surfaces_feed
 CREATE INDEX IF NOT EXISTS idx_a2ui_surfaces_expiry
     ON nous_system.a2ui_surfaces (expires_at) WHERE status = 'live';
 
-CREATE INDEX IF NOT EXISTS idx_a2ui_surfaces_dedup
-    ON nous_system.a2ui_surfaces (agent_id, dedup_key) WHERE status = 'live';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_a2ui_surfaces_dedup
+    ON nous_system.a2ui_surfaces (agent_id, dedup_key)
+    WHERE status = 'live' AND dedup_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS nous_system.a2ui_outbox (
     seq         BIGSERIAL PRIMARY KEY,

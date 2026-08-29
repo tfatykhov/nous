@@ -246,8 +246,14 @@ describe('formatString', () => {
 
 describe('formatting helpers', () => {
   const ctx = ctxOf({});
-  it('formatNumber applies fixed fraction digits', () => {
-    expect(callFunction('formatNumber', { value: 3.14159, fractionDigits: 2 }, ctx)).toBe('3.14');
+  it('formatNumber honors the catalog decimals + grouping args', () => {
+    // Catalog arg names are `decimals` and `grouping` (codex P2 pinned:
+    // `fractionDigits` is not a catalog key).
+    expect(callFunction('formatNumber', { value: 3.14159, decimals: 2 }, ctx)).toBe('3.14');
+    expect(callFunction('formatNumber', { value: 1234.5, decimals: 0, grouping: false }, ctx)).toBe(
+      '1235',
+    );
+    expect(String(callFunction('formatNumber', { value: 1234, decimals: 0 }, ctx))).toContain(',');
   });
   it('formatCurrency renders a currency and falls back on a bad code', () => {
     expect(String(callFunction('formatCurrency', { value: 5, currency: 'USD' }, ctx))).toContain('5');
@@ -255,11 +261,18 @@ describe('formatting helpers', () => {
       'NOTACODE 5',
     );
   });
-  it('pluralize switches on a count of exactly one', () => {
+  it('pluralize reads the count from `value` and selects via CLDR', () => {
+    // The catalog's count arg is `value` (codex P2 pinned: `count` is not a
+    // catalog key, so 1 rendered as plural). English CLDR: 1 -> one,
+    // everything else -> other.
     const args = { one: 'item', other: 'items' };
-    expect(callFunction('pluralize', { count: 1, ...args }, ctx)).toBe('item');
-    expect(callFunction('pluralize', { count: 0, ...args }, ctx)).toBe('items');
-    expect(callFunction('pluralize', { count: 2, ...args }, ctx)).toBe('items');
+    expect(callFunction('pluralize', { value: 1, ...args }, ctx)).toBe('item');
+    expect(callFunction('pluralize', { value: 0, ...args }, ctx)).toBe('items');
+    expect(callFunction('pluralize', { value: 2, ...args }, ctx)).toBe('items');
+  });
+  it('formatString resolves a bound template before interpolating', () => {
+    const bound = ctxOf({ tmpl: 'Hi ${/name}!', name: 'Ada' });
+    expect(callFunction('formatString', { value: { path: '/tmpl' } }, bound)).toBe('Hi Ada!');
   });
   it('an unknown function resolves to undefined instead of throwing', () => {
     expect(callFunction('noSuchFunction', {}, ctx)).toBeUndefined();
