@@ -474,13 +474,42 @@ async def test_late_dedup_match_reenters_the_locked_path(service, db) -> None:
         agent_id=service._settings.agent_id,
         now=datetime.now(UTC),
         expires_at=None,
-        _locked=False,
+        _locked_surface_id=None,
     )
 
     assert replaced == first, "re-entered as a replacement, not a duplicate insert"
     row = await _surface_row(db, first)
     assert row.title == "loser-turned-replacement"
     assert row.nonce != old_nonce, "the locked replacement path rotated the nonce"
+
+
+async def test_stale_lock_identity_reenters_for_the_current_winner(service, db) -> None:
+    """Codex round 8: holding SOME surface lock is not holding the RIGHT
+    one. A producer that locked S1 (since closed) must not replace S2 — the
+    lookup's row identity is compared against the held lock's."""
+    from datetime import UTC, datetime
+
+    current = await service.push_built(_micro_app(title="S2-winner"), dedup_key="app:race8")
+    old_nonce = (await _surface_row(db, current)).nonce
+
+    replaced = await service._push_transaction(
+        _micro_app(title="replacement-under-right-lock"),
+        dedup_key="app:race8",
+        session_id=None,
+        notify=False,
+        _dedup_retry=False,
+        agent_id=service._settings.agent_id,
+        now=datetime.now(UTC),
+        expires_at=None,
+        # Simulates having locked a DIFFERENT (since-closed) surface: the
+        # identity check must refuse and re-enter for the current winner.
+        _locked_surface_id="nous:chat:micro_app:dead01",
+    )
+
+    assert replaced == current
+    row = await _surface_row(db, current)
+    assert row.title == "replacement-under-right-lock"
+    assert row.nonce != old_nonce
 
 
 async def test_dedup_update_does_not_evict(service, db) -> None:

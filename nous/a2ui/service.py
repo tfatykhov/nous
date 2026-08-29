@@ -104,6 +104,7 @@ class SurfaceService:
         session_id: str | None = None,
         notify: bool | None = None,
         _dedup_retry: bool = False,
+        _race_retries: int = 0,
     ) -> str:
         """Persist a built surface and broadcast it. Returns the surface_id.
 
@@ -166,7 +167,8 @@ class SurfaceService:
                         agent_id=agent_id,
                         now=now,
                         expires_at=expires_at,
-                        _locked=True,
+                        _race_retries=_race_retries,
+                        _locked_surface_id=existing_id,
                     )
         return await self._push_transaction(
             built,
@@ -177,6 +179,7 @@ class SurfaceService:
             agent_id=agent_id,
             now=now,
             expires_at=expires_at,
+            _race_retries=_race_retries,
         )
 
     async def _push_transaction(
@@ -190,7 +193,8 @@ class SurfaceService:
         agent_id: str,
         now: datetime,
         expires_at: datetime | None,
-        _locked: bool = False,
+        _race_retries: int = 0,
+        _locked_surface_id: str | None = None,
     ) -> str:
         try:
             return await self._push_transaction_inner(
@@ -202,18 +206,25 @@ class SurfaceService:
                 agent_id=agent_id,
                 now=now,
                 expires_at=expires_at,
-                _locked=_locked,
+                _locked_surface_id=_locked_surface_id,
             )
         except _DedupRaceRetry:
             # Session is closed by now; the recursion re-runs the
-            # preliminary lookup, finds the race winner, and takes the
-            # LOCKED replacement path.
+            # preliminary lookup, finds the CURRENT race winner, and locks
+            # THAT row. Bounded (codex round 8): pathological dedup churn
+            # (close + recreate between every lookup) must terminate as an
+            # error, not recurse forever.
+            if _race_retries >= 3:
+                raise RuntimeError(
+                    f"dedup race on {dedup_key!r} did not settle after 3 retries"
+                ) from None
             return await self.push_built(
                 built,
                 dedup_key=dedup_key,
                 session_id=session_id,
                 notify=notify,
                 _dedup_retry=_dedup_retry,
+                _race_retries=_race_retries + 1,
             )
 
     async def _push_transaction_inner(
@@ -227,7 +238,7 @@ class SurfaceService:
         agent_id: str,
         now: datetime,
         expires_at: datetime | None,
-        _locked: bool = False,
+        _locked_surface_id: str | None = None,
     ) -> str:
         async with self._db.session() as session:
             existing = None
@@ -242,7 +253,7 @@ class SurfaceService:
                     )
                 ).scalar_one_or_none()
 
-            if existing is not None and not _locked:
+            if existing is not None and existing.surface_id != _locked_surface_id:
                 # Late dedup match on the UNLOCKED branch (codex round 7):
                 # two first-time producers raced, the loser's preliminary
                 # lookup saw no row, and this inner lookup now does. A
