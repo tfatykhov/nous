@@ -33,6 +33,11 @@ import DecisionCardView from './DecisionCardView.svelte';
 import ConfidenceMeterView from './ConfidenceMeterView.svelte';
 import MemoryGraphView from './MemoryGraphView.svelte';
 import DagGraphView from './DagGraphView.svelte';
+import AppHeaderView from './AppHeaderView.svelte';
+import AppFooterView from './AppFooterView.svelte';
+import SectionView from './SectionView.svelte';
+import StatRowView from './StatRowView.svelte';
+import TimelineView from './TimelineView.svelte';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const registry: Record<string, Component<any>> = {
@@ -62,4 +67,10 @@ export const registry: Record<string, Component<any>> = {
   ConfidenceMeter: ConfidenceMeterView,
   MemoryGraph: MemoryGraphView,
   DagGraph: DagGraphView,
+  // F092.1 micro-apps
+  AppHeader: AppHeaderView,
+  AppFooter: AppFooterView,
+  Section: SectionView,
+  StatRow: StatRowView,
+  Timeline: TimelineView,
 };

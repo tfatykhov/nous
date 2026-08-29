@@ -1303,6 +1303,10 @@ class A2uiSurface(Base):
     nonce: Mapped[str] = mapped_column(Text, nullable=False)
     session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     trace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # F092.1 (migration 072): server-authoritative micro-app spec — refine
+    # options, data_sources, provenance markers, compose metadata. NULL for
+    # template surfaces.
+    app_spec: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

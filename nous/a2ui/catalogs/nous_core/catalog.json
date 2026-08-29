@@ -258,6 +258,144 @@
         "nodes",
         "edges"
       ]
+    },
+    "AppHeader": {
+      "type": "object",
+      "description": "Micro-app header: title, subtitle, and the mandatory freshness stamp rendered client-side from composedAt (amber past staleAfterS).",
+      "properties": {
+        "component": {
+          "const": "AppHeader"
+        },
+        "title": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "App headline."
+        },
+        "subtitle": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "One-line context under the title."
+        },
+        "composedAt": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "ISO-8601 UTC instant the app was composed — bind it to the data model (e.g. /meta/composedAt) so app.refresh can update the stamp without touching components. Mandatory (grammar rule)."
+        },
+        "staleAfterS": {
+          "type": "number",
+          "description": "Seconds after composedAt before the stamp degrades to amber."
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": [
+        "component",
+        "title",
+        "composedAt"
+      ]
+    },
+    "AppFooter": {
+      "type": "object",
+      "description": "Micro-app footer: enumerated refine options, refresh, and close. Refine/refresh call agent functions over /a2ui/call; close is the app's only action-router verb.",
+      "properties": {
+        "component": {
+          "const": "AppFooter"
+        },
+        "refineOptions": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicValue",
+          "description": "Array of {id, label} refine options, validated server-side against the surface's app_spec."
+        },
+        "showRefresh": {
+          "type": "boolean",
+          "description": "Render the refresh control (default true)."
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": [
+        "component"
+      ]
+    },
+    "Section": {
+      "type": "object",
+      "description": "Titled content block of a micro-app. No anonymous blocks (grammar rule). provenance='model' marks a subtree whose data no registered source produced — rendered amber.",
+      "properties": {
+        "component": {
+          "const": "Section"
+        },
+        "title": {
+          "type": "string",
+          "description": "Section heading. Required and non-empty."
+        },
+        "child": {
+          "type": "string",
+          "description": "Component id of the section body."
+        },
+        "provenance": {
+          "type": "string",
+          "enum": [
+            "source",
+            "model"
+          ],
+          "description": "Where this section's data came from. 'model' renders the amber model-supplied treatment regardless of age."
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": [
+        "component",
+        "title",
+        "child"
+      ]
+    },
+    "StatRow": {
+      "type": "object",
+      "description": "Horizontal row of up to four StatTiles at the top of a micro-app.",
+      "properties": {
+        "component": {
+          "const": "StatRow"
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4,
+          "description": "StatTile component ids (max 4)."
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": [
+        "component",
+        "children"
+      ]
+    },
+    "Timeline": {
+      "type": "object",
+      "description": "Time-ordered event list: the Briefing archetype's backbone.",
+      "properties": {
+        "component": {
+          "const": "Timeline"
+        },
+        "items": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicValue",
+          "description": "Path to an array of {at, label, detail?, flag?} — at is a preformatted time string, flag=true highlights the row."
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": [
+        "component",
+        "items"
+      ]
     }
   },
   "functions": {},
@@ -287,6 +425,21 @@
         },
         {
           "$ref": "#/components/DagGraph"
+        },
+        {
+          "$ref": "#/components/AppHeader"
+        },
+        {
+          "$ref": "#/components/AppFooter"
+        },
+        {
+          "$ref": "#/components/Section"
+        },
+        {
+          "$ref": "#/components/StatRow"
+        },
+        {
+          "$ref": "#/components/Timeline"
         }
       ],
       "discriminator": {

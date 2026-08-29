@@ -14,6 +14,7 @@ or rejected action never silently no-ops.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -66,6 +67,7 @@ class ActionRouter:
         brain: Any = None,
         heartbeat_runner: Any = None,
         dag_orchestrator: Any = None,
+        composer: Any = None,
     ):
         self._db = database
         self._settings = settings
@@ -74,6 +76,9 @@ class ActionRouter:
         self._brain = brain
         self._heartbeat = heartbeat_runner
         self._dag_orchestrator = dag_orchestrator
+        # F092.1: SurfaceComposer for app.refine (recompose) and app.refresh
+        # (source re-read). None => the micro-app functions report unavailable.
+        self._composer = composer
         self._handlers: dict[str, _HandlerMeta] = {}
         # Phase 2: agent-side functions callable by the renderer over
         # POST /a2ui/call (spec's HTTP request-response pattern — the
@@ -86,6 +91,8 @@ class ActionRouter:
         _register_default_handlers(self)
         _register_phase2_handlers(self)
         _register_default_functions(self)
+        _register_micro_app_handlers(self)
+        _register_micro_app_functions(self)
 
     def register(self, name: str, fn: Handler, *, mutating: bool, irreversible: bool = False) -> None:
         self._handlers[name] = _HandlerMeta(fn=fn, mutating=mutating, irreversible=irreversible)
@@ -148,11 +155,20 @@ class ActionRouter:
         # No per-surface lock here, unlike handle(): functions are read-only
         # by contract, so there is no terminal transition to serialize and a
         # concurrent expiry/action changes nothing a read can corrupt.
+        # (Exception: the F092.1 micro-app functions write surface
+        # presentation state and take the lock themselves, scoped to their
+        # writes — locking every read RPC for two writers would be backwards.)
         ctx = ActionContext(surface=surface, name=name, context=args, data_model=None, services=self)
         try:
             value = await fn(ctx)
         except ValueError as exc:
             return 422, _fn_err(function_call_id, "INVALID_FUNCTION_CALL", str(exc))
+        except KeyError:
+            # A micro-app write lost the race with app.close/eviction — the
+            # surface is gone, which the client will learn from the
+            # deleteSurface envelope; 422 (not 500) so it doesn't read as
+            # a server fault.
+            return 422, _fn_err(function_call_id, "INVALID_FUNCTION_CALL", "surface no longer live")
         except Exception:
             logger.exception("F092 agent function %s failed", name)
             return 500, _fn_err(function_call_id, "EXECUTION_FAILED", f"function {name!r} failed")
@@ -676,6 +692,95 @@ def _register_default_functions(router: ActionRouter) -> None:
 
     router.register_function("expandGraphNode", expand_graph_node)
     router.register_function("loadDecisionDetail", load_decision_detail)
+
+
+def _register_micro_app_handlers(router: ActionRouter) -> None:
+    """F092.1: app.close — the ONLY action-router verb a micro-app holds.
+
+    mutating=False (same class as approval.defer): closing an ephemeral
+    read-only view mutates nothing that needs a censor round-trip, but the
+    lifecycle event still writes its ordinary audit row.
+    """
+
+    async def app_close(ctx: ActionContext) -> ActionResult:
+        return ActionResult(message="app closed", resolve_surface=True)
+
+    router.register("app.close", app_close, mutating=False)
+
+
+def _register_micro_app_functions(router: ActionRouter) -> None:
+    """F092.1 navigable-readonly class: refine + refresh over /a2ui/call.
+
+    Both validate against the surface's server-stored app_spec — the same
+    authority pattern as the allowlist. A refine button is NOT a free-form
+    prompt with a nice label; the submitted id must be one this surface
+    declared at compose time.
+    """
+
+    async def app_refresh(ctx: ActionContext) -> Any:
+        if router._composer is None:
+            raise ValueError("micro-app composer unavailable")
+        spec = ctx.surface.app_spec or {}
+        # Re-runs the DECLARED sources only — no LLM. With model-supplied
+        # data, "refresh" would replay whatever the model said last time;
+        # with sources it is a real re-read (F092.1 §3.6).
+        patches = await router._composer.refresh_data(spec)
+        # handle_call is lockless because functions are read-only by
+        # contract — these two micro-app functions are the exception (they
+        # write surface presentation state), so they take the per-surface
+        # lock THEMSELVES to serialize with app.close and LRU eviction.
+        async with router._service.surface_lock(ctx.surface.surface_id):
+            for key, value in patches.items():
+                await router._service.update_data(ctx.surface.surface_id, f"/{key}", value)
+        return {"refreshed": sorted(patches)}
+
+    async def app_refine(ctx: ActionContext) -> Any:
+        if router._composer is None:
+            raise ValueError("micro-app composer unavailable")
+        spec = ctx.surface.app_spec or {}
+        options = {
+            str(o.get("id")): o for o in spec.get("refine_options") or [] if isinstance(o, dict)
+        }
+        option_id = str(ctx.context.get("id") or "")
+        if option_id not in options:
+            raise ValueError(f"refine option {option_id!r} is not offered by this surface")
+        option = options[option_id]
+        intent = str(spec.get("intent") or ctx.surface.title)
+        refined_intent = (
+            f"{intent}\n\nRefine request: {option.get('label')}"
+            + (f"\nRefine params: {json.dumps(option.get('params'))}" if option.get("params") else "")
+        )
+        composed = await router._composer.compose(
+            refined_intent,
+            archetype=str(spec.get("archetype") or "") or None,
+            data_sources=spec.get("data_sources") or [],
+            origin=ctx.surface.origin,
+            priority=ctx.surface.priority,
+        )
+        # Same surface_id, delivered as updateComponents + whole-model
+        # updateDataModel — never a dedup re-push, which tears down and
+        # recreates (repaint, feed reorder, nonce race; rev-ui #3). The
+        # composer already ran schema + grammar validation on this output.
+        # The per-surface lock keeps the two-envelope delivery atomic
+        # against a concurrent app.close: without it, close could land
+        # between them and strand components without their data model.
+        async with router._service.surface_lock(ctx.surface.surface_id):
+            await router._service.update_components(
+                ctx.surface.surface_id,
+                composed.built.components,
+                app_spec=composed.app_spec,
+            )
+            await router._service.update_data(
+                ctx.surface.surface_id, None, composed.built.data_model
+            )
+        return {
+            "refined": option_id,
+            "fallback": composed.fallback,
+            "title": composed.built.title,
+        }
+
+    router.register_function("app.refresh", app_refresh)
+    router.register_function("app.refine", app_refine)
 
 
 def _submitted_model_error(authoritative: dict, submitted: Any, path: str = "") -> str | None:

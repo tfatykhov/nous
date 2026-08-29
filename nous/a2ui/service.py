@@ -37,7 +37,8 @@ from sqlalchemy.exc import IntegrityError
 from nous.storage.database import Database
 from nous.storage.models import A2uiAction, A2uiOutbox, A2uiSurface
 
-from .dsl import BuiltSurface
+from .dsl import BuiltSurface, SurfaceValidationError
+from .grammar import lint_micro_app
 
 logger = logging.getLogger(__name__)
 
@@ -107,11 +108,29 @@ class SurfaceService:
         loser's insert raises and retries once down the update path.
         """
         built.validate()
+        if built.kind == "micro_app":
+            # F092.1 fail-closed at creation, deliberately a fixed subset
+            # check rather than a handler-metadata predicate: the action
+            # registry grew 8 → 11 verbs in one PR, and a subset against
+            # {"app.close"} cannot drift with it.
+            forbidden = set(built.allowed_actions) - {"app.close"}
+            if forbidden:
+                raise ValueError(
+                    f"micro-app surfaces may only offer app.close, got {sorted(forbidden)}"
+                )
+            if built.priority > 1:
+                raise ValueError("micro-apps are never blocking: priority must be 0 or 1")
+            lint = lint_micro_app(built.components)
+            if lint:
+                raise SurfaceValidationError(lint)
         await self._censor_gate(built)
 
         agent_id = self._settings.agent_id
         now = datetime.now(UTC)
         expires_at = (now + built.expires_in) if built.expires_in else None
+
+        if built.kind == "micro_app":
+            await self._evict_over_cap(dedup_key)
 
         # A dedup REPLACEMENT must serialize with in-flight actions on the
         # existing surface (codex P1): without the lock, an action validated
@@ -189,6 +208,7 @@ class SurfaceService:
                 # trace_id — leaving the old one would misdirect
                 # course-corrections at the stale decision.
                 existing.trace_id = built.trace_id
+                existing.app_spec = built.app_spec
                 if session_id is not None:
                     existing.session_id = session_id
                 existing.updated_at = now
@@ -233,6 +253,7 @@ class SurfaceService:
                         nonce=nonce,
                         session_id=session_id,
                         trace_id=built.trace_id,
+                        app_spec=built.app_spec,
                         expires_at=expires_at,
                     )
                 )
@@ -372,6 +393,86 @@ class SurfaceService:
             await session.commit()
             seq = row.seq
         self._broadcast(seq, envelope)
+
+    async def update_components(
+        self, surface_id: str, components: list[dict], *, app_spec: dict | None = None
+    ) -> None:
+        """Replace the component tree of a live surface (F092.1 app.refine).
+
+        Delivered as ONE updateComponents envelope carrying the full new
+        list — deliberately not a dedup re-push, which would tear down and
+        recreate the surface (two envelopes, a repaint between them, a feed
+        reorder, and a nonce rotation that races the client's next call).
+        The store merges by component id and never deletes, so components
+        the new tree no longer references linger client-side as invisible
+        orphans until the next reconnect rebuilds from snapshot — accepted,
+        bounded, and cheaper than mirroring the validator's reachability
+        walk in a client GC (rev-ui #3).
+        """
+        async with self._db.session() as session:
+            surface = await self._get_own(session, surface_id)
+            if surface is None or surface.status != "live":
+                raise KeyError(surface_id)
+            surface.components = deepcopy(components)
+            if app_spec is not None:
+                # A refine recomposition carries a fresh spec (new refine
+                # options, new provenance) — the row must follow or the next
+                # refine validates against a stale allowlist.
+                surface.app_spec = app_spec
+            surface.updated_at = datetime.now(UTC)
+            envelope = {
+                "version": "v1.0",
+                "updateComponents": {"surfaceId": surface_id, "components": components},
+            }
+            row = A2uiOutbox(agent_id=surface.agent_id, surface_id=surface_id, envelope=envelope)
+            session.add(row)
+            await session.commit()
+            seq = row.seq
+        self._broadcast(seq, envelope)
+
+    async def _evict_over_cap(self, incoming_dedup_key: str | None) -> None:
+        """F092.1 §6.3: concurrency cap, not a TTL. Before a NEW micro-app
+        lands, the least-recently-touched live ones are closed until the
+        cap holds. Touch = updated_at (refresh/refine/patch bump it) — the
+        server never learns about views, so recency-of-use is the honest
+        proxy. A dedup update-in-place doesn't grow the count and skips
+        eviction."""
+        agent_id = self._settings.agent_id
+        cap = self._settings.a2ui_max_live_apps
+        async with self._db.session() as session:
+            if incoming_dedup_key:
+                exists = (
+                    await session.execute(
+                        select(A2uiSurface.surface_id).where(
+                            A2uiSurface.agent_id == agent_id,
+                            A2uiSurface.dedup_key == incoming_dedup_key,
+                            A2uiSurface.status == "live",
+                        )
+                    )
+                ).scalar_one_or_none()
+                if exists is not None:
+                    return
+            victims = (
+                await session.execute(
+                    select(A2uiSurface.surface_id, A2uiSurface.title)
+                    .where(
+                        A2uiSurface.agent_id == agent_id,
+                        A2uiSurface.kind == "micro_app",
+                        A2uiSurface.status == "live",
+                    )
+                    .order_by(A2uiSurface.updated_at.desc())
+                    .offset(cap - 1)
+                )
+            ).all()
+        for surface_id, title in victims:
+            logger.info("F092.1: LRU-evicting micro-app %s (%r) over cap %d", surface_id, title, cap)
+            # Same discipline as the expiry sweep: the victim's surface lock
+            # serializes eviction against an in-flight action/refine on it.
+            async with self.surface_lock(surface_id):
+                try:
+                    await self.resolve(surface_id, status="expired")
+                except KeyError:
+                    pass
 
     async def resolve(self, surface_id: str, *, status: str = "resolved") -> None:
         """Terminal transition + teardown envelope."""

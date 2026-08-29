@@ -44,6 +44,10 @@ class BuiltSurface:
     data_model: dict = field(default_factory=dict)
     trace_id: str | None = None
     expires_in: timedelta | None = None
+    # F092.1: server-authoritative micro-app spec (refine options, data
+    # sources, provenance, compose metadata). Persisted to the surface row;
+    # never shipped to the client.
+    app_spec: dict | None = None
 
     def validate(self) -> None:
         """Schema + structural validation; raises SurfaceValidationError."""
@@ -244,3 +248,60 @@ def MemoryGraph(id: str, *, nodes: Any, edges: Any, focusNodeId: Any = None) -> 
 
 def DagGraph(id: str, *, nodes: Any, edges: Any) -> dict:
     return _clean({"id": id, "component": "DagGraph", "nodes": nodes, "edges": edges})
+
+
+# --- F092.1 micro-app components ------------------------------------------
+
+
+def AppHeader(
+    id: str,
+    *,
+    title: Any,
+    # A binding ({"path": "/meta/composedAt"}), not a literal — app.refresh
+    # patches the data model only, and a literal stamp would keep saying
+    # "2h ago" over fresh data (rev-ui #1).
+    composedAt: Any,
+    subtitle: Any = None,
+    staleAfterS: float | None = None,
+) -> dict:
+    return _clean(
+        {
+            "id": id,
+            "component": "AppHeader",
+            "title": title,
+            "subtitle": subtitle,
+            "composedAt": composedAt,
+            "staleAfterS": staleAfterS,
+        }
+    )
+
+
+def AppFooter(id: str, *, refineOptions: Any = None, showRefresh: bool = True) -> dict:
+    return _clean(
+        {
+            "id": id,
+            "component": "AppFooter",
+            "refineOptions": refineOptions,
+            "showRefresh": showRefresh,
+        }
+    )
+
+
+def Section(id: str, *, title: str, child: str, provenance: str | None = None) -> dict:
+    return _clean(
+        {
+            "id": id,
+            "component": "Section",
+            "title": title,
+            "child": child,
+            "provenance": provenance,
+        }
+    )
+
+
+def StatRow(id: str, *, children: list[str]) -> dict:
+    return {"id": id, "component": "StatRow", "children": children}
+
+
+def Timeline(id: str, *, items: Any) -> dict:
+    return {"id": id, "component": "Timeline", "items": items}

@@ -1009,10 +1009,28 @@ async def create_components(settings: Settings) -> dict:
     a2ui_sweep_task = None
     if settings.a2ui_enabled:
         from nous.a2ui.actions import ActionRouter
+        from nous.a2ui.compose import SurfaceComposer
         from nous.a2ui.service import SurfaceService
+        from nous.a2ui.sources import build_default_registry
         from nous.a2ui.tools import register_a2ui_tools
 
         surface_service = SurfaceService(database, settings, heart=heart)
+        # F092.1: ephemeral micro-apps. The composer needs the same client
+        # the background handlers use; the source registry gives every
+        # micro-app its server-resolved data (self-sourcing, extended from
+        # the Phase 2 template guard).
+        composer = None
+        if settings.a2ui_compose_enabled:
+            composer = SurfaceComposer(
+                api_client,
+                settings,
+                build_default_registry(
+                    heart=heart,
+                    brain=brain,
+                    dag_store=dag_store,
+                    heartbeat_runner=heartbeat_runner,
+                ),
+            )
         action_router = ActionRouter(
             database,
             settings,
@@ -1021,8 +1039,11 @@ async def create_components(settings: Settings) -> dict:
             brain=brain,
             heartbeat_runner=heartbeat_runner,
             dag_orchestrator=dag_orchestrator,
+            composer=composer,
         )
-        register_a2ui_tools(dispatcher, surface_service, brain=brain, dag_store=dag_store)
+        register_a2ui_tools(
+            dispatcher, surface_service, brain=brain, dag_store=dag_store, composer=composer
+        )
 
         async def _a2ui_sweep_loop():
             # Sweep once at startup, then periodically. The sweep must run

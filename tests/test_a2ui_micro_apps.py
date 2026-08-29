@@ -1,0 +1,654 @@
+"""F092.1 Phase 3: ephemeral micro-apps — grammar, composer, service gates,
+navigable-readonly functions, compose_surface tool.
+
+Postgres-only for the same reason as the other A2UI suites (ARRAY columns).
+The composer's LLM is faked by patching ``call_background_llm`` in the
+compose module namespace with a scripted response queue.
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from typing import Any
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import delete, select
+
+import nous.a2ui.compose as compose_mod
+from nous.a2ui.actions import ActionRouter
+from nous.a2ui.compose import ComposedApp, SurfaceComposer
+from nous.a2ui.dsl import BuiltSurface, SurfaceValidationError
+from nous.a2ui.grammar import lint_micro_app
+from nous.a2ui.sources import SourceRegistry, UnknownSourceError
+from nous.storage.models import A2uiAction, A2uiOutbox, A2uiSurface
+
+pytestmark = pytest.mark.postgres_only
+
+JSON_CT = "application/json"
+
+
+# ---------------------------------------------------------------------------
+# Component fixtures
+# ---------------------------------------------------------------------------
+
+
+def _valid_components() -> list[dict]:
+    return [
+        {"id": "root", "component": "Column", "children": ["header", "stats", "sec1", "footer"], "align": "stretch"},
+        {
+            "id": "header",
+            "component": "AppHeader",
+            "title": "Italy — Sep 5-20",
+            "subtitle": "departs in 7 days",
+            "composedAt": {"path": "/meta/composedAt"},
+            "staleAfterS": 3600,
+        },
+        {"id": "stats", "component": "StatRow", "children": ["t1"]},
+        {"id": "t1", "component": "StatTile", "label": "Days out", "value": "7"},
+        {"id": "sec1", "component": "Section", "title": "Flights", "child": "kv", "provenance": "model"},
+        {"id": "kv", "component": "KeyValueTable", "rows": {"path": "/trip/flights"}},
+        {"id": "footer", "component": "AppFooter", "refineOptions": [], "showRefresh": True},
+    ]
+
+
+def _llm_response(
+    components: list[dict] | None = None,
+    data_model: dict | None = None,
+    refine_options: list | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "title": "Italy — Sep 5-20",
+            "archetype": "status",
+            "components": components if components is not None else _valid_components(),
+            "dataModel": data_model if data_model is not None else {"trip": {"flights": []}},
+            "refine_options": refine_options if refine_options is not None else [
+                {"id": "blockers", "label": "Just the blockers"}
+            ],
+        }
+    )
+
+
+class _ScriptedLLM:
+    """Patched in place of call_background_llm — pops scripted responses."""
+
+    def __init__(self, responses: list[str | None]) -> None:
+        self.responses = list(responses)
+        self.calls: list[str] = []
+
+    async def __call__(self, client, model, system_prompt, user_message, max_tokens=800):
+        self.calls.append(user_message)
+        return self.responses.pop(0) if self.responses else None
+
+
+@pytest.fixture
+def scripted_llm(monkeypatch):
+    def _install(responses: list[str | None]) -> _ScriptedLLM:
+        fake = _ScriptedLLM(responses)
+        monkeypatch.setattr(compose_mod, "call_background_llm", fake)
+        return fake
+
+    return _install
+
+
+@pytest.fixture
+def sources() -> SourceRegistry:
+    registry = SourceRegistry()
+
+    async def trip_status(params: dict) -> dict:
+        return {"days_out": 7, "booked": "5/5"}
+
+    registry.register("trip_status", trip_status)
+    return registry
+
+
+@pytest.fixture
+def composer(a2ui_settings, sources: SourceRegistry) -> SurfaceComposer:
+    return SurfaceComposer(object(), a2ui_settings, sources)
+
+
+# ---------------------------------------------------------------------------
+# Shared service fixtures (same shape as test_a2ui_phase2.py)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def a2ui_agent_id() -> str:
+    return f"test-a2ui-app-{uuid.uuid4().hex[:12]}"
+
+
+@pytest.fixture
+def a2ui_settings(settings, a2ui_agent_id: str):
+    return settings.model_copy(
+        update={
+            "agent_id": a2ui_agent_id,
+            "telegram_bot_token": None,
+            "telegram_chat_id": None,
+            "a2ui_max_live_apps": 2,
+        }
+    )
+
+
+@pytest_asyncio.fixture
+async def service(db, a2ui_settings, a2ui_agent_id: str):
+    from nous.a2ui.service import SurfaceService
+
+    svc = SurfaceService(db, a2ui_settings)
+    yield svc
+    async with db.session() as session:
+        await session.execute(delete(A2uiAction).where(A2uiAction.agent_id == a2ui_agent_id))
+        await session.execute(delete(A2uiOutbox).where(A2uiOutbox.agent_id == a2ui_agent_id))
+        await session.execute(delete(A2uiSurface).where(A2uiSurface.agent_id == a2ui_agent_id))
+        await session.commit()
+
+
+async def _surface_row(db, surface_id: str) -> A2uiSurface:
+    async with db.session() as session:
+        row = await session.get(A2uiSurface, surface_id)
+        assert row is not None
+        return row
+
+
+def _micro_app(app_spec: dict | None = None, title: str = "Test app") -> BuiltSurface:
+    built = BuiltSurface(
+        kind="micro_app",
+        origin="chat",
+        title=title,
+        priority=0,
+        allowed_actions=["app.close"],
+        components=_valid_components(),
+        data_model={"meta": {"composedAt": "2026-08-29T14:00:00+00:00"}, "trip": {"flights": []}},
+        expires_in=None,
+    )
+    built.app_spec = app_spec or {
+        "intent": "test",
+        "archetype": "status",
+        "composed_at": "2026-08-29T14:00:00+00:00",
+        "refine_options": [{"id": "blockers", "label": "Just the blockers"}],
+        "data_sources": [],
+        "provenance": {"trip": "model"},
+    }
+    return built
+
+
+# ---------------------------------------------------------------------------
+# Grammar
+# ---------------------------------------------------------------------------
+
+
+def test_grammar_accepts_the_conforming_fixture() -> None:
+    assert lint_micro_app(_valid_components()) == []
+
+
+def test_grammar_rejects_banned_input_components() -> None:
+    comps = _valid_components()
+    comps[5] = {"id": "kv", "component": "TextField", "label": "free text"}
+
+    errors = lint_micro_app(comps)
+
+    assert any("banned" in e for e in errors)
+
+
+def test_grammar_rejects_untitled_sections_and_missing_stamp() -> None:
+    comps = _valid_components()
+    comps[4] = {"id": "sec1", "component": "Section", "title": "  ", "child": "kv"}
+    comps[1] = {**comps[1]}
+    del comps[1]["composedAt"]
+
+    errors = lint_micro_app(comps)
+
+    assert any("no title" in e for e in errors)
+    assert any("composedAt" in e for e in errors)
+
+
+def test_grammar_rejects_broken_skeletons() -> None:
+    no_footer = [c for c in _valid_components() if c["id"] != "footer"]
+    no_footer[0] = {**no_footer[0], "children": ["header", "stats", "sec1"]}
+    assert any("skeleton" in e for e in lint_micro_app(no_footer))
+
+    # Six sections exceed the 1-5 band.
+    comps = _valid_components()
+    extra_ids = [f"sec{i}" for i in range(2, 8)]
+    for sid in extra_ids:
+        comps.append({"id": sid, "component": "Section", "title": sid, "child": f"{sid}_b"})
+        comps.append({"id": f"{sid}_b", "component": "Text", "text": "x"})
+    comps[0] = {**comps[0], "children": ["header", "stats", "sec1", *extra_ids, "footer"]}
+    assert any("1-5 Section" in e for e in lint_micro_app(comps))
+
+
+def test_grammar_rejects_component_budget_and_depth() -> None:
+    comps = _valid_components()
+    for i in range(40):
+        comps.append({"id": f"pad{i}", "component": "Text", "text": "x"})
+    assert any("budget" in e for e in lint_micro_app(comps))
+
+    deep = _valid_components()
+    # Chain of nested Columns under the section body: sec1 > kv chain.
+    deep[5] = {"id": "kv", "component": "Column", "children": ["d1"]}
+    for i in range(1, 7):
+        nxt = f"d{i + 1}"
+        deep.append({"id": f"d{i}", "component": "Column", "children": [nxt]})
+    deep.append({"id": "d7", "component": "Text", "text": "bottom"})
+    assert any("depth" in e for e in lint_micro_app(deep))
+
+
+def test_grammar_rejects_duplicate_and_multi_parent_refs() -> None:
+    comps = _valid_components()
+    comps[2] = {"id": "stats", "component": "StatRow", "children": ["t1", "t1"]}
+    errors = lint_micro_app(comps)
+    assert any("duplicate child refs" in e for e in errors)
+
+    comps = _valid_components()
+    comps[4] = {"id": "sec1", "component": "Section", "title": "Flights", "child": "t1"}
+    errors = lint_micro_app(comps)
+    assert any("one parent per component" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# Composer
+# ---------------------------------------------------------------------------
+
+
+async def test_compose_happy_path_merges_server_data_and_stamps_provenance(
+    composer: SurfaceComposer, scripted_llm
+) -> None:
+    scripted_llm([_llm_response()])
+
+    composed = await composer.compose(
+        "show me my vacation plans",
+        data_sources=[{"key": "status", "source": "trip_status"}],
+    )
+
+    assert not composed.fallback
+    built = composed.built
+    assert built.kind == "micro_app"
+    assert built.allowed_actions == ["app.close"]
+    assert built.expires_in is None
+    # Server authority: sourced key injected, meta stamped server-side.
+    assert built.data_model["status"] == {"days_out": 7, "booked": "5/5"}
+    assert built.data_model["meta"]["composedAt"]
+    # The model-supplied subtree is recorded, the sourced one is not.
+    assert composed.app_spec["provenance"] == {"trip": "model"}
+    assert composed.app_spec["refine_options"] == [{"id": "blockers", "label": "Just the blockers"}]
+    # Footer renders the SERVER-cleaned options.
+    footer = next(c for c in built.components if c["id"] == "footer")
+    assert footer["refineOptions"] == [{"id": "blockers", "label": "Just the blockers"}]
+
+
+async def test_compose_repairs_a_rejected_attempt(
+    composer: SurfaceComposer, scripted_llm
+) -> None:
+    bad = _valid_components()
+    bad[1] = {**bad[1], "composedAt": "2026-08-29T14:00:00Z"}  # literal, not binding
+    llm = scripted_llm([_llm_response(components=bad), _llm_response()])
+
+    composed = await composer.compose("vacation")
+
+    assert not composed.fallback
+    assert composed.repairs == 1
+    assert "REJECTED" in llm.calls[1]
+    assert "/meta/composedAt" in llm.calls[1]
+
+
+async def test_compose_falls_back_to_markdown_after_max_repairs(
+    composer: SurfaceComposer, scripted_llm
+) -> None:
+    llm = scripted_llm(["not json", "still not json", "{\"components\": []}"])
+
+    composed = await composer.compose(
+        "vacation", data_sources=[{"key": "status", "source": "trip_status"}]
+    )
+
+    assert composed.fallback
+    assert len(llm.calls) == 3
+    built = composed.built
+    # The fallback is itself a conforming micro-app — degraded, never broken.
+    built.validate()
+    assert lint_micro_app(built.components) == []
+    assert built.allowed_actions == ["app.close"]
+    assert built.data_model["status"] == {"days_out": 7, "booked": "5/5"}
+
+
+async def test_compose_rejects_a_model_shadowing_sourced_keys(
+    composer: SurfaceComposer, scripted_llm
+) -> None:
+    llm = scripted_llm(
+        [
+            _llm_response(data_model={"status": {"days_out": 999}}),
+            _llm_response(),
+        ]
+    )
+
+    composed = await composer.compose(
+        "vacation", data_sources=[{"key": "status", "source": "trip_status"}]
+    )
+
+    assert not composed.fallback
+    assert composed.repairs == 1
+    assert "shadows a server-resolved source" in llm.calls[1]
+
+
+async def test_compose_propagates_unknown_sources_to_the_caller(
+    composer: SurfaceComposer, scripted_llm
+) -> None:
+    scripted_llm([_llm_response()])
+
+    with pytest.raises(UnknownSourceError):
+        await composer.compose("x", data_sources=[{"key": "a", "source": "nope"}])
+
+
+async def test_refresh_data_reruns_sources_and_restamps(
+    composer: SurfaceComposer,
+) -> None:
+    patches = await composer.refresh_data(
+        {"data_sources": [{"key": "status", "source": "trip_status"}]}
+    )
+
+    assert patches["status"] == {"days_out": 7, "booked": "5/5"}
+    assert patches["meta"]["composedAt"]
+
+
+# ---------------------------------------------------------------------------
+# Service gates: fail-closed creation + cap/LRU
+# ---------------------------------------------------------------------------
+
+
+async def test_push_rejects_micro_app_with_extra_actions(service) -> None:
+    built = _micro_app()
+    built.allowed_actions = ["app.close", "dag.cancel"]
+
+    with pytest.raises(ValueError, match="app.close"):
+        await service.push_built(built)
+
+
+async def test_push_rejects_blocking_priority(service) -> None:
+    built = _micro_app()
+    built.priority = 2
+
+    with pytest.raises(ValueError, match="never blocking"):
+        await service.push_built(built)
+
+
+async def test_push_rejects_grammar_violations(service) -> None:
+    built = _micro_app()
+    built.components[5] = {"id": "kv", "component": "TextField", "label": "x"}
+
+    with pytest.raises(SurfaceValidationError):
+        await service.push_built(built)
+
+
+async def test_push_persists_app_spec_and_null_expiry(service, db) -> None:
+    surface_id = await service.push_built(_micro_app())
+
+    row = await _surface_row(db, surface_id)
+    assert row.kind == "micro_app"
+    assert row.expires_at is None
+    assert row.app_spec["refine_options"] == [{"id": "blockers", "label": "Just the blockers"}]
+
+
+async def test_cap_evicts_least_recently_touched(service, db, a2ui_agent_id: str) -> None:
+    """Cap is 2 (fixture). Pushing a third evicts the least-recently-updated;
+    touching the oldest first must protect it."""
+    first = await service.push_built(_micro_app(title="first"))
+    second = await service.push_built(_micro_app(title="second"))
+    # Touch FIRST so second becomes the LRU victim.
+    await service.update_data(first, "/trip/flights", [{"key": "UA", "value": "booked"}])
+
+    third = await service.push_built(_micro_app(title="third"))
+
+    assert (await _surface_row(db, first)).status == "live"
+    assert (await _surface_row(db, second)).status == "expired"
+    assert (await _surface_row(db, third)).status == "live"
+    # Eviction emitted a teardown envelope for the victim.
+    async with db.session() as session:
+        envs = (
+            await session.execute(
+                select(A2uiOutbox.envelope).where(
+                    A2uiOutbox.agent_id == a2ui_agent_id,
+                    A2uiOutbox.surface_id == second,
+                )
+            )
+        ).scalars().all()
+    assert any("deleteSurface" in e for e in envs)
+
+
+async def test_dedup_update_does_not_evict(service, db) -> None:
+    first = await service.push_built(_micro_app(title="first"), dedup_key="app:one")
+    second = await service.push_built(_micro_app(title="second"), dedup_key="app:two")
+
+    replaced = await service.push_built(_micro_app(title="one again"), dedup_key="app:one")
+
+    assert replaced == first
+    assert (await _surface_row(db, first)).status == "live"
+    assert (await _surface_row(db, second)).status == "live"
+
+
+async def test_update_components_replaces_tree_and_app_spec(service, db, a2ui_agent_id) -> None:
+    surface_id = await service.push_built(_micro_app())
+    before = (await _surface_row(db, surface_id)).updated_at
+    new_components = _valid_components()
+    new_components[4] = {"id": "sec1", "component": "Section", "title": "Blockers", "child": "kv"}
+    new_spec = {"intent": "test", "refine_options": [], "data_sources": [], "provenance": {}}
+
+    await service.update_components(surface_id, new_components, app_spec=new_spec)
+
+    row = await _surface_row(db, surface_id)
+    assert row.components[4]["title"] == "Blockers"
+    assert row.app_spec == new_spec
+    assert row.updated_at >= before
+    async with db.session() as session:
+        envs = (
+            await session.execute(
+                select(A2uiOutbox.envelope).where(
+                    A2uiOutbox.agent_id == a2ui_agent_id,
+                    A2uiOutbox.surface_id == surface_id,
+                )
+            )
+        ).scalars().all()
+    assert any("updateComponents" in e for e in envs)
+
+
+# ---------------------------------------------------------------------------
+# app.close / app.refresh / app.refine
+# ---------------------------------------------------------------------------
+
+
+class _FakeComposer:
+    def __init__(self) -> None:
+        self.refreshes: list[dict] = []
+        self.compose_calls: list[str] = []
+
+    async def refresh_data(self, app_spec: dict) -> dict:
+        self.refreshes.append(app_spec)
+        return {"trip": {"flights": ["fresh"]}, "meta": {"composedAt": "2026-08-29T15:00:00+00:00"}}
+
+    async def compose(self, intent: str, **kwargs: Any) -> ComposedApp:
+        self.compose_calls.append(intent)
+        built = _micro_app(title="refined")
+        return ComposedApp(built=built, app_spec=built.app_spec, fallback=False, repairs=0)
+
+
+@pytest.fixture
+def fake_composer() -> _FakeComposer:
+    return _FakeComposer()
+
+
+@pytest.fixture
+def router(db, a2ui_settings, service, fake_composer: _FakeComposer):
+    return ActionRouter(db, a2ui_settings, service, composer=fake_composer)
+
+
+def _action_body(name: str, surface_id: str, nonce: str, context: dict | None = None) -> dict:
+    return {
+        "version": "v1.0",
+        "action": {
+            "name": name,
+            "surfaceId": surface_id,
+            "context": dict(context or {}),
+            "metadata": {"extensions": {"com_nous_nonce": nonce}},
+        },
+    }
+
+
+def _call_body(surface_id: str, nonce: str, call: str, args: dict | None = None) -> dict:
+    return {
+        "version": "v1.0",
+        "callAgentFunction": {
+            "surfaceId": surface_id,
+            "functionCallId": "fc-1",
+            "callFunction": {"call": call, "args": dict(args or {})},
+        },
+        "metadata": {"extensions": {"com_nous_nonce": nonce}},
+    }
+
+
+async def test_app_close_resolves_and_audits(router, service, db, a2ui_agent_id) -> None:
+    surface_id = await service.push_built(_micro_app())
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, payload = await router.handle(
+        _action_body("app.close", surface_id, nonce), content_type=JSON_CT
+    )
+
+    assert status == 200
+    assert payload["resolved"] is True
+    assert (await _surface_row(db, surface_id)).status == "resolved"
+    async with db.session() as session:
+        audits = (
+            await session.execute(
+                select(A2uiAction).where(A2uiAction.agent_id == a2ui_agent_id)
+            )
+        ).scalars().all()
+    assert [a.status for a in audits] == ["completed"]
+
+
+async def test_app_refresh_reruns_sources_and_patches(
+    router, service, db, fake_composer: _FakeComposer
+) -> None:
+    surface_id = await service.push_built(_micro_app())
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, payload = await router.handle_call(
+        _call_body(surface_id, nonce, "app.refresh"), content_type=JSON_CT
+    )
+
+    assert status == 200
+    assert payload["agentFunctionResponse"]["value"]["refreshed"] == ["meta", "trip"]
+    row = await _surface_row(db, surface_id)
+    assert row.data_model["trip"] == {"flights": ["fresh"]}
+    assert row.data_model["meta"]["composedAt"] == "2026-08-29T15:00:00+00:00"
+    assert fake_composer.refreshes, "refresh must consult the surface's app_spec"
+
+
+async def test_app_refine_validates_against_app_spec(
+    router, service, db, fake_composer: _FakeComposer
+) -> None:
+    surface_id = await service.push_built(_micro_app())
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, payload = await router.handle_call(
+        _call_body(surface_id, nonce, "app.refine", {"id": "not-offered"}),
+        content_type=JSON_CT,
+    )
+
+    assert status == 422
+    assert "not offered" in payload["agentFunctionResponse"]["error"]["message"]
+    assert fake_composer.compose_calls == []
+
+
+async def test_app_refine_recomposes_the_same_surface(
+    router, service, db, fake_composer: _FakeComposer
+) -> None:
+    surface_id = await service.push_built(_micro_app())
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, payload = await router.handle_call(
+        _call_body(surface_id, nonce, "app.refine", {"id": "blockers"}),
+        content_type=JSON_CT,
+    )
+
+    assert status == 200
+    value = payload["agentFunctionResponse"]["value"]
+    assert value["refined"] == "blockers"
+    assert "Just the blockers" in fake_composer.compose_calls[0]
+    row = await _surface_row(db, surface_id)
+    assert row.status == "live", "refine recomposes in place, never tears down"
+    assert row.nonce == nonce, "no nonce rotation on refine (updateComponents path)"
+
+
+async def test_micro_app_functions_report_unavailable_without_composer(
+    db, a2ui_settings, service
+) -> None:
+    router = ActionRouter(db, a2ui_settings, service)  # no composer
+    surface_id = await service.push_built(_micro_app())
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, payload = await router.handle_call(
+        _call_body(surface_id, nonce, "app.refresh"), content_type=JSON_CT
+    )
+
+    assert status == 422
+    assert "unavailable" in payload["agentFunctionResponse"]["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# compose_surface tool
+# ---------------------------------------------------------------------------
+
+
+class _CapturingService:
+    def __init__(self) -> None:
+        self.pushed: list[tuple[Any, str | None]] = []
+
+    async def push_built(self, built, dedup_key=None, session_id=None, notify=None):
+        self.pushed.append((built, dedup_key))
+        return "nous:chat:micro_app:0001"
+
+
+async def test_compose_surface_tool_defaults_the_dedup_key(fake_composer) -> None:
+    from nous.a2ui.tools import register_a2ui_tools
+    from nous.api.tools import ToolDispatcher
+
+    dispatcher = ToolDispatcher()
+    service = _CapturingService()
+    register_a2ui_tools(dispatcher, service, composer=fake_composer)
+
+    text, is_error = await dispatcher.dispatch(
+        "compose_surface", {"intent": "Show me my Vacation Plans!"}
+    )
+
+    assert not is_error, text
+    _, dedup_key = service.pushed[0]
+    assert dedup_key == "app:show-me-my-vacation-plans"
+    assert json.loads(text)["url"].startswith("/companion#/s/")
+
+
+async def test_compose_surface_tool_rejects_blocking_priority(fake_composer) -> None:
+    from nous.a2ui.tools import register_a2ui_tools
+    from nous.api.tools import ToolDispatcher
+
+    dispatcher = ToolDispatcher()
+    service = _CapturingService()
+    register_a2ui_tools(dispatcher, service, composer=fake_composer)
+
+    _, is_error = await dispatcher.dispatch(
+        "compose_surface", {"intent": "x", "priority": 2}
+    )
+
+    assert is_error is True
+    assert service.pushed == []
+
+
+async def test_compose_surface_tool_is_absent_without_composer() -> None:
+    from nous.a2ui.tools import register_a2ui_tools
+    from nous.api.tools import ToolDispatcher
+
+    dispatcher = ToolDispatcher()
+    register_a2ui_tools(dispatcher, _CapturingService())  # composer None (flag off)
+
+    text, is_error = await dispatcher.dispatch("compose_surface", {"intent": "x"})
+
+    assert is_error is True
+    assert "Unknown tool" in text
