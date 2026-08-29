@@ -756,6 +756,29 @@ def _register_micro_app_functions(router: ActionRouter) -> None:
     declared at compose time.
     """
 
+    async def _assert_same_epoch(surface_id: str, snapshot_nonce: str) -> None:
+        """Re-read under the lock and compare nonces (codex round 5).
+
+        Both functions do slow work (source fetches, an LLM recompose)
+        against a PRE-lock snapshot. A dedup replacement can commit in that
+        window — it rotates the nonce — and the write would then land
+        stale content on the NEW app. The nonce is the epoch marker: a
+        mismatch means the snapshot's app no longer exists as such.
+        """
+        async with router._db.session() as session:
+            row = (
+                await session.execute(
+                    select(A2uiSurface).where(
+                        A2uiSurface.surface_id == surface_id,
+                        A2uiSurface.agent_id == router._settings.agent_id,
+                    )
+                )
+            ).scalar_one_or_none()
+        if row is None or row.status != "live":
+            raise KeyError(surface_id)
+        if row.nonce != snapshot_nonce:
+            raise ValueError("the app was replaced while this call was in flight — try again")
+
     async def app_refresh(ctx: ActionContext) -> Any:
         if router._composer is None:
             raise ValueError("micro-app composer unavailable")
@@ -778,6 +801,7 @@ def _register_micro_app_functions(router: ActionRouter) -> None:
         # surface presentation state), so they take the per-surface lock
         # THEMSELVES to serialize with app.close and LRU eviction.
         async with router._service.surface_lock(ctx.surface.surface_id):
+            await _assert_same_epoch(ctx.surface.surface_id, ctx.surface.nonce)
             for key, value in patches.items():
                 await router._service.update_data(ctx.surface.surface_id, f"/{key}", value)
         return {"refreshed": sorted(patches)}
@@ -825,6 +849,7 @@ def _register_micro_app_functions(router: ActionRouter) -> None:
         # against a concurrent app.close: without it, close could land
         # between them and strand components without their data model.
         async with router._service.surface_lock(ctx.surface.surface_id):
+            await _assert_same_epoch(ctx.surface.surface_id, ctx.surface.nonce)
             await router._service.update_components(
                 ctx.surface.surface_id,
                 composed.built.components,

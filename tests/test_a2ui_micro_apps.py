@@ -844,6 +844,70 @@ async def test_source_resolve_bounds_oversized_values() -> None:
     assert len(_json.dumps(model, default=str)) < 13_000
 
 
+async def test_refresh_rejects_a_mid_flight_dedup_replacement(
+    db, a2ui_settings, service
+) -> None:
+    """Codex round 5 TOCTOU: sources resolve against a PRE-lock snapshot;
+    a dedup replacement committing in that window rotates the nonce, and
+    the stale patches must NOT land on the new app."""
+
+    class _ReplacingComposer(_FakeComposer):
+        def __init__(self, svc, dedup_key: str) -> None:
+            super().__init__()
+            self._svc = svc
+            self._dedup_key = dedup_key
+
+        async def refresh_data(self, app_spec: dict) -> dict:
+            # Simulate the race deterministically: the replacement commits
+            # while the (slow) source fetch is still in flight.
+            await self._svc.push_built(_micro_app(title="replacement"), dedup_key=self._dedup_key)
+            return await super().refresh_data(app_spec)
+
+    composer = _ReplacingComposer(service, "app:raced")
+    router = ActionRouter(db, a2ui_settings, service, composer=composer)
+    surface_id = await service.push_built(_micro_app(title="original"), dedup_key="app:raced")
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, payload = await router.handle_call(
+        _call_body(surface_id, nonce, "app.refresh"), content_type=JSON_CT
+    )
+
+    # The call 403s at the nonce gate OR 422s at the epoch check depending
+    # on where the replacement lands relative to the gate — either way the
+    # stale patches never touch the replacement.
+    assert status in (403, 422)
+    row = await _surface_row(db, surface_id)
+    assert row.title == "replacement"
+    assert row.data_model["trip"] == {"flights": []}, "stale patches never landed"
+
+
+async def test_refine_rejects_a_mid_flight_dedup_replacement(
+    db, a2ui_settings, service
+) -> None:
+    class _ReplacingComposer(_FakeComposer):
+        def __init__(self, svc, dedup_key: str) -> None:
+            super().__init__()
+            self._svc = svc
+            self._dedup_key = dedup_key
+
+        async def compose(self, intent: str, **kwargs: Any) -> ComposedApp:
+            await self._svc.push_built(_micro_app(title="replacement"), dedup_key=self._dedup_key)
+            return await super().compose(intent, **kwargs)
+
+    composer = _ReplacingComposer(service, "app:raced2")
+    router = ActionRouter(db, a2ui_settings, service, composer=composer)
+    surface_id = await service.push_built(_micro_app(title="original"), dedup_key="app:raced2")
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, _ = await router.handle_call(
+        _call_body(surface_id, nonce, "app.refine", {"id": "blockers"}),
+        content_type=JSON_CT,
+    )
+
+    assert status in (403, 422)
+    assert (await _surface_row(db, surface_id)).title == "replacement"
+
+
 async def test_micro_app_functions_report_unavailable_without_composer(
     db, a2ui_settings, service
 ) -> None:
