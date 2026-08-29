@@ -55,14 +55,34 @@ async function warmCache() {
   await put('/dashboard/v2/companion.webmanifest');
 
   // Warm the surface snapshots so the offline feed exists from visit one.
+  // The index is published LAST, and rewritten to list only surfaces whose
+  // snapshots actually stored (codex P2): an index advertising a snapshot
+  // the cache lacks would send the offline hydration cycle into a fetch
+  // failure and a blank feed — a coherent partial index beats a complete
+  // incoherent one.
   try {
     const index = await fetch('/a2ui/surfaces');
     if (index.ok) {
-      await cache.put('/a2ui/surfaces', index.clone());
       const data = await index.json();
+      const stored = [];
       for (const surface of data.surfaces ?? []) {
-        await put('/a2ui/surfaces/' + encodeURIComponent(surface.surface_id));
+        const url = '/a2ui/surfaces/' + encodeURIComponent(surface.surface_id);
+        try {
+          const response = await fetch(url);
+          if (response.ok) {
+            await cache.put(url, response);
+            stored.push(surface);
+          }
+        } catch {
+          /* skip — the index below will not list it */
+        }
       }
+      await cache.put(
+        '/a2ui/surfaces',
+        new Response(JSON.stringify({ ...data, surfaces: stored }), {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
     }
   } catch {
     /* best-effort */
