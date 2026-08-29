@@ -228,7 +228,20 @@ class ActionRouter:
         note = result.message or None
         if delivery_note:
             note = f"{result.message} ({delivery_note})" if result.message else delivery_note
-        await self._audit_update(audit_id, "completed" if result.ok else "rejected", note)
+        # The terminal audit write gets the same reconciliation as delivery
+        # (codex P2): the handler's side effect already happened, so letting
+        # this raise would 500 the client into a retry that repeats it,
+        # while the row sat at 'dispatched'. A failed finalization is logged
+        # loudly and reported in the response instead.
+        try:
+            await self._audit_update(audit_id, "completed" if result.ok else "rejected", note)
+        except Exception:
+            logger.exception("F092 final audit update failed for %s (audit %s)", name, audit_id)
+            note = (
+                f"{note} (audit finalization failed — recorded as dispatched)"
+                if note
+                else "audit finalization failed — recorded as dispatched"
+            )
         if not result.ok:
             return 422, _err("ACTION_FAILED", surface_id, result.message)
         return 200, {

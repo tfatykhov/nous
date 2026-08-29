@@ -442,6 +442,12 @@ class SurfaceService:
             # silence claim can never both land.
             async with self.surface_lock(surface_id):
                 async with self._db.session() as session:
+                    # Deadline REVALIDATED inside the claim (codex P1): a
+                    # dedup refresh that ran while we waited for the lock
+                    # moves expires_at into the future — claiming on
+                    # liveness alone would delete the fresh card and record
+                    # false no_objection evidence.
+                    claim_now = datetime.now(UTC)
                     claimed = (
                         (
                             await session.execute(
@@ -450,8 +456,10 @@ class SurfaceService:
                                     A2uiSurface.surface_id == surface_id,
                                     A2uiSurface.agent_id == agent_id,
                                     A2uiSurface.status == "live",
+                                    A2uiSurface.expires_at.is_not(None),
+                                    A2uiSurface.expires_at <= claim_now,
                                 )
-                                .values(status="expired", resolved_at=now)
+                                .values(status="expired", resolved_at=claim_now)
                                 .returning(A2uiSurface.surface_id)
                             )
                         )
@@ -554,8 +562,18 @@ class SurfaceService:
     # ---------------------------------------------------------------- reads
 
     async def live_index(self) -> dict:
-        """Feed index for cold-start hydration. Never includes the nonce."""
+        """Feed index for cold-start hydration. Never includes the nonce.
+
+        The watermark is read BEFORE the surface list (codex P1): under READ
+        COMMITTED each statement sees its own snapshot, so watermark-after
+        could cover a create envelope for a surface the list query missed —
+        the client would then floor past it and never learn of the surface.
+        Watermark-first inverts the race into the harmless direction: a
+        surface created in between appears in the list AND its envelope
+        replays above the floor (idempotent re-apply).
+        """
         async with self._db.session() as session:
+            latest = await self._latest_visible_seq(session)
             surfaces = (
                 (
                     await session.execute(
@@ -570,7 +588,6 @@ class SurfaceService:
                 .scalars()
                 .all()
             )
-            latest = await self._latest_visible_seq(session)
         return {
             "latest_seq": latest,
             "surfaces": [
