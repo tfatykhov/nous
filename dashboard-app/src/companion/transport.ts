@@ -53,7 +53,6 @@ export class Transport {
   private stream: A2uiStream | null = null;
   private stopped = false;
   private attempt = 0;
-  private streamErrors = 0;
 
   constructor(opts: TransportOptions = {}) {
     this.streamFactory = opts.streamFactory ?? defaultStreamFactory;
@@ -96,29 +95,28 @@ export class Transport {
       // 3. Tail the stream from the index watermark.
       this.stream = this.streamFactory(`/a2ui/stream?since=${store.lastSeq}`, {
         onA2ui: (seq, envelope) => {
-          this.streamErrors = 0;
           store.apply(seq, envelope as never);
         },
         onControl: (data) => {
-          this.streamErrors = 0;
           if (data.type === 'resync') void this.reconnect();
         },
         onError: () => {
-          // EventSource auto-reconnects with Last-Event-ID for short gaps.
-          // But behind oauth2-proxy an expired session 302s the reconnect to
-          // a login page — EventSource then errors and retries FOREVER. After
-          // several consecutive errors with no event in between, stop the
-          // stream and fall back to the full hydration cycle with backoff.
+          // NEVER let EventSource auto-reconnect (codex P1): its
+          // Last-Event-ID resume treats the highest seen seq as a
+          // contiguous floor, so a later-committing LOWER seq that was
+          // in flight when the connection dropped would be skipped by
+          // both replay and the delivered-set floor. Every stream error
+          // instead closes the source and re-enters the hydration-first
+          // cycle, which re-fetches the live index and snapshots — the
+          // one path that is always correct. (This also caps the
+          // oauth2-proxy expired-session case, where auto-reconnect
+          // would chase a login redirect forever.)
           store.connection = 'error';
-          this.streamErrors += 1;
-          if (this.streamErrors >= 5) {
-            this.streamErrors = 0;
-            this.stream?.close();
-            this.stream = null;
-            this.attempt += 1;
-            const delay = Math.min(this.backoffMs * 2 ** Math.min(this.attempt, 4), 30000);
-            if (!this.stopped) setTimeout(() => void this.cycle(), delay);
-          }
+          this.stream?.close();
+          this.stream = null;
+          this.attempt += 1;
+          const delay = Math.min(this.backoffMs * 2 ** Math.min(this.attempt, 4), 30000);
+          if (!this.stopped) setTimeout(() => void this.cycle(), delay);
         },
       });
       store.connection = 'live';

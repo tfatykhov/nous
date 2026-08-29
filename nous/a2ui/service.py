@@ -99,6 +99,13 @@ class SurfaceService:
                 existing.title = built.title
                 existing.priority = built.priority
                 existing.allowed_actions = built.allowed_actions
+                # Provenance must follow the content (codex P2): a reused
+                # dedup_key describing a NEW occurrence carries a new
+                # trace_id — leaving the old one would misdirect
+                # course-corrections at the stale decision.
+                existing.trace_id = built.trace_id
+                if session_id is not None:
+                    existing.session_id = session_id
                 existing.updated_at = now
                 existing.expires_at = expires_at
                 if priority_changed:

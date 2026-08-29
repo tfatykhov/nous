@@ -5,6 +5,13 @@ recommendation-plus-options card BEFORE execution. Options become one
 Button each (the basic catalog requires literal ``variant`` enums, so a
 List template over options — which the spec example uses — cannot vary the
 recommended option's styling; per-option buttons can).
+
+SCOPE (v1, deliberate): choosing an option records a durable, audited
+decision and resolves the card — it does NOT invoke an executor. The spec's
+worked example resumes a blocked DAG node; that callback plumbing ships
+with the escalation integration, and the pushing agent is responsible for
+holding the operation and reading the recorded choice until then. The
+push_surface tool description says the same to the model.
 """
 
 from __future__ import annotations

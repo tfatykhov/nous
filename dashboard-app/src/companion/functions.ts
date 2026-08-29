@@ -146,8 +146,17 @@ export function callFunction(
     case 'formatCurrency': {
       const v = Number(resolveArg(args, 'value', ctx));
       const currency = String(resolveArg(args, 'currency', ctx) ?? 'USD');
+      // decimals + grouping are catalog args here too (codex P2).
+      const digits = args.decimals !== undefined ? Number(resolveArg(args, 'decimals', ctx)) : undefined;
+      const grouping = args.grouping !== undefined ? Boolean(resolveArg(args, 'grouping', ctx)) : true;
       try {
-        return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(v);
+        return new Intl.NumberFormat(undefined, {
+          style: 'currency',
+          currency,
+          useGrouping: grouping,
+          maximumFractionDigits: digits,
+          minimumFractionDigits: digits,
+        }).format(v);
       } catch {
         return `${currency} ${v}`;
       }

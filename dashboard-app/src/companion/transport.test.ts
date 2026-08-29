@@ -167,11 +167,13 @@ describe('Transport — hydration-first connect', () => {
   });
 });
 
-describe('Transport — runaway stream-error escalation', () => {
-  // Behind oauth2-proxy an expired session 302s the EventSource reconnect to
-  // a login page, so the browser retries forever and never surfaces an event.
-  // After 5 consecutive errors with nothing in between, the transport must
-  // abandon the stream and fall back to a full hydration cycle.
+describe('Transport — stream errors re-enter hydration', () => {
+  // Every stream error closes the source and re-runs the hydration-first
+  // cycle (codex P1): EventSource's own Last-Event-ID resume treats the
+  // highest seen seq as a contiguous floor, so a later-committing LOWER seq
+  // in flight at disconnect would be lost by an auto-reconnect. Hydration
+  // is the one always-correct path (and it also caps the oauth2-proxy
+  // login-redirect retry loop).
   function connected(backoffMs = 0) {
     const stream = fakeStream();
     const counts = { index: 0 };
@@ -185,30 +187,17 @@ describe('Transport — runaway stream-error escalation', () => {
     return { stream, counts, transport: new Transport({ streamFactory: stream.factory, fetchImpl: impl, backoffMs }) };
   }
 
-  it('closes the stream and re-hydrates after 5 consecutive errors', async () => {
+  it('closes the stream and re-hydrates on the FIRST error', async () => {
     const { stream, counts, transport } = connected();
     active = transport;
     await transport.connect();
     expect(counts.index).toBe(1);
 
-    for (let i = 0; i < 5; i++) stream.state.handlers!.onError();
+    stream.state.handlers!.onError();
     await flush();
 
     expect(stream.state.closed).toBeGreaterThanOrEqual(1);
     expect(counts.index).toBe(2);
-  });
-
-  it('does NOT escalate while events keep arriving between errors', async () => {
-    const { stream, counts, transport } = connected();
-    active = transport;
-    await transport.connect();
-
-    for (let i = 0; i < 4; i++) stream.state.handlers!.onError();
-    stream.state.handlers!.onA2ui(2, createEnvelope('alive')); // resets the counter
-    for (let i = 0; i < 4; i++) stream.state.handlers!.onError();
-    await flush();
-
-    expect(counts.index).toBe(1);
   });
 });
 

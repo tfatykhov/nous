@@ -342,6 +342,14 @@ def _register_default_handlers(router: ActionRouter) -> None:
                 noted = True
             except Exception:
                 logger.warning("F092 course-correct: brain.review failed", exc_info=True)
+                # Fail LOUDLY and keep the card (codex P2): swallowing this
+                # marked the audit completed and tore down the surface while
+                # the decision was never reviewed — the user loses both the
+                # retry affordance and the calibration signal.
+                return ActionResult(
+                    ok=False,
+                    message="could not record the correction against the decision — try again",
+                )
         return ActionResult(
             message="correction recorded" + (" against decision" if noted else ""),
             resolve_surface=True,

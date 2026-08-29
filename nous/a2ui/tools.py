@@ -36,7 +36,11 @@ _PUSH_SURFACE_SCHEMA = {
             "description": (
                 "approval_gate: pre-execution escalation with options "
                 "(params: title, summary, risk, options=[{id,label}], "
-                "recommendation, trace_id). "
+                "recommendation, trace_id). v1 RECORDS the user's choice as "
+                "a durable audited action and resolves the card — it does "
+                "NOT resume a blocked operation for you; hold the operation "
+                "yourself and check the recorded choice (executor callbacks "
+                "ship with the escalation integration). "
                 "action_review: post-hoc review of an action already taken "
                 "(params: title, did, why, cost, compensation={revertible,"
                 "handler,note}, trace_id). "
