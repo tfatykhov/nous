@@ -478,6 +478,10 @@ class ToolDispatcher:
                 # silently accepts the kwarg (added by F051.4) and ignores
                 # it — fail-open contract.
                 args = {**args, "_session_id": session_id}
+            if session_id is not None and name == "push_surface":
+                # F092: surfaces record the chat session that pushed them so
+                # a companion card can be traced back to its conversation.
+                args = {**args, "_session_id": session_id}
             result = await handler(**args)  # P0-6: **kwargs unpacking
             # P1-1: Extract text from MCP-format response. is_error honors
             # the MCP field when a handler sets it (#179: run_python error

@@ -16,6 +16,14 @@ export default defineConfig({
   build: {
     outDir: '../static/dashboard-v2/dist',
     emptyOutDir: true,
+    rollupOptions: {
+      // F092: setting `input` REPLACES the index.html default — both entries
+      // must be listed or the dashboard entry silently disappears.
+      input: {
+        main: resolve(__dirname, 'index.html'),
+        companion: resolve(__dirname, 'companion.html'),
+      },
+    },
   },
   server: { port: 5174 },
   test: {

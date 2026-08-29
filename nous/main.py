@@ -1002,6 +1002,26 @@ async def create_components(settings: Settings) -> dict:
         except ImportError:
             logger.debug("F038: DAG module not available yet")
 
+    # F092: A2UI companion surfaces
+    surface_service = None
+    action_router = None
+    if settings.a2ui_enabled:
+        from nous.a2ui.actions import ActionRouter
+        from nous.a2ui.service import SurfaceService
+        from nous.a2ui.tools import register_a2ui_tools
+
+        surface_service = SurfaceService(database, settings, heart=heart)
+        action_router = ActionRouter(
+            database,
+            settings,
+            surface_service,
+            heart=heart,
+            brain=brain,
+            heartbeat_runner=heartbeat_runner,
+        )
+        register_a2ui_tools(dispatcher, surface_service)
+        logger.info("F092: A2UI companion enabled (push_surface + /a2ui routes)")
+
     return {
         "database": database,
         "brain": brain,
@@ -1028,6 +1048,8 @@ async def create_components(settings: Settings) -> dict:
         "context_log_retention_task": context_log_retention_task,
         "retrieval_log_retention_task": retrieval_log_retention_task,
         "retrieval_logger": retrieval_logger,
+        "surface_service": surface_service,
+        "action_router": action_router,
     }
 
 
@@ -1198,6 +1220,8 @@ def build_app(settings: Settings) -> Starlette:
         heartbeat_runner=_lazy_component(components, "heartbeat_runner"),
         session_monitor=_lazy_component(components, "session_monitor"),
         context_logger=_lazy_component(components, "context_logger"),
+        surface_service=_lazy_component(components, "surface_service"),
+        action_router=_lazy_component(components, "action_router"),
     )
 
     if settings.mcp_enabled:

@@ -1,0 +1,534 @@
+"""F092: SurfaceService — surface lifecycle, outbox, and live broadcast.
+
+Authoritative state lives on ``nous_system.a2ui_surfaces`` (components +
+data_model updated on every mutation); the outbox is a delta log for
+connected SSE clients only. Reconnect is hydration-first on the client, so
+replay correctness is an optimization, not a durability requirement.
+
+Concurrency notes (review findings, do not simplify away):
+
+- Broadcast happens strictly AFTER commit — a subscriber must never see an
+  envelope whose row could still roll back.
+- ``BIGSERIAL`` seq values become visible at commit, not insert, so a bare
+  ``seq > watermark`` scan can permanently skip a row committed late. Every
+  catch-up read therefore only advances over rows older than
+  ``_LAG_WINDOW_SECONDS``.
+- Subscriber queues are bounded and fed with ``put_nowait``; a slow consumer
+  overflows, is dropped, and its stream tells the client to resync (F087
+  precedent: drop-on-full by design, never backpressure a producer).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import secrets
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+import httpx
+from sqlalchemy import delete, select, text, update
+
+from nous.storage.database import Database
+from nous.storage.models import A2uiAction, A2uiOutbox, A2uiSurface
+
+from .dsl import BuiltSurface
+
+logger = logging.getLogger(__name__)
+
+_LAG_WINDOW_SECONDS = 2
+_SUBSCRIBER_QUEUE_SIZE = 256
+
+
+class SurfaceService:
+    def __init__(self, database: Database, settings: Any, heart: Any = None):
+        self._db = database
+        self._settings = settings
+        self._heart = heart
+        self._subscribers: set[asyncio.Queue] = set()
+        self._pending_tasks: set[asyncio.Task] = set()
+
+    # ------------------------------------------------------------------ push
+
+    async def push_built(
+        self,
+        built: BuiltSurface,
+        *,
+        dedup_key: str | None = None,
+        session_id: str | None = None,
+        notify: bool | None = None,
+    ) -> str:
+        """Persist a built surface and broadcast it. Returns the surface_id.
+
+        With a ``dedup_key`` matching a live surface, the existing surface is
+        updated in place (components + data model replaced) instead of a new
+        card being created — a hourly heartbeat check must not stack 24 cards.
+        """
+        built.validate()
+        await self._censor_gate(built)
+
+        agent_id = self._settings.agent_id
+        now = datetime.now(timezone.utc)
+        expires_at = (now + built.expires_in) if built.expires_in else None
+
+        async with self._db.session() as session:
+            existing = None
+            if dedup_key:
+                existing = (
+                    await session.execute(
+                        select(A2uiSurface).where(
+                            A2uiSurface.agent_id == agent_id,
+                            A2uiSurface.dedup_key == dedup_key,
+                            A2uiSurface.status == "live",
+                        )
+                    )
+                ).scalar_one_or_none()
+
+            if existing is not None:
+                surface_id = existing.surface_id
+                existing.components = built.components
+                existing.data_model = built.data_model
+                existing.title = built.title
+                existing.priority = built.priority
+                existing.allowed_actions = built.allowed_actions
+                existing.updated_at = now
+                existing.expires_at = expires_at
+                envelopes = [
+                    {
+                        "version": "v1.0",
+                        "updateComponents": {
+                            "surfaceId": surface_id,
+                            "components": built.components,
+                        },
+                    },
+                    {
+                        "version": "v1.0",
+                        "updateDataModel": {
+                            "surfaceId": surface_id,
+                            "value": built.data_model,
+                        },
+                    },
+                ]
+                created = False
+            else:
+                surface_id = f"nous:{built.origin}:{built.kind}:{uuid.uuid4().hex[:6]}"
+                nonce = secrets.token_urlsafe(16)
+                session.add(
+                    A2uiSurface(
+                        surface_id=surface_id,
+                        agent_id=agent_id,
+                        origin=built.origin,
+                        kind=built.kind,
+                        catalog_id=built.catalog_id,
+                        status="live",
+                        priority=built.priority,
+                        title=built.title,
+                        components=built.components,
+                        data_model=built.data_model,
+                        allowed_actions=built.allowed_actions,
+                        dedup_key=dedup_key,
+                        nonce=nonce,
+                        session_id=session_id,
+                        trace_id=built.trace_id,
+                        expires_at=expires_at,
+                    )
+                )
+                envelopes = [
+                    self._create_envelope(
+                        surface_id,
+                        built.catalog_id,
+                        built.components,
+                        built.data_model,
+                        nonce,
+                        built.priority,
+                    )
+                ]
+                created = True
+
+            # Explicit flush so the surface row exists before the outbox FK
+            # references it — unit-of-work ordering alone proved unreliable
+            # here (observed FK violation with add() + add_all() unflushed).
+            await session.flush()
+            rows = [
+                A2uiOutbox(agent_id=agent_id, surface_id=surface_id, envelope=env)
+                for env in envelopes
+            ]
+            session.add_all(rows)
+            await session.commit()
+            seqs = [row.seq for row in rows]
+
+        for seq, env in zip(seqs, envelopes):
+            self._broadcast(seq, env)
+
+        should_notify = built.priority >= 1 if notify is None else notify
+        if created and should_notify:
+            self._schedule_bg(self._notify_telegram(built.title, surface_id))
+        return surface_id
+
+    def _create_envelope(
+        self,
+        surface_id: str,
+        catalog_id: str,
+        components: list[dict],
+        data_model: dict,
+        nonce: str,
+        priority: int,
+    ) -> dict:
+        return {
+            "version": "v1.0",
+            "createSurface": {
+                "surfaceId": surface_id,
+                "catalogId": catalog_id,
+                "sendDataModel": True,
+                "metadata": {
+                    "extensions": {
+                        "com_nous_nonce": nonce,
+                        "com_nous_priority": priority,
+                    }
+                },
+                "components": components,
+                "dataModel": data_model,
+            },
+        }
+
+    async def _censor_gate(self, built: BuiltSurface) -> None:
+        """Push-time censor check on the surface's prose (title + data model).
+
+        The action names themselves are opaque tokens; the risky text a censor
+        was written against lives here. abort/refuse block the push; steer
+        passes (guidance belongs to the agent's turn, not the surface).
+        """
+        if self._heart is None:
+            return
+        prose = built.title + " " + _flatten_strings(built.data_model)
+        try:
+            matches = await self._heart.check_censors(prose[:2000])
+        except Exception:
+            logger.warning("F092 censor check failed open on push", exc_info=True)
+            return
+        blocking = [m for m in matches if m.action in ("abort", "refuse")]
+        if blocking:
+            raise PermissionError(
+                f"surface blocked by censor: {blocking[0].reason or blocking[0].trigger_pattern}"
+            )
+
+    # ------------------------------------------------------------- mutations
+
+    async def update_data(self, surface_id: str, path: str | None, value: Any) -> None:
+        """Patch the data model (authoritative row + outbox + broadcast)."""
+        async with self._db.session() as session:
+            surface = await session.get(A2uiSurface, surface_id)
+            if surface is None or surface.status != "live":
+                raise KeyError(surface_id)
+            model = dict(surface.data_model)
+            if path in (None, "", "/"):
+                if not isinstance(value, dict):
+                    raise ValueError("whole-model replace requires an object")
+                model = value
+            else:
+                _pointer_set(model, path, value)
+            surface.data_model = model
+            surface.updated_at = datetime.now(timezone.utc)
+            body: dict[str, Any] = {"surfaceId": surface_id, "value": value}
+            if path not in (None, "", "/"):
+                body["path"] = path
+            envelope = {"version": "v1.0", "updateDataModel": body}
+            row = A2uiOutbox(
+                agent_id=surface.agent_id, surface_id=surface_id, envelope=envelope
+            )
+            session.add(row)
+            await session.commit()
+            seq = row.seq
+        self._broadcast(seq, envelope)
+
+    async def resolve(self, surface_id: str, *, status: str = "resolved") -> None:
+        """Terminal transition + teardown envelope."""
+        envelope = {"version": "v1.0", "deleteSurface": {"surfaceId": surface_id}}
+        async with self._db.session() as session:
+            surface = await session.get(A2uiSurface, surface_id)
+            if surface is None:
+                raise KeyError(surface_id)
+            if surface.status != "live":
+                return
+            surface.status = status
+            surface.resolved_at = datetime.now(timezone.utc)
+            row = A2uiOutbox(
+                agent_id=surface.agent_id, surface_id=surface_id, envelope=envelope
+            )
+            session.add(row)
+            await session.commit()
+            seq = row.seq
+        self._broadcast(seq, envelope)
+
+    async def expire_sweep(self) -> int:
+        """Expire overdue surfaces + prune old rows. Returns surfaces expired.
+
+        Spec 6.2 "silence counts": before a surface expires unactioned, a
+        durable ``no_objection`` record is written to a2ui_actions. (Linking
+        that evidence into brain.decisions rides with the escalation
+        integration, not this PR — a2ui_actions is the durable audit tier.)
+        """
+        now = datetime.now(timezone.utc)
+        agent_id = self._settings.agent_id
+        expired = 0
+        async with self._db.session() as session:
+            overdue = (
+                (
+                    await session.execute(
+                        select(A2uiSurface).where(
+                            A2uiSurface.agent_id == agent_id,
+                            A2uiSurface.status == "live",
+                            A2uiSurface.expires_at.is_not(None),
+                            A2uiSurface.expires_at <= now,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for surface in overdue:
+                session.add(
+                    A2uiAction(
+                        agent_id=agent_id,
+                        surface_id=surface.surface_id,
+                        action_name="no_objection",
+                        context={"expired_at": now.isoformat()},
+                        status="completed",
+                        completed_at=now,
+                    )
+                )
+            await session.commit()
+
+        for surface in overdue:
+            await self.resolve(surface.surface_id, status="expired")
+            expired += 1
+
+        async with self._db.session() as session:
+            await session.execute(
+                delete(A2uiOutbox).where(
+                    A2uiOutbox.created_at
+                    < now - timedelta(hours=self._settings.a2ui_outbox_nonlive_retention_hours),
+                    A2uiOutbox.surface_id.in_(
+                        select(A2uiSurface.surface_id).where(A2uiSurface.status != "live")
+                    ),
+                )
+            )
+            retention_days = self._settings.a2ui_surface_retention_days
+            if retention_days > 0:
+                await session.execute(
+                    delete(A2uiSurface).where(
+                        A2uiSurface.agent_id == agent_id,
+                        A2uiSurface.status != "live",
+                        A2uiSurface.resolved_at.is_not(None),
+                        A2uiSurface.resolved_at < now - timedelta(days=retention_days),
+                    )
+                )
+            await session.commit()
+        return expired
+
+    # ---------------------------------------------------------------- reads
+
+    async def live_index(self) -> dict:
+        """Feed index for cold-start hydration. Never includes the nonce."""
+        async with self._db.session() as session:
+            surfaces = (
+                (
+                    await session.execute(
+                        select(A2uiSurface)
+                        .where(
+                            A2uiSurface.agent_id == self._settings.agent_id,
+                            A2uiSurface.status == "live",
+                        )
+                        .order_by(A2uiSurface.priority.desc(), A2uiSurface.created_at.desc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            latest = await self._latest_visible_seq(session)
+        return {
+            "latest_seq": latest,
+            "surfaces": [
+                {
+                    "surface_id": s.surface_id,
+                    "kind": s.kind,
+                    "origin": s.origin,
+                    "title": s.title,
+                    "priority": s.priority,
+                    "created_at": s.created_at.isoformat(),
+                    "updated_at": s.updated_at.isoformat(),
+                }
+                for s in surfaces
+            ],
+        }
+
+    async def snapshot(self, surface_id: str) -> dict | None:
+        """Full surface as a single createSurface envelope (v1.0 inline)."""
+        async with self._db.session() as session:
+            surface = await session.get(A2uiSurface, surface_id)
+        if surface is None or surface.status != "live":
+            return None
+        return self._create_envelope(
+            surface.surface_id,
+            surface.catalog_id,
+            surface.components,
+            surface.data_model,
+            surface.nonce,
+            surface.priority,
+        )
+
+    async def replay(self, since: int) -> list[tuple[int, dict]] | None:
+        """Outbox rows after ``since`` for live surfaces, lag-windowed.
+
+        Returns None when the gap exceeds the replay window — the caller
+        must tell the client to resync (hydration-first) instead.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=_LAG_WINDOW_SECONDS)
+        async with self._db.session() as session:
+            gap = (
+                await session.execute(
+                    text(
+                        "SELECT count(*) FROM nous_system.a2ui_outbox "
+                        "WHERE seq > :since AND agent_id = :agent AND created_at <= :cutoff"
+                    ),
+                    {"since": since, "agent": self._settings.agent_id, "cutoff": cutoff},
+                )
+            ).scalar_one()
+            if gap > self._settings.a2ui_outbox_replay_window:
+                return None
+            rows = (
+                await session.execute(
+                    select(A2uiOutbox.seq, A2uiOutbox.envelope)
+                    .join(A2uiSurface, A2uiOutbox.surface_id == A2uiSurface.surface_id)
+                    .where(
+                        A2uiOutbox.seq > since,
+                        A2uiOutbox.agent_id == self._settings.agent_id,
+                        A2uiOutbox.created_at <= cutoff,
+                        A2uiSurface.status == "live",
+                    )
+                    .order_by(A2uiOutbox.seq)
+                )
+            ).all()
+        return [(seq, env) for seq, env in rows]
+
+    async def latest_seq(self) -> int:
+        """Latest lag-window-visible outbox seq (SSE tail starting point)."""
+        async with self._db.session() as session:
+            return await self._latest_visible_seq(session)
+
+    async def _latest_visible_seq(self, session: Any) -> int:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=_LAG_WINDOW_SECONDS)
+        latest = (
+            await session.execute(
+                text(
+                    "SELECT coalesce(max(seq), 0) FROM nous_system.a2ui_outbox "
+                    "WHERE agent_id = :agent AND created_at <= :cutoff"
+                ),
+                {"agent": self._settings.agent_id, "cutoff": cutoff},
+            )
+        ).scalar_one()
+        return int(latest)
+
+    # ------------------------------------------------------------ broadcast
+
+    def subscribe(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_SIZE)
+        self._subscribers.add(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        self._subscribers.discard(q)
+
+    def _broadcast(self, seq: int, envelope: dict) -> None:
+        for q in list(self._subscribers):
+            try:
+                q.put_nowait((seq, envelope))
+            except asyncio.QueueFull:
+                # Slow consumer: drop it. Its stream loop notices the closed
+                # queue sentinel is gone and forces a client resync.
+                self._subscribers.discard(q)
+                try:
+                    q.put_nowait(None)
+                except asyncio.QueueFull:
+                    pass
+
+    # ------------------------------------------------------------- plumbing
+
+    def _schedule_bg(self, coro) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            coro.close()
+            return
+        task = loop.create_task(coro)
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
+
+    async def _notify_telegram(self, title: str, surface_id: str) -> None:
+        """One-line Telegram pointer with a deep link (best-effort)."""
+        token = self._settings.telegram_bot_token
+        chat_id = self._settings.telegram_chat_id
+        if not token or not chat_id:
+            return
+        base = getattr(self._settings, "a2ui_public_base_url", "") or ""
+        link = f"{base}/companion#/s/{surface_id}" if base else f"/companion#/s/{surface_id}"
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": f"[companion] {title}\n{link}"},
+                    timeout=10,
+                )
+        except Exception:
+            logger.warning("F092 Telegram notification failed")
+
+
+def _flatten_strings(node: Any, depth: int = 0) -> str:
+    if depth > 4:
+        return ""
+    if isinstance(node, str):
+        return node
+    if isinstance(node, dict):
+        return " ".join(_flatten_strings(v, depth + 1) for v in node.values())
+    if isinstance(node, list):
+        return " ".join(_flatten_strings(v, depth + 1) for v in node)
+    return ""
+
+
+def _pointer_set(model: dict, pointer: str, value: Any) -> None:
+    """RFC 6901 upsert into ``model``; ``value=None`` deletes the key.
+
+    Missing intermediates are created: numeric-token children become lists,
+    everything else objects (mirrored by the client's pointer.ts).
+    """
+    tokens = [t.replace("~1", "/").replace("~0", "~") for t in pointer.lstrip("/").split("/")]
+    node: Any = model
+    for i, token in enumerate(tokens[:-1]):
+        nxt = tokens[i + 1]
+        if isinstance(node, list):
+            idx = int(token)
+            while len(node) <= idx:
+                node.append(None)
+            if node[idx] is None or not isinstance(node[idx], (dict, list)):
+                node[idx] = [] if nxt.isdigit() else {}
+            node = node[idx]
+        else:
+            if token not in node or not isinstance(node[token], (dict, list)):
+                node[token] = [] if nxt.isdigit() else {}
+            node = node[token]
+    last = tokens[-1]
+    if isinstance(node, list):
+        idx = int(last)
+        if value is None:
+            if 0 <= idx < len(node):
+                node.pop(idx)
+        else:
+            while len(node) <= idx:
+                node.append(None)
+            node[idx] = value
+    else:
+        if value is None:
+            node.pop(last, None)
+        else:
+            node[last] = value

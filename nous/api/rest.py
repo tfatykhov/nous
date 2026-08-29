@@ -81,6 +81,8 @@ def create_app(
     heartbeat_runner: Any | None = None,
     session_monitor: Any | None = None,
     context_logger: Any | None = None,
+    surface_service: Any | None = None,
+    action_router: Any | None = None,
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
 
@@ -2909,6 +2911,108 @@ def create_app(
         """Redirect bare /dashboard and /dashboard/ to the Svelte v2 app."""
         return RedirectResponse(url="/dashboard/v2/")
 
+    async def _companion_redirect(request: Request) -> RedirectResponse:
+        """Redirect /companion to the built companion entry.
+
+        The Location header carries NO fragment, so a deep link like
+        /companion#/s/{id} keeps its fragment client-side across the redirect
+        (standard browser behavior) and the companion router reads it on mount.
+        """
+        return RedirectResponse(url="/dashboard/v2/companion.html")
+
+    # ------------------------------------------------------------ F092 A2UI
+
+    def _a2ui_services() -> tuple[Any, Any] | None:
+        """Resolve the A2UI services or None if unavailable/disabled.
+
+        Mirrors the heartbeat routes' probe: a lazy proxy raises RuntimeError
+        before lifespan init, and tests construct create_app without the
+        kwargs — both cases must 503, not crash.
+        """
+        try:
+            # Truthiness, not `is None`: a _LazyProxy over a missing/None
+            # component is falsy (main.py __bool__ override) but never None.
+            if not surface_service or not action_router:
+                return None
+            if not settings.a2ui_enabled:
+                return None
+            return surface_service, action_router
+        except (RuntimeError, AttributeError):
+            return None
+
+    async def a2ui_stream(request: Request) -> Response:
+        """GET /a2ui/stream — SSE surface envelopes, resumable by seq."""
+        resolved = _a2ui_services()
+        if resolved is None:
+            return JSONResponse({"error": "A2UI not available"}, status_code=503)
+        service, _ = resolved
+        # Last-Event-ID WINS over ?since=: a browser auto-reconnect reuses the
+        # original URL (stale ?since) but sends the header from the last id.
+        raw = request.headers.get("last-event-id") or request.query_params.get("since")
+        try:
+            since = int(raw) if raw is not None else None
+        except ValueError:
+            return JSONResponse({"error": "since must be an integer"}, status_code=400)
+        if since is None:
+            since = await service.latest_seq()
+
+        from nous.a2ui.transport import stream_events
+
+        async def generate():
+            async for frame in stream_events(
+                service, since=since, ping_interval=settings.sse_ping_interval
+            ):
+                yield frame
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    async def a2ui_surfaces_index(request: Request) -> JSONResponse:
+        """GET /a2ui/surfaces — live-surface index for hydration (no nonces)."""
+        resolved = _a2ui_services()
+        if resolved is None:
+            return JSONResponse({"error": "A2UI not available"}, status_code=503)
+        service, _ = resolved
+        return JSONResponse(await service.live_index())
+
+    async def a2ui_surface_snapshot(request: Request) -> JSONResponse:
+        """GET /a2ui/surfaces/{surface_id} — full createSurface snapshot."""
+        resolved = _a2ui_services()
+        if resolved is None:
+            return JSONResponse({"error": "A2UI not available"}, status_code=503)
+        service, _ = resolved
+        snapshot = await service.snapshot(request.path_params["surface_id"])
+        if snapshot is None:
+            return JSONResponse({"error": "surface not found or not live"}, status_code=404)
+        return JSONResponse(snapshot)
+
+    async def a2ui_action(request: Request) -> JSONResponse:
+        """POST /a2ui/action — renderer->agent user action."""
+        resolved = _a2ui_services()
+        if resolved is None:
+            return JSONResponse({"error": "A2UI not available"}, status_code=503)
+        _, router = resolved
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        status_code, payload = await router.handle(
+            body, content_type=request.headers.get("content-type", "")
+        )
+        return JSONResponse(payload, status_code=status_code)
+
+    async def a2ui_catalog(request: Request) -> JSONResponse:
+        """GET /a2ui/catalog/{name} — serve a vendored catalog by short name."""
+        from nous.a2ui.validator import load_catalog
+
+        catalog = load_catalog(request.path_params["name"])
+        if catalog is None:
+            return JSONResponse({"error": "unknown catalog"}, status_code=404)
+        return JSONResponse(catalog)
+
     routes = [
         Route("/chat", chat, methods=["POST"]),
         Route("/chat/stream", chat_stream, methods=["POST"]),
@@ -2940,6 +3044,12 @@ def create_app(
         Route("/schedules", create_schedule, methods=["POST"]),
         Route("/schedules/{id}", deactivate_schedule, methods=["DELETE"]),
         Route("/health", health),
+        # F092: A2UI companion — detail before list (Starlette top-down matching)
+        Route("/a2ui/stream", a2ui_stream),
+        Route("/a2ui/surfaces/{surface_id}", a2ui_surface_snapshot),
+        Route("/a2ui/surfaces", a2ui_surfaces_index),
+        Route("/a2ui/action", a2ui_action, methods=["POST"]),
+        Route("/a2ui/catalog/{name}", a2ui_catalog),
         # F035.1: Event bus observability
         Route("/events/stats", events_stats),
         Route("/events/recent", events_recent),
@@ -3078,6 +3188,10 @@ def create_app(
         # variants listed explicitly to avoid auto-slash-redirect ambiguity.
         routes.append(Route("/dashboard", _dashboard_redirect))
         routes.append(Route("/dashboard/", _dashboard_redirect))
+        # F092: companion entry — both slash variants, exact-match Routes
+        # (same rationale as the /dashboard pair above).
+        routes.append(Route("/companion", _companion_redirect))
+        routes.append(Route("/companion/", _companion_redirect))
 
     kwargs: dict[str, Any] = {"routes": routes}
     if lifespan is not None:
