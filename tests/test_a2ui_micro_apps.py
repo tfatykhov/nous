@@ -438,6 +438,22 @@ async def test_cap_evicts_least_recently_touched(service, db, a2ui_agent_id: str
     assert any("deleteSurface" in e for e in envs)
 
 
+async def test_dedup_replacement_updates_the_origin(service, db) -> None:
+    """Codex round 4: a background compose replacing a chat-origin app via
+    the shared dedup key must persist origin='agent' or the push/pull
+    measurement misclassifies it."""
+    chat_app = _micro_app(title="chat version")
+    surface_id = await service.push_built(chat_app, dedup_key="app:same-intent")
+    assert (await _surface_row(db, surface_id)).origin == "chat"
+
+    agent_app = _micro_app(title="agent version")
+    agent_app.origin = "agent"
+    replaced = await service.push_built(agent_app, dedup_key="app:same-intent")
+
+    assert replaced == surface_id
+    assert (await _surface_row(db, surface_id)).origin == "agent"
+
+
 async def test_dedup_update_does_not_evict(service, db) -> None:
     first = await service.push_built(_micro_app(title="first"), dedup_key="app:one")
     second = await service.push_built(_micro_app(title="second"), dedup_key="app:two")

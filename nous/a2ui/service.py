@@ -209,6 +209,12 @@ class SurfaceService:
                 # course-corrections at the stale decision.
                 existing.trace_id = built.trace_id
                 existing.app_spec = built.app_spec
+                # Origin follows the replacement (codex round 4): a scheduled
+                # compose replacing a chat-origin app via the shared dedup
+                # key must read origin="agent" in live_index and the Phase 5
+                # measurement — the row column is authoritative (the origin
+                # embedded in the surface_id is only its minting label).
+                existing.origin = built.origin
                 if session_id is not None:
                     existing.session_id = session_id
                 existing.updated_at = now
