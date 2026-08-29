@@ -358,3 +358,13 @@ describe('runChecks', () => {
     expect(failures.map((f) => f.message)).toEqual(['second', 'third']);
   });
 });
+
+describe('formatDateCldr — date-only calendar semantics', () => {
+  it('treats a date-only string as a local calendar date, not a UTC instant', () => {
+    // new Date('2025-12-15') parses as midnight UTC; users west of UTC would
+    // see Dec 14 and the wrong weekday (codex P2). The formatter must build
+    // date-only values in LOCAL time.
+    expect(formatDateCldr('2025-12-15', 'yyyy-MM-dd')).toBe('2025-12-15');
+    expect(formatDateCldr('2025-12-15', 'd')).toBe('15');
+  });
+});

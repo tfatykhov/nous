@@ -959,3 +959,25 @@ async def test_startup_invalidation_expires_only_heartbeat_surfaces(
         ).scalars().all()
     assert [a.action_name for a in audit] == ["invalidated"]
     assert audit[0].actor == "system:restart"
+
+
+@pytest.mark.postgres_only
+async def test_overflowed_subscriber_still_receives_the_resync_sentinel(
+    service: SurfaceService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full queue must make ROOM for the sentinel (codex P2): put_nowait on
+
+    a full queue raises, so without evicting one item the dropped stream
+    would drain its stale buffer and then wait forever, silently missing
+    every later update instead of resyncing.
+    """
+    monkeypatch.setattr(service_module, "_SUBSCRIBER_QUEUE_SIZE", 1)
+    queue = service.subscribe()
+    service._broadcast(1, {"a": 1})
+    service._broadcast(2, {"b": 2})
+
+    assert queue not in service._subscribers
+    drained = []
+    while not queue.empty():
+        drained.append(queue.get_nowait())
+    assert drained[-1] is None

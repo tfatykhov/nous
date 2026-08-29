@@ -367,7 +367,19 @@ const CLDR_TOKENS: [RegExp, (d: Date) => string][] = [
 
 /** Minimal CLDR/ICU date pattern formatter (the tokens fixtures use). */
 export function formatDateCldr(value: unknown, pattern: string): string {
-  const date = value instanceof Date ? value : new Date(String(value));
+  let date: Date;
+  if (value instanceof Date) {
+    date = value;
+  } else {
+    const raw = String(value);
+    // A date-only string is a CALENDAR date: new Date('2025-12-15') parses
+    // as midnight UTC, so local getters shift users west of UTC to Dec 14
+    // and the wrong weekday (codex P2). Construct it in local time.
+    const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+    date = dateOnly
+      ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]))
+      : new Date(raw);
+  }
   if (Number.isNaN(date.getTime())) return '';
   let out = '';
   let i = 0;

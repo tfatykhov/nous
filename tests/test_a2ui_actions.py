@@ -678,3 +678,23 @@ async def test_overlapping_terminal_actions_dispatch_exactly_once(
     assert statuses == [200, 404]
     completed = [a for a in await _audits(db, a2ui_agent_id) if a.status == "completed"]
     assert len(completed) == 1
+
+
+async def test_defer_keeps_the_surface_live(
+    router: ActionRouter, service: SurfaceService, db, a2ui_agent_id: str
+) -> None:
+    """'Ask me later' must not destroy the approval (codex P2): nothing
+
+    reschedules a resolved card, so defer leaves it live until the user
+    decides or expiry writes the honest no_objection evidence.
+    """
+    surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, payload = await router.handle(
+        _body("approval.defer", surface_id, nonce=nonce), content_type=JSON
+    )
+
+    assert status == 200
+    assert payload["resolved"] is False
+    assert (await _surface_row(db, surface_id)).status == "live"

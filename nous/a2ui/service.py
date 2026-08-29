@@ -574,9 +574,16 @@ class SurfaceService:
             try:
                 q.put_nowait((seq, envelope))
             except asyncio.QueueFull:
-                # Slow consumer: drop it. Its stream loop notices the closed
-                # queue sentinel is gone and forces a client resync.
+                # Slow consumer: drop it and deliver the resync sentinel. The
+                # queue is FULL here, so a bare put would raise again and the
+                # sentinel would never arrive (codex P2: the stream drained
+                # the stale buffer and then waited forever) — evict one
+                # buffered item first to guarantee room.
                 self._subscribers.discard(q)
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
                 try:
                     q.put_nowait(None)
                 except asyncio.QueueFull:

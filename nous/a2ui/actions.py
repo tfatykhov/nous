@@ -316,7 +316,14 @@ def _register_default_handlers(router: ActionRouter) -> None:
         )
 
     async def approval_defer(ctx: ActionContext) -> ActionResult:
-        return ActionResult(message="deferred", resolve_surface=True)
+        # Defer must NOT resolve (codex P2): nothing reschedules a resolved
+        # card, so "Ask me later" would permanently destroy the approval.
+        # The card stays live until the user decides or it expires — and
+        # expiry then writes the honest `no_objection` evidence.
+        return ActionResult(
+            message="deferred — the card stays until you decide or it expires",
+            data_patches=[("/summary", "Deferred. This stays here until you decide or it expires.")],
+        )
 
     async def review_acknowledge(ctx: ActionContext) -> ActionResult:
         return ActionResult(message="acknowledged", resolve_surface=True)
