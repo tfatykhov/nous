@@ -18,6 +18,10 @@ export interface StreamHandlers {
   onA2ui(seq: number | null, envelope: unknown): void;
   onControl(data: { type: string }): void;
   onError(): void;
+  /** Fires when the SSE connection actually OPENS — construction is not
+   * connection (codex round 6): the partial-index re-hydration must wait
+   * for proof of connectivity, not for the constructor returning. */
+  onOpen(): void;
 }
 
 export interface A2uiStream {
@@ -36,6 +40,7 @@ const defaultStreamFactory: StreamFactory = (url, handlers) => {
     handlers.onControl(JSON.parse(e.data));
   });
   es.onerror = () => handlers.onError();
+  es.onopen = () => handlers.onOpen();
   return { close: () => es.close() };
 };
 
@@ -109,12 +114,26 @@ export class Transport {
       }
       store.setDeliveredFloor(index.latest_seq);
       // 3. Tail the stream from the index watermark.
+      const wasPartial = index.partial === true;
+      if (!wasPartial) this.partialRetried = false;
       this.stream = this.streamFactory(`/a2ui/stream?since=${store.lastSeq}`, {
         onA2ui: (seq, envelope) => {
           store.apply(seq, envelope as never);
         },
         onControl: (data) => {
           if (data.type === 'resync') void this.reconnect();
+        },
+        onOpen: () => {
+          if (wasPartial && !this.partialRetried) {
+            // The index came from the SW's degraded offline warm, and the
+            // stream OPENING (not merely constructing — codex round 6) is
+            // the proof the network is back. Re-hydrate once: network-
+            // first fetches the live full index, restoring the surfaces
+            // the warm omitted; a replay-window overflow is not a
+            // deterministic substitute (codex round 4).
+            this.partialRetried = true;
+            void this.cycle();
+          }
         },
         onError: () => {
           // NEVER let EventSource auto-reconnect (codex P1): its
@@ -137,17 +156,6 @@ export class Transport {
       });
       store.connection = 'live';
       this.attempt = 0;
-      if (index.partial && !this.partialRetried) {
-        // The index came from the SW's degraded offline warm, but the
-        // stream just opened — the network is back. Re-hydrate once from
-        // the live index (network-first wins now) so the surfaces the
-        // warm omitted appear; relying on a replay-window overflow is not
-        // deterministic on a low-traffic agent (codex round 4).
-        this.partialRetried = true;
-        void this.cycle();
-        return;
-      }
-      this.partialRetried = false;
     } catch {
       store.connection = 'error';
       this.attempt += 1;

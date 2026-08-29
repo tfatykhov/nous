@@ -320,10 +320,12 @@ describe('Transport — postAction', () => {
 });
 
 describe('Transport — partial offline-warm index (F092 Phase 4)', () => {
-  it('re-hydrates once from the live index after a partial one connects', async () => {
-    // First index is the SW's degraded warm (partial, one surface); once
-    // the stream opens the transport must refresh and pick up the surface
-    // the warm omitted.
+  it('re-hydrates once from the live index after the stream OPENS on a partial one', async () => {
+    // First index is the SW's degraded warm (partial, one surface). The
+    // refresh must wait for the stream's OPEN event — construction is not
+    // connection (codex round 6): offline, the EventSource exists but
+    // never opens, and re-cycling then would just consume the same cached
+    // partial index.
     const stream = fakeStream();
     let indexCalls = 0;
     const { impl } = fakeFetch((url) => {
@@ -345,9 +347,20 @@ describe('Transport — partial offline-warm index (F092 Phase 4)', () => {
     await active.connect();
     await flush();
 
+    // No open yet (still "connecting") — NO refresh may have happened.
+    expect(indexCalls).toBe(1);
+
+    stream.state.handlers!.onOpen();
+    await flush();
+
     expect(indexCalls).toBe(2);
     expect(Object.keys(store.surfaces).sort()).toEqual(['a', 'b']);
     expect(store.connection).toBe('live');
+
+    // The refreshed (full) stream opening again must not re-trigger.
+    stream.state.handlers!.onOpen();
+    await flush();
+    expect(indexCalls).toBe(2);
   });
 
   it('does not loop when the refreshed index is partial again', async () => {
@@ -364,8 +377,12 @@ describe('Transport — partial offline-warm index (F092 Phase 4)', () => {
     active = new Transport({ streamFactory: stream.factory, fetchImpl: impl });
     await active.connect();
     await flush();
+    stream.state.handlers!.onOpen();
+    await flush();
+    stream.state.handlers!.onOpen();
+    await flush();
 
-    expect(indexCalls).toBe(2, 'exactly one partial-triggered refresh, never a loop');
+    expect(indexCalls).toBe(2);
   });
 });
 
