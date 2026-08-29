@@ -33,7 +33,17 @@
   const ctx = $derived({ dataModel: store.surfaces[surfaceId]?.dataModel ?? {}, scope });
   const nodes = $derived.by(() => {
     const raw = resolveDynamic(comp.nodes, ctx);
-    return Array.isArray(raw) ? (raw as DNode[]).filter((n) => n && typeof n.name === 'string') : [];
+    if (!Array.isArray(raw)) return [];
+    // Dedupe on the render key (same class as edges): a duplicate name in a
+    // keyed each is a Svelte crash.
+    const seen = new Set<string>();
+    const out: DNode[] = [];
+    for (const n of raw as DNode[]) {
+      if (!n || typeof n.name !== 'string' || seen.has(n.name)) continue;
+      seen.add(n.name);
+      out.push(n);
+    }
+    return out;
   });
   const edges = $derived.by(() => {
     const raw = resolveDynamic(comp.edges, ctx);
@@ -109,7 +119,15 @@
 </script>
 
 <div class="dag">
-  <svg viewBox="0 0 {layout.width} {layout.height}" role="img" aria-label="DAG graph">
+  <!-- min-width from the layout, not a constant (codex P2): a many-column
+       DAG otherwise scales down to fit the container until labels are
+       unreadable and the wrapper's overflow-x never engages. -->
+  <svg
+    viewBox="0 0 {layout.width} {layout.height}"
+    style:min-width="{layout.width}px"
+    role="img"
+    aria-label="DAG graph"
+  >
     <defs>
       <marker id="arrow-{surfaceId}-{comp.id}" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
         <path d="M0 0 L8 4 L0 8 z" fill="var(--muted)" />
@@ -162,7 +180,6 @@
     display: block;
     width: 100%;
     height: auto;
-    min-width: 280px;
   }
   text {
     fill: var(--muted);

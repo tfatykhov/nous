@@ -46,7 +46,18 @@
   const ctx = $derived({ dataModel: store.surfaces[surfaceId]?.dataModel ?? {}, scope });
   const nodes = $derived.by(() => {
     const raw = resolveDynamic(comp.nodes, ctx);
-    return Array.isArray(raw) ? (raw as GNode[]).filter((n) => n && typeof n.id === 'string') : [];
+    if (!Array.isArray(raw)) return [];
+    // Dedupe on the render key, exactly like edges below: seed nodes arrive
+    // from params unchecked, and a duplicate id in a keyed each is a Svelte
+    // crash, not a cosmetic glitch.
+    const seen = new Set<string>();
+    const out: GNode[] = [];
+    for (const n of raw as GNode[]) {
+      if (!n || typeof n.id !== 'string' || seen.has(n.id)) continue;
+      seen.add(n.id);
+      out.push(n);
+    }
+    return out;
   });
   const edges = $derived.by(() => {
     const raw = resolveDynamic(comp.edges, ctx);

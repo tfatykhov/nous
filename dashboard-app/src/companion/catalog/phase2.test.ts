@@ -172,6 +172,34 @@ describe('DagGraphView', () => {
     expect(container.querySelectorAll('line').length).toBe(1);
   });
 
+  it('dedupes duplicate node names and sizes the SVG from the layout', () => {
+    seedSurface({
+      nodes: [
+        { name: 'a', status: 'completed' },
+        { name: 'a', status: 'failed' },
+        { name: 'b', status: 'running' },
+      ],
+      edges: [{ from: 'a', to: 'b' }],
+    });
+    const { container } = render(DagGraphView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: {
+          id: 'g',
+          component: 'DagGraph',
+          nodes: { path: '/nodes' },
+          edges: { path: '/edges' },
+        },
+      },
+    });
+
+    expect(container.querySelectorAll('g.node circle').length).toBe(2);
+    // Two depth columns → 2*150+40 = 340; min-width must track the layout so
+    // wide DAGs scroll inside the wrapper instead of scaling to illegibility.
+    const svg = container.querySelector('svg') as SVGSVGElement;
+    expect(svg.style.minWidth).toBe('340px');
+  });
+
   it('drops edges that reference unknown nodes instead of crashing', () => {
     seedSurface({
       nodes: [{ name: 'only', status: 'running' }],
@@ -222,6 +250,31 @@ describe('MemoryGraphView', () => {
     const { container } = renderGraph();
     const circle = container.querySelector('g.node circle')!;
     expect(circle.getAttribute('r')).toBe('14');
+  });
+
+  it('dedupes duplicate seed node ids (duplicate keyed-each crash)', () => {
+    seedSurface({
+      nodes: [
+        { id: FOCUS, type: 'fact', label: 'focus fact' },
+        { id: FOCUS, type: 'fact', label: 'focus fact again' },
+      ],
+      edges: [],
+      focus: FOCUS,
+    });
+    const { container } = render(MemoryGraphView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: {
+          id: 'g',
+          component: 'MemoryGraph',
+          nodes: { path: '/nodes' },
+          edges: { path: '/edges' },
+          focusNodeId: FOCUS,
+        },
+      },
+    });
+
+    expect(container.querySelectorAll('g.node circle').length).toBe(1);
   });
 
   it('tap → callAgentFunction → merges the neighborhood into the data model', async () => {
