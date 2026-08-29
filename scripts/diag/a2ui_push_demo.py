@@ -6,7 +6,12 @@ server's SSE catch-up poll delivers these cross-process writes to any
 connected companion within ~2s — which is precisely the path this probes.
 
 Usage:
-    uv run python scripts/diag/a2ui_push_demo.py [approval|review|findings|all|resolve <surface_id>]
+    uv run python scripts/diag/a2ui_push_demo.py \
+        [approval|review|findings|all|gallery|sweep|graph|dag|resolve <surface_id>]
+
+The Phase-2 demos (sweep, graph, dag) source REAL rows from the connected DB
+when any exist, so the resolve buttons and node expansion hit live data; they
+fall back to synthetic ids (rendering works, round-trips error inline).
 """
 
 from __future__ import annotations
@@ -235,6 +240,106 @@ def _gallery_surface():
     )
 
 
+async def _sweep_params(database, settings) -> dict:
+    """Real unreviewed decisions when the DB has them; synthetic otherwise."""
+    from sqlalchemy import text
+
+    async with database.session() as session:
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT id, description, confidence, stakes, category "
+                    "FROM brain.decisions WHERE agent_id = :aid "
+                    "AND (outcome IS NULL OR outcome = 'pending') "
+                    "ORDER BY created_at DESC LIMIT 3"
+                ),
+                {"aid": settings.agent_id},
+            )
+        ).all()
+    if rows:
+        return {
+            "decisions": [
+                {
+                    "id": str(r[0]),
+                    "description": r[1],
+                    "confidence": float(r[2] or 0),
+                    "stakes": r[3] or "",
+                    "category": r[4] or "",
+                }
+                for r in rows
+            ]
+        }
+    return {
+        "decisions": [
+            {
+                "id": "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8",
+                "description": "SYNTHETIC: ship the eval harness behind a flag (resolve will error)",
+                "confidence": 0.8,
+                "stakes": "medium",
+                "category": "architecture",
+            }
+        ]
+    }
+
+
+async def _graph_params(database, settings) -> dict:
+    """A real fact that has at least one graph edge, else any fact, else synthetic."""
+    from sqlalchemy import text
+
+    async with database.session() as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT f.id, f.content FROM heart.facts f "
+                    "WHERE f.agent_id = :aid AND f.active AND EXISTS ("
+                    "  SELECT 1 FROM brain.graph_edges e "
+                    "  WHERE e.agent_id = :aid AND (e.source_id = f.id OR e.target_id = f.id)"
+                    "  AND e.relation NOT IN ('supersedes', 'superseded_by')"
+                    ") ORDER BY f.learned_at DESC LIMIT 1"
+                ),
+                {"aid": settings.agent_id},
+            )
+        ).first()
+        if row is None:
+            row = (
+                await session.execute(
+                    text(
+                        "SELECT id, content FROM heart.facts "
+                        "WHERE agent_id = :aid AND active ORDER BY learned_at DESC LIMIT 1"
+                    ),
+                    {"aid": settings.agent_id},
+                )
+            ).first()
+    if row:
+        return {"node_id": str(row[0]), "node_type": "fact", "label": (row[1] or "")[:80]}
+    return {
+        "node_id": "b1c2d3e4-f5a6-4b7c-8d9e-0f1a2b3c4d5e",
+        "node_type": "fact",
+        "label": "SYNTHETIC focus fact (expansion returns nothing)",
+    }
+
+
+DAG_DEMO_PARAMS = {
+    "dag_id": "0e9d8c7b-6a5f-4e3d-8c2b-1a0f9e8d7c6b",
+    "name": "nightly-audit",
+    "status": "running",
+    "nodes": [
+        {"name": "collect", "status": "completed", "node_type": "subtask"},
+        {"name": "classify", "status": "completed", "node_type": "subtask"},
+        {"name": "analyze", "status": "failed", "node_type": "subtask"},
+        {"name": "cross_check", "status": "running", "node_type": "check"},
+        {"name": "report", "status": "pending", "node_type": "callback"},
+    ],
+    "edges": [
+        {"from": "collect", "to": "analyze"},
+        {"from": "classify", "to": "analyze"},
+        {"from": "collect", "to": "cross_check"},
+        {"from": "analyze", "to": "report"},
+        {"from": "cross_check", "to": "report"},
+    ],
+}
+
+
 async def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     settings = Settings()
@@ -245,6 +350,16 @@ async def main() -> None:
         if which == "resolve":
             await service.resolve(sys.argv[2])
             print(f"resolved {sys.argv[2]}")
+            return
+        if which in ("sweep", "graph", "dag"):
+            if which == "sweep":
+                built = TEMPLATES["decision_sweep"](await _sweep_params(database, settings))
+            elif which == "graph":
+                built = TEMPLATES["memory_graph"](await _graph_params(database, settings))
+            else:
+                built = TEMPLATES["dag_monitor"](DAG_DEMO_PARAMS)
+            surface_id = await service.push_built(built, dedup_key=f"demo:{which}", notify=False)
+            print(f"pushed {which}: {surface_id}  ->  /companion#/s/{surface_id}")
             return
         if which == "gallery":
             built = _gallery_surface()

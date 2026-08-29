@@ -35,7 +35,10 @@
           "description": "The relative weight of this component within a Row or Column."
         }
       },
-      "required": ["component", "title"]
+      "required": [
+        "component",
+        "title"
+      ]
     },
     "ActionReviewCard": {
       "type": "object",
@@ -69,7 +72,11 @@
           "description": "The relative weight of this component within a Row or Column."
         }
       },
-      "required": ["component", "title", "did"]
+      "required": [
+        "component",
+        "title",
+        "did"
+      ]
     },
     "StatTile": {
       "type": "object",
@@ -93,7 +100,12 @@
         "intent": {
           "type": "string",
           "description": "Visual intent of the tile.",
-          "enum": ["neutral", "good", "bad", "warn"],
+          "enum": [
+            "neutral",
+            "good",
+            "bad",
+            "warn"
+          ],
           "default": "neutral"
         },
         "weight": {
@@ -101,7 +113,11 @@
           "description": "The relative weight of this component within a Row or Column."
         }
       },
-      "required": ["component", "label", "value"]
+      "required": [
+        "component",
+        "label",
+        "value"
+      ]
     },
     "KeyValueTable": {
       "type": "object",
@@ -119,7 +135,129 @@
           "description": "The relative weight of this component within a Row or Column."
         }
       },
-      "required": ["component", "rows"]
+      "required": [
+        "component",
+        "rows"
+      ]
+    },
+    "DecisionCard": {
+      "type": "object",
+      "description": "One decision under review: description, calibrated confidence, stakes/category badges, current outcome.",
+      "properties": {
+        "component": {
+          "const": "DecisionCard"
+        },
+        "decisionId": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "The decision UUID."
+        },
+        "description": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "What was decided."
+        },
+        "confidence": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicNumber",
+          "description": "Calibrated confidence 0..1."
+        },
+        "stakes": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "low|medium|high|critical."
+        },
+        "category": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Decision category."
+        },
+        "outcome": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Current outcome (pending until reviewed)."
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": [
+        "component",
+        "decisionId",
+        "description"
+      ]
+    },
+    "ConfidenceMeter": {
+      "type": "object",
+      "description": "Horizontal 0..1 confidence bar with the numeric value.",
+      "properties": {
+        "component": {
+          "const": "ConfidenceMeter"
+        },
+        "value": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicNumber",
+          "description": "Confidence 0..1."
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": [
+        "component",
+        "value"
+      ]
+    },
+    "MemoryGraph": {
+      "type": "object",
+      "description": "Interactive memory-graph view: nodes/edges bound from the data model, radial layout around a focus node; tapping a node asks the agent to expand its neighborhood.",
+      "properties": {
+        "component": {
+          "const": "MemoryGraph"
+        },
+        "nodes": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicValue",
+          "description": "Path to an array of {id, type, label}."
+        },
+        "edges": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicValue",
+          "description": "Path to an array of {source, target, relation, weight}."
+        },
+        "focusNodeId": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Node id at the center of the layout."
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": [
+        "component",
+        "nodes",
+        "edges"
+      ]
+    },
+    "DagGraph": {
+      "type": "object",
+      "description": "Wave-layout DAG view: nodes colored by status, edges as arrows.",
+      "properties": {
+        "component": {
+          "const": "DagGraph"
+        },
+        "nodes": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicValue",
+          "description": "Path to an array of {name, status, node_type}."
+        },
+        "edges": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicValue",
+          "description": "Path to an array of {from, to}."
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": [
+        "component",
+        "nodes",
+        "edges"
+      ]
     }
   },
   "functions": {},
@@ -137,6 +275,18 @@
         },
         {
           "$ref": "#/components/KeyValueTable"
+        },
+        {
+          "$ref": "#/components/DecisionCard"
+        },
+        {
+          "$ref": "#/components/ConfidenceMeter"
+        },
+        {
+          "$ref": "#/components/MemoryGraph"
+        },
+        {
+          "$ref": "#/components/DagGraph"
         }
       ],
       "discriminator": {

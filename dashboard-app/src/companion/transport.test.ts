@@ -318,3 +318,74 @@ describe('Transport — postAction', () => {
     expect(body.a2uiRendererDataModel.surfaces.ghost).toEqual({});
   });
 });
+
+describe('Transport — callAgentFunction', () => {
+  // Phase 2 RPC: the agentFunctionResponse envelope rides back in the HTTP
+  // response, and the surface nonce travels in metadata.extensions exactly
+  // like actions — the server's trust pipeline is shared.
+  beforeEach(() => {
+    store.apply(null, createEnvelope('s1', 'nonce-s1'));
+  });
+
+  it('posts the callAgentFunction envelope with the surface nonce', async () => {
+    const { impl, calls } = fakeFetch(() =>
+      response({
+        version: 'v1.0',
+        agentFunctionResponse: { functionCallId: 'x', value: { nodes: [] } },
+      }),
+    );
+    active = new Transport({ fetchImpl: impl });
+
+    const result = await active.callAgentFunction('s1', 'expandGraphNode', { nodeId: 'n-1' });
+
+    expect(result.ok).toBe(true);
+    expect(result.value).toEqual({ nodes: [] });
+    expect(calls[0].url).toBe('/a2ui/call');
+    const body = JSON.parse(String(calls[0].init?.body));
+    expect(body.callAgentFunction.surfaceId).toBe('s1');
+    expect(body.callAgentFunction.functionCallId).toBeTruthy();
+    expect(body.callAgentFunction.callFunction).toEqual({
+      call: 'expandGraphNode',
+      args: { nodeId: 'n-1' },
+    });
+    expect(body.metadata.extensions.com_nous_nonce).toBe('nonce-s1');
+  });
+
+  it('surfaces the error message from an agentFunctionResponse error', async () => {
+    const { impl } = fakeFetch(() =>
+      response(
+        {
+          version: 'v1.0',
+          agentFunctionResponse: {
+            functionCallId: 'x',
+            error: { code: 'RATE_LIMITED', message: 'too many calls; slow down' },
+          },
+        },
+        429,
+      ),
+    );
+    active = new Transport({ fetchImpl: impl });
+
+    const result = await active.callAgentFunction('s1', 'expandGraphNode', {});
+
+    expect(result).toEqual({ ok: false, message: 'too many calls; slow down' });
+  });
+
+  it('falls back to the status code when the error body is bare', async () => {
+    const { impl } = fakeFetch(() => response({}, 503));
+    active = new Transport({ fetchImpl: impl });
+
+    const result = await active.callAgentFunction('s1', 'expandGraphNode', {});
+
+    expect(result).toEqual({ ok: false, message: 'HTTP 503' });
+  });
+
+  it('resolves with the failure when the network throws', async () => {
+    const impl = (() => Promise.reject(new Error('offline'))) as unknown as typeof fetch;
+    active = new Transport({ fetchImpl: impl });
+
+    const result = await active.callAgentFunction('s1', 'expandGraphNode', {});
+
+    expect(result).toEqual({ ok: false, message: 'offline' });
+  });
+});

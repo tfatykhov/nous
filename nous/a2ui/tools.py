@@ -45,7 +45,16 @@ _PUSH_SURFACE_SCHEMA = {
                 "(params: title, did, why, cost, compensation={revertible,"
                 "handler,note}, trace_id). "
                 "heartbeat_findings: triage list (params: findings=[{"
-                "fingerprint,message,urgency,check}], title)."
+                "fingerprint,message,urgency,check}], title). "
+                "decision_sweep: unreviewed-decision review cards, ALWAYS "
+                "self-sourced from the brain — decision rows in params are "
+                "ignored (optional: max_age_days, max_decisions, title). "
+                "memory_graph: interactive graph explorer seeded on one "
+                "node (params: node_id UUID, node_type, label; tap-to-"
+                "expand happens client-side). "
+                "dag_monitor: DAG node/status graph with retry+cancel; "
+                "params={dag_id} — nodes/edges/name/status are ALWAYS "
+                "fetched from the store, supplied values are ignored."
             ),
         },
         "params": {
@@ -69,15 +78,25 @@ _PUSH_SURFACE_SCHEMA = {
 }
 
 
-def register_a2ui_tools(dispatcher: ToolDispatcher, surface_service: Any) -> None:
-    """Register the push_surface tool against a live SurfaceService."""
+def register_a2ui_tools(
+    dispatcher: ToolDispatcher,
+    surface_service: Any,
+    brain: Any = None,
+    dag_store: Any = None,
+) -> None:
+    """Register the push_surface tool against a live SurfaceService.
+
+    ``brain`` and ``dag_store`` let self-sourcing templates fetch their own
+    data (decision_sweep from get_unreviewed, dag_monitor from the store),
+    so the model can push them with minimal params.
+    """
 
     async def push_surface(**kwargs) -> dict:
         template = kwargs.get("template", "")
         builder = TEMPLATES.get(template)
         if builder is None:
             return _tool_error(f"Unknown template {template!r}. Available: {sorted(TEMPLATES)}")
-        params = kwargs.get("params") or {}
+        params = dict(kwargs.get("params") or {})
         dedup_key = kwargs.get("dedup_key")
         if template == "heartbeat_findings" and not dedup_key:
             # Recurring producers MUST dedup (codex P2): a scheduled check
@@ -85,6 +104,72 @@ def register_a2ui_tools(dispatcher: ToolDispatcher, surface_service: Any) -> Non
             # exactly the spam dedup exists to prevent. Derive the stable
             # default rather than bouncing the model.
             dedup_key = "heartbeat:findings"
+
+        # Self-sourcing templates — ALWAYS, not as a fallback (codex P1 x2):
+        # the DB is the only source of truth for actionable rows. A caller-
+        # supplied list was previously honored when present, which let the
+        # model render fabricated text over a REAL decision/DAG id — the user
+        # reads the fabrication, but their click records against the id.
+        # Caller-supplied rows are therefore overwritten unconditionally;
+        # callers control filters and display options only.
+        if template == "decision_sweep":
+            if brain is None:
+                return _tool_error("decision_sweep needs the brain wired to self-source")
+            try:
+                unreviewed = await brain.get_unreviewed(
+                    max_age_days=int(params.get("max_age_days", 30))
+                )
+            except Exception as exc:
+                return _tool_error(f"Could not fetch unreviewed decisions: {exc}")
+            params["decisions"] = [
+                {
+                    "id": str(d.id),
+                    "description": d.description,
+                    "confidence": d.confidence,
+                    "stakes": d.stakes,
+                    "category": d.category,
+                }
+                for d in unreviewed[: int(params.get("max_decisions", 15))]
+            ]
+            dedup_key = dedup_key or "sweep:decisions"
+        if template == "dag_monitor":
+            if dag_store is None:
+                return _tool_error("dag_monitor needs the dag_store wired to self-source")
+            from uuid import UUID as _UUID
+
+            try:
+                dag = await dag_store.get_dag(_UUID(str(params.get("dag_id", ""))))
+            except ValueError:
+                return _tool_error("dag_monitor params require a dag_id UUID")
+            except Exception as exc:
+                return _tool_error(f"Could not fetch DAG: {exc}")
+            if dag is None:
+                return _tool_error("DAG not found")
+            # Distinct (from, to) name pairs only: DAGEdge uniqueness includes
+            # edge_type, so a stored DAG can carry parallel edges that project
+            # to the same pair — and the renderer keys edges by that pair.
+            name_by_id = {n.id: n.name for n in dag.nodes}
+            seen_pairs: set[tuple[str, str]] = set()
+            edges = []
+            for e in dag.edges:
+                pair = (name_by_id.get(e.from_node_id, ""), name_by_id.get(e.to_node_id, ""))
+                if not pair[0] or not pair[1] or pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                edges.append({"from": pair[0], "to": pair[1]})
+            params.update(
+                {
+                    "dag_id": str(dag.id),
+                    "name": dag.name,
+                    "status": dag.status,
+                    "nodes": [
+                        {"name": n.name, "status": n.status, "node_type": n.node_type}
+                        for n in dag.nodes
+                    ],
+                    "edges": edges,
+                }
+            )
+            dedup_key = dedup_key or f"dag:{dag.id}"
         try:
             built = builder(params)
         except SurfaceValidationError as exc:

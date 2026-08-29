@@ -3017,6 +3017,34 @@ def create_app(
         )
         return JSONResponse(payload, status_code=status_code)
 
+    async def a2ui_call(request: Request) -> JSONResponse:
+        """POST /a2ui/call — renderer->agent callAgentFunction (synchronous RPC).
+
+        Same trust pipeline as /a2ui/action (Content-Type, agent-scoped
+        surface, nonce, rate limit); the agentFunctionResponse envelope is
+        returned in the HTTP response, so no functionCallId correlation over
+        SSE is needed.
+        """
+        resolved = _a2ui_services()
+        if resolved is None:
+            return JSONResponse({"error": "A2UI not available"}, status_code=503)
+        _, router = resolved
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        actor = "unattributed"
+        if settings.a2ui_trust_forwarded_identity:
+            actor = (
+                request.headers.get("x-forwarded-user")
+                or request.headers.get("x-forwarded-email")
+                or "unattributed"
+            )
+        status_code, payload = await router.handle_call(
+            body, content_type=request.headers.get("content-type", ""), actor=actor
+        )
+        return JSONResponse(payload, status_code=status_code)
+
     async def a2ui_catalog(request: Request) -> JSONResponse:
         """GET /a2ui/catalog/{name} — serve a vendored catalog by short name."""
         from nous.a2ui.validator import load_catalog
@@ -3062,6 +3090,7 @@ def create_app(
         Route("/a2ui/surfaces/{surface_id}", a2ui_surface_snapshot),
         Route("/a2ui/surfaces", a2ui_surfaces_index),
         Route("/a2ui/action", a2ui_action, methods=["POST"]),
+        Route("/a2ui/call", a2ui_call, methods=["POST"]),
         Route("/a2ui/catalog/{name}", a2ui_catalog),
         # F035.1: Event bus observability
         Route("/events/stats", events_stats),
