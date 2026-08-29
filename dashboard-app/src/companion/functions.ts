@@ -135,19 +135,27 @@ export function callFunction(
       // Catalog args are `decimals` + `grouping` (codex P2: the previous
       // `fractionDigits` key does not exist in the catalog).
       const v = Number(resolveArg(args, 'value', ctx));
-      const digits = args.decimals !== undefined ? Number(resolveArg(args, 'decimals', ctx)) : undefined;
+      const digits = clampDigits(
+        args.decimals !== undefined ? Number(resolveArg(args, 'decimals', ctx)) : undefined,
+      );
       const grouping = args.grouping !== undefined ? Boolean(resolveArg(args, 'grouping', ctx)) : true;
-      return new Intl.NumberFormat(undefined, {
-        useGrouping: grouping,
-        maximumFractionDigits: digits,
-        minimumFractionDigits: digits,
-      }).format(v);
+      try {
+        return new Intl.NumberFormat(undefined, {
+          useGrouping: grouping,
+          maximumFractionDigits: digits,
+          minimumFractionDigits: digits,
+        }).format(v);
+      } catch {
+        return String(v);
+      }
     }
     case 'formatCurrency': {
       const v = Number(resolveArg(args, 'value', ctx));
       const currency = String(resolveArg(args, 'currency', ctx) ?? 'USD');
       // decimals + grouping are catalog args here too (codex P2).
-      const digits = args.decimals !== undefined ? Number(resolveArg(args, 'decimals', ctx)) : undefined;
+      const digits = clampDigits(
+        args.decimals !== undefined ? Number(resolveArg(args, 'decimals', ctx)) : undefined,
+      );
       const grouping = args.grouping !== undefined ? Boolean(resolveArg(args, 'grouping', ctx)) : true;
       try {
         return new Intl.NumberFormat(undefined, {
@@ -188,6 +196,17 @@ export function callFunction(
       // undefined so bindings render as empty rather than crashing the tree.
       return undefined;
   }
+}
+
+/**
+ * Intl fraction digits must be 0..100 (codex P2: the catalog allows any
+ * DynamicNumber, and a schema-valid -1 or 101 makes the constructor throw
+ * DURING RENDER). Out-of-range or non-finite values fall back to locale
+ * defaults rather than crashing the component tree.
+ */
+function clampDigits(digits: number | undefined): number | undefined {
+  if (digits === undefined || !Number.isFinite(digits)) return undefined;
+  return Math.min(100, Math.max(0, Math.trunc(digits)));
 }
 
 /**

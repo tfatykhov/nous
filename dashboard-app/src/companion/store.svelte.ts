@@ -73,10 +73,15 @@ export class SurfaceStore {
     return true;
   }
 
-  /** Record a surface's snapshot watermark (from X-A2UI-Upto-Seq). */
+  /** Record a surface's snapshot watermark (from X-A2UI-Upto-Seq).
+   *
+   * Deliberately does NOT raise `lastSeq` (codex P1): the stream cursor
+   * must stay at the INDEX watermark — a per-surface upto of 12 says
+   * nothing about seq 11, which may be a create for a surface the index
+   * missed. Uptos only SUPPRESS re-application in apply(); the stream
+   * replays the in-between range and suppression handles the overlap. */
   setSurfaceUpto(surfaceId: string, uptoSeq: number): void {
     this.surfaceUpto[surfaceId] = Math.max(this.surfaceUpto[surfaceId] ?? 0, uptoSeq);
-    this.lastSeq = Math.max(this.lastSeq, uptoSeq);
   }
 
   private targetOf(envelope: Envelope): string | null {

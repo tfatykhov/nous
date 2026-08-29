@@ -181,3 +181,23 @@ describe('SurfaceStore — pruneAbsent / reset / ordered', () => {
     expect(store.ordered().map((s) => s.surfaceId)).toEqual(['high', 'mid', 'low']);
   });
 });
+
+describe('SurfaceStore — per-surface snapshot watermarks', () => {
+  it('setSurfaceUpto suppresses covered envelopes without moving the stream cursor', () => {
+    // codex P1: raising lastSeq from a per-surface upto opened the stream
+    // PAST envelopes for surfaces the index missed. The upto only
+    // suppresses re-application; the cursor stays at the index watermark.
+    const store = new SurfaceStore();
+    store.apply(null, createSurface('snap'));
+    store.setSurfaceUpto('snap', 12);
+    expect(store.lastSeq).toBe(0);
+
+    // A covered envelope (seq 12 <= upto) must NOT clobber hydrated state…
+    store.apply(12, { updateDataModel: { surfaceId: 'snap', path: '/x', value: 'stale' } });
+    expect(store.surfaces.snap.dataModel.x).toBeUndefined();
+
+    // …but an uncovered one for ANOTHER surface applies normally.
+    store.apply(11, createSurface('missed'));
+    expect(store.surfaces.missed).toBeDefined();
+  });
+});

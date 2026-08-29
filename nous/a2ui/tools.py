@@ -78,6 +78,13 @@ def register_a2ui_tools(dispatcher: ToolDispatcher, surface_service: Any) -> Non
         if builder is None:
             return _tool_error(f"Unknown template {template!r}. Available: {sorted(TEMPLATES)}")
         params = kwargs.get("params") or {}
+        dedup_key = kwargs.get("dedup_key")
+        if template == "heartbeat_findings" and not dedup_key:
+            # Recurring producers MUST dedup (codex P2): a scheduled check
+            # calling without a key would stack a new card every run —
+            # exactly the spam dedup exists to prevent. Derive the stable
+            # default rather than bouncing the model.
+            dedup_key = "heartbeat:findings"
         try:
             built = builder(params)
         except SurfaceValidationError as exc:
@@ -87,7 +94,7 @@ def register_a2ui_tools(dispatcher: ToolDispatcher, surface_service: Any) -> Non
         try:
             surface_id = await surface_service.push_built(
                 built,
-                dedup_key=kwargs.get("dedup_key"),
+                dedup_key=dedup_key,
                 session_id=kwargs.get("_session_id"),
                 notify=kwargs.get("notify"),
             )
