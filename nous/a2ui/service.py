@@ -40,6 +40,13 @@ from nous.storage.models import A2uiAction, A2uiOutbox, A2uiSurface
 from .dsl import BuiltSurface, SurfaceValidationError
 from .grammar import lint_micro_app
 
+
+class _DedupRaceRetry(Exception):
+    """Internal: a dedup match surfaced on the UNLOCKED push branch (two
+    first-time producers raced). Raised out of the DB session so the
+    connection is released, then push_built re-enters via the locked path
+    (codex round 7)."""
+
 logger = logging.getLogger(__name__)
 
 _LAG_WINDOW_SECONDS = 2
@@ -159,6 +166,7 @@ class SurfaceService:
                         agent_id=agent_id,
                         now=now,
                         expires_at=expires_at,
+                        _locked=True,
                     )
         return await self._push_transaction(
             built,
@@ -182,6 +190,44 @@ class SurfaceService:
         agent_id: str,
         now: datetime,
         expires_at: datetime | None,
+        _locked: bool = False,
+    ) -> str:
+        try:
+            return await self._push_transaction_inner(
+                built,
+                dedup_key=dedup_key,
+                session_id=session_id,
+                notify=notify,
+                _dedup_retry=_dedup_retry,
+                agent_id=agent_id,
+                now=now,
+                expires_at=expires_at,
+                _locked=_locked,
+            )
+        except _DedupRaceRetry:
+            # Session is closed by now; the recursion re-runs the
+            # preliminary lookup, finds the race winner, and takes the
+            # LOCKED replacement path.
+            return await self.push_built(
+                built,
+                dedup_key=dedup_key,
+                session_id=session_id,
+                notify=notify,
+                _dedup_retry=_dedup_retry,
+            )
+
+    async def _push_transaction_inner(
+        self,
+        built: BuiltSurface,
+        *,
+        dedup_key: str | None,
+        session_id: str | None,
+        notify: bool | None,
+        _dedup_retry: bool,
+        agent_id: str,
+        now: datetime,
+        expires_at: datetime | None,
+        _locked: bool = False,
     ) -> str:
         async with self._db.session() as session:
             existing = None
@@ -195,6 +241,19 @@ class SurfaceService:
                         )
                     )
                 ).scalar_one_or_none()
+
+            if existing is not None and not _locked:
+                # Late dedup match on the UNLOCKED branch (codex round 7):
+                # two first-time producers raced, the loser's preliminary
+                # lookup saw no row, and this inner lookup now does. A
+                # replacement here would commit WITHOUT the per-surface
+                # lock — sliding under an in-flight refine/refresh that
+                # already passed its epoch check. Raise out of the session
+                # (so the connection is RELEASED before any lock wait —
+                # waiting on the lock while holding a pool connection could
+                # starve the very lock holder) and re-enter through
+                # push_built's locked path.
+                raise _DedupRaceRetry
 
             if existing is not None:
                 surface_id = existing.surface_id

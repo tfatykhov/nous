@@ -454,6 +454,35 @@ async def test_dedup_replacement_updates_the_origin(service, db) -> None:
     assert (await _surface_row(db, surface_id)).origin == "agent"
 
 
+async def test_late_dedup_match_reenters_the_locked_path(service, db) -> None:
+    """Codex round 7: when the preliminary lookup misses but the inner one
+    hits (two first-time producers raced), the replacement must NOT commit
+    on the unlocked branch. Exercised by calling _push_transaction directly
+    with _locked=False against an existing live dedup match."""
+    from datetime import UTC, datetime
+
+    first = await service.push_built(_micro_app(title="winner"), dedup_key="app:race7")
+    old_nonce = (await _surface_row(db, first)).nonce
+
+    loser = _micro_app(title="loser-turned-replacement")
+    replaced = await service._push_transaction(
+        loser,
+        dedup_key="app:race7",
+        session_id=None,
+        notify=False,
+        _dedup_retry=False,
+        agent_id=service._settings.agent_id,
+        now=datetime.now(UTC),
+        expires_at=None,
+        _locked=False,
+    )
+
+    assert replaced == first, "re-entered as a replacement, not a duplicate insert"
+    row = await _surface_row(db, first)
+    assert row.title == "loser-turned-replacement"
+    assert row.nonce != old_nonce, "the locked replacement path rotated the nonce"
+
+
 async def test_dedup_update_does_not_evict(service, db) -> None:
     first = await service.push_built(_micro_app(title="first"), dedup_key="app:one")
     second = await service.push_built(_micro_app(title="second"), dedup_key="app:two")
