@@ -56,9 +56,14 @@ export class SurfaceStore {
   private markSeen(seq: number): boolean {
     if (seq <= this.seenFloor || this.seen.has(seq)) return false;
     this.seen.add(seq);
-    if (this.seen.size > 4096) {
-      this.seenFloor = Math.max(this.seenFloor, Math.min(...this.seen));
-      this.seen = new Set([...this.seen].filter((s) => s > this.seenFloor));
+    // Advance the floor ONLY through the contiguous prefix (codex P2):
+    // jumping to min(seen) could hop a still-uncommitted lower seq and then
+    // reject it forever. A persistent hole just lets the set grow — a few
+    // thousand integers is nothing in a browser, and every stream error
+    // re-hydrates anyway.
+    while (this.seen.has(this.seenFloor + 1)) {
+      this.seenFloor += 1;
+      this.seen.delete(this.seenFloor);
     }
     return true;
   }

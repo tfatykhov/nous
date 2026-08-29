@@ -44,12 +44,21 @@ def _frame(seq: int | None, event: str, data: dict) -> str:
 
 
 class _Delivered:
-    """Bounded membership set of delivered seqs (out-of-order safe)."""
+    """Bounded membership set of delivered seqs (out-of-order safe).
+
+    Compaction advances the floor ONLY through the contiguous prefix (codex
+    P2): jumping the floor to min(seen) could hop over a still-uncommitted
+    lower seq, and `seq <= floor` would then reject it forever — the exact
+    permanent-loss the membership design exists to prevent. If a hole keeps
+    the set above the hard cap, ``overflowed`` flips and the stream resyncs
+    instead of guessing.
+    """
 
     def __init__(self, floor: int) -> None:
         # Everything at or below `floor` counts as delivered (the client
         # resumed from there).
         self.floor = floor
+        self.overflowed = False
         self._seen: set[int] = set()
 
     def mark(self, seq: int) -> bool:
@@ -57,11 +66,11 @@ class _Delivered:
         if seq <= self.floor or seq in self._seen:
             return False
         self._seen.add(seq)
+        while (self.floor + 1) in self._seen:
+            self.floor += 1
+            self._seen.discard(self.floor)
         if len(self._seen) > _SEEN_MAX:
-            # Compact: raise the floor to the lowest contiguous run.
-            low = min(self._seen)
-            self.floor = max(self.floor, low)
-            self._seen = {s for s in self._seen if s > self.floor}
+            self.overflowed = True
         return True
 
 
@@ -90,6 +99,9 @@ async def stream_events(
                 yield _frame(seq, "a2ui", envelope)
                 last_byte = time.monotonic()
             poll_since = max(poll_since, seq)
+        if delivered.overflowed:
+            yield _frame(None, "control", {"type": "resync"})
+            return
 
         while True:
             if pending is None:
@@ -106,6 +118,9 @@ async def stream_events(
                 if delivered.mark(seq):
                     yield _frame(seq, "a2ui", envelope)
                     last_byte = time.monotonic()
+                if delivered.overflowed:
+                    yield _frame(None, "control", {"type": "resync"})
+                    return
                 continue
 
             # Timeout: cross-process catch-up, then keepalive if quiet.
@@ -118,6 +133,9 @@ async def stream_events(
                     yield _frame(seq, "a2ui", envelope)
                     last_byte = time.monotonic()
                 poll_since = max(poll_since, seq)
+            if delivered.overflowed:
+                yield _frame(None, "control", {"type": "resync"})
+                return
             if time.monotonic() - last_byte >= ping_interval:
                 yield ": keepalive\n\n"
                 last_byte = time.monotonic()

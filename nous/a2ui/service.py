@@ -24,6 +24,8 @@ import asyncio
 import logging
 import secrets
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -43,6 +45,16 @@ _LAG_WINDOW_SECONDS = 2
 _SUBSCRIBER_QUEUE_SIZE = 256
 
 
+class _LockEntry:
+    """A per-surface lock plus the count of tasks holding or awaiting it."""
+
+    __slots__ = ("lock", "refs")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.refs = 0
+
+
 class SurfaceService:
     def __init__(self, database: Database, settings: Any, heart: Any = None):
         self._db = database
@@ -50,6 +62,29 @@ class SurfaceService:
         self._heart = heart
         self._subscribers: set[asyncio.Queue] = set()
         self._pending_tasks: set[asyncio.Task] = set()
+        # Per-surface serialization shared by the ActionRouter AND the expiry
+        # sweep (codex P1): an action could pass its live check and still be
+        # mid-handler when the sweep claimed the surface, recording both a
+        # completed action and contradictory no_objection evidence. One lock
+        # registry means expiry waits for in-flight actions and vice versa.
+        self._surface_locks: dict[str, _LockEntry] = {}
+
+    @asynccontextmanager
+    async def surface_lock(self, surface_id: str) -> AsyncIterator[None]:
+        """Serialize mutations of one surface (refcounted; see ActionRouter).
+
+        The refcount mutations sit on either side of the await with no await
+        between check and delete, so they are atomic under the event loop.
+        """
+        entry = self._surface_locks.setdefault(surface_id, _LockEntry())
+        entry.refs += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            entry.refs -= 1
+            if entry.refs == 0 and self._surface_locks.get(surface_id) is entry:
+                self._surface_locks.pop(surface_id, None)
 
     # ------------------------------------------------------------------ push
 
@@ -331,49 +366,67 @@ class SurfaceService:
         now = datetime.now(UTC)
         agent_id = self._settings.agent_id
         async with self._db.session() as session:
-            # Atomic claim (codex P1): only rows this UPDATE flips from live
-            # get a no_objection row, in the SAME transaction — so a user
-            # action that resolved the surface first can never coexist with
-            # a permanent silence claim, and vice versa.
-            claimed = (
+            overdue_ids = (
                 (
                     await session.execute(
-                        update(A2uiSurface)
-                        .where(
+                        select(A2uiSurface.surface_id).where(
                             A2uiSurface.agent_id == agent_id,
                             A2uiSurface.status == "live",
                             A2uiSurface.expires_at.is_not(None),
                             A2uiSurface.expires_at <= now,
                         )
-                        .values(status="expired", resolved_at=now)
-                        .returning(A2uiSurface.surface_id)
                     )
                 )
                 .scalars()
                 .all()
             )
-            teardowns = []
-            for surface_id in claimed:
-                session.add(
-                    A2uiAction(
-                        agent_id=agent_id,
-                        surface_id=surface_id,
-                        action_name="no_objection",
-                        actor="system:expiry",
-                        context={"expired_at": now.isoformat()},
-                        status="completed",
-                        completed_at=now,
-                    )
-                )
-                envelope = {"version": "v1.0", "deleteSurface": {"surfaceId": surface_id}}
-                row = A2uiOutbox(agent_id=agent_id, surface_id=surface_id, envelope=envelope)
-                session.add(row)
-                teardowns.append((row, envelope))
-            await session.commit()
-            expired = len(claimed)
 
-        for row, envelope in teardowns:
-            self._broadcast(row.seq, envelope)
+        expired = 0
+        for surface_id in overdue_ids:
+            # Per-surface lock + atomic claim (codex P1, two layers): the
+            # lock serializes with an in-flight action's whole dispatch, so
+            # expiry cannot record no_objection while a handler is mid-run;
+            # the UPDATE..WHERE live claim keeps the evidence write in the
+            # same transaction as the flip, so a completed action and the
+            # silence claim can never both land.
+            async with self.surface_lock(surface_id):
+                async with self._db.session() as session:
+                    claimed = (
+                        (
+                            await session.execute(
+                                update(A2uiSurface)
+                                .where(
+                                    A2uiSurface.surface_id == surface_id,
+                                    A2uiSurface.agent_id == agent_id,
+                                    A2uiSurface.status == "live",
+                                )
+                                .values(status="expired", resolved_at=now)
+                                .returning(A2uiSurface.surface_id)
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                    if not claimed:
+                        continue
+                    session.add(
+                        A2uiAction(
+                            agent_id=agent_id,
+                            surface_id=surface_id,
+                            action_name="no_objection",
+                            actor="system:expiry",
+                            context={"expired_at": now.isoformat()},
+                            status="completed",
+                            completed_at=now,
+                        )
+                    )
+                    envelope = {"version": "v1.0", "deleteSurface": {"surfaceId": surface_id}}
+                    row = A2uiOutbox(agent_id=agent_id, surface_id=surface_id, envelope=envelope)
+                    session.add(row)
+                    await session.commit()
+                    seq = row.seq
+                self._broadcast(seq, envelope)
+                expired += 1
 
         async with self._db.session() as session:
             await session.execute(
@@ -662,16 +715,28 @@ async def check_censors_chunked(heart: Any, text_in: str, *, where: str) -> str 
     return None
 
 
-def _flatten_strings(node: Any, depth: int = 0) -> str:
-    if depth > 4:
-        return ""
-    if isinstance(node, str):
-        return node
-    if isinstance(node, dict):
-        return " ".join(_flatten_strings(v, depth + 1) for v in node.values())
-    if isinstance(node, list):
-        return " ".join(_flatten_strings(v, depth + 1) for v in node)
-    return ""
+def _flatten_strings(node: Any) -> str:
+    """Collect every string in a JSON tree, bounded by SIZE, not depth.
+
+    A depth cutoff silently dropped prose nested more than a few containers
+    deep — bindable, renderable, and invisible to the censor gate (codex
+    P1). Iterative walk, so arbitrarily deep valid JSON cannot recurse out;
+    collection stops once the censor cap is exceeded, and the chunked
+    checker then FAILS CLOSED on oversized content rather than skipping it.
+    """
+    parts: list[str] = []
+    total = 0
+    stack: list[Any] = [node]
+    while stack and total <= _CENSOR_MAX_CHARS:
+        current = stack.pop()
+        if isinstance(current, str):
+            parts.append(current)
+            total += len(current) + 1
+        elif isinstance(current, dict):
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+    return " ".join(parts)
 
 
 def _pointer_set(model: dict, pointer: str, value: Any) -> None:

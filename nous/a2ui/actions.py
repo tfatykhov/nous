@@ -56,16 +56,6 @@ class _HandlerMeta:
     irreversible: bool
 
 
-class _LockEntry:
-    """A per-surface lock plus the count of tasks holding or awaiting it."""
-
-    __slots__ = ("lock", "refs")
-
-    def __init__(self) -> None:
-        self.lock = asyncio.Lock()
-        self.refs = 0
-
-
 class ActionRouter:
     def __init__(
         self,
@@ -85,12 +75,6 @@ class ActionRouter:
         self._handlers: dict[str, _HandlerMeta] = {}
         self._recent: list[float] = []
         self._rate_lock = asyncio.Lock()
-        # Per-surface serialization (codex P2): two overlapping POSTs for the
-        # same terminal action would both read the surface as live and both
-        # dispatch. In-process lock + a status re-read inside it closes the
-        # race for this single-process server; entries are refcounted so the
-        # last user removes them (see handle()).
-        self._surface_locks: dict[str, _LockEntry] = {}
         _register_default_handlers(self)
 
     def register(self, name: str, fn: Handler, *, mutating: bool, irreversible: bool = False) -> None:
@@ -124,21 +108,13 @@ class ActionRouter:
         if surface_id in surfaces_meta:
             data_model = surfaces_meta[surface_id]
 
-        # Refcounted lock entry (codex P2 on the previous cleanup): pruning on
-        # `not lock.locked()` raced the released-but-not-yet-reacquired window
-        # between waiters, letting a third request mint a fresh lock and run
-        # concurrently with the second. The refcount mutations sit on either
-        # side of the await with no await between check and delete, so they
-        # are atomic under the event loop.
-        entry = self._surface_locks.setdefault(surface_id, _LockEntry())
-        entry.refs += 1
-        try:
-            async with entry.lock:
-                return await self._handle_locked(surface_id, name, context, data_model, action, actor)
-        finally:
-            entry.refs -= 1
-            if entry.refs == 0 and self._surface_locks.get(surface_id) is entry:
-                self._surface_locks.pop(surface_id, None)
+        # Per-surface serialization via the SERVICE's shared lock registry
+        # (codex P1): the expiry sweep takes the same lock, so expiry cannot
+        # record no_objection while an action handler is mid-dispatch, and
+        # two overlapping terminal actions still dispatch exactly once (the
+        # status re-read inside the lock turns the loser into a 404).
+        async with self._service.surface_lock(surface_id):
+            return await self._handle_locked(surface_id, name, context, data_model, action, actor)
 
     async def _handle_locked(
         self,
