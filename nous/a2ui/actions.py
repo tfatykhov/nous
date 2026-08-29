@@ -145,6 +145,9 @@ class ActionRouter:
         if fn is None:
             return 404, _fn_err(function_call_id, "UNKNOWN_FUNCTION", f"no agent function {name!r}")
 
+        # No per-surface lock here, unlike handle(): functions are read-only
+        # by contract, so there is no terminal transition to serialize and a
+        # concurrent expiry/action changes nothing a read can corrupt.
         ctx = ActionContext(surface=surface, name=name, context=args, data_model=None, services=self)
         try:
             value = await fn(ctx)

@@ -6,11 +6,11 @@ invalid A2UI raises in its unit test, not in production. Registered in
 """
 
 from .action_review import action_review
+from .approval import approval_gate
 from .dag_monitor import dag_monitor
 from .decision_sweep import decision_sweep
-from .memory_graph import memory_graph
-from .approval import approval_gate
 from .heartbeat_findings import heartbeat_findings
+from .memory_graph import memory_graph
 
 TEMPLATES = {
     "approval_gate": approval_gate,

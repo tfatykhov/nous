@@ -738,8 +738,8 @@ class _FakeDagStore:
 
 @pytest.fixture
 def dispatcher_env(brain: FakeBrain):
-    from nous.api.tools import ToolDispatcher
     from nous.a2ui.tools import register_a2ui_tools
+    from nous.api.tools import ToolDispatcher
 
     dispatcher = ToolDispatcher()
     service = _CapturingService()
@@ -788,8 +788,8 @@ async def test_push_surface_dag_monitor_requires_a_uuid(dispatcher_env) -> None:
 
 
 async def test_push_surface_decision_sweep_without_brain_errors() -> None:
-    from nous.api.tools import ToolDispatcher
     from nous.a2ui.tools import register_a2ui_tools
+    from nous.api.tools import ToolDispatcher
 
     dispatcher = ToolDispatcher()
     service = _CapturingService()
