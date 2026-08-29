@@ -137,14 +137,12 @@ class SurfaceService:
         now = datetime.now(UTC)
         expires_at = (now + built.expires_in) if built.expires_in else None
 
-        if built.kind == "micro_app":
-            await self._evict_over_cap(dedup_key)
-
         # A dedup REPLACEMENT must serialize with in-flight actions on the
         # existing surface (codex P1): without the lock, an action validated
         # against the old components could patch or resolve the freshly
         # committed replacement. Resolve the target id first, then re-run the
         # lookup INSIDE the same per-surface lock the ActionRouter holds.
+        surface_id: str | None = None
         if dedup_key:
             async with self._db.session() as session:
                 existing_id = (
@@ -158,7 +156,7 @@ class SurfaceService:
                 ).scalar_one_or_none()
             if existing_id is not None:
                 async with self.surface_lock(existing_id):
-                    return await self._push_transaction(
+                    surface_id = await self._push_transaction(
                         built,
                         dedup_key=dedup_key,
                         session_id=session_id,
@@ -170,17 +168,32 @@ class SurfaceService:
                         _race_retries=_race_retries,
                         _locked_surface_id=existing_id,
                     )
-        return await self._push_transaction(
-            built,
-            dedup_key=dedup_key,
-            session_id=session_id,
-            notify=notify,
-            _dedup_retry=_dedup_retry,
-            agent_id=agent_id,
-            now=now,
-            expires_at=expires_at,
-            _race_retries=_race_retries,
-        )
+        if surface_id is None:
+            surface_id = await self._push_transaction(
+                built,
+                dedup_key=dedup_key,
+                session_id=session_id,
+                notify=notify,
+                _dedup_retry=_dedup_retry,
+                agent_id=agent_id,
+                now=now,
+                expires_at=expires_at,
+                _race_retries=_race_retries,
+            )
+        if built.kind == "micro_app":
+            # Cap enforcement is POST-insert reconciliation (codex round 9):
+            # a pre-insert check is a TOCTOU — two concurrent pushes both
+            # count against the same snapshot, both admit, and the cap is
+            # exceeded with no correction until the next push. Reconciling
+            # after the row exists is self-correcting under concurrency:
+            # every pusher evicts down to the cap by the same deterministic
+            # LRU ordering, eviction is idempotent under the per-victim
+            # lock, and the just-pushed app carries the newest updated_at
+            # so the ordering protects it by construction. Runs OUTSIDE the
+            # dedup lock: victims take their own locks, and nesting them
+            # under another surface's lock is an ordering hazard.
+            await self._reconcile_cap()
+        return surface_id
 
     async def _push_transaction(
         self,
@@ -531,28 +544,16 @@ class SurfaceService:
             seq = row.seq
         self._broadcast(seq, envelope)
 
-    async def _evict_over_cap(self, incoming_dedup_key: str | None) -> None:
-        """F092.1 §6.3: concurrency cap, not a TTL. Before a NEW micro-app
-        lands, the least-recently-touched live ones are closed until the
-        cap holds. Touch = updated_at (refresh/refine/patch bump it) — the
-        server never learns about views, so recency-of-use is the honest
-        proxy. A dedup update-in-place doesn't grow the count and skips
-        eviction."""
+    async def _reconcile_cap(self) -> None:
+        """F092.1 §6.3: concurrency cap, not a TTL — enforced by POST-push
+        reconciliation down to the cap. Touch = updated_at (refresh/refine/
+        patch bump it) — the server never learns about views, so recency-of-
+        use is the honest proxy, and the just-pushed app is the newest so
+        it is never its own victim. Dedup replacements don't grow the count
+        and reconcile to a no-op."""
         agent_id = self._settings.agent_id
         cap = self._settings.a2ui_max_live_apps
         async with self._db.session() as session:
-            if incoming_dedup_key:
-                exists = (
-                    await session.execute(
-                        select(A2uiSurface.surface_id).where(
-                            A2uiSurface.agent_id == agent_id,
-                            A2uiSurface.dedup_key == incoming_dedup_key,
-                            A2uiSurface.status == "live",
-                        )
-                    )
-                ).scalar_one_or_none()
-                if exists is not None:
-                    return
             victims = (
                 await session.execute(
                     select(A2uiSurface.surface_id, A2uiSurface.title)
@@ -562,7 +563,7 @@ class SurfaceService:
                         A2uiSurface.status == "live",
                     )
                     .order_by(A2uiSurface.updated_at.desc())
-                    .offset(cap - 1)
+                    .offset(cap)
                 )
             ).all()
         for surface_id, title in victims:

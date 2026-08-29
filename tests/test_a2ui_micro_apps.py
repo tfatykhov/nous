@@ -454,6 +454,32 @@ async def test_dedup_replacement_updates_the_origin(service, db) -> None:
     assert (await _surface_row(db, surface_id)).origin == "agent"
 
 
+async def test_concurrent_pushes_converge_to_the_cap(
+    service, db, a2ui_agent_id: str
+) -> None:
+    """Codex round 9: a pre-insert cap check was a TOCTOU — concurrent
+    pushes admitted against the same snapshot. Post-insert reconciliation
+    converges: whichever insert lands last, its reconcile sees the full
+    population and evicts down to the cap."""
+    import asyncio
+
+    await asyncio.gather(
+        *(service.push_built(_micro_app(title=f"app{i}")) for i in range(4))
+    )
+
+    async with db.session() as session:
+        live = (
+            await session.execute(
+                select(A2uiSurface).where(
+                    A2uiSurface.agent_id == a2ui_agent_id,
+                    A2uiSurface.kind == "micro_app",
+                    A2uiSurface.status == "live",
+                )
+            )
+        ).scalars().all()
+    assert len(live) == 2, "cap holds under concurrency (fixture cap = 2)"
+
+
 async def test_late_dedup_match_reenters_the_locked_path(service, db) -> None:
     """Codex round 7: when the preliminary lookup misses but the inner one
     hits (two first-time producers raced), the replacement must NOT commit
