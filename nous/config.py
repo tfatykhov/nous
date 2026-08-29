@@ -2569,6 +2569,64 @@ class Settings(BaseSettings):
             "forwarding headers."
         ),
     )
+    a2ui_compose_enabled: bool = Field(
+        default=True,
+        description=(
+            "F092.1: register the compose_surface tool (ephemeral micro-apps). "
+            "Ships ON with the same rationale as a2ui_enabled — a compose path "
+            "that lands dark demonstrates nothing, and every output is "
+            "validated + grammar-linted before it reaches a client. Kill "
+            "switch only."
+        ),
+    )
+    a2ui_compose_model: str = Field(
+        default="",
+        description=(
+            "F092.1: model for the compose_surface LLM call. Empty = fall "
+            "back to NOUS_BACKGROUND_MODEL."
+        ),
+    )
+    a2ui_compose_timeout_seconds: int = Field(
+        default=60,
+        ge=5,
+        description=(
+            "F092.1: per-round timeout on the compose LLM call. A round runs "
+            "inside a synchronous /a2ui/call or tool dispatch bounded by "
+            "NOUS_TOOL_TIMEOUT — keep (repairs+1)*this under that, or the "
+            "outer cancel swallows the real error. Timeout is terminal "
+            "(markdown fallback), never a repair round."
+        ),
+    )
+    a2ui_compose_max_per_hour: int = Field(
+        default=60,
+        ge=1,
+        description=(
+            "F092.1: hourly in-process cap on compose LLM rounds (initial "
+            "compose + repairs + every app.refine). Breach is the caller's "
+            "error (422/tool error), not a silent fallback. Mirrors the "
+            "F050 budget pattern."
+        ),
+    )
+    a2ui_app_stale_after_s: int = Field(
+        default=3600,
+        ge=60,
+        description=(
+            "F092.1: seconds after composed_at before a micro-app's freshness "
+            "stamp degrades to amber client-side. Rendering only — nothing "
+            "server-side fires on this."
+        ),
+    )
+    a2ui_max_live_apps: int = Field(
+        default=8,
+        ge=1,
+        description=(
+            "F092.1: max live micro-app surfaces. On overflow the least-"
+            "recently-touched app (updated_at — refresh/refine bump it) is "
+            "resolved with a deleteSurface and a server log line. 'Until you "
+            "close it' is honored for everything plausibly still in use; it "
+            "does not mean unbounded accumulation."
+        ),
+    )
 
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":

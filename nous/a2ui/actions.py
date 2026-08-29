@@ -14,6 +14,7 @@ or rejected action never silently no-ops.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -56,6 +57,15 @@ class _HandlerMeta:
     irreversible: bool
 
 
+@dataclass
+class _FunctionMeta:
+    fn: Callable[[ActionContext], Awaitable[Any]]
+    # F092.1: app.refine / app.refresh write surface state. Mutating
+    # functions get an audit row (they are what the evidence tier exists
+    # for); read-only functions stay unaudited as before.
+    mutating: bool = False
+
+
 class ActionRouter:
     def __init__(
         self,
@@ -66,6 +76,7 @@ class ActionRouter:
         brain: Any = None,
         heartbeat_runner: Any = None,
         dag_orchestrator: Any = None,
+        composer: Any = None,
     ):
         self._db = database
         self._settings = settings
@@ -74,25 +85,43 @@ class ActionRouter:
         self._brain = brain
         self._heartbeat = heartbeat_runner
         self._dag_orchestrator = dag_orchestrator
+        # F092.1: SurfaceComposer for app.refine (recompose) and app.refresh
+        # (source re-read). None => the micro-app functions report unavailable.
+        self._composer = composer
         self._handlers: dict[str, _HandlerMeta] = {}
         # Phase 2: agent-side functions callable by the renderer over
         # POST /a2ui/call (spec's HTTP request-response pattern — the
         # agentFunctionResponse rides back in the HTTP response, so there is
         # no functionCallId-over-SSE correlation). Same trust pipeline as
-        # actions: a read RPC is still a probe surface.
-        self._functions: dict[str, Callable[[ActionContext], Awaitable[Any]]] = {}
+        # actions: a read RPC is still a probe surface. Most functions are
+        # read-only; the F092.1 micro-app pair is mutating (see
+        # _FunctionMeta) and additionally audited + self-locked.
+        self._functions: dict[str, _FunctionMeta] = {}
         self._recent: list[float] = []
         self._rate_lock = asyncio.Lock()
         _register_default_handlers(self)
         _register_phase2_handlers(self)
         _register_default_functions(self)
+        _register_micro_app_handlers(self)
+        _register_micro_app_functions(self)
 
     def register(self, name: str, fn: Handler, *, mutating: bool, irreversible: bool = False) -> None:
         self._handlers[name] = _HandlerMeta(fn=fn, mutating=mutating, irreversible=irreversible)
 
-    def register_function(self, name: str, fn: Callable[[ActionContext], Awaitable[Any]]) -> None:
-        """Register an agent-side function for renderer RPC (read-only)."""
-        self._functions[name] = fn
+    def register_function(
+        self,
+        name: str,
+        fn: Callable[[ActionContext], Awaitable[Any]],
+        *,
+        mutating: bool = False,
+    ) -> None:
+        """Register an agent-side function for renderer RPC.
+
+        ``mutating=True`` (the F092.1 micro-app pair) makes handle_call
+        write an audit row for the call — a function that rewrites a
+        surface is exactly what the evidence tier exists for.
+        """
+        self._functions[name] = _FunctionMeta(fn=fn, mutating=mutating)
 
     # ------------------------------------------------------------- functions
 
@@ -101,10 +130,11 @@ class ActionRouter:
     ) -> tuple[int, dict]:
         """POST /a2ui/call — renderer-initiated agent function (spec pattern 1).
 
-        Returns (status, agentFunctionResponse envelope). Functions are
-        READ-ONLY by contract (mutations go through actions with their
-        audit/censor pipeline), so calls are rate-limited and gated but not
-        individually audited.
+        Returns (status, agentFunctionResponse envelope). Most functions
+        are read-only and go unaudited; the F092.1 micro-app pair
+        (app.refine / app.refresh) is registered ``mutating=True`` — those
+        calls write an audit row, censor their new content before pushing
+        it, and self-lock their surface writes.
         """
         if "application/json" not in (content_type or ""):
             return 415, _fn_err("", "INVALID_FUNCTION_CALL", "Content-Type must be application/json")
@@ -141,21 +171,46 @@ class ActionRouter:
         if not await self._rate_ok():
             return 429, _fn_err(function_call_id, "RATE_LIMITED", "too many calls; slow down")
 
-        fn = self._functions.get(name)
-        if fn is None:
+        meta = self._functions.get(name)
+        if meta is None:
             return 404, _fn_err(function_call_id, "UNKNOWN_FUNCTION", f"no agent function {name!r}")
 
-        # No per-surface lock here, unlike handle(): functions are read-only
-        # by contract, so there is no terminal transition to serialize and a
-        # concurrent expiry/action changes nothing a read can corrupt.
+        # No per-surface lock here, unlike handle(): most functions are
+        # read-only, so there is no terminal transition to serialize and a
+        # concurrent expiry/action changes nothing a read can corrupt. The
+        # two MUTATING micro-app functions (refine/refresh) take the lock
+        # THEMSELVES, scoped to their writes — locking every read RPC for
+        # two writers would be backwards. NOTE: the per-surface lock is a
+        # plain non-reentrant asyncio.Lock, so if this dispatch ever grows
+        # its own surface_lock, those functions will deadlock.
+        # NOTE: `surface` is a pre-mutation snapshot from its own (closed)
+        # session — readable throughout, but STALE after a function writes.
+        # Both micro-app functions read app_spec before writing; keep it so.
+        audit_id = None
+        if meta.mutating:
+            audit_id = await self._audit(surface, name, args, None, "dispatched", None, actor)
         ctx = ActionContext(surface=surface, name=name, context=args, data_model=None, services=self)
         try:
-            value = await fn(ctx)
+            value = await meta.fn(ctx)
         except ValueError as exc:
+            if audit_id is not None:
+                await self._audit_update(audit_id, "rejected", str(exc))
             return 422, _fn_err(function_call_id, "INVALID_FUNCTION_CALL", str(exc))
+        except KeyError:
+            # A micro-app write lost the race with app.close/eviction — the
+            # surface is gone, which the client will learn from the
+            # deleteSurface envelope; 422 (not 500) so it doesn't read as
+            # a server fault.
+            if audit_id is not None:
+                await self._audit_update(audit_id, "rejected", "surface no longer live")
+            return 422, _fn_err(function_call_id, "INVALID_FUNCTION_CALL", "surface no longer live")
         except Exception:
             logger.exception("F092 agent function %s failed", name)
+            if audit_id is not None:
+                await self._audit_update(audit_id, "rejected", f"function {name!r} failed")
             return 500, _fn_err(function_call_id, "EXECUTION_FAILED", f"function {name!r} failed")
+        if audit_id is not None:
+            await self._audit_update(audit_id, "completed", None)
         return 200, {
             "version": "v1.0",
             "agentFunctionResponse": {"functionCallId": function_call_id, "value": value},
@@ -676,6 +731,146 @@ def _register_default_functions(router: ActionRouter) -> None:
 
     router.register_function("expandGraphNode", expand_graph_node)
     router.register_function("loadDecisionDetail", load_decision_detail)
+
+
+def _register_micro_app_handlers(router: ActionRouter) -> None:
+    """F092.1: app.close — the ONLY action-router verb a micro-app holds.
+
+    mutating=False (same class as approval.defer): closing an ephemeral
+    read-only view mutates nothing that needs a censor round-trip, but the
+    lifecycle event still writes its ordinary audit row.
+    """
+
+    async def app_close(ctx: ActionContext) -> ActionResult:
+        return ActionResult(message="app closed", resolve_surface=True)
+
+    router.register("app.close", app_close, mutating=False)
+
+
+def _register_micro_app_functions(router: ActionRouter) -> None:
+    """F092.1 navigable-readonly class: refine + refresh over /a2ui/call.
+
+    Both validate against the surface's server-stored app_spec — the same
+    authority pattern as the allowlist. A refine button is NOT a free-form
+    prompt with a nice label; the submitted id must be one this surface
+    declared at compose time.
+    """
+
+    async def _assert_same_epoch(surface_id: str, snapshot: Any) -> None:
+        """Re-read under the lock and compare the mutation epoch (codex
+        rounds 5+6).
+
+        Both functions do slow work (source fetches, an LLM recompose)
+        against a PRE-lock snapshot, so anything that mutated the surface
+        in that window makes the pending write stale. The nonce catches
+        dedup replacement (it rotates there), but refine/refresh/patches do
+        NOT rotate it — two overlapping calls would both pass a nonce-only
+        check and the slower one would overwrite the newer work. The
+        COMPLETE revision is ``updated_at``: every mutation path (dedup
+        replacement, update_components, update_data) bumps it, so equality
+        with the snapshot proves nothing intervened.
+        """
+        async with router._db.session() as session:
+            row = (
+                await session.execute(
+                    select(A2uiSurface).where(
+                        A2uiSurface.surface_id == surface_id,
+                        A2uiSurface.agent_id == router._settings.agent_id,
+                    )
+                )
+            ).scalar_one_or_none()
+        if row is None or row.status != "live":
+            raise KeyError(surface_id)
+        if row.nonce != snapshot.nonce or row.updated_at != snapshot.updated_at:
+            raise ValueError("the app changed while this call was in flight — try again")
+
+    async def app_refresh(ctx: ActionContext) -> Any:
+        if router._composer is None:
+            raise ValueError("micro-app composer unavailable")
+        spec = ctx.surface.app_spec or {}
+        # Re-runs the DECLARED sources only — no LLM. With model-supplied
+        # data, "refresh" would replay whatever the model said last time;
+        # with sources it is a real re-read (F092.1 §3.6).
+        patches = await router._composer.refresh_data(spec)
+        # Censor the fresh content BEFORE it reaches a client (rev-arch P1:
+        # refreshed source data is bulk memory content — facts, findings,
+        # episode summaries — exactly the class the push gate was written
+        # for, and update_data has no gate of its own).
+        reason = await router._service.censor_prose(
+            json.dumps(patches, default=str), where="refresh"
+        )
+        if reason is not None:
+            raise ValueError(f"refresh blocked by censor: {reason}")
+        # handle_call is lockless because most functions are read-only —
+        # these two micro-app functions are the exception (they write
+        # surface presentation state), so they take the per-surface lock
+        # THEMSELVES to serialize with app.close and LRU eviction.
+        async with router._service.surface_lock(ctx.surface.surface_id):
+            await _assert_same_epoch(ctx.surface.surface_id, ctx.surface)
+            for key, value in patches.items():
+                await router._service.update_data(ctx.surface.surface_id, f"/{key}", value)
+        return {"refreshed": sorted(patches)}
+
+    async def app_refine(ctx: ActionContext) -> Any:
+        if router._composer is None:
+            raise ValueError("micro-app composer unavailable")
+        spec = ctx.surface.app_spec or {}
+        options = {
+            str(o.get("id")): o for o in spec.get("refine_options") or [] if isinstance(o, dict)
+        }
+        option_id = str(ctx.context.get("id") or "")
+        if option_id not in options:
+            raise ValueError(f"refine option {option_id!r} is not offered by this surface")
+        option = options[option_id]
+        intent = str(spec.get("intent") or ctx.surface.title)
+        refined_intent = (
+            f"{intent}\n\nRefine request: {option.get('label')}"
+            + (f"\nRefine params: {json.dumps(option.get('params'))}" if option.get("params") else "")
+        )
+        composed = await router._composer.compose(
+            refined_intent,
+            archetype=str(spec.get("archetype") or "") or None,
+            data_sources=spec.get("data_sources") or [],
+            origin=ctx.surface.origin,
+            priority=ctx.surface.priority,
+        )
+        # Censor the recomposed surface exactly like the initial push
+        # (rev-arch P1: update_components/update_data carry no gate, and an
+        # app that is censored on turn 1 must not be uncensored on every
+        # refine after).
+        try:
+            await router._service.censor_built(composed.built, where="refine")
+        except PermissionError as exc:
+            raise ValueError(str(exc)) from exc
+        # Same surface_id, delivered as updateComponents + whole-model
+        # updateDataModel — never a dedup re-push, which tears down and
+        # recreates (repaint, feed reorder, nonce race; rev-ui #3). The
+        # composer already ran schema + grammar validation on this output.
+        # Deliberately NO nonce rotation (updateComponents path): the client
+        # only learns a new nonce from createSurface metadata. Acceptable at
+        # allowed_actions ⊆ {app.close} — there is no stale click that could
+        # do anything but close.
+        # The per-surface lock keeps the two-envelope delivery atomic
+        # against a concurrent app.close: without it, close could land
+        # between them and strand components without their data model.
+        async with router._service.surface_lock(ctx.surface.surface_id):
+            await _assert_same_epoch(ctx.surface.surface_id, ctx.surface)
+            await router._service.update_components(
+                ctx.surface.surface_id,
+                composed.built.components,
+                app_spec=composed.app_spec,
+            )
+            await router._service.update_data(
+                ctx.surface.surface_id, None, composed.built.data_model
+            )
+        return {
+            "refined": option_id,
+            "fallback": composed.fallback,
+            "title": composed.built.title,
+        }
+
+    router.register_function("app.refresh", app_refresh, mutating=True)
+    router.register_function("app.refine", app_refine, mutating=True)
 
 
 def _submitted_model_error(authoritative: dict, submitted: Any, path: str = "") -> str | None:

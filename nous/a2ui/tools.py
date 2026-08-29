@@ -78,17 +78,112 @@ _PUSH_SURFACE_SCHEMA = {
 }
 
 
+_COMPOSE_SURFACE_SCHEMA = {
+    "type": "object",
+    "description": (
+        "Compose an EPHEMERAL MICRO-APP for the companion (F092.1): a "
+        "read-only, navigable UI built fresh for one intent — a vacation "
+        "status app, a sailing briefing, a project ledger. It lives until "
+        "the user closes it and is rebuilt (not restored) next time. Use "
+        "push_surface's templates for recurring shapes; compose for "
+        "genuinely ad-hoc intents. Data comes from registered server-side "
+        "sources; anything you can't source is stamped model-supplied and "
+        "rendered amber."
+    ),
+    "properties": {
+        "intent": {
+            "type": "string",
+            "description": (
+                "What the app is FOR, in one or two sentences — the composer "
+                "designs the whole app from this."
+            ),
+        },
+        "archetype": {
+            "type": "string",
+            "enum": ["status", "briefing", "ledger"],
+            "description": (
+                "Optional layout archetype: status (where does X stand), "
+                "briefing (what's happening in window W), ledger (list of "
+                "things with attributes). Omit to let the composer pick."
+            ),
+        },
+        "data_sources": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Data-model key the app binds."},
+                    "source": {
+                        "type": "string",
+                        "description": (
+                            "Registered fetcher: unreviewed_decisions, dag, "
+                            "heartbeat_findings, facts_search, recent_episodes, "
+                            "subtasks, schedules."
+                        ),
+                    },
+                    "params": {"type": "object", "description": "Fetcher params (e.g. {q}, {dag_id})."},
+                },
+                "required": ["key", "source"],
+            },
+            "description": (
+                "Server-side data the app should show. The server resolves "
+                "these and owns the values; app.refresh re-runs them."
+            ),
+        },
+        "dedup_key": {
+            "type": "string",
+            "description": (
+                "Stable key for update-in-place. Defaults to app:<intent-slug>. "
+                "A recurring producer (Friday sailing app) MUST keep it stable "
+                "so the app updates instead of stacking."
+            ),
+        },
+        "priority": {
+            "type": "integer",
+            "enum": [0, 1],
+            "description": (
+                "0 = ambient (default, no ping). 1 only when the app carries a "
+                "live deadline. Micro-apps are never blocking (2 is rejected)."
+            ),
+        },
+        "notify": {
+            "type": "boolean",
+            "description": "Override the Telegram ping (default: priority >= 1 pings).",
+        },
+    },
+    "required": ["intent"],
+}
+
+
+def _intent_slug(intent: str) -> str:
+    """Readable slug + a digest of the FULL intent (codex P2): slugging
+    alone maps 'C++ status' and 'C status' — or any two long intents
+    sharing a 40-char prefix — onto one dedup key, and push_built would
+    then replace an unrelated live app. Same intent → same key (stable
+    update-in-place); different intent → different key, guaranteed."""
+    import hashlib
+
+    slug = "".join(c if c.isalnum() else "-" for c in intent.lower())
+    slug = "-".join(part for part in slug.split("-") if part)
+    digest = hashlib.sha256(intent.encode()).hexdigest()[:8]
+    return f"{slug[:40] or 'app'}-{digest}"
+
+
 def register_a2ui_tools(
     dispatcher: ToolDispatcher,
     surface_service: Any,
     brain: Any = None,
     dag_store: Any = None,
+    composer: Any = None,
 ) -> None:
     """Register the push_surface tool against a live SurfaceService.
 
     ``brain`` and ``dag_store`` let self-sourcing templates fetch their own
     data (decision_sweep from get_unreviewed, dag_monitor from the store),
-    so the model can push them with minimal params.
+    so the model can push them with minimal params. ``composer`` (a
+    SurfaceComposer) additionally registers compose_surface — the F092.1
+    ephemeral micro-app path; None (component missing or
+    NOUS_A2UI_COMPOSE_ENABLED=false) leaves it unregistered.
     """
 
     async def push_surface(**kwargs) -> dict:
@@ -116,8 +211,12 @@ def register_a2ui_tools(
             if brain is None:
                 return _tool_error("decision_sweep needs the brain wired to self-source")
             try:
+                # Bound pushed into SQL (same class as codex round 3 on the
+                # sources registry): a Python slice after the fetch still
+                # materializes the whole age window.
                 unreviewed = await brain.get_unreviewed(
-                    max_age_days=int(params.get("max_age_days", 30))
+                    max_age_days=int(params.get("max_age_days", 30)),
+                    limit=max(1, min(int(params.get("max_decisions", 15)), 50)),
                 )
             except Exception as exc:
                 return _tool_error(f"Could not fetch unreviewed decisions: {exc}")
@@ -129,7 +228,7 @@ def register_a2ui_tools(
                     "stakes": d.stakes,
                     "category": d.category,
                 }
-                for d in unreviewed[: int(params.get("max_decisions", 15))]
+                for d in unreviewed
             ]
             dedup_key = dedup_key or "sweep:decisions"
         if template == "dag_monitor":
@@ -205,3 +304,65 @@ def register_a2ui_tools(
         }
 
     dispatcher.register("push_surface", push_surface, _PUSH_SURFACE_SCHEMA)
+
+    if composer is None:
+        return
+
+    async def compose_surface(**kwargs) -> dict:
+        intent = str(kwargs.get("intent") or "").strip()
+        if not intent:
+            return _tool_error("compose_surface requires an intent")
+        priority = int(kwargs.get("priority") or 0)
+        if priority > 1:
+            return _tool_error("micro-apps are never blocking: priority must be 0 or 1")
+        # Origin is SERVER-derived, never caller-supplied (codex round 3):
+        # a heartbeat/schedule turn dispatches with _is_background=True, and
+        # its apps must persist as origin="agent" or the push path and the
+        # Phase 5 origin-based measurement cannot distinguish push from pull.
+        origin = "agent" if kwargs.get("_is_background") else "chat"
+        try:
+            composed = await composer.compose(
+                intent,
+                archetype=kwargs.get("archetype"),
+                data_sources=kwargs.get("data_sources") or [],
+                origin=origin,
+                priority=priority,
+            )
+        except Exception as exc:
+            # UnknownSourceError and fetcher failures land here: the DECLARED
+            # sources are the caller's input, so the caller gets the error.
+            return _tool_error(f"compose failed: {exc}")
+        dedup_key = kwargs.get("dedup_key") or f"app:{_intent_slug(intent)}"
+        try:
+            surface_id = await surface_service.push_built(
+                composed.built,
+                dedup_key=dedup_key,
+                session_id=kwargs.get("_session_id"),
+                notify=kwargs.get("notify"),
+            )
+        except PermissionError as exc:
+            return _tool_error(f"Surface blocked: {exc}")
+        except Exception as exc:
+            logger.exception("compose_surface push failed")
+            return _tool_error(f"Failed to push composed app: {exc}")
+        return {
+            "is_error": False,
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "surface_id": surface_id,
+                            "url": f"/companion#/s/{surface_id}",
+                            "dedup_key": dedup_key,
+                            "archetype": composed.app_spec.get("archetype"),
+                            "fallback": composed.fallback,
+                            "repairs": composed.repairs,
+                            "model_supplied_keys": sorted(composed.app_spec.get("provenance") or {}),
+                        }
+                    ),
+                }
+            ],
+        }
+
+    dispatcher.register("compose_surface", compose_surface, _COMPOSE_SURFACE_SCHEMA)

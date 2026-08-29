@@ -31,13 +31,21 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from nous.storage.database import Database
 from nous.storage.models import A2uiAction, A2uiOutbox, A2uiSurface
 
-from .dsl import BuiltSurface
+from .dsl import BuiltSurface, SurfaceValidationError
+from .grammar import lint_micro_app
+
+
+class _DedupRaceRetry(Exception):
+    """Internal: a dedup match surfaced on the UNLOCKED push branch (two
+    first-time producers raced). Raised out of the DB session so the
+    connection is released, then push_built re-enters via the locked path
+    (codex round 7)."""
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +104,7 @@ class SurfaceService:
         session_id: str | None = None,
         notify: bool | None = None,
         _dedup_retry: bool = False,
+        _race_retries: int = 0,
     ) -> str:
         """Persist a built surface and broadcast it. Returns the surface_id.
 
@@ -107,6 +116,21 @@ class SurfaceService:
         loser's insert raises and retries once down the update path.
         """
         built.validate()
+        if built.kind == "micro_app":
+            # F092.1 fail-closed at creation, deliberately a fixed subset
+            # check rather than a handler-metadata predicate: the action
+            # registry grew 8 → 11 verbs in one PR, and a subset against
+            # {"app.close"} cannot drift with it.
+            forbidden = set(built.allowed_actions) - {"app.close"}
+            if forbidden:
+                raise ValueError(
+                    f"micro-app surfaces may only offer app.close, got {sorted(forbidden)}"
+                )
+            if built.priority > 1:
+                raise ValueError("micro-apps are never blocking: priority must be 0 or 1")
+            lint = lint_micro_app(built.components)
+            if lint:
+                raise SurfaceValidationError(lint)
         await self._censor_gate(built)
 
         agent_id = self._settings.agent_id
@@ -118,6 +142,7 @@ class SurfaceService:
         # against the old components could patch or resolve the freshly
         # committed replacement. Resolve the target id first, then re-run the
         # lookup INSIDE the same per-surface lock the ActionRouter holds.
+        surface_id: str | None = None
         if dedup_key:
             async with self._db.session() as session:
                 existing_id = (
@@ -131,7 +156,7 @@ class SurfaceService:
                 ).scalar_one_or_none()
             if existing_id is not None:
                 async with self.surface_lock(existing_id):
-                    return await self._push_transaction(
+                    surface_id = await self._push_transaction(
                         built,
                         dedup_key=dedup_key,
                         session_id=session_id,
@@ -140,17 +165,35 @@ class SurfaceService:
                         agent_id=agent_id,
                         now=now,
                         expires_at=expires_at,
+                        _race_retries=_race_retries,
+                        _locked_surface_id=existing_id,
                     )
-        return await self._push_transaction(
-            built,
-            dedup_key=dedup_key,
-            session_id=session_id,
-            notify=notify,
-            _dedup_retry=_dedup_retry,
-            agent_id=agent_id,
-            now=now,
-            expires_at=expires_at,
-        )
+        if surface_id is None:
+            surface_id = await self._push_transaction(
+                built,
+                dedup_key=dedup_key,
+                session_id=session_id,
+                notify=notify,
+                _dedup_retry=_dedup_retry,
+                agent_id=agent_id,
+                now=now,
+                expires_at=expires_at,
+                _race_retries=_race_retries,
+            )
+        if built.kind == "micro_app":
+            # Cap enforcement is POST-insert reconciliation (codex round 9):
+            # a pre-insert check is a TOCTOU — two concurrent pushes both
+            # count against the same snapshot, both admit, and the cap is
+            # exceeded with no correction until the next push. Reconciling
+            # after the row exists is self-correcting under concurrency:
+            # every pusher evicts down to the cap by the same deterministic
+            # LRU ordering, eviction is idempotent under the per-victim
+            # lock, and the just-pushed app carries the newest updated_at
+            # so the ordering protects it by construction. Runs OUTSIDE the
+            # dedup lock: victims take their own locks, and nesting them
+            # under another surface's lock is an ordering hazard.
+            await self._reconcile_cap()
+        return surface_id
 
     async def _push_transaction(
         self,
@@ -163,6 +206,52 @@ class SurfaceService:
         agent_id: str,
         now: datetime,
         expires_at: datetime | None,
+        _race_retries: int = 0,
+        _locked_surface_id: str | None = None,
+    ) -> str:
+        try:
+            return await self._push_transaction_inner(
+                built,
+                dedup_key=dedup_key,
+                session_id=session_id,
+                notify=notify,
+                _dedup_retry=_dedup_retry,
+                agent_id=agent_id,
+                now=now,
+                expires_at=expires_at,
+                _locked_surface_id=_locked_surface_id,
+            )
+        except _DedupRaceRetry:
+            # Session is closed by now; the recursion re-runs the
+            # preliminary lookup, finds the CURRENT race winner, and locks
+            # THAT row. Bounded (codex round 8): pathological dedup churn
+            # (close + recreate between every lookup) must terminate as an
+            # error, not recurse forever.
+            if _race_retries >= 3:
+                raise RuntimeError(
+                    f"dedup race on {dedup_key!r} did not settle after 3 retries"
+                ) from None
+            return await self.push_built(
+                built,
+                dedup_key=dedup_key,
+                session_id=session_id,
+                notify=notify,
+                _dedup_retry=_dedup_retry,
+                _race_retries=_race_retries + 1,
+            )
+
+    async def _push_transaction_inner(
+        self,
+        built: BuiltSurface,
+        *,
+        dedup_key: str | None,
+        session_id: str | None,
+        notify: bool | None,
+        _dedup_retry: bool,
+        agent_id: str,
+        now: datetime,
+        expires_at: datetime | None,
+        _locked_surface_id: str | None = None,
     ) -> str:
         async with self._db.session() as session:
             existing = None
@@ -177,6 +266,19 @@ class SurfaceService:
                     )
                 ).scalar_one_or_none()
 
+            if existing is not None and existing.surface_id != _locked_surface_id:
+                # Late dedup match on the UNLOCKED branch (codex round 7):
+                # two first-time producers raced, the loser's preliminary
+                # lookup saw no row, and this inner lookup now does. A
+                # replacement here would commit WITHOUT the per-surface
+                # lock — sliding under an in-flight refine/refresh that
+                # already passed its epoch check. Raise out of the session
+                # (so the connection is RELEASED before any lock wait —
+                # waiting on the lock while holding a pool connection could
+                # starve the very lock holder) and re-enter through
+                # push_built's locked path.
+                raise _DedupRaceRetry
+
             if existing is not None:
                 surface_id = existing.surface_id
                 existing.components = built.components
@@ -189,9 +291,21 @@ class SurfaceService:
                 # trace_id — leaving the old one would misdirect
                 # course-corrections at the stale decision.
                 existing.trace_id = built.trace_id
+                existing.app_spec = built.app_spec
+                # Origin follows the replacement (codex round 4): a scheduled
+                # compose replacing a chat-origin app via the shared dedup
+                # key must read origin="agent" in live_index and the Phase 5
+                # measurement — the row column is authoritative (the origin
+                # embedded in the surface_id is only its minting label).
+                existing.origin = built.origin
                 if session_id is not None:
                     existing.session_id = session_id
-                existing.updated_at = now
+                # Fresh clock, NOT the `now` captured in push_built (codex
+                # round 10): this write can sit behind the surface lock for
+                # seconds waiting out a refine, and stamping the pre-wait
+                # time would move updated_at BACKWARDS past that mutation —
+                # making the just-replaced app the LRU eviction victim.
+                existing.updated_at = datetime.now(UTC)
                 existing.expires_at = expires_at
                 # Every replacement ROTATES the nonce (codex P1): a stale
                 # client holding the old card could otherwise submit an old
@@ -233,6 +347,7 @@ class SurfaceService:
                         nonce=nonce,
                         session_id=session_id,
                         trace_id=built.trace_id,
+                        app_spec=built.app_spec,
                         expires_at=expires_at,
                     )
                 )
@@ -316,12 +431,30 @@ class SurfaceService:
         against is what gets matched. abort/refuse block the push; steer
         passes (guidance belongs to the agent's turn, not the surface).
         """
+        await self.censor_built(built, where="push")
+
+    async def censor_built(self, built: BuiltSurface, *, where: str = "push") -> None:
+        """The push gate, callable by other writers of surface prose.
+
+        F092.1 app.refine recomposes a surface's whole content and delivers
+        it via update_components/update_data, which are transport, not
+        policy — an app censored on the initial push must not be uncensored
+        on every refine after (rev-arch P1). Raises PermissionError on a
+        blocking match.
+        """
         if self._heart is None:
             return
         prose = built.title + " " + _flatten_strings(built.data_model) + " " + _flatten_strings(built.components)
-        blocking = await check_censors_chunked(self._heart, prose, where="push")
+        blocking = await check_censors_chunked(self._heart, prose, where=where)
         if blocking is not None:
             raise PermissionError(f"surface blocked by censor: {blocking}")
+
+    async def censor_prose(self, text_in: str, *, where: str) -> str | None:
+        """Censor arbitrary prose headed for a live surface (app.refresh's
+        re-fetched source data). Returns the blocking reason or None."""
+        if self._heart is None:
+            return None
+        return await check_censors_chunked(self._heart, text_in, where=where)
 
     # ------------------------------------------------------------- mutations
 
@@ -372,6 +505,113 @@ class SurfaceService:
             await session.commit()
             seq = row.seq
         self._broadcast(seq, envelope)
+
+    async def update_components(
+        self, surface_id: str, components: list[dict], *, app_spec: dict | None = None
+    ) -> None:
+        """Replace the component tree of a live surface (F092.1 app.refine).
+
+        Delivered as ONE updateComponents envelope carrying the full new
+        list — deliberately not a dedup re-push, which would tear down and
+        recreate the surface (two envelopes, a repaint between them, a feed
+        reorder, and a nonce rotation that races the client's next call).
+        The store merges by component id and never deletes, so components
+        the new tree no longer references linger client-side as invisible
+        orphans until the next reconnect rebuilds from snapshot — accepted,
+        bounded, and cheaper than mirroring the validator's reachability
+        walk in a client GC (rev-ui #3).
+        """
+        async with self._db.session() as session:
+            surface = await self._get_own(session, surface_id)
+            if surface is None or surface.status != "live":
+                raise KeyError(surface_id)
+            if surface.kind == "micro_app":
+                # Same fail-closed grammar as push_built: a recomposition is
+                # a creation as far as the renderer is concerned. (The
+                # composer lints its own output; this guards future callers.)
+                lint = lint_micro_app(components)
+                if lint:
+                    raise SurfaceValidationError(lint)
+            surface.components = deepcopy(components)
+            if app_spec is not None:
+                # A refine recomposition carries a fresh spec (new refine
+                # options, new provenance) — the row must follow or the next
+                # refine validates against a stale allowlist.
+                surface.app_spec = app_spec
+            surface.updated_at = datetime.now(UTC)
+            envelope = {
+                "version": "v1.0",
+                "updateComponents": {"surfaceId": surface_id, "components": components},
+            }
+            row = A2uiOutbox(agent_id=surface.agent_id, surface_id=surface_id, envelope=envelope)
+            session.add(row)
+            await session.commit()
+            seq = row.seq
+        self._broadcast(seq, envelope)
+
+    async def _reconcile_cap(self) -> None:
+        """F092.1 §6.3: concurrency cap, not a TTL — enforced by POST-push
+        reconciliation down to the cap. Touch = updated_at (refresh/refine/
+        patch bump it) — the server never learns about views, so recency-of-
+        use is the honest proxy, and the just-pushed app is the newest so
+        it is never its own victim. Dedup replacements don't grow the count
+        and reconcile to a no-op."""
+        agent_id = self._settings.agent_id
+        cap = self._settings.a2ui_max_live_apps
+        async with self._db.session() as session:
+            victims = (
+                await session.execute(
+                    select(A2uiSurface.surface_id, A2uiSurface.title)
+                    .where(
+                        A2uiSurface.agent_id == agent_id,
+                        A2uiSurface.kind == "micro_app",
+                        A2uiSurface.status == "live",
+                    )
+                    .order_by(A2uiSurface.updated_at.desc(), A2uiSurface.surface_id.desc())
+                    .offset(cap)
+                )
+            ).all()
+        for surface_id, title in victims:
+            # Same discipline as the expiry sweep: the victim's surface lock
+            # serializes eviction against an in-flight action/refine on it.
+            async with self.surface_lock(surface_id):
+                # Re-validate MEMBERSHIP under the lock (codex round 10): a
+                # refine/refresh may have touched this victim between the
+                # selection query and lock acquisition (no longer the LRU),
+                # or a concurrent reconciler may already have evicted enough.
+                # Evicting on the stale ranking would delete an actively
+                # used app — under-eviction is fine (the next push
+                # reconciles again), over-eviction is data the user watched
+                # disappear. Tiebreak mirrors the selection ordering.
+                async with self._db.session() as session:
+                    row = await self._get_own(session, surface_id)
+                    if row is None or row.status != "live":
+                        continue
+                    newer = (
+                        await session.execute(
+                            select(func.count())
+                            .select_from(A2uiSurface)
+                            .where(
+                                A2uiSurface.agent_id == agent_id,
+                                A2uiSurface.kind == "micro_app",
+                                A2uiSurface.status == "live",
+                                or_(
+                                    A2uiSurface.updated_at > row.updated_at,
+                                    and_(
+                                        A2uiSurface.updated_at == row.updated_at,
+                                        A2uiSurface.surface_id > row.surface_id,
+                                    ),
+                                ),
+                            )
+                        )
+                    ).scalar_one()
+                if newer < cap:
+                    continue
+                logger.info("F092.1: LRU-evicting micro-app %s (%r) over cap %d", surface_id, title, cap)
+                try:
+                    await self.resolve(surface_id, status="expired")
+                except KeyError:
+                    pass
 
     async def resolve(self, surface_id: str, *, status: str = "resolved") -> None:
         """Terminal transition + teardown envelope."""
@@ -472,11 +712,22 @@ class SurfaceService:
                 expired += 1
 
         async with self._db.session() as session:
+            # F092.1 amendment to the retention invariant (rev-arch #3):
+            # the age cutoff now applies to LIVE surfaces' rows too.
+            # Micro-apps are the first surfaces that never expire
+            # (expires_at NULL), so an app left open and refreshed on a
+            # loop previously grew the outbox without bound — and once the
+            # agent-wide gap cleared a2ui_outbox_replay_window, every
+            # reconnect forced a full resync. Deleting old live-surface
+            # rows is safe by construction: reconnect is hydration-first
+            # (snapshots, not replay, are the source of truth) and the
+            # per-surface upto watermark means a client never asks for
+            # rows this old — a replay that does hit the gap returns the
+            # resync control, which is exactly the hydration path.
             await session.execute(
                 delete(A2uiOutbox).where(
                     A2uiOutbox.agent_id == agent_id,
                     A2uiOutbox.created_at < now - timedelta(hours=self._settings.a2ui_outbox_nonlive_retention_hours),
-                    A2uiOutbox.surface_id.in_(select(A2uiSurface.surface_id).where(A2uiSurface.status != "live")),
                 )
             )
             retention_days = self._settings.a2ui_surface_retention_days

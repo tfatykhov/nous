@@ -1117,16 +1117,21 @@ class Brain:
 
     async def get_unreviewed(
         self, max_age_days: int = 30, stakes: str | None = None,
-        session: AsyncSession | None = None,
+        session: AsyncSession | None = None, limit: int | None = None,
     ) -> list[DecisionSummary]:
-        """Fetch unreviewed decisions, optionally filtered by stakes."""
+        """Fetch unreviewed decisions, optionally filtered by stakes.
+
+        ``limit`` pushes the bound into SQL (F092.1 sources — a Python
+        slice after ``.all()`` still materializes the whole window).
+        """
         if session is None:
             async with self.db.session() as session:
-                return await self._get_unreviewed(max_age_days, stakes, session)
-        return await self._get_unreviewed(max_age_days, stakes, session)
+                return await self._get_unreviewed(max_age_days, stakes, session, limit)
+        return await self._get_unreviewed(max_age_days, stakes, session, limit)
 
     async def _get_unreviewed(
         self, max_age_days: int, stakes: str | None, session: AsyncSession,
+        limit: int | None = None,
     ) -> list[DecisionSummary]:
         cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
         stmt = (
@@ -1140,6 +1145,8 @@ class Brain:
         )
         if stakes:
             stmt = stmt.where(Decision.stakes == stakes)
+        if limit is not None:
+            stmt = stmt.limit(limit)
         result = await session.execute(stmt)
         return [self._decision_to_summary(d) for d in result.scalars().all()]
 

@@ -7,7 +7,12 @@ connected companion within ~2s — which is precisely the path this probes.
 
 Usage:
     uv run python scripts/diag/a2ui_push_demo.py \
-        [approval|review|findings|all|gallery|sweep|graph|dag|resolve <surface_id>]
+        [approval|review|findings|all|gallery|sweep|graph|dag|app|resolve <surface_id>]
+
+``app`` runs a REAL F092.1 compose (LLM call + grammar validation + repair
+loop) for a vacation-style intent with no registered source — the whole
+surface is model-supplied and must render amber. Requires API credentials
+in the environment.
 
 The Phase-2 demos (sweep, graph, dag) source REAL rows from the connected DB
 when any exist, so the resolve buttons and node expansion hit live data; they
@@ -350,6 +355,33 @@ async def main() -> None:
         if which == "resolve":
             await service.resolve(sys.argv[2])
             print(f"resolved {sys.argv[2]}")
+            return
+        if which == "app":
+            from nous.a2ui.compose import SurfaceComposer
+            from nous.a2ui.sources import build_default_registry
+            from nous.api.anthropic_client import create_client
+
+            client = create_client(settings)
+            await client.start()
+            try:
+                composer = SurfaceComposer(client, settings, build_default_registry())
+                composed = await composer.compose(
+                    "Show my Italy vacation plans: Sep 5-20, flights booked (UA), "
+                    "5 stays with one gap Sep 7, rental car pickup Venice, "
+                    "2 blockers (blank license plates on 2 bookings, Tre Cime "
+                    "shuttle deadline Sep 7 10:00), still unbooked: Scrovegni, "
+                    "Seceda cable car.",
+                    archetype="status",
+                )
+                surface_id = await service.push_built(
+                    composed.built, dedup_key="app:italy-vacation", notify=False
+                )
+                print(
+                    f"pushed app: {surface_id} (fallback={composed.fallback}, "
+                    f"repairs={composed.repairs})  ->  /companion#/s/{surface_id}"
+                )
+            finally:
+                await client.close()
             return
         if which in ("sweep", "graph", "dag"):
             if which == "sweep":

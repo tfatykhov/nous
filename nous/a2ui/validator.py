@@ -112,7 +112,18 @@ def _validator() -> Draft202012Validator:
 
 
 def validate_envelope(envelope: dict) -> list[dict[str, Any]]:
-    """Validate one agent->renderer envelope. Returns spec-shaped errors."""
+    """Validate one agent->renderer envelope. Returns spec-shaped errors.
+
+    Errors are DESCENDED before reporting (F092.1): the envelope schema is a
+    oneOf over message types, and a single bad component prop used to
+    surface as one root-level oneOf error whose message was the entire
+    instance dump — which made the compose repair loop feed the model 300
+    chars of its own output as "the problem". jsonschema's best_match walks
+    into the failing branch; we additionally descend its context to the
+    deepest failures so a Section that wrote ``children`` instead of
+    ``child`` reports at ``.../components/6`` with the actual missing-prop
+    message.
+    """
     surface_id = ""
     for key in ("createSurface", "updateComponents", "updateDataModel", "deleteSurface"):
         if isinstance(envelope.get(key), dict):
@@ -120,15 +131,78 @@ def validate_envelope(envelope: dict) -> list[dict[str, Any]]:
             break
     errors = []
     for err in _validator().iter_errors(envelope):
+        leaves = _descend(err)
+        primary = leaves[0]
+        messages: list[str] = []
+        for leaf in leaves[:5]:
+            msg = leaf.message[:200]
+            if msg not in messages:
+                messages.append(msg)
         errors.append(
             {
                 "code": "VALIDATION_FAILED",
                 "surfaceId": surface_id,
-                "path": "/" + "/".join(str(p) for p in err.absolute_path),
-                "message": err.message[:300],
+                "path": "/" + "/".join(str(p) for p in primary.absolute_path),
+                "message": "; ".join(messages)[:300],
             }
         )
     return errors
+
+
+def _descend(err: Any, depth: int = 0) -> list[Any]:
+    """Follow oneOf/anyOf context down to the most specific failures.
+
+    Two heuristics, both about which oneOf BRANCH the instance was actually
+    aiming for (context errors carry their branch index as the head of
+    ``schema_path``):
+
+    - Discriminator: inside an anyComponent oneOf, every wrong branch fails
+      on its ``component`` const ("'Text' was expected" × 20 — noise). Any
+      branch containing such a failure is dropped; the branch whose const
+      matched fails on its real problem ("'child' is a required property").
+    - Depth: among surviving branches, keep those whose errors reach the
+      deepest instance path — at the envelope level the createSurface
+      branch fails deep inside components while the updateDataModel branch
+      fails at the root on a missing key nobody intended to send.
+
+    An instance matching NO branch (unknown component) keeps the oneOf
+    error itself, at its own path rather than the envelope root.
+    """
+    if not err.context or depth >= 8:
+        return [err]
+    by_branch: dict[Any, list[Any]] = {}
+    for child in err.context:
+        schema_path = list(child.schema_path)
+        by_branch.setdefault(schema_path[0] if schema_path else -1, []).append(child)
+    survivors = {
+        branch: errs
+        for branch, errs in by_branch.items()
+        if not any(
+            e.validator == "const" and (list(e.absolute_path) or [None])[-1] == "component"
+            for e in errs
+        )
+    }
+    if not survivors:
+        return [err]
+
+    def _branch_depth(errs: list[Any]) -> int:
+        return max(len(list(e.absolute_path)) for e in errs)
+
+    deepest = max(_branch_depth(errs) for errs in survivors.values())
+    picked: list[Any] = []
+    seen: set[tuple[str, str]] = set()
+    for errs in survivors.values():
+        if _branch_depth(errs) != deepest:
+            continue
+        for child in errs:
+            for leaf in _descend(child, depth + 1):
+                key = ("/".join(str(p) for p in leaf.absolute_path), leaf.message[:120])
+                if key not in seen:
+                    seen.add(key)
+                    picked.append(leaf)
+        if len(picked) >= 8:
+            break
+    return picked or [err]
 
 
 def validate_structure(

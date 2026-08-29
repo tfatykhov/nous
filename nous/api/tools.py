@@ -435,7 +435,10 @@ class ToolDispatcher:
                     True,
                 )
 
-            if name in ("resolve_decision", "resolve_decisions"):
+            if name in ("resolve_decision", "resolve_decisions", "compose_surface"):
+                # compose_surface derives origin from it: a heartbeat or
+                # scheduled turn composes origin="agent" apps (F092.1 push
+                # path); a chat turn composes origin="chat".
                 args = {**args, "_is_background": is_background}
             if session_id is not None and name == "spawn_task":
                 args = {**args, "_session_id": session_id}
@@ -478,7 +481,7 @@ class ToolDispatcher:
                 # silently accepts the kwarg (added by F051.4) and ignores
                 # it — fail-open contract.
                 args = {**args, "_session_id": session_id}
-            if session_id is not None and name == "push_surface":
+            if session_id is not None and name in ("push_surface", "compose_surface"):
                 # F092: surfaces record the chat session that pushed them so
                 # a companion card can be traced back to its conversation.
                 args = {**args, "_session_id": session_id}
