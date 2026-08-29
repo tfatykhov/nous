@@ -145,9 +145,7 @@ def validate_structure(
     errors: list[dict[str, Any]] = []
 
     def err(path: str, message: str, code: str = "VALIDATION_FAILED") -> None:
-        errors.append(
-            {"code": code, "surfaceId": surface_id, "path": path, "message": message}
-        )
+        errors.append({"code": code, "surfaceId": surface_id, "path": path, "message": message})
 
     by_id: dict[str, dict] = {}
     for i, comp in enumerate(components):
@@ -175,9 +173,7 @@ def validate_structure(
             elif key in ("trigger", "content") and isinstance(value, str):
                 ids.append(value)
             elif key == "tabs" and isinstance(value, list):
-                ids.extend(
-                    t["child"] for t in value if isinstance(t, dict) and isinstance(t.get("child"), str)
-                )
+                ids.extend(t["child"] for t in value if isinstance(t, dict) and isinstance(t.get("child"), str))
         return ids
 
     for cid, comp in by_id.items():

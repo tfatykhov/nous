@@ -24,11 +24,11 @@ import asyncio
 import logging
 import secrets
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, select, text
 
 from nous.storage.database import Database
 from nous.storage.models import A2uiAction, A2uiOutbox, A2uiSurface
@@ -69,7 +69,7 @@ class SurfaceService:
         await self._censor_gate(built)
 
         agent_id = self._settings.agent_id
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires_at = (now + built.expires_in) if built.expires_in else None
 
         async with self._db.session() as session:
@@ -150,10 +150,7 @@ class SurfaceService:
             # references it — unit-of-work ordering alone proved unreliable
             # here (observed FK violation with add() + add_all() unflushed).
             await session.flush()
-            rows = [
-                A2uiOutbox(agent_id=agent_id, surface_id=surface_id, envelope=env)
-                for env in envelopes
-            ]
+            rows = [A2uiOutbox(agent_id=agent_id, surface_id=surface_id, envelope=env) for env in envelopes]
             session.add_all(rows)
             await session.commit()
             seqs = [row.seq for row in rows]
@@ -209,9 +206,7 @@ class SurfaceService:
             return
         blocking = [m for m in matches if m.action in ("abort", "refuse")]
         if blocking:
-            raise PermissionError(
-                f"surface blocked by censor: {blocking[0].reason or blocking[0].trigger_pattern}"
-            )
+            raise PermissionError(f"surface blocked by censor: {blocking[0].reason or blocking[0].trigger_pattern}")
 
     # ------------------------------------------------------------- mutations
 
@@ -229,14 +224,12 @@ class SurfaceService:
             else:
                 _pointer_set(model, path, value)
             surface.data_model = model
-            surface.updated_at = datetime.now(timezone.utc)
+            surface.updated_at = datetime.now(UTC)
             body: dict[str, Any] = {"surfaceId": surface_id, "value": value}
             if path not in (None, "", "/"):
                 body["path"] = path
             envelope = {"version": "v1.0", "updateDataModel": body}
-            row = A2uiOutbox(
-                agent_id=surface.agent_id, surface_id=surface_id, envelope=envelope
-            )
+            row = A2uiOutbox(agent_id=surface.agent_id, surface_id=surface_id, envelope=envelope)
             session.add(row)
             await session.commit()
             seq = row.seq
@@ -252,10 +245,8 @@ class SurfaceService:
             if surface.status != "live":
                 return
             surface.status = status
-            surface.resolved_at = datetime.now(timezone.utc)
-            row = A2uiOutbox(
-                agent_id=surface.agent_id, surface_id=surface_id, envelope=envelope
-            )
+            surface.resolved_at = datetime.now(UTC)
+            row = A2uiOutbox(agent_id=surface.agent_id, surface_id=surface_id, envelope=envelope)
             session.add(row)
             await session.commit()
             seq = row.seq
@@ -269,7 +260,7 @@ class SurfaceService:
         that evidence into brain.decisions rides with the escalation
         integration, not this PR — a2ui_actions is the durable audit tier.)
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         agent_id = self._settings.agent_id
         expired = 0
         async with self._db.session() as session:
@@ -307,11 +298,8 @@ class SurfaceService:
         async with self._db.session() as session:
             await session.execute(
                 delete(A2uiOutbox).where(
-                    A2uiOutbox.created_at
-                    < now - timedelta(hours=self._settings.a2ui_outbox_nonlive_retention_hours),
-                    A2uiOutbox.surface_id.in_(
-                        select(A2uiSurface.surface_id).where(A2uiSurface.status != "live")
-                    ),
+                    A2uiOutbox.created_at < now - timedelta(hours=self._settings.a2ui_outbox_nonlive_retention_hours),
+                    A2uiOutbox.surface_id.in_(select(A2uiSurface.surface_id).where(A2uiSurface.status != "live")),
                 )
             )
             retention_days = self._settings.a2ui_surface_retention_days
@@ -384,7 +372,7 @@ class SurfaceService:
         Returns None when the gap exceeds the replay window — the caller
         must tell the client to resync (hydration-first) instead.
         """
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=_LAG_WINDOW_SECONDS)
+        cutoff = datetime.now(UTC) - timedelta(seconds=_LAG_WINDOW_SECONDS)
         async with self._db.session() as session:
             gap = (
                 await session.execute(
@@ -418,7 +406,7 @@ class SurfaceService:
             return await self._latest_visible_seq(session)
 
     async def _latest_visible_seq(self, session: Any) -> int:
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=_LAG_WINDOW_SECONDS)
+        cutoff = datetime.now(UTC) - timedelta(seconds=_LAG_WINDOW_SECONDS)
         latest = (
             await session.execute(
                 text(

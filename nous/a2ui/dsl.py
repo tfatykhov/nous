@@ -88,11 +88,11 @@ class Surface:
             expires_in=expires_in,
         )
 
-    def data(self, model: dict) -> "Surface":
+    def data(self, model: dict) -> Surface:
         self._built.data_model = model
         return self
 
-    def add(self, *components: dict) -> "Surface":
+    def add(self, *components: dict) -> Surface:
         self._built.components.extend(components)
         return self
 
@@ -113,20 +113,12 @@ def Text(id: str, text: Any, *, variant: str | None = None) -> dict:
     return _clean({"id": id, "component": "Text", "text": text, "variant": variant})
 
 
-def Column(
-    id: str, *, children: Any, justify: str | None = None, align: str | None = None
-) -> dict:
-    return _clean(
-        {"id": id, "component": "Column", "children": children, "justify": justify, "align": align}
-    )
+def Column(id: str, *, children: Any, justify: str | None = None, align: str | None = None) -> dict:
+    return _clean({"id": id, "component": "Column", "children": children, "justify": justify, "align": align})
 
 
-def Row(
-    id: str, *, children: Any, justify: str | None = None, align: str | None = None
-) -> dict:
-    return _clean(
-        {"id": id, "component": "Row", "children": children, "justify": justify, "align": align}
-    )
+def Row(id: str, *, children: Any, justify: str | None = None, align: str | None = None) -> dict:
+    return _clean({"id": id, "component": "Row", "children": children, "justify": justify, "align": align})
 
 
 def List_(id: str, *, children: Any, direction: str | None = None) -> dict:
@@ -141,24 +133,16 @@ def Divider(id: str, *, axis: str | None = None) -> dict:
     return _clean({"id": id, "component": "Divider", "axis": axis})
 
 
-def Button(
-    id: str, *, child: str, action: dict, variant: str | None = None
-) -> dict:
+def Button(id: str, *, child: str, action: dict, variant: str | None = None) -> dict:
     # variant must be a LITERAL enum string: the basic catalog does not accept
     # a data binding here (the F092 spec's Appendix A example does, and is
     # invalid against the catalog it cites — builders know their options at
     # build time, so per-option buttons carry literal variants instead).
-    return _clean(
-        {"id": id, "component": "Button", "child": child, "action": action, "variant": variant}
-    )
+    return _clean({"id": id, "component": "Button", "child": child, "action": action, "variant": variant})
 
 
-def TextField(
-    id: str, *, label: Any, value: Any = None, variant: str | None = None
-) -> dict:
-    return _clean(
-        {"id": id, "component": "TextField", "label": label, "value": value, "variant": variant}
-    )
+def TextField(id: str, *, label: Any, value: Any = None, variant: str | None = None) -> dict:
+    return _clean({"id": id, "component": "TextField", "label": label, "value": value, "variant": variant})
 
 
 def CheckBox(id: str, *, label: Any, value: Any) -> dict:
@@ -207,9 +191,7 @@ def ActionReviewCard(
     )
 
 
-def StatTile(
-    id: str, *, label: Any, value: Any, delta: Any = None, intent: str | None = None
-) -> dict:
+def StatTile(id: str, *, label: Any, value: Any, delta: Any = None, intent: str | None = None) -> dict:
     return _clean(
         {
             "id": id,

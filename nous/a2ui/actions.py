@@ -16,9 +16,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable
+from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import update
@@ -34,7 +35,7 @@ class ActionContext:
     name: str
     context: dict
     data_model: dict | None
-    services: "ActionRouter"
+    services: ActionRouter
 
 
 @dataclass
@@ -76,9 +77,7 @@ class ActionRouter:
         self._rate_lock = asyncio.Lock()
         _register_default_handlers(self)
 
-    def register(
-        self, name: str, fn: Handler, *, mutating: bool, irreversible: bool = False
-    ) -> None:
+    def register(self, name: str, fn: Handler, *, mutating: bool, irreversible: bool = False) -> None:
         self._handlers[name] = _HandlerMeta(fn=fn, mutating=mutating, irreversible=irreversible)
 
     # ------------------------------------------------------------------ gate
@@ -116,9 +115,8 @@ class ActionRouter:
         if name not in (surface.allowed_actions or []):
             return await reject(403, "ACTION_NOT_ALLOWED", f"action {name!r} not offered by this surface")
 
-        nonce = (
-            ((action.get("metadata") or {}).get("extensions") or {}).get("com_nous_nonce")
-            or context.get("surfaceNonce")
+        nonce = ((action.get("metadata") or {}).get("extensions") or {}).get("com_nous_nonce") or context.get(
+            "surfaceNonce"
         )
         if nonce != surface.nonce:
             return await reject(403, "NONCE_MISMATCH", "surface nonce missing or stale")
@@ -144,9 +142,7 @@ class ActionRouter:
 
         audit_id = await self._audit(surface, name, context, data_model, "dispatched", None)
 
-        ctx = ActionContext(
-            surface=surface, name=name, context=context, data_model=data_model, services=self
-        )
+        ctx = ActionContext(surface=surface, name=name, context=context, data_model=data_model, services=self)
         try:
             result = await meta.fn(ctx)
         except Exception as exc:
@@ -210,7 +206,7 @@ class ActionRouter:
                 .values(
                     status=status,
                     rejection_reason=message if status == "rejected" else None,
-                    completed_at=datetime.now(timezone.utc),
+                    completed_at=datetime.now(UTC),
                 )
             )
             await session.commit()
@@ -268,9 +264,7 @@ def _register_default_handlers(router: ActionRouter) -> None:
             f"{ctx.context.get('correction') or 'do not repeat this action without checking first.'}"
         )
         try:
-            await router._heart.learn(
-                FactInput(content=rule_text, category="rule", source="a2ui_review")
-            )
+            await router._heart.learn(FactInput(content=rule_text, category="rule", source="a2ui_review"))
         except Exception as exc:
             logger.warning("F092 make-rule failed", exc_info=True)
             return ActionResult(ok=False, message=f"could not store rule: {exc}")

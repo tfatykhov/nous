@@ -58,9 +58,7 @@ _PUSH_SURFACE_SCHEMA = {
         },
         "notify": {
             "type": "boolean",
-            "description": (
-                "Override the Telegram ping (default: priority >= 1 pings)."
-            ),
+            "description": ("Override the Telegram ping (default: priority >= 1 pings)."),
         },
     },
     "required": ["template", "params"],
@@ -74,9 +72,7 @@ def register_a2ui_tools(dispatcher: ToolDispatcher, surface_service: Any) -> Non
         template = kwargs.get("template", "")
         builder = TEMPLATES.get(template)
         if builder is None:
-            return _tool_error(
-                f"Unknown template {template!r}. Available: {sorted(TEMPLATES)}"
-            )
+            return _tool_error(f"Unknown template {template!r}. Available: {sorted(TEMPLATES)}")
         params = kwargs.get("params") or {}
         try:
             built = builder(params)
