@@ -314,10 +314,14 @@ async def test_nonce_is_accepted_on_both_channels(
 # ---------------------------------------------------------------------------
 
 
-async def test_rate_limit_rejects_and_audits_the_excess(
+async def test_rate_limit_rejects_without_writing_audit_rows(
     db, a2ui_settings, service: SurfaceService, finding_store: FakeFindingStore, a2ui_agent_id: str
 ) -> None:
-    """Server-side sliding window, keyed on agent_id.
+    """Server-side sliding window, keyed on agent_id — and 429s are NOT
+
+    audited (codex P2): the limiter exists to bound what a hostile client
+    can make the server persist, so it must gate every audit-writing path
+    and itself write nothing.
 
     Uses heartbeat.acknowledge deliberately: the approval verbs RESOLVE the
     surface, so a second call would 404 on liveness before ever reaching the
@@ -344,7 +348,7 @@ async def test_rate_limit_rejects_and_audits_the_excess(
     assert payload["error"]["code"] == "RATE_LIMITED"
 
     statuses = [a.status for a in await _audits(db, a2ui_agent_id)]
-    assert statuses == ["completed", "rejected"]
+    assert statuses == ["completed"]
 
 
 # ---------------------------------------------------------------------------

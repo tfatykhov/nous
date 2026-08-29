@@ -38,8 +38,11 @@
   const ctx = $derived({ dataModel: store.surfaces[surfaceId]?.dataModel ?? {}, scope });
   const label = $derived(toDisplayString(resolveDynamic(comp.label, ctx)));
   const failures = $derived(runChecks(comp.checks as CheckRule[] | undefined, ctx));
-  const min = $derived(toDisplayString(resolveDynamic(comp.min, ctx)));
-  const max = $derived(toDisplayString(resolveDynamic(comp.max, ctx)));
+  // Bounds go through the same control-type normalization as the value
+  // (codex P2): a schema-valid ISO instant like "…T17:00:00Z" is silently
+  // IGNORED by datetime-local min/max, letting users pick out-of-range values.
+  const min = $derived(normalizeForControl(toDisplayString(resolveDynamic(comp.min, ctx))));
+  const max = $derived(normalizeForControl(toDisplayString(resolveDynamic(comp.max, ctx))));
   const type = $derived(
     comp.enableDate === true && comp.enableTime === true
       ? 'datetime-local'

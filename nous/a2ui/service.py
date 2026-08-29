@@ -237,15 +237,18 @@ class SurfaceService:
         }
 
     async def _censor_gate(self, built: BuiltSurface) -> None:
-        """Push-time censor check on the surface's prose (title + data model).
+        """Push-time censor check on ALL the surface's prose.
 
-        The action names themselves are opaque tokens; the risky text a censor
-        was written against lives here. abort/refuse block the push; steer
+        Title + data model + component literals (codex P1: heartbeat finding
+        messages live as Text component literals, not data-model values, so
+        a data-model-only flatten never showed them to the censors). Action
+        names stay opaque tokens; the risky text a censor was written
+        against is what gets matched. abort/refuse block the push; steer
         passes (guidance belongs to the agent's turn, not the surface).
         """
         if self._heart is None:
             return
-        prose = built.title + " " + _flatten_strings(built.data_model)
+        prose = built.title + " " + _flatten_strings(built.data_model) + " " + _flatten_strings(built.components)
         try:
             matches = await self._heart.check_censors(prose[:2000])
         except Exception:

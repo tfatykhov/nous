@@ -166,6 +166,13 @@ class ActionRouter:
         if surface is None or surface.status != "live":
             return 404, _err("SURFACE_NOT_LIVE", surface_id, "surface not found or not live")
 
+        # Rate limit FIRST (codex P2): every rejection below commits an audit
+        # row, so a hostile client replaying bad names/nonces at a live
+        # surface id could otherwise grow the audit table without bound —
+        # the limiter must gate the audited paths, not just the handlers.
+        if not await self._rate_ok():
+            return 429, _err("RATE_LIMITED", surface_id, "too many actions; slow down")
+
         async def reject(status: int, code: str, message: str) -> tuple[int, dict]:
             await self._audit(
                 surface,
@@ -187,9 +194,6 @@ class ActionRouter:
         )
         if nonce != surface.nonce:
             return await reject(403, "NONCE_MISMATCH", "surface nonce missing or stale")
-
-        if not await self._rate_ok():
-            return await reject(429, "RATE_LIMITED", "too many actions; slow down")
 
         meta = self._handlers.get(name)
         if meta is None:
@@ -226,18 +230,37 @@ class ActionRouter:
             await self._audit_update(audit_id, "rejected", f"handler error: {exc}")
             return 500, _err("HANDLER_FAILED", surface_id, f"handler error: {exc}")
 
-        for path, value in result.data_patches:
-            try:
-                await self._service.update_data(surface_id, path, value)
-            except KeyError:
-                pass
-        if result.resolve_surface:
-            await self._service.resolve(surface_id)
+        # Post-dispatch surface delivery is RECONCILED, never allowed to
+        # escape (codex P2): the handler's side effect has already happened,
+        # so a raised patch/resolve failure would leave the audit row at
+        # 'dispatched' and hand the client a 500 that invites a retry — and
+        # the retry would repeat the side effect. The audit records the truth
+        # (completed, with a delivery note); the surface catches up via the
+        # expiry sweep or the client's next hydration.
+        delivery_note = None
+        try:
+            for path, value in result.data_patches:
+                try:
+                    await self._service.update_data(surface_id, path, value)
+                except KeyError:
+                    pass
+            if result.resolve_surface:
+                await self._service.resolve(surface_id)
+        except Exception:
+            logger.exception("F092 post-dispatch surface update failed for %s", name)
+            delivery_note = "completed; surface update failed — card may linger until resync"
 
-        await self._audit_update(audit_id, "completed" if result.ok else "rejected", result.message or None)
+        note = result.message or None
+        if delivery_note:
+            note = f"{result.message} ({delivery_note})" if result.message else delivery_note
+        await self._audit_update(audit_id, "completed" if result.ok else "rejected", note)
         if not result.ok:
             return 422, _err("ACTION_FAILED", surface_id, result.message)
-        return 200, {"ok": True, "message": result.message, "resolved": result.resolve_surface}
+        return 200, {
+            "ok": True,
+            "message": note or "",
+            "resolved": result.resolve_surface and delivery_note is None,
+        }
 
     # -------------------------------------------------------------- plumbing
 

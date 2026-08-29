@@ -348,8 +348,12 @@ function indexOfTopLevelColon(s: string): number {
 
 // -------------------------------------------------------------- formatDate
 
+// Longest variants MUST precede their prefixes (yyyy before yy, HH before H,
+// hh before h) — the scanner takes the first match (codex P2: the catalog
+// permits yy, hh and H, which previously fell through or mis-rendered).
 const CLDR_TOKENS: [RegExp, (d: Date) => string][] = [
   [/^yyyy/, (d) => String(d.getFullYear()).padStart(4, '0')],
+  [/^yy/, (d) => String(d.getFullYear() % 100).padStart(2, '0')],
   [/^MMMM/, (d) => d.toLocaleDateString(undefined, { month: 'long' })],
   [/^MMM/, (d) => d.toLocaleDateString(undefined, { month: 'short' })],
   [/^MM/, (d) => String(d.getMonth() + 1).padStart(2, '0')],
@@ -359,6 +363,8 @@ const CLDR_TOKENS: [RegExp, (d: Date) => string][] = [
   [/^EEEE/, (d) => d.toLocaleDateString(undefined, { weekday: 'long' })],
   [/^EEE|^E/, (d) => d.toLocaleDateString(undefined, { weekday: 'short' })],
   [/^HH/, (d) => String(d.getHours()).padStart(2, '0')],
+  [/^H/, (d) => String(d.getHours())],
+  [/^hh/, (d) => String(((d.getHours() + 11) % 12) + 1).padStart(2, '0')],
   [/^h/, (d) => String(((d.getHours() + 11) % 12) + 1)],
   [/^mm/, (d) => String(d.getMinutes()).padStart(2, '0')],
   [/^ss/, (d) => String(d.getSeconds()).padStart(2, '0')],
