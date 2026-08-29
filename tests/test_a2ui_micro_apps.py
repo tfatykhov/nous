@@ -454,6 +454,91 @@ async def test_dedup_replacement_updates_the_origin(service, db) -> None:
     assert (await _surface_row(db, surface_id)).origin == "agent"
 
 
+async def test_dedup_replacement_timestamp_never_moves_backwards(service, db) -> None:
+    """Codex round 10: a replacement can wait out a refine on the surface
+    lock; stamping the pre-wait clock would move updated_at BACKWARDS past
+    that mutation, making the freshly replaced app the LRU victim."""
+    from datetime import UTC, datetime, timedelta
+
+    surface_id = await service.push_built(_micro_app(title="v1"), dedup_key="app:ts")
+    await service.update_data(surface_id, "/trip", {"flights": ["touched"]})
+    touched_at = (await _surface_row(db, surface_id)).updated_at
+
+    stale_now = datetime.now(UTC) - timedelta(minutes=5)
+    await service._push_transaction(
+        _micro_app(title="v2"),
+        dedup_key="app:ts",
+        session_id=None,
+        notify=False,
+        _dedup_retry=False,
+        agent_id=service._settings.agent_id,
+        now=stale_now,
+        expires_at=None,
+        _locked_surface_id=surface_id,
+    )
+
+    row = await _surface_row(db, surface_id)
+    assert row.title == "v2"
+    assert row.updated_at >= touched_at, "replacement stamps a fresh clock, never the pre-wait one"
+
+
+async def test_reconcile_spares_a_victim_touched_after_selection(
+    db, a2ui_settings, a2ui_agent_id: str
+) -> None:
+    """Codex round 10: the victim is re-validated under its lock — a
+    refine/refresh landing between selection and lock acquisition makes it
+    no longer the LRU, and evicting on the stale ranking would delete an
+    actively used app."""
+    from contextlib import asynccontextmanager
+
+    from nous.a2ui.service import SurfaceService
+
+    svc = SurfaceService(db, a2ui_settings)
+    a = await svc.push_built(_micro_app(title="oldest"))
+    b = await svc.push_built(_micro_app(title="middle"))
+
+    orig_lock = svc.surface_lock
+    bumped: dict[str, bool] = {}
+
+    @asynccontextmanager
+    async def touching_lock(surface_id: str):
+        # Simulate the race: the selected victim gets touched right before
+        # the reconciler acquires its lock.
+        if surface_id == a and not bumped:
+            bumped[surface_id] = True
+            await svc.update_data(a, "/trip", {"flights": ["still in use"]})
+        async with orig_lock(surface_id):
+            yield
+
+    svc.surface_lock = touching_lock  # type: ignore[method-assign]
+    try:
+        # Third push (cap 2) selects `a` as the victim; the hook touches it
+        # first, so the under-lock recheck must spare it.
+        await svc.push_built(_micro_app(title="newest"))
+    finally:
+        svc.surface_lock = orig_lock  # type: ignore[method-assign]
+
+    assert (await _surface_row(db, a)).status == "live", "touched victim spared"
+    # Under-eviction is the accepted trade: the next push reconciles again.
+    async with db.session() as session:
+        live = (
+            await session.execute(
+                select(A2uiSurface).where(
+                    A2uiSurface.agent_id == a2ui_agent_id,
+                    A2uiSurface.kind == "micro_app",
+                    A2uiSurface.status == "live",
+                )
+            )
+        ).scalars().all()
+    assert {s.title for s in live} >= {"oldest", "newest"}
+    # Cleanup rows created outside the shared `service` fixture.
+    async with db.session() as session:
+        await session.execute(delete(A2uiOutbox).where(A2uiOutbox.agent_id == a2ui_agent_id))
+        await session.execute(delete(A2uiSurface).where(A2uiSurface.agent_id == a2ui_agent_id))
+        await session.commit()
+    assert b  # silence unused warning
+
+
 async def test_concurrent_pushes_converge_to_the_cap(
     service, db, a2ui_agent_id: str
 ) -> None:

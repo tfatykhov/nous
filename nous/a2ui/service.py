@@ -31,7 +31,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from nous.storage.database import Database
@@ -300,7 +300,12 @@ class SurfaceService:
                 existing.origin = built.origin
                 if session_id is not None:
                     existing.session_id = session_id
-                existing.updated_at = now
+                # Fresh clock, NOT the `now` captured in push_built (codex
+                # round 10): this write can sit behind the surface lock for
+                # seconds waiting out a refine, and stamping the pre-wait
+                # time would move updated_at BACKWARDS past that mutation —
+                # making the just-replaced app the LRU eviction victim.
+                existing.updated_at = datetime.now(UTC)
                 existing.expires_at = expires_at
                 # Every replacement ROTATES the nonce (codex P1): a stale
                 # client holding the old card could otherwise submit an old
@@ -562,15 +567,47 @@ class SurfaceService:
                         A2uiSurface.kind == "micro_app",
                         A2uiSurface.status == "live",
                     )
-                    .order_by(A2uiSurface.updated_at.desc())
+                    .order_by(A2uiSurface.updated_at.desc(), A2uiSurface.surface_id.desc())
                     .offset(cap)
                 )
             ).all()
         for surface_id, title in victims:
-            logger.info("F092.1: LRU-evicting micro-app %s (%r) over cap %d", surface_id, title, cap)
             # Same discipline as the expiry sweep: the victim's surface lock
             # serializes eviction against an in-flight action/refine on it.
             async with self.surface_lock(surface_id):
+                # Re-validate MEMBERSHIP under the lock (codex round 10): a
+                # refine/refresh may have touched this victim between the
+                # selection query and lock acquisition (no longer the LRU),
+                # or a concurrent reconciler may already have evicted enough.
+                # Evicting on the stale ranking would delete an actively
+                # used app — under-eviction is fine (the next push
+                # reconciles again), over-eviction is data the user watched
+                # disappear. Tiebreak mirrors the selection ordering.
+                async with self._db.session() as session:
+                    row = await self._get_own(session, surface_id)
+                    if row is None or row.status != "live":
+                        continue
+                    newer = (
+                        await session.execute(
+                            select(func.count())
+                            .select_from(A2uiSurface)
+                            .where(
+                                A2uiSurface.agent_id == agent_id,
+                                A2uiSurface.kind == "micro_app",
+                                A2uiSurface.status == "live",
+                                or_(
+                                    A2uiSurface.updated_at > row.updated_at,
+                                    and_(
+                                        A2uiSurface.updated_at == row.updated_at,
+                                        A2uiSurface.surface_id > row.surface_id,
+                                    ),
+                                ),
+                            )
+                        )
+                    ).scalar_one()
+                if newer < cap:
+                    continue
+                logger.info("F092.1: LRU-evicting micro-app %s (%r) over cap %d", surface_id, title, cap)
                 try:
                     await self.resolve(surface_id, status="expired")
                 except KeyError:
