@@ -87,6 +87,10 @@ _WORKER_DEADLINE_MARGIN = 4.0
 # Slots reserved for the agent's own interactive run_python; a dashboard
 # script refuses to start when fewer than this many are free.
 _INTERACTIVE_SLOT_RESERVE = 2
+
+# Below this, a script cannot finish inside the shared budget before the
+# registry's own wait expires, so it is not started at all.
+_MIN_SCRIPT_SECONDS = 2.0
 _MIN_SOURCE_SECONDS = 5.0
 
 
@@ -195,9 +199,7 @@ class SourceRegistry:
             # the outer cancel win and abort the whole compose/refresh instead
             # of letting agent_script return its shape-preserving failure
             # (codex P1). The worker must expire first.
-            call_params["_remaining_seconds"] = max(
-                1.0, remaining - _WORKER_DEADLINE_MARGIN
-            )
+            call_params["_remaining_seconds"] = remaining - _WORKER_DEADLINE_MARGIN
             try:
                 value = await asyncio.wait_for(
                     fetcher(call_params), timeout=remaining
@@ -842,6 +844,19 @@ def build_default_registry(
             # await would let concurrent slow refreshes starve every later
             # run_python of slots (codex P1).
             remaining = params.get("_remaining_seconds")
+            if remaining is not None and float(remaining) < _MIN_SCRIPT_SECONDS:
+                # Too little left for the worker to finish FIRST. A floor here
+                # would invert the ordering — run_python waits `timeout + 2s`
+                # grace while the registry waits only `remaining`, so the
+                # registry would time out first and abort the whole
+                # compose/refresh instead of reaching _script_failure (codex
+                # P1). Yield with the shape-preserving value instead of
+                # starting a worker that cannot land in time.
+                return _script_failure(
+                    f"only {float(remaining):.1f}s left in the source budget — "
+                    "not enough to run this script; use fewer sources",
+                    shape,
+                )
             # Gate on the GLOBAL in-flight count, not a local semaphore
             # (codex P1): a semaphore around the await releases as soon as the
             # coroutine returns, while a worker blocked in a C call keeps its

@@ -3889,13 +3889,14 @@ def _release_run_slot() -> None:
 # injected into script scope, so a script can assign `json.loads = ...`; using
 # the attribute later would then dispatch agent-authored code on the main event
 # loop, after the deadline and run slot are gone (codex P1).
-# Aliasing `json.loads` is NOT enough: the saved function still reads mutable
-# module globals at call time (`json._default_decoder`), so a script could
-# replace that object and have its `decode()` run on the event loop after the
-# deadline and slot are gone (codex P1). Own instances read nothing from the
-# module, so a script cannot reach them at all.
-_TRUSTED_DECODER = json.JSONDecoder()
-_TRUSTED_ENCODER_CLS = json.JSONEncoder
+# JSON classes captured at import for use as CLOSURE locals below. They are
+# deliberately NOT used through module attributes at call time: a script may
+# `import nous.api.tools` and rebind a module global, and it may also rebind
+# `json._default_decoder`. Both encode and decode therefore happen inside the
+# deadline-protected worker, using these classes, so nothing a script can
+# reach ever executes on the main event loop (codex P1).
+_JSON_DECODER_CLS = json.JSONDecoder
+_JSON_ENCODER_CLS = json.JSONEncoder
 
 
 def create_programmatic_tools(
@@ -3926,6 +3927,13 @@ def create_programmatic_tools(
     import math
     import re
     import statistics
+
+    # Captured HERE, at closure creation, before any script can run. Reading
+    # these through module attributes inside the worker would still be a
+    # post-script lookup, and `import nous.api.tools; T._JSON_DECODER_CLS = ...`
+    # would win (codex P1 — proved by test_decoding_never_happens_on_the_event_loop).
+    _enc_cls = _JSON_ENCODER_CLS
+    _dec_cls = _JSON_DECODER_CLS
 
     async def run_python(
         code: str,
@@ -4522,9 +4530,20 @@ def create_programmatic_tools(
                             return float(obj)
                         return str(obj)
 
-                    namespace["__nous_json__"] = _TRUSTED_ENCODER_CLS(
+                    _encoded = _enc_cls(
                         default=_jsonable, allow_nan=False
                     ).encode(namespace.get("result"))
+                    namespace["__nous_chars__"] = len(_encoded)
+                    if (
+                        _max_result_chars is not None
+                        and len(_encoded) > _max_result_chars
+                    ):
+                        # Oversized: never decode it (codex P1) — not here, and
+                        # certainly not on the loop.
+                        namespace["__nous_obj__"] = None
+                    else:
+                        # Decode HERE, in the worker, under the deadline tracer.
+                        namespace["__nous_obj__"] = _dec_cls().decode(_encoded)
             finally:
                 # Restore original functions
                 sys.settrace = _original_settrace
@@ -4581,19 +4600,17 @@ def create_programmatic_tools(
             # Decoding pure JSON text runs no user code, so this is safe on the
             # loop; `result_chars` lets the caller size-check without a second
             # serialization (and without touching the raw object again).
-            encoded = namespace.get("__nous_json__") or "null"
-            if _max_result_chars is not None and len(encoded) > _max_result_chars:
-                # Reject on the ENCODED length, before json.loads (codex P1):
-                # decoding a rejected 100MB result would block the event loop
-                # and materialize the object anyway. len() is O(1).
+            result_chars = int(namespace.get("__nous_chars__") or 4)
+            if _max_result_chars is not None and result_chars > _max_result_chars:
                 return _fail(
-                    f"Error: script result is {len(encoded)} chars — max "
+                    f"Error: script result is {result_chars} chars — max "
                     f"{_max_result_chars}; aggregate or limit it in the script"
                 )
             return {
                 "ok": True,
-                "result": _TRUSTED_DECODER.decode(encoded),
-                "result_chars": len(encoded),
+                # Already decoded in the worker; NOTHING is parsed on the loop.
+                "result": namespace.get("__nous_obj__"),
+                "result_chars": result_chars,
                 "output": output,
                 "error": None,
             }

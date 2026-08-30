@@ -1276,3 +1276,52 @@ async def test_non_mapping_series_meta_is_rejected():
           "params": {"code": "result = bad", "shape": "series", "series_keys": ["v"]}}]
     )
     assert is_series(out["d"]) and "declared shape 'series'" in out["d"]["meta"]["reason"]
+
+
+async def test_script_is_not_started_when_it_cannot_finish_in_time():
+    """codex P1: a max(1.0, ...) floor inverted the worker-first ordering near
+    the shared deadline — run_python waits `timeout + 2s` grace while the
+    registry waits only `remaining`, so the registry timed out first and
+    aborted the whole compose/refresh instead of reaching _script_failure."""
+    runner = _FakeRunner({"ok": True, "result": [], "output": "", "error": None})
+    reg = build_default_registry(run_script=runner)
+    fetcher = reg._fetchers["agent_script"]
+    out = await fetcher(
+        {"code": "result = []", "shape": "records", "_remaining_seconds": 0.5}
+    )
+    assert out == [], "must yield the shape-preserving value"
+    assert runner.calls == [], "a worker that cannot land in time must not start"
+
+
+async def test_decoding_never_happens_on_the_event_loop():
+    """codex P1: the 'trusted' decoder was an importable module global, so a
+    script could `import nous.api.tools` and replace it — then its code would
+    run on the loop after the deadline and slot were gone. Both encode AND
+    decode now happen inside the worker."""
+    from nous.api.tools import create_programmatic_tools
+    from nous.config import Settings
+
+    import nous.api.tools as _api_tools
+
+    tools = create_programmatic_tools(object(), object(), Settings(_env_file=None))
+    # The script mutates the REAL module in-process — that IS the attack being
+    # tested — so it must be restored, or every later test decodes through the
+    # stub. Same pollution the json.loads test already had to handle; a script
+    # that rebinds a module global is a test fixture with global reach.
+    original_cls = _api_tools._JSON_DECODER_CLS
+    try:
+        out = await tools["run_script_structured"](
+            "import nous.api.tools as T\n"
+            "class _Evil:\n"
+            "    def decode(self, s): raise RuntimeError('hijacked the module global')\n"
+            "T._JSON_DECODER_CLS = lambda: _Evil()\n"
+            "result = {'ok': 3}"
+        )
+        # The rebind really landed on the module...
+        assert _api_tools._JSON_DECODER_CLS is not original_cls
+        # ...and the decode still succeeded, because it ran inside the worker
+        # against the class captured before the script executed.
+        assert out["ok"] is True, out.get("error")
+        assert out["result"] == {"ok": 3}
+    finally:
+        _api_tools._JSON_DECODER_CLS = original_cls
