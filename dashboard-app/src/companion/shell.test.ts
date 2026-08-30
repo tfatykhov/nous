@@ -9,15 +9,26 @@ import { transport } from './transport';
 // transport.connect is spied out — these tests exercise the shell against
 // the store, not the network.
 
-function seed(surfaceId: string, priority = 0) {
+function seed(surfaceId: string, priority = 0, title?: string, headerTitle?: string) {
   store.apply(null, {
     version: 'v1.0',
     createSurface: {
       surfaceId,
       catalogId: 'nous-core',
-      components: [{ id: 'root', component: 'Text', text: `body of ${surfaceId}` }],
+      components: [
+        { id: 'root', component: 'Text', text: `body of ${surfaceId}` },
+        ...(headerTitle
+          ? [{ id: 'header', component: 'AppHeader', title: headerTitle }]
+          : []),
+      ],
       dataModel: {},
-      metadata: { extensions: { com_nous_nonce: 'n-' + surfaceId, com_nous_priority: priority } },
+      metadata: {
+        extensions: {
+          com_nous_nonce: 'n-' + surfaceId,
+          com_nous_priority: priority,
+          ...(title ? { com_nous_title: title } : {}),
+        },
+      },
     },
   } as never);
 }
@@ -112,5 +123,93 @@ describe('Companion shell — #/a/ route alias', () => {
     const sections = container.querySelectorAll('section.surface');
     expect(sections.length).toBe(1);
     expect(sections[0].getAttribute('aria-label')).toBe('nous:chat:micro_app:aaa001');
+  });
+});
+
+describe('Companion shell — chip labels (micro-app naming)', () => {
+  it('labels a micro-app chip with its own title, not the constant "app"', async () => {
+    seed('nous:chat:micro_app:aaa001', 0, 'Health Monitor');
+    seed('nous:chat:micro_app:bbb002', 0, 'Crypto Note');
+    const { container } = render(Companion);
+    await settle();
+    const chips = [...container.querySelectorAll('.switcher a.chip')].map((c) =>
+      c.textContent?.trim(),
+    );
+    expect(chips).toContain('Health Monitor');
+    expect(chips).toContain('Crypto Note');
+    // The whole point: two live apps are no longer indistinguishable.
+    expect(chips).not.toContain('app');
+  });
+
+  it('falls back to the kind label when a micro-app has no title', async () => {
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:sweep:decision_sweep:bbb002');
+    const { container } = render(Companion);
+    await settle();
+    const chips = [...container.querySelectorAll('.switcher a.chip')].map((c) =>
+      c.textContent?.trim(),
+    );
+    expect(chips).toContain('app');
+  });
+
+  it('keeps the curated label for template kinds even when titled', async () => {
+    seed('nous:chat:micro_app:aaa001', 0, 'Health Monitor');
+    seed('nous:heartbeat:heartbeat_findings:ccc003', 0, 'Heartbeat Triage \u2014 Aug 30 2026 21:00 UTC');
+    const { container } = render(Companion);
+    await settle();
+    const chips = [...container.querySelectorAll('.switcher a.chip')].map((c) =>
+      c.textContent?.trim(),
+    );
+    expect(chips).toContain('findings');
+    expect(chips).not.toContain('Heartbeat Triage \u2014 Aug 30 2026 21:00 UTC');
+  });
+
+  it('truncates a long title on a word boundary and keeps the full text on hover', async () => {
+    const long = 'Crypto Note: Six Months, Forward View';
+    seed('nous:chat:micro_app:aaa001', 0, long);
+    seed('nous:sweep:decision_sweep:bbb002');
+    const { container } = render(Companion);
+    await settle();
+    const chip = [...container.querySelectorAll('.switcher a.chip')].find((c) =>
+      c.getAttribute('title')?.startsWith(long),
+    );
+    expect(chip).toBeTruthy();
+    const text = chip!.textContent!.trim();
+    expect(text.length).toBeLessThanOrEqual(23);
+    expect(text.endsWith('\u2026')).toBe(true);
+    expect(long.startsWith(text.slice(0, -1))).toBe(true);
+    expect(chip!.getAttribute('title')).toContain('nous:chat:micro_app:aaa001');
+  });
+});
+
+describe('Companion shell — chip label source precedence', () => {
+  it('prefers the AppHeader title over the longer record title', async () => {
+    seed(
+      'nous:chat:micro_app:aaa001',
+      0,
+      'Crypto Note: Six Months, Forward View',
+      'Crypto Note',
+    );
+    seed('nous:sweep:decision_sweep:bbb002');
+    const { container } = render(Companion);
+    await settle();
+    const chips = [...container.querySelectorAll('.switcher a.chip')].map((c) =>
+      c.textContent?.trim(),
+    );
+    // Short authored name wins outright — no truncation ellipsis.
+    expect(chips).toContain('Crypto Note');
+  });
+
+  it('names both live apps distinctly from their headers', async () => {
+    seed('nous:chat:micro_app:aaa001', 0, undefined, 'Health Monitor');
+    seed('nous:chat:micro_app:bbb002', 0, undefined, 'Crypto Note');
+    const { container } = render(Companion);
+    await settle();
+    const chips = [...container.querySelectorAll('.switcher a.chip')].map((c) =>
+      c.textContent?.trim(),
+    );
+    expect(chips).toContain('Health Monitor');
+    expect(chips).toContain('Crypto Note');
+    expect(chips).not.toContain('app');
   });
 });

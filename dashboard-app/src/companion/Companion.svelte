@@ -39,9 +39,51 @@
     return surfaceId.split(':')[2] ?? '';
   }
 
-  function chipLabel(surfaceId: string): string {
-    const kind = kindOf(surfaceId);
-    return KIND_LABELS[kind] ?? kind ?? surfaceId.slice(-4);
+  /** Chip labels are ~a dozen characters before they crowd the switcher.
+   * Cut on a word boundary when one is close to the limit, else hard-cut. */
+  const CHIP_MAX = 22;
+  function shorten(title: string): string {
+    const t = title.replace(/\s+/g, ' ').trim();
+    if (t.length <= CHIP_MAX) return t;
+    const cut = t.slice(0, CHIP_MAX);
+    const sp = cut.lastIndexOf(' ');
+    return (sp >= CHIP_MAX - 8 ? cut.slice(0, sp) : cut).replace(/[\s:,\u2014-]+$/, '') + '\u2026';
+  }
+
+  /** An app's AppHeader is structurally mandatory (lint_micro_app: it must
+   * be the first top-level child) and its title is authored SHORT for
+   * display — "Crypto Note", not the record title "Crypto Note: Six
+   * Months, Forward View". That makes it the better chip label, and it
+   * needs no server round-trip: it is already in the components we render. */
+  function headerTitle(surface: {
+    components?: Record<string, { component?: string; title?: unknown }>;
+  }): string {
+    for (const comp of Object.values(surface.components ?? {})) {
+      if (comp?.component === 'AppHeader' && typeof comp.title === 'string') {
+        return comp.title;
+      }
+    }
+    return '';
+  }
+
+  function chipLabel(surface: {
+    surfaceId: string;
+    title?: string;
+    components?: Record<string, { component?: string; title?: unknown }>;
+  }): string {
+    const kind = kindOf(surface.surfaceId);
+    // Every composed app's id carries the SAME kind segment ("micro_app"),
+    // so KIND_LABELS can only ever say "app" — N live apps become N chips
+    // reading "app". Its own title is the only thing that distinguishes
+    // them. Template kinds keep the curated label: it is shorter and more
+    // scannable than their titles, which carry timestamps.
+    if (kind === 'micro_app') {
+      // Header title first (short, authored); the record title from
+      // createSurface metadata is the fallback for a headerless surface.
+      const name = headerTitle(surface) || surface.title || '';
+      if (name.trim()) return shorten(name);
+    }
+    return KIND_LABELS[kind] ?? kind ?? surface.surfaceId.slice(-4);
   }
 
   let route = $state<View>(parseHash());
@@ -99,9 +141,9 @@
           class="chip"
           class:active={route.view === 'surface' && route.id === surface.surfaceId}
           href={'#/s/' + encodeURIComponent(surface.surfaceId)}
-          title={surface.surfaceId}
+          title={surface.title ? surface.title + ' \u2014 ' + surface.surfaceId : surface.surfaceId}
         >
-          {chipLabel(surface.surfaceId)}
+          {chipLabel(surface)}
         </a>
       {/each}
       {#if microApps.length >= 2}
