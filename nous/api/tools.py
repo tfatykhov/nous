@@ -3889,8 +3889,13 @@ def _release_run_slot() -> None:
 # injected into script scope, so a script can assign `json.loads = ...`; using
 # the attribute later would then dispatch agent-authored code on the main event
 # loop, after the deadline and run slot are gone (codex P1).
-_TRUSTED_JSON_DUMPS = json.dumps
-_TRUSTED_JSON_LOADS = json.loads
+# Aliasing `json.loads` is NOT enough: the saved function still reads mutable
+# module globals at call time (`json._default_decoder`), so a script could
+# replace that object and have its `decode()` run on the event loop after the
+# deadline and slot are gone (codex P1). Own instances read nothing from the
+# module, so a script cannot reach them at all.
+_TRUSTED_DECODER = json.JSONDecoder()
+_TRUSTED_ENCODER_CLS = json.JSONEncoder
 
 
 def create_programmatic_tools(
@@ -4517,9 +4522,9 @@ def create_programmatic_tools(
                             return float(obj)
                         return str(obj)
 
-                    namespace["__nous_json__"] = _TRUSTED_JSON_DUMPS(
-                        namespace.get("result"), default=_jsonable, allow_nan=False
-                    )
+                    namespace["__nous_json__"] = _TRUSTED_ENCODER_CLS(
+                        default=_jsonable, allow_nan=False
+                    ).encode(namespace.get("result"))
             finally:
                 # Restore original functions
                 sys.settrace = _original_settrace
@@ -4587,7 +4592,7 @@ def create_programmatic_tools(
                 )
             return {
                 "ok": True,
-                "result": _TRUSTED_JSON_LOADS(encoded),
+                "result": _TRUSTED_DECODER.decode(encoded),
                 "result_chars": len(encoded),
                 "output": output,
                 "error": None,

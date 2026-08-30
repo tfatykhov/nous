@@ -1215,3 +1215,64 @@ async def test_script_cannot_hijack_the_json_decoder():
         # The script mutates the REAL module in-process; leaving it patched
         # breaks pytest's own cache write at session end.
         _json_mod.loads = original_loads
+
+
+async def test_script_cannot_hijack_the_decoder_internals():
+    """codex P1: aliasing json.loads is not enough — the saved function still
+    reads json._default_decoder at call time, so a script could swap THAT and
+    have its decode() run on the event loop after the deadline is gone."""
+    import json as _json_mod
+
+    from nous.api.tools import create_programmatic_tools
+    from nous.config import Settings
+
+    tools = create_programmatic_tools(object(), object(), Settings(_env_file=None))
+    original = _json_mod._default_decoder
+    try:
+        out = await tools["run_script_structured"](
+            "import json\n"
+            "class _Evil:\n"
+            "    def decode(self, s): raise RuntimeError('hijacked internals')\n"
+            "json._default_decoder = _Evil()\n"
+            "result = {'ok': 2}"
+        )
+        assert _json_mod._default_decoder is not original
+        assert out["ok"] is True, out.get("error")
+        assert out["result"] == {"ok": 2}
+    finally:
+        _json_mod._default_decoder = original
+
+
+async def test_a_pool_too_small_to_reserve_refuses_dashboard_scripts():
+    """codex P1: at the supported MAX_CONCURRENT=1 the old threshold let an
+    unattended script take the only slot; blocked in C code it would reject
+    every interactive call indefinitely."""
+    from types import SimpleNamespace
+
+    runner = _FakeRunner({"ok": True, "result": [], "output": "", "error": None})
+    reg = build_default_registry(
+        run_script=runner,
+        settings=SimpleNamespace(
+            programmatic_tools_max_concurrent=1, tool_timeout=2000,
+            a2ui_compose_timeout_seconds=60,
+        ),
+    )
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = []", "shape": "records"}}]
+    )
+    assert out["d"] == [] and runner.calls == [], "script ran on a pool with no reserve"
+
+
+async def test_non_mapping_series_meta_is_rejected():
+    """codex P2: `_downsample_series` does (meta or {}).get(...), so a truthy
+    non-mapping meta raised AttributeError inside _bound_series — a 500."""
+    bad = {"kind": "series", "points": [{"t": "a", "v": 1}], "unit": "", "meta": "bad"}
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": bad, "output": "", "error": None})
+    )
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = bad", "shape": "series", "series_keys": ["v"]}}]
+    )
+    assert is_series(out["d"]) and "declared shape 'series'" in out["d"]["meta"]["reason"]

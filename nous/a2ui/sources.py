@@ -506,6 +506,12 @@ def _is_valid_series(value: Any) -> bool:
     """
     if not (is_series(value) and isinstance(value.get("points"), list)):
         return False
+    meta = value.get("meta")
+    if meta and not isinstance(meta, dict):
+        # `_downsample_series` does `(series.get("meta") or {}).get(...)`, so a
+        # truthy non-mapping such as "bad" raises AttributeError inside
+        # `_bound_series` — a 500 rather than the promised failure value.
+        return False
     return all(isinstance(p, dict) for p in value["points"])
 
 
@@ -853,7 +859,21 @@ def build_default_registry(
                 )
             except Exception:  # pragma: no cover - defensive
                 in_flight, capacity = 0, 4
-            if in_flight >= max(1, capacity - _INTERACTIVE_SLOT_RESERVE):
+            allowed = capacity - _INTERACTIVE_SLOT_RESERVE
+            if allowed < 1:
+                # A pool too small to reserve anything (the supported
+                # NOUS_PROGRAMMATIC_TOOLS_MAX_CONCURRENT=1) must not let an
+                # unattended script take the only slot — if it blocked in C
+                # code every interactive call would be rejected indefinitely,
+                # which is the opposite of what this gate promises (codex P1).
+                return _script_failure(
+                    f"script pool of {capacity} cannot reserve "
+                    f"{_INTERACTIVE_SLOT_RESERVE} slots for interactive use — "
+                    "raise NOUS_PROGRAMMATIC_TOOLS_MAX_CONCURRENT to use "
+                    "dashboard scripts",
+                    shape,
+                )
+            if in_flight >= allowed:
                 return _script_failure(
                     f"{in_flight} script slots already in use — dashboard "
                     "scripts yield to interactive use; try refresh again",
