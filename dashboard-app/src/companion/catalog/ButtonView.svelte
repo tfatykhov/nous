@@ -102,7 +102,7 @@
   .btn.primary {
     background: var(--accent);
     border-color: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
   }
   .btn.primary:hover:not(:disabled) {
     background: var(--accent-dim);
@@ -116,7 +116,7 @@
     color: var(--text);
   }
   .err {
-    color: var(--red);
+    color: var(--crit);
     font-size: 0.8rem;
   }
 </style>

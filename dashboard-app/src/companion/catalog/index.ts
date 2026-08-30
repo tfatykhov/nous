@@ -38,6 +38,9 @@ import AppFooterView from './AppFooterView.svelte';
 import SectionView from './SectionView.svelte';
 import StatRowView from './StatRowView.svelte';
 import TimelineView from './TimelineView.svelte';
+import SparklineView from './SparklineView.svelte';
+import LineChartView from './LineChartView.svelte';
+import BarChartView from './BarChartView.svelte';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const registry: Record<string, Component<any>> = {
@@ -73,4 +76,8 @@ export const registry: Record<string, Component<any>> = {
   Section: SectionView,
   StatRow: StatRowView,
   Timeline: TimelineView,
+  // F094 charts
+  Sparkline: SparklineView,
+  LineChart: LineChartView,
+  BarChart: BarChartView,
 };

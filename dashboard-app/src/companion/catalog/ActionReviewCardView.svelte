@@ -99,6 +99,6 @@
     white-space: pre-wrap;
   }
   dd.no {
-    color: var(--yellow);
+    color: var(--warn);
   }
 </style>

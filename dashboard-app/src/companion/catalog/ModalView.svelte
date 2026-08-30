@@ -85,7 +85,7 @@
     width: 100%;
   }
   dialog::backdrop {
-    background: rgba(10, 10, 15, 0.72);
+    background: var(--scrim);
   }
   .content {
     position: relative;

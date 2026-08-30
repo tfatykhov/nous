@@ -199,7 +199,7 @@
     font-size: 0.85rem;
   }
   .err {
-    color: var(--red);
+    color: var(--crit);
     font-size: 0.8rem;
   }
 </style>

@@ -46,7 +46,9 @@ def _valid_components() -> list[dict]:
             "staleAfterS": 3600,
         },
         {"id": "stats", "component": "StatRow", "children": ["t1"]},
-        {"id": "t1", "component": "StatTile", "label": "Days out", "value": "7"},
+        # Binds the `status` source so the unread-source rule (F093 §1.1) is
+        # satisfied — a declared source must be bound by something.
+        {"id": "t1", "component": "StatTile", "label": "Days out", "value": {"path": "/status/days_out"}},
         {"id": "sec1", "component": "Section", "title": "Flights", "child": "kv", "provenance": "model"},
         {"id": "kv", "component": "KeyValueTable", "rows": {"path": "/trip/flights"}},
         {"id": "footer", "component": "AppFooter", "refineOptions": [], "showRefresh": True},

@@ -287,7 +287,14 @@ def AppFooter(id: str, *, refineOptions: Any = None, showRefresh: bool = True) -
     )
 
 
-def Section(id: str, *, title: str, child: str, provenance: str | None = None) -> dict:
+def Section(
+    id: str,
+    *,
+    title: str,
+    child: str,
+    provenance: str | None = None,
+    layout: str | None = None,
+) -> dict:
     return _clean(
         {
             "id": id,
@@ -295,6 +302,7 @@ def Section(id: str, *, title: str, child: str, provenance: str | None = None) -
             "title": title,
             "child": child,
             "provenance": provenance,
+            "layout": layout,
         }
     )
 
@@ -305,3 +313,52 @@ def StatRow(id: str, *, children: list[str]) -> dict:
 
 def Timeline(id: str, *, items: Any) -> dict:
     return {"id": id, "component": "Timeline", "items": items}
+
+
+# --- F094 chart primitives (binding-mandatory; renderer-owned SVG) --------
+
+
+def Sparkline(id: str, *, path: str, label: str | None = None, tone: str | None = None) -> dict:
+    return _clean({"id": id, "component": "Sparkline", "path": path, "label": label, "tone": tone})
+
+
+def LineChart(
+    id: str,
+    *,
+    path: str,
+    series: list[dict],
+    label: str | None = None,
+    xLabel: str | None = None,
+    yLabel: str | None = None,
+) -> dict:
+    return _clean(
+        {
+            "id": id,
+            "component": "LineChart",
+            "path": path,
+            "series": series,
+            "label": label,
+            "xLabel": xLabel,
+            "yLabel": yLabel,
+        }
+    )
+
+
+def BarChart(
+    id: str,
+    *,
+    path: str,
+    label: str | None = None,
+    orientation: str | None = None,
+    tone: str | None = None,
+) -> dict:
+    return _clean(
+        {
+            "id": id,
+            "component": "BarChart",
+            "path": path,
+            "label": label,
+            "orientation": orientation,
+            "tone": tone,
+        }
+    )

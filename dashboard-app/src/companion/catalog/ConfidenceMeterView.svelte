@@ -54,13 +54,13 @@
     transition: var(--transition);
   }
   .fill.low {
-    background: var(--red);
+    background: var(--crit);
   }
   .fill.mid {
-    background: var(--yellow);
+    background: var(--warn);
   }
   .fill.high {
-    background: var(--green);
+    background: var(--ok);
   }
   .num {
     color: var(--muted);

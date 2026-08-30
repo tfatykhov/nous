@@ -2616,6 +2616,17 @@ class Settings(BaseSettings):
             "server-side fires on this."
         ),
     )
+    a2ui_health_db_path: str = Field(
+        default="",
+        description=(
+            "F094: path to the external health SQLite db backing the "
+            "`health_series` chart source. Empty ⇒ the source is not "
+            "registered (deployments without the health integration simply "
+            "lack it). The db + schema are owned by the health integration, "
+            "not this repo; the reader is defensive (missing db/table ⇒ an "
+            "explicit empty series, never a blank box)."
+        ),
+    )
     a2ui_max_live_apps: int = Field(
         default=8,
         ge=1,

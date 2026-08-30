@@ -77,7 +77,7 @@
     padding-left: 0.7rem;
   }
   li.flag {
-    border-left-color: var(--yellow);
+    border-left-color: var(--warn);
   }
   .at {
     color: var(--muted);
@@ -95,7 +95,7 @@
     overflow-wrap: anywhere;
   }
   li.flag .label {
-    color: var(--yellow);
+    color: var(--warn);
   }
   .detail {
     color: var(--muted);

@@ -70,8 +70,17 @@ ALLOWED_COMPONENTS = frozenset(
         "Section",
         "StatRow",
         "Timeline",
+        # F094 chart primitives
+        "Sparkline",
+        "LineChart",
+        "BarChart",
     }
 )
+
+# F093 §5.1 / F094 §5 — components that are meaningless without their data:
+# a chart with no `path` cannot render. A missing/blank `path` is a hard
+# error (unlike a Text with no binding, which is merely lazy).
+BINDING_MANDATORY = frozenset({"Sparkline", "LineChart", "BarChart"})
 
 _CHILD_KEYS = ("child", "children", "trigger", "content")
 
@@ -84,25 +93,60 @@ def _children_of(component: dict) -> list[str]:
             ids.append(value)
         elif isinstance(value, list):
             ids.extend(v for v in value if isinstance(v, str))
+        elif isinstance(value, dict) and isinstance(value.get("componentId"), str):
+            # F093 §6.2 Repeat: a `{componentId, path}` template child. The
+            # renderer (Children.svelte) already expands the referenced
+            # component over the bound array with a per-item scope; the
+            # template child was INVISIBLE here (the "unreachable prior
+            # art"), so the reference check and depth walk never saw it.
+            ids.append(value["componentId"])
     for tab in component.get("tabs") or []:
         if isinstance(tab, dict) and isinstance(tab.get("child"), str):
             ids.append(tab["child"])
     return ids
 
 
-def lint_micro_app(components: list[dict[str, Any]]) -> list[str]:
+def _template_children(component: dict) -> list[dict]:
+    """The `{componentId, path}` template children of a component (F093 §6.2)."""
+    out = []
+    for key in _CHILD_KEYS:
+        value = component.get(key)
+        if isinstance(value, dict) and isinstance(value.get("componentId"), str):
+            out.append(value)
+    return out
+
+
+# F093 §6.3 — list-heavy archetypes get a larger budget. MAX_DEPTH stays
+# 5 for all (depth is a complexity smell, not an expressiveness need).
+_ROOMY_ARCHETYPES = frozenset({"ledger", "briefing"})
+
+
+def caps_for(archetype: str | None) -> tuple[int, int]:
+    """(max_components, max_sections) for an archetype. Default 40/5;
+    ledger/briefing get 80/8 (a 16-day itinerary or a metrics dashboard
+    does not fit 40/5, and Repeat keeps the component count low anyway)."""
+    if archetype in _ROOMY_ARCHETYPES:
+        return 80, 8
+    return MAX_COMPONENTS, MAX_SECTIONS
+
+
+def lint_micro_app(
+    components: list[dict[str, Any]], *, archetype: str | None = None
+) -> list[str]:
     """Return every grammar violation (empty list = conforming).
 
     Operates on the raw component array (the shape BuiltSurface carries and
     the composer emits) so both compose output and refine recomposition run
-    through the identical check.
+    through the identical check. ``archetype`` selects the component/section
+    caps (F093 §6.3).
     """
     errors: list[str] = []
     by_id = {c.get("id"): c for c in components if isinstance(c, dict)}
+    max_components, max_sections = caps_for(archetype)
 
-    if len(components) > MAX_COMPONENTS:
+    if len(components) > max_components:
         errors.append(
-            f"component budget exceeded: {len(components)} > {MAX_COMPONENTS} — "
+            f"component budget exceeded: {len(components)} > {max_components} — "
             "summarize and offer an app.refine drill-down instead"
         )
 
@@ -124,6 +168,27 @@ def lint_micro_app(components: list[dict[str, Any]]) -> list[str]:
                 errors.append(f"Section {comp.get('id')!r} has no title — no anonymous blocks")
         if ctype == "AppHeader" and not comp.get("composedAt"):
             errors.append("AppHeader is missing composedAt — the freshness stamp is mandatory")
+        if ctype in BINDING_MANDATORY:
+            path = comp.get("path")
+            if not isinstance(path, str) or not path.strip():
+                errors.append(
+                    f"{ctype} {comp.get('id')!r} has no `path` — a chart with no "
+                    "bound series is meaningless (F094 §5)"
+                )
+        for tmpl in _template_children(comp):
+            # F093 §6.2 Repeat: a template child must name a real component
+            # and bind an array path; the referenced component renders ONCE
+            # per array item, so it must exist in the flat list.
+            if not isinstance(tmpl.get("path"), str) or not tmpl["path"].strip():
+                errors.append(
+                    f"repeat template in {comp.get('id')!r} has no `path` — it "
+                    "must bind the array to expand over"
+                )
+            if tmpl["componentId"] not in by_id:
+                errors.append(
+                    f"repeat template in {comp.get('id')!r} references unknown "
+                    f"component {tmpl['componentId']!r}"
+                )
         if ctype == "StatRow":
             # Type-check the children (codex round 3): the catalog schema
             # only bounds children to <=4 strings, so a Text or Card ref
@@ -160,13 +225,18 @@ def lint_micro_app(components: list[dict[str, Any]]) -> list[str]:
     root = by_id.get("root")
     if root is None or root.get("component") != "Column":
         errors.append("root must be a Column")
+    elif not isinstance(root.get("children"), list):
+        # The skeleton is a fixed ordered list; a template child at root
+        # (F093 §6.2) would make the skeleton unrepresentable. Repeat lives
+        # inside a Section, never at root.
+        errors.append("root children must be an ordered list, not a repeat template")
     else:
         order = [
             by_id[cid].get("component")
             for cid in root.get("children") or []
             if cid in by_id
         ]
-        skeleton_error = _skeleton_error(order)
+        skeleton_error = _skeleton_error(order, max_sections)
         if skeleton_error:
             errors.append(skeleton_error)
 
@@ -179,9 +249,9 @@ def lint_micro_app(components: list[dict[str, Any]]) -> list[str]:
     return errors
 
 
-def _skeleton_error(order: list[str | None]) -> str | None:
-    """AppHeader · StatRow? · Section{1,5} · AppFooter — anything else fails."""
-    want = "AppHeader, optional StatRow, 1-5 Section, AppFooter"
+def _skeleton_error(order: list[str | None], max_sections: int = MAX_SECTIONS) -> str | None:
+    """AppHeader · StatRow? · Section{1,N} · AppFooter — anything else fails."""
+    want = f"AppHeader, optional StatRow, 1-{max_sections} Section, AppFooter"
     i = 0
     if i >= len(order) or order[i] != "AppHeader":
         return f"skeleton: first top-level child must be AppHeader (want {want})"
@@ -192,8 +262,8 @@ def _skeleton_error(order: list[str | None]) -> str | None:
     while i < len(order) and order[i] == "Section":
         sections += 1
         i += 1
-    if sections < 1 or sections > MAX_SECTIONS:
-        return f"skeleton: need 1-{MAX_SECTIONS} Section blocks, got {sections} (want {want})"
+    if sections < 1 or sections > max_sections:
+        return f"skeleton: need 1-{max_sections} Section blocks, got {sections} (want {want})"
     if i >= len(order) or order[i] != "AppFooter":
         return f"skeleton: last top-level child must be AppFooter (want {want})"
     if i + 1 != len(order):

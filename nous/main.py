@@ -1029,6 +1029,8 @@ async def create_components(settings: Settings) -> dict:
                     brain=brain,
                     dag_store=dag_store,
                     heartbeat_runner=heartbeat_runner,
+                    database=database,
+                    health_db_path=settings.a2ui_health_db_path or None,
                 ),
             )
         action_router = ActionRouter(

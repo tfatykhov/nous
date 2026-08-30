@@ -140,8 +140,8 @@ describe('DagGraphView', () => {
 
     const circles = container.querySelectorAll('g.node circle');
     expect(circles.length).toBe(3);
-    expect(circles[0].getAttribute('fill')).toBe('var(--green)');
-    expect(circles[1].getAttribute('fill')).toBe('var(--red)');
+    expect(circles[0].getAttribute('fill')).toBe('var(--ok)');
+    expect(circles[1].getAttribute('fill')).toBe('var(--crit)');
     expect(container.querySelectorAll('line').length).toBe(2);
     expect(container.textContent).toContain('analyze');
   });

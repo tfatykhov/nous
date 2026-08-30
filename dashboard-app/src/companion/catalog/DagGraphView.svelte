@@ -104,9 +104,9 @@
   });
 
   const STATUS_COLORS: Record<string, string> = {
-    completed: 'var(--green)',
+    completed: 'var(--ok)',
     running: 'var(--accent)',
-    failed: 'var(--red)',
+    failed: 'var(--crit)',
     pending: 'var(--muted)',
     ready: 'var(--muted)',
     cancelled: 'var(--muted)',
@@ -161,9 +161,9 @@
     {/each}
   </svg>
   <div class="legend">
-    <span><i style:background="var(--green)"></i>completed</span>
+    <span><i style:background="var(--ok)"></i>completed</span>
     <span><i style:background="var(--accent)"></i>running</span>
-    <span><i style:background="var(--red)"></i>failed</span>
+    <span><i style:background="var(--crit)"></i>failed</span>
     <span><i style:background="var(--muted)"></i>pending</span>
   </div>
 </div>

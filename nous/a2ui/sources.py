@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from collections.abc import Awaitable, Callable
 from typing import Any
 from uuid import UUID
@@ -27,6 +28,12 @@ from uuid import UUID
 logger = logging.getLogger(__name__)
 
 Fetcher = Callable[[dict], Awaitable[Any]]
+
+# F094 §4.1 — server-side point cap per series. A chart binds one component
+# regardless of point count, but the WIRE payload and the censor budget both
+# grow with points, so the source downsamples above this (never truncates —
+# a partial trend reads as a finished one, the §1.1 failure in a new costume).
+_MAX_SERIES_POINTS = 200
 
 # The push censor gate FAILS CLOSED above 20,000 flattened chars, surfacing
 # as an opaque "Surface blocked" (rev-arch #9). Sources bound rows but not
@@ -90,10 +97,154 @@ class SourceRegistry:
                     f"unknown data source {name!r}; available: {self.names()}"
                 )
             value = await fetcher(dict(decl.get("params") or {}))
-            value, size = _bound(value, min(_PER_SOURCE_BUDGET_CHARS, _TOTAL_BUDGET_CHARS - spent))
+            budget = min(_PER_SOURCE_BUDGET_CHARS, _TOTAL_BUDGET_CHARS - spent)
+            if is_series(value):
+                # A series is EXEMPT from _bound's wholesale-dict-replacement
+                # (F094): _bound would swap the whole {kind:series,...} object
+                # for a {_truncated} marker, and the model's chart — bound
+                # correctly — would then fail the series-shape rule against a
+                # marker. Series bound themselves by DOWNSAMPLING points to
+                # fit both the point cap and the char budget, staying a valid
+                # series throughout.
+                value, size = _bound_series(value, budget)
+            else:
+                value, size = _bound(value, budget)
             spent += size
             model[key] = value
         return model
+
+
+def is_series(value: Any) -> bool:
+    """A source's series contract: {kind:"series", points:[{t,v|...}], ...}."""
+    return isinstance(value, dict) and value.get("kind") == "series"
+
+
+def _bound_series(series: dict, budget: int) -> tuple[dict, int]:
+    """Fit a series under the char budget by downsampling points, never by
+    replacing the object. Returns the (possibly downsampled) series and its
+    serialized size."""
+    points = series.get("points") or []
+    size = len(json.dumps(series, default=str))
+    if size <= budget or len(points) <= 2:
+        return series, size
+    # Binary-search the largest point count that fits (endpoints preserved).
+    lo, hi = 2, len(points)
+    best = _downsample_series(series, lo)
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate = _downsample_series(series, mid)
+        if len(json.dumps(candidate, default=str)) <= budget:
+            best = candidate
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best, len(json.dumps(best, default=str))
+
+
+def _downsample_series(series: dict, target: int) -> dict:
+    """Naive stride downsample preserving first + last (LTTB deferred to
+    F094 P3). Stamps meta.downsampled_from with the ORIGINAL length so the
+    renderer can mark it, carried across repeated downsampling."""
+    points = series.get("points") or []
+    original = series.get("meta", {}).get("downsampled_from") or len(points)
+    if len(points) <= target:
+        return series
+    step = len(points) / target
+    kept = [points[min(len(points) - 1, int(i * step))] for i in range(target)]
+    kept[-1] = points[-1]
+    out = dict(series)
+    out["points"] = kept
+    meta = dict(series.get("meta") or {})
+    meta["downsampled_from"] = original
+    out["meta"] = meta
+    return out
+
+
+def to_series(
+    records: list[dict],
+    t_key: str,
+    v_key: str,
+    *,
+    unit: str = "",
+    value_keys: list[str] | None = None,
+) -> dict:
+    """General normalizer: a record list → the F094 series contract, so any
+    existing record-list fetcher becomes chartable without a rewrite.
+
+    - Sorts ascending by ``t_key``.
+    - Single-series (``value_keys`` None): each point is ``{t, v}`` from
+      ``t_key``/``v_key``; a point whose value is non-finite is DROPPED and
+      counted in ``meta.dropped`` (a dropped reading and a zero reading are
+      different facts — never coerce to 0).
+    - Multi-series (``value_keys`` given): each point keeps ``t`` plus every
+      listed numeric key; a per-key non-finite value is omitted from that
+      point. The result carries ``keys`` so LineChart/validation can check
+      arity and key presence.
+    - Caps to ``_MAX_SERIES_POINTS`` by downsampling (``meta.downsampled_from``).
+    """
+    keys = value_keys or [v_key]
+    ordered = sorted(records, key=lambda r: str(r.get(t_key, "")))
+    points: list[dict] = []
+    dropped = 0
+    for rec in ordered:
+        t = rec.get(t_key)
+        if t is None:
+            continue
+        point: dict[str, Any] = {"t": _iso(t)}
+        any_finite = False
+        for k in keys:
+            raw = rec.get(k)
+            if isinstance(raw, (int, float)) and math.isfinite(raw):
+                point[k if value_keys else "v"] = raw
+                any_finite = True
+        if not any_finite:
+            dropped += 1
+            continue
+        points.append(point)
+    result: dict[str, Any] = {
+        "kind": "series",
+        "points": points,
+        "unit": unit,
+        "meta": {"dropped": dropped, "downsampled_from": None},
+    }
+    if value_keys:
+        result["keys"] = list(value_keys)
+    if len(points) > _MAX_SERIES_POINTS:
+        result = _downsample_series(result, _MAX_SERIES_POINTS)
+    return result
+
+
+def empty_series(reason: str, *, unit: str = "") -> dict:
+    """An explicit empty series (F094 R5 / §3.1) — a missing db or drifted
+    schema returns this, and the renderer draws the empty state with the
+    reason, never a blank box or a confident zero."""
+    return {
+        "kind": "series",
+        "points": [],
+        "unit": unit,
+        "meta": {"dropped": 0, "downsampled_from": None, "reason": reason},
+    }
+
+
+def _iso(t: Any) -> str:
+    """Coerce a timestamp/date to an ISO string; the renderer displays it,
+    never parses it for math (F094 series contract)."""
+    if hasattr(t, "isoformat"):
+        return t.isoformat()
+    return str(t)
+
+
+def _pivot(rows: list[tuple], categories: list[str]) -> list[dict]:
+    """Turn grouped (t, category, count) rows into one record per t with a
+    numeric key per category (0 where a category had no rows that day), so
+    to_series can produce a multi-series chart."""
+    by_t: dict[str, dict[str, Any]] = {}
+    for t, cat, n in rows:
+        key = _iso(t)
+        rec = by_t.setdefault(key, {"t": key, **{c: 0 for c in categories}})
+        if str(cat) in categories:
+            rec[str(cat)] = int(n)
+    return [by_t[k] for k in sorted(by_t)]
 
 
 def _bound(value: Any, budget: int) -> tuple[Any, int]:
@@ -122,12 +273,16 @@ def build_default_registry(
     brain: Any = None,
     dag_store: Any = None,
     heartbeat_runner: Any = None,
+    database: Any = None,
+    health_db_path: str | None = None,
 ) -> SourceRegistry:
-    """The Phase 3 fetcher set — thin wrappers over existing APIs.
+    """The Phase 3 fetcher set + F094 series sources.
 
     Each is registered only when its backing component is wired, so a
     deployment without (say) the heartbeat simply lacks that source and
-    compose is told so via the registry names.
+    compose is told so via the registry names. ``database`` enables the
+    grouped-over-time series sources; ``health_db_path`` the external
+    health series (defensive — absent db ⇒ an explicit empty series).
     """
     registry = SourceRegistry()
 
@@ -250,5 +405,106 @@ def build_default_registry(
         registry.register("recent_episodes", recent_episodes)
         registry.register("subtasks", subtasks)
         registry.register("schedules", schedules)
+
+    # --- F094 series sources — the general "any dashboard" enablers. -------
+    if database is not None and brain is not None:
+        from sqlalchemy import text
+
+        agent_id = getattr(brain, "agent_id", None)
+
+        async def decision_outcomes_series(params: dict) -> dict:
+            """Reviewed decisions per day by outcome — a multi-series chart
+            that makes the calibration loop visible in a surface, not a
+            report."""
+            days = max(1, min(int(params.get("days", 90)), 365))
+            outcomes = ["success", "partial", "failure", "noise", "superseded"]
+            async with database.session() as session:
+                rows = (
+                    await session.execute(
+                        text(
+                            "SELECT reviewed_at::date AS d, outcome, count(*) "
+                            "FROM brain.decisions WHERE agent_id = :aid "
+                            "AND reviewed_at IS NOT NULL "
+                            "AND reviewed_at >= now() - make_interval(days => :days) "
+                            "GROUP BY 1, 2 ORDER BY 1"
+                        ),
+                        {"aid": agent_id, "days": days},
+                    )
+                ).all()
+            records = _pivot([(r[0], r[1], r[2]) for r in rows], outcomes)
+            return to_series(records, "t", "v", unit="decisions", value_keys=outcomes)
+
+        registry.register("decision_outcomes_series", decision_outcomes_series)
+
+    if database is not None:
+        from sqlalchemy import text
+
+        agent_id = getattr(brain, "agent_id", None) if brain is not None else None
+
+        async def dag_throughput_series(params: dict) -> dict:
+            """Completed vs failed DAG nodes per day."""
+            days = max(1, min(int(params.get("days", 30)), 180))
+            cats = ["completed", "failed"]
+            aid_clause = "AND e.agent_id = :aid " if agent_id else ""
+            async with database.session() as session:
+                rows = (
+                    await session.execute(
+                        text(
+                            "SELECT n.completed_at::date AS d, n.status, count(*) "
+                            "FROM nous_system.dag_nodes n "
+                            "JOIN nous_system.execution_dags e ON n.dag_id = e.id "
+                            "WHERE n.completed_at IS NOT NULL "
+                            "AND n.status IN ('completed','failed') "
+                            f"{aid_clause}"
+                            "AND n.completed_at >= now() - make_interval(days => :days) "
+                            "GROUP BY 1, 2 ORDER BY 1"
+                        ),
+                        {"aid": agent_id, "days": days} if agent_id else {"days": days},
+                    )
+                ).all()
+            records = _pivot([(r[0], r[1], r[2]) for r in rows], cats)
+            return to_series(records, "t", "v", unit="nodes", value_keys=cats)
+
+        registry.register("dag_throughput_series", dag_throughput_series)
+
+    if health_db_path:
+
+        async def health_series(params: dict) -> dict:
+            """A metric over time from the external health SQLite db. The db
+            and its schema are owned by the health integration, not this
+            repo, so this reads a documented contract table
+            ``health_metrics(metric TEXT, ts TEXT ISO, value REAL)`` and
+            returns an EXPLICIT empty series (never a blank box) when the db
+            or table is missing or the schema has drifted (F094 R5)."""
+            import os
+            import sqlite3
+
+            metric = str(params.get("metric") or "")
+            if not metric:
+                return empty_series("no metric requested", unit="")
+            if not os.path.exists(health_db_path):
+                return empty_series(f"health db not found at {health_db_path}")
+            try:
+                conn = sqlite3.connect(f"file:{health_db_path}?mode=ro", uri=True)
+                try:
+                    cur = conn.execute(
+                        "SELECT ts, value FROM health_metrics "
+                        "WHERE metric = ? ORDER BY ts",
+                        (metric,),
+                    )
+                    records = [
+                        {"t": row[0], "v": row[1]}
+                        for row in cur.fetchall()
+                        if row[0] is not None
+                    ]
+                finally:
+                    conn.close()
+            except sqlite3.Error as exc:
+                return empty_series(f"health db read failed ({exc})")
+            if not records:
+                return empty_series(f"no rows for metric {metric!r}", unit=str(params.get("unit", "")))
+            return to_series(records, "t", "v", unit=str(params.get("unit", "")))
+
+        registry.register("health_series", health_series)
 
     return registry
