@@ -828,8 +828,11 @@ _REFINE_COMMAND_RE = re.compile(
     r"|^\s*(?:e-?mail|send|notify|remind|text|share|schedule|deliver|post)\s+"
     r"(?:me|us|it|them|the|a|an|this|that|these|those|my|our|all|everyone|team|"
     r"daily|weekly|monthly|quarterly|nightly|hourly)\b"
-    # A delivery target anywhere: "Send report to Alice", "Email summary to ops".
-    r"|\b(?:e-?mail|send|deliver|post)\b[^,;]*\bto\s+\w"
+    # A delivery target, but only when the verb OPENS the label — i.e. it is an
+    # imperative clause: "Send report to Alice", "Email summary to ops". Not
+    # anywhere, which matched "Compare email volume to last month" from `email`
+    # through `to l` and rejected a perfectly good comparison (codex P2).
+    r"|^\s*(?:e-?mail|send|deliver|post)\b[^,;]*\bto\s+\w"
     r"|\b(?:e-?mail|send|notify|remind|text)\s+(?:me|us|it|them)\b"
     r"|\bschedule\s+(?:a|an|the|this|daily|weekly|monthly|quarterly)\b"
     r"|\bsave\s+(?:to|as)\b"

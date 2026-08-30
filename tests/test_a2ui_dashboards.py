@@ -1427,3 +1427,36 @@ def test_leading_imperatives_without_a_pronoun_are_caught():
     for label in ("Email volume by week", "Send rate by hour",
                   "Notifications per day", "Sender leaderboard"):
         assert _refine_capability_errors([{"id": "x", "label": label}]) == [], label
+
+
+def test_lint_never_raises_on_inline_children_in_a_statrow():
+    """codex P2: the inline-child error was recorded and then execution fell
+    into the StatRow loop, where `by_id.get(dict)` raises TypeError. Lint runs
+    BEFORE schema validation, so that escaped _validate and took the repair
+    loop and the guaranteed fallback with it — a crash strictly worse than the
+    silent drop being fixed. A lint pass must always RETURN errors, never raise."""
+    comps = [
+        {"id": "root", "component": "Column",
+         "children": ["header", "stats", "sec", "footer"]},
+        {"id": "header", "component": "AppHeader", "title": "t",
+         "composedAt": {"path": "/meta/composedAt"}},
+        {"id": "stats", "component": "StatRow",
+         "children": [{"component": "StatTile", "label": "x"}]},
+        {"id": "sec", "component": "Section", "title": "S", "child": "b"},
+        {"id": "b", "component": "Text", "text": "x"},
+        {"id": "footer", "component": "AppFooter"},
+    ]
+    errs = grammar.lint_micro_app(comps)  # must not raise
+    assert any("inline child object" in e for e in errs)
+
+
+def test_delivery_target_only_counts_in_an_imperative_clause():
+    """codex P2: matching a delivery target ANYWHERE rejected "Compare email
+    volume to last month" — from `email` through `to l` — which is a
+    comparison, not a send."""
+    from nous.a2ui.compose import _refine_capability_errors
+
+    assert _refine_capability_errors(
+        [{"id": "x", "label": "Compare email volume to last month"}]
+    ) == []
+    assert _refine_capability_errors([{"id": "x", "label": "Send report to Alice"}])

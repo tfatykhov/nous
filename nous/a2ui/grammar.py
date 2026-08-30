@@ -229,6 +229,14 @@ def lint_micro_app(
             # only bounds children to <=4 strings, so a Text or Card ref
             # would otherwise render arbitrary content in the summary grid.
             for kid in comp.get("children") or []:
+                if not isinstance(kid, str):
+                    # An inline child object is already reported above; feeding
+                    # the dict to `by_id.get` raises `TypeError: unhashable
+                    # type` — and lint runs BEFORE schema validation, so that
+                    # escapes _validate entirely, taking the repair loop and
+                    # the guaranteed fallback with it (codex P2). A lint pass
+                    # must always return errors, never raise.
+                    continue
                 kid_type = (by_id.get(kid) or {}).get("component")
                 if kid_type is not None and kid_type != "StatTile":
                     errors.append(
