@@ -128,9 +128,13 @@ _COMPOSE_SURFACE_SCHEMA = {
                         "type": "object",
                         "description": (
                             "Fetcher params (e.g. {q}, {dag_id}, {days}). For "
-                            "`agent_script`: {\"code\": \"<python>\"} — the script "
-                            "assigns its data to a variable named `result` "
-                            "(a list of records, or a chart series). It may "
+                            "`agent_script`: {\"code\": \"<python>\", \"shape\": "
+                            "\"records\"|\"series\"} — the script assigns its data "
+                            "to a variable named `result`, and `shape` declares "
+                            "what it produces so a later failure returns a "
+                            "value the app's existing bindings still accept "
+                            "(refresh does not re-validate). Use \"series\" for "
+                            "any chart. It may "
                             "import and fetch anything, so an external API or "
                             "link needs no new code and no new env var. It is "
                             "STORED and RE-RUN on every refresh, which is what "

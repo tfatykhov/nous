@@ -390,41 +390,28 @@ _MAX_SCRIPT_CHARS = 16_000
 _MAX_SCRIPT_RESULT_CHARS = 256_000
 
 
-def _script_failure(reason: str) -> dict:
-    """A failed script's value.
+_SCRIPT_SHAPES = ("records", "series")
 
-    Deliberately an EMPTY SERIES, not a bare ``{"_error": …}`` marker (codex
-    P1): refresh does not re-run binding validation, so a chart bound at
-    compose time to a working series would, on a later transient failure, be
-    left pointing at a non-series object and render the useless "not a series
-    (object)" defensive state — losing the reason, which is the entire point.
-    An empty series is a VALID chart binding, so the chart renders its §3.1
-    empty state carrying the actual reason; a records-bound component degrades
-    to empty exactly as it did before.
+
+def _script_failure(reason: str, shape: str) -> Any:
+    """A failed script's value, in the SHAPE the app was built against.
+
+    Refresh does not re-run binding validation, so whatever a failure returns
+    must remain a valid binding for the components already on the surface
+    (codex P1, twice):
+
+    - ``series`` → an empty series carrying the reason, so a chart renders its
+      §3.1 empty state WITH the cause instead of "not a series (object)".
+    - ``records`` → a one-row list carrying the reason, so a table/ledger's
+      list paths stay valid and the row itself shows what went wrong. An empty
+      list would keep the shape but silently drop the reason.
+
+    The shape is declared by the agent on the source, because at failure time
+    there is nothing left to infer it from.
     """
-    return empty_series(reason)
-
-
-def _normalize_script_result(result: Any) -> Any:
-    """Make a script result JSON-safe, or reject it explicitly.
-
-    The data model and outbox are persisted as JSONB with no custom
-    serializer, so a `datetime`, `Decimal`, `UUID`, set or API-library object
-    in the result would pass `_bound` (which only MEASURES, via
-    ``default=str``) and then fail at commit time (codex P2). Round-tripping
-    through ``default=str`` normalizes those to strings by construction.
-    Size is checked on the same single serialization — no second pass.
-    """
-    try:
-        encoded = json.dumps(result, default=str)
-    except (TypeError, ValueError) as exc:
-        return _script_failure(f"script result is not JSON-serializable ({exc})")
-    if len(encoded) > _MAX_SCRIPT_RESULT_CHARS:
-        return _script_failure(
-            f"script result is {len(encoded)} chars — max "
-            f"{_MAX_SCRIPT_RESULT_CHARS}; aggregate or limit it in the script"
-        )
-    return json.loads(encoded)
+    if shape == "series":
+        return empty_series(reason)
+    return [{"_error": reason}]
 
 
 def build_default_registry(
@@ -719,16 +706,45 @@ def build_default_registry(
                 raise ValueError(
                     f"agent_script code is {len(code)} chars — max {_MAX_SCRIPT_CHARS}"
                 )
+            shape = str(params.get("shape") or "records")
+            if shape not in _SCRIPT_SHAPES:
+                raise ValueError(
+                    f"agent_script shape must be one of {list(_SCRIPT_SHAPES)}, got {shape!r}"
+                )
             outcome = await run_script(code)
             if not outcome.get("ok"):
-                return _script_failure(str(outcome.get("error") or "script failed"))
+                return _script_failure(str(outcome.get("error") or "script failed"), shape)
+            # Already JSON-normalized inside the worker (default=str,
+            # allow_nan=False), so nothing here re-touches the raw object or
+            # re-serializes it — the size is measured from that same encoding.
+            if outcome.get("result_chars", 0) > _MAX_SCRIPT_RESULT_CHARS:
+                return _script_failure(
+                    f"script result is {outcome['result_chars']} chars — max "
+                    f"{_MAX_SCRIPT_RESULT_CHARS}; aggregate or limit it in the script",
+                    shape,
+                )
             result = outcome.get("result")
             if result is None:
                 return _script_failure(
                     "script set no `result` — assign the data to a variable "
-                    "named `result` (a list of records, or a series dict)"
+                    "named `result` (a list of records, or a series dict)",
+                    shape,
                 )
-            return _normalize_script_result(result)
+            # A declared shape the script did not produce is a script bug, and
+            # catching it HERE keeps a chart from ever binding to records.
+            if shape == "series" and not is_series(result):
+                return _script_failure(
+                    f"script declared shape 'series' but returned "
+                    f"{type(result).__name__} — build one with to_series(...)",
+                    shape,
+                )
+            if shape == "records" and not isinstance(result, list):
+                return _script_failure(
+                    f"script declared shape 'records' but returned "
+                    f"{type(result).__name__} — return a list of dicts",
+                    shape,
+                )
+            return result
 
         registry.register("agent_script", agent_script)
 

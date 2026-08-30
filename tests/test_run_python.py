@@ -7,6 +7,7 @@ memory operations, filter results, and return shaped data — reducing
 token consumption compared to separate tool calls.
 """
 
+import json
 import asyncio
 import threading
 import time
@@ -1869,3 +1870,34 @@ async def test_interactive_run_python_still_writes(run_python_tool, mock_heart):
     # interactive run_python is unchanged.
     await run_python_tool("learn_fact('x', 'note')")
     mock_heart.learn.assert_awaited()
+
+
+async def test_structured_run_serializes_inside_the_worker(run_script_structured):
+    """codex P1: `default=str` can invoke an agent-authored `__str__`. Doing
+    that on the main loop, after the run slot and deadline are gone, would let
+    a blocking method stall every request outside the script's own timeout.
+    A raising `__str__` proves the encode happens where errors are caught."""
+    out = await run_script_structured(
+        "class Boom:\n"
+        "    def __str__(self): raise RuntimeError('exploding repr')\n"
+        "result = {'x': Boom()}"
+    )
+    assert out["ok"] is False
+    assert "exploding repr" in out["error"]
+
+
+async def test_structured_run_rejects_non_finite_floats(run_script_structured):
+    """codex P2: json emits NaN/Infinity as non-standard tokens that Postgres
+    JSONB refuses at COMMIT time — long after the dashboard looked fine."""
+    out = await run_script_structured("result = {'v': float('nan')}")
+    assert out["ok"] is False
+    assert "not JSON compliant" in out["error"] or "NaN" in out["error"]
+
+
+async def test_structured_run_normalizes_datetimes_and_reports_size(run_script_structured):
+    out = await run_script_structured(
+        "import datetime\nresult = [{'t': datetime.datetime(2026, 8, 30), 'v': 1}]"
+    )
+    assert out["ok"] is True
+    assert isinstance(out["result"][0]["t"], str)
+    assert out["result_chars"] == len(json.dumps(out["result"]))

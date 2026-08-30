@@ -681,7 +681,13 @@ class _FakeRunner:
     sandbox, exercised by its own suite; here we assert the SOURCE contract."""
 
     def __init__(self, outcome):
-        self.outcome = outcome
+        self.outcome = dict(outcome)
+        # The real worker JSON-normalizes inside the deadline and reports the
+        # encoded size; mirror that so the source sees the same contract.
+        if self.outcome.get("ok"):
+            encoded = json.dumps(self.outcome.get("result"), default=str, allow_nan=False)
+            self.outcome["result"] = json.loads(encoded)
+            self.outcome.setdefault("result_chars", len(encoded))
         self.calls: list[str] = []
 
     async def __call__(self, code: str):
@@ -710,7 +716,8 @@ async def test_agent_script_failure_is_explicit_never_a_blank_box():
     runner = _FakeRunner({"ok": False, "result": None, "output": "", "error": "boom"})
     reg = build_default_registry(run_script=runner)
     out = await reg.resolve(
-        [{"key": "d", "source": "agent_script", "params": {"code": "1/0"}}]
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "1/0", "shape": "series"}}]
     )
     # An empty SERIES, not a bare marker: refresh does not re-run binding
     # validation, so a chart bound to a working series must not be left
@@ -723,7 +730,8 @@ async def test_agent_script_without_a_result_says_so():
     runner = _FakeRunner({"ok": True, "result": None, "output": "printed", "error": None})
     reg = build_default_registry(run_script=runner)
     out = await reg.resolve(
-        [{"key": "d", "source": "agent_script", "params": {"code": "print('hi')"}}]
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "print('hi')", "shape": "series"}}]
     )
     assert is_series(out["d"]) and "no `result`" in out["d"]["meta"]["reason"]
 
@@ -746,7 +754,8 @@ async def test_agent_script_series_flows_through_the_normal_budget_path():
         run_script=_FakeRunner({"ok": True, "result": big, "output": "", "error": None})
     )
     out = await reg.resolve(
-        [{"key": "d", "source": "agent_script", "params": {"code": "result = s"}}]
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = s", "shape": "series"}}]
     )
     assert is_series(out["d"]) and len(out["d"]["points"]) <= 200
 
@@ -775,7 +784,8 @@ async def test_refresh_re_runs_the_script_so_the_app_is_live_not_a_snapshot():
     )
     spec = {
         "data_sources": [
-            {"key": "live", "source": "agent_script", "params": {"code": "result = f()"}}
+            {"key": "live", "source": "agent_script",
+             "params": {"code": "result = f()", "shape": "series"}}
         ]
     }
     first = await composer.refresh_data(spec)
@@ -791,7 +801,8 @@ async def test_agent_script_failure_keeps_a_chart_binding_valid():
     runner = _FakeRunner({"ok": False, "result": None, "output": "", "error": "API timeout"})
     reg = build_default_registry(run_script=runner)
     out = await reg.resolve(
-        [{"key": "trend", "source": "agent_script", "params": {"code": "result = f()"}}]
+        [{"key": "trend", "source": "agent_script",
+          "params": {"code": "result = f()", "shape": "series"}}]
     )
     comps = [{"id": "c", "component": "Sparkline", "path": "/trend"}]
     errs = _binding_rules(comps, out, out, _collect_bindings(comps))
@@ -808,7 +819,8 @@ async def test_agent_script_rejects_an_oversized_result_before_bounding_it():
         run_script=_FakeRunner({"ok": True, "result": huge, "output": "", "error": None})
     )
     out = await reg.resolve(
-        [{"key": "d", "source": "agent_script", "params": {"code": "result = big"}}]
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = big", "shape": "series"}}]
     )
     assert is_series(out["d"]) and "max" in out["d"]["meta"]["reason"]
 
@@ -831,3 +843,38 @@ async def test_agent_script_normalizes_non_json_values_for_jsonb():
     # Round-trips cleanly => JSONB-safe by construction.
     json.dumps(out["d"])
     assert all(isinstance(r["t"], str) and isinstance(r["id"], str) for r in out["d"])
+
+
+async def test_agent_script_failure_preserves_a_RECORDS_shape():
+    """codex P1 round 2: an unconditional empty-series failure broke a
+    ledger/table bound to list paths. A records source fails as a one-row
+    list, so those paths stay valid AND the row shows the reason."""
+    runner = _FakeRunner({"ok": False, "result": None, "output": "", "error": "429 rate limited"})
+    reg = build_default_registry(run_script=runner)
+    out = await reg.resolve(
+        [{"key": "rows", "source": "agent_script",
+          "params": {"code": "result = f()", "shape": "records"}}]
+    )
+    assert isinstance(out["rows"], list) and len(out["rows"]) == 1
+    assert "429" in out["rows"][0]["_error"]
+
+
+async def test_agent_script_rejects_a_declared_shape_the_script_did_not_produce():
+    # Catching it here keeps a chart from ever binding to a record list.
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": [{"a": 1}], "output": "", "error": None})
+    )
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = rows", "shape": "series"}}]
+    )
+    assert is_series(out["d"]) and "declared shape 'series'" in out["d"]["meta"]["reason"]
+
+
+async def test_agent_script_rejects_an_unknown_shape():
+    reg = build_default_registry(run_script=_FakeRunner({"ok": True, "result": [], "error": None}))
+    with pytest.raises(ValueError, match="shape must be one of"):
+        await reg.resolve(
+            [{"key": "d", "source": "agent_script",
+              "params": {"code": "result = []", "shape": "blob"}}]
+        )

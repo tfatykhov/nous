@@ -4475,6 +4475,21 @@ def create_programmatic_tools(
                 sys.settrace = _settrace_shim
                 sys.setprofile = _setprofile_shim
                 exec(compile(code, "<nous_script>", "exec"), namespace)
+                if _structured:
+                    # Serialize INSIDE the worker, under the deadline tracer
+                    # (codex P1). `default=str` can invoke an agent-authored
+                    # `__str__`; doing that on the main loop after the slot and
+                    # deadline are gone would let a blocking or looping method
+                    # stall every request, outside the script's own timeout.
+                    # Here the tracer still fires on its lines, and anything it
+                    # raises lands in the outer handlers as a script error.
+                    # `allow_nan=False` rejects NaN/Infinity, which json emits
+                    # as non-standard tokens that Postgres JSONB then refuses
+                    # at commit time (codex P2) — explicit here beats a commit
+                    # failure later.
+                    namespace["__nous_json__"] = json.dumps(
+                        namespace.get("result"), default=str, allow_nan=False
+                    )
             finally:
                 # Restore original functions
                 sys.settrace = _original_settrace
@@ -4528,7 +4543,17 @@ def create_programmatic_tools(
         output = output_buf.getvalue()
         result = namespace.get("result")
         if _structured:
-            return {"ok": True, "result": result, "output": output, "error": None}
+            # Decoding pure JSON text runs no user code, so this is safe on the
+            # loop; `result_chars` lets the caller size-check without a second
+            # serialization (and without touching the raw object again).
+            encoded = namespace.get("__nous_json__") or "null"
+            return {
+                "ok": True,
+                "result": json.loads(encoded),
+                "result_chars": len(encoded),
+                "output": output,
+                "error": None,
+            }
         text = output or (str(result) if result is not None else "OK")
         return {"content": [{"type": "text", "text": text}]}
 
