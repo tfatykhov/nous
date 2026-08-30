@@ -67,21 +67,21 @@
     font-size: 0.82rem;
   }
   .tile.good {
-    border-left-color: var(--green);
+    border-left-color: var(--ok);
   }
   .tile.good .value {
-    color: var(--green);
+    color: var(--ok);
   }
   .tile.bad {
-    border-left-color: var(--red);
+    border-left-color: var(--crit);
   }
   .tile.bad .value {
-    color: var(--red);
+    color: var(--crit);
   }
   .tile.warn {
-    border-left-color: var(--yellow);
+    border-left-color: var(--warn);
   }
   .tile.warn .value {
-    color: var(--yellow);
+    color: var(--warn);
   }
 </style>

@@ -23,6 +23,9 @@ export interface SurfaceState {
   dataModel: Record<string, unknown>;
   nonce: string;
   priority: number;
+  /** F093 §3.2 — theme id stamped as data-theme on this surface's root, so
+   * two apps in the switcher theme independently. Empty = nous-default. */
+  theme: string;
 }
 
 export type Connection = 'connecting' | 'live' | 'resyncing' | 'error';
@@ -118,6 +121,7 @@ export class SurfaceStore {
         dataModel: (cs.dataModel ?? {}) as Record<string, unknown>,
         nonce: String(ext['com_nous_nonce'] ?? ''),
         priority: Number(ext['com_nous_priority'] ?? 0),
+        theme: String(ext['com_nous_theme'] ?? ''),
       };
     } else if (envelope.updateComponents) {
       const uc = envelope.updateComponents;

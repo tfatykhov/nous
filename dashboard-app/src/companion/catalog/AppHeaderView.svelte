@@ -72,6 +72,6 @@
     white-space: nowrap;
   }
   .stamp.stale {
-    color: var(--yellow);
+    color: var(--warn);
   }
 </style>

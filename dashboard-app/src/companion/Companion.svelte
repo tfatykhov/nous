@@ -112,7 +112,7 @@
   <main>
     {#if route.view === 'surface'}
       {#if focused}
-        <section class="surface" aria-label={focused.surfaceId}>
+        <section class="surface" data-theme={focused.theme || null} aria-label={focused.surfaceId}>
           <Renderer surfaceId={focused.surfaceId} componentId="root" />
         </section>
       {:else}
@@ -128,7 +128,7 @@
       </p>
     {:else}
       {#each feed as surface (surface.surfaceId)}
-        <section class="surface" aria-label={surface.surfaceId}>
+        <section class="surface" data-theme={surface.theme || null} aria-label={surface.surfaceId}>
           <a class="permalink" href={'#/s/' + encodeURIComponent(surface.surfaceId)}>⧉</a>
           <Renderer surfaceId={surface.surfaceId} componentId="root" />
         </section>

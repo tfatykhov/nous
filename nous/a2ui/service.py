@@ -128,7 +128,9 @@ class SurfaceService:
                 )
             if built.priority > 1:
                 raise ValueError("micro-apps are never blocking: priority must be 0 or 1")
-            lint = lint_micro_app(built.components)
+            lint = lint_micro_app(
+                built.components, archetype=(built.app_spec or {}).get("archetype")
+            )
             if lint:
                 raise SurfaceValidationError(lint)
         await self._censor_gate(built)
@@ -324,6 +326,7 @@ class SurfaceService:
                         built.data_model,
                         existing.nonce,
                         built.priority,
+                        (built.app_spec or {}).get("theme"),
                     ),
                 ]
                 created = False
@@ -359,6 +362,7 @@ class SurfaceService:
                         built.data_model,
                         nonce,
                         built.priority,
+                        (built.app_spec or {}).get("theme"),
                     )
                 ]
                 created = True
@@ -403,19 +407,24 @@ class SurfaceService:
         data_model: dict,
         nonce: str,
         priority: int,
+        theme: str | None = None,
     ) -> dict:
+        extensions: dict[str, Any] = {
+            "com_nous_nonce": nonce,
+            "com_nous_priority": priority,
+        }
+        # F093 §3.2 — theme travels in createSurface metadata (like priority)
+        # so the client can stamp data-theme on the app root. Only emitted
+        # when set; absent ⇒ the renderer's nous-default.
+        if theme:
+            extensions["com_nous_theme"] = theme
         return {
             "version": "v1.0",
             "createSurface": {
                 "surfaceId": surface_id,
                 "catalogId": catalog_id,
                 "sendDataModel": True,
-                "metadata": {
-                    "extensions": {
-                        "com_nous_nonce": nonce,
-                        "com_nous_priority": priority,
-                    }
-                },
+                "metadata": {"extensions": extensions},
                 "components": components,
                 "dataModel": data_model,
             },
@@ -529,7 +538,10 @@ class SurfaceService:
                 # Same fail-closed grammar as push_built: a recomposition is
                 # a creation as far as the renderer is concerned. (The
                 # composer lints its own output; this guards future callers.)
-                lint = lint_micro_app(components)
+                # Archetype for caps comes from the incoming app_spec if the
+                # refine supplied one, else the surface's stored spec.
+                spec = app_spec if app_spec is not None else (surface.app_spec or {})
+                lint = lint_micro_app(components, archetype=spec.get("archetype"))
                 if lint:
                     raise SurfaceValidationError(lint)
             surface.components = deepcopy(components)
@@ -876,6 +888,7 @@ class SurfaceService:
             surface.data_model,
             surface.nonce,
             surface.priority,
+            (surface.app_spec or {}).get("theme"),
         )
         return envelope, int(upto_seq)
 

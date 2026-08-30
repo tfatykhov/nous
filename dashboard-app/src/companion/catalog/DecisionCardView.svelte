@@ -79,25 +79,25 @@
   }
   .badge.stakes-high,
   .badge.stakes-critical {
-    color: var(--red);
-    border-color: var(--red);
+    color: var(--crit);
+    border-color: var(--crit);
   }
   .badge.outcome-success {
-    color: var(--green);
-    border-color: var(--green);
+    color: var(--ok);
+    border-color: var(--ok);
   }
   .badge.outcome-failure {
-    color: var(--red);
-    border-color: var(--red);
+    color: var(--crit);
+    border-color: var(--crit);
   }
   .badge.outcome-partial {
-    color: var(--yellow);
-    border-color: var(--yellow);
+    color: var(--warn);
+    border-color: var(--warn);
   }
   .id {
     margin-left: auto;
     color: var(--muted);
     font-size: 0.72rem;
-    font-family: var(--mono, monospace);
+    font-family: var(--font-mono);
   }
 </style>

@@ -36,12 +36,23 @@ from nous.handlers import call_background_llm
 
 from .dsl import BuiltSurface, SurfaceValidationError
 from .grammar import lint_micro_app
-from .sources import SourceRegistry, UnknownSourceError
+from .sources import SourceRegistry, UnknownSourceError, is_series
 
 logger = logging.getLogger(__name__)
 
 MAX_REPAIRS = 2
 _META_KEY = "meta"
+
+# F093 §3 — the closed theme enum. Unknown ⇒ validation error (a silently
+# ignored theme is indistinguishable from a broken one). Absent ⇒ default.
+_THEMES: dict[str, str] = {
+    "nous-default": "violet-on-dark, the standard companion look",
+    "alpine-dusk": "warm near-black with an alpenglow accent — trips, outdoor plans",
+    "harbor": "cool blue-grey — status, ops, monitoring dashboards",
+    "paper": "warm light with a serif display — reading, briefings, digests",
+    "signal": "high-contrast dark with an electric accent — alerts, dense data",
+}
+_DEFAULT_THEME = "nous-default"
 
 _ARCHETYPES = """\
 Pick ONE archetype and fill it:
@@ -66,13 +77,14 @@ Hard rules (violations are rejected and returned to you to fix):
 - Every Section has a non-empty title and exactly one body component via
   "child" (a single component id STRING — Section has no "children" array;
   wrap multiple components in a Column and point child at it).
-- Max 40 components total, nesting depth max 5. Over budget? Summarize and
-  offer a refine option for the detail instead.
+- Budget: 40 components (80 for ledger/briefing), nesting depth max 5.
+  Over budget? Use a repeat template (below) or summarize + a refine option.
 - Allowed components ONLY: Text, Image, Icon, Row, Column, List, Card,
   Tabs, Modal, Divider, Button, StatTile, KeyValueTable, DecisionCard,
   ConfidenceMeter, MemoryGraph, DagGraph, AppHeader, AppFooter, Section,
-  StatRow, Timeline. Input components (TextField, Slider, DateTimeInput,
-  CheckBox, ChoicePicker) are BANNED — micro-apps are read-only.
+  StatRow, Timeline, Sparkline, LineChart, BarChart. Input components
+  (TextField, Slider, DateTimeInput, CheckBox, ChoicePicker) are BANNED —
+  micro-apps are read-only.
 - No component id may appear twice, be referenced by two parents, or be
   repeated inside one children array.
 - Buttons may not carry actions (the AppFooter renders the app's controls).
@@ -80,14 +92,41 @@ Hard rules (violations are rejected and returned to you to fix):
   "provenance": "source". Sections showing data YOU supplied (no source
   key behind it) MUST get "provenance": "model".
 - Bind data through the data model ({"path": "/key/..."}), don't inline
-  long literals.
+  long literals. A source that resolved data MUST be bound by something —
+  an unbound source is rejected.
+
+CHARTS (bind `path` to a source marked kind=series; REQUIRED, no literal):
+- Sparkline {path, label?, tone?} — inline trend, tone ∈ neutral|ok|warn|crit.
+- LineChart {path, series:[{key,label?,tone?}], label?, xLabel?, yLabel?} —
+  ≤4 series; each `key` must be a numeric key present in the series points.
+- BarChart {path, label?, orientation?: vertical|horizontal, tone?} —
+  categorical (each point's `t` is a category, `v` its bar value).
+The renderer owns scale, axes, colour and gaps — you pick tone/series, never
+a colour. Binding a chart to a record LIST (not a series) is rejected.
+
+REPEAT a component over an array instead of hand-writing N bindings: set a
+Column's "children" to {"componentId": "<template-id>", "path": "/array"};
+the template component renders once per item, and bare paths inside it (or
+"@index") resolve relative to the item. This counts as ONE component and
+renders ALL items — a fixed /array/0../k slice that under-covers the source
+is rejected.
+
+SECTION LAYOUT via Section "layout": stack (default) | hero (large/primary,
+for the headline section) | grid-2 | grid-3 (N-column grid over the child's
+items) | rail (horizontal scroll). Use hero to create hierarchy — a flat
+stack of equal sections reads as generated.
 """
+
+_THEME_MENU = "Pick a `theme` (or omit for nous-default):\n" + "\n".join(
+    f"- {tid}: {desc}" for tid, desc in _THEMES.items()
+)
 
 _RESPONSE_SHAPE = """\
 Respond with ONLY a JSON object (no prose, no code fence) shaped:
 {
   "title": "...",
   "archetype": "status" | "briefing" | "ledger",
+  "theme": "<one of the listed theme ids>",  // optional; omit for nous-default
   "components": [ ... A2UI component objects, each with "id" and "component" ... ],
   "dataModel": { ... ONLY the subtrees you are supplying yourself ... },
   "refine_options": [ {"id": "slug", "label": "Button label"} ]  // 0-4 predefined drill-downs
@@ -193,6 +232,9 @@ class SurfaceComposer:
             "refine_options": refine_options,
             "data_sources": data_sources,
             "provenance": provenance,
+            # Validated against _THEMES in _validate; default is byte-identical
+            # to today's render (F093 §3.1).
+            "theme": str(parsed.get("theme") or _DEFAULT_THEME),
         }
         built.app_spec = app_spec
         return ComposedApp(built=built, app_spec=app_spec, fallback=False, repairs=repairs)
@@ -270,11 +312,19 @@ class SurfaceComposer:
     def _build_prompt(
         self, intent: str, archetype: str | None, source_data: dict
     ) -> str:
-        source_desc = (
-            json.dumps({k: _sample(v) for k, v in source_data.items()}, default=str)[:4000]
-            if source_data
-            else "(none — any data you show is model-supplied and must be marked provenance: model)"
-        )
+        if source_data:
+            # Mark each source's kind so the model binds series to charts and
+            # record lists to repeats/fields BEFORE it guesses (F094 §5).
+            marked = {
+                f"{k} [{'series — chartable' if is_series(v) else 'records'}]": _sample(v)
+                for k, v in source_data.items()
+            }
+            source_desc = json.dumps(marked, default=str)[:4000]
+        else:
+            source_desc = (
+                "(none — any data you show is model-supplied and must be marked "
+                "provenance: model)"
+            )
         want = f"Preferred archetype: {archetype}.\n" if archetype else ""
         return (
             f"Compose a micro-app for this intent:\n{intent}\n\n"
@@ -282,9 +332,12 @@ class SurfaceComposer:
             + _ARCHETYPES
             + "\n"
             + _GRAMMAR_RULES
-            + "\nServer-resolved data available at these data-model keys "
+            + "\n"
+            + _THEME_MENU
+            + "\n\nServer-resolved data available at these data-model keys "
             + "(bind with {\"path\": \"/<key>/...\"} — do NOT copy the values "
-            + "into dataModel, the server injects them):\n"
+            + "into dataModel, the server injects them; the [series]/[records] "
+            + "tag tells you which sources a chart can bind):\n"
             + source_desc
             + "\n\n"
             + _RESPONSE_SHAPE
@@ -306,6 +359,20 @@ class SurfaceComposer:
             return ["dataModel must be an object"]
 
         errors: list[str] = []
+        theme = parsed.get("theme")
+        # `theme not in _THEMES` would hash the value — a model-emitted dict or
+        # list raises TypeError INSIDE _validate, escaping the repair loop and
+        # the guaranteed fallback (codex P2). Reject a non-string as invalid.
+        if theme is not None and (not isinstance(theme, str) or theme not in _THEMES):
+            errors.append(
+                f"theme {theme!r} is not one of {sorted(_THEMES)} — pick a listed "
+                "theme or omit it for the default"
+            )
+        # Archetype selects the grammar caps and is fed to lint_micro_app; a
+        # non-string one would raise TypeError there (same hash trap as theme).
+        archetype = parsed.get("archetype")
+        if archetype is not None and not isinstance(archetype, str):
+            errors.append("archetype must be a string or omitted")
         for key in model_supplied or {}:
             if key in source_data:
                 errors.append(
@@ -333,7 +400,17 @@ class SurfaceComposer:
                     "micro-app controls live in the AppFooter only"
                 )
 
-        errors += lint_micro_app([c for c in components if isinstance(c, dict)])
+        errors += lint_micro_app(
+            [c for c in components if isinstance(c, dict)],
+            archetype=parsed.get("archetype"),
+        )
+
+        # --- data-aware rules (F093 §5.1, F094 §5) — need the RESOLVED
+        # source data, which is why they live here and not in grammar. ---
+        full_model = self._merge_data_model(parsed, source_data, "1970-01-01T00:00:00+00:00")
+        comp_dicts = [c for c in components if isinstance(c, dict)]
+        bindings = _collect_bindings(comp_dicts)
+        errors += _binding_rules(comp_dicts, source_data, full_model, bindings)
 
         # Full schema + structural pass on a probe build. Composer-level
         # errors above are cheaper to report first, but schema errors must
@@ -438,6 +515,259 @@ class SurfaceComposer:
         }
         built.app_spec = app_spec
         return ComposedApp(built=built, app_spec=app_spec, fallback=True, repairs=MAX_REPAIRS)
+
+
+_CHART_COMPONENTS = frozenset({"Sparkline", "LineChart", "BarChart"})
+
+
+def _collect_bindings(components: list[dict]) -> list[str]:
+    """Every data-model path any component binds — DynamicValue {path:…}
+    anywhere in the component, a chart's string `path`, and a Repeat
+    template's `path`. Used by the unread-source and over-capacity rules."""
+    paths: list[str] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            p = value.get("path")
+            if isinstance(p, str):
+                paths.append(p)
+            for v in value.values():
+                walk(v)
+        elif isinstance(value, list):
+            for v in value:
+                walk(v)
+
+    for comp in components:
+        walk(comp)
+        # A chart's `path` is a plain string prop, not a {path:…} binding.
+        if comp.get("component") in _CHART_COMPONENTS and isinstance(comp.get("path"), str):
+            paths.append(comp["path"])
+    return paths
+
+
+def _get_path(model: dict, path: str) -> Any:
+    """Resolve an absolute JSON-pointer-ish path (/a/b/0) against a model."""
+    cur: Any = model
+    for seg in path.strip("/").split("/"):
+        if seg == "":
+            continue
+        if isinstance(cur, dict):
+            cur = cur.get(seg)
+        elif isinstance(cur, list):
+            try:
+                cur = cur[int(seg)]
+            except (ValueError, IndexError):
+                return None
+        else:
+            return None
+    return cur
+
+
+def _is_nonempty(value: Any) -> bool:
+    if isinstance(value, dict) and value.get("kind") == "series":
+        return bool(value.get("points"))
+    if isinstance(value, (list, dict, str)):
+        return len(value) > 0
+    return value is not None
+
+
+def _child_ids(comp: dict) -> list[str]:
+    """Component ids this component references — a `child` string, a `children`
+    list of strings, or a Repeat template's `children.componentId`."""
+    out: list[str] = []
+    if isinstance(comp.get("child"), str):
+        out.append(comp["child"])
+    children = comp.get("children")
+    if isinstance(children, list):
+        out += [c for c in children if isinstance(c, str)]
+    elif isinstance(children, dict) and isinstance(children.get("componentId"), str):
+        out.append(children["componentId"])
+    return out
+
+
+def _containing_templates(comp_id: str, by_id: dict[str, dict]) -> list[str]:
+    """The source paths of every Repeat template whose subtree contains
+    ``comp_id``. A Repeat template is a component whose ``children`` is a
+    ``{componentId, path}`` dict; its ``componentId`` roots a per-item scope
+    (pointer.ts `absolute`). More than one means NESTED scopes — the renderer
+    composes each template path against its parent scope, which this static
+    resolver does not model, so a nested chart is left to the renderer rather
+    than validated against a wrong path (codex P2)."""
+    found: list[str] = []
+    for comp in by_id.values():
+        children = comp.get("children")
+        if not (isinstance(children, dict) and isinstance(children.get("path"), str)):
+            continue
+        root = children.get("componentId")
+        if not isinstance(root, str):
+            continue
+        seen, stack = set(), [root]
+        while stack:
+            cid = stack.pop()
+            if cid in seen:
+                continue
+            seen.add(cid)
+            node = by_id.get(cid)
+            if node:
+                stack.extend(_child_ids(node))
+        if comp_id in seen:
+            found.append(children["path"])
+    return found
+
+
+def _chart_shape_errors(ctype: str, comp: dict, path: str, resolved: Any) -> list[str]:
+    """Series-shape (rule 2), single-value (2b) and LineChart-arity (3) checks
+    for ONE resolved chart target. Returned as a list so a repeat can validate
+    every item independently (codex P2)."""
+    errs: list[str] = []
+    if not (isinstance(resolved, dict) and resolved.get("kind") == "series"):
+        shape = (
+            "an array"
+            if isinstance(resolved, list)
+            else "nothing"
+            if resolved is None
+            else type(resolved).__name__
+        )
+        errs.append(
+            f"{ctype} {comp.get('id')!r} binds {path} which resolved to "
+            f"{shape}, not a series — chart paths need a series-shaped source"
+        )
+        return errs
+    # `points` must be an array: {kind:"series", points:{}} passes the kind
+    # check but readSeries requires a list and renders "not a series" (codex P2).
+    if not isinstance(resolved.get("points"), list):
+        errs.append(
+            f"{ctype} {comp.get('id')!r} binds {path}: series `points` must be an "
+            f"array, got {type(resolved.get('points')).__name__}"
+        )
+        return errs
+    # Sparkline and BarChart both read the default `v` key, so a MULTI-series
+    # source (named keys, no `v`) renders "no data" despite valid rows.
+    if ctype in ("Sparkline", "BarChart") and isinstance(resolved.get("keys"), list):
+        errs.append(
+            f"{ctype} {comp.get('id')!r} binds {path}, a multi-series source "
+            f"(keys {sorted(str(k) for k in resolved['keys'])}) — Sparkline/BarChart "
+            "read a single-value (v) series; use LineChart or a single-key source"
+        )
+        return errs
+    if ctype == "LineChart":
+        specs = comp.get("series") or []
+        if not specs:
+            errs.append(f"LineChart {comp.get('id')!r} declares no series — name 1–4 keys")
+        elif len(specs) > 4:
+            errs.append(f"LineChart {comp.get('id')!r} has {len(specs)} series — max 4")
+        # Declared keys are authoritative even when points is empty; else fall
+        # back to the union across ALL points (a per-point non-finite reading is
+        # omitted from that point), never points[0] alone.
+        points = resolved.get("points") or []
+        declared = resolved.get("keys")
+        available = (
+            {str(k) for k in declared}
+            if isinstance(declared, list)
+            else {k for p in points if isinstance(p, dict) for k in p if k != "t"}
+        )
+        if points or isinstance(declared, list):
+            for spec in specs:
+                key = spec.get("key") if isinstance(spec, dict) else None
+                if isinstance(key, str) and key not in available:
+                    errs.append(
+                        f"LineChart {comp.get('id')!r} series key {key!r} is absent "
+                        f"from the series (keys: {sorted(available)})"
+                    )
+    return errs
+
+
+def _binding_rules(
+    components: list[dict], source_data: dict, full_model: dict, bindings: list[str]
+) -> list[str]:
+    errors: list[str] = []
+
+    # (1) Unread-source (F093 §1.1): a source that resolved non-empty must be
+    # bound by SOMETHING, or its records are silently dropped and the model
+    # inlined strings instead.
+    for key, value in source_data.items():
+        if not _is_nonempty(value):
+            continue
+        if not any(b == f"/{key}" or b.startswith(f"/{key}/") for b in bindings):
+            errors.append(
+                f"source {key!r} resolved data but no component binds /{key} — "
+                "bind it (a chart, a repeat template, or a field) instead of "
+                "inlining values"
+            )
+
+    by_id = {c["id"]: c for c in components if isinstance(c.get("id"), str)}
+    for comp in components:
+        ctype = comp.get("component")
+        if ctype not in _CHART_COMPONENTS:
+            continue
+        path = comp.get("path")
+        if not isinstance(path, str) or not path.strip():
+            continue  # binding-mandatory already caught this in grammar
+        # A relative chart path resolves the way the renderer resolves it
+        # (pointer.ts `absolute`): an absolute /path from root; inside a repeat
+        # template, against EACH item base; with no scope, from root as /path.
+        # Validate every resolved target — a root lookup would false-reject a
+        # per-item chart (codex round 4), a blanket skip lets `{trend:[]}`
+        # through (round 6), and validating only item 0 lets a later
+        # heterogeneous item through (round 7).
+        if path.startswith("/"):
+            targets = [(path, _get_path(full_model, path))]
+        else:
+            templates = _containing_templates(comp.get("id", ""), by_id)
+            if len(templates) > 1:
+                continue  # nested scopes — the renderer composes; leave to it
+            if not templates:
+                targets = [("/" + path, _get_path(full_model, "/" + path))]
+            else:
+                source_path = templates[0]
+                items = _get_path(full_model, source_path)
+                if not isinstance(items, list) or not items:
+                    continue  # template has no items yet — nothing to validate
+                targets = [
+                    (f"{source_path}/{i}/{path}", _get_path(full_model, f"{source_path}/{i}/{path}"))
+                    for i in range(len(items))
+                ]
+        for tpath, resolved in targets:
+            errs = _chart_shape_errors(ctype, comp, tpath, resolved)
+            if errs:
+                errors.extend(errs)
+                break  # one failing item rejects the chart — no N duplicates
+
+    # (4) Over-capacity / under-render (F093 §5.1 / AC7): a record-LIST source
+    # bound only by FIXED indices that cover fewer than all records renders a
+    # partial source as if complete. A repeat template (binds /key with no
+    # index) covers all records, so it exempts the key.
+    for key, value in source_data.items():
+        if not isinstance(value, list) or not value:
+            continue
+        n = len(value)
+        template_bound = any(b == f"/{key}" for b in bindings)
+        if template_bound:
+            continue
+        prefix = f"/{key}/"
+        prefix_bound = any(b.startswith(prefix) for b in bindings)
+        indices = set()
+        for b in bindings:
+            if b.startswith(prefix):
+                seg = b[len(prefix) :].split("/", 1)[0]
+                if seg.isdigit():
+                    indices.add(int(seg))
+        # Coverage is the count of DISTINCT IN-RANGE bound indices — not max+1,
+        # not the raw count, and not merely "some index binding exists". Binding
+        # /key/11 of 12 has max+1 == n; n-1 real indices plus /key/999 has raw
+        # count == n; binding only /key/foo (non-numeric) or /key/999 has ZERO
+        # valid indices — all leave real records unrendered (codex P2). Only
+        # indices inside range(n) render a record; a prefix binding with none
+        # valid renders NOTHING, which is under-render at its worst.
+        covered = {i for i in indices if i < n}
+        if prefix_bound and len(covered) < n:
+            errors.append(
+                f"source {key!r} resolved {n} records but only {len(covered)} "
+                "are bound by fixed index — use a repeat template so all render, "
+                "never a partial slice of a complete source"
+            )
+
+    return errors
 
 
 def _parse_json_object(raw: str) -> dict | None:

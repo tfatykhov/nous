@@ -24,6 +24,158 @@
   --transition: 0.2s ease;
   --font-ui: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+
+  /* F093 §4 — semantic tokens. --ok/--warn/--crit default to the exact
+     --green/--red/--yellow values they name, so nous-default renders
+     byte-identical (AC1). --locked/--soft take their alpine-dusk values as
+     universal defaults per §4 (a token absent from :root resolves to
+     nothing and silently drops the property). */
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --crit: #f87171;
+  --locked: #5fb3a1;
+  --soft: #8a8fa3;
+  /* --font-display defaults to the UI font (no visual change under
+     nous-default); themes may swap in a serif for editorial character. */
+  --font-display: var(--font-ui);
+
+  /* F093 §1(a) — the three hardcoded literals migrate here so themes
+     re-skin them too. */
+  --on-accent: #ffffff; /* text on a filled --accent button (ButtonView) */
+  --scrim: rgba(10, 10, 15, 0.72); /* modal backdrop (ModalView) */
+  --node-decision: #a78bfa; /* MemoryGraph 'decision' node type — semantic */
+
+  /* F094 §2 — ordered series ramp assigned by the renderer for multi-series
+     charts. The model never picks a color; it picks a `tone` or a series
+     `key`, and the renderer maps it here. */
+  --series-1: #7c6af7;
+  --series-2: #34d399;
+  --series-3: #fbbf24;
+  --series-4: #60a5fa;
+  --chart-axis: #6b6b8a;
+  --chart-grid: #1e1e2e;
+}
+
+/* ── F093 §3 themes ────────────────────────────────────────────────────
+   Hand-designed, contrast-checked (see chart/theme contrast test), never
+   generated. Stamped as data-theme on the APP ROOT (not :root) so two
+   apps in the switcher theme independently. nous-default needs no block —
+   an absent or 'nous-default' data-theme inherits :root above. */
+
+[data-theme='alpine-dusk'] {
+  /* warm near-black, for trips and outdoor plans */
+  --bg: #0e1014;
+  --surface: #161a20;
+  --surface-hover: #1e232b;
+  --border: #232a33;
+  --accent: #e8833a; /* alpenglow */
+  --accent-dim: #a85a25;
+  --accent-glow: rgba(232, 131, 58, 0.15);
+  --text: #ece6dd;
+  --muted: #8a8072;
+  --ok: #5fb3a1; /* glacier */
+  --warn: #e8a33a;
+  --crit: #d9553f;
+  --locked: #5fb3a1;
+  --soft: #8a8072;
+  --on-accent: #1a1206;
+  --scrim: rgba(14, 16, 20, 0.74);
+  --node-decision: #c79bde;
+  --series-1: #e8833a;
+  --series-2: #5fb3a1;
+  --series-3: #e8a33a;
+  --series-4: #8fb8d9;
+  --chart-axis: #8a8072;
+  --chart-grid: #232a33;
+  --font-display: Fraunces, 'Georgia', 'Times New Roman', serif;
+}
+
+[data-theme='harbor'] {
+  /* cool blue-grey, for status and monitoring */
+  --bg: #0b1016;
+  --surface: #121a24;
+  --surface-hover: #182230;
+  --border: #1f2c3a;
+  --accent: #4a90d9;
+  --accent-dim: #2f5f92;
+  --accent-glow: rgba(74, 144, 217, 0.15);
+  --text: #dbe6f0;
+  --muted: #7089a0;
+  --ok: #3fb6a0;
+  --warn: #e0a94a;
+  --crit: #e0685f;
+  --locked: #4a90d9;
+  --soft: #7089a0;
+  --on-accent: #06101a;
+  --scrim: rgba(11, 16, 22, 0.74);
+  --node-decision: #8fb0e0;
+  --series-1: #4a90d9;
+  --series-2: #3fb6a0;
+  --series-3: #e0a94a;
+  --series-4: #a98fd9;
+  --chart-axis: #7089a0;
+  --chart-grid: #1f2c3a;
+}
+
+[data-theme='paper'] {
+  /* warm light, for reading and briefings */
+  /* `html { color-scheme: dark }` is global; without this the light theme's
+     scrollbars and form controls render dark-scheme. color-scheme is honored
+     per-element, so declaring it on the themed surface is enough (F7). */
+  color-scheme: light;
+  --bg: #f4f1ea;
+  --surface: #fbf9f4;
+  --surface-hover: #f0ece1;
+  --border: #ddd6c8;
+  --accent: #b5651d;
+  --accent-dim: #8a4d16;
+  --accent-glow: rgba(181, 101, 29, 0.12);
+  --text: #2a2622;
+  --muted: #6e675b;
+  --ok: #2f8f6b;
+  --warn: #b5811d;
+  --crit: #c0432f;
+  --locked: #2f8f6b;
+  --soft: #6e675b;
+  --on-accent: #fbf9f4;
+  --scrim: rgba(42, 38, 34, 0.42);
+  --node-decision: #7a5aa8;
+  --series-1: #b5651d;
+  --series-2: #2f8f6b;
+  --series-3: #b5811d;
+  --series-4: #3a6ea8;
+  --chart-axis: #6e675b;
+  --chart-grid: #ddd6c8;
+  --font-display: Fraunces, 'Georgia', 'Times New Roman', serif;
+}
+
+[data-theme='signal'] {
+  /* high-contrast, for alerts and dense data */
+  --bg: #08080a;
+  --surface: #101014;
+  --surface-hover: #17171d;
+  --border: #24242e;
+  --accent: #00d9a3;
+  --accent-dim: #009873;
+  --accent-glow: rgba(0, 217, 163, 0.16);
+  --text: #f4f4fa;
+  --muted: #7a7a92;
+  --ok: #00d9a3;
+  --warn: #ffcc33;
+  --crit: #ff5c5c;
+  --locked: #00d9a3;
+  --soft: #7a7a92;
+  --on-accent: #04120d;
+  --scrim: rgba(8, 8, 10, 0.8);
+  --node-decision: #b18cff;
+  --series-1: #00d9a3;
+  --series-2: #60a5fa;
+  --series-3: #ffcc33;
+  --series-4: #ff5c5c;
+  --chart-axis: #7a7a92;
+  --chart-grid: #24242e;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+  --font-display: 'JetBrains Mono', 'Cascadia Code', monospace;
 }
 
 html {

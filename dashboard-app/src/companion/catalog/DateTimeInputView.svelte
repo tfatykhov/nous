@@ -138,7 +138,7 @@
     border-color: var(--accent);
   }
   .err {
-    color: var(--red);
+    color: var(--crit);
     font-size: 0.8rem;
   }
 </style>

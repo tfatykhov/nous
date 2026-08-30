@@ -340,6 +340,17 @@
           ],
           "description": "Where this section's data came from. 'model' renders the amber model-supplied treatment regardless of age."
         },
+        "layout": {
+          "type": "string",
+          "enum": [
+            "stack",
+            "hero",
+            "grid-2",
+            "grid-3",
+            "rail"
+          ],
+          "description": "How the section's child lays out (default stack). hero = large/primary for visual hierarchy; grid-2/grid-3 = N-column grid over the child's items; rail = horizontal scroll. The renderer owns the CSS."
+        },
         "weight": {
           "type": "number",
           "description": "The relative weight of this component within a Row or Column."
@@ -396,6 +407,144 @@
         "component",
         "items"
       ]
+    },
+    "Sparkline": {
+      "type": "object",
+      "description": "Inline single-series trend line: no axes, no grid, no point labels. Bind `path` to a series-shaped source ({kind:series, points:[{t,v}]}). The renderer owns scale, domain, gaps and colour; you pick a `tone`.",
+      "properties": {
+        "component": {
+          "const": "Sparkline"
+        },
+        "path": {
+          "type": "string",
+          "description": "REQUIRED. Data-model path to a series object. No literal fallback — a chart with no data is meaningless."
+        },
+        "label": {
+          "type": "string",
+          "description": "Short caption shown beside the line."
+        },
+        "tone": {
+          "type": "string",
+          "enum": [
+            "neutral",
+            "ok",
+            "warn",
+            "crit"
+          ],
+          "description": "What the series MEANS (default neutral). The renderer maps it to a theme token — you never pick a colour."
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": [
+        "component",
+        "path"
+      ]
+    },
+    "LineChart": {
+      "type": "object",
+      "description": "Multi-series line chart with axes and a legend. Bind `path` to a multi-series source ({kind:series, points:[{t, <key>:number,...}], keys:[...]}). Max 4 series (renderer-enforced).",
+      "properties": {
+        "component": {
+          "const": "LineChart"
+        },
+        "path": {
+          "type": "string",
+          "description": "REQUIRED. Data-model path to a multi-series object."
+        },
+        "label": {
+          "type": "string",
+          "description": "Chart heading."
+        },
+        "series": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string",
+                "description": "A numeric key present in every point."
+              },
+              "label": {
+                "type": "string"
+              },
+              "tone": {
+                "type": "string",
+                "enum": [
+                  "neutral",
+                  "ok",
+                  "warn",
+                  "crit"
+                ]
+              }
+            },
+            "required": [
+              "key"
+            ]
+          },
+          "description": "1-4 series to draw, each naming a numeric key in the points. Colour is renderer-assigned from the series ramp or the tone."
+        },
+        "xLabel": {
+          "type": "string"
+        },
+        "yLabel": {
+          "type": "string"
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": [
+        "component",
+        "path",
+        "series"
+      ]
+    },
+    "BarChart": {
+      "type": "object",
+      "description": "Categorical bar chart, y-axis always zero-based (a truncated bar axis is how a chart lies). Bind `path` to a series object where each point's `t` is a category label and `v` its bar value.",
+      "properties": {
+        "component": {
+          "const": "BarChart"
+        },
+        "path": {
+          "type": "string",
+          "description": "REQUIRED. Data-model path to a series object."
+        },
+        "label": {
+          "type": "string"
+        },
+        "orientation": {
+          "type": "string",
+          "enum": [
+            "vertical",
+            "horizontal"
+          ],
+          "description": "Horizontal reads better for long category names (default vertical)."
+        },
+        "tone": {
+          "type": "string",
+          "enum": [
+            "neutral",
+            "ok",
+            "warn",
+            "crit"
+          ]
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": [
+        "component",
+        "path"
+      ]
     }
   },
   "functions": {},
@@ -440,6 +589,15 @@
         },
         {
           "$ref": "#/components/Timeline"
+        },
+        {
+          "$ref": "#/components/Sparkline"
+        },
+        {
+          "$ref": "#/components/LineChart"
+        },
+        {
+          "$ref": "#/components/BarChart"
         }
       ],
       "discriminator": {

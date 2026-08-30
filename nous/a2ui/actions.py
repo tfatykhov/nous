@@ -834,6 +834,14 @@ def _register_micro_app_functions(router: ActionRouter) -> None:
             origin=ctx.surface.origin,
             priority=ctx.surface.priority,
         )
+        # F093 §3.2 — theme is the app's creation-time visual identity. A refine
+        # adjusts content, not identity, and update_components carries NO theme
+        # envelope (the client reads themes only from createSurface metadata), so
+        # a recomposed theme would not apply live and would ambush the user on the
+        # next reconnect snapshot. Pin the recomposition to the existing theme.
+        existing_theme = spec.get("theme")
+        if existing_theme and isinstance(composed.app_spec, dict):
+            composed.app_spec["theme"] = existing_theme
         # Censor the recomposed surface exactly like the initial push
         # (rev-arch P1: update_components/update_data carry no gate, and an
         # app that is censored on turn 1 must not be uncensored on every

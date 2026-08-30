@@ -77,7 +77,7 @@
     margin-top: 0.2rem;
   }
   .err {
-    color: var(--red);
+    color: var(--crit);
     font-size: 0.8rem;
   }
 </style>

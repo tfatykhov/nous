@@ -39,7 +39,7 @@
 <style>
   .panel {
     border: 1px solid var(--border);
-    border-left: 3px solid var(--yellow);
+    border-left: 3px solid var(--warn);
     border-radius: var(--radius-sm);
     background: var(--surface);
     padding: 0.9rem 1rem;
@@ -56,8 +56,8 @@
     font-size: 0.7rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--yellow);
-    border: 1px solid var(--yellow);
+    color: var(--warn);
+    border: 1px solid var(--warn);
     border-radius: 999px;
     padding: 0.1rem 0.5rem;
   }
@@ -70,6 +70,6 @@
     white-space: pre-wrap;
   }
   .risk {
-    color: var(--red);
+    color: var(--crit);
   }
 </style>

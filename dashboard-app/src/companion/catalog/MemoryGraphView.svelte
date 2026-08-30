@@ -96,9 +96,9 @@
 
   const TYPE_COLORS: Record<string, string> = {
     fact: 'var(--accent)',
-    decision: '#a78bfa',
-    episode: 'var(--green)',
-    procedure: 'var(--yellow)',
+    decision: 'var(--node-decision)',
+    episode: 'var(--ok)',
+    procedure: 'var(--warn)',
     chunk: 'var(--muted)',
   };
 
@@ -242,6 +242,6 @@
     color: var(--muted);
   }
   .err {
-    color: var(--red);
+    color: var(--crit);
   }
 </style>
