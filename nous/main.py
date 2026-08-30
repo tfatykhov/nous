@@ -1042,6 +1042,10 @@ async def create_components(settings: Settings) -> dict:
                     database=database,
                     health_db_path=settings.a2ui_health_db_path or None,
                     run_script=_run_script,
+                    # Lets the registry DERIVE its resolution budget from the
+                    # enclosing tool/compose timeouts instead of assuming the
+                    # defaults.
+                    settings=settings,
                 ),
             )
         action_router = ActionRouter(

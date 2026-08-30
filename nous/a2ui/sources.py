@@ -56,12 +56,30 @@ _PER_SOURCE_BUDGET_CHARS = 6_000
 # millions would still do the database work. Clamp before the query.
 _MAX_ROWS = 50
 
-# Wall-clock ceiling on resolving ALL of one surface's sources. Compose runs
-# inside `NOUS_TOOL_TIMEOUT` (default 120s) and must still fit the compose LLM
-# (default 60s) afterwards, so source resolution cannot be allowed to consume
-# the whole budget — an `agent_script` alone may run for
-# `programmatic_tools_timeout` (90s).
+# Fallback ceiling on resolving ALL of one surface's sources, used when no
+# Settings are wired. Prefer `_source_budget_seconds`, which DERIVES the value
+# — a hardcoded 45 silently assumes the default 120s `NOUS_TOOL_TIMEOUT`, and
+# at the explicitly supported `NOUS_TOOL_TIMEOUT=60` it would let sources burn
+# 45s and then start a 60s compose LLM, so the outer wrapper cancels the tool
+# and returns the very generic timeout this budget exists to prevent (codex P1).
 _TOTAL_SOURCE_SECONDS = 45.0
+
+# Left for the push + validation work after the compose LLM returns.
+_SOURCE_BUDGET_SAFETY_SECONDS = 10.0
+_MIN_SOURCE_SECONDS = 5.0
+
+
+def _source_budget_seconds(settings: Any) -> float:
+    """Seconds all sources of one surface may take, derived from the enclosing
+    timeouts: whatever `NOUS_TOOL_TIMEOUT` leaves after reserving the compose
+    LLM round and a safety margin, clamped so it is neither negative nor
+    unbounded (prod runs `NOUS_TOOL_TIMEOUT=2000`)."""
+    if settings is None:
+        return _TOTAL_SOURCE_SECONDS
+    tool_timeout = float(getattr(settings, "tool_timeout", 120) or 120)
+    compose_timeout = float(getattr(settings, "a2ui_compose_timeout_seconds", 60) or 60)
+    available = tool_timeout - compose_timeout - _SOURCE_BUDGET_SAFETY_SECONDS
+    return max(_MIN_SOURCE_SECONDS, min(_TOTAL_SOURCE_SECONDS, available))
 
 
 def _limit(params: dict, default: int) -> int:
@@ -83,8 +101,11 @@ class UnknownSourceError(ValueError):
 class SourceRegistry:
     """Named server-side fetchers a micro-app may bind data from."""
 
-    def __init__(self) -> None:
+    def __init__(self, settings: Any = None) -> None:
         self._fetchers: dict[str, Fetcher] = {}
+        # Optional so existing constructions (and tests) keep working; when
+        # present the resolution budget is derived rather than assumed.
+        self._settings = settings
 
     def register(self, name: str, fetcher: Fetcher) -> None:
         self._fetchers[name] = fetcher
@@ -107,7 +128,11 @@ class SourceRegistry:
         # plus the compose LLM, blow the 120s tool timeout wrapping the whole
         # compose call and the app never gets built. Bounding the total here
         # rather than per-source also covers a slow DB fetcher.
-        deadline = time.monotonic() + _TOTAL_SOURCE_SECONDS
+        # NOT named `budget` — that name is reused below for the per-source
+        # CHAR budget, and the collision would make these timeout messages
+        # report byte counts as seconds from the second source onward.
+        time_budget = _source_budget_seconds(self._settings)
+        deadline = time.monotonic() + time_budget
         for decl in data_sources:
             key = str(decl.get("key") or "")
             name = str(decl.get("source") or "")
@@ -121,7 +146,7 @@ class SourceRegistry:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(
-                    f"source resolution exceeded {_TOTAL_SOURCE_SECONDS}s before "
+                    f"source resolution exceeded {time_budget:.0f}s before "
                     f"reaching {name!r} — use fewer or faster sources"
                 )
             try:
@@ -130,7 +155,7 @@ class SourceRegistry:
                 )
             except TimeoutError as exc:
                 raise TimeoutError(
-                    f"source {name!r} exceeded the {_TOTAL_SOURCE_SECONDS}s "
+                    f"source {name!r} exceeded the {time_budget:.0f}s "
                     "resolution budget shared by all sources on this surface"
                 ) from exc
             budget = min(_PER_SOURCE_BUDGET_CHARS, _TOTAL_BUDGET_CHARS - spent)
@@ -460,6 +485,7 @@ def build_default_registry(
     database: Any = None,
     health_db_path: str | None = None,
     run_script: Any = None,
+    settings: Any = None,
 ) -> SourceRegistry:
     """The Phase 3 fetcher set + F094 series sources.
 
@@ -469,7 +495,7 @@ def build_default_registry(
     grouped-over-time series sources; ``health_db_path`` the external
     health series (defensive — absent db ⇒ an explicit empty series).
     """
-    registry = SourceRegistry()
+    registry = SourceRegistry(settings)
 
     if brain is not None:
 
@@ -779,10 +805,22 @@ def build_default_registry(
                     f"{type(result).__name__} — build one with to_series(...)",
                     shape,
                 )
-            if shape == "records" and not isinstance(result, list):
+            if shape == "records" and not (
+                isinstance(result, list) and all(isinstance(r, dict) for r in result)
+            ):
+                # Every ELEMENT must be a mapping, not just the container
+                # (codex P2): `["offline"]` passed a list-only check, and a
+                # Repeat child binding a relative `name` against a scalar item
+                # resolves to undefined — blank rows, and never routed through
+                # _script_failure so no reason is reported anywhere.
+                bad = (
+                    type(result).__name__
+                    if not isinstance(result, list)
+                    else "a list containing non-object items"
+                )
                 return _script_failure(
-                    f"script declared shape 'records' but returned "
-                    f"{type(result).__name__} — return a list of dicts",
+                    f"script declared shape 'records' but returned {bad} — "
+                    "return a list of dicts",
                     shape,
                 )
             return result

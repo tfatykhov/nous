@@ -942,3 +942,45 @@ def test_compose_schema_only_advertises_registered_sources():
     with_it = _compose_schema_for(_C(build_default_registry(run_script=object())))
     src2 = with_it["properties"]["data_sources"]["items"]["properties"]
     assert "agent_script" in src2["source"]["description"]
+
+
+def test_source_budget_is_derived_from_the_enclosing_timeouts():
+    """codex P1: a hardcoded 45s assumed NOUS_TOOL_TIMEOUT=120. At the
+    supported NOUS_TOOL_TIMEOUT=60 it let sources burn 45s and THEN start a
+    60s compose LLM, so the outer wrapper cancelled the tool anyway."""
+    from types import SimpleNamespace
+
+    from nous.a2ui.sources import (
+        _MIN_SOURCE_SECONDS,
+        _TOTAL_SOURCE_SECONDS,
+        _source_budget_seconds,
+    )
+
+    # default 120s tool / 60s compose -> 120-60-10 = 50, clamped to the 45 cap
+    assert _source_budget_seconds(
+        SimpleNamespace(tool_timeout=120, a2ui_compose_timeout_seconds=60)
+    ) == _TOTAL_SOURCE_SECONDS
+    # the tight config codex named: no room left, so sources get the floor
+    assert _source_budget_seconds(
+        SimpleNamespace(tool_timeout=60, a2ui_compose_timeout_seconds=60)
+    ) == _MIN_SOURCE_SECONDS
+    # prod (tool_timeout=2000) stays capped, never unbounded
+    assert _source_budget_seconds(
+        SimpleNamespace(tool_timeout=2000, a2ui_compose_timeout_seconds=60)
+    ) == _TOTAL_SOURCE_SECONDS
+    # no settings wired -> documented fallback
+    assert _source_budget_seconds(None) == _TOTAL_SOURCE_SECONDS
+
+
+async def test_agent_script_records_must_contain_objects():
+    """codex P2: ["offline"] passed a list-only check, and a Repeat child
+    binding a relative `name` against a scalar resolves to undefined — blank
+    rows, and never routed through _script_failure so nothing reports why."""
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": ["offline"], "output": "", "error": None})
+    )
+    out = await reg.resolve(
+        [{"key": "rows", "source": "agent_script",
+          "params": {"code": "result = x", "shape": "records"}}]
+    )
+    assert out["rows"] == []  # shape-preserving failure, reason logged
