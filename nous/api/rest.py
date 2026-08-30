@@ -42,6 +42,7 @@ import logging
 import os
 import re
 from typing import Any
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 from starlette.applications import Starlette
@@ -2910,6 +2911,19 @@ def create_app(
         """Redirect bare /dashboard and /dashboard/ to the Svelte v2 app."""
         return RedirectResponse(url="/dashboard/v2/")
 
+    async def _companion_app_redirect(request: Request) -> RedirectResponse:
+        """F092.1 §7: per-app deep link /companion/a/{surface_id}.
+
+        A PATH link (shareable from Telegram or anywhere fragment-stripping
+        happens) that lands on the companion entry with the surface id
+        moved into the hash the client router reads. The client treats
+        #/a/ and #/s/ as aliases.
+        """
+        surface_id = request.path_params["surface_id"]
+        return RedirectResponse(
+            url="/dashboard/v2/companion.html#/a/" + quote(surface_id, safe="")
+        )
+
     async def _companion_redirect(request: Request) -> RedirectResponse:
         """Redirect /companion to the built companion entry.
 
@@ -3234,6 +3248,8 @@ def create_app(
         # (same rationale as the /dashboard pair above).
         routes.append(Route("/companion", _companion_redirect))
         routes.append(Route("/companion/", _companion_redirect))
+        # F092.1 §7: shareable path-form deep link per app.
+        routes.append(Route("/companion/a/{surface_id}", _companion_app_redirect))
 
     kwargs: dict[str, Any] = {"routes": routes}
     if lifespan is not None:

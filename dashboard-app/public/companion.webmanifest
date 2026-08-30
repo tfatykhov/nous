@@ -1,0 +1,35 @@
+{
+  "name": "Nous Companion",
+  "short_name": "Nous",
+  "description": "Structured surfaces from your Nous agent: approvals, reviews, micro-apps.",
+  "id": "/dashboard/v2/companion.html",
+  "start_url": "/dashboard/v2/companion.html",
+  "scope": "/dashboard/v2/",
+  "display": "standalone",
+  "background_color": "#0b0b10",
+  "theme_color": "#0b0b10",
+  "icons": [
+    {
+      "src": "/dashboard/v2/icons/companion-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/dashboard/v2/icons/companion-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "/dashboard/v2/icons/companion-maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/dashboard/v2/icons/companion-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

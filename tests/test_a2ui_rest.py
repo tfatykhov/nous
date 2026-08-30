@@ -479,6 +479,24 @@ async def test_companion_redirects_to_the_built_entry(
     assert response.headers["location"] == "/dashboard/v2/companion.html"
 
 
+async def test_companion_per_app_deep_link_redirects_into_the_hash_router(
+    dashboard_dist_present: None, brain, heart, cognitive, db, settings
+) -> None:
+    """F092.1 §7: /companion/a/{surface_id} is a PATH-form deep link
+    (shareable where fragments get stripped) that lands on the entry with
+    the id moved into the hash; #/a/ and #/s/ are client-side aliases."""
+    app = create_app(MockAgentRunner(), brain, heart, cognitive, db, settings)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/companion/a/nous:chat:micro_app:abc123")
+
+    assert response.status_code == 307
+    assert (
+        response.headers["location"]
+        == "/dashboard/v2/companion.html#/a/nous%3Achat%3Amicro_app%3Aabc123"
+    )
+
+
 async def test_companion_routes_absent_without_a_build(
     brain, heart, cognitive, db, settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:

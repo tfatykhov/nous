@@ -14,9 +14,33 @@
 
   function parseHash(): View {
     const h = location.hash;
-    const m = /^#\/s\/(.+)$/.exec(h);
+    // #/s/<id> (Phase 1) and #/a/<id> (F092.1 §7 per-app deep links) are
+    // aliases — an app is a surface; the /companion/a/<id> server route
+    // redirects into the latter.
+    const m = /^#\/[sa]\/(.+)$/.exec(h);
     if (m) return { view: 'surface', id: decodeURIComponent(m[1]) };
     return { view: 'feed' };
+  }
+
+  const KIND_LABELS: Record<string, string> = {
+    micro_app: 'app',
+    approval_gate: 'approval',
+    action_review: 'review',
+    heartbeat_findings: 'findings',
+    decision_sweep: 'decisions',
+    dag_monitor: 'DAG',
+    memory_graph: 'graph',
+  };
+
+  function kindOf(surfaceId: string): string {
+    // Surface ids are minted as nous:<origin>:<kind>:<hex> — the kind
+    // segment is stable for the surface's lifetime.
+    return surfaceId.split(':')[2] ?? '';
+  }
+
+  function chipLabel(surfaceId: string): string {
+    const kind = kindOf(surfaceId);
+    return KIND_LABELS[kind] ?? kind ?? surfaceId.slice(-4);
   }
 
   let route = $state<View>(parseHash());
@@ -36,6 +60,26 @@
 
   const feed = $derived(store.ordered());
   const focused = $derived(route.view === 'surface' ? store.surfaces[route.id] : null);
+
+  // F092.1 §7: several live apps at once is now the normal case — the
+  // switcher gives one-tap focus per surface, and close-all sweeps the
+  // disposable micro-apps (they are rebuilt, not restored, by design).
+  const microApps = $derived(feed.filter((s) => kindOf(s.surfaceId) === 'micro_app'));
+  let closingAll = $state(false);
+
+  async function closeAllApps() {
+    if (closingAll) return;
+    closingAll = true;
+    try {
+      // Sequential on purpose: app.close posts share the server rate limit
+      // with everything else, and each close's footer is its own component.
+      for (const surface of microApps) {
+        await transport.postAction(surface.surfaceId, 'app.close', 'footer', {});
+      }
+    } finally {
+      closingAll = false;
+    }
+  }
 </script>
 
 <div class="shell">
@@ -43,6 +87,27 @@
     <a class="brand" href="#/">Nous <span>Companion</span></a>
     <span class="conn {store.connection}">{store.connection}</span>
   </header>
+
+  {#if feed.length > 1}
+    <nav class="switcher" aria-label="live surfaces">
+      <a class="chip" class:active={route.view === 'feed'} href="#/">all ({feed.length})</a>
+      {#each feed as surface (surface.surfaceId)}
+        <a
+          class="chip"
+          class:active={route.view === 'surface' && route.id === surface.surfaceId}
+          href={'#/s/' + encodeURIComponent(surface.surfaceId)}
+          title={surface.surfaceId}
+        >
+          {chipLabel(surface.surfaceId)}
+        </a>
+      {/each}
+      {#if microApps.length >= 2}
+        <button class="chip close-all" disabled={closingAll} onclick={() => void closeAllApps()}>
+          {closingAll ? 'closing…' : `close all apps (${microApps.length})`}
+        </button>
+      {/if}
+    </nav>
+  {/if}
 
   <main>
     {#if route.view === 'surface'}
@@ -113,6 +178,45 @@
   .conn.resyncing {
     color: var(--yellow);
     border-color: var(--yellow);
+  }
+  .switcher {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .chip {
+    font: inherit;
+    font-size: 0.78rem;
+    color: var(--muted);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.2rem 0.7rem;
+    text-decoration: none;
+    cursor: pointer;
+    transition: var(--transition);
+  }
+  .chip:hover {
+    border-color: var(--accent);
+    color: var(--text);
+  }
+  .chip.active {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .chip.close-all {
+    margin-left: auto;
+    color: var(--muted);
+    background: none;
+  }
+  .chip.close-all:hover:not(:disabled) {
+    color: var(--red);
+    border-color: var(--red);
+  }
+  .chip.close-all:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   main {
     display: flex;

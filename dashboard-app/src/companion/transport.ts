@@ -18,6 +18,10 @@ export interface StreamHandlers {
   onA2ui(seq: number | null, envelope: unknown): void;
   onControl(data: { type: string }): void;
   onError(): void;
+  /** Fires when the SSE connection actually OPENS — construction is not
+   * connection (codex round 6): the partial-index re-hydration must wait
+   * for proof of connectivity, not for the constructor returning. */
+  onOpen(): void;
 }
 
 export interface A2uiStream {
@@ -36,6 +40,7 @@ const defaultStreamFactory: StreamFactory = (url, handlers) => {
     handlers.onControl(JSON.parse(e.data));
   });
   es.onerror = () => handlers.onError();
+  es.onopen = () => handlers.onOpen();
   return { close: () => es.close() };
 };
 
@@ -53,6 +58,11 @@ export class Transport {
   private stream: A2uiStream | null = null;
   private stopped = false;
   private attempt = 0;
+  // One partial-triggered refresh at a time: a partial index means the SW
+  // served its degraded offline warm, and the stream opening proves the
+  // network is back — but if the refreshed index is somehow partial again,
+  // looping cycles would hammer the server for nothing.
+  private partialRetried = false;
 
   constructor(opts: TransportOptions = {}) {
     this.streamFactory = opts.streamFactory ?? defaultStreamFactory;
@@ -80,6 +90,10 @@ export class Transport {
       // 1. Hydrate the live index; prune anything the server no longer lists.
       const index = (await this.getJson('/a2ui/surfaces')) as {
         latest_seq: number;
+        // Set by the service worker's install warmer when its offline warm
+        // could not store every snapshot — the index deliberately lists
+        // only what IS cached (F092 Phase 4, codex rounds 2-4).
+        partial?: boolean;
         surfaces: { surface_id: string }[];
       };
       const liveIds = new Set(index.surfaces.map((s) => s.surface_id));
@@ -100,12 +114,26 @@ export class Transport {
       }
       store.setDeliveredFloor(index.latest_seq);
       // 3. Tail the stream from the index watermark.
+      const wasPartial = index.partial === true;
+      if (!wasPartial) this.partialRetried = false;
       this.stream = this.streamFactory(`/a2ui/stream?since=${store.lastSeq}`, {
         onA2ui: (seq, envelope) => {
           store.apply(seq, envelope as never);
         },
         onControl: (data) => {
           if (data.type === 'resync') void this.reconnect();
+        },
+        onOpen: () => {
+          if (wasPartial && !this.partialRetried) {
+            // The index came from the SW's degraded offline warm, and the
+            // stream OPENING (not merely constructing — codex round 6) is
+            // the proof the network is back. Re-hydrate once: network-
+            // first fetches the live full index, restoring the surfaces
+            // the warm omitted; a replay-window overflow is not a
+            // deterministic substitute (codex round 4).
+            this.partialRetried = true;
+            void this.cycle();
+          }
         },
         onError: () => {
           // NEVER let EventSource auto-reconnect (codex P1): its
