@@ -837,7 +837,14 @@ _REFINE_COMMAND_RE = re.compile(
     r"|\bschedule\s+(?:a|an|the|this|daily|weekly|monthly|quarterly)\b"
     r"|\bsave\s+(?:to|as)\b"
     r"|\b(?:export|download)\s+as\b"
-    r"|\bshare\s+(?:via|with|to)\b"
+    # Start-anchored: "share with" ANYWHERE rejected "Compare market share with
+    # last month", which is analysis (codex P2).
+    r"|^\s*share\s+(?:via|with|to)\b"
+    # File-generation imperatives — "Generate CSV", "Create a PDF", "Open in
+    # Excel". No component emits a file, so these are as undeliverable as
+    # export; pressing one just recomposes the same data (codex P2).
+    r"|^\s*(?:generate|create|produce|make|open|render|build)\b[^,;]{0,24}"
+    r"\b(?:csv|pdf|xlsx?|excel|spreadsheet|zip|docx?)\b"
     r"|\bsubscribe\b",
     re.IGNORECASE,
 )

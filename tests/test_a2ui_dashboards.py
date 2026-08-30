@@ -1460,3 +1460,26 @@ def test_delivery_target_only_counts_in_an_imperative_clause():
         [{"id": "x", "label": "Compare email volume to last month"}]
     ) == []
     assert _refine_capability_errors([{"id": "x", "label": "Send report to Alice"}])
+
+
+def test_file_generation_imperatives_are_caught():
+    """codex P2: no component emits a file, so "Generate CSV" / "Create a PDF"
+    / "Open in Excel" are as undeliverable as "Export" — pressing one just
+    recomposes the same data."""
+    from nous.a2ui.compose import _refine_capability_errors
+
+    for label in ("Generate CSV", "Create a PDF", "Open in Excel",
+                  "Produce an xlsx", "Build a spreadsheet"):
+        assert _refine_capability_errors([{"id": "x", "label": label}]), label
+
+
+def test_share_matching_is_start_anchored():
+    """codex P2: "share with" anywhere rejected "Compare market share with last
+    month" — analysis, not delivery."""
+    from nous.a2ui.compose import _refine_capability_errors
+
+    for label in ("Compare market share with last month", "Market share by region",
+                  "Share of voice trend"):
+        assert _refine_capability_errors([{"id": "x", "label": label}]) == [], label
+    for label in ("Share via link", "Share with team", "Share to Slack"):
+        assert _refine_capability_errors([{"id": "x", "label": label}]), label
