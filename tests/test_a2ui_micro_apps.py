@@ -670,6 +670,9 @@ class _FakeComposer:
     def __init__(self) -> None:
         self.refreshes: list[dict] = []
         self.compose_calls: list[str] = []
+        # Theme the recomposition claims (a refine that "restyles"); the router
+        # must pin it back to the existing surface's theme.
+        self.compose_theme: str | None = None
 
     async def refresh_data(self, app_spec: dict) -> dict:
         self.refreshes.append(app_spec)
@@ -678,6 +681,8 @@ class _FakeComposer:
     async def compose(self, intent: str, **kwargs: Any) -> ComposedApp:
         self.compose_calls.append(intent)
         built = _micro_app(title="refined")
+        if self.compose_theme is not None:
+            built.app_spec = {**built.app_spec, "theme": self.compose_theme}
         return ComposedApp(built=built, app_spec=built.app_spec, fallback=False, repairs=0)
 
 
@@ -787,6 +792,35 @@ async def test_app_refine_recomposes_the_same_surface(
     row = await _surface_row(db, surface_id)
     assert row.status == "live", "refine recomposes in place, never tears down"
     assert row.nonce == nonce, "no nonce rotation on refine (updateComponents path)"
+
+
+async def test_app_refine_pins_the_existing_theme(
+    router, service, db, fake_composer: _FakeComposer
+) -> None:
+    # updateComponents carries no theme envelope, so a recomposed theme would
+    # only surface on the next reconnect snapshot — an ambush. The refine must
+    # pin the stored theme to the existing surface's (codex P2).
+    spec = {
+        "intent": "test",
+        "archetype": "status",
+        "composed_at": "2026-08-29T14:00:00+00:00",
+        "refine_options": [{"id": "blockers", "label": "Just the blockers"}],
+        "data_sources": [],
+        "provenance": {"trip": "model"},
+        "theme": "harbor",
+    }
+    surface_id = await service.push_built(_micro_app(app_spec=spec))
+    nonce = (await _surface_row(db, surface_id)).nonce
+    fake_composer.compose_theme = "signal"  # the recomposition tries to restyle
+
+    status, _ = await router.handle_call(
+        _call_body(surface_id, nonce, "app.refine", {"id": "blockers"}),
+        content_type=JSON_CT,
+    )
+
+    assert status == 200
+    row = await _surface_row(db, surface_id)
+    assert row.app_spec["theme"] == "harbor", "refine must not change the live theme"
 
 
 async def test_refine_and_refresh_write_audit_rows(

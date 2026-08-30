@@ -605,21 +605,39 @@ def _binding_rules(
                 f"{shape}, not a series — chart paths need a series-shaped source"
             )
             continue
-        # (3) Series-arity (F094 §5 rule 3): a LineChart series key must exist
-        # in the points.
+        # (3) Series-arity (F094 §5 rule 3): a LineChart must declare 1–4 series,
+        # each naming a key the series carries.
         if ctype == "LineChart":
             specs = comp.get("series") or []
-            if len(specs) > 4:
+            if not specs:
+                errors.append(
+                    f"LineChart {comp.get('id')!r} declares no series — name 1–4 keys"
+                )
+            elif len(specs) > 4:
                 errors.append(f"LineChart {comp.get('id')!r} has {len(specs)} series — max 4")
+            # A per-point non-finite reading is OMITTED from that point (to_series),
+            # and an empty series is a valid empty state — so check declared keys
+            # against the series' own `keys` list, falling back to the union of
+            # keys across ALL points, never points[0] alone (codex P2).
             points = resolved.get("points") or []
-            sample = points[0] if points else {}
-            for spec in specs:
-                key = spec.get("key") if isinstance(spec, dict) else None
-                if isinstance(key, str) and key not in sample:
-                    errors.append(
-                        f"LineChart {comp.get('id')!r} series key {key!r} is absent "
-                        f"from the points (keys: {sorted(k for k in sample if k != 't')})"
-                    )
+            declared = resolved.get("keys")
+            if isinstance(declared, list):
+                available = {str(k) for k in declared}
+            else:
+                available = {
+                    k for p in points if isinstance(p, dict) for k in p if k != "t"
+                }
+            # Nothing to check for an empty single-series source (it declares its
+            # emptiness via meta/reason); a declared `keys` list is authoritative
+            # even when points is empty.
+            if points or isinstance(declared, list):
+                for spec in specs:
+                    key = spec.get("key") if isinstance(spec, dict) else None
+                    if isinstance(key, str) and key not in available:
+                        errors.append(
+                            f"LineChart {comp.get('id')!r} series key {key!r} is absent "
+                            f"from the series (keys: {sorted(available)})"
+                        )
 
     # (4) Over-capacity / under-render (F093 §5.1 / AC7): a record-LIST source
     # bound only by FIXED indices that cover fewer than all records renders a

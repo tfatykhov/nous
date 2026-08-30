@@ -125,6 +125,37 @@ describe('BarChartView', () => {
     });
     expect(container.querySelectorAll('.vcol').length).toBe(2);
   });
+
+  it('sizes negative bars by magnitude, not by vanishing (codex P2)', () => {
+    // Pre-fix (v-min)/span gave the most-negative bar 0% and reversed the rest.
+    seed({ ep: cats([['a', -10], ['b', -5]]) });
+    const { container } = render(BarChartView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'b', component: 'BarChart', path: '/ep', orientation: 'horizontal' },
+      },
+    });
+    const fills = [...container.querySelectorAll('.track i')] as HTMLElement[];
+    expect(parseFloat(fills[0].style.width)).toBeCloseTo(100); // -10 → longest
+    expect(parseFloat(fills[1].style.width)).toBeCloseTo(50); //  -5 → half
+    // both are negative, so both carry the sign marker
+    expect(fills.every((i) => i.classList.contains('neg'))).toBe(true);
+  });
+
+  it('gives equal-magnitude opposite-sign bars equal length, marks the negative', () => {
+    seed({ ep: cats([['up', 10], ['down', -10]]) });
+    const { container } = render(BarChartView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'b', component: 'BarChart', path: '/ep', orientation: 'horizontal' },
+      },
+    });
+    const fills = [...container.querySelectorAll('.track i')] as HTMLElement[];
+    expect(parseFloat(fills[0].style.width)).toBeCloseTo(100);
+    expect(parseFloat(fills[1].style.width)).toBeCloseTo(100);
+    expect(fills[0].classList.contains('neg')).toBe(false);
+    expect(fills[1].classList.contains('neg')).toBe(true);
+  });
 });
 
 describe('LineChartView', () => {

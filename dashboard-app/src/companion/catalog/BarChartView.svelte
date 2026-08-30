@@ -43,12 +43,15 @@
     })),
   );
   const kind = $derived(classify(bars.map((b) => b.v)));
-  // Always zero-based (§3). Bar length is |v| fraction of the domain span
-  // from zero.
+  // Always zero-based (§3): the domain includes 0, so bar length is |v| as a
+  // fraction of the largest magnitude present. A negative bar must be as long
+  // as a positive bar of equal size — its sign shows in the value label and
+  // the `neg` marker, never by vanishing (an earlier (v-min)/span reversed
+  // negative magnitudes; codex P2). Bidirectional geometry is deferred.
   const domain = $derived(yDomain(bars.map((b) => b.v), true));
-  const span = $derived(domain.max - domain.min || 1);
+  const maxAbs = $derived(Math.max(Math.abs(domain.min), Math.abs(domain.max)) || 1);
   function frac(v: number): number {
-    return Math.max(0, Math.min(100, ((v - Math.min(0, domain.min)) / span) * 100));
+    return Math.max(0, Math.min(100, (Math.abs(v) / maxAbs) * 100));
   }
 </script>
 
@@ -63,7 +66,7 @@
       {#each bars as bar, i (i)}
         <div class="hrow">
           <span class="cat" title={bar.cat}>{bar.cat}</span>
-          <span class="track"><i style:width="{frac(bar.v)}%"></i></span>
+          <span class="track"><i class:neg={bar.v < 0} style:width="{frac(bar.v)}%"></i></span>
           <span class="val">{formatTick(bar.v)}</span>
         </div>
       {/each}
@@ -73,7 +76,7 @@
       {#each bars as bar, i (i)}
         <div class="vcol">
           <span class="val">{formatTick(bar.v)}</span>
-          <span class="vtrack"><i style:height="{frac(bar.v)}%"></i></span>
+          <span class="vtrack"><i class:neg={bar.v < 0} style:height="{frac(bar.v)}%"></i></span>
           <span class="cat" title={bar.cat}>{bar.cat}</span>
         </div>
       {/each}
@@ -127,6 +130,18 @@
     display: block;
     background: var(--tone);
     border-radius: 4px;
+  }
+  /* A negative bar is as long as its magnitude; the diagonal hatch + the
+     signed value label carry the sign so it is never mistaken for positive. */
+  .track i.neg,
+  .vtrack i.neg {
+    background-image: repeating-linear-gradient(
+      45deg,
+      var(--scrim) 0,
+      var(--scrim) 2px,
+      transparent 2px,
+      transparent 5px
+    );
   }
   .track i {
     height: 100%;

@@ -202,6 +202,44 @@ def test_series_arity_rule():
     assert any("ghost" in e for e in errs)
 
 
+def test_series_arity_uses_declared_keys_not_the_first_point():
+    # A per-point non-finite reading is omitted from that point, so `success`
+    # is absent from points[0] yet declared in `keys` — a points[0] check would
+    # falsely reject this valid multi-series LineChart (codex P2).
+    ser = {
+        "kind": "series",
+        "points": [{"t": "a", "failure": 2}, {"t": "b", "success": 1, "failure": 3}],
+        "keys": ["success", "failure"],
+        "unit": "",
+        "meta": {},
+    }
+    comps = [
+        {"id": "l", "component": "LineChart", "path": "/o", "series": [{"key": "success"}]}
+    ]
+    errs = _binding_rules(comps, {"o": ser}, {"o": ser}, _collect_bindings(comps))
+    assert not any("absent" in e for e in errs)
+    # A key in neither the declared list nor any point is still caught.
+    comps[0]["series"] = [{"key": "ghost"}]
+    errs = _binding_rules(comps, {"o": ser}, {"o": ser}, _collect_bindings(comps))
+    assert any("ghost" in e for e in errs)
+
+
+def test_series_arity_empty_series_is_a_valid_empty_state():
+    # An empty single series declares its emptiness via reason/meta; it must not
+    # be rejected as "series key absent" (points[0] would be {} → false error).
+    empty = {"kind": "series", "points": [], "unit": "", "meta": {"reason": "no rows"}}
+    comps = [{"id": "l", "component": "LineChart", "path": "/o", "series": [{"key": "v"}]}]
+    errs = _binding_rules(comps, {"o": empty}, {"o": empty}, _collect_bindings(comps))
+    assert not any("absent" in e for e in errs)
+
+
+def test_linechart_requires_at_least_one_series():
+    ser = {"kind": "series", "points": [{"t": "a", "v": 1}], "unit": "", "meta": {}}
+    comps = [{"id": "l", "component": "LineChart", "path": "/o", "series": []}]
+    errs = _binding_rules(comps, {"o": ser}, {"o": ser}, _collect_bindings(comps))
+    assert any("no series" in e for e in errs)
+
+
 def test_over_capacity_under_render_rule():
     big = {"pending": [{"i": i} for i in range(12)]}
     comps = [
