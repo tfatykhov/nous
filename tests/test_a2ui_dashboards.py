@@ -1325,3 +1325,69 @@ async def test_decoding_never_happens_on_the_event_loop():
         assert out["result"] == {"ok": 3}
     finally:
         _api_tools._JSON_DECODER_CLS = original_cls
+
+
+# ---------------------------------------------------------------------------
+# Issue #620 — two accept-and-degrade gaps
+# ---------------------------------------------------------------------------
+
+
+def test_inline_child_objects_are_a_repair_error_not_a_silent_drop():
+    """#620 gap 2: `children` is reference-based, so inline child OBJECTS were
+    filtered out by _children_of and nothing complained — no dangling ref (it
+    never existed), no depth accounting. The section the model believed it
+    filled validated clean and rendered EMPTY, with repairs:0."""
+    comps = _skel([
+        {"id": "c", "component": "Column",
+         "children": [{"component": "Text", "text": "invisible"}]},
+    ])
+    errs = grammar.lint_micro_app(comps)
+    assert any("inline child object" in e for e in errs)
+
+    # A mixed array is caught too — the id ref alone used to make it look fine.
+    mixed = _skel([
+        {"id": "c", "component": "Column", "children": ["t1", {"component": "Text"}]},
+        {"id": "t1", "component": "Text", "text": "visible"},
+    ])
+    assert any("inline child object" in e for e in grammar.lint_micro_app(mixed))
+
+
+def test_id_reference_children_still_pass():
+    ok = _skel([
+        {"id": "c", "component": "Column", "children": ["t1"]},
+        {"id": "t1", "component": "Text", "text": "visible"},
+    ])
+    assert grammar.lint_micro_app(ok) == []
+
+
+def test_repeat_template_children_are_not_mistaken_for_inline_objects():
+    """The {componentId, path} template is a DICT, not a list — it must keep
+    working (F093 §6.2) rather than tripping the new list check."""
+    comps = _skel([
+        {"id": "c", "component": "Column",
+         "children": {"componentId": "row", "path": "/items"}},
+        {"id": "row", "component": "Text", "text": {"path": "name"}},
+    ])
+    assert not any("inline child" in e for e in grammar.lint_micro_app(comps))
+
+
+def test_undeliverable_refine_options_are_rejected():
+    """#620 gap 1: a refine option is not a dispatched action — app_refine
+    appends its LABEL to the intent and re-composes against the SAME sources.
+    A button promising a file or a message is unsatisfiable by construction,
+    yet rendered pixel-identical to a real capability."""
+    from nous.a2ui.compose import _refine_capability_errors
+
+    for label in ("Export raw data", "Download CSV", "Email me a summary",
+                  "Schedule a weekly digest"):
+        errs = _refine_capability_errors([{"id": "x", "label": label}])
+        assert errs, f"{label!r} should be rejected"
+        assert "RE-RENDERS" in errs[0]
+
+
+def test_legitimate_refine_options_still_pass():
+    from nous.a2ui.compose import _refine_capability_errors
+
+    for label in ("Compare periods", "Show only blockers", "Group by category",
+                  "Last 7 days"):
+        assert _refine_capability_errors([{"id": "x", "label": label}]) == [], label

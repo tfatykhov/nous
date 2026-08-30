@@ -165,6 +165,27 @@ def lint_micro_app(
                 f"component {ctype!r} ({comp.get('id')}) is outside the "
                 "micro-app catalog subset"
             )
+        # Issue #620 gap 2 — the grammar is REFERENCE-based: a `children`
+        # array holds component ids. When the model emits inline child
+        # OBJECTS instead (a very common LLM failure), `_children_of` filtered
+        # them out and nothing complained: no dangling ref (the ref never
+        # existed), no depth accounting, no repair error. The section the
+        # model believed it filled validated clean and rendered EMPTY, and the
+        # pipeline reported success with repairs:0. Accept-and-degrade is the
+        # exact class the _validate codex guards were written to remove, so
+        # this is a hard error like an unknown theme — not a silent drop.
+        for key in _CHILD_KEYS:
+            value = comp.get(key)
+            if not isinstance(value, list):
+                continue
+            inline = sum(1 for v in value if not isinstance(v, str))
+            if inline:
+                errors.append(
+                    f"{ctype} {comp.get('id')!r} has {inline} inline child "
+                    f"object(s) in `{key}` — children must be component ID "
+                    "strings; define each child as its own component and "
+                    "reference it by id"
+                )
         if ctype == "Section":
             title = comp.get("title")
             if not isinstance(title, str) or not title.strip():

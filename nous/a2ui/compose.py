@@ -129,7 +129,10 @@ Respond with ONLY a JSON object (no prose, no code fence) shaped:
   "theme": "<one of the listed theme ids>",  // optional; omit for nous-default
   "components": [ ... A2UI component objects, each with "id" and "component" ... ],
   "dataModel": { ... ONLY the subtrees you are supplying yourself ... },
-  "refine_options": [ {"id": "slug", "label": "Button label"} ]  // 0-4 predefined drill-downs
+  "refine_options": [ {"id": "slug", "label": "Button label"} ]  // 0-4. Each RE-RENDERS
+  // the SAME data sources from a different angle (narrower window, one grouping, one section
+  // expanded). It cannot export, download, email, notify or schedule — there is no component
+  // for any of that, and a button promising one is rejected.
 }
 """
 
@@ -375,6 +378,7 @@ class SurfaceComposer:
         archetype = parsed.get("archetype")
         if archetype is not None and not isinstance(archetype, str):
             errors.append("archetype must be a string or omitted")
+        errors.extend(_refine_capability_errors(parsed.get("refine_options")))
         for key in model_supplied or {}:
             if key in source_data:
                 errors.append(
@@ -788,6 +792,45 @@ def _parse_json_object(raw: str) -> dict | None:
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+# Issue #620 gap 1 — verbs the micro-app grammar cannot perform under ANY
+# model response. A refine option is not a dispatched action: `app_refine`
+# appends the option's LABEL to the intent and re-composes against the SAME
+# stored data_sources, so a button promising a file or a message is
+# unsatisfiable by construction. F092.1 makes invented DATA visible (amber
+# provenance); there was no equivalent for invented CAPABILITY, so a fake
+# button was pixel-identical to a real one and surfaced a raw ValueError on
+# press. Rejecting at compose is consistent with an unknown theme being a hard
+# error rather than a silent default.
+_UNSUPPORTED_REFINE_VERBS = (
+    "export", "download", "csv", "spreadsheet", "attach", "print",
+    "email", "e-mail", "send", "notify", "alert", "message", "share",
+    "schedule", "remind", "subscribe", "save to", "upload",
+)
+
+
+def _refine_capability_errors(raw: Any) -> list[str]:
+    """Repair errors for refine options promising capabilities that do not
+    exist. Checked on the RAW model output, before _clean_refine_options
+    quietly normalizes it."""
+    errors: list[str] = []
+    if not isinstance(raw, list):
+        return errors
+    for opt in raw[:4]:
+        if not isinstance(opt, dict):
+            continue
+        label = str(opt.get("label") or "").strip()
+        low = label.lower()
+        hit = next((v for v in _UNSUPPORTED_REFINE_VERBS if v in low), None)
+        if hit:
+            errors.append(
+                f"refine option {label!r} promises {hit!r}, which no micro-app "
+                "component can do — refine RE-RENDERS the existing data sources, "
+                "it cannot export, send or schedule anything. Offer a different "
+                "view of the same data instead."
+            )
+    return errors
 
 
 def _clean_refine_options(raw: Any) -> list[dict]:
