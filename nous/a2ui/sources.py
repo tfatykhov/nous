@@ -380,6 +380,52 @@ def _bound(value: Any, budget: int) -> tuple[Any, int]:
 # it on every refresh.
 _MAX_SCRIPT_CHARS = 16_000
 
+# Hard ceiling on a script's SERIALIZED result, enforced before it reaches
+# `_bound` (codex P1). Every other source is row-capped at `_MAX_ROWS`, but a
+# script can construct or fetch anything, and `_bound`'s trim pops ONE list
+# entry and re-serializes the remainder per iteration — quadratic. Handing it
+# a 100k-row result would do that work on the MAIN EVENT LOOP, outside the
+# script's own deadline, stalling every other request. One O(n) measurement
+# here turns that into an explicit, self-describing rejection.
+_MAX_SCRIPT_RESULT_CHARS = 256_000
+
+
+def _script_failure(reason: str) -> dict:
+    """A failed script's value.
+
+    Deliberately an EMPTY SERIES, not a bare ``{"_error": …}`` marker (codex
+    P1): refresh does not re-run binding validation, so a chart bound at
+    compose time to a working series would, on a later transient failure, be
+    left pointing at a non-series object and render the useless "not a series
+    (object)" defensive state — losing the reason, which is the entire point.
+    An empty series is a VALID chart binding, so the chart renders its §3.1
+    empty state carrying the actual reason; a records-bound component degrades
+    to empty exactly as it did before.
+    """
+    return empty_series(reason)
+
+
+def _normalize_script_result(result: Any) -> Any:
+    """Make a script result JSON-safe, or reject it explicitly.
+
+    The data model and outbox are persisted as JSONB with no custom
+    serializer, so a `datetime`, `Decimal`, `UUID`, set or API-library object
+    in the result would pass `_bound` (which only MEASURES, via
+    ``default=str``) and then fail at commit time (codex P2). Round-tripping
+    through ``default=str`` normalizes those to strings by construction.
+    Size is checked on the same single serialization — no second pass.
+    """
+    try:
+        encoded = json.dumps(result, default=str)
+    except (TypeError, ValueError) as exc:
+        return _script_failure(f"script result is not JSON-serializable ({exc})")
+    if len(encoded) > _MAX_SCRIPT_RESULT_CHARS:
+        return _script_failure(
+            f"script result is {len(encoded)} chars — max "
+            f"{_MAX_SCRIPT_RESULT_CHARS}; aggregate or limit it in the script"
+        )
+    return json.loads(encoded)
+
 
 def build_default_registry(
     *,
@@ -675,18 +721,14 @@ def build_default_registry(
                 )
             outcome = await run_script(code)
             if not outcome.get("ok"):
-                # Mirrors health_series: an explicit, self-describing failure
-                # value beats a blank box or a confident zero.
-                return {"_error": str(outcome.get("error") or "script failed")}
+                return _script_failure(str(outcome.get("error") or "script failed"))
             result = outcome.get("result")
             if result is None:
-                return {
-                    "_error": (
-                        "script set no `result` — assign the data to a variable "
-                        "named `result` (a list of records, or a series dict)"
-                    )
-                }
-            return result
+                return _script_failure(
+                    "script set no `result` — assign the data to a variable "
+                    "named `result` (a list of records, or a series dict)"
+                )
+            return _normalize_script_result(result)
 
         registry.register("agent_script", agent_script)
 

@@ -712,7 +712,11 @@ async def test_agent_script_failure_is_explicit_never_a_blank_box():
     out = await reg.resolve(
         [{"key": "d", "source": "agent_script", "params": {"code": "1/0"}}]
     )
-    assert "boom" in out["d"]["_error"]
+    # An empty SERIES, not a bare marker: refresh does not re-run binding
+    # validation, so a chart bound to a working series must not be left
+    # pointing at a non-series object on a transient failure (codex P1).
+    assert is_series(out["d"]) and out["d"]["points"] == []
+    assert "boom" in out["d"]["meta"]["reason"]
 
 
 async def test_agent_script_without_a_result_says_so():
@@ -721,7 +725,7 @@ async def test_agent_script_without_a_result_says_so():
     out = await reg.resolve(
         [{"key": "d", "source": "agent_script", "params": {"code": "print('hi')"}}]
     )
-    assert "no `result`" in out["d"]["_error"]
+    assert is_series(out["d"]) and "no `result`" in out["d"]["meta"]["reason"]
 
 
 async def test_agent_script_requires_code_and_caps_its_size():
@@ -778,3 +782,52 @@ async def test_refresh_re_runs_the_script_so_the_app_is_live_not_a_snapshot():
     second = await composer.refresh_data(spec)
     assert first["live"]["points"][0]["v"] == 1.0
     assert second["live"]["points"][0]["v"] == 2.0, "refresh replayed instead of re-running"
+
+
+async def test_agent_script_failure_keeps_a_chart_binding_valid():
+    """codex P1: refresh does not re-run binding validation, so a transient
+    script failure must not swap a chart's series for a non-series object —
+    the chart would render 'not a series (object)' and LOSE the reason."""
+    runner = _FakeRunner({"ok": False, "result": None, "output": "", "error": "API timeout"})
+    reg = build_default_registry(run_script=runner)
+    out = await reg.resolve(
+        [{"key": "trend", "source": "agent_script", "params": {"code": "result = f()"}}]
+    )
+    comps = [{"id": "c", "component": "Sparkline", "path": "/trend"}]
+    errs = _binding_rules(comps, out, out, _collect_bindings(comps))
+    assert not any("not a series" in e for e in errs), "failure broke the chart binding"
+    assert "API timeout" in out["trend"]["meta"]["reason"]
+
+
+async def test_agent_script_rejects_an_oversized_result_before_bounding_it():
+    """codex P1: `_bound` trims a list by popping ONE entry and re-serializing
+    the rest — quadratic, on the main event loop, outside the script deadline.
+    An oversized result is rejected after ONE O(n) measurement instead."""
+    huge = [{"i": i, "pad": "x" * 100} for i in range(5000)]
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": huge, "output": "", "error": None})
+    )
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script", "params": {"code": "result = big"}}]
+    )
+    assert is_series(out["d"]) and "max" in out["d"]["meta"]["reason"]
+
+
+async def test_agent_script_normalizes_non_json_values_for_jsonb():
+    """codex P2: the data model is persisted as JSONB with no custom
+    serializer, and `_bound` only MEASURES with default=str — so a datetime or
+    UUID would survive to the commit and fail there."""
+    import uuid as _uuid
+    from datetime import datetime as _dt
+    from decimal import Decimal
+
+    raw = [{"t": _dt(2026, 8, 30), "id": _uuid.uuid4(), "v": Decimal("1.5")}]
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": raw, "output": "", "error": None})
+    )
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script", "params": {"code": "result = rows"}}]
+    )
+    # Round-trips cleanly => JSONB-safe by construction.
+    json.dumps(out["d"])
+    assert all(isinstance(r["t"], str) and isinstance(r["id"], str) for r in out["d"])
