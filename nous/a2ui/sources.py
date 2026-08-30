@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import math
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -54,6 +55,13 @@ _PER_SOURCE_BUDGET_CHARS = 6_000
 # char budget trims AFTER materialization, so a prompted limit in the
 # millions would still do the database work. Clamp before the query.
 _MAX_ROWS = 50
+
+# Wall-clock ceiling on resolving ALL of one surface's sources. Compose runs
+# inside `NOUS_TOOL_TIMEOUT` (default 120s) and must still fit the compose LLM
+# (default 60s) afterwards, so source resolution cannot be allowed to consume
+# the whole budget — an `agent_script` alone may run for
+# `programmatic_tools_timeout` (90s).
+_TOTAL_SOURCE_SECONDS = 45.0
 
 
 def _limit(params: dict, default: int) -> int:
@@ -93,6 +101,13 @@ class SourceRegistry:
         """
         model: dict[str, Any] = {}
         spent = 0
+        # Wall-clock budget across ALL sources in one resolve (codex P1).
+        # Sources run sequentially, and an `agent_script` gets the full
+        # `programmatic_tools_timeout` (90s) each — so two slow ones, or one
+        # plus the compose LLM, blow the 120s tool timeout wrapping the whole
+        # compose call and the app never gets built. Bounding the total here
+        # rather than per-source also covers a slow DB fetcher.
+        deadline = time.monotonic() + _TOTAL_SOURCE_SECONDS
         for decl in data_sources:
             key = str(decl.get("key") or "")
             name = str(decl.get("source") or "")
@@ -103,7 +118,21 @@ class SourceRegistry:
                 raise UnknownSourceError(
                     f"unknown data source {name!r}; available: {self.names()}"
                 )
-            value = await fetcher(dict(decl.get("params") or {}))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"source resolution exceeded {_TOTAL_SOURCE_SECONDS}s before "
+                    f"reaching {name!r} — use fewer or faster sources"
+                )
+            try:
+                value = await asyncio.wait_for(
+                    fetcher(dict(decl.get("params") or {})), timeout=remaining
+                )
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    f"source {name!r} exceeded the {_TOTAL_SOURCE_SECONDS}s "
+                    "resolution budget shared by all sources on this surface"
+                ) from exc
             budget = min(_PER_SOURCE_BUDGET_CHARS, _TOTAL_BUDGET_CHARS - spent)
             if is_series(value):
                 # A series is EXEMPT from _bound's wholesale-dict-replacement
@@ -393,25 +422,33 @@ _MAX_SCRIPT_RESULT_CHARS = 256_000
 _SCRIPT_SHAPES = ("records", "series")
 
 
+def _is_valid_series(value: Any) -> bool:
+    """The FULL series contract, not just the `kind` tag `is_series` checks."""
+    return is_series(value) and isinstance(value.get("points"), list)
+
+
 def _script_failure(reason: str, shape: str) -> Any:
     """A failed script's value, in the SHAPE the app was built against.
 
     Refresh does not re-run binding validation, so whatever a failure returns
-    must remain a valid binding for the components already on the surface
-    (codex P1, twice):
+    must remain a valid binding for the components ALREADY on the surface.
 
-    - ``series`` → an empty series carrying the reason, so a chart renders its
-      §3.1 empty state WITH the cause instead of "not a series (object)".
-    - ``records`` → a one-row list carrying the reason, so a table/ledger's
-      list paths stay valid and the row itself shows what went wrong. An empty
-      list would keep the shape but silently drop the reason.
+    The two shapes are deliberately asymmetric, and the asymmetry is honest:
 
-    The shape is declared by the agent on the source, because at failure time
-    there is nothing left to infer it from.
+    - ``series`` carries its reason in ``meta``, which the chart's §3.1 empty
+      state renders — the failure is visible in the app.
+    - ``records`` returns an EMPTY LIST. A one-row ``[{"_error": …}]`` was
+      tried and is worse (codex P1): a repeat template's children bind fields
+      like ``name``/``value``, so the marker row renders as a row of blanks
+      and nothing is bound to ``_error`` — the reason is invisible AND the
+      table now lies about having a row. The record schema the surface was
+      built against cannot be reconstructed at failure time, so the honest
+      value is "no rows", with the reason going to the log for the operator.
     """
     if shape == "series":
         return empty_series(reason)
-    return [{"_error": reason}]
+    logger.warning("agent_script (records) failed: %s", reason)
+    return []
 
 
 def build_default_registry(
@@ -732,7 +769,11 @@ def build_default_registry(
                 )
             # A declared shape the script did not produce is a script bug, and
             # catching it HERE keeps a chart from ever binding to records.
-            if shape == "series" and not is_series(result):
+            if shape == "series" and not _is_valid_series(result):
+                # The FULL contract, not just `kind` (codex P1): refresh skips
+                # binding validation, so a later {"kind":"series","points":{}}
+                # would replace a working chart with something the renderer
+                # shows as "not a series" instead of the empty state.
                 return _script_failure(
                     f"script declared shape 'series' but returned "
                     f"{type(result).__name__} — build one with to_series(...)",

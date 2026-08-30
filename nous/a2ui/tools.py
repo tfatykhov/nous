@@ -181,6 +181,46 @@ _COMPOSE_SURFACE_SCHEMA = {
 }
 
 
+def _compose_schema_for(composer: Any) -> dict:
+    """The compose schema with its source guidance built from the LIVE registry.
+
+    `agent_script` is registered only when its flag AND programmatic tools are
+    both on, but a static schema advertised it unconditionally — so in the
+    default deployment the agent would follow that instruction, hit
+    `UnknownSourceError`, and fail the whole compose call (codex P2). The
+    registry is the single source of truth for what exists; describing
+    anything else is telling the model about a tool it does not have.
+    """
+    import copy
+
+    schema = copy.deepcopy(_COMPOSE_SURFACE_SCHEMA)
+    registry = getattr(composer, "_sources", None)
+    if registry is None:
+        # No composer wired at all — the tool is not registered either.
+        return schema
+    # A registry that is merely EMPTY must still rewrite: falling back to the
+    # static text is how the disabled source got advertised in the first place.
+    names = list(registry.names())
+    props = schema["properties"]["data_sources"]["items"]["properties"]
+    props["source"]["description"] = (
+        f"Registered fetcher — one of: {', '.join(names)}."
+        if names
+        else "No data sources are registered; omit data_sources."
+    )
+    if "agent_script" in names:
+        props["source"]["description"] += (
+            " Use `agent_script` to supply the data YOURSELF for any domain "
+            "that has no fetcher."
+        )
+    else:
+        # Drop the agent_script contract from params too: describing how to
+        # write a script the server will reject is worse than silence.
+        props["params"]["description"] = (
+            "Fetcher params (e.g. {q}, {dag_id}, {days})."
+        )
+    return schema
+
+
 def _intent_slug(intent: str) -> str:
     """Readable slug + a digest of the FULL intent (codex P2): slugging
     alone maps 'C++ status' and 'C status' — or any two long intents
@@ -391,4 +431,6 @@ def register_a2ui_tools(
             ],
         }
 
-    dispatcher.register("compose_surface", compose_surface, _COMPOSE_SURFACE_SCHEMA)
+    dispatcher.register(
+        "compose_surface", compose_surface, _compose_schema_for(composer)
+    )

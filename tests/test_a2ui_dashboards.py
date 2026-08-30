@@ -845,18 +845,22 @@ async def test_agent_script_normalizes_non_json_values_for_jsonb():
     assert all(isinstance(r["t"], str) and isinstance(r["id"], str) for r in out["d"])
 
 
-async def test_agent_script_failure_preserves_a_RECORDS_shape():
-    """codex P1 round 2: an unconditional empty-series failure broke a
-    ledger/table bound to list paths. A records source fails as a one-row
-    list, so those paths stay valid AND the row shows the reason."""
+async def test_agent_script_failure_preserves_a_RECORDS_shape(caplog):
+    """codex P1: an unconditional empty-SERIES failure broke a table bound to
+    list paths. A one-row [{_error}] marker was the next attempt and is also
+    wrong — a repeat template's children bind fields like `name`, so the
+    marker renders as a row of blanks with nothing bound to `_error`, and the
+    table lies about having a row. The record schema cannot be reconstructed
+    at failure time, so the honest value is no rows + a logged reason."""
     runner = _FakeRunner({"ok": False, "result": None, "output": "", "error": "429 rate limited"})
     reg = build_default_registry(run_script=runner)
-    out = await reg.resolve(
-        [{"key": "rows", "source": "agent_script",
-          "params": {"code": "result = f()", "shape": "records"}}]
-    )
-    assert isinstance(out["rows"], list) and len(out["rows"]) == 1
-    assert "429" in out["rows"][0]["_error"]
+    with caplog.at_level("WARNING"):
+        out = await reg.resolve(
+            [{"key": "rows", "source": "agent_script",
+              "params": {"code": "result = f()", "shape": "records"}}]
+        )
+    assert out["rows"] == [], "records failure must stay a list, with no fake row"
+    assert "429 rate limited" in caplog.text, "the reason must reach the operator"
 
 
 async def test_agent_script_rejects_a_declared_shape_the_script_did_not_produce():
@@ -878,3 +882,63 @@ async def test_agent_script_rejects_an_unknown_shape():
             [{"key": "d", "source": "agent_script",
               "params": {"code": "result = []", "shape": "blob"}}]
         )
+
+
+async def test_agent_script_rejects_a_series_with_non_list_points():
+    """codex P1: is_series() checks only `kind`, so a refreshed
+    {"kind":"series","points":{}} would replace a working chart with a value
+    the renderer shows as "not a series" — refresh skips binding validation."""
+    bad = {"kind": "series", "points": {}, "unit": "", "meta": {}}
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": bad, "output": "", "error": None})
+    )
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = bad", "shape": "series"}}]
+    )
+    assert is_series(out["d"]) and isinstance(out["d"]["points"], list)
+    assert "declared shape 'series'" in out["d"]["meta"]["reason"]
+
+
+async def test_source_resolution_has_a_total_wall_clock_budget():
+    """codex P1: sources resolve sequentially and an agent_script may run for
+    the full 90s programmatic timeout, but compose must still fit the LLM
+    inside NOUS_TOOL_TIMEOUT. The budget is shared across ALL sources."""
+    import asyncio as _asyncio
+
+    from nous.a2ui import sources as _sources
+
+    reg = SourceRegistry()
+
+    async def slow(params):
+        await _asyncio.sleep(5)
+        return []
+
+    reg.register("slow", slow)
+    original = _sources._TOTAL_SOURCE_SECONDS
+    _sources._TOTAL_SOURCE_SECONDS = 0.05
+    try:
+        with pytest.raises(TimeoutError, match="resolution budget"):
+            await reg.resolve([{"key": "a", "source": "slow", "params": {}}])
+    finally:
+        _sources._TOTAL_SOURCE_SECONDS = original
+
+
+def test_compose_schema_only_advertises_registered_sources():
+    """codex P2: the flag defaults OFF, so a static schema telling the agent to
+    use `agent_script` would send it straight into UnknownSourceError and fail
+    the whole compose call."""
+    from nous.a2ui.tools import _compose_schema_for
+
+    class _C:
+        def __init__(self, reg):
+            self._sources = reg
+
+    without = _compose_schema_for(_C(build_default_registry()))
+    src = without["properties"]["data_sources"]["items"]["properties"]
+    assert "agent_script" not in src["source"]["description"]
+    assert "agent_script" not in src["params"]["description"]
+
+    with_it = _compose_schema_for(_C(build_default_registry(run_script=object())))
+    src2 = with_it["properties"]["data_sources"]["items"]["properties"]
+    assert "agent_script" in src2["source"]["description"]
