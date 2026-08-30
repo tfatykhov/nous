@@ -1391,3 +1391,22 @@ def test_legitimate_refine_options_still_pass():
     for label in ("Compare periods", "Show only blockers", "Group by category",
                   "Last 7 days"):
         assert _refine_capability_errors([{"id": "x", "label": label}]) == [], label
+
+
+def test_capability_gate_matches_commands_not_substrings():
+    """codex P2: raw containment read "Group by sender" as send, "Email volume
+    by week" as email and "Compare attachment types" as attach — all valid
+    analytical labels for mail/file dashboards. Rejecting them is WORSE than
+    the bug: repeated false matches burn the repair loop into a markdown
+    fallback. Only command phrases count."""
+    from nous.a2ui.compose import _refine_capability_errors
+
+    for label in ("Group by sender", "Email volume by week",
+                  "Compare attachment types", "Shared vs private items",
+                  "Attachment size breakdown", "Sender leaderboard"):
+        assert _refine_capability_errors([{"id": "x", "label": label}]) == [], label
+
+    # ...while the phrasings that genuinely promise a capability still fail.
+    for label in ("Send me the report", "Save to Drive", "Share via link",
+                  "Subscribe to updates", "Notify me on change"):
+        assert _refine_capability_errors([{"id": "x", "label": label}]), label

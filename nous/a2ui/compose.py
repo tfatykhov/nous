@@ -803,10 +803,31 @@ def _parse_json_object(raw: str) -> dict | None:
 # button was pixel-identical to a real one and surfaced a raw ValueError on
 # press. Rejecting at compose is consistent with an unknown theme being a hard
 # error rather than a silent default.
-_UNSUPPORTED_REFINE_VERBS = (
-    "export", "download", "csv", "spreadsheet", "attach", "print",
-    "email", "e-mail", "send", "notify", "alert", "message", "share",
-    "schedule", "remind", "subscribe", "save to", "upload",
+# Matched as COMMAND PHRASES, never bare substrings (codex P2). Containment
+# alone reads "Group by sender" as send, "Email volume by week" as email, and
+# "Compare attachment types" as attach — all legitimate analytical labels for
+# mail/file dashboards. Rejecting those is worse than the bug being fixed:
+# repeated false matches burn the repair loop and force a markdown fallback.
+# So: imperative verbs only where they can ONLY be imperative — anchored at
+# the start of the label, or in a phrase that has no noun reading.
+_REFINE_COMMAND_RE = re.compile(
+    # Imperative only where it can ONLY be imperative: anchored at the START of
+    # the label, or inside a phrase with no noun reading ("email me", "save to").
+    # So "Group by sender", "Email volume by week" and "Compare attachment
+    # types" all pass — those are analytical labels for mail/file dashboards,
+    # and rejecting them would burn the repair loop into a markdown fallback.
+    # A label OPENING with the verb is still rejected even when a noun reading
+    # exists ("Export trends by month"): leading-imperative is the strongest
+    # signal available, and a rephrase costs one repair round while an
+    # undeliverable button costs the user a raw ValueError.
+    r"^\s*(?:export|download|print|upload)\b"
+    r"|\b(?:e-?mail|send|notify|remind|text)\s+(?:me|us|it|them)\b"
+    r"|\bschedule\s+(?:a|an|the|this|daily|weekly)\b"
+    r"|\bsave\s+(?:to|as)\b"
+    r"|\b(?:export|download)\s+as\b"
+    r"|\bshare\s+(?:via|with|to)\b"
+    r"|\bsubscribe\b",
+    re.IGNORECASE,
 )
 
 
@@ -821,14 +842,13 @@ def _refine_capability_errors(raw: Any) -> list[str]:
         if not isinstance(opt, dict):
             continue
         label = str(opt.get("label") or "").strip()
-        low = label.lower()
-        hit = next((v for v in _UNSUPPORTED_REFINE_VERBS if v in low), None)
-        if hit:
+        match = _REFINE_COMMAND_RE.search(label)
+        if match:
             errors.append(
-                f"refine option {label!r} promises {hit!r}, which no micro-app "
-                "component can do — refine RE-RENDERS the existing data sources, "
-                "it cannot export, send or schedule anything. Offer a different "
-                "view of the same data instead."
+                f"refine option {label!r} promises {match.group(0).strip()!r}, which no "
+                "micro-app component can do — refine RE-RENDERS the existing data "
+                "sources, it cannot export, send or schedule anything. Offer a "
+                "different view of the same data instead."
             )
     return errors
 
