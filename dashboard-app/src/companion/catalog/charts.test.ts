@@ -213,4 +213,42 @@ describe('LineChartView', () => {
     });
     expect(container.querySelectorAll('.legend .lg').length).toBe(4);
   });
+
+  it('draws a dot for a single-timestamp series instead of an empty plot', () => {
+    // One coordinate has no segment to stroke; without the dot fallback the
+    // chart shows axes + legend but no data (codex P2).
+    seed({
+      out: { kind: 'series', unit: '', keys: ['success'], points: [{ t: 'd1', success: 7 }], meta: {} },
+    });
+    const { container } = render(LineChartView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'l', component: 'LineChart', path: '/out', series: [{ key: 'success' }] },
+      },
+    });
+    expect(container.querySelectorAll('polyline').length).toBe(0);
+    expect(container.querySelectorAll('circle').length).toBe(1);
+  });
+
+  it('breaks the line at a gap and dots an isolated reading between gaps', () => {
+    // Middle + last present, index-2 missing → a lone point at index 0 (dot)
+    // and a 2-point segment at indices 2-3 (polyline), never one bridged line.
+    seed({
+      out: {
+        kind: 'series',
+        unit: '',
+        keys: ['v'],
+        points: [{ t: 'a', v: 5 }, { t: 'b' }, { t: 'c', v: 8 }, { t: 'd', v: 9 }],
+        meta: { dropped: 1 },
+      },
+    });
+    const { container } = render(LineChartView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'l', component: 'LineChart', path: '/out', series: [{ key: 'v' }] },
+      },
+    });
+    expect(container.querySelectorAll('circle').length).toBe(1); // isolated a
+    expect(container.querySelectorAll('polyline').length).toBe(1); // c–d
+  });
 });

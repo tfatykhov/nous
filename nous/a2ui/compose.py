@@ -360,7 +360,10 @@ class SurfaceComposer:
 
         errors: list[str] = []
         theme = parsed.get("theme")
-        if theme is not None and theme not in _THEMES:
+        # `theme not in _THEMES` would hash the value — a model-emitted dict or
+        # list raises TypeError INSIDE _validate, escaping the repair loop and
+        # the guaranteed fallback (codex P2). Reject a non-string as invalid.
+        if theme is not None and (not isinstance(theme, str) or theme not in _THEMES):
             errors.append(
                 f"theme {theme!r} is not one of {sorted(_THEMES)} — pick a listed "
                 "theme or omit it for the default"
@@ -657,9 +660,12 @@ def _binding_rules(
                 seg = b[len(prefix) :].split("/", 1)[0]
                 if seg.isdigit():
                     indices.add(int(seg))
-        if indices and (max(indices) + 1) < n:
+        # Coverage is the count of DISTINCT bound indices, not max+1: binding
+        # only /key/11 of 12 records has max+1 == n yet renders one record
+        # (codex P2). Sparse or late fixed bindings are under-render too.
+        if indices and len(indices) < n:
             errors.append(
-                f"source {key!r} resolved {n} records but only {max(indices) + 1} "
+                f"source {key!r} resolved {n} records but only {len(indices)} "
                 "are bound by fixed index — use a repeat template so all render, "
                 "never a partial slice of a complete source"
             )

@@ -111,7 +111,15 @@
       {/if}
       {#each lines as ln (ln.key)}
         {#each ln.segments as seg, si (si)}
-          <polyline points={seg} fill="none" stroke={ln.stroke} stroke-width="1.5" />
+          {#if seg.includes(' ')}
+            <polyline points={seg} fill="none" stroke={ln.stroke} stroke-width="1.5" />
+          {:else}
+            <!-- A one-coordinate segment (single timestamp, or a lone reading
+                 between two gaps) has no line to stroke — draw the point as a
+                 dot so the value is visible instead of an empty plot (codex P2). -->
+            {@const xy = seg.split(',')}
+            <circle cx={xy[0]} cy={xy[1]} r="2.5" fill={ln.stroke} />
+          {/if}
         {/each}
       {/each}
       {#if comp.yLabel}<text class="axl" x={4} y={PAD_T + 4}>{toDisplayString(comp.yLabel)}</text>{/if}

@@ -15,8 +15,9 @@ import pytest_asyncio
 from sqlalchemy import delete
 
 from nous.a2ui import grammar
-from nous.a2ui.compose import _THEMES, _binding_rules, _collect_bindings
+from nous.a2ui.compose import _THEMES, SurfaceComposer, _binding_rules, _collect_bindings
 from nous.a2ui.sources import (
+    SourceRegistry,
     _bound_series,
     _pivot,
     empty_series,
@@ -30,7 +31,7 @@ from nous.storage.models import A2uiAction, A2uiOutbox, A2uiSurface
 # ---------------------------------------------------------------------------
 
 
-def test_to_series_sorts_drops_nonfinite_and_counts():
+def test_to_series_sorts_counts_and_keeps_gap_placeholder():
     recs = [
         {"d": "2026-08-03", "x": 3.0},
         {"d": "2026-08-01", "x": 1.0},
@@ -38,11 +39,30 @@ def test_to_series_sorts_drops_nonfinite_and_counts():
     ]
     s = to_series(recs, "d", "x", unit="bpm")
     assert is_series(s)
-    assert [p["t"] for p in s["points"]] == ["2026-08-01", "2026-08-03"]
+    # The dropped reading keeps its position as a t-only placeholder, so the
+    # renderer breaks the line there instead of bridging the gap (codex P1).
+    assert [p["t"] for p in s["points"]] == ["2026-08-01", "2026-08-02", "2026-08-03"]
+    assert "v" not in s["points"][1] and s["points"][1] == {"t": "2026-08-02"}
     assert s["meta"]["dropped"] == 1
     assert s["unit"] == "bpm"
-    # never coerces a dropped reading to zero
-    assert all(math.isfinite(p["v"]) for p in s["points"])
+    # never coerces a dropped reading to zero — the finite points stay finite
+    assert all(math.isfinite(p["v"]) for p in s["points"] if "v" in p)
+
+
+def test_to_series_multi_series_all_missing_timestamp_is_a_placeholder():
+    s = to_series(
+        [
+            {"d": "2026-08-01", "ok": 2, "bad": 1},
+            {"d": "2026-08-02", "ok": float("nan"), "bad": float("inf")},
+            {"d": "2026-08-03", "ok": 5, "bad": 0},
+        ],
+        "d",
+        "v",
+        value_keys=["ok", "bad"],
+    )
+    assert [p["t"] for p in s["points"]] == ["2026-08-01", "2026-08-02", "2026-08-03"]
+    assert s["points"][1] == {"t": "2026-08-02"}  # gap kept, no keys
+    assert s["meta"]["dropped"] == 1
 
 
 def test_to_series_multi_series_keeps_keys():
@@ -250,12 +270,33 @@ def test_over_capacity_under_render_rule():
     assert any("resolved 12 records but only 7" in e for e in errs)
 
 
+def test_over_capacity_counts_distinct_indices_not_the_max():
+    # Binding only the LAST record: max(indices)+1 == n, but coverage is 1
+    # record — a partial source presented as complete (codex P2).
+    big = {"pending": [{"i": i} for i in range(12)]}
+    comps = [{"id": "k", "component": "KeyValueTable", "rows": {"path": "/pending/11"}}]
+    errs = _binding_rules(comps, big, big, _collect_bindings(comps))
+    assert any("resolved 12 records but only 1" in e for e in errs)
+
+
 def test_repeat_template_binding_exempts_over_capacity():
     big = {"items": [{"i": i} for i in range(12)]}
     # a template binds /items (no index) → all render → no over-capacity error
     comps = [{"id": "list", "component": "Column", "children": {"componentId": "row", "path": "/items"}}]
     errs = _binding_rules(comps, big, big, _collect_bindings(comps))
     assert not any("only" in e for e in errs)
+
+
+def test_validate_rejects_a_non_string_theme_without_crashing(settings):
+    # `theme not in _THEMES` would hash a dict/list and raise TypeError inside
+    # _validate, bypassing the repair loop and the fallback (codex P2).
+    composer = SurfaceComposer(object(), settings, SourceRegistry())
+    parsed = {
+        "components": [{"id": "x", "component": "Text", "text": "hi"}],
+        "theme": {"unhashable": True},
+    }
+    errs = composer._validate(parsed, {})
+    assert any("theme" in e for e in errs)
 
 
 # ---------------------------------------------------------------------------

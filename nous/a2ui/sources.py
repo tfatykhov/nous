@@ -173,13 +173,19 @@ def to_series(
 
     - Sorts ascending by ``t_key``.
     - Single-series (``value_keys`` None): each point is ``{t, v}`` from
-      ``t_key``/``v_key``; a point whose value is non-finite is DROPPED and
-      counted in ``meta.dropped`` (a dropped reading and a zero reading are
-      different facts — never coerce to 0).
+      ``t_key``/``v_key``; a point whose value is non-finite keeps its ``t`` but
+      omits ``v`` and is counted in ``meta.dropped`` (a dropped reading and a
+      zero reading are different facts — never coerce to 0).
     - Multi-series (``value_keys`` given): each point keeps ``t`` plus every
       listed numeric key; a per-key non-finite value is omitted from that
       point. The result carries ``keys`` so LineChart/validation can check
       arity and key presence.
+    - A dropped reading is retained as a ``t``-only PLACEHOLDER, never removed:
+      the renderer breaks the line at a point whose value key is absent (the
+      index is preserved) and counts it dropped. Removing the point would let
+      the retained points fall consecutive and ``lineSegments`` bridge a real
+      gap — the §1.1 "partial reads as complete" failure at point granularity
+      (codex P1).
     - Caps to ``_MAX_SERIES_POINTS`` by downsampling (``meta.downsampled_from``).
     """
     keys = value_keys or [v_key]
@@ -199,7 +205,6 @@ def to_series(
                 any_finite = True
         if not any_finite:
             dropped += 1
-            continue
         points.append(point)
     result: dict[str, Any] = {
         "kind": "series",
