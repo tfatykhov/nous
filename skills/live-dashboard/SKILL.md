@@ -29,7 +29,19 @@ answer is a single fact they need once, just say it.
 The test: *would they ask this again next week?* If yes, build the app — it
 refreshes; a message doesn't.
 
-## The one thing that makes it live
+## First: is `agent_script` actually available?
+
+It is **flag-gated and off by default** (`NOUS_A2UI_AGENT_SCRIPT_SOURCE_ENABLED`).
+`compose_surface`'s own `source` description is generated from the LIVE registry,
+so it lists exactly what exists right now — **read it before writing a script**.
+
+If `agent_script` is not there, do not name it: compose rejects an unknown
+source and you lose the whole app. Bind a registered source instead, or supply
+the data yourself in `dataModel` and say plainly that it is a snapshot which
+will not refresh. Then mention the flag, so the user can decide whether to
+enable it.
+
+## What makes it live, when it is available
 
 Every other data source is a fetcher someone wrote in Python months ago. If the
 user's domain has no fetcher, **write it yourself** with an `agent_script`
@@ -49,7 +61,9 @@ compose_surface(
     "params": {
       "code": "import urllib.request, json\n"
               "from nous.a2ui.sources import to_series\n"
-              "raw = json.load(urllib.request.urlopen('https://api.example.com/nav'))\n"
+              // timeout= is not optional: a hung socket read cannot be
+              // interrupted, and this runs again on every refresh.
+              "raw = json.load(urllib.request.urlopen('https://api.example.com/nav', timeout=10))\n"
               "rows = [{'t': r['date'], 'v': r['drawdown']} for r in raw['series']]\n"
               "result = to_series(rows, 't', 'v', unit='%')",
       "shape": "series",
@@ -108,8 +122,11 @@ for ambient, `nous-default` when unsure.
 
 ## Cost and limits
 
-- Scripts share the `run_python` pool and yield to interactive use; a blocked
-  network call holds a slot until it returns, so keep fetches short.
+- Scripts share the `run_python` pool and yield to interactive use. **Always
+  pass a `timeout=` to any network call.** The executor's deadline stops
+  Python-level code but CANNOT interrupt a thread blocked in a C-level
+  socket read, so a hung fetch holds its slot until the peer replies —
+  and an unattended refresh repeats that every time.
 - Result cap 256k chars — aggregate in the script, don't return raw rows.
 - Compose-time budget is tight on a default `NOUS_TOOL_TIMEOUT`; the
   **refresh** path gets the full budget, so prefer computing on refresh.
