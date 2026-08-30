@@ -6,6 +6,7 @@
   // surface ids to 'overview'. The `initialized` guard is copied from it —
   // it stops hashchange listeners stacking across tests and HMR.
   import { onMount } from 'svelte';
+  import InstallPrompt from './InstallPrompt.svelte';
   import Renderer from './Renderer.svelte';
   import { store } from './store.svelte';
   import { transport } from './transport';
@@ -87,6 +88,8 @@
     <a class="brand" href="#/">Nous <span>Companion</span></a>
     <span class="conn {store.connection}">{store.connection}</span>
   </header>
+
+  <InstallPrompt />
 
   {#if feed.length > 1}
     <nav class="switcher" aria-label="live surfaces">
