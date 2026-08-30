@@ -1594,3 +1594,32 @@ def test_command_pattern_never_matches_the_empty_string():
 
     assert _REFINE_COMMAND_RE.search("") is None
     assert not _REFINE_COMMAND_RE.pattern.startswith("|")
+
+
+@pytest.mark.parametrize("victim", ["root", "stats", "body", "sec"])
+def test_lint_never_raises_for_inline_children_anywhere(victim):
+    """CATEGORY test. An inline child object was fixed once for StatRow and
+    then crashed again at the root skeleton lookup — `x in by_id` HASHES x, so
+    every by_id access keyed by a child value is the same latent TypeError.
+    Lint runs before schema validation, so such a crash escapes _validate and
+    takes the repair loop AND the guaranteed fallback with it. This sweeps
+    every child-bearing position instead of chasing them one at a time."""
+    inline = {"component": "Text", "text": "inline"}
+    comps = [
+        {"id": "root", "component": "Column",
+         "children": ["header", "stats", "sec", "footer"]},
+        {"id": "header", "component": "AppHeader", "title": "t",
+         "composedAt": {"path": "/meta/composedAt"}},
+        {"id": "stats", "component": "StatRow", "children": ["t1"]},
+        {"id": "t1", "component": "StatTile", "label": "x", "value": "1"},
+        {"id": "sec", "component": "Section", "title": "S", "child": "body"},
+        {"id": "body", "component": "Column", "children": ["t2"]},
+        {"id": "t2", "component": "Text", "text": "x"},
+        {"id": "footer", "component": "AppFooter"},
+    ]
+    for comp in comps:
+        if comp["id"] == victim:
+            comp["children"] = [*comp.get("children", []), inline]
+
+    errs = grammar.lint_micro_app(comps)  # must RETURN, never raise
+    assert any("inline child object" in e for e in errs)

@@ -277,7 +277,12 @@ def lint_micro_app(
         order = [
             by_id[cid].get("component")
             for cid in root.get("children") or []
-            if cid in by_id
+            # `cid in by_id` HASHES cid, so an inline child object raises
+            # TypeError here — the same crash already fixed for StatRow, in a
+            # second place (codex P2). Lint runs before schema validation, so
+            # it would escape _validate and take the repair loop and fallback
+            # with it. The inline children are reported above; skip them here.
+            if isinstance(cid, str) and cid in by_id
         ]
         skeleton_error = _skeleton_error(order, max_sections)
         if skeleton_error:
