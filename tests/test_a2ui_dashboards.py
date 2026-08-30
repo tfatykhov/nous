@@ -1005,3 +1005,53 @@ async def test_shared_deadline_is_pushed_into_the_script_worker():
 
     assert runner.last_timeout is not None, "worker ran on its own longer deadline"
     assert 0 < runner.last_timeout <= _TOTAL_SOURCE_SECONDS
+
+
+def test_refresh_is_not_charged_for_compose_rounds():
+    """codex P1: app.refresh runs NO LLM, but the budget reserved three
+    compose rounds anyway — leaving refresh the 5s floor at default settings
+    and cutting off the long-running external-API script the feature exists
+    to keep live."""
+    from types import SimpleNamespace
+
+    from nous.a2ui.sources import (
+        _MIN_SOURCE_SECONDS,
+        _TOTAL_SOURCE_SECONDS,
+        _source_budget_seconds,
+    )
+
+    cfg = SimpleNamespace(tool_timeout=120, a2ui_compose_timeout_seconds=60)
+    assert _source_budget_seconds(cfg, for_compose=True) == _MIN_SOURCE_SECONDS
+    # refresh reserves nothing for the LLM -> 120-0-10 = 110, capped at 45
+    assert _source_budget_seconds(cfg, for_compose=False) == _TOTAL_SOURCE_SECONDS
+
+
+async def test_worker_deadline_is_shorter_than_the_registry_wait():
+    """codex P1: run_python waits `timeout + grace`, so handing the worker the
+    SAME deadline as the registry's wait_for let the outer cancel win — a
+    routine script timeout aborted the whole resolve instead of returning the
+    promised shape-preserving failure."""
+    from nous.a2ui.sources import _WORKER_DEADLINE_MARGIN, _source_budget_seconds
+
+    runner = _FakeRunner({"ok": True, "result": [], "output": "", "error": None})
+    reg = build_default_registry(run_script=runner)
+    await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = []", "shape": "records"}}]
+    )
+    outer = _source_budget_seconds(None)
+    assert runner.last_timeout <= outer - _WORKER_DEADLINE_MARGIN + 0.5
+
+
+async def test_agent_script_rejects_series_points_that_are_not_objects():
+    """codex P2: _downsample_series does `for k in p` / `p.get(...)`, so a null
+    or int point raises INSIDE _bound_series — a 500 instead of a failure."""
+    bad = {"kind": "series", "points": [{"t": "a", "v": 1}, None], "unit": "", "meta": {}}
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": bad, "output": "", "error": None})
+    )
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = bad", "shape": "series"}}]
+    )
+    assert is_series(out["d"]) and "declared shape 'series'" in out["d"]["meta"]["reason"]

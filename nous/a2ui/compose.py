@@ -259,7 +259,9 @@ class SurfaceComposer:
             raise ValueError(
                 "this app has no registered data sources — nothing to refresh"
             )
-        source_data = await self._sources.resolve(data_sources)
+        # No compose round follows a refresh, so it must not be charged for
+        # LLM time it will never spend (codex P1).
+        source_data = await self._sources.resolve(data_sources, for_compose=False)
         source_data[_META_KEY] = {
             "composedAt": datetime.now(UTC).isoformat(timespec="seconds")
         }

@@ -66,14 +66,27 @@ _TOTAL_SOURCE_SECONDS = 45.0
 
 # Left for the push + validation work after the compose LLM returns.
 _SOURCE_BUDGET_SAFETY_SECONDS = 10.0
+
+# Head start given to a script worker's OWN deadline over the registry's
+# `wait_for`, so a routine script timeout comes back as an outcome the source
+# can turn into a shape-preserving failure rather than a cancellation that
+# aborts the whole resolve. Covers run_python's `timeout + _TIMEOUT_GRACE`
+# (2.0s) plus scheduling slack.
+_WORKER_DEADLINE_MARGIN = 4.0
 _MIN_SOURCE_SECONDS = 5.0
 
 
-def _source_budget_seconds(settings: Any) -> float:
+def _source_budget_seconds(settings: Any, *, for_compose: bool = True) -> float:
     """Seconds all sources of one surface may take, derived from the enclosing
     timeouts: whatever `NOUS_TOOL_TIMEOUT` leaves after reserving the compose
-    LLM round and a safety margin, clamped so it is neither negative nor
-    unbounded (prod runs `NOUS_TOOL_TIMEOUT=2000`)."""
+    LLM rounds and a safety margin, clamped so it is neither negative nor
+    unbounded (prod runs `NOUS_TOOL_TIMEOUT=2000`).
+
+    `for_compose=False` reserves NOTHING for the LLM, because `app.refresh`
+    re-runs fetchers ONLY — no compose round follows it. Charging refresh for
+    three LLM rounds it will never make left it with the 5s floor at default
+    settings, which would cut off exactly the long-running external-API script
+    this feature exists to keep live (codex P1)."""
     if settings is None:
         return _TOTAL_SOURCE_SECONDS
     from .compose import MAX_REPAIRS
@@ -84,7 +97,7 @@ def _source_budget_seconds(settings: Any) -> float:
     # response costs up to MAX_REPAIRS more LLM calls, and reserving a single
     # round let two of them overrun the tool timeout before a repair or the
     # markdown fallback could return (codex P1).
-    rounds = MAX_REPAIRS + 1
+    rounds = (MAX_REPAIRS + 1) if for_compose else 0
     available = tool_timeout - (compose_timeout * rounds) - _SOURCE_BUDGET_SAFETY_SECONDS
     return max(_MIN_SOURCE_SECONDS, min(_TOTAL_SOURCE_SECONDS, available))
 
@@ -120,7 +133,9 @@ class SourceRegistry:
     def names(self) -> list[str]:
         return sorted(self._fetchers)
 
-    async def resolve(self, data_sources: list[dict]) -> dict[str, Any]:
+    async def resolve(
+        self, data_sources: list[dict], *, for_compose: bool = True
+    ) -> dict[str, Any]:
         """Resolve declared sources into data-model subtrees keyed by `key`.
 
         Raises UnknownSourceError on an unregistered source name. A fetcher
@@ -138,7 +153,7 @@ class SourceRegistry:
         # NOT named `budget` — that name is reused below for the per-source
         # CHAR budget, and the collision would make these timeout messages
         # report byte counts as seconds from the second source onward.
-        time_budget = _source_budget_seconds(self._settings)
+        time_budget = _source_budget_seconds(self._settings, for_compose=for_compose)
         deadline = time.monotonic() + time_budget
         for decl in data_sources:
             key = str(decl.get("key") or "")
@@ -161,7 +176,14 @@ class SourceRegistry:
             # deadline down into its own worker instead of being merely
             # cancelled here — a cancelled await leaves the worker holding its
             # run slot (codex P1). Ordinary fetchers ignore it.
-            call_params["_remaining_seconds"] = remaining
+            # Deliberately SHORTER than this loop's own `wait_for`: run_python
+            # waits `timeout + grace`, so passing the identical value would let
+            # the outer cancel win and abort the whole compose/refresh instead
+            # of letting agent_script return its shape-preserving failure
+            # (codex P1). The worker must expire first.
+            call_params["_remaining_seconds"] = max(
+                1.0, remaining - _WORKER_DEADLINE_MARGIN
+            )
             try:
                 value = await asyncio.wait_for(
                     fetcher(call_params), timeout=remaining
@@ -461,8 +483,16 @@ _SCRIPT_SHAPES = ("records", "series")
 
 
 def _is_valid_series(value: Any) -> bool:
-    """The FULL series contract, not just the `kind` tag `is_series` checks."""
-    return is_series(value) and isinstance(value.get("points"), list)
+    """The FULL series contract, not just the `kind` tag `is_series` checks.
+
+    Every POINT must be a mapping too (codex P2): `_downsample_series` does
+    `for k in p` and `p.get(...)`, so a `null` or int point raises there — and
+    that happens inside `_bound_series`, turning script data into a 500 rather
+    than the shape-preserving failure value.
+    """
+    if not (is_series(value) and isinstance(value.get("points"), list)):
+        return False
+    return all(isinstance(p, dict) for p in value["points"])
 
 
 def _script_failure(reason: str, shape: str) -> Any:
