@@ -720,7 +720,7 @@ async def test_agent_script_failure_is_explicit_never_a_blank_box():
     reg = build_default_registry(run_script=runner)
     out = await reg.resolve(
         [{"key": "d", "source": "agent_script",
-          "params": {"code": "1/0", "shape": "series"}}]
+          "params": {"code": "1/0", "shape": "series", "series_keys": ["v"]}}]
     )
     # An empty SERIES, not a bare marker: refresh does not re-run binding
     # validation, so a chart bound to a working series must not be left
@@ -734,7 +734,7 @@ async def test_agent_script_without_a_result_says_so():
     reg = build_default_registry(run_script=runner)
     out = await reg.resolve(
         [{"key": "d", "source": "agent_script",
-          "params": {"code": "print('hi')", "shape": "series"}}]
+          "params": {"code": "print('hi')", "shape": "series", "series_keys": ["v"]}}]
     )
     assert is_series(out["d"]) and "no `result`" in out["d"]["meta"]["reason"]
 
@@ -758,7 +758,7 @@ async def test_agent_script_series_flows_through_the_normal_budget_path():
     )
     out = await reg.resolve(
         [{"key": "d", "source": "agent_script",
-          "params": {"code": "result = s", "shape": "series"}}]
+          "params": {"code": "result = s", "shape": "series", "series_keys": ["v"]}}]
     )
     assert is_series(out["d"]) and len(out["d"]["points"]) <= 200
 
@@ -788,7 +788,7 @@ async def test_refresh_re_runs_the_script_so_the_app_is_live_not_a_snapshot():
     spec = {
         "data_sources": [
             {"key": "live", "source": "agent_script",
-             "params": {"code": "result = f()", "shape": "series"}}
+             "params": {"code": "result = f()", "shape": "series", "series_keys": ["v"]}}
         ]
     }
     first = await composer.refresh_data(spec)
@@ -805,7 +805,7 @@ async def test_agent_script_failure_keeps_a_chart_binding_valid():
     reg = build_default_registry(run_script=runner)
     out = await reg.resolve(
         [{"key": "trend", "source": "agent_script",
-          "params": {"code": "result = f()", "shape": "series"}}]
+          "params": {"code": "result = f()", "shape": "series", "series_keys": ["v"]}}]
     )
     comps = [{"id": "c", "component": "Sparkline", "path": "/trend"}]
     errs = _binding_rules(comps, out, out, _collect_bindings(comps))
@@ -823,7 +823,7 @@ async def test_agent_script_rejects_an_oversized_result_before_bounding_it():
     )
     out = await reg.resolve(
         [{"key": "d", "source": "agent_script",
-          "params": {"code": "result = big", "shape": "series"}}]
+          "params": {"code": "result = big", "shape": "series", "series_keys": ["v"]}}]
     )
     assert is_series(out["d"]) and "max" in out["d"]["meta"]["reason"]
 
@@ -873,7 +873,7 @@ async def test_agent_script_rejects_a_declared_shape_the_script_did_not_produce(
     )
     out = await reg.resolve(
         [{"key": "d", "source": "agent_script",
-          "params": {"code": "result = rows", "shape": "series"}}]
+          "params": {"code": "result = rows", "shape": "series", "series_keys": ["v"]}}]
     )
     assert is_series(out["d"]) and "declared shape 'series'" in out["d"]["meta"]["reason"]
 
@@ -897,7 +897,7 @@ async def test_agent_script_rejects_a_series_with_non_list_points():
     )
     out = await reg.resolve(
         [{"key": "d", "source": "agent_script",
-          "params": {"code": "result = bad", "shape": "series"}}]
+          "params": {"code": "result = bad", "shape": "series", "series_keys": ["v"]}}]
     )
     assert is_series(out["d"]) and isinstance(out["d"]["points"], list)
     assert "declared shape 'series'" in out["d"]["meta"]["reason"]
@@ -1054,7 +1054,7 @@ async def test_agent_script_rejects_series_points_that_are_not_objects():
     )
     out = await reg.resolve(
         [{"key": "d", "source": "agent_script",
-          "params": {"code": "result = bad", "shape": "series"}}]
+          "params": {"code": "result = bad", "shape": "series", "series_keys": ["v"]}}]
     )
     assert is_series(out["d"]) and "declared shape 'series'" in out["d"]["meta"]["reason"]
 
@@ -1107,3 +1107,46 @@ def _settings_stub():
     from nous.config import Settings
 
     return Settings(_env_file=None)
+
+
+async def test_series_script_must_declare_its_key_contract():
+    """codex P2: an OPTIONAL series_keys meant no check when omitted — a first
+    single-value result validates a Sparkline and a later multi-series refresh
+    is accepted unchecked, leaving the chart empty."""
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": {}, "output": "", "error": None})
+    )
+    with pytest.raises(ValueError, match="requires params.series_keys"):
+        await reg.resolve(
+            [{"key": "d", "source": "agent_script",
+              "params": {"code": "result = s", "shape": "series"}}]
+        )
+
+
+async def test_dashboard_scripts_cannot_exhaust_every_run_python_slot():
+    """codex P1: the deadline pushed into the worker stops PYTHON-level code,
+    but a script blocked in a C call (urlopen/sleep) cannot be interrupted at
+    all — a documented run_python property this source makes far more
+    reachable. Killing the thread is impossible, so the blast radius is bounded
+    instead: dashboard scripts can never take the whole pool."""
+    from nous.a2ui.sources import _MAX_CONCURRENT_SOURCE_SCRIPTS
+    from nous.config import Settings
+
+    assert _MAX_CONCURRENT_SOURCE_SCRIPTS < Settings(
+        _env_file=None
+    ).programmatic_tools_max_concurrent, "interactive run_python must keep capacity"
+
+
+async def test_decimal_series_values_stay_numbers(run_script_structured=None):
+    """codex P2: `default=str` turned a Decimal reading into "1.5" — it
+    persisted fine and passed every shape check, but the renderer accepts only
+    finite JS numbers, so the chart silently drew nothing."""
+    from nous.api.tools import create_programmatic_tools
+    from nous.config import Settings
+
+    tools = create_programmatic_tools(object(), object(), Settings(_env_file=None))
+    out = await tools["run_script_structured"](
+        "from decimal import Decimal\nresult = {'v': Decimal('1.5')}"
+    )
+    assert out["ok"] is True
+    assert out["result"]["v"] == 1.5 and isinstance(out["result"]["v"], float)

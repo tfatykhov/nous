@@ -4496,8 +4496,21 @@ def create_programmatic_tools(
                     # as non-standard tokens that Postgres JSONB then refuses
                     # at commit time (codex P2) — explicit here beats a commit
                     # failure later.
+                    def _jsonable(obj):
+                        # Numeric types must stay NUMBERS. `default=str` alone
+                        # turned a Decimal reading into "1.5", which survives
+                        # persistence and every shape check but the renderer
+                        # accepts only finite JS numbers — so the chart drew
+                        # nothing, silently (codex P2). Everything else still
+                        # degrades to its string form.
+                        import decimal
+
+                        if isinstance(obj, decimal.Decimal):
+                            return float(obj)
+                        return str(obj)
+
                     namespace["__nous_json__"] = json.dumps(
-                        namespace.get("result"), default=str, allow_nan=False
+                        namespace.get("result"), default=_jsonable, allow_nan=False
                     )
             finally:
                 # Restore original functions

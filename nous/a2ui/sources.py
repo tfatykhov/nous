@@ -73,6 +73,19 @@ _SOURCE_BUDGET_SAFETY_SECONDS = 10.0
 # aborts the whole resolve. Covers run_python's `timeout + _TIMEOUT_GRACE`
 # (2.0s) plus scheduling slack.
 _WORKER_DEADLINE_MARGIN = 4.0
+
+# Dashboard scripts may hold at most this many of the shared run_python slots
+# (`NOUS_PROGRAMMATIC_TOOLS_MAX_CONCURRENT`, 4). The deadline pushed into the
+# worker stops PYTHON-level runaway code, but a script blocked inside a C call
+# — `urlopen`, `time.sleep` — cannot be interrupted at all and holds its slot
+# until it returns. That is a documented property of run_python, not something
+# this source introduced; what this source DOES change is how reachable it is,
+# since fetching an external API is the advertised use and refreshes recur
+# unattended. Killing the thread is not possible, so bound the blast radius
+# instead: stalled dashboard scripts can never take the whole pool, and the
+# agent's own interactive run_python always has capacity left (codex P1).
+_MAX_CONCURRENT_SOURCE_SCRIPTS = 2
+_script_slots = asyncio.Semaphore(_MAX_CONCURRENT_SOURCE_SCRIPTS)
 _MIN_SOURCE_SECONDS = 5.0
 
 
@@ -822,11 +835,12 @@ def build_default_registry(
             # await would let concurrent slow refreshes starve every later
             # run_python of slots (codex P1).
             remaining = params.get("_remaining_seconds")
-            outcome = await run_script(
-                code,
-                timeout=float(remaining) if remaining else None,
-                max_result_chars=_MAX_SCRIPT_RESULT_CHARS,
-            )
+            async with _script_slots:
+                outcome = await run_script(
+                    code,
+                    timeout=float(remaining) if remaining else None,
+                    max_result_chars=_MAX_SCRIPT_RESULT_CHARS,
+                )
             if not outcome.get("ok"):
                 return _script_failure(str(outcome.get("error") or "script failed"), shape)
             # Already JSON-normalized inside the worker (default=str,
@@ -848,7 +862,28 @@ def build_default_registry(
             # A declared shape the script did not produce is a script bug, and
             # catching it HERE keeps a chart from ever binding to records.
             declared_keys = params.get("series_keys")
-            if shape == "series" and isinstance(declared_keys, list) and declared_keys:
+            if shape == "series" and not (
+                isinstance(declared_keys, list) and declared_keys
+            ):
+                # REQUIRED, not optional (codex P2): without it a first
+                # single-value result validates a Sparkline and a later
+                # multi-series refresh is accepted unchecked, leaving the chart
+                # empty — and refresh never re-runs binding validation.
+                raise ValueError(
+                    "agent_script with shape='series' requires params.series_keys "
+                    "— the keys the chart binds (['v'] for Sparkline/BarChart)"
+                )
+            if shape == "series" and not _is_valid_series(result):
+                # The FULL contract, not just `kind` (codex P1): refresh skips
+                # binding validation, so a later {"kind":"series","points":{}}
+                # would replace a working chart with something the renderer
+                # shows as "not a series" instead of the empty state.
+                return _script_failure(
+                    f"script declared shape 'series' but returned "
+                    f"{type(result).__name__} — build one with to_series(...)",
+                    shape,
+                )
+            if shape == "series":
                 # Refresh skips binding validation, so a later result that
                 # silently changes series MODE (single <-> multi) or drops a
                 # LineChart's declared key would leave the existing chart
@@ -863,16 +898,6 @@ def build_default_registry(
                         "to the old keys would render nothing",
                         shape,
                     )
-            if shape == "series" and not _is_valid_series(result):
-                # The FULL contract, not just `kind` (codex P1): refresh skips
-                # binding validation, so a later {"kind":"series","points":{}}
-                # would replace a working chart with something the renderer
-                # shows as "not a series" instead of the empty state.
-                return _script_failure(
-                    f"script declared shape 'series' but returned "
-                    f"{type(result).__name__} — build one with to_series(...)",
-                    shape,
-                )
             if shape == "records" and not (
                 isinstance(result, list) and all(isinstance(r, dict) for r in result)
             ):
