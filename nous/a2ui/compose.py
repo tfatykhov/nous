@@ -131,8 +131,9 @@ Respond with ONLY a JSON object (no prose, no code fence) shaped:
   "dataModel": { ... ONLY the subtrees you are supplying yourself ... },
   "refine_options": [ {"id": "slug", "label": "Button label"} ]  // 0-4. Each RE-RENDERS
   // the SAME data sources from a different angle (narrower window, one grouping, one section
-  // expanded). It cannot export, download, email, notify or schedule — there is no component
-  // for any of that, and a button promising one is rejected.
+  // expanded). There is no component that exports, downloads, emails, notifies or schedules,
+  // so a button promising one cannot work and will be dropped — label them as VIEWS
+  // ("Last 7 days", "Group by category"), never as actions ("Email report").
 }
 """
 
@@ -378,7 +379,6 @@ class SurfaceComposer:
         archetype = parsed.get("archetype")
         if archetype is not None and not isinstance(archetype, str):
             errors.append("archetype must be a string or omitted")
-        errors.extend(_refine_capability_errors(parsed.get("refine_options")))
         for key in model_supplied or {}:
             if key in source_data:
                 errors.append(
@@ -917,6 +917,22 @@ def _refine_capability_errors(raw: Any) -> list[str]:
 
 
 def _clean_refine_options(raw: Any) -> list[dict]:
+    """Normalize the model's refine options, dropping any the system cannot
+    deliver.
+
+    A capability failure DROPS the option rather than failing validation
+    (issue #620). Eight review rounds established that no lexical rule
+    separates "Print volume by department" (a metric) from "Schedule report
+    distribution across teams" (a command) — they are the same shape, and the
+    distinction is semantic. So the classifier is treated as what it is: a
+    heuristic. Wiring a heuristic into `_validate` made every misjudgement
+    cost the WHOLE APP, because repeated rejections exhaust the repair loop
+    into the markdown fallback. Dropping instead bounds the blast radius to
+    one button: a false positive loses an option nobody may have wanted, a
+    false negative leaves today's behaviour. The prompt, which now states that
+    refine re-renders existing sources, is what actually prevents these at
+    source; this is the backstop.
+    """
     if not isinstance(raw, list):
         return []
     out = []
@@ -925,8 +941,13 @@ def _clean_refine_options(raw: Any) -> list[dict]:
             continue
         oid = str(opt.get("id") or "").strip()
         label = str(opt.get("label") or "").strip()
-        if oid and label:
-            out.append({"id": oid[:60], "label": label[:80]})
+        if not (oid and label):
+            continue
+        undeliverable = _refine_capability_errors([opt])
+        if undeliverable:
+            logger.info("F092.1 dropped refine option: %s", undeliverable[0])
+            continue
+        out.append({"id": oid[:60], "label": label[:80]})
     return out
 
 

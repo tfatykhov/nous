@@ -1538,3 +1538,34 @@ def test_analytical_labels_are_never_rejected(label):
     from nous.a2ui.compose import _refine_capability_errors
 
     assert _refine_capability_errors([{"id": "x", "label": label}]) == [], label
+
+
+def test_undeliverable_options_are_dropped_not_failed():
+    """#620 + 8 review rounds: no lexical rule separates "Print volume by
+    department" (a metric) from "Schedule report distribution across teams" (a
+    command) — same shape, semantic difference. So the classifier is treated as
+    a HEURISTIC: it drops the option instead of failing validation. Wiring a
+    heuristic into _validate made every misjudgement cost the whole app, since
+    repeated rejections exhaust the repair loop into the markdown fallback."""
+    from nous.a2ui.compose import _clean_refine_options
+
+    kept = _clean_refine_options([
+        {"id": "a", "label": "Export raw data"},
+        {"id": "b", "label": "Compare periods"},
+        {"id": "c", "label": "Email me a summary"},
+        {"id": "d", "label": "Group by category"},
+    ])
+    assert [o["label"] for o in kept] == ["Compare periods", "Group by category"]
+
+
+def test_capability_heuristic_never_reaches_the_repair_loop(settings):
+    """A misjudged label must never be able to cost the whole app."""
+    from nous.a2ui.compose import SurfaceComposer
+    from nous.a2ui.sources import SourceRegistry
+
+    composer = SurfaceComposer(object(), settings, SourceRegistry())
+    parsed = {
+        "components": [{"id": "x", "component": "Text", "text": "hi"}],
+        "refine_options": [{"id": "a", "label": "Email me the report"}],
+    }
+    assert not any("refine" in e.lower() for e in composer._validate(parsed, {}))
