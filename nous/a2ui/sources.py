@@ -151,13 +151,18 @@ def _downsample_series(series: dict, target: int) -> dict:
     original = series.get("meta", {}).get("downsampled_from") or len(points)
     if len(points) <= target:
         return series
-    # A gap placeholder (a point carrying only 't') is what makes the renderer
-    # break the line. A naive stride can skip it while keeping finite points on
-    # both sides — silently bridging a real gap again (codex P1). So retain
-    # every gap, stride-sample the finite points into the remaining budget, and
-    # merge back in chronological order.
-    gap_idx = [i for i, p in enumerate(points) if set(p) <= {"t"}]
-    finite_idx = [i for i, p in enumerate(points) if set(p) > {"t"}]
+    # A point that omits ANY rendered key is a gap for that key's line — and
+    # the renderer breaks the line there. A naive stride can skip it while
+    # keeping full points on both sides, silently bridging a real gap (codex
+    # P1). This must be PER KEY: a multi-series point that carries `a` but omits
+    # `b` is a gap for `b` even though it is not a bare `{t}` placeholder. So a
+    # point is a gap-boundary unless it carries every value key seen anywhere;
+    # retain all of those, stride-sample the rest into the remaining budget.
+    value_keys: set = set()
+    for p in points:
+        value_keys |= {k for k in p if k != "t"}
+    gap_idx = [i for i, p in enumerate(points) if value_keys - set(p)]
+    finite_idx = [i for i, p in enumerate(points) if not (value_keys - set(p))]
     finite_budget = max(2, target - len(gap_idx))
     if len(finite_idx) > finite_budget:
         fstep = len(finite_idx) / finite_budget

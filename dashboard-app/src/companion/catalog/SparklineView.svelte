@@ -76,7 +76,14 @@
         <text class="brk" x={PAD} y={H - 2}>~</text>
       {/if}
       {#each segments as seg, i (i)}
-        <polyline points={seg} fill="none" stroke="var(--tone)" stroke-width="1.5" />
+        {#if seg.includes(' ')}
+          <polyline points={seg} fill="none" stroke="var(--tone)" stroke-width="1.5" />
+        {:else}
+          <!-- A one-coordinate segment (a lone reading between two gaps) has no
+               line to stroke — draw it as a dot so it is visible (codex P2). -->
+          {@const xy = seg.split(',')}
+          <circle cx={xy[0]} cy={xy[1]} r="2" fill="var(--tone)" />
+        {/if}
       {/each}
     </svg>
     {#if dropped > 0 || series.downsampledFrom}

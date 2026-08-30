@@ -566,6 +566,47 @@ def _is_nonempty(value: Any) -> bool:
     return value is not None
 
 
+def _child_ids(comp: dict) -> list[str]:
+    """Component ids this component references — a `child` string, a `children`
+    list of strings, or a Repeat template's `children.componentId`."""
+    out: list[str] = []
+    if isinstance(comp.get("child"), str):
+        out.append(comp["child"])
+    children = comp.get("children")
+    if isinstance(children, list):
+        out += [c for c in children if isinstance(c, str)]
+    elif isinstance(children, dict) and isinstance(children.get("componentId"), str):
+        out.append(children["componentId"])
+    return out
+
+
+def _owning_template(comp_id: str, by_id: dict[str, dict]) -> str | None:
+    """The source path of the Repeat template whose subtree contains
+    ``comp_id``, or None. A Repeat template is a component whose ``children`` is
+    a ``{componentId, path}`` dict; its ``componentId`` roots a per-item scope
+    (pointer.ts `absolute`), so a relative chart path inside it resolves against
+    the template's item records, not the model root."""
+    for comp in by_id.values():
+        children = comp.get("children")
+        if not (isinstance(children, dict) and isinstance(children.get("path"), str)):
+            continue
+        root = children.get("componentId")
+        if not isinstance(root, str):
+            continue
+        seen, stack = set(), [root]
+        while stack:
+            cid = stack.pop()
+            if cid in seen:
+                continue
+            seen.add(cid)
+            node = by_id.get(cid)
+            if node:
+                stack.extend(_child_ids(node))
+        if comp_id in seen:
+            return children["path"]
+    return None
+
+
 def _binding_rules(
     components: list[dict], source_data: dict, full_model: dict, bindings: list[str]
 ) -> list[str]:
@@ -584,6 +625,7 @@ def _binding_rules(
                 "inlining values"
             )
 
+    by_id = {c["id"]: c for c in components if isinstance(c.get("id"), str)}
     for comp in components:
         ctype = comp.get("component")
         if ctype not in _CHART_COMPONENTS:
@@ -591,14 +633,22 @@ def _binding_rules(
         path = comp.get("path")
         if not isinstance(path, str) or not path.strip():
             continue  # binding-mandatory already caught this in grammar
-        if not path.startswith("/"):
+        if path.startswith("/"):
+            resolved = _get_path(full_model, path)
+        else:
             # A relative chart path is scope-bound: inside a repeat template the
             # renderer resolves it per-item against the item base (pointer.ts
-            # `absolute`), so it CANNOT be resolved at the model root and the
-            # checks below would false-reject a valid per-item chart (codex P2).
-            # Grammar's binding-mandatory still guarantees the path is non-empty.
-            continue
-        resolved = _get_path(full_model, path)
+            # `absolute`). Validate it against the template's FIRST item record
+            # rather than the model root — a root lookup would always miss and
+            # false-reject a valid per-item chart, while a blanket skip lets a
+            # relative path that resolves to an array/scalar through (codex P2).
+            source_path = _owning_template(comp.get("id", ""), by_id)
+            if source_path is None:
+                continue  # scope unknown — cannot resolve; leave to the renderer
+            items = _get_path(full_model, source_path)
+            if not isinstance(items, list) or not items:
+                continue  # nothing to validate against yet
+            resolved = _get_path(full_model, f"{source_path}/0/{path}")
         # (2) Series-shape (F094 §5 rule 2): a chart bound to a record list
         # (the mistake the model makes most) — reject naming what it actually
         # resolved to.
@@ -613,6 +663,17 @@ def _binding_rules(
             errors.append(
                 f"{ctype} {comp.get('id')!r} binds {path} which resolved to "
                 f"{shape}, not a series — chart paths need a series-shaped source"
+            )
+            continue
+        # (2b) Single-value shape: Sparkline and BarChart both read the default
+        # `v` key, so a MULTI-series source (named keys, no `v`) renders "no
+        # data" despite valid rows (codex P2). `keys` is to_series's multi-series
+        # marker — reject binding one to a single-value chart.
+        if ctype in ("Sparkline", "BarChart") and isinstance(resolved.get("keys"), list):
+            errors.append(
+                f"{ctype} {comp.get('id')!r} binds {path}, a multi-series source "
+                f"(keys {sorted(str(k) for k in resolved['keys'])}) — Sparkline/BarChart "
+                "read a single-value (v) series; use LineChart or a single-key source"
             )
             continue
         # (3) Series-arity (F094 §5 rule 3): a LineChart must declare 1–4 series,

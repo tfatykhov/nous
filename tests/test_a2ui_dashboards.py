@@ -115,6 +115,58 @@ def test_downsample_preserves_the_gap_placeholder():
     assert s["points"][0]["v"] == 0.0 and s["points"][-1]["v"] == 499.0
 
 
+def test_downsample_preserves_per_key_gaps_in_multi_series():
+    # A multi-series point that omits ONE key (the other still finite) is a gap
+    # for that key's line; naive stride could skip it and bridge the gap (codex
+    # P1). Series 'a' is absent at index 251 of 500.
+    recs = []
+    for i in range(500):
+        rec = {"d": f"2026-{i:04d}", "a": float(i), "b": float(i)}
+        if i == 251:
+            rec["a"] = float("nan")
+        recs.append(rec)
+    s = to_series(recs, "d", "v", value_keys=["a", "b"])
+    assert len(s["points"]) <= 200
+    assert any("a" not in p and "b" in p for p in s["points"]), "per-key gap lost"
+
+
+def test_sparkline_and_barchart_reject_a_multi_series_source():
+    ser = {
+        "kind": "series",
+        "points": [{"t": "a", "ok": 1, "bad": 2}],
+        "keys": ["ok", "bad"],
+        "unit": "",
+        "meta": {},
+    }
+    for ctype in ("Sparkline", "BarChart"):
+        comps = [{"id": "c", "component": ctype, "path": "/o"}]
+        errs = _binding_rules(comps, {"o": ser}, {"o": ser}, _collect_bindings(comps))
+        assert any("multi-series" in e for e in errs), ctype
+    # LineChart is the multi-series consumer — it must NOT be flagged.
+    lc = [{"id": "l", "component": "LineChart", "path": "/o", "series": [{"key": "ok"}]}]
+    errs = _binding_rules(lc, {"o": ser}, {"o": ser}, _collect_bindings(lc))
+    assert not any("multi-series" in e for e in errs)
+
+
+def test_relative_chart_path_validated_against_the_template_item():
+    ser = {"kind": "series", "points": [{"t": "a", "v": 1}], "unit": "", "meta": {}}
+    comps = [
+        {"id": "list", "component": "Column", "children": {"componentId": "card", "path": "/items"}},
+        {"id": "card", "component": "Sparkline", "path": "trend"},
+    ]
+    ok_model = {"items": [{"trend": ser}]}
+    assert not any(
+        "not a series" in e
+        for e in _binding_rules(comps, ok_model, ok_model, _collect_bindings(comps))
+    )
+    # item.trend is an array, not a series → now CAUGHT (the blunt skip missed it)
+    bad_model = {"items": [{"trend": [1, 2, 3]}]}
+    assert any(
+        "not a series" in e
+        for e in _binding_rules(comps, bad_model, bad_model, _collect_bindings(comps))
+    )
+
+
 def test_pivot_materializes_the_full_calendar_window():
     cal = ["2026-08-01", "2026-08-02", "2026-08-03"]
     rows = [("2026-08-02", "success", 4)]  # only the middle day had rows

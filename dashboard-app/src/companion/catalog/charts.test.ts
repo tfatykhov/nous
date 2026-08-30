@@ -74,9 +74,19 @@ describe('SparklineView', () => {
   it('breaks the line at a gap and reports dropped count', () => {
     seed({ hr: series([62, null, 58, 61]) });
     const { container } = renderSpark('/hr');
-    // two segments (gap at index 1)
-    expect(container.querySelectorAll('polyline').length).toBe(2);
+    // index 0 is isolated (gap at 1) → a dot; 58-61 is a real segment → a line.
+    expect(container.querySelectorAll('polyline').length).toBe(1);
+    expect(container.querySelectorAll('circle').length).toBe(1);
     expect(container.textContent).toContain('1 gap');
+  });
+
+  it('dots isolated readings separated by gaps instead of an empty chart', () => {
+    // [62, gap, 58] → two one-coordinate segments; polylines stroke nothing, so
+    // without the dot fallback the chart is blank (codex P2).
+    seed({ hr: series([62, null, 58]) });
+    const { container } = renderSpark('/hr');
+    expect(container.querySelectorAll('polyline').length).toBe(0);
+    expect(container.querySelectorAll('circle').length).toBe(2);
   });
 
   it('shows a break marker when the domain excludes zero', () => {
