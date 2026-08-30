@@ -874,7 +874,15 @@ _REFINE_COMMAND_RE = re.compile(
 # the label reads analytically.
 _LEADING_ACTION_RE = re.compile(
     r"^\s*(?:e-?mail|send|notify|remind|text|share|schedule|deliver|post|subscribe"
-    r"|export|download|print|upload)\b",
+    r"|export|download|print|upload"
+    # MUTATION verbs (codex P2). A micro-app is read-only by construction —
+    # the grammar bans every input component — so "Archive completed tasks",
+    # "Delete old records", "Approve request" and "Mark all as read" are as
+    # undeliverable as an export. The analytical exemption still applies:
+    # "Approval rate by reviewer" and "Delete volume per day" are metrics.
+    r"|archive|delete|remove|approve|reject|dismiss|resolve|close|acknowledge"
+    r"|mark|assign|rename|edit|update|merge|cancel|retry|restart|snooze|mute"
+    r"|clear|purge|reset)\b",
     re.IGNORECASE,
 )
 

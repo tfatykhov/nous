@@ -1507,6 +1507,10 @@ _UNDELIVERABLE = [
     # Calendar/reminder commands — no component writes a calendar either.
     "Add to calendar", "Set a reminder", "Create calendar event", "Book a slot",
     "Print this", "Upload the file",
+    # Mutations — a micro-app is read-only by construction (the grammar bans
+    # every input component), so these are as undeliverable as an export.
+    "Archive completed tasks", "Delete old records", "Approve request",
+    "Mark all as read", "Dismiss warnings", "Cancel the run", "Retry failed nodes",
 ]
 
 _ANALYTICAL = [
@@ -1527,6 +1531,9 @@ _ANALYTICAL = [
     "Print volume by department", "Download counts by file type",
     "Export trends by month", "Event volume by day", "Meeting count per team",
     "Calendar density heatmap",
+    # The same mutation verbs reading analytically are metrics.
+    "Approval rate by reviewer", "Delete volume per day", "Resolution time trend",
+    "Close rate by team", "Retry rate by node",
 ]
 
 
