@@ -14,4 +14,12 @@ if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   });
 }
 
+// `beforeinstallprompt` typically fires BEFORE the Svelte tree mounts, so
+// the component would never see it. Park it here and let InstallPrompt pick
+// it up; preventDefault stops Chrome's own (long-deprecated) mini-infobar.
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  (window as unknown as { __nousInstallEvent?: Event }).__nousInstallEvent = e;
+});
+
 export default mount(Companion, { target: document.getElementById('app')! });

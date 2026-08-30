@@ -43,7 +43,10 @@
   const H = 160;
   const PAD_L = 34;
   const PAD_R = 8;
-  const PAD_T = 8;
+  // A yLabel is drawn in the top-left gutter, exactly where the highest
+  // y-tick also lands — at PAD_T=8 the two overlapped into unreadable
+  // glyph soup ("Count" over "7.56"). Reserve a row for it instead.
+  const PAD_T = $derived(comp.yLabel ? 20 : 8);
   const PAD_B = 22;
 
   const ctx = $derived({ dataModel: store.surfaces[surfaceId]?.dataModel ?? {}, scope });
@@ -122,7 +125,7 @@
           {/if}
         {/each}
       {/each}
-      {#if comp.yLabel}<text class="axl" x={4} y={PAD_T + 4}>{toDisplayString(comp.yLabel)}</text>{/if}
+      {#if comp.yLabel}<text class="axl" x={4} y={10}>{toDisplayString(comp.yLabel)}</text>{/if}
       {#if comp.xLabel}<text class="axl" x={W - PAD_R} y={H - 4} text-anchor="end">{toDisplayString(comp.xLabel)}</text>{/if}
     </svg>
     <div class="legend">

@@ -56,6 +56,20 @@
   --chart-grid: #1e1e2e;
 }
 
+/* A themed root MUST re-assert the inherited properties it re-defines.
+   `body { color: var(--text) }` is substituted at the BODY, in root scope, and
+   that already-computed colour inherits into the themed subtree — so an
+   element which merely inherits (a plain Text, the app title) keeps the
+   DARK-theme colour while its siblings that re-declare `color: var(--text)`
+   pick the theme up. Measured on `paper`: the surface's --text token resolved
+   correctly to #2a2622 while the title still painted #e2e2f0. Re-declaring
+   here recomputes the inherited value inside the theme scope. Same reason
+   F093 rejected `--green: var(--ok)` aliases in :root. */
+[data-theme] {
+  color: var(--text);
+  font-family: var(--font-ui);
+}
+
 /* ── F093 §3 themes ────────────────────────────────────────────────────
    Hand-designed, contrast-checked (see chart/theme contrast test), never
    generated. Stamped as data-theme on the APP ROOT (not :root) so two
