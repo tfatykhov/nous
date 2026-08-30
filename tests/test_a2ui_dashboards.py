@@ -1504,6 +1504,9 @@ _UNDELIVERABLE = [
     # A deliverable OBJECT is not an analytical marker, and "by <weekday>" is a
     # deadline rather than a grouping.
     "Email summary", "Send overview", "Schedule review by Monday",
+    # Calendar/reminder commands — no component writes a calendar either.
+    "Add to calendar", "Set a reminder", "Create calendar event", "Book a slot",
+    "Print this", "Upload the file",
 ]
 
 _ANALYTICAL = [
@@ -1520,6 +1523,10 @@ _ANALYTICAL = [
     "Subscribe clicks by source", "Subscribe-to-purchase funnel",
     "Email open rate", "Notification volume trend",
     "Schedule adherence by team", "Delivery rate by day",
+    # The file/print verbs are metrics when the label reads analytically.
+    "Print volume by department", "Download counts by file type",
+    "Export trends by month", "Event volume by day", "Meeting count per team",
+    "Calendar density heatmap",
 ]
 
 
@@ -1569,3 +1576,14 @@ def test_capability_heuristic_never_reaches_the_repair_loop(settings):
         "refine_options": [{"id": "a", "label": "Email me the report"}],
     }
     assert not any("refine" in e.lower() for e in composer._validate(parsed, {}))
+
+
+def test_command_pattern_never_matches_the_empty_string():
+    """A regex assembled from `|`-joined fragments will match EVERYTHING if a
+    branch is ever removed and leaves a leading `|` — an empty first
+    alternative. That happened while editing and silently rejected all 22
+    analytical labels; this asserts the shape rather than the behaviour."""
+    from nous.a2ui.compose import _REFINE_COMMAND_RE
+
+    assert _REFINE_COMMAND_RE.search("") is None
+    assert not _REFINE_COMMAND_RE.pattern.startswith("|")

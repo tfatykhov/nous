@@ -820,12 +820,15 @@ _REFINE_COMMAND_RE = re.compile(
     # exists ("Export trends by month"): leading-imperative is the strongest
     # signal available, and a rephrase costs one repair round while an
     # undeliverable button costs the user a raw ValueError.
-    r"^\s*(?:export|download|print|upload)\b"
+    # NOTE: export/download/print/upload deliberately live in
+    # _LEADING_ACTION_RE instead, so the analytical exemption applies to them
+    # too — "Print volume by department" and "Download counts by file type" are
+    # metrics, while "Export raw data" and "Print this" still fail (codex P2).
     # A leading messaging/scheduling verb followed by a determiner, possessive
     # or cadence word is imperative — "Email the report", "Notify the team",
     # "Schedule monthly digest". Followed by a measurement noun it is a noun
     # modifier and passes: "Email volume by week", "Send rate by hour".
-    r"|^\s*(?:e-?mail|send|notify|remind|text|share|schedule|deliver|post)\s+"
+    r"^\s*(?:e-?mail|send|notify|remind|text|share|schedule|deliver|post)\s+"
     r"(?:me|us|it|them|the|a|an|this|that|these|those|my|our|all|everyone|team|"
     r"daily|weekly|monthly|quarterly|nightly|hourly)\b"
     # A delivery target, but only when the verb OPENS the label — i.e. it is an
@@ -853,7 +856,13 @@ _REFINE_COMMAND_RE = re.compile(
     # Excel". No component emits a file, so these are as undeliverable as
     # export; pressing one just recomposes the same data (codex P2).
     r"|^\s*(?:generate|create|produce|make|open|render|build)\b[^,;]{0,24}"
-    r"\b(?:csv|pdf|xlsx?|excel|spreadsheet|zip|docx?)\b",
+    r"\b(?:csv|pdf|xlsx?|excel|spreadsheet|zip|docx?)\b"
+    # Calendar/reminder imperatives — "Add to calendar", "Set a reminder",
+    # "Create calendar event", "Book a slot". None open with a delivery verb,
+    # and `create` only matched the file branch (codex P2). A micro-app has no
+    # component that writes a calendar any more than it has one that emails.
+    r"|^\s*(?:add|create|make|set|book|schedule)\b[^,;]{0,24}"
+    r"\b(?:calendar|reminder|event|invite|meeting|appointment|slot)\b",
     re.IGNORECASE,
 )
 
@@ -864,7 +873,8 @@ _REFINE_COMMAND_RE = re.compile(
 # the default for a leading action verb is INVERTED: it is a command unless
 # the label reads analytically.
 _LEADING_ACTION_RE = re.compile(
-    r"^\s*(?:e-?mail|send|notify|remind|text|share|schedule|deliver|post|subscribe)\b",
+    r"^\s*(?:e-?mail|send|notify|remind|text|share|schedule|deliver|post|subscribe"
+    r"|export|download|print|upload)\b",
     re.IGNORECASE,
 )
 
