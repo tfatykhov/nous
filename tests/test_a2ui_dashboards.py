@@ -690,8 +690,9 @@ class _FakeRunner:
             self.outcome.setdefault("result_chars", len(encoded))
         self.calls: list[str] = []
 
-    async def __call__(self, code: str):
+    async def __call__(self, code: str, *, timeout: float | None = None):
         self.calls.append(code)
+        self.last_timeout = timeout
         return self.outcome
 
 
@@ -770,7 +771,7 @@ async def test_refresh_re_runs_the_script_so_the_app_is_live_not_a_snapshot():
 
     runs = {"n": 0}
 
-    async def runner(code: str):
+    async def runner(code: str, *, timeout: float | None = None):
         runs["n"] += 1
         return {
             "ok": True,
@@ -956,15 +957,18 @@ def test_source_budget_is_derived_from_the_enclosing_timeouts():
         _source_budget_seconds,
     )
 
-    # default 120s tool / 60s compose -> 120-60-10 = 50, clamped to the 45 cap
+    # The composer may run MAX_REPAIRS+1 = 3 LLM rounds, and ALL of them are
+    # reserved — so the DEFAULT 120s tool timeout leaves sources nothing and
+    # they get the floor. That is the honest answer: enabling agent_script on
+    # a 120s tool timeout genuinely has no room, and prod runs 2000.
     assert _source_budget_seconds(
         SimpleNamespace(tool_timeout=120, a2ui_compose_timeout_seconds=60)
-    ) == _TOTAL_SOURCE_SECONDS
-    # the tight config codex named: no room left, so sources get the floor
+    ) == _MIN_SOURCE_SECONDS
+    # the tight config codex named: likewise the floor
     assert _source_budget_seconds(
         SimpleNamespace(tool_timeout=60, a2ui_compose_timeout_seconds=60)
     ) == _MIN_SOURCE_SECONDS
-    # prod (tool_timeout=2000) stays capped, never unbounded
+    # prod (tool_timeout=2000) has ample room and stays CAPPED, never unbounded
     assert _source_budget_seconds(
         SimpleNamespace(tool_timeout=2000, a2ui_compose_timeout_seconds=60)
     ) == _TOTAL_SOURCE_SECONDS
@@ -984,3 +988,20 @@ async def test_agent_script_records_must_contain_objects():
           "params": {"code": "result = x", "shape": "records"}}]
     )
     assert out["rows"] == []  # shape-preserving failure, reason logged
+
+
+async def test_shared_deadline_is_pushed_into_the_script_worker():
+    """codex P1: `wait_for` cancels only the AWAIT — the worker thread keeps
+    its run slot until its own 90s deadline, so concurrent slow refreshes
+    starve every later run_python of slots. The shared budget must reach the
+    worker itself."""
+    runner = _FakeRunner({"ok": True, "result": [], "output": "", "error": None})
+    reg = build_default_registry(run_script=runner)
+    await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = []", "shape": "records"}}]
+    )
+    from nous.a2ui.sources import _TOTAL_SOURCE_SECONDS
+
+    assert runner.last_timeout is not None, "worker ran on its own longer deadline"
+    assert 0 < runner.last_timeout <= _TOTAL_SOURCE_SECONDS

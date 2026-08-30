@@ -76,9 +76,16 @@ def _source_budget_seconds(settings: Any) -> float:
     unbounded (prod runs `NOUS_TOOL_TIMEOUT=2000`)."""
     if settings is None:
         return _TOTAL_SOURCE_SECONDS
+    from .compose import MAX_REPAIRS
+
     tool_timeout = float(getattr(settings, "tool_timeout", 120) or 120)
     compose_timeout = float(getattr(settings, "a2ui_compose_timeout_seconds", 60) or 60)
-    available = tool_timeout - compose_timeout - _SOURCE_BUDGET_SAFETY_SECONDS
+    # Reserve EVERY round the composer may run, not one: an invalid first
+    # response costs up to MAX_REPAIRS more LLM calls, and reserving a single
+    # round let two of them overrun the tool timeout before a repair or the
+    # markdown fallback could return (codex P1).
+    rounds = MAX_REPAIRS + 1
+    available = tool_timeout - (compose_timeout * rounds) - _SOURCE_BUDGET_SAFETY_SECONDS
     return max(_MIN_SOURCE_SECONDS, min(_TOTAL_SOURCE_SECONDS, available))
 
 
@@ -149,9 +156,15 @@ class SourceRegistry:
                     f"source resolution exceeded {time_budget:.0f}s before "
                     f"reaching {name!r} — use fewer or faster sources"
                 )
+            call_params = dict(decl.get("params") or {})
+            # Reserved key: lets a fetcher that runs agent code push the SHARED
+            # deadline down into its own worker instead of being merely
+            # cancelled here — a cancelled await leaves the worker holding its
+            # run slot (codex P1). Ordinary fetchers ignore it.
+            call_params["_remaining_seconds"] = remaining
             try:
                 value = await asyncio.wait_for(
-                    fetcher(dict(decl.get("params") or {})), timeout=remaining
+                    fetcher(call_params), timeout=remaining
                 )
             except TimeoutError as exc:
                 raise TimeoutError(
@@ -774,7 +787,14 @@ def build_default_registry(
                 raise ValueError(
                     f"agent_script shape must be one of {list(_SCRIPT_SHAPES)}, got {shape!r}"
                 )
-            outcome = await run_script(code)
+            # Push the SHARED source deadline into the worker so the thread
+            # itself stops there and releases its run slot; cancelling only the
+            # await would let concurrent slow refreshes starve every later
+            # run_python of slots (codex P1).
+            remaining = params.get("_remaining_seconds")
+            outcome = await run_script(
+                code, timeout=float(remaining) if remaining else None
+            )
             if not outcome.get("ok"):
                 return _script_failure(str(outcome.get("error") or "script failed"), shape)
             # Already JSON-normalized inside the worker (default=str,

@@ -3921,6 +3921,7 @@ def create_programmatic_tools(
         *,
         _structured: bool = False,
         _allow_writes: bool = True,
+        _timeout_override: float | None = None,
     ) -> dict[str, Any]:
         """Execute Python code with Nous memory functions in scope.
 
@@ -3978,6 +3979,13 @@ def create_programmatic_tools(
         # the coroutine on the MAIN loop while it's awaiting the executor — no deadlock.
         loop = asyncio.get_running_loop()
         timeout = settings.programmatic_tools_timeout
+        if _timeout_override is not None:
+            # A caller with a SHORTER enclosing deadline (the A2UI source
+            # budget) must push it down here, not merely cancel its own await:
+            # `asyncio.wait_for` stops the waiter while the worker thread keeps
+            # its run slot until this deadline, so concurrent slow refreshes
+            # would starve every later run_python of slots (codex P1).
+            timeout = max(1.0, min(float(timeout), float(_timeout_override)))
         deadline = time.monotonic() + timeout
 
         def _schedule(coro):
@@ -4558,7 +4566,7 @@ def create_programmatic_tools(
         return {"content": [{"type": "text", "text": text}]}
 
     async def run_script_structured(
-        code: str, *, allow_writes: bool = False
+        code: str, *, allow_writes: bool = False, timeout: float | None = None
     ) -> dict[str, Any]:
         """Run agent-authored code and return its `result` object.
 
@@ -4569,7 +4577,12 @@ def create_programmatic_tools(
         every refresh.
         """
         return await run_python(
-            code, None, None, _structured=True, _allow_writes=allow_writes
+            code,
+            None,
+            None,
+            _structured=True,
+            _allow_writes=allow_writes,
+            _timeout_override=timeout,
         )
 
     return {"run_python": run_python, "run_script_structured": run_script_structured}

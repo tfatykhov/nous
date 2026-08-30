@@ -2637,7 +2637,7 @@ class Settings(BaseSettings):
             "`NOUS_PROGRAMMATIC_TOOLS_ENABLED` so an operator can stop stored "
             "scripts from re-running without losing interactive `run_python` "
             "— different exposure windows. Memory writes are disabled on this "
-            "path regardless of the flag."
+            "path regardless of the flag. **Operator note:** source resolution is budgeted from what `NOUS_TOOL_TIMEOUT` leaves after reserving EVERY compose round (`MAX_REPAIRS + 1`), so at the default 120s tool timeout there is no room and sources fall to a 5s floor — enabling this realistically means raising `NOUS_TOOL_TIMEOUT` (prod runs 2000)."
         ),
     )
     a2ui_health_db_path: str = Field(
