@@ -119,6 +119,10 @@
 
 [data-theme='paper'] {
   /* warm light, for reading and briefings */
+  /* `html { color-scheme: dark }` is global; without this the light theme's
+     scrollbars and form controls render dark-scheme. color-scheme is honored
+     per-element, so declaring it on the themed surface is enough (F7). */
+  color-scheme: light;
   --bg: #f4f1ea;
   --surface: #fbf9f4;
   --surface-hover: #f0ece1;

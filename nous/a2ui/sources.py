@@ -42,7 +42,12 @@ _MAX_SERIES_POINTS = 200
 # characters — ten episode summaries can clear 20k on their own — so
 # resolve() enforces a serialized budget well under the gate, trimming list
 # tails with an EXPLICIT marker rather than a silent cut.
-_TOTAL_BUDGET_CHARS = 12_000
+# Deliberately 16k, not 12k: a 3-chart dashboard (F094 acceptance #7) needs
+# three series to render REAL data, and at ~6k per downsampled 200-point series
+# the old 12k left the third source ~0 chars → a fabricated 2-point trend. 16k
+# fits three (~6k/6k/4k) while staying under the 20k censor gate with ~4k of
+# headroom for the title + components (a chart app's component tree is small).
+_TOTAL_BUDGET_CHARS = 16_000
 _PER_SOURCE_BUDGET_CHARS = 6_000
 
 # Server-owned ceiling on any caller/model-supplied limit (codex P2): the
@@ -122,25 +127,39 @@ def is_series(value: Any) -> bool:
 
 
 def _bound_series(series: dict, budget: int) -> tuple[dict, int]:
-    """Fit a series under the char budget by downsampling points, never by
-    replacing the object. Returns the (possibly downsampled) series and its
-    serialized size."""
+    """Fit a series under the char budget by downsampling points. Returns the
+    (possibly downsampled) series and its serialized size — or, when even the
+    2-point minimum does not fit, an honest empty series, NEVER a downsampled
+    stub that exceeds its budget."""
     points = series.get("points") or []
     size = len(json.dumps(series, default=str))
-    if size <= budget or len(points) <= 2:
+    if size <= budget:
         return series, size
-    # Binary-search the largest point count that fits (endpoints preserved).
-    lo, hi = 2, len(points)
-    best = _downsample_series(series, lo)
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        candidate = _downsample_series(series, mid)
-        if len(json.dumps(candidate, default=str)) <= budget:
-            best = candidate
-            lo = mid + 1
-        else:
-            hi = mid - 1
-    return best, len(json.dumps(best, default=str))
+    if len(points) > 2:
+        # Binary-search the largest point count that fits (endpoints preserved).
+        lo, hi = 2, len(points)
+        best: tuple[dict, int] | None = None
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            candidate = _downsample_series(series, mid)
+            csize = len(json.dumps(candidate, default=str))
+            if csize <= budget:
+                best = (candidate, csize)
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        if best is not None:
+            return best
+    # Even 2 points do not fit (earlier series on this surface consumed the
+    # budget): a 2-point line stamped downsampled_from:200 is a FABRICATED
+    # trend, the §1.1 "published a false statement" failure. An explicit empty
+    # series with a reason is honest; the stub is not (rev-be/codex P1). It also
+    # keeps `spent` accurate — the old stub overran _TOTAL_BUDGET_CHARS.
+    empty = empty_series(
+        "char budget exhausted — earlier series on this surface used it",
+        unit=str(series.get("unit", "")),
+    )
+    return empty, len(json.dumps(empty, default=str))
 
 
 def _stride_pick(idxs: list[int], budget: int) -> list[int]:
@@ -163,7 +182,9 @@ def _downsample_series(series: dict, target: int) -> dict:
     BREAK, and the peak + trough (full LTTB deferred to F094 P3). Stamps
     meta.downsampled_from with the ORIGINAL length, carried across repeats."""
     points = series.get("points") or []
-    original = series.get("meta", {}).get("downsampled_from") or len(points)
+    # `series.get("meta", {})` would crash on a hand-built fetcher that sets
+    # "meta": None (None.get); `or {}` closes it (rev-be P3).
+    original = (series.get("meta") or {}).get("downsampled_from") or len(points)
     if len(points) <= target:
         return series
     value_keys: set = set()

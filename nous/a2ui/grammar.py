@@ -178,6 +178,17 @@ def lint_micro_app(
                     f"{ctype} {comp.get('id')!r} has no `path` — a chart with no "
                     "bound series is meaningless (F094 §5)"
                 )
+        if ctype == "LineChart":
+            # Data-free arity, so the repair loop leads with THIS clean message
+            # instead of the schema's maxItems error — which reads "remove path
+            # and series" (both valid) because the failed `series` branch marks
+            # them unevaluated, guiding the model to make the app worse (rev-be
+            # P2). `minItems:1` in the schema still backstops the empty case.
+            n_series = len(comp.get("series") or []) if isinstance(comp.get("series"), list) else 0
+            if n_series > 4:
+                errors.append(
+                    f"LineChart {comp.get('id')!r} declares {n_series} series — max 4"
+                )
         for tmpl in _template_children(comp):
             # F093 §6.2 Repeat: a template child must name a real component
             # and bind an array path; the referenced component renders ONCE

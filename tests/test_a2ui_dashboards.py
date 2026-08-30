@@ -7,6 +7,7 @@ fixtures like the other A2UI suites.
 
 from __future__ import annotations
 
+import json
 import math
 import uuid
 
@@ -17,6 +18,7 @@ from sqlalchemy import delete
 from nous.a2ui import grammar
 from nous.a2ui.compose import _THEMES, SurfaceComposer, _binding_rules, _collect_bindings
 from nous.a2ui.sources import (
+    _TOTAL_BUDGET_CHARS,
     SourceRegistry,
     _bound_series,
     _pivot,
@@ -81,6 +83,44 @@ def test_to_series_caps_and_downsamples():
     # endpoints preserved
     assert s["points"][0]["v"] == 0
     assert s["points"][-1]["v"] == 499
+
+
+async def _series_registry(*keys):
+    reg = SourceRegistry()
+
+    def _mk(_k):
+        async def fetch(params):
+            return to_series(
+                [{"d": f"2026-{i:04d}", "x": float(i)} for i in range(200)], "d", "x"
+            )
+
+        return fetch
+
+    for k in keys:
+        reg.register(k, _mk(k))
+    return reg
+
+
+async def test_three_chart_app_renders_three_real_series_within_budget():
+    # rev-be/codex P1: at ~6k per 200-point series the old 12k total left the
+    # THIRD chart ~0 chars, and _bound_series returned an unvalidated 2-point
+    # stub stamped downsampled_from:200 — a fabricated trend AND a budget
+    # overrun. All three must now render real data within the total.
+    reg = await _series_registry("a", "b", "c")
+    out = await reg.resolve([{"key": k, "source": k, "params": {}} for k in ("a", "b", "c")])
+    total = sum(len(json.dumps(out[k], default=str)) for k in out)
+    assert all(len(out[k]["points"]) > 100 for k in ("a", "b", "c")), "a chart lost its data"
+    assert total <= _TOTAL_BUDGET_CHARS
+
+
+async def test_budget_exhaustion_returns_honest_empty_not_a_fake_trend():
+    # The 4th series has no budget left — it must be an explicit empty series
+    # with a reason, never a 2-point line pretending to be a 200-point trend.
+    reg = await _series_registry("a", "b", "c", "d")
+    out = await reg.resolve([{"key": k, "source": k, "params": {}} for k in ("a", "b", "c", "d")])
+    d = out["d"]
+    assert d["points"] == [] and "reason" in d["meta"]
+    assert "budget" in d["meta"]["reason"]
 
 
 def test_bound_series_downsamples_never_replaces_with_a_marker():
@@ -326,6 +366,21 @@ def test_charts_are_allowed_and_binding_mandatory():
     assert grammar.lint_micro_app(_skel([{"id": "c", "component": "Sparkline", "path": "/hr"}])) == []
     bad = grammar.lint_micro_app(_skel([{"id": "c", "component": "LineChart", "series": []}]))
     assert any("no `path`" in e for e in bad)
+
+
+def test_linechart_over_arity_gets_a_clean_grammar_message():
+    # >4 series is caught data-free in grammar so the repair loop leads with a
+    # clean "max 4" instead of the schema's misleading maxItems error (rev-be P2).
+    over = _skel([
+        {
+            "id": "c",
+            "component": "LineChart",
+            "path": "/o",
+            "series": [{"key": f"k{i}"} for i in range(5)],
+        }
+    ])
+    errs = grammar.lint_micro_app(over)
+    assert any("max 4" in e and "LineChart" in e for e in errs)
 
 
 def test_repeat_template_is_visible_and_validated():
