@@ -1410,3 +1410,20 @@ def test_capability_gate_matches_commands_not_substrings():
     for label in ("Send me the report", "Save to Drive", "Share via link",
                   "Subscribe to updates", "Notify me on change"):
         assert _refine_capability_errors([{"id": "x", "label": label}]), label
+
+
+def test_leading_imperatives_without_a_pronoun_are_caught():
+    """codex P2 round 2: requiring a pronoun ("email ME") missed the commonest
+    imperative forms — "Email the report", "Notify the team", "Send report to
+    Alice", "Schedule monthly digest" — which are just as undeliverable."""
+    from nous.a2ui.compose import _refine_capability_errors
+
+    for label in ("Email the report", "Notify the team", "Send report to Alice",
+                  "Schedule monthly digest", "Post this to Slack",
+                  "Deliver the digest to ops"):
+        assert _refine_capability_errors([{"id": "x", "label": label}]), label
+
+    # The same verbs used as NOUN MODIFIERS remain valid analytics.
+    for label in ("Email volume by week", "Send rate by hour",
+                  "Notifications per day", "Sender leaderboard"):
+        assert _refine_capability_errors([{"id": "x", "label": label}]) == [], label

@@ -821,8 +821,17 @@ _REFINE_COMMAND_RE = re.compile(
     # signal available, and a rephrase costs one repair round while an
     # undeliverable button costs the user a raw ValueError.
     r"^\s*(?:export|download|print|upload)\b"
+    # A leading messaging/scheduling verb followed by a determiner, possessive
+    # or cadence word is imperative — "Email the report", "Notify the team",
+    # "Schedule monthly digest". Followed by a measurement noun it is a noun
+    # modifier and passes: "Email volume by week", "Send rate by hour".
+    r"|^\s*(?:e-?mail|send|notify|remind|text|share|schedule|deliver|post)\s+"
+    r"(?:me|us|it|them|the|a|an|this|that|these|those|my|our|all|everyone|team|"
+    r"daily|weekly|monthly|quarterly|nightly|hourly)\b"
+    # A delivery target anywhere: "Send report to Alice", "Email summary to ops".
+    r"|\b(?:e-?mail|send|deliver|post)\b[^,;]*\bto\s+\w"
     r"|\b(?:e-?mail|send|notify|remind|text)\s+(?:me|us|it|them)\b"
-    r"|\bschedule\s+(?:a|an|the|this|daily|weekly)\b"
+    r"|\bschedule\s+(?:a|an|the|this|daily|weekly|monthly|quarterly)\b"
     r"|\bsave\s+(?:to|as)\b"
     r"|\b(?:export|download)\s+as\b"
     r"|\bshare\s+(?:via|with|to)\b"
