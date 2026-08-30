@@ -1496,6 +1496,11 @@ _UNDELIVERABLE = [
     "Schedule a weekly digest", "Save to Drive", "Share via link",
     "Share with team", "Subscribe to updates", "Generate CSV", "Create a PDF",
     "Open in Excel", "Remind me tomorrow", "Notify me on change",
+    # Leading action verb with a BARE object — enumerating the words that may
+    # follow could never keep up, so a leading action verb is a command unless
+    # the label reads analytically.
+    "Email report", "Notify stakeholders", "Remind Alice", "Schedule digest",
+    "Post to Slack", "Deliver weekly",
 ]
 
 _ANALYTICAL = [
@@ -1508,6 +1513,9 @@ _ANALYTICAL = [
     "Compare export as csv counts", "Compare email volume to last month",
     "Compare periods", "Last 7 days", "Notifications per day",
     "Sender leaderboard", "Create-time distribution",
+    # ...and the same verbs reading analytically must still survive.
+    "Subscribe clicks by source", "Subscribe-to-purchase funnel",
+    "Email open rate", "Notification volume trend",
 ]
 
 

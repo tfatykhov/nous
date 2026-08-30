@@ -858,6 +858,30 @@ _REFINE_COMMAND_RE = re.compile(
 )
 
 
+# A delivery/scheduling verb OPENING the label, with any object at all —
+# "Email report", "Notify stakeholders", "Remind Alice", "Schedule digest".
+# Enumerating the objects that may follow could never keep up (codex P2), so
+# the default for a leading action verb is INVERTED: it is a command unless
+# the label reads analytically.
+_LEADING_ACTION_RE = re.compile(
+    r"^\s*(?:e-?mail|send|notify|remind|text|share|schedule|deliver|post|subscribe)\b",
+    re.IGNORECASE,
+)
+
+# ...and this is what "reads analytically" means. These markers are what a
+# metric label has and an imperative does not: a grouping ("by week"), a
+# comparison ("vs"), or a measurement noun. "Email volume by week" and "Send
+# rate by hour" survive; "Email report" does not.
+_ANALYTICAL_RE = re.compile(
+    r"\b(?:by|per|vs\.?|versus|between|across|over)\b"
+    r"|\b(?:trend|trends|rate|rates|volume|count|counts|total|totals|share of|"
+    r"ratio|average|median|mean|percentile|growth|distribution|breakdown|"
+    r"histogram|funnel|leaderboard|activity|latency|throughput|adherence|"
+    r"conversion|split|mix|cohort|heatmap|summary|overview|detail|history)\b",
+    re.IGNORECASE,
+)
+
+
 def _refine_capability_errors(raw: Any) -> list[str]:
     """Repair errors for refine options promising capabilities that do not
     exist. Checked on the RAW model output, before _clean_refine_options
@@ -870,6 +894,10 @@ def _refine_capability_errors(raw: Any) -> list[str]:
             continue
         label = str(opt.get("label") or "").strip()
         match = _REFINE_COMMAND_RE.search(label)
+        if match is None:
+            leading = _LEADING_ACTION_RE.match(label)
+            if leading and not _ANALYTICAL_RE.search(label):
+                match = leading
         if match:
             errors.append(
                 f"refine option {label!r} promises {match.group(0).strip()!r}, which no "
