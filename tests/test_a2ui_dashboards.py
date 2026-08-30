@@ -1483,3 +1483,46 @@ def test_share_matching_is_start_anchored():
         assert _refine_capability_errors([{"id": "x", "label": label}]) == [], label
     for label in ("Share via link", "Share with team", "Share to Slack"):
         assert _refine_capability_errors([{"id": "x", "label": label}]), label
+
+
+# The full capability matrix. Four review rounds each found the same defect in
+# a different token, so the rule became categorical — a verb counts as a
+# command only when it OPENS the label (the sole exception being a pronoun
+# object, which is imperative in every reading). This table is the guard
+# against the next token being added unanchored.
+_UNDELIVERABLE = [
+    "Export raw data", "Download CSV", "Email me a summary", "Email the report",
+    "Notify the team", "Send report to Alice", "Schedule monthly digest",
+    "Schedule a weekly digest", "Save to Drive", "Share via link",
+    "Share with team", "Subscribe to updates", "Generate CSV", "Create a PDF",
+    "Open in Excel", "Remind me tomorrow", "Notify me on change",
+]
+
+_ANALYTICAL = [
+    "Group by sender", "Email volume by week", "Send rate by hour",
+    "Compare attachment types", "Compare market share with last month",
+    "Market share by region", "Share of voice trend",
+    "Compare subscribe vs purchase conversion", "Subscribe clicks by source",
+    "Subscribe-to-purchase funnel", "On-call schedule this month",
+    "Schedule adherence by team", "Compare save to disk latency",
+    "Compare export as csv counts", "Compare email volume to last month",
+    "Compare periods", "Last 7 days", "Notifications per day",
+    "Sender leaderboard", "Create-time distribution",
+]
+
+
+@pytest.mark.parametrize("label", _UNDELIVERABLE)
+def test_undeliverable_labels_are_rejected(label):
+    from nous.a2ui.compose import _refine_capability_errors
+
+    assert _refine_capability_errors([{"id": "x", "label": label}]), label
+
+
+@pytest.mark.parametrize("label", _ANALYTICAL)
+def test_analytical_labels_are_never_rejected(label):
+    """A false positive is worse than a false negative here: repeated
+    rejection exhausts the repair loop and replaces a valid dashboard with the
+    markdown fallback — losing the whole app to police one button."""
+    from nous.a2ui.compose import _refine_capability_errors
+
+    assert _refine_capability_errors([{"id": "x", "label": label}]) == [], label

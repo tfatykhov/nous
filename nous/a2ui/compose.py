@@ -833,19 +833,27 @@ _REFINE_COMMAND_RE = re.compile(
     # anywhere, which matched "Compare email volume to last month" from `email`
     # through `to l` and rejected a perfectly good comparison (codex P2).
     r"|^\s*(?:e-?mail|send|deliver|post)\b[^,;]*\bto\s+\w"
+    # The ONLY unanchored branch, and safe because the pronoun object makes it
+    # imperative in every reading: "notify me", "send us". A bare noun after
+    # the same verb ("send rate", "email volume") is analysis and passes.
     r"|\b(?:e-?mail|send|notify|remind|text)\s+(?:me|us|it|them)\b"
-    r"|\bschedule\s+(?:a|an|the|this|daily|weekly|monthly|quarterly)\b"
-    r"|\bsave\s+(?:to|as)\b"
-    r"|\b(?:export|download)\s+as\b"
-    # Start-anchored: "share with" ANYWHERE rejected "Compare market share with
-    # last month", which is analysis (codex P2).
+    # Everything below is START-ANCHORED. Four review rounds each found the
+    # same defect in a different token — "Group by sender", "Email volume by
+    # week", "Compare market share with last month", "Compare subscribe vs
+    # purchase" — so the rule is now categorical rather than per-word: a verb
+    # only counts as a command when it OPENS the label. Mid-label it is a noun
+    # naming a metric or an event, and rejecting those burns the repair loop
+    # into a markdown fallback, losing the whole app to save one button.
+    r"|^\s*schedule\s+(?:a|an|the|this|daily|weekly|monthly|quarterly)\b"
+    r"|^\s*save\s+(?:to|as)\b"
+    r"|^\s*(?:export|download)\s+as\b"
     r"|^\s*share\s+(?:via|with|to)\b"
+    r"|^\s*subscribe\s+(?:to|me|us)\b"
     # File-generation imperatives — "Generate CSV", "Create a PDF", "Open in
     # Excel". No component emits a file, so these are as undeliverable as
     # export; pressing one just recomposes the same data (codex P2).
     r"|^\s*(?:generate|create|produce|make|open|render|build)\b[^,;]{0,24}"
-    r"\b(?:csv|pdf|xlsx?|excel|spreadsheet|zip|docx?)\b"
-    r"|\bsubscribe\b",
+    r"\b(?:csv|pdf|xlsx?|excel|spreadsheet|zip|docx?)\b",
     re.IGNORECASE,
 )
 
