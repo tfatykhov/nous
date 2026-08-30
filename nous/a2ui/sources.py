@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import math
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -55,6 +56,69 @@ _PER_SOURCE_BUDGET_CHARS = 6_000
 # millions would still do the database work. Clamp before the query.
 _MAX_ROWS = 50
 
+# Fallback ceiling on resolving ALL of one surface's sources, used when no
+# Settings are wired. Prefer `_source_budget_seconds`, which DERIVES the value
+# — a hardcoded 45 silently assumes the default 120s `NOUS_TOOL_TIMEOUT`, and
+# at the explicitly supported `NOUS_TOOL_TIMEOUT=60` it would let sources burn
+# 45s and then start a 60s compose LLM, so the outer wrapper cancels the tool
+# and returns the very generic timeout this budget exists to prevent (codex P1).
+_TOTAL_SOURCE_SECONDS = 45.0
+
+# Left for the push + validation work after the compose LLM returns.
+_SOURCE_BUDGET_SAFETY_SECONDS = 10.0
+
+# Head start given to a script worker's OWN deadline over the registry's
+# `wait_for`, so a routine script timeout comes back as an outcome the source
+# can turn into a shape-preserving failure rather than a cancellation that
+# aborts the whole resolve. Covers run_python's `timeout + _TIMEOUT_GRACE`
+# (2.0s) plus scheduling slack.
+_WORKER_DEADLINE_MARGIN = 4.0
+
+# Dashboard scripts may hold at most this many of the shared run_python slots
+# (`NOUS_PROGRAMMATIC_TOOLS_MAX_CONCURRENT`, 4). The deadline pushed into the
+# worker stops PYTHON-level runaway code, but a script blocked inside a C call
+# — `urlopen`, `time.sleep` — cannot be interrupted at all and holds its slot
+# until it returns. That is a documented property of run_python, not something
+# this source introduced; what this source DOES change is how reachable it is,
+# since fetching an external API is the advertised use and refreshes recur
+# unattended. Killing the thread is not possible, so bound the blast radius
+# instead: stalled dashboard scripts can never take the whole pool, and the
+# agent's own interactive run_python always has capacity left (codex P1).
+# Slots reserved for the agent's own interactive run_python; a dashboard
+# script refuses to start when fewer than this many are free.
+_INTERACTIVE_SLOT_RESERVE = 2
+
+# Below this, a script cannot finish inside the shared budget before the
+# registry's own wait expires, so it is not started at all.
+_MIN_SCRIPT_SECONDS = 2.0
+_MIN_SOURCE_SECONDS = 5.0
+
+
+def _source_budget_seconds(settings: Any, *, for_compose: bool = True) -> float:
+    """Seconds all sources of one surface may take, derived from the enclosing
+    timeouts: whatever `NOUS_TOOL_TIMEOUT` leaves after reserving the compose
+    LLM rounds and a safety margin, clamped so it is neither negative nor
+    unbounded (prod runs `NOUS_TOOL_TIMEOUT=2000`).
+
+    `for_compose=False` reserves NOTHING for the LLM, because `app.refresh`
+    re-runs fetchers ONLY — no compose round follows it. Charging refresh for
+    three LLM rounds it will never make left it with the 5s floor at default
+    settings, which would cut off exactly the long-running external-API script
+    this feature exists to keep live (codex P1)."""
+    if settings is None:
+        return _TOTAL_SOURCE_SECONDS
+    from .compose import MAX_REPAIRS
+
+    tool_timeout = float(getattr(settings, "tool_timeout", 120) or 120)
+    compose_timeout = float(getattr(settings, "a2ui_compose_timeout_seconds", 60) or 60)
+    # Reserve EVERY round the composer may run, not one: an invalid first
+    # response costs up to MAX_REPAIRS more LLM calls, and reserving a single
+    # round let two of them overrun the tool timeout before a repair or the
+    # markdown fallback could return (codex P1).
+    rounds = (MAX_REPAIRS + 1) if for_compose else 0
+    available = tool_timeout - (compose_timeout * rounds) - _SOURCE_BUDGET_SAFETY_SECONDS
+    return max(_MIN_SOURCE_SECONDS, min(_TOTAL_SOURCE_SECONDS, available))
+
 
 def _limit(params: dict, default: int) -> int:
     try:
@@ -75,8 +139,11 @@ class UnknownSourceError(ValueError):
 class SourceRegistry:
     """Named server-side fetchers a micro-app may bind data from."""
 
-    def __init__(self) -> None:
+    def __init__(self, settings: Any = None) -> None:
         self._fetchers: dict[str, Fetcher] = {}
+        # Optional so existing constructions (and tests) keep working; when
+        # present the resolution budget is derived rather than assumed.
+        self._settings = settings
 
     def register(self, name: str, fetcher: Fetcher) -> None:
         self._fetchers[name] = fetcher
@@ -84,7 +151,9 @@ class SourceRegistry:
     def names(self) -> list[str]:
         return sorted(self._fetchers)
 
-    async def resolve(self, data_sources: list[dict]) -> dict[str, Any]:
+    async def resolve(
+        self, data_sources: list[dict], *, for_compose: bool = True
+    ) -> dict[str, Any]:
         """Resolve declared sources into data-model subtrees keyed by `key`.
 
         Raises UnknownSourceError on an unregistered source name. A fetcher
@@ -93,6 +162,17 @@ class SourceRegistry:
         """
         model: dict[str, Any] = {}
         spent = 0
+        # Wall-clock budget across ALL sources in one resolve (codex P1).
+        # Sources run sequentially, and an `agent_script` gets the full
+        # `programmatic_tools_timeout` (90s) each — so two slow ones, or one
+        # plus the compose LLM, blow the 120s tool timeout wrapping the whole
+        # compose call and the app never gets built. Bounding the total here
+        # rather than per-source also covers a slow DB fetcher.
+        # NOT named `budget` — that name is reused below for the per-source
+        # CHAR budget, and the collision would make these timeout messages
+        # report byte counts as seconds from the second source onward.
+        time_budget = _source_budget_seconds(self._settings, for_compose=for_compose)
+        deadline = time.monotonic() + time_budget
         for decl in data_sources:
             key = str(decl.get("key") or "")
             name = str(decl.get("source") or "")
@@ -103,7 +183,32 @@ class SourceRegistry:
                 raise UnknownSourceError(
                     f"unknown data source {name!r}; available: {self.names()}"
                 )
-            value = await fetcher(dict(decl.get("params") or {}))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"source resolution exceeded {time_budget:.0f}s before "
+                    f"reaching {name!r} — use fewer or faster sources"
+                )
+            call_params = dict(decl.get("params") or {})
+            # Reserved key: lets a fetcher that runs agent code push the SHARED
+            # deadline down into its own worker instead of being merely
+            # cancelled here — a cancelled await leaves the worker holding its
+            # run slot (codex P1). Ordinary fetchers ignore it.
+            # Deliberately SHORTER than this loop's own `wait_for`: run_python
+            # waits `timeout + grace`, so passing the identical value would let
+            # the outer cancel win and abort the whole compose/refresh instead
+            # of letting agent_script return its shape-preserving failure
+            # (codex P1). The worker must expire first.
+            call_params["_remaining_seconds"] = remaining - _WORKER_DEADLINE_MARGIN
+            try:
+                value = await asyncio.wait_for(
+                    fetcher(call_params), timeout=remaining
+                )
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    f"source {name!r} exceeded the {time_budget:.0f}s "
+                    "resolution budget shared by all sources on this surface"
+                ) from exc
             budget = min(_PER_SOURCE_BUDGET_CHARS, _TOTAL_BUDGET_CHARS - spent)
             if is_series(value):
                 # A series is EXEMPT from _bound's wholesale-dict-replacement
@@ -375,6 +480,67 @@ def _bound(value: Any, budget: int) -> tuple[Any, int]:
     return marker, len(json.dumps(marker))
 
 
+# A stored dashboard script is agent-authored code, not prose — cap it so a
+# runaway generation cannot park an unbounded blob in app_spec and re-compile
+# it on every refresh.
+_MAX_SCRIPT_CHARS = 16_000
+
+# Hard ceiling on a script's SERIALIZED result, enforced before it reaches
+# `_bound` (codex P1). Every other source is row-capped at `_MAX_ROWS`, but a
+# script can construct or fetch anything, and `_bound`'s trim pops ONE list
+# entry and re-serializes the remainder per iteration — quadratic. Handing it
+# a 100k-row result would do that work on the MAIN EVENT LOOP, outside the
+# script's own deadline, stalling every other request. One O(n) measurement
+# here turns that into an explicit, self-describing rejection.
+_MAX_SCRIPT_RESULT_CHARS = 256_000
+
+
+_SCRIPT_SHAPES = ("records", "series")
+
+
+def _is_valid_series(value: Any) -> bool:
+    """The FULL series contract, not just the `kind` tag `is_series` checks.
+
+    Every POINT must be a mapping too (codex P2): `_downsample_series` does
+    `for k in p` and `p.get(...)`, so a `null` or int point raises there — and
+    that happens inside `_bound_series`, turning script data into a 500 rather
+    than the shape-preserving failure value.
+    """
+    if not (is_series(value) and isinstance(value.get("points"), list)):
+        return False
+    meta = value.get("meta")
+    if meta and not isinstance(meta, dict):
+        # `_downsample_series` does `(series.get("meta") or {}).get(...)`, so a
+        # truthy non-mapping such as "bad" raises AttributeError inside
+        # `_bound_series` — a 500 rather than the promised failure value.
+        return False
+    return all(isinstance(p, dict) for p in value["points"])
+
+
+def _script_failure(reason: str, shape: str) -> Any:
+    """A failed script's value, in the SHAPE the app was built against.
+
+    Refresh does not re-run binding validation, so whatever a failure returns
+    must remain a valid binding for the components ALREADY on the surface.
+
+    The two shapes are deliberately asymmetric, and the asymmetry is honest:
+
+    - ``series`` carries its reason in ``meta``, which the chart's §3.1 empty
+      state renders — the failure is visible in the app.
+    - ``records`` returns an EMPTY LIST. A one-row ``[{"_error": …}]`` was
+      tried and is worse (codex P1): a repeat template's children bind fields
+      like ``name``/``value``, so the marker row renders as a row of blanks
+      and nothing is bound to ``_error`` — the reason is invisible AND the
+      table now lies about having a row. The record schema the surface was
+      built against cannot be reconstructed at failure time, so the honest
+      value is "no rows", with the reason going to the log for the operator.
+    """
+    if shape == "series":
+        return empty_series(reason)
+    logger.warning("agent_script (records) failed: %s", reason)
+    return []
+
+
 def build_default_registry(
     *,
     heart: Any = None,
@@ -383,6 +549,8 @@ def build_default_registry(
     heartbeat_runner: Any = None,
     database: Any = None,
     health_db_path: str | None = None,
+    run_script: Any = None,
+    settings: Any = None,
 ) -> SourceRegistry:
     """The Phase 3 fetcher set + F094 series sources.
 
@@ -392,7 +560,7 @@ def build_default_registry(
     grouped-over-time series sources; ``health_db_path`` the external
     health series (defensive — absent db ⇒ an explicit empty series).
     """
-    registry = SourceRegistry()
+    registry = SourceRegistry(settings)
 
     if brain is not None:
 
@@ -632,5 +800,196 @@ def build_default_registry(
             return to_series(records, "t", "v", unit=str(params.get("unit", "")))
 
         registry.register("health_series", health_series)
+
+    if run_script is not None:
+
+        async def agent_script(params: dict) -> Any:
+            """Data the AGENT itself produced, re-runnable.
+
+            Every other source is a fetcher someone added in code, so a domain
+            with no fetcher could only ever be a model-supplied SNAPSHOT: an
+            app with no `data_sources` is refused a refresh outright
+            (``compose.refresh_data``), which is exactly the property that made
+            it no better than the emailed static HTML this feature replaces.
+
+            This source closes that: the agent writes the code that produces
+            the data, that code is stored in ``app_spec.data_sources[].params``,
+            and ``refresh_data`` re-resolves it — so the app is genuinely live
+            without anyone adding a fetcher or setting an env var. The script
+            may reach whatever it needs (it has full builtins, the same as the
+            agent's own ``run_python``), which is what makes "plug in an
+            external source with no code change" true.
+
+            It re-runs UNATTENDED, so memory writes are disabled (``learn_fact``
+            raises) — reads are what a dashboard needs. Execution reuses the
+            run_python sandbox verbatim: one run slot, the wall-clock deadline
+            tracer, the settrace shims. A failing script yields an explicit
+            error value, never a stale one and never a blank box, so one broken
+            source cannot fail the whole app's refresh.
+            """
+            code = params.get("code")
+            if not isinstance(code, str) or not code.strip():
+                raise ValueError("agent_script requires params.code (the Python to run)")
+            if len(code) > _MAX_SCRIPT_CHARS:
+                raise ValueError(
+                    f"agent_script code is {len(code)} chars — max {_MAX_SCRIPT_CHARS}"
+                )
+            shape = str(params.get("shape") or "records")
+            if shape not in _SCRIPT_SHAPES:
+                raise ValueError(
+                    f"agent_script shape must be one of {list(_SCRIPT_SHAPES)}, got {shape!r}"
+                )
+            # Push the SHARED source deadline into the worker so the thread
+            # itself stops there and releases its run slot; cancelling only the
+            # await would let concurrent slow refreshes starve every later
+            # run_python of slots (codex P1).
+            remaining = params.get("_remaining_seconds")
+            if remaining is not None and float(remaining) < _MIN_SCRIPT_SECONDS:
+                # Too little left for the worker to finish FIRST. A floor here
+                # would invert the ordering — run_python waits `timeout + 2s`
+                # grace while the registry waits only `remaining`, so the
+                # registry would time out first and abort the whole
+                # compose/refresh instead of reaching _script_failure (codex
+                # P1). Yield with the shape-preserving value instead of
+                # starting a worker that cannot land in time.
+                return _script_failure(
+                    f"only {float(remaining):.1f}s left in the source budget — "
+                    "not enough to run this script; use fewer sources",
+                    shape,
+                )
+            # Gate on the GLOBAL in-flight count, not a local semaphore
+            # (codex P1): a semaphore around the await releases as soon as the
+            # coroutine returns, while a worker blocked in a C call keeps its
+            # global run slot alive well past that — so repeated refreshes
+            # could still stack blocked threads until interactive calls
+            # starved. `run_python_active_runs()` reflects the threads that are
+            # actually alive, which is the only signal that tracks a blocked
+            # worker.
+            try:
+                from nous.api.tools import run_python_active_runs
+
+                in_flight = run_python_active_runs()
+                capacity = int(
+                    getattr(settings, "programmatic_tools_max_concurrent", 4) or 4
+                )
+            except Exception:  # pragma: no cover - defensive
+                in_flight, capacity = 0, 4
+            allowed = capacity - _INTERACTIVE_SLOT_RESERVE
+            if allowed < 1:
+                # A pool too small to reserve anything (the supported
+                # NOUS_PROGRAMMATIC_TOOLS_MAX_CONCURRENT=1) must not let an
+                # unattended script take the only slot — if it blocked in C
+                # code every interactive call would be rejected indefinitely,
+                # which is the opposite of what this gate promises (codex P1).
+                return _script_failure(
+                    f"script pool of {capacity} cannot reserve "
+                    f"{_INTERACTIVE_SLOT_RESERVE} slots for interactive use — "
+                    "raise NOUS_PROGRAMMATIC_TOOLS_MAX_CONCURRENT to use "
+                    "dashboard scripts",
+                    shape,
+                )
+            if in_flight >= allowed:
+                return _script_failure(
+                    f"{in_flight} script slots already in use — dashboard "
+                    "scripts yield to interactive use; try refresh again",
+                    shape,
+                )
+            outcome = await run_script(
+                code,
+                timeout=float(remaining) if remaining else None,
+                max_result_chars=_MAX_SCRIPT_RESULT_CHARS,
+            )
+            if not outcome.get("ok"):
+                return _script_failure(str(outcome.get("error") or "script failed"), shape)
+            # Already JSON-normalized inside the worker (default=str,
+            # allow_nan=False), so nothing here re-touches the raw object or
+            # re-serializes it — the size is measured from that same encoding.
+            if outcome.get("result_chars", 0) > _MAX_SCRIPT_RESULT_CHARS:
+                return _script_failure(
+                    f"script result is {outcome['result_chars']} chars — max "
+                    f"{_MAX_SCRIPT_RESULT_CHARS}; aggregate or limit it in the script",
+                    shape,
+                )
+            result = outcome.get("result")
+            if result is None:
+                return _script_failure(
+                    "script set no `result` — assign the data to a variable "
+                    "named `result` (a list of records, or a series dict)",
+                    shape,
+                )
+            # A declared shape the script did not produce is a script bug, and
+            # catching it HERE keeps a chart from ever binding to records.
+            declared_keys = params.get("series_keys")
+            if shape == "series" and not (
+                isinstance(declared_keys, list) and declared_keys
+            ):
+                # REQUIRED, not optional (codex P2): without it a first
+                # single-value result validates a Sparkline and a later
+                # multi-series refresh is accepted unchecked, leaving the chart
+                # empty — and refresh never re-runs binding validation.
+                raise ValueError(
+                    "agent_script with shape='series' requires params.series_keys "
+                    "— the keys the chart binds (['v'] for Sparkline/BarChart)"
+                )
+            if shape == "series" and not _is_valid_series(result):
+                # The FULL contract, not just `kind` (codex P1): refresh skips
+                # binding validation, so a later {"kind":"series","points":{}}
+                # would replace a working chart with something the renderer
+                # shows as "not a series" instead of the empty state.
+                return _script_failure(
+                    f"script declared shape 'series' but returned "
+                    f"{type(result).__name__} — build one with to_series(...)",
+                    shape,
+                )
+            if shape == "series":
+                # Refresh skips binding validation, so a later result that
+                # silently changes series MODE (single <-> multi) or drops a
+                # LineChart's declared key would leave the existing chart
+                # rendering nothing (codex P2). The agent declares the key
+                # contract its chart binds; every resolve must honour it.
+                raw_keys = result.get("keys") if is_series(result) else None
+                if raw_keys is not None and not (
+                    isinstance(raw_keys, list)
+                    and all(isinstance(k, str) for k in raw_keys)
+                ):
+                    # `set([["value"]])` raises TypeError: unhashable list, and
+                    # that escapes _script_failure — one malformed result would
+                    # turn compose/refresh into a 500 despite this source's
+                    # failure-isolation contract (codex P2).
+                    return _script_failure(
+                        "series `keys` must be a list of strings, got "
+                        f"{type(raw_keys).__name__}",
+                        shape,
+                    )
+                actual = set(raw_keys or ["v"]) if is_series(result) else set()
+                missing = sorted(set(map(str, declared_keys)) - actual)
+                if missing:
+                    return _script_failure(
+                        f"series no longer carries declared key(s) "
+                        f"{missing} — it now has {sorted(actual)}; a chart bound "
+                        "to the old keys would render nothing",
+                        shape,
+                    )
+            if shape == "records" and not (
+                isinstance(result, list) and all(isinstance(r, dict) for r in result)
+            ):
+                # Every ELEMENT must be a mapping, not just the container
+                # (codex P2): `["offline"]` passed a list-only check, and a
+                # Repeat child binding a relative `name` against a scalar item
+                # resolves to undefined — blank rows, and never routed through
+                # _script_failure so no reason is reported anywhere.
+                bad = (
+                    type(result).__name__
+                    if not isinstance(result, list)
+                    else "a list containing non-object items"
+                )
+                return _script_failure(
+                    f"script declared shape 'records' but returned {bad} — "
+                    "return a list of dicts",
+                    shape,
+                )
+            return result
+
+        registry.register("agent_script", agent_script)
 
     return registry

@@ -1021,6 +1021,16 @@ async def create_components(settings: Settings) -> dict:
         # the Phase 2 template guard).
         composer = None
         if settings.a2ui_compose_enabled:
+            # The agent-authored dashboard source reuses the run_python
+            # sandbox verbatim (one set of guards, two return shapes), so it
+            # is registered only when programmatic tools are actually enabled.
+            _run_script = None
+            if settings.a2ui_agent_script_source_enabled and settings.programmatic_tools_enabled:
+                from nous.api.tools import create_programmatic_tools
+
+                _run_script = create_programmatic_tools(brain, heart, settings)[
+                    "run_script_structured"
+                ]
             composer = SurfaceComposer(
                 api_client,
                 settings,
@@ -1031,6 +1041,11 @@ async def create_components(settings: Settings) -> dict:
                     heartbeat_runner=heartbeat_runner,
                     database=database,
                     health_db_path=settings.a2ui_health_db_path or None,
+                    run_script=_run_script,
+                    # Lets the registry DERIVE its resolution budget from the
+                    # enclosing tool/compose timeouts instead of assuming the
+                    # defaults.
+                    settings=settings,
                 ),
             )
         action_router = ActionRouter(

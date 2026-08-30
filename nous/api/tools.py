@@ -3885,6 +3885,20 @@ def _release_run_slot() -> None:
         _active_runs -= 1
 
 
+# Bound at import, before any script exists. The `json` MODULE object is
+# injected into script scope, so a script can assign `json.loads = ...`; using
+# the attribute later would then dispatch agent-authored code on the main event
+# loop, after the deadline and run slot are gone (codex P1).
+# JSON classes captured at import for use as CLOSURE locals below. They are
+# deliberately NOT used through module attributes at call time: a script may
+# `import nous.api.tools` and rebind a module global, and it may also rebind
+# `json._default_decoder`. Both encode and decode therefore happen inside the
+# deadline-protected worker, using these classes, so nothing a script can
+# reach ever executes on the main event loop (codex P1).
+_JSON_DECODER_CLS = json.JSONDecoder
+_JSON_ENCODER_CLS = json.JSONEncoder
+
+
 def create_programmatic_tools(
     brain: Brain,
     heart: Heart,
@@ -3914,12 +3928,36 @@ def create_programmatic_tools(
     import re
     import statistics
 
+    # Captured HERE, at closure creation, before any script can run. Reading
+    # these through module attributes inside the worker would still be a
+    # post-script lookup, and `import nous.api.tools; T._JSON_DECODER_CLS = ...`
+    # would win (codex P1 — proved by test_decoding_never_happens_on_the_event_loop).
+    _enc_cls = _JSON_ENCODER_CLS
+    _dec_cls = _JSON_DECODER_CLS
+
     async def run_python(
         code: str,
         _session_id: str | None = None,
         _turn_number: int | None = None,
+        *,
+        _structured: bool = False,
+        _allow_writes: bool = True,
+        _timeout_override: float | None = None,
+        _max_result_chars: int | None = None,
     ) -> dict[str, Any]:
-        """Execute Python code with Nous memory functions in scope."""
+        """Execute Python code with Nous memory functions in scope.
+
+        `_structured` returns ``{ok, result, output, error}`` with `result` as
+        the RAW object the script left in `result`, instead of MCP text blocks.
+        That is what lets an A2UI dashboard source re-run agent-authored code
+        and get data back — one sandbox, two return shapes. Building a second
+        executor for that path would mean a second, weaker set of guards.
+
+        `_allow_writes=False` removes `learn_fact` from scope. A stored
+        dashboard script re-runs unattended on every refresh, so a write would
+        mutate memory repeatedly with nobody in the loop; reads are the whole
+        point of a dashboard and stay available.
+        """
         write_count = {"n": 0}
         output_buf = io.StringIO()
         # F022 P2-1: Capture active episode at call time so _learn_fact can
@@ -3963,6 +4001,13 @@ def create_programmatic_tools(
         # the coroutine on the MAIN loop while it's awaiting the executor — no deadlock.
         loop = asyncio.get_running_loop()
         timeout = settings.programmatic_tools_timeout
+        if _timeout_override is not None:
+            # A caller with a SHORTER enclosing deadline (the A2UI source
+            # budget) must push it down here, not merely cancel its own await:
+            # `asyncio.wait_for` stops the waiter while the worker thread keeps
+            # its run slot until this deadline, so concurrent slow refreshes
+            # would starve every later run_python of slots (codex P1).
+            timeout = max(1.0, min(float(timeout), float(_timeout_override)))
         deadline = time.monotonic() + timeout
 
         def _schedule(coro):
@@ -4385,6 +4430,21 @@ def create_programmatic_tools(
         def _print(*args: object) -> None:
             output_buf.write(" ".join(str(a) for a in args) + "\n")
 
+        def _fail(text: str) -> dict[str, Any]:
+            """One exit shape per mode, so a structured caller never has to
+            dig an error out of MCP text blocks (and never mistakes an error
+            for data)."""
+            if _structured:
+                return {"ok": False, "result": None, "output": "", "error": text}
+            return {"content": [{"type": "text", "text": text}], "is_error": True}
+
+        def _writes_disabled(*_a, **_kw):
+            raise RuntimeError(
+                "learn_fact is disabled in dashboard data sources — a stored "
+                "script re-runs on every refresh, so a write would repeat "
+                "unattended. Read memory freely; write from a normal turn."
+            )
+
         namespace: dict[str, Any] = {
             # Full builtins: the allowlist that used to live here bought no
             # security (the same agent holds an unrestricted `bash` tool) and
@@ -4394,7 +4454,7 @@ def create_programmatic_tools(
             "recall_deep": _recall_deep,
             "recall_recent": _recall_recent,
             "list_tasks": _list_tasks,
-            "learn_fact": _learn_fact,
+            "learn_fact": _learn_fact if _allow_writes else _writes_disabled,
             "print": _print,
             "result": None,
             # Pre-injected for convenience — `import` also works.
@@ -4445,6 +4505,45 @@ def create_programmatic_tools(
                 sys.settrace = _settrace_shim
                 sys.setprofile = _setprofile_shim
                 exec(compile(code, "<nous_script>", "exec"), namespace)
+                if _structured:
+                    # Serialize INSIDE the worker, under the deadline tracer
+                    # (codex P1). `default=str` can invoke an agent-authored
+                    # `__str__`; doing that on the main loop after the slot and
+                    # deadline are gone would let a blocking or looping method
+                    # stall every request, outside the script's own timeout.
+                    # Here the tracer still fires on its lines, and anything it
+                    # raises lands in the outer handlers as a script error.
+                    # `allow_nan=False` rejects NaN/Infinity, which json emits
+                    # as non-standard tokens that Postgres JSONB then refuses
+                    # at commit time (codex P2) — explicit here beats a commit
+                    # failure later.
+                    def _jsonable(obj):
+                        # Numeric types must stay NUMBERS. `default=str` alone
+                        # turned a Decimal reading into "1.5", which survives
+                        # persistence and every shape check but the renderer
+                        # accepts only finite JS numbers — so the chart drew
+                        # nothing, silently (codex P2). Everything else still
+                        # degrades to its string form.
+                        import decimal
+
+                        if isinstance(obj, decimal.Decimal):
+                            return float(obj)
+                        return str(obj)
+
+                    _encoded = _enc_cls(
+                        default=_jsonable, allow_nan=False
+                    ).encode(namespace.get("result"))
+                    namespace["__nous_chars__"] = len(_encoded)
+                    if (
+                        _max_result_chars is not None
+                        and len(_encoded) > _max_result_chars
+                    ):
+                        # Oversized: never decode it (codex P1) — not here, and
+                        # certainly not on the loop.
+                        namespace["__nous_obj__"] = None
+                    else:
+                        # Decode HERE, in the worker, under the deadline tracer.
+                        namespace["__nous_obj__"] = _dec_cls().decode(_encoded)
             finally:
                 # Restore original functions
                 sys.settrace = _original_settrace
@@ -4458,16 +4557,10 @@ def create_programmatic_tools(
                 "run_python rejected: %d/%d concurrent executions in flight",
                 run_python_active_runs(), max_concurrent,
             )
-            return {
-                "content": [{
-                    "type": "text",
-                    "text": (
-                        f"Error: too many concurrent run_python executions "
-                        f"({max_concurrent} max) — retry shortly"
-                    ),
-                }],
-                "is_error": True,
-            }
+            return _fail(
+                f"Error: too many concurrent run_python executions "
+                f"({max_concurrent} max) — retry shortly"
+            )
 
         logger.info(
             "run_python | %d chars | %d/%d slots in use\n%s",
@@ -4487,15 +4580,9 @@ def create_programmatic_tools(
             # tool_result block, compaction bulk-failure detection)
             # distinguish a real execution failure from a successful run
             # whose OUTPUT merely begins with "Error: ".
-            return {
-                "content": [{"type": "text", "text": f"Error: execution timed out ({timeout}s)"}],
-                "is_error": True,
-            }
+            return _fail(f"Error: execution timed out ({timeout}s)")
         except Exception as e:
-            return {
-                "content": [{"type": "text", "text": f"Error: {type(e).__name__}: {e}"}],
-                "is_error": True,
-            }
+            return _fail(f"Error: {type(e).__name__}: {e}")
         except BaseException as exc:
             # P1 Fix 2: Translate SystemExit/KeyboardInterrupt to is_error.
             # ScriptDeadlineExceeded is a BaseException so `except Exception`
@@ -4503,22 +4590,59 @@ def create_programmatic_tools(
             # BaseException subclasses and would escape past the Exception
             # catch, propagate through ToolDispatcher.dispatch, and crash
             # the API process. Catch and translate to is_error.
-            return {
-                "is_error": True,
-                "content": [{
-                    "type": "text",
-                    "text": f"Error: script raised {type(exc).__name__}: {exc}"
-                }],
-            }
+            return _fail(f"Error: script raised {type(exc).__name__}: {exc}")
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
         output = output_buf.getvalue()
         result = namespace.get("result")
+        if _structured:
+            # Decoding pure JSON text runs no user code, so this is safe on the
+            # loop; `result_chars` lets the caller size-check without a second
+            # serialization (and without touching the raw object again).
+            result_chars = int(namespace.get("__nous_chars__") or 4)
+            if _max_result_chars is not None and result_chars > _max_result_chars:
+                return _fail(
+                    f"Error: script result is {result_chars} chars — max "
+                    f"{_max_result_chars}; aggregate or limit it in the script"
+                )
+            return {
+                "ok": True,
+                # Already decoded in the worker; NOTHING is parsed on the loop.
+                "result": namespace.get("__nous_obj__"),
+                "result_chars": result_chars,
+                "output": output,
+                "error": None,
+            }
         text = output or (str(result) if result is not None else "OK")
         return {"content": [{"type": "text", "text": text}]}
 
-    return {"run_python": run_python}
+    async def run_script_structured(
+        code: str,
+        *,
+        allow_writes: bool = False,
+        timeout: float | None = None,
+        max_result_chars: int | None = None,
+    ) -> dict[str, Any]:
+        """Run agent-authored code and return its `result` object.
+
+        Same sandbox as `run_python` — same run slot, deadline tracer,
+        settrace shims and timeout — differing only in return shape and, by
+        default, in having memory writes disabled. Used by the A2UI
+        `agent_script` dashboard source, which re-executes stored code on
+        every refresh.
+        """
+        return await run_python(
+            code,
+            None,
+            None,
+            _structured=True,
+            _allow_writes=allow_writes,
+            _timeout_override=timeout,
+            _max_result_chars=max_result_chars,
+        )
+
+    return {"run_python": run_python, "run_script_structured": run_script_structured}
 
 
 _RUN_PYTHON_SCHEMA: dict[str, Any] = {

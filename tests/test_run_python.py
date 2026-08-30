@@ -7,6 +7,7 @@ memory operations, filter results, and return shaped data — reducing
 token consumption compared to separate tool calls.
 """
 
+import json
 import asyncio
 import threading
 import time
@@ -1825,3 +1826,78 @@ raise KeyboardInterrupt("user interrupted")
         result = await run_python_tool(code)
         assert result["is_error"] is True
         assert "KeyboardInterrupt" in result["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# F095 — structured return + writes-disabled (the A2UI agent_script source)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def run_script_structured(mock_brain, mock_heart, settings):
+    from nous.api.tools import create_programmatic_tools
+
+    return create_programmatic_tools(mock_brain, mock_heart, settings)["run_script_structured"]
+
+
+async def test_structured_run_returns_the_raw_result_object(run_script_structured):
+    # The dashboard source needs the OBJECT, not MCP text blocks — that is the
+    # whole reason for the second return shape (one sandbox, two shapes).
+    out = await run_script_structured("result = {'rows': [1, 2, 3]}")
+    assert out["ok"] is True
+    assert out["result"] == {"rows": [1, 2, 3]}
+
+
+async def test_structured_run_reports_errors_as_data_not_text(run_script_structured):
+    out = await run_script_structured("1 / 0")
+    assert out["ok"] is False and out["result"] is None
+    assert "ZeroDivisionError" in out["error"]
+
+
+async def test_structured_run_disables_memory_writes_by_default(
+    run_script_structured, mock_heart
+):
+    # A stored dashboard script re-runs unattended on every refresh, so a write
+    # would repeat with nobody in the loop. Reads stay available.
+    out = await run_script_structured("result = learn_fact('x', 'note')")
+    assert out["ok"] is False
+    assert "disabled" in out["error"]
+    mock_heart.learn.assert_not_awaited()
+
+
+async def test_interactive_run_python_still_writes(run_python_tool, mock_heart):
+    # The guard must be scoped to the source path — the agent's own
+    # interactive run_python is unchanged.
+    await run_python_tool("learn_fact('x', 'note')")
+    mock_heart.learn.assert_awaited()
+
+
+async def test_structured_run_serializes_inside_the_worker(run_script_structured):
+    """codex P1: `default=str` can invoke an agent-authored `__str__`. Doing
+    that on the main loop, after the run slot and deadline are gone, would let
+    a blocking method stall every request outside the script's own timeout.
+    A raising `__str__` proves the encode happens where errors are caught."""
+    out = await run_script_structured(
+        "class Boom:\n"
+        "    def __str__(self): raise RuntimeError('exploding repr')\n"
+        "result = {'x': Boom()}"
+    )
+    assert out["ok"] is False
+    assert "exploding repr" in out["error"]
+
+
+async def test_structured_run_rejects_non_finite_floats(run_script_structured):
+    """codex P2: json emits NaN/Infinity as non-standard tokens that Postgres
+    JSONB refuses at COMMIT time — long after the dashboard looked fine."""
+    out = await run_script_structured("result = {'v': float('nan')}")
+    assert out["ok"] is False
+    assert "not JSON compliant" in out["error"] or "NaN" in out["error"]
+
+
+async def test_structured_run_normalizes_datetimes_and_reports_size(run_script_structured):
+    out = await run_script_structured(
+        "import datetime\nresult = [{'t': datetime.datetime(2026, 8, 30), 'v': 1}]"
+    )
+    assert out["ok"] is True
+    assert isinstance(out["result"][0]["t"], str)
+    assert out["result_chars"] == len(json.dumps(out["result"]))

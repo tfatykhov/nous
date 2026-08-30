@@ -118,10 +118,41 @@ _COMPOSE_SURFACE_SCHEMA = {
                         "description": (
                             "Registered fetcher: unreviewed_decisions, dag, "
                             "heartbeat_findings, facts_search, recent_episodes, "
-                            "subtasks, schedules."
+                            "subtasks, schedules, decision_outcomes_series, "
+                            "dag_throughput_series — or `agent_script` to "
+                            "supply the data YOURSELF for any domain that has "
+                            "no fetcher."
                         ),
                     },
-                    "params": {"type": "object", "description": "Fetcher params (e.g. {q}, {dag_id})."},
+                    "params": {
+                        "type": "object",
+                        "description": (
+                            "Fetcher params (e.g. {q}, {dag_id}, {days}). For "
+                            "`agent_script`: {\"code\": \"<python>\", \"shape\": "
+                            "\"records\"|\"series\", \"series_keys\": [...]} — the "
+                            "script assigns its data "
+                            "to a variable named `result`, and `shape` declares "
+                            "what it produces so a later failure returns a "
+                            "value the app's existing bindings still accept "
+                            "(refresh does not re-validate). Use \"series\" for "
+                            "any chart, and set `series_keys` to the keys your "
+                            "chart binds (`[\"v\"]` for a Sparkline/BarChart, the "
+                            "LineChart's series keys otherwise) so a later "
+                            "refresh cannot silently drop one and leave the "
+                            "chart empty. It may "
+                            "import and fetch anything, so an external API or "
+                            "link needs no new code and no new env var. It is "
+                            "STORED and RE-RUN on every refresh, which is what "
+                            "keeps the app live instead of a snapshot — so "
+                            "make it self-contained and deterministic, not a "
+                            "one-off. Memory reads (recall_deep, "
+                            "recall_recent, list_tasks) are in scope; "
+                            "learn_fact is disabled because it would repeat "
+                            "unattended. For a chart, return a series: "
+                            "`from nous.a2ui.sources import to_series; "
+                            "result = to_series(rows, 't', 'v')`."
+                        ),
+                    },
                 },
                 "required": ["key", "source"],
             },
@@ -153,6 +184,46 @@ _COMPOSE_SURFACE_SCHEMA = {
     },
     "required": ["intent"],
 }
+
+
+def _compose_schema_for(composer: Any) -> dict:
+    """The compose schema with its source guidance built from the LIVE registry.
+
+    `agent_script` is registered only when its flag AND programmatic tools are
+    both on, but a static schema advertised it unconditionally — so in the
+    default deployment the agent would follow that instruction, hit
+    `UnknownSourceError`, and fail the whole compose call (codex P2). The
+    registry is the single source of truth for what exists; describing
+    anything else is telling the model about a tool it does not have.
+    """
+    import copy
+
+    schema = copy.deepcopy(_COMPOSE_SURFACE_SCHEMA)
+    registry = getattr(composer, "_sources", None)
+    if registry is None:
+        # No composer wired at all — the tool is not registered either.
+        return schema
+    # A registry that is merely EMPTY must still rewrite: falling back to the
+    # static text is how the disabled source got advertised in the first place.
+    names = list(registry.names())
+    props = schema["properties"]["data_sources"]["items"]["properties"]
+    props["source"]["description"] = (
+        f"Registered fetcher — one of: {', '.join(names)}."
+        if names
+        else "No data sources are registered; omit data_sources."
+    )
+    if "agent_script" in names:
+        props["source"]["description"] += (
+            " Use `agent_script` to supply the data YOURSELF for any domain "
+            "that has no fetcher."
+        )
+    else:
+        # Drop the agent_script contract from params too: describing how to
+        # write a script the server will reject is worse than silence.
+        props["params"]["description"] = (
+            "Fetcher params (e.g. {q}, {dag_id}, {days})."
+        )
+    return schema
 
 
 def _intent_slug(intent: str) -> str:
@@ -365,4 +436,6 @@ def register_a2ui_tools(
             ],
         }
 
-    dispatcher.register("compose_surface", compose_surface, _COMPOSE_SURFACE_SCHEMA)
+    dispatcher.register(
+        "compose_surface", compose_surface, _compose_schema_for(composer)
+    )

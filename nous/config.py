@@ -2616,6 +2616,37 @@ class Settings(BaseSettings):
             "server-side fires on this."
         ),
     )
+    a2ui_agent_script_source_enabled: bool = Field(
+        default=False,
+        description=(
+            "F095: register the `agent_script` dashboard source — the agent "
+            "writes the code that produces an app's data, it is stored in "
+            "app_spec, and refresh re-runs it. This is what makes a dashboard "
+            "for a domain with no first-party fetcher LIVE rather than a "
+            "compose-time snapshot, with no new code and no new env var. "
+            "**Default OFF, land-dark.** The other A2UI switches ship ON as "
+            "kill switches because they gate a rendering surface; this one "
+            "opens a new EXPOSURE WINDOW — code stored now and re-executed "
+            "later on refresh, with nobody in the loop. By the same reasoning "
+            "as `NOUS_DAG_CALLBACK_EXECUTION_ENABLED`, a change of that kind "
+            "is flipped deliberately by an operator rather than acquired on "
+            "deploy, and no measurement of real usage exists yet to size the "
+            "impact. The capability argument (the same agent already holds "
+            "unrestricted `run_python` and `bash`) is why this is SAFE to "
+            "flip, not a reason to flip it for you. Separate from "
+            "`NOUS_PROGRAMMATIC_TOOLS_ENABLED` so an operator can stop stored "
+            "scripts from re-running without losing interactive `run_python` "
+            "— different exposure windows. Memory writes are disabled on this "
+            "path regardless of the flag. **Operator note:** source resolution "
+            "is budgeted PER PATH. Compose reserves every round the composer "
+            "may run (`MAX_REPAIRS + 1`), so at the default 120s tool timeout "
+            "there is no room and compose-time scripts fall to a 5s floor — "
+            "raise `NOUS_TOOL_TIMEOUT` if you want long ones (prod runs 2000). "
+            "`app.refresh` reserves NO LLM time (it re-runs fetchers only) and "
+            "keeps the full 45s cap, so a live dashboard that gathers its data "
+            "on refresh is unaffected by that squeeze."
+        ),
+    )
     a2ui_health_db_path: str = Field(
         default="",
         description=(

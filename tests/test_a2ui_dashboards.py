@@ -667,3 +667,661 @@ async def test_theme_survives_dedup_replacement(service, db):
 
 def test_theme_enum_is_closed():
     assert set(_THEMES) == {"nous-default", "alpine-dusk", "harbor", "paper", "signal"}
+
+
+# ---------------------------------------------------------------------------
+# F095 — agent-authored dashboard sources (the "any domain, live, no code"
+# path). The agent writes the code that makes the data; it is stored and
+# re-run on refresh.
+# ---------------------------------------------------------------------------
+
+
+class _FakeRunner:
+    """Stands in for run_script_structured — the real one is the run_python
+    sandbox, exercised by its own suite; here we assert the SOURCE contract."""
+
+    def __init__(self, outcome):
+        self.outcome = dict(outcome)
+        # The real worker JSON-normalizes inside the deadline and reports the
+        # encoded size; mirror that so the source sees the same contract.
+        if self.outcome.get("ok"):
+            encoded = json.dumps(self.outcome.get("result"), default=str, allow_nan=False)
+            self.outcome["result"] = json.loads(encoded)
+            self.outcome.setdefault("result_chars", len(encoded))
+        self.calls: list[str] = []
+
+    async def __call__(
+        self, code: str, *, timeout: float | None = None, max_result_chars: int | None = None
+    ):
+        self.calls.append(code)
+        self.last_timeout = timeout
+        return self.outcome
+
+
+async def test_agent_script_returns_the_scripts_result():
+    runner = _FakeRunner({"ok": True, "result": [{"t": "a", "v": 1}], "output": "", "error": None})
+    reg = build_default_registry(run_script=runner)
+    assert "agent_script" in reg.names()
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script", "params": {"code": "result = []"}}]
+    )
+    assert out["d"] == [{"t": "a", "v": 1}]
+    assert runner.calls == ["result = []"]
+
+
+async def test_agent_script_is_absent_when_no_runner_is_wired():
+    # Same conditional-registration discipline as every other source: no
+    # backing component ⇒ the source does not exist, rather than erroring.
+    assert "agent_script" not in build_default_registry().names()
+
+
+async def test_agent_script_failure_is_explicit_never_a_blank_box():
+    runner = _FakeRunner({"ok": False, "result": None, "output": "", "error": "boom"})
+    reg = build_default_registry(run_script=runner)
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "1/0", "shape": "series", "series_keys": ["v"]}}]
+    )
+    # An empty SERIES, not a bare marker: refresh does not re-run binding
+    # validation, so a chart bound to a working series must not be left
+    # pointing at a non-series object on a transient failure (codex P1).
+    assert is_series(out["d"]) and out["d"]["points"] == []
+    assert "boom" in out["d"]["meta"]["reason"]
+
+
+async def test_agent_script_without_a_result_says_so():
+    runner = _FakeRunner({"ok": True, "result": None, "output": "printed", "error": None})
+    reg = build_default_registry(run_script=runner)
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "print('hi')", "shape": "series", "series_keys": ["v"]}}]
+    )
+    assert is_series(out["d"]) and "no `result`" in out["d"]["meta"]["reason"]
+
+
+async def test_agent_script_requires_code_and_caps_its_size():
+    reg = build_default_registry(run_script=_FakeRunner({"ok": True, "result": [], "error": None}))
+    with pytest.raises(ValueError, match="requires params.code"):
+        await reg.resolve([{"key": "d", "source": "agent_script", "params": {}}])
+    with pytest.raises(ValueError, match="max"):
+        await reg.resolve(
+            [{"key": "d", "source": "agent_script", "params": {"code": "x" * 20_000}}]
+        )
+
+
+async def test_agent_script_series_flows_through_the_normal_budget_path():
+    # A script returning a 500-point series must be downsampled by the SAME
+    # _bound_series path as a first-party source — not exempt from the cap.
+    big = to_series([{"d": f"2026-{i:04d}", "x": float(i)} for i in range(500)], "d", "x")
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": big, "output": "", "error": None})
+    )
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = s", "shape": "series", "series_keys": ["v"]}}]
+    )
+    assert is_series(out["d"]) and len(out["d"]["points"]) <= 200
+
+
+async def test_refresh_re_runs_the_script_so_the_app_is_live_not_a_snapshot():
+    """The point of the whole source: an app whose domain has no first-party
+    fetcher used to be refused a refresh (model-supplied data ⇒ replaying what
+    the model last said), making it no better than emailed static HTML. A
+    script source re-EXECUTES, so the data actually changes."""
+    from nous.a2ui.compose import SurfaceComposer
+    from nous.config import Settings
+
+    runs = {"n": 0}
+
+    async def runner(code: str, *, timeout: float | None = None, max_result_chars=None):
+        runs["n"] += 1
+        return {
+            "ok": True,
+            "result": to_series([{"d": "2026-08-30", "x": float(runs["n"])}], "d", "x"),
+            "output": "",
+            "error": None,
+        }
+
+    composer = SurfaceComposer(
+        object(), Settings(_env_file=None), build_default_registry(run_script=runner)
+    )
+    spec = {
+        "data_sources": [
+            {"key": "live", "source": "agent_script",
+             "params": {"code": "result = f()", "shape": "series", "series_keys": ["v"]}}
+        ]
+    }
+    first = await composer.refresh_data(spec)
+    second = await composer.refresh_data(spec)
+    assert first["live"]["points"][0]["v"] == 1.0
+    assert second["live"]["points"][0]["v"] == 2.0, "refresh replayed instead of re-running"
+
+
+async def test_agent_script_failure_keeps_a_chart_binding_valid():
+    """codex P1: refresh does not re-run binding validation, so a transient
+    script failure must not swap a chart's series for a non-series object —
+    the chart would render 'not a series (object)' and LOSE the reason."""
+    runner = _FakeRunner({"ok": False, "result": None, "output": "", "error": "API timeout"})
+    reg = build_default_registry(run_script=runner)
+    out = await reg.resolve(
+        [{"key": "trend", "source": "agent_script",
+          "params": {"code": "result = f()", "shape": "series", "series_keys": ["v"]}}]
+    )
+    comps = [{"id": "c", "component": "Sparkline", "path": "/trend"}]
+    errs = _binding_rules(comps, out, out, _collect_bindings(comps))
+    assert not any("not a series" in e for e in errs), "failure broke the chart binding"
+    assert "API timeout" in out["trend"]["meta"]["reason"]
+
+
+async def test_agent_script_rejects_an_oversized_result_before_bounding_it():
+    """codex P1: `_bound` trims a list by popping ONE entry and re-serializing
+    the rest — quadratic, on the main event loop, outside the script deadline.
+    An oversized result is rejected after ONE O(n) measurement instead."""
+    huge = [{"i": i, "pad": "x" * 100} for i in range(5000)]
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": huge, "output": "", "error": None})
+    )
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = big", "shape": "series", "series_keys": ["v"]}}]
+    )
+    assert is_series(out["d"]) and "max" in out["d"]["meta"]["reason"]
+
+
+async def test_agent_script_normalizes_non_json_values_for_jsonb():
+    """codex P2: the data model is persisted as JSONB with no custom
+    serializer, and `_bound` only MEASURES with default=str — so a datetime or
+    UUID would survive to the commit and fail there."""
+    import uuid as _uuid
+    from datetime import datetime as _dt
+    from decimal import Decimal
+
+    raw = [{"t": _dt(2026, 8, 30), "id": _uuid.uuid4(), "v": Decimal("1.5")}]
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": raw, "output": "", "error": None})
+    )
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script", "params": {"code": "result = rows"}}]
+    )
+    # Round-trips cleanly => JSONB-safe by construction.
+    json.dumps(out["d"])
+    assert all(isinstance(r["t"], str) and isinstance(r["id"], str) for r in out["d"])
+
+
+async def test_agent_script_failure_preserves_a_RECORDS_shape(caplog):
+    """codex P1: an unconditional empty-SERIES failure broke a table bound to
+    list paths. A one-row [{_error}] marker was the next attempt and is also
+    wrong — a repeat template's children bind fields like `name`, so the
+    marker renders as a row of blanks with nothing bound to `_error`, and the
+    table lies about having a row. The record schema cannot be reconstructed
+    at failure time, so the honest value is no rows + a logged reason."""
+    runner = _FakeRunner({"ok": False, "result": None, "output": "", "error": "429 rate limited"})
+    reg = build_default_registry(run_script=runner)
+    with caplog.at_level("WARNING"):
+        out = await reg.resolve(
+            [{"key": "rows", "source": "agent_script",
+              "params": {"code": "result = f()", "shape": "records"}}]
+        )
+    assert out["rows"] == [], "records failure must stay a list, with no fake row"
+    assert "429 rate limited" in caplog.text, "the reason must reach the operator"
+
+
+async def test_agent_script_rejects_a_declared_shape_the_script_did_not_produce():
+    # Catching it here keeps a chart from ever binding to a record list.
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": [{"a": 1}], "output": "", "error": None})
+    )
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = rows", "shape": "series", "series_keys": ["v"]}}]
+    )
+    assert is_series(out["d"]) and "declared shape 'series'" in out["d"]["meta"]["reason"]
+
+
+async def test_agent_script_rejects_an_unknown_shape():
+    reg = build_default_registry(run_script=_FakeRunner({"ok": True, "result": [], "error": None}))
+    with pytest.raises(ValueError, match="shape must be one of"):
+        await reg.resolve(
+            [{"key": "d", "source": "agent_script",
+              "params": {"code": "result = []", "shape": "blob"}}]
+        )
+
+
+async def test_agent_script_rejects_a_series_with_non_list_points():
+    """codex P1: is_series() checks only `kind`, so a refreshed
+    {"kind":"series","points":{}} would replace a working chart with a value
+    the renderer shows as "not a series" — refresh skips binding validation."""
+    bad = {"kind": "series", "points": {}, "unit": "", "meta": {}}
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": bad, "output": "", "error": None})
+    )
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = bad", "shape": "series", "series_keys": ["v"]}}]
+    )
+    assert is_series(out["d"]) and isinstance(out["d"]["points"], list)
+    assert "declared shape 'series'" in out["d"]["meta"]["reason"]
+
+
+async def test_source_resolution_has_a_total_wall_clock_budget():
+    """codex P1: sources resolve sequentially and an agent_script may run for
+    the full 90s programmatic timeout, but compose must still fit the LLM
+    inside NOUS_TOOL_TIMEOUT. The budget is shared across ALL sources."""
+    import asyncio as _asyncio
+
+    from nous.a2ui import sources as _sources
+
+    reg = SourceRegistry()
+
+    async def slow(params):
+        await _asyncio.sleep(5)
+        return []
+
+    reg.register("slow", slow)
+    original = _sources._TOTAL_SOURCE_SECONDS
+    _sources._TOTAL_SOURCE_SECONDS = 0.05
+    try:
+        with pytest.raises(TimeoutError, match="resolution budget"):
+            await reg.resolve([{"key": "a", "source": "slow", "params": {}}])
+    finally:
+        _sources._TOTAL_SOURCE_SECONDS = original
+
+
+def test_compose_schema_only_advertises_registered_sources():
+    """codex P2: the flag defaults OFF, so a static schema telling the agent to
+    use `agent_script` would send it straight into UnknownSourceError and fail
+    the whole compose call."""
+    from nous.a2ui.tools import _compose_schema_for
+
+    class _C:
+        def __init__(self, reg):
+            self._sources = reg
+
+    without = _compose_schema_for(_C(build_default_registry()))
+    src = without["properties"]["data_sources"]["items"]["properties"]
+    assert "agent_script" not in src["source"]["description"]
+    assert "agent_script" not in src["params"]["description"]
+
+    with_it = _compose_schema_for(_C(build_default_registry(run_script=object())))
+    src2 = with_it["properties"]["data_sources"]["items"]["properties"]
+    assert "agent_script" in src2["source"]["description"]
+
+
+def test_source_budget_is_derived_from_the_enclosing_timeouts():
+    """codex P1: a hardcoded 45s assumed NOUS_TOOL_TIMEOUT=120. At the
+    supported NOUS_TOOL_TIMEOUT=60 it let sources burn 45s and THEN start a
+    60s compose LLM, so the outer wrapper cancelled the tool anyway."""
+    from types import SimpleNamespace
+
+    from nous.a2ui.sources import (
+        _MIN_SOURCE_SECONDS,
+        _TOTAL_SOURCE_SECONDS,
+        _source_budget_seconds,
+    )
+
+    # The composer may run MAX_REPAIRS+1 = 3 LLM rounds, and ALL of them are
+    # reserved — so the DEFAULT 120s tool timeout leaves sources nothing and
+    # they get the floor. That is the honest answer: enabling agent_script on
+    # a 120s tool timeout genuinely has no room, and prod runs 2000.
+    assert _source_budget_seconds(
+        SimpleNamespace(tool_timeout=120, a2ui_compose_timeout_seconds=60)
+    ) == _MIN_SOURCE_SECONDS
+    # the tight config codex named: likewise the floor
+    assert _source_budget_seconds(
+        SimpleNamespace(tool_timeout=60, a2ui_compose_timeout_seconds=60)
+    ) == _MIN_SOURCE_SECONDS
+    # prod (tool_timeout=2000) has ample room and stays CAPPED, never unbounded
+    assert _source_budget_seconds(
+        SimpleNamespace(tool_timeout=2000, a2ui_compose_timeout_seconds=60)
+    ) == _TOTAL_SOURCE_SECONDS
+    # no settings wired -> documented fallback
+    assert _source_budget_seconds(None) == _TOTAL_SOURCE_SECONDS
+
+
+async def test_agent_script_records_must_contain_objects():
+    """codex P2: ["offline"] passed a list-only check, and a Repeat child
+    binding a relative `name` against a scalar resolves to undefined — blank
+    rows, and never routed through _script_failure so nothing reports why."""
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": ["offline"], "output": "", "error": None})
+    )
+    out = await reg.resolve(
+        [{"key": "rows", "source": "agent_script",
+          "params": {"code": "result = x", "shape": "records"}}]
+    )
+    assert out["rows"] == []  # shape-preserving failure, reason logged
+
+
+async def test_shared_deadline_is_pushed_into_the_script_worker():
+    """codex P1: `wait_for` cancels only the AWAIT — the worker thread keeps
+    its run slot until its own 90s deadline, so concurrent slow refreshes
+    starve every later run_python of slots. The shared budget must reach the
+    worker itself."""
+    runner = _FakeRunner({"ok": True, "result": [], "output": "", "error": None})
+    reg = build_default_registry(run_script=runner)
+    await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = []", "shape": "records"}}]
+    )
+    from nous.a2ui.sources import _TOTAL_SOURCE_SECONDS
+
+    assert runner.last_timeout is not None, "worker ran on its own longer deadline"
+    assert 0 < runner.last_timeout <= _TOTAL_SOURCE_SECONDS
+
+
+def test_refresh_is_not_charged_for_compose_rounds():
+    """codex P1: app.refresh runs NO LLM, but the budget reserved three
+    compose rounds anyway — leaving refresh the 5s floor at default settings
+    and cutting off the long-running external-API script the feature exists
+    to keep live."""
+    from types import SimpleNamespace
+
+    from nous.a2ui.sources import (
+        _MIN_SOURCE_SECONDS,
+        _TOTAL_SOURCE_SECONDS,
+        _source_budget_seconds,
+    )
+
+    cfg = SimpleNamespace(tool_timeout=120, a2ui_compose_timeout_seconds=60)
+    assert _source_budget_seconds(cfg, for_compose=True) == _MIN_SOURCE_SECONDS
+    # refresh reserves nothing for the LLM -> 120-0-10 = 110, capped at 45
+    assert _source_budget_seconds(cfg, for_compose=False) == _TOTAL_SOURCE_SECONDS
+
+
+async def test_worker_deadline_is_shorter_than_the_registry_wait():
+    """codex P1: run_python waits `timeout + grace`, so handing the worker the
+    SAME deadline as the registry's wait_for let the outer cancel win — a
+    routine script timeout aborted the whole resolve instead of returning the
+    promised shape-preserving failure."""
+    from nous.a2ui.sources import _WORKER_DEADLINE_MARGIN, _source_budget_seconds
+
+    runner = _FakeRunner({"ok": True, "result": [], "output": "", "error": None})
+    reg = build_default_registry(run_script=runner)
+    await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = []", "shape": "records"}}]
+    )
+    outer = _source_budget_seconds(None)
+    assert runner.last_timeout <= outer - _WORKER_DEADLINE_MARGIN + 0.5
+
+
+async def test_agent_script_rejects_series_points_that_are_not_objects():
+    """codex P2: _downsample_series does `for k in p` / `p.get(...)`, so a null
+    or int point raises INSIDE _bound_series — a 500 instead of a failure."""
+    bad = {"kind": "series", "points": [{"t": "a", "v": 1}, None], "unit": "", "meta": {}}
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": bad, "output": "", "error": None})
+    )
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = bad", "shape": "series", "series_keys": ["v"]}}]
+    )
+    assert is_series(out["d"]) and "declared shape 'series'" in out["d"]["meta"]["reason"]
+
+
+async def test_declared_series_keys_are_enforced_on_every_resolve():
+    """codex P2: refresh skips binding validation, so a result that changes
+    series MODE (single <-> multi) or drops a LineChart key would leave the
+    existing chart rendering nothing. The declared contract is enforced."""
+    single = to_series([{"d": "2026-08-30", "x": 1.0}], "d", "x")
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": single, "output": "", "error": None})
+    )
+    # a chart declared on multi-series keys must reject a single-value refresh
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = s", "shape": "series",
+                     "series_keys": ["success", "failure"]}}]
+    )
+    assert "no longer carries declared key" in out["d"]["meta"]["reason"]
+    # and the matching contract passes untouched
+    ok = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = s", "shape": "series", "series_keys": ["v"]}}]
+    )
+    assert ok["d"]["points"], "a conforming series must pass through"
+
+
+async def test_oversized_result_is_rejected_before_it_is_decoded(monkeypatch):
+    """codex P1: the size check lived DOWNSTREAM of json.loads, so a rejected
+    100MB result was still decoded on the event loop first."""
+    from nous.api import tools as api_tools
+
+    seen = {"loads": 0}
+    real_loads = api_tools.json.loads
+
+    def counting_loads(s, *a, **kw):
+        seen["loads"] += 1
+        return real_loads(s, *a, **kw)
+
+    monkeypatch.setattr(api_tools.json, "loads", counting_loads)
+    tools = api_tools.create_programmatic_tools(object(), object(), _settings_stub())
+    out = await tools["run_script_structured"](
+        "result = ['x' * 100] * 500", max_result_chars=200
+    )
+    assert out["ok"] is False and "max 200" in out["error"]
+    assert seen["loads"] == 0, "oversized result was decoded before rejection"
+
+
+def _settings_stub():
+    from nous.config import Settings
+
+    return Settings(_env_file=None)
+
+
+async def test_series_script_must_declare_its_key_contract():
+    """codex P2: an OPTIONAL series_keys meant no check when omitted — a first
+    single-value result validates a Sparkline and a later multi-series refresh
+    is accepted unchecked, leaving the chart empty."""
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": {}, "output": "", "error": None})
+    )
+    with pytest.raises(ValueError, match="requires params.series_keys"):
+        await reg.resolve(
+            [{"key": "d", "source": "agent_script",
+              "params": {"code": "result = s", "shape": "series"}}]
+        )
+
+
+async def test_dashboard_scripts_cannot_exhaust_every_run_python_slot():
+    """codex P1: the deadline pushed into the worker stops PYTHON-level code,
+    but a script blocked in a C call (urlopen/sleep) cannot be interrupted at
+    all — a documented run_python property this source makes far more
+    reachable. Killing the thread is impossible, so the blast radius is bounded
+    instead: dashboard scripts can never take the whole pool."""
+    from nous.a2ui.sources import _INTERACTIVE_SLOT_RESERVE
+    from nous.config import Settings
+
+    capacity = Settings(_env_file=None).programmatic_tools_max_concurrent
+    assert 0 < _INTERACTIVE_SLOT_RESERVE < capacity, "interactive use must keep capacity"
+
+    # The gate must consult the GLOBAL in-flight count, because that is what a
+    # blocked C-call worker keeps held — a local semaphore would release as
+    # soon as the await returned and let refreshes stack blocked threads.
+    import nous.api.tools as api_tools
+
+    calls = {"n": 0}
+    real = api_tools.run_python_active_runs
+    api_tools.run_python_active_runs = lambda: capacity  # pool fully busy
+    try:
+        runner = _FakeRunner({"ok": True, "result": [], "output": "", "error": None})
+        reg = build_default_registry(run_script=runner)
+        out = await reg.resolve(
+            [{"key": "d", "source": "agent_script",
+              "params": {"code": "result = []", "shape": "records"}}]
+        )
+    finally:
+        api_tools.run_python_active_runs = real
+    assert out["d"] == [], "a busy pool must yield, not queue behind blocked workers"
+    assert runner.calls == [], "the script must not have been started at all"
+    assert calls["n"] == 0
+
+
+async def test_decimal_series_values_stay_numbers(run_script_structured=None):
+    """codex P2: `default=str` turned a Decimal reading into "1.5" — it
+    persisted fine and passed every shape check, but the renderer accepts only
+    finite JS numbers, so the chart silently drew nothing."""
+    from nous.api.tools import create_programmatic_tools
+    from nous.config import Settings
+
+    tools = create_programmatic_tools(object(), object(), Settings(_env_file=None))
+    out = await tools["run_script_structured"](
+        "from decimal import Decimal\nresult = {'v': Decimal('1.5')}"
+    )
+    assert out["ok"] is True
+    assert out["result"]["v"] == 1.5 and isinstance(out["result"]["v"], float)
+
+
+async def test_malformed_series_keys_do_not_500():
+    """codex P2: set([["value"]]) raises TypeError: unhashable list, escaping
+    _script_failure — one malformed result turned compose/refresh into a
+    server error despite the source's failure-isolation contract."""
+    bad = {"kind": "series", "points": [{"t": "a", "v": 1}],
+           "keys": [["value"]], "unit": "", "meta": {}}
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": bad, "output": "", "error": None})
+    )
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = bad", "shape": "series", "series_keys": ["v"]}}]
+    )
+    assert is_series(out["d"]) and "list of strings" in out["d"]["meta"]["reason"]
+
+
+async def test_script_cannot_hijack_the_json_decoder():
+    """codex P1: the injected `json` is the shared MODULE, so a script can
+    assign json.loads — and the post-worker decode would then run agent code on
+    the event loop, after the deadline and run slot are gone."""
+    from nous.api.tools import create_programmatic_tools
+    from nous.config import Settings
+
+    import json as _json_mod
+
+    tools = create_programmatic_tools(object(), object(), Settings(_env_file=None))
+    original_loads = _json_mod.loads
+    try:
+        out = await tools["run_script_structured"](
+            "import json\n"
+            "def _evil(*a, **k): raise RuntimeError('hijacked the decoder')\n"
+            "json.loads = _evil\n"
+            "result = {'ok': 1}"
+        )
+        # The script really did replace the module attribute...
+        assert _json_mod.loads is not original_loads
+        # ...and the decode still used the reference bound at import time.
+        assert out["ok"] is True, out.get("error")
+        assert out["result"] == {"ok": 1}
+    finally:
+        # The script mutates the REAL module in-process; leaving it patched
+        # breaks pytest's own cache write at session end.
+        _json_mod.loads = original_loads
+
+
+async def test_script_cannot_hijack_the_decoder_internals():
+    """codex P1: aliasing json.loads is not enough — the saved function still
+    reads json._default_decoder at call time, so a script could swap THAT and
+    have its decode() run on the event loop after the deadline is gone."""
+    import json as _json_mod
+
+    from nous.api.tools import create_programmatic_tools
+    from nous.config import Settings
+
+    tools = create_programmatic_tools(object(), object(), Settings(_env_file=None))
+    original = _json_mod._default_decoder
+    try:
+        out = await tools["run_script_structured"](
+            "import json\n"
+            "class _Evil:\n"
+            "    def decode(self, s): raise RuntimeError('hijacked internals')\n"
+            "json._default_decoder = _Evil()\n"
+            "result = {'ok': 2}"
+        )
+        assert _json_mod._default_decoder is not original
+        assert out["ok"] is True, out.get("error")
+        assert out["result"] == {"ok": 2}
+    finally:
+        _json_mod._default_decoder = original
+
+
+async def test_a_pool_too_small_to_reserve_refuses_dashboard_scripts():
+    """codex P1: at the supported MAX_CONCURRENT=1 the old threshold let an
+    unattended script take the only slot; blocked in C code it would reject
+    every interactive call indefinitely."""
+    from types import SimpleNamespace
+
+    runner = _FakeRunner({"ok": True, "result": [], "output": "", "error": None})
+    reg = build_default_registry(
+        run_script=runner,
+        settings=SimpleNamespace(
+            programmatic_tools_max_concurrent=1, tool_timeout=2000,
+            a2ui_compose_timeout_seconds=60,
+        ),
+    )
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = []", "shape": "records"}}]
+    )
+    assert out["d"] == [] and runner.calls == [], "script ran on a pool with no reserve"
+
+
+async def test_non_mapping_series_meta_is_rejected():
+    """codex P2: `_downsample_series` does (meta or {}).get(...), so a truthy
+    non-mapping meta raised AttributeError inside _bound_series — a 500."""
+    bad = {"kind": "series", "points": [{"t": "a", "v": 1}], "unit": "", "meta": "bad"}
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": bad, "output": "", "error": None})
+    )
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = bad", "shape": "series", "series_keys": ["v"]}}]
+    )
+    assert is_series(out["d"]) and "declared shape 'series'" in out["d"]["meta"]["reason"]
+
+
+async def test_script_is_not_started_when_it_cannot_finish_in_time():
+    """codex P1: a max(1.0, ...) floor inverted the worker-first ordering near
+    the shared deadline — run_python waits `timeout + 2s` grace while the
+    registry waits only `remaining`, so the registry timed out first and
+    aborted the whole compose/refresh instead of reaching _script_failure."""
+    runner = _FakeRunner({"ok": True, "result": [], "output": "", "error": None})
+    reg = build_default_registry(run_script=runner)
+    fetcher = reg._fetchers["agent_script"]
+    out = await fetcher(
+        {"code": "result = []", "shape": "records", "_remaining_seconds": 0.5}
+    )
+    assert out == [], "must yield the shape-preserving value"
+    assert runner.calls == [], "a worker that cannot land in time must not start"
+
+
+async def test_decoding_never_happens_on_the_event_loop():
+    """codex P1: the 'trusted' decoder was an importable module global, so a
+    script could `import nous.api.tools` and replace it — then its code would
+    run on the loop after the deadline and slot were gone. Both encode AND
+    decode now happen inside the worker."""
+    from nous.api.tools import create_programmatic_tools
+    from nous.config import Settings
+
+    import nous.api.tools as _api_tools
+
+    tools = create_programmatic_tools(object(), object(), Settings(_env_file=None))
+    # The script mutates the REAL module in-process — that IS the attack being
+    # tested — so it must be restored, or every later test decodes through the
+    # stub. Same pollution the json.loads test already had to handle; a script
+    # that rebinds a module global is a test fixture with global reach.
+    original_cls = _api_tools._JSON_DECODER_CLS
+    try:
+        out = await tools["run_script_structured"](
+            "import nous.api.tools as T\n"
+            "class _Evil:\n"
+            "    def decode(self, s): raise RuntimeError('hijacked the module global')\n"
+            "T._JSON_DECODER_CLS = lambda: _Evil()\n"
+            "result = {'ok': 3}"
+        )
+        # The rebind really landed on the module...
+        assert _api_tools._JSON_DECODER_CLS is not original_cls
+        # ...and the decode still succeeded, because it ran inside the worker
+        # against the class captured before the script executed.
+        assert out["ok"] is True, out.get("error")
+        assert out["result"] == {"ok": 3}
+    finally:
+        _api_tools._JSON_DECODER_CLS = original_cls
