@@ -1501,6 +1501,9 @@ _UNDELIVERABLE = [
     # the label reads analytically.
     "Email report", "Notify stakeholders", "Remind Alice", "Schedule digest",
     "Post to Slack", "Deliver weekly",
+    # A deliverable OBJECT is not an analytical marker, and "by <weekday>" is a
+    # deadline rather than a grouping.
+    "Email summary", "Send overview", "Schedule review by Monday",
 ]
 
 _ANALYTICAL = [
@@ -1516,6 +1519,7 @@ _ANALYTICAL = [
     # ...and the same verbs reading analytically must still survive.
     "Subscribe clicks by source", "Subscribe-to-purchase funnel",
     "Email open rate", "Notification volume trend",
+    "Schedule adherence by team", "Delivery rate by day",
 ]
 
 

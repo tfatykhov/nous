@@ -873,11 +873,19 @@ _LEADING_ACTION_RE = re.compile(
 # comparison ("vs"), or a measurement noun. "Email volume by week" and "Send
 # rate by hour" survive; "Email report" does not.
 _ANALYTICAL_RE = re.compile(
-    r"\b(?:by|per|vs\.?|versus|between|across|over)\b"
+    # "by" groups — unless it introduces a DEADLINE ("Schedule review by
+    # Monday"), which is a command, not a grouping (codex P2).
+    r"\bby\b(?!\s+(?:mon|tues?|wed|thur?s?|fri|sat|sun|tomorrow|today|tonight|"
+    r"eod|eow|noon|midnight|next|end\b|\d))"
+    r"|\b(?:per|vs\.?|versus|between|across|over)\b"
+    # Measurement nouns only. Deliberately NOT summary/overview/report/digest:
+    # those are things you would EMAIL, so listing them as analytical exempted
+    # "Email summary" and "Send overview" — the exemption was swallowing the
+    # very commands it sits behind (codex P2).
     r"|\b(?:trend|trends|rate|rates|volume|count|counts|total|totals|share of|"
     r"ratio|average|median|mean|percentile|growth|distribution|breakdown|"
     r"histogram|funnel|leaderboard|activity|latency|throughput|adherence|"
-    r"conversion|split|mix|cohort|heatmap|summary|overview|detail|history)\b",
+    r"conversion|split|mix|cohort|heatmap)\b",
     re.IGNORECASE,
 )
 
