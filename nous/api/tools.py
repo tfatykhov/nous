@@ -3885,6 +3885,14 @@ def _release_run_slot() -> None:
         _active_runs -= 1
 
 
+# Bound at import, before any script exists. The `json` MODULE object is
+# injected into script scope, so a script can assign `json.loads = ...`; using
+# the attribute later would then dispatch agent-authored code on the main event
+# loop, after the deadline and run slot are gone (codex P1).
+_TRUSTED_JSON_DUMPS = json.dumps
+_TRUSTED_JSON_LOADS = json.loads
+
+
 def create_programmatic_tools(
     brain: Brain,
     heart: Heart,
@@ -4509,7 +4517,7 @@ def create_programmatic_tools(
                             return float(obj)
                         return str(obj)
 
-                    namespace["__nous_json__"] = json.dumps(
+                    namespace["__nous_json__"] = _TRUSTED_JSON_DUMPS(
                         namespace.get("result"), default=_jsonable, allow_nan=False
                     )
             finally:
@@ -4579,7 +4587,7 @@ def create_programmatic_tools(
                 )
             return {
                 "ok": True,
-                "result": json.loads(encoded),
+                "result": _TRUSTED_JSON_LOADS(encoded),
                 "result_chars": len(encoded),
                 "output": output,
                 "error": None,

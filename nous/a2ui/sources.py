@@ -84,8 +84,9 @@ _WORKER_DEADLINE_MARGIN = 4.0
 # unattended. Killing the thread is not possible, so bound the blast radius
 # instead: stalled dashboard scripts can never take the whole pool, and the
 # agent's own interactive run_python always has capacity left (codex P1).
-_MAX_CONCURRENT_SOURCE_SCRIPTS = 2
-_script_slots = asyncio.Semaphore(_MAX_CONCURRENT_SOURCE_SCRIPTS)
+# Slots reserved for the agent's own interactive run_python; a dashboard
+# script refuses to start when fewer than this many are free.
+_INTERACTIVE_SLOT_RESERVE = 2
 _MIN_SOURCE_SECONDS = 5.0
 
 
@@ -835,12 +836,34 @@ def build_default_registry(
             # await would let concurrent slow refreshes starve every later
             # run_python of slots (codex P1).
             remaining = params.get("_remaining_seconds")
-            async with _script_slots:
-                outcome = await run_script(
-                    code,
-                    timeout=float(remaining) if remaining else None,
-                    max_result_chars=_MAX_SCRIPT_RESULT_CHARS,
+            # Gate on the GLOBAL in-flight count, not a local semaphore
+            # (codex P1): a semaphore around the await releases as soon as the
+            # coroutine returns, while a worker blocked in a C call keeps its
+            # global run slot alive well past that — so repeated refreshes
+            # could still stack blocked threads until interactive calls
+            # starved. `run_python_active_runs()` reflects the threads that are
+            # actually alive, which is the only signal that tracks a blocked
+            # worker.
+            try:
+                from nous.api.tools import run_python_active_runs
+
+                in_flight = run_python_active_runs()
+                capacity = int(
+                    getattr(settings, "programmatic_tools_max_concurrent", 4) or 4
                 )
+            except Exception:  # pragma: no cover - defensive
+                in_flight, capacity = 0, 4
+            if in_flight >= max(1, capacity - _INTERACTIVE_SLOT_RESERVE):
+                return _script_failure(
+                    f"{in_flight} script slots already in use — dashboard "
+                    "scripts yield to interactive use; try refresh again",
+                    shape,
+                )
+            outcome = await run_script(
+                code,
+                timeout=float(remaining) if remaining else None,
+                max_result_chars=_MAX_SCRIPT_RESULT_CHARS,
+            )
             if not outcome.get("ok"):
                 return _script_failure(str(outcome.get("error") or "script failed"), shape)
             # Already JSON-normalized inside the worker (default=str,
@@ -889,7 +912,21 @@ def build_default_registry(
                 # LineChart's declared key would leave the existing chart
                 # rendering nothing (codex P2). The agent declares the key
                 # contract its chart binds; every resolve must honour it.
-                actual = set(result.get("keys") or ["v"]) if is_series(result) else set()
+                raw_keys = result.get("keys") if is_series(result) else None
+                if raw_keys is not None and not (
+                    isinstance(raw_keys, list)
+                    and all(isinstance(k, str) for k in raw_keys)
+                ):
+                    # `set([["value"]])` raises TypeError: unhashable list, and
+                    # that escapes _script_failure — one malformed result would
+                    # turn compose/refresh into a 500 despite this source's
+                    # failure-isolation contract (codex P2).
+                    return _script_failure(
+                        "series `keys` must be a list of strings, got "
+                        f"{type(raw_keys).__name__}",
+                        shape,
+                    )
+                actual = set(raw_keys or ["v"]) if is_series(result) else set()
                 missing = sorted(set(map(str, declared_keys)) - actual)
                 if missing:
                     return _script_failure(

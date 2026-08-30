@@ -1129,12 +1129,32 @@ async def test_dashboard_scripts_cannot_exhaust_every_run_python_slot():
     all — a documented run_python property this source makes far more
     reachable. Killing the thread is impossible, so the blast radius is bounded
     instead: dashboard scripts can never take the whole pool."""
-    from nous.a2ui.sources import _MAX_CONCURRENT_SOURCE_SCRIPTS
+    from nous.a2ui.sources import _INTERACTIVE_SLOT_RESERVE
     from nous.config import Settings
 
-    assert _MAX_CONCURRENT_SOURCE_SCRIPTS < Settings(
-        _env_file=None
-    ).programmatic_tools_max_concurrent, "interactive run_python must keep capacity"
+    capacity = Settings(_env_file=None).programmatic_tools_max_concurrent
+    assert 0 < _INTERACTIVE_SLOT_RESERVE < capacity, "interactive use must keep capacity"
+
+    # The gate must consult the GLOBAL in-flight count, because that is what a
+    # blocked C-call worker keeps held — a local semaphore would release as
+    # soon as the await returned and let refreshes stack blocked threads.
+    import nous.api.tools as api_tools
+
+    calls = {"n": 0}
+    real = api_tools.run_python_active_runs
+    api_tools.run_python_active_runs = lambda: capacity  # pool fully busy
+    try:
+        runner = _FakeRunner({"ok": True, "result": [], "output": "", "error": None})
+        reg = build_default_registry(run_script=runner)
+        out = await reg.resolve(
+            [{"key": "d", "source": "agent_script",
+              "params": {"code": "result = []", "shape": "records"}}]
+        )
+    finally:
+        api_tools.run_python_active_runs = real
+    assert out["d"] == [], "a busy pool must yield, not queue behind blocked workers"
+    assert runner.calls == [], "the script must not have been started at all"
+    assert calls["n"] == 0
 
 
 async def test_decimal_series_values_stay_numbers(run_script_structured=None):
@@ -1150,3 +1170,48 @@ async def test_decimal_series_values_stay_numbers(run_script_structured=None):
     )
     assert out["ok"] is True
     assert out["result"]["v"] == 1.5 and isinstance(out["result"]["v"], float)
+
+
+async def test_malformed_series_keys_do_not_500():
+    """codex P2: set([["value"]]) raises TypeError: unhashable list, escaping
+    _script_failure — one malformed result turned compose/refresh into a
+    server error despite the source's failure-isolation contract."""
+    bad = {"kind": "series", "points": [{"t": "a", "v": 1}],
+           "keys": [["value"]], "unit": "", "meta": {}}
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": bad, "output": "", "error": None})
+    )
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = bad", "shape": "series", "series_keys": ["v"]}}]
+    )
+    assert is_series(out["d"]) and "list of strings" in out["d"]["meta"]["reason"]
+
+
+async def test_script_cannot_hijack_the_json_decoder():
+    """codex P1: the injected `json` is the shared MODULE, so a script can
+    assign json.loads — and the post-worker decode would then run agent code on
+    the event loop, after the deadline and run slot are gone."""
+    from nous.api.tools import create_programmatic_tools
+    from nous.config import Settings
+
+    import json as _json_mod
+
+    tools = create_programmatic_tools(object(), object(), Settings(_env_file=None))
+    original_loads = _json_mod.loads
+    try:
+        out = await tools["run_script_structured"](
+            "import json\n"
+            "def _evil(*a, **k): raise RuntimeError('hijacked the decoder')\n"
+            "json.loads = _evil\n"
+            "result = {'ok': 1}"
+        )
+        # The script really did replace the module attribute...
+        assert _json_mod.loads is not original_loads
+        # ...and the decode still used the reference bound at import time.
+        assert out["ok"] is True, out.get("error")
+        assert out["result"] == {"ok": 1}
+    finally:
+        # The script mutates the REAL module in-process; leaving it patched
+        # breaks pytest's own cache write at session end.
+        _json_mod.loads = original_loads
