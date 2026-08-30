@@ -690,7 +690,9 @@ class _FakeRunner:
             self.outcome.setdefault("result_chars", len(encoded))
         self.calls: list[str] = []
 
-    async def __call__(self, code: str, *, timeout: float | None = None):
+    async def __call__(
+        self, code: str, *, timeout: float | None = None, max_result_chars: int | None = None
+    ):
         self.calls.append(code)
         self.last_timeout = timeout
         return self.outcome
@@ -771,7 +773,7 @@ async def test_refresh_re_runs_the_script_so_the_app_is_live_not_a_snapshot():
 
     runs = {"n": 0}
 
-    async def runner(code: str, *, timeout: float | None = None):
+    async def runner(code: str, *, timeout: float | None = None, max_result_chars=None):
         runs["n"] += 1
         return {
             "ok": True,
@@ -1055,3 +1057,53 @@ async def test_agent_script_rejects_series_points_that_are_not_objects():
           "params": {"code": "result = bad", "shape": "series"}}]
     )
     assert is_series(out["d"]) and "declared shape 'series'" in out["d"]["meta"]["reason"]
+
+
+async def test_declared_series_keys_are_enforced_on_every_resolve():
+    """codex P2: refresh skips binding validation, so a result that changes
+    series MODE (single <-> multi) or drops a LineChart key would leave the
+    existing chart rendering nothing. The declared contract is enforced."""
+    single = to_series([{"d": "2026-08-30", "x": 1.0}], "d", "x")
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": single, "output": "", "error": None})
+    )
+    # a chart declared on multi-series keys must reject a single-value refresh
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = s", "shape": "series",
+                     "series_keys": ["success", "failure"]}}]
+    )
+    assert "no longer carries declared key" in out["d"]["meta"]["reason"]
+    # and the matching contract passes untouched
+    ok = await reg.resolve(
+        [{"key": "d", "source": "agent_script",
+          "params": {"code": "result = s", "shape": "series", "series_keys": ["v"]}}]
+    )
+    assert ok["d"]["points"], "a conforming series must pass through"
+
+
+async def test_oversized_result_is_rejected_before_it_is_decoded(monkeypatch):
+    """codex P1: the size check lived DOWNSTREAM of json.loads, so a rejected
+    100MB result was still decoded on the event loop first."""
+    from nous.api import tools as api_tools
+
+    seen = {"loads": 0}
+    real_loads = api_tools.json.loads
+
+    def counting_loads(s, *a, **kw):
+        seen["loads"] += 1
+        return real_loads(s, *a, **kw)
+
+    monkeypatch.setattr(api_tools.json, "loads", counting_loads)
+    tools = api_tools.create_programmatic_tools(object(), object(), _settings_stub())
+    out = await tools["run_script_structured"](
+        "result = ['x' * 100] * 500", max_result_chars=200
+    )
+    assert out["ok"] is False and "max 200" in out["error"]
+    assert seen["loads"] == 0, "oversized result was decoded before rejection"
+
+
+def _settings_stub():
+    from nous.config import Settings
+
+    return Settings(_env_file=None)

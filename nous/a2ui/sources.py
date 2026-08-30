@@ -823,7 +823,9 @@ def build_default_registry(
             # run_python of slots (codex P1).
             remaining = params.get("_remaining_seconds")
             outcome = await run_script(
-                code, timeout=float(remaining) if remaining else None
+                code,
+                timeout=float(remaining) if remaining else None,
+                max_result_chars=_MAX_SCRIPT_RESULT_CHARS,
             )
             if not outcome.get("ok"):
                 return _script_failure(str(outcome.get("error") or "script failed"), shape)
@@ -845,6 +847,22 @@ def build_default_registry(
                 )
             # A declared shape the script did not produce is a script bug, and
             # catching it HERE keeps a chart from ever binding to records.
+            declared_keys = params.get("series_keys")
+            if shape == "series" and isinstance(declared_keys, list) and declared_keys:
+                # Refresh skips binding validation, so a later result that
+                # silently changes series MODE (single <-> multi) or drops a
+                # LineChart's declared key would leave the existing chart
+                # rendering nothing (codex P2). The agent declares the key
+                # contract its chart binds; every resolve must honour it.
+                actual = set(result.get("keys") or ["v"]) if is_series(result) else set()
+                missing = sorted(set(map(str, declared_keys)) - actual)
+                if missing:
+                    return _script_failure(
+                        f"series no longer carries declared key(s) "
+                        f"{missing} — it now has {sorted(actual)}; a chart bound "
+                        "to the old keys would render nothing",
+                        shape,
+                    )
             if shape == "series" and not _is_valid_series(result):
                 # The FULL contract, not just `kind` (codex P1): refresh skips
                 # binding validation, so a later {"kind":"series","points":{}}

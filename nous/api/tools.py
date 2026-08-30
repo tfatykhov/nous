@@ -3922,6 +3922,7 @@ def create_programmatic_tools(
         _structured: bool = False,
         _allow_writes: bool = True,
         _timeout_override: float | None = None,
+        _max_result_chars: int | None = None,
     ) -> dict[str, Any]:
         """Execute Python code with Nous memory functions in scope.
 
@@ -4555,6 +4556,14 @@ def create_programmatic_tools(
             # loop; `result_chars` lets the caller size-check without a second
             # serialization (and without touching the raw object again).
             encoded = namespace.get("__nous_json__") or "null"
+            if _max_result_chars is not None and len(encoded) > _max_result_chars:
+                # Reject on the ENCODED length, before json.loads (codex P1):
+                # decoding a rejected 100MB result would block the event loop
+                # and materialize the object anyway. len() is O(1).
+                return _fail(
+                    f"Error: script result is {len(encoded)} chars — max "
+                    f"{_max_result_chars}; aggregate or limit it in the script"
+                )
             return {
                 "ok": True,
                 "result": json.loads(encoded),
@@ -4566,7 +4575,11 @@ def create_programmatic_tools(
         return {"content": [{"type": "text", "text": text}]}
 
     async def run_script_structured(
-        code: str, *, allow_writes: bool = False, timeout: float | None = None
+        code: str,
+        *,
+        allow_writes: bool = False,
+        timeout: float | None = None,
+        max_result_chars: int | None = None,
     ) -> dict[str, Any]:
         """Run agent-authored code and return its `result` object.
 
@@ -4583,6 +4596,7 @@ def create_programmatic_tools(
             _structured=True,
             _allow_writes=allow_writes,
             _timeout_override=timeout,
+            _max_result_chars=max_result_chars,
         )
 
     return {"run_python": run_python, "run_script_structured": run_script_structured}
