@@ -375,6 +375,12 @@ def _bound(value: Any, budget: int) -> tuple[Any, int]:
     return marker, len(json.dumps(marker))
 
 
+# A stored dashboard script is agent-authored code, not prose — cap it so a
+# runaway generation cannot park an unbounded blob in app_spec and re-compile
+# it on every refresh.
+_MAX_SCRIPT_CHARS = 16_000
+
+
 def build_default_registry(
     *,
     heart: Any = None,
@@ -383,6 +389,7 @@ def build_default_registry(
     heartbeat_runner: Any = None,
     database: Any = None,
     health_db_path: str | None = None,
+    run_script: Any = None,
 ) -> SourceRegistry:
     """The Phase 3 fetcher set + F094 series sources.
 
@@ -632,5 +639,55 @@ def build_default_registry(
             return to_series(records, "t", "v", unit=str(params.get("unit", "")))
 
         registry.register("health_series", health_series)
+
+    if run_script is not None:
+
+        async def agent_script(params: dict) -> Any:
+            """Data the AGENT itself produced, re-runnable.
+
+            Every other source is a fetcher someone added in code, so a domain
+            with no fetcher could only ever be a model-supplied SNAPSHOT: an
+            app with no `data_sources` is refused a refresh outright
+            (``compose.refresh_data``), which is exactly the property that made
+            it no better than the emailed static HTML this feature replaces.
+
+            This source closes that: the agent writes the code that produces
+            the data, that code is stored in ``app_spec.data_sources[].params``,
+            and ``refresh_data`` re-resolves it — so the app is genuinely live
+            without anyone adding a fetcher or setting an env var. The script
+            may reach whatever it needs (it has full builtins, the same as the
+            agent's own ``run_python``), which is what makes "plug in an
+            external source with no code change" true.
+
+            It re-runs UNATTENDED, so memory writes are disabled (``learn_fact``
+            raises) — reads are what a dashboard needs. Execution reuses the
+            run_python sandbox verbatim: one run slot, the wall-clock deadline
+            tracer, the settrace shims. A failing script yields an explicit
+            error value, never a stale one and never a blank box, so one broken
+            source cannot fail the whole app's refresh.
+            """
+            code = params.get("code")
+            if not isinstance(code, str) or not code.strip():
+                raise ValueError("agent_script requires params.code (the Python to run)")
+            if len(code) > _MAX_SCRIPT_CHARS:
+                raise ValueError(
+                    f"agent_script code is {len(code)} chars — max {_MAX_SCRIPT_CHARS}"
+                )
+            outcome = await run_script(code)
+            if not outcome.get("ok"):
+                # Mirrors health_series: an explicit, self-describing failure
+                # value beats a blank box or a confident zero.
+                return {"_error": str(outcome.get("error") or "script failed")}
+            result = outcome.get("result")
+            if result is None:
+                return {
+                    "_error": (
+                        "script set no `result` — assign the data to a variable "
+                        "named `result` (a list of records, or a series dict)"
+                    )
+                }
+            return result
+
+        registry.register("agent_script", agent_script)
 
     return registry

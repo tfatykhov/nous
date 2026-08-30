@@ -3918,8 +3918,23 @@ def create_programmatic_tools(
         code: str,
         _session_id: str | None = None,
         _turn_number: int | None = None,
+        *,
+        _structured: bool = False,
+        _allow_writes: bool = True,
     ) -> dict[str, Any]:
-        """Execute Python code with Nous memory functions in scope."""
+        """Execute Python code with Nous memory functions in scope.
+
+        `_structured` returns ``{ok, result, output, error}`` with `result` as
+        the RAW object the script left in `result`, instead of MCP text blocks.
+        That is what lets an A2UI dashboard source re-run agent-authored code
+        and get data back — one sandbox, two return shapes. Building a second
+        executor for that path would mean a second, weaker set of guards.
+
+        `_allow_writes=False` removes `learn_fact` from scope. A stored
+        dashboard script re-runs unattended on every refresh, so a write would
+        mutate memory repeatedly with nobody in the loop; reads are the whole
+        point of a dashboard and stay available.
+        """
         write_count = {"n": 0}
         output_buf = io.StringIO()
         # F022 P2-1: Capture active episode at call time so _learn_fact can
@@ -4385,6 +4400,21 @@ def create_programmatic_tools(
         def _print(*args: object) -> None:
             output_buf.write(" ".join(str(a) for a in args) + "\n")
 
+        def _fail(text: str) -> dict[str, Any]:
+            """One exit shape per mode, so a structured caller never has to
+            dig an error out of MCP text blocks (and never mistakes an error
+            for data)."""
+            if _structured:
+                return {"ok": False, "result": None, "output": "", "error": text}
+            return {"content": [{"type": "text", "text": text}], "is_error": True}
+
+        def _writes_disabled(*_a, **_kw):
+            raise RuntimeError(
+                "learn_fact is disabled in dashboard data sources — a stored "
+                "script re-runs on every refresh, so a write would repeat "
+                "unattended. Read memory freely; write from a normal turn."
+            )
+
         namespace: dict[str, Any] = {
             # Full builtins: the allowlist that used to live here bought no
             # security (the same agent holds an unrestricted `bash` tool) and
@@ -4394,7 +4424,7 @@ def create_programmatic_tools(
             "recall_deep": _recall_deep,
             "recall_recent": _recall_recent,
             "list_tasks": _list_tasks,
-            "learn_fact": _learn_fact,
+            "learn_fact": _learn_fact if _allow_writes else _writes_disabled,
             "print": _print,
             "result": None,
             # Pre-injected for convenience — `import` also works.
@@ -4458,16 +4488,10 @@ def create_programmatic_tools(
                 "run_python rejected: %d/%d concurrent executions in flight",
                 run_python_active_runs(), max_concurrent,
             )
-            return {
-                "content": [{
-                    "type": "text",
-                    "text": (
-                        f"Error: too many concurrent run_python executions "
-                        f"({max_concurrent} max) — retry shortly"
-                    ),
-                }],
-                "is_error": True,
-            }
+            return _fail(
+                f"Error: too many concurrent run_python executions "
+                f"({max_concurrent} max) — retry shortly"
+            )
 
         logger.info(
             "run_python | %d chars | %d/%d slots in use\n%s",
@@ -4487,15 +4511,9 @@ def create_programmatic_tools(
             # tool_result block, compaction bulk-failure detection)
             # distinguish a real execution failure from a successful run
             # whose OUTPUT merely begins with "Error: ".
-            return {
-                "content": [{"type": "text", "text": f"Error: execution timed out ({timeout}s)"}],
-                "is_error": True,
-            }
+            return _fail(f"Error: execution timed out ({timeout}s)")
         except Exception as e:
-            return {
-                "content": [{"type": "text", "text": f"Error: {type(e).__name__}: {e}"}],
-                "is_error": True,
-            }
+            return _fail(f"Error: {type(e).__name__}: {e}")
         except BaseException as exc:
             # P1 Fix 2: Translate SystemExit/KeyboardInterrupt to is_error.
             # ScriptDeadlineExceeded is a BaseException so `except Exception`
@@ -4503,22 +4521,33 @@ def create_programmatic_tools(
             # BaseException subclasses and would escape past the Exception
             # catch, propagate through ToolDispatcher.dispatch, and crash
             # the API process. Catch and translate to is_error.
-            return {
-                "is_error": True,
-                "content": [{
-                    "type": "text",
-                    "text": f"Error: script raised {type(exc).__name__}: {exc}"
-                }],
-            }
+            return _fail(f"Error: script raised {type(exc).__name__}: {exc}")
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
         output = output_buf.getvalue()
         result = namespace.get("result")
+        if _structured:
+            return {"ok": True, "result": result, "output": output, "error": None}
         text = output or (str(result) if result is not None else "OK")
         return {"content": [{"type": "text", "text": text}]}
 
-    return {"run_python": run_python}
+    async def run_script_structured(
+        code: str, *, allow_writes: bool = False
+    ) -> dict[str, Any]:
+        """Run agent-authored code and return its `result` object.
+
+        Same sandbox as `run_python` — same run slot, deadline tracer,
+        settrace shims and timeout — differing only in return shape and, by
+        default, in having memory writes disabled. Used by the A2UI
+        `agent_script` dashboard source, which re-executes stored code on
+        every refresh.
+        """
+        return await run_python(
+            code, None, None, _structured=True, _allow_writes=allow_writes
+        )
+
+    return {"run_python": run_python, "run_script_structured": run_script_structured}
 
 
 _RUN_PYTHON_SCHEMA: dict[str, Any] = {

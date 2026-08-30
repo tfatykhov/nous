@@ -667,3 +667,114 @@ async def test_theme_survives_dedup_replacement(service, db):
 
 def test_theme_enum_is_closed():
     assert set(_THEMES) == {"nous-default", "alpine-dusk", "harbor", "paper", "signal"}
+
+
+# ---------------------------------------------------------------------------
+# F095 — agent-authored dashboard sources (the "any domain, live, no code"
+# path). The agent writes the code that makes the data; it is stored and
+# re-run on refresh.
+# ---------------------------------------------------------------------------
+
+
+class _FakeRunner:
+    """Stands in for run_script_structured — the real one is the run_python
+    sandbox, exercised by its own suite; here we assert the SOURCE contract."""
+
+    def __init__(self, outcome):
+        self.outcome = outcome
+        self.calls: list[str] = []
+
+    async def __call__(self, code: str):
+        self.calls.append(code)
+        return self.outcome
+
+
+async def test_agent_script_returns_the_scripts_result():
+    runner = _FakeRunner({"ok": True, "result": [{"t": "a", "v": 1}], "output": "", "error": None})
+    reg = build_default_registry(run_script=runner)
+    assert "agent_script" in reg.names()
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script", "params": {"code": "result = []"}}]
+    )
+    assert out["d"] == [{"t": "a", "v": 1}]
+    assert runner.calls == ["result = []"]
+
+
+async def test_agent_script_is_absent_when_no_runner_is_wired():
+    # Same conditional-registration discipline as every other source: no
+    # backing component ⇒ the source does not exist, rather than erroring.
+    assert "agent_script" not in build_default_registry().names()
+
+
+async def test_agent_script_failure_is_explicit_never_a_blank_box():
+    runner = _FakeRunner({"ok": False, "result": None, "output": "", "error": "boom"})
+    reg = build_default_registry(run_script=runner)
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script", "params": {"code": "1/0"}}]
+    )
+    assert "boom" in out["d"]["_error"]
+
+
+async def test_agent_script_without_a_result_says_so():
+    runner = _FakeRunner({"ok": True, "result": None, "output": "printed", "error": None})
+    reg = build_default_registry(run_script=runner)
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script", "params": {"code": "print('hi')"}}]
+    )
+    assert "no `result`" in out["d"]["_error"]
+
+
+async def test_agent_script_requires_code_and_caps_its_size():
+    reg = build_default_registry(run_script=_FakeRunner({"ok": True, "result": [], "error": None}))
+    with pytest.raises(ValueError, match="requires params.code"):
+        await reg.resolve([{"key": "d", "source": "agent_script", "params": {}}])
+    with pytest.raises(ValueError, match="max"):
+        await reg.resolve(
+            [{"key": "d", "source": "agent_script", "params": {"code": "x" * 20_000}}]
+        )
+
+
+async def test_agent_script_series_flows_through_the_normal_budget_path():
+    # A script returning a 500-point series must be downsampled by the SAME
+    # _bound_series path as a first-party source — not exempt from the cap.
+    big = to_series([{"d": f"2026-{i:04d}", "x": float(i)} for i in range(500)], "d", "x")
+    reg = build_default_registry(
+        run_script=_FakeRunner({"ok": True, "result": big, "output": "", "error": None})
+    )
+    out = await reg.resolve(
+        [{"key": "d", "source": "agent_script", "params": {"code": "result = s"}}]
+    )
+    assert is_series(out["d"]) and len(out["d"]["points"]) <= 200
+
+
+async def test_refresh_re_runs_the_script_so_the_app_is_live_not_a_snapshot():
+    """The point of the whole source: an app whose domain has no first-party
+    fetcher used to be refused a refresh (model-supplied data ⇒ replaying what
+    the model last said), making it no better than emailed static HTML. A
+    script source re-EXECUTES, so the data actually changes."""
+    from nous.a2ui.compose import SurfaceComposer
+    from nous.config import Settings
+
+    runs = {"n": 0}
+
+    async def runner(code: str):
+        runs["n"] += 1
+        return {
+            "ok": True,
+            "result": to_series([{"d": "2026-08-30", "x": float(runs["n"])}], "d", "x"),
+            "output": "",
+            "error": None,
+        }
+
+    composer = SurfaceComposer(
+        object(), Settings(_env_file=None), build_default_registry(run_script=runner)
+    )
+    spec = {
+        "data_sources": [
+            {"key": "live", "source": "agent_script", "params": {"code": "result = f()"}}
+        ]
+    }
+    first = await composer.refresh_data(spec)
+    second = await composer.refresh_data(spec)
+    assert first["live"]["points"][0]["v"] == 1.0
+    assert second["live"]["points"][0]["v"] == 2.0, "refresh replayed instead of re-running"

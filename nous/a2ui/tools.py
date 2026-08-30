@@ -118,10 +118,32 @@ _COMPOSE_SURFACE_SCHEMA = {
                         "description": (
                             "Registered fetcher: unreviewed_decisions, dag, "
                             "heartbeat_findings, facts_search, recent_episodes, "
-                            "subtasks, schedules."
+                            "subtasks, schedules, decision_outcomes_series, "
+                            "dag_throughput_series — or `agent_script` to "
+                            "supply the data YOURSELF for any domain that has "
+                            "no fetcher."
                         ),
                     },
-                    "params": {"type": "object", "description": "Fetcher params (e.g. {q}, {dag_id})."},
+                    "params": {
+                        "type": "object",
+                        "description": (
+                            "Fetcher params (e.g. {q}, {dag_id}, {days}). For "
+                            "`agent_script`: {\"code\": \"<python>\"} — the script "
+                            "assigns its data to a variable named `result` "
+                            "(a list of records, or a chart series). It may "
+                            "import and fetch anything, so an external API or "
+                            "link needs no new code and no new env var. It is "
+                            "STORED and RE-RUN on every refresh, which is what "
+                            "keeps the app live instead of a snapshot — so "
+                            "make it self-contained and deterministic, not a "
+                            "one-off. Memory reads (recall_deep, "
+                            "recall_recent, list_tasks) are in scope; "
+                            "learn_fact is disabled because it would repeat "
+                            "unattended. For a chart, return a series: "
+                            "`from nous.a2ui.sources import to_series; "
+                            "result = to_series(rows, 't', 'v')`."
+                        ),
+                    },
                 },
                 "required": ["key", "source"],
             },

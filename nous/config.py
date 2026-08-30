@@ -2616,6 +2616,25 @@ class Settings(BaseSettings):
             "server-side fires on this."
         ),
     )
+    a2ui_agent_script_source_enabled: bool = Field(
+        default=True,
+        description=(
+            "F095: register the `agent_script` dashboard source — the agent "
+            "writes the code that produces an app's data, it is stored in "
+            "app_spec, and refresh re-runs it. This is what makes a dashboard "
+            "for a domain with no first-party fetcher LIVE rather than a "
+            "compose-time snapshot, with no new code and no new env var. "
+            "Ships ON (A2UI kill-switch posture): it grants the agent no "
+            "capability it lacks — the same agent already holds unrestricted "
+            "`run_python` and `bash`. What it does add is PERSISTENCE, since "
+            "stored code re-executes on refresh with nobody in the loop, which "
+            "is precisely why this is a separate switch from "
+            "`NOUS_PROGRAMMATIC_TOOLS_ENABLED`: an operator can stop stored "
+            "scripts from re-running without taking away interactive "
+            "`run_python`, because they are different exposure windows. "
+            "Memory writes are disabled on this path regardless of the flag."
+        ),
+    )
     a2ui_health_db_path: str = Field(
         default="",
         description=(

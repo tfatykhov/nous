@@ -1825,3 +1825,47 @@ raise KeyboardInterrupt("user interrupted")
         result = await run_python_tool(code)
         assert result["is_error"] is True
         assert "KeyboardInterrupt" in result["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# F095 — structured return + writes-disabled (the A2UI agent_script source)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def run_script_structured(mock_brain, mock_heart, settings):
+    from nous.api.tools import create_programmatic_tools
+
+    return create_programmatic_tools(mock_brain, mock_heart, settings)["run_script_structured"]
+
+
+async def test_structured_run_returns_the_raw_result_object(run_script_structured):
+    # The dashboard source needs the OBJECT, not MCP text blocks — that is the
+    # whole reason for the second return shape (one sandbox, two shapes).
+    out = await run_script_structured("result = {'rows': [1, 2, 3]}")
+    assert out["ok"] is True
+    assert out["result"] == {"rows": [1, 2, 3]}
+
+
+async def test_structured_run_reports_errors_as_data_not_text(run_script_structured):
+    out = await run_script_structured("1 / 0")
+    assert out["ok"] is False and out["result"] is None
+    assert "ZeroDivisionError" in out["error"]
+
+
+async def test_structured_run_disables_memory_writes_by_default(
+    run_script_structured, mock_heart
+):
+    # A stored dashboard script re-runs unattended on every refresh, so a write
+    # would repeat with nobody in the loop. Reads stay available.
+    out = await run_script_structured("result = learn_fact('x', 'note')")
+    assert out["ok"] is False
+    assert "disabled" in out["error"]
+    mock_heart.learn.assert_not_awaited()
+
+
+async def test_interactive_run_python_still_writes(run_python_tool, mock_heart):
+    # The guard must be scoped to the source path — the agent's own
+    # interactive run_python is unchanged.
+    await run_python_tool("learn_fact('x', 'note')")
+    mock_heart.learn.assert_awaited()
