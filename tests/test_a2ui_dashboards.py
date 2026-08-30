@@ -156,6 +156,38 @@ def test_downsample_preserves_per_key_gap_representatives():
     assert any("b" not in p for p in pts), "b's break lost"
 
 
+def test_chart_rejects_non_array_series_points():
+    # {kind:series, points:{}} passes the kind check but readSeries needs an
+    # array and renders "not a series" (codex P2).
+    bad = {"kind": "series", "points": {}, "unit": "", "meta": {}}
+    comps = [{"id": "s", "component": "Sparkline", "path": "/o"}]
+    errs = _binding_rules(comps, {"o": bad}, {"o": bad}, _collect_bindings(comps))
+    assert any("points" in e and "array" in e for e in errs)
+
+
+def test_over_capacity_rejects_zero_valid_index_coverage():
+    # Bound only through a non-numeric child /pending/foo: bound per rule 1, but
+    # zero records render (codex P2).
+    big = {"pending": [{"i": i} for i in range(12)]}
+    comps = [{"id": "k", "component": "KeyValueTable", "rows": {"path": "/pending/foo"}}]
+    errs = _binding_rules(comps, big, big, _collect_bindings(comps))
+    assert any("only 0" in e for e in errs)
+
+
+def test_nested_repeat_chart_is_left_to_the_renderer():
+    # A chart inside NESTED repeat scopes is composed per-scope by the renderer;
+    # the single-level static resolver must not validate it against a wrong path
+    # (false reject or false pass) — it defers instead (codex P2).
+    comps = [
+        {"id": "outer", "component": "Column", "children": {"componentId": "grp", "path": "/groups"}},
+        {"id": "grp", "component": "Column", "children": {"componentId": "card", "path": "metrics"}},
+        {"id": "card", "component": "Sparkline", "path": "trend"},
+    ]
+    model = {"groups": [{"metrics": [{"trend": [1, 2, 3]}]}]}  # inner is a bad array
+    errs = _binding_rules(comps, model, model, _collect_bindings(comps))
+    assert not any("not a series" in e for e in errs)
+
+
 def test_relative_chart_path_validates_every_repeat_item():
     # Item 0 is a valid series but item 1 is an array — a heterogeneous repeat
     # must be caught, not passed on the strength of item 0 (codex P2).

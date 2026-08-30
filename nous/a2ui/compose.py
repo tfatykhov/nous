@@ -585,12 +585,15 @@ def _child_ids(comp: dict) -> list[str]:
     return out
 
 
-def _owning_template(comp_id: str, by_id: dict[str, dict]) -> str | None:
-    """The source path of the Repeat template whose subtree contains
-    ``comp_id``, or None. A Repeat template is a component whose ``children`` is
-    a ``{componentId, path}`` dict; its ``componentId`` roots a per-item scope
-    (pointer.ts `absolute`), so a relative chart path inside it resolves against
-    the template's item records, not the model root."""
+def _containing_templates(comp_id: str, by_id: dict[str, dict]) -> list[str]:
+    """The source paths of every Repeat template whose subtree contains
+    ``comp_id``. A Repeat template is a component whose ``children`` is a
+    ``{componentId, path}`` dict; its ``componentId`` roots a per-item scope
+    (pointer.ts `absolute`). More than one means NESTED scopes — the renderer
+    composes each template path against its parent scope, which this static
+    resolver does not model, so a nested chart is left to the renderer rather
+    than validated against a wrong path (codex P2)."""
+    found: list[str] = []
     for comp in by_id.values():
         children = comp.get("children")
         if not (isinstance(children, dict) and isinstance(children.get("path"), str)):
@@ -608,8 +611,8 @@ def _owning_template(comp_id: str, by_id: dict[str, dict]) -> str | None:
             if node:
                 stack.extend(_child_ids(node))
         if comp_id in seen:
-            return children["path"]
-    return None
+            found.append(children["path"])
+    return found
 
 
 def _chart_shape_errors(ctype: str, comp: dict, path: str, resolved: Any) -> list[str]:
@@ -628,6 +631,14 @@ def _chart_shape_errors(ctype: str, comp: dict, path: str, resolved: Any) -> lis
         errs.append(
             f"{ctype} {comp.get('id')!r} binds {path} which resolved to "
             f"{shape}, not a series — chart paths need a series-shaped source"
+        )
+        return errs
+    # `points` must be an array: {kind:"series", points:{}} passes the kind
+    # check but readSeries requires a list and renders "not a series" (codex P2).
+    if not isinstance(resolved.get("points"), list):
+        errs.append(
+            f"{ctype} {comp.get('id')!r} binds {path}: series `points` must be an "
+            f"array, got {type(resolved.get('points')).__name__}"
         )
         return errs
     # Sparkline and BarChart both read the default `v` key, so a MULTI-series
@@ -702,10 +713,13 @@ def _binding_rules(
         if path.startswith("/"):
             targets = [(path, _get_path(full_model, path))]
         else:
-            source_path = _owning_template(comp.get("id", ""), by_id)
-            if source_path is None:
+            templates = _containing_templates(comp.get("id", ""), by_id)
+            if len(templates) > 1:
+                continue  # nested scopes — the renderer composes; leave to it
+            if not templates:
                 targets = [("/" + path, _get_path(full_model, "/" + path))]
             else:
+                source_path = templates[0]
                 items = _get_path(full_model, source_path)
                 if not isinstance(items, list) or not items:
                     continue  # template has no items yet — nothing to validate
@@ -730,20 +744,23 @@ def _binding_rules(
         template_bound = any(b == f"/{key}" for b in bindings)
         if template_bound:
             continue
-        indices = set()
         prefix = f"/{key}/"
+        prefix_bound = any(b.startswith(prefix) for b in bindings)
+        indices = set()
         for b in bindings:
             if b.startswith(prefix):
                 seg = b[len(prefix) :].split("/", 1)[0]
                 if seg.isdigit():
                     indices.add(int(seg))
-        # Coverage is the count of DISTINCT IN-RANGE bound indices, not max+1
-        # and not the raw count: binding /key/11 of 12 has max+1 == n, and
-        # binding n-1 real indices plus an out-of-range /key/999 makes the raw
-        # count == n — both leave real records unrendered (codex P2). Only
-        # indices inside range(n) render a record.
+        # Coverage is the count of DISTINCT IN-RANGE bound indices — not max+1,
+        # not the raw count, and not merely "some index binding exists". Binding
+        # /key/11 of 12 has max+1 == n; n-1 real indices plus /key/999 has raw
+        # count == n; binding only /key/foo (non-numeric) or /key/999 has ZERO
+        # valid indices — all leave real records unrendered (codex P2). Only
+        # indices inside range(n) render a record; a prefix binding with none
+        # valid renders NOTHING, which is under-render at its worst.
         covered = {i for i in indices if i < n}
-        if indices and len(covered) < n:
+        if prefix_bound and len(covered) < n:
             errors.append(
                 f"source {key!r} resolved {n} records but only {len(covered)} "
                 "are bound by fixed index — use a repeat template so all render, "
