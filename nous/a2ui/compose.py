@@ -591,6 +591,13 @@ def _binding_rules(
         path = comp.get("path")
         if not isinstance(path, str) or not path.strip():
             continue  # binding-mandatory already caught this in grammar
+        if not path.startswith("/"):
+            # A relative chart path is scope-bound: inside a repeat template the
+            # renderer resolves it per-item against the item base (pointer.ts
+            # `absolute`), so it CANNOT be resolved at the model root and the
+            # checks below would false-reject a valid per-item chart (codex P2).
+            # Grammar's binding-mandatory still guarantees the path is non-empty.
+            continue
         resolved = _get_path(full_model, path)
         # (2) Series-shape (F094 §5 rule 2): a chart bound to a record list
         # (the mistake the model makes most) — reject naming what it actually
@@ -660,12 +667,15 @@ def _binding_rules(
                 seg = b[len(prefix) :].split("/", 1)[0]
                 if seg.isdigit():
                     indices.add(int(seg))
-        # Coverage is the count of DISTINCT bound indices, not max+1: binding
-        # only /key/11 of 12 records has max+1 == n yet renders one record
-        # (codex P2). Sparse or late fixed bindings are under-render too.
-        if indices and len(indices) < n:
+        # Coverage is the count of DISTINCT IN-RANGE bound indices, not max+1
+        # and not the raw count: binding /key/11 of 12 has max+1 == n, and
+        # binding n-1 real indices plus an out-of-range /key/999 makes the raw
+        # count == n — both leave real records unrendered (codex P2). Only
+        # indices inside range(n) render a record.
+        covered = {i for i in indices if i < n}
+        if indices and len(covered) < n:
             errors.append(
-                f"source {key!r} resolved {n} records but only {len(indices)} "
+                f"source {key!r} resolved {n} records but only {len(covered)} "
                 "are bound by fixed index — use a repeat template so all render, "
                 "never a partial slice of a complete source"
             )

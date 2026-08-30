@@ -142,17 +142,20 @@ export interface Domain {
  * sits mid-height rather than collapsing. */
 export function yDomain(values: number[], zeroBase: boolean): Domain {
   if (values.length === 0) return { min: 0, max: 1, zeroBreak: false };
-  let min = Math.min(...values);
-  let max = Math.max(...values);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  if (zeroBase) {
+    // Zero-basing is the Bar/Area contract and must win BEFORE the flat-line
+    // pad, or all-equal bars (yDomain([10,10], true)) get a [9,11] domain and
+    // render at ~91% of the track instead of full (codex P2). All-equal-zero
+    // yields [0,0]; the caller's `span || 1` / `maxAbs || 1` handles it.
+    return { min: Math.min(0, min), max: Math.max(0, max), zeroBreak: false };
+  }
   if (min === max) {
-    // all-equal: pad symmetrically around the value
+    // all-equal (Line/Spark only): pad symmetrically so a flat line sits
+    // mid-height rather than collapsing.
     const pad = Math.abs(min) > 0 ? Math.abs(min) * 0.1 : 1;
     return { min: min - pad, max: max + pad, zeroBreak: false };
-  }
-  if (zeroBase) {
-    min = Math.min(0, min);
-    max = Math.max(0, max);
-    return { min, max, zeroBreak: false };
   }
   const span = max - min;
   const pad = span * 0.08;

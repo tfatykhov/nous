@@ -109,6 +109,9 @@
   .app-section.rail > :global(.row) {
     display: flex;
     flex-direction: row;
+    /* A Row child keeps its own flex-wrap: wrap, so without this reset rail
+       items wrap onto new lines instead of scrolling horizontally (codex P2). */
+    flex-wrap: nowrap;
     gap: 0.6rem;
     overflow-x: auto;
     padding-bottom: 0.3rem;

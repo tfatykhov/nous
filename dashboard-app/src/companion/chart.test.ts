@@ -106,6 +106,16 @@ describe('y-domain zero-basing (§3 — the axis must not be able to lie)', () =
     expect(d.min).not.toBe(d.max);
   });
 
+  it('zero-bases all-equal bars instead of padding symmetrically (codex P2)', () => {
+    // Bar/Area must include zero even when flat, or the bars render short.
+    const d = yDomain([10, 10], true);
+    expect(d.min).toBe(0);
+    expect(d.max).toBe(10);
+    const neg = yDomain([-10, -10], true);
+    expect(neg.min).toBe(-10);
+    expect(neg.max).toBe(0);
+  });
+
   it('handles an empty value list without dividing by zero', () => {
     const d = yDomain([], false);
     expect(Number.isFinite(d.min)).toBe(true);

@@ -330,6 +330,27 @@ def test_over_capacity_counts_distinct_indices_not_the_max():
     assert any("resolved 12 records but only 1" in e for e in errs)
 
 
+def test_over_capacity_ignores_out_of_range_indices():
+    # n-1 real indices + one out-of-range /pending/999: the raw count is n, but
+    # one real record is unrendered (codex P2). Only in-range indices count.
+    big = {"pending": [{"i": i} for i in range(12)]}
+    comps = [
+        {"id": f"k{i}", "component": "KeyValueTable", "rows": {"path": f"/pending/{i}"}}
+        for i in range(11)
+    ] + [{"id": "kx", "component": "KeyValueTable", "rows": {"path": "/pending/999"}}]
+    errs = _binding_rules(comps, big, big, _collect_bindings(comps))
+    assert any("resolved 12 records but only 11" in e for e in errs)
+
+
+def test_relative_chart_path_in_a_repeat_scope_is_not_root_validated():
+    # A chart inside a repeat template has a scope-relative path the renderer
+    # resolves per-item; the root series-shape check must not false-reject it
+    # (codex P2). Grammar's binding-mandatory still requires a non-empty path.
+    comps = [{"id": "sp", "component": "Sparkline", "path": "trend"}]
+    errs = _binding_rules(comps, {}, {}, _collect_bindings(comps))
+    assert not any("not a series" in e for e in errs)
+
+
 def test_repeat_template_binding_exempts_over_capacity():
     big = {"items": [{"i": i} for i in range(12)]}
     # a template binds /items (no index) → all render → no over-capacity error
