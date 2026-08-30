@@ -130,6 +130,20 @@ def test_downsample_preserves_per_key_gaps_in_multi_series():
     assert any("a" not in p and "b" in p for p in s["points"]), "per-key gap lost"
 
 
+def test_downsample_keeps_breaks_when_gaps_exceed_the_cap():
+    # 500-point alternating valid/missing series (250 gaps): the cap cannot keep
+    # every gap, but must keep a representative break for each broken pair —
+    # never stride them all away and re-bridge (codex P1 round 6).
+    recs = [
+        {"d": f"2026-{i:04d}", "x": (float(i) if i % 2 == 0 else float("nan"))}
+        for i in range(500)
+    ]
+    s = to_series(recs, "d", "x")
+    assert len(s["points"]) <= 200
+    gaps = sum(1 for p in s["points"] if "v" not in p)
+    assert gaps > 10, "representative breaks must survive, not be strided away"
+
+
 def test_sparkline_and_barchart_reject_a_multi_series_source():
     ser = {
         "kind": "series",
@@ -394,13 +408,21 @@ def test_over_capacity_ignores_out_of_range_indices():
     assert any("resolved 12 records but only 11" in e for e in errs)
 
 
-def test_relative_chart_path_in_a_repeat_scope_is_not_root_validated():
-    # A chart inside a repeat template has a scope-relative path the renderer
-    # resolves per-item; the root series-shape check must not false-reject it
-    # (codex P2). Grammar's binding-mandatory still requires a non-empty path.
+def test_root_relative_chart_path_is_validated_from_root():
+    # With no repeat scope, the renderer resolves a bare relative path from the
+    # model root as `/trend` — so validation must too, not skip (codex round 6).
+    ser = {"kind": "series", "points": [{"t": "a", "v": 1}], "unit": "", "meta": {}}
     comps = [{"id": "sp", "component": "Sparkline", "path": "trend"}]
-    errs = _binding_rules(comps, {}, {}, _collect_bindings(comps))
-    assert not any("not a series" in e for e in errs)
+    assert not any(
+        "not a series" in e
+        for e in _binding_rules(comps, {"trend": ser}, {"trend": ser}, _collect_bindings(comps))
+    )
+    # a root-relative path resolving to an array must still be caught
+    bad = {"trend": [1, 2, 3]}
+    assert any(
+        "not a series" in e
+        for e in _binding_rules(comps, bad, bad, _collect_bindings(comps))
+    )
 
 
 def test_repeat_template_binding_exempts_over_capacity():

@@ -143,48 +143,63 @@ def _bound_series(series: dict, budget: int) -> tuple[dict, int]:
     return best, len(json.dumps(best, default=str))
 
 
+def _stride_pick(idxs: list[int], budget: int) -> list[int]:
+    """Evenly sample ``budget`` items from ``idxs``, preserving both ends."""
+    if len(idxs) <= budget:
+        return list(idxs)
+    step = len(idxs) / budget
+    out = [idxs[min(len(idxs) - 1, int(i * step))] for i in range(budget)]
+    out[-1] = idxs[-1]
+    return out
+
+
 def _downsample_series(series: dict, target: int) -> dict:
-    """Stride downsample preserving first + last AND every gap placeholder
-    (LTTB deferred to F094 P3). Stamps meta.downsampled_from with the ORIGINAL
-    length so the renderer can mark it, carried across repeated downsampling."""
+    """Stride downsample preserving first + last AND every line BREAK (LTTB
+    deferred to F094 P3). Stamps meta.downsampled_from with the ORIGINAL length,
+    carried across repeated downsampling."""
     points = series.get("points") or []
     original = series.get("meta", {}).get("downsampled_from") or len(points)
     if len(points) <= target:
         return series
-    # A point that omits ANY rendered key is a gap for that key's line — and
-    # the renderer breaks the line there. A naive stride can skip it while
-    # keeping full points on both sides, silently bridging a real gap (codex
-    # P1). This must be PER KEY: a multi-series point that carries `a` but omits
-    # `b` is a gap for `b` even though it is not a bare `{t}` placeholder. So a
-    # point is a gap-boundary unless it carries every value key seen anywhere;
-    # retain all of those, stride-sample the rest into the remaining budget.
+    # A point that omits ANY rendered key is a gap for that key's line, and the
+    # renderer breaks the line there. Bridging one is a fidelity lie (codex P1),
+    # and it is PER KEY: a multi-series point carrying `a` but omitting `b` is a
+    # gap for `b`. What the LINE needs is a break, and ONE gap point between two
+    # kept finite points suffices for one — so keep a REPRESENTATIVE gap per
+    # broken pair, not every gap. That preserves every break AND fits the budget
+    # even when gaps outnumber it (the earlier "keep all gaps" then strode the
+    # combined set and dropped some, re-bridging — codex P1 round 6).
     value_keys: set = set()
     for p in points:
         value_keys |= {k for k in p if k != "t"}
-    gap_idx = [i for i, p in enumerate(points) if value_keys - set(p)]
-    finite_idx = [i for i, p in enumerate(points) if not (value_keys - set(p))]
-    finite_budget = max(2, target - len(gap_idx))
-    if len(finite_idx) > finite_budget:
-        fstep = len(finite_idx) / finite_budget
-        picked = [
-            finite_idx[min(len(finite_idx) - 1, int(i * fstep))]
-            for i in range(finite_budget)
-        ]
-        picked[-1] = finite_idx[-1]
-    else:
-        picked = finite_idx
-    keep = set(picked) | set(gap_idx)
-    keep.add(0)
-    keep.add(len(points) - 1)  # endpoints are the visible range — never dropped
-    kept_idx = sorted(keep)
-    if len(kept_idx) > target:
-        # Pathological (gaps alone exceed the budget): stride the kept set down,
-        # still pinning the endpoints.
-        kstep = len(kept_idx) / target
-        pos = {int(i * kstep) for i in range(target)}
-        pos.add(0)
-        pos.add(len(kept_idx) - 1)
-        kept_idx = [kept_idx[min(len(kept_idx) - 1, j)] for j in sorted(pos)]
+    gap_set = {i for i, p in enumerate(points) if value_keys - set(p)}
+    finite_idx = [i for i in range(len(points)) if i not in gap_set]
+
+    def _reps(picked: list[int]) -> set[int]:
+        # One representative gap between each consecutive kept-finite pair that
+        # had a gap between them in the original — enough to break the line.
+        reps: set[int] = set()
+        for a, b in zip(picked, picked[1:]):
+            rep = next((g for g in range(a + 1, b) if g in gap_set), None)
+            if rep is not None:
+                reps.add(rep)
+        return reps
+
+    # Largest finite budget whose (finite + representative gaps + endpoints) set
+    # still fits the target. Binary search — the same shape as _bound_series.
+    ends = {0, len(points) - 1}
+    lo, hi = 2, min(target, max(2, len(finite_idx)))
+    best: set[int] = set(ends)
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        picked = _stride_pick(finite_idx, mid)
+        keep = set(picked) | _reps(picked) | ends
+        if len(keep) <= target:
+            best = keep
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    kept_idx = sorted(best)
     out = dict(series)
     out["points"] = [points[i] for i in kept_idx]
     meta = dict(series.get("meta") or {})

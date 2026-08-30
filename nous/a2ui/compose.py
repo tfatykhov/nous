@@ -636,19 +636,20 @@ def _binding_rules(
         if path.startswith("/"):
             resolved = _get_path(full_model, path)
         else:
-            # A relative chart path is scope-bound: inside a repeat template the
-            # renderer resolves it per-item against the item base (pointer.ts
-            # `absolute`). Validate it against the template's FIRST item record
-            # rather than the model root — a root lookup would always miss and
-            # false-reject a valid per-item chart, while a blanket skip lets a
-            # relative path that resolves to an array/scalar through (codex P2).
+            # A relative chart path resolves the way the renderer resolves it
+            # (pointer.ts `absolute`): inside a repeat template, against the
+            # item base; with no scope, from the model ROOT as `/path`. Validate
+            # it the SAME way — a root lookup would false-reject a per-item chart
+            # (codex round 4), but skipping a root-relative path lets `{trend:[]}`
+            # through (codex round 6).
             source_path = _owning_template(comp.get("id", ""), by_id)
             if source_path is None:
-                continue  # scope unknown — cannot resolve; leave to the renderer
-            items = _get_path(full_model, source_path)
-            if not isinstance(items, list) or not items:
-                continue  # nothing to validate against yet
-            resolved = _get_path(full_model, f"{source_path}/0/{path}")
+                resolved = _get_path(full_model, "/" + path)
+            else:
+                items = _get_path(full_model, source_path)
+                if not isinstance(items, list) or not items:
+                    continue  # template has no items yet — nothing to validate
+                resolved = _get_path(full_model, f"{source_path}/0/{path}")
         # (2) Series-shape (F094 §5 rule 2): a chart bound to a record list
         # (the mistake the model makes most) — reject naming what it actually
         # resolved to.
