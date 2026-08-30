@@ -37,13 +37,21 @@ export function readSeries(value: unknown): ReadSeries {
     Array.isArray((value as { points?: unknown }).points)
   ) {
     const v = value as {
-      points: SeriesPoint[];
+      points: unknown[];
       unit?: unknown;
       meta?: { reason?: unknown; downsampled_from?: unknown };
     };
+    // Model-supplied series pass the compose shape check (kind only), so a
+    // malformed point such as `null` or a bare string can reach here; a later
+    // `p[key]` would throw with no renderer error boundary to contain it. Map
+    // any non-object entry to an empty gap so its INDEX survives (the line
+    // still breaks there) instead of dropping it and bridging the gap.
+    const points = v.points.map((p) =>
+      p && typeof p === 'object' ? (p as SeriesPoint) : ({} as SeriesPoint),
+    );
     return {
       ok: true,
-      points: v.points,
+      points,
       unit: typeof v.unit === 'string' ? v.unit : '',
       reason: typeof v.meta?.reason === 'string' ? v.meta.reason : undefined,
       downsampledFrom:
@@ -92,7 +100,9 @@ export function seriesValues(
 ): { i: number; v: number }[] {
   const out: { i: number; v: number }[] = [];
   points.forEach((p, i) => {
-    const raw = p[key];
+    // Defensive: a non-object point (readSeries maps these to {}, but this is
+    // exported and unit-tested directly) has no value → a gap, not a throw.
+    const raw = p && typeof p === 'object' ? p[key] : undefined;
     if (isFiniteNumber(raw)) out.push({ i, v: raw });
   });
   return out;
@@ -101,7 +111,8 @@ export function seriesValues(
 export function countDropped(points: SeriesPoint[], keys: string[]): number {
   let dropped = 0;
   for (const p of points) {
-    if (keys.every((k) => !isFiniteNumber(p[k]))) dropped += 1;
+    const obj = p && typeof p === 'object';
+    if (keys.every((k) => !isFiniteNumber(obj ? p[k] : undefined))) dropped += 1;
   }
   return dropped;
 }

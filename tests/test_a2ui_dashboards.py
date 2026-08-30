@@ -20,6 +20,7 @@ from nous.a2ui.sources import (
     SourceRegistry,
     _bound_series,
     _pivot,
+    build_default_registry,
     empty_series,
     is_series,
     to_series,
@@ -97,6 +98,56 @@ def test_empty_series_carries_a_reason():
     assert is_series(e) and e["points"] == []
     assert e["meta"]["reason"] == "no db"
     assert e["unit"] == "kg"
+
+
+def test_downsample_preserves_the_gap_placeholder():
+    # A non-finite reading in the middle of a >200-point source: the gap must
+    # survive the 200-point cap, or the renderer bridges it (codex P1).
+    recs = [
+        {"d": f"2026-{i:04d}", "x": (float("nan") if i == 250 else float(i))}
+        for i in range(500)
+    ]
+    s = to_series(recs, "d", "x")
+    assert len(s["points"]) <= 200
+    assert s["meta"]["dropped"] == 1
+    assert any(set(p) == {"t"} for p in s["points"]), "gap dropped by downsampling"
+    # endpoints still pinned
+    assert s["points"][0]["v"] == 0.0 and s["points"][-1]["v"] == 499.0
+
+
+def test_pivot_materializes_the_full_calendar_window():
+    cal = ["2026-08-01", "2026-08-02", "2026-08-03"]
+    rows = [("2026-08-02", "success", 4)]  # only the middle day had rows
+    recs = _pivot(rows, ["success", "failure"], calendar=cal)
+    assert [r["t"] for r in recs] == cal, "quiet days must not vanish"
+    assert recs[0] == {"t": "2026-08-01", "success": 0, "failure": 0}
+    assert recs[1]["success"] == 4
+    # a returned date outside the window is still kept (union, never dropped)
+    recs2 = _pivot([("2026-07-31", "success", 1)], ["success"], calendar=cal)
+    assert "2026-07-31" in [r["t"] for r in recs2]
+
+
+async def test_health_series_bounds_rows_and_orders_ascending(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "h.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE health_metrics(metric TEXT, ts TEXT, value REAL)")
+    conn.executemany(
+        "INSERT INTO health_metrics VALUES('hr', ?, ?)",
+        [(f"2026-01-{i:02d}", float(i)) for i in range(1, 6)],
+    )
+    conn.commit()
+    conn.close()
+
+    reg = build_default_registry(health_db_path=str(db))
+    out = await reg.resolve(
+        [{"key": "h", "source": "health_series", "params": {"metric": "hr", "limit": 3}}]
+    )
+    s = out["h"]
+    assert is_series(s)
+    # limit=3 keeps the 3 most recent rows, re-ordered ascending for the series
+    assert [p["v"] for p in s["points"]] == [3.0, 4.0, 5.0]
 
 
 def test_pivot_fills_missing_categories_with_zero():

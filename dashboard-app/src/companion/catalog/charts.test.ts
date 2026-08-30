@@ -251,4 +251,32 @@ describe('LineChartView', () => {
     expect(container.querySelectorAll('circle').length).toBe(1); // isolated a
     expect(container.querySelectorAll('polyline').length).toBe(1); // c–d
   });
+
+  it('survives duplicate series keys without a keyed-each crash', () => {
+    // The schema and _binding_rules both accept two specs with the same key;
+    // keying the each by index (not ln.key) keeps one bad chart from taking
+    // down its surface (codex P2).
+    seed({
+      out: {
+        kind: 'series',
+        unit: '',
+        keys: ['v'],
+        points: [{ t: 'a', v: 1 }, { t: 'b', v: 2 }],
+        meta: {},
+      },
+    });
+    expect(() =>
+      render(LineChartView, {
+        props: {
+          surfaceId: SURFACE,
+          comp: {
+            id: 'l',
+            component: 'LineChart',
+            path: '/out',
+            series: [{ key: 'v' }, { key: 'v' }],
+          },
+        },
+      }),
+    ).not.toThrow();
+  });
 });

@@ -3,6 +3,7 @@ import {
   normalizeTone,
   toneVar,
   seriesVar,
+  readSeries,
   seriesValues,
   countDropped,
   classify,
@@ -52,6 +53,26 @@ describe('finite extraction + gaps', () => {
     ];
     expect(seriesValues(p).map((x) => x.v)).toEqual([1]);
     expect(countDropped(p, ['v'])).toBe(2);
+  });
+
+  it('sanitizes a malformed (null) point into a gap instead of throwing', () => {
+    // Model-supplied series only pass a kind check at compose; a null point
+    // must become an index-preserving gap, never a `p[key]` throw (codex P2).
+    const s = readSeries({ kind: 'series', points: [{ t: 'a', v: 1 }, null, { t: 'c', v: 3 }] });
+    expect(s.ok).toBe(true);
+    expect(s.points[1]).toEqual({});
+    const finite = seriesValues(s.points);
+    expect(finite).toEqual([
+      { i: 0, v: 1 },
+      { i: 2, v: 3 },
+    ]);
+  });
+
+  it('seriesValues/countDropped tolerate a non-object entry directly', () => {
+    const p = [{ t: 'a', v: 5 }, null as unknown as SeriesPoint];
+    expect(() => seriesValues(p)).not.toThrow();
+    expect(seriesValues(p).map((x) => x.v)).toEqual([5]);
+    expect(countDropped(p, ['v'])).toBe(1);
   });
 });
 

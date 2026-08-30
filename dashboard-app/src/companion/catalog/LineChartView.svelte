@@ -109,7 +109,7 @@
       {#if domain.zeroBreak}
         <text class="brk" x={PAD_L - 4} y={H - PAD_B + 10} text-anchor="end">~</text>
       {/if}
-      {#each lines as ln (ln.key)}
+      {#each lines as ln, li (li)}
         {#each ln.segments as seg, si (si)}
           {#if seg.includes(' ')}
             <polyline points={seg} fill="none" stroke={ln.stroke} stroke-width="1.5" />
@@ -126,7 +126,7 @@
       {#if comp.xLabel}<text class="axl" x={W - PAD_R} y={H - 4} text-anchor="end">{toDisplayString(comp.xLabel)}</text>{/if}
     </svg>
     <div class="legend">
-      {#each lines as ln (ln.key)}
+      {#each lines as ln, li (li)}
         <span class="lg"><i style:background={ln.stroke}></i>{ln.label}</span>
       {/each}
     </div>

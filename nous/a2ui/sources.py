@@ -18,10 +18,12 @@ Every fetcher returns plain JSON-serializable data.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -142,18 +144,44 @@ def _bound_series(series: dict, budget: int) -> tuple[dict, int]:
 
 
 def _downsample_series(series: dict, target: int) -> dict:
-    """Naive stride downsample preserving first + last (LTTB deferred to
-    F094 P3). Stamps meta.downsampled_from with the ORIGINAL length so the
-    renderer can mark it, carried across repeated downsampling."""
+    """Stride downsample preserving first + last AND every gap placeholder
+    (LTTB deferred to F094 P3). Stamps meta.downsampled_from with the ORIGINAL
+    length so the renderer can mark it, carried across repeated downsampling."""
     points = series.get("points") or []
     original = series.get("meta", {}).get("downsampled_from") or len(points)
     if len(points) <= target:
         return series
-    step = len(points) / target
-    kept = [points[min(len(points) - 1, int(i * step))] for i in range(target)]
-    kept[-1] = points[-1]
+    # A gap placeholder (a point carrying only 't') is what makes the renderer
+    # break the line. A naive stride can skip it while keeping finite points on
+    # both sides — silently bridging a real gap again (codex P1). So retain
+    # every gap, stride-sample the finite points into the remaining budget, and
+    # merge back in chronological order.
+    gap_idx = [i for i, p in enumerate(points) if set(p) <= {"t"}]
+    finite_idx = [i for i, p in enumerate(points) if set(p) > {"t"}]
+    finite_budget = max(2, target - len(gap_idx))
+    if len(finite_idx) > finite_budget:
+        fstep = len(finite_idx) / finite_budget
+        picked = [
+            finite_idx[min(len(finite_idx) - 1, int(i * fstep))]
+            for i in range(finite_budget)
+        ]
+        picked[-1] = finite_idx[-1]
+    else:
+        picked = finite_idx
+    keep = set(picked) | set(gap_idx)
+    keep.add(0)
+    keep.add(len(points) - 1)  # endpoints are the visible range — never dropped
+    kept_idx = sorted(keep)
+    if len(kept_idx) > target:
+        # Pathological (gaps alone exceed the budget): stride the kept set down,
+        # still pinning the endpoints.
+        kstep = len(kept_idx) / target
+        pos = {int(i * kstep) for i in range(target)}
+        pos.add(0)
+        pos.add(len(kept_idx) - 1)
+        kept_idx = [kept_idx[min(len(kept_idx) - 1, j)] for j in sorted(pos)]
     out = dict(series)
-    out["points"] = kept
+    out["points"] = [points[i] for i in kept_idx]
     meta = dict(series.get("meta") or {})
     meta["downsampled_from"] = original
     out["meta"] = meta
@@ -239,17 +267,35 @@ def _iso(t: Any) -> str:
     return str(t)
 
 
-def _pivot(rows: list[tuple], categories: list[str]) -> list[dict]:
+def _pivot(
+    rows: list[tuple], categories: list[str], calendar: list[str] | None = None
+) -> list[dict]:
     """Turn grouped (t, category, count) rows into one record per t with a
     numeric key per category (0 where a category had no rows that day), so
-    to_series can produce a multi-series chart."""
+    to_series can produce a multi-series chart.
+
+    ``calendar`` (a list of ISO dates for the requested window) materializes
+    EVERY day as a zero record, not just the days SQL returned. LineChart
+    positions points by array index and never parses timestamps, so a missing
+    zero-throughput day would let two distant active dates fall adjacent and a
+    quiet day vanish — a misleading trend (codex P2). Days SQL returns outside
+    the calendar are still included (union), never dropped."""
     by_t: dict[str, dict[str, Any]] = {}
+    for key in calendar or []:
+        by_t[key] = {"t": key, **{c: 0 for c in categories}}
     for t, cat, n in rows:
         key = _iso(t)
         rec = by_t.setdefault(key, {"t": key, **{c: 0 for c in categories}})
         if str(cat) in categories:
             rec[str(cat)] = int(n)
     return [by_t[k] for k in sorted(by_t)]
+
+
+def _calendar(days: int) -> list[str]:
+    """The last ``days`` ISO dates ending today (UTC, matching SQL ``now()``),
+    oldest→newest — the window a daily series must fully materialize."""
+    today = datetime.now(UTC).date()
+    return [(today - timedelta(days=i)).isoformat() for i in range(days - 1, -1, -1)]
 
 
 def _bound(value: Any, budget: int) -> tuple[Any, int]:
@@ -436,7 +482,9 @@ def build_default_registry(
                         {"aid": agent_id, "days": days},
                     )
                 ).all()
-            records = _pivot([(r[0], r[1], r[2]) for r in rows], outcomes)
+            records = _pivot(
+                [(r[0], r[1], r[2]) for r in rows], outcomes, calendar=_calendar(days)
+            )
             return to_series(records, "t", "v", unit="decisions", value_keys=outcomes)
 
         registry.register("decision_outcomes_series", decision_outcomes_series)
@@ -467,7 +515,9 @@ def build_default_registry(
                         {"aid": agent_id, "days": days} if agent_id else {"days": days},
                     )
                 ).all()
-            records = _pivot([(r[0], r[1], r[2]) for r in rows], cats)
+            records = _pivot(
+                [(r[0], r[1], r[2]) for r in rows], cats, calendar=_calendar(days)
+            )
             return to_series(records, "t", "v", unit="nodes", value_keys=cats)
 
         registry.register("dag_throughput_series", dag_throughput_series)
@@ -489,21 +539,35 @@ def build_default_registry(
                 return empty_series("no metric requested", unit="")
             if not os.path.exists(health_db_path):
                 return empty_series(f"health db not found at {health_db_path}")
-            try:
+
+            # Bound the read IN SQLite and run the synchronous driver OFF the
+            # event loop (codex P2): an unbounded fetchall() on a multi-year
+            # metric would do the whole scan, hold it all in memory, and block
+            # the loop for every other async request during compose/refresh.
+            # The later 200-point cap prevents none of that. Cap to the most
+            # recent N rows (DESC + LIMIT), then re-order ascending for the
+            # series contract.
+            row_cap = max(1, min(int(params.get("limit", 2000)), 5000))
+
+            def _read() -> list[dict]:
                 conn = sqlite3.connect(f"file:{health_db_path}?mode=ro", uri=True)
                 try:
                     cur = conn.execute(
                         "SELECT ts, value FROM health_metrics "
-                        "WHERE metric = ? ORDER BY ts",
-                        (metric,),
+                        "WHERE metric = ? ORDER BY ts DESC LIMIT ?",
+                        (metric, row_cap),
                     )
-                    records = [
-                        {"t": row[0], "v": row[1]}
-                        for row in cur.fetchall()
-                        if row[0] is not None
-                    ]
+                    fetched = cur.fetchall()
                 finally:
                     conn.close()
+                return [
+                    {"t": row[0], "v": row[1]}
+                    for row in reversed(fetched)
+                    if row[0] is not None
+                ]
+
+            try:
+                records = await asyncio.to_thread(_read)
             except sqlite3.Error as exc:
                 return empty_series(f"health db read failed ({exc})")
             if not records:
