@@ -125,7 +125,10 @@ def caps_for(archetype: str | None) -> tuple[int, int]:
     """(max_components, max_sections) for an archetype. Default 40/5;
     ledger/briefing get 80/8 (a 16-day itinerary or a metrics dashboard
     does not fit 40/5, and Repeat keeps the component count low anyway)."""
-    if archetype in _ROOMY_ARCHETYPES:
+    # `in` would hash the value — a non-string archetype (a model emitting an
+    # object/array) raises TypeError, which escapes _validate's repair loop and
+    # the guaranteed fallback (codex P2). A non-string is simply not roomy.
+    if isinstance(archetype, str) and archetype in _ROOMY_ARCHETYPES:
         return 80, 8
     return MAX_COMPONENTS, MAX_SECTIONS
 

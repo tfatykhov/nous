@@ -130,6 +130,56 @@ def test_downsample_preserves_per_key_gaps_in_multi_series():
     assert any("a" not in p and "b" in p for p in s["points"]), "per-key gap lost"
 
 
+def test_downsample_preserves_extrema():
+    # A flat series with a single spike: stride alone would sample the spike out
+    # and the domain would hide the anomaly (codex P1). The peak must survive.
+    recs = [{"d": f"2026-{i:04d}", "x": (100.0 if i == 251 else 5.0)} for i in range(500)]
+    s = to_series(recs, "d", "x")
+    assert len(s["points"]) <= 200
+    assert max(p["v"] for p in s["points"] if "v" in p) == 100.0
+
+
+def test_downsample_preserves_per_key_gap_representatives():
+    # 'a' missing at 251, 'b' at 252 in the SAME sampled interval: keeping only
+    # one global gap marker would bridge the other key's line (codex P1).
+    recs = []
+    for i in range(500):
+        rec = {"d": f"2026-{i:04d}", "a": float(i), "b": float(i)}
+        if i == 251:
+            rec["a"] = float("nan")
+        if i == 252:
+            rec["b"] = float("nan")
+        recs.append(rec)
+    s = to_series(recs, "d", "v", value_keys=["a", "b"])
+    pts = s["points"]
+    assert any("a" not in p for p in pts), "a's break lost"
+    assert any("b" not in p for p in pts), "b's break lost"
+
+
+def test_relative_chart_path_validates_every_repeat_item():
+    # Item 0 is a valid series but item 1 is an array — a heterogeneous repeat
+    # must be caught, not passed on the strength of item 0 (codex P2).
+    ser = {"kind": "series", "points": [{"t": "a", "v": 1}], "unit": "", "meta": {}}
+    comps = [
+        {"id": "list", "component": "Column", "children": {"componentId": "card", "path": "/items"}},
+        {"id": "card", "component": "Sparkline", "path": "trend"},
+    ]
+    model = {"items": [{"trend": ser}, {"trend": [1, 2, 3]}]}
+    errs = _binding_rules(comps, model, model, _collect_bindings(comps))
+    assert any("not a series" in e for e in errs)
+
+
+def test_validate_and_caps_tolerate_a_non_string_archetype(settings):
+    from nous.a2ui.grammar import caps_for
+
+    # caps_for must not hash a non-string archetype (TypeError escapes the
+    # repair loop + fallback, codex P2); _validate returns a clean error.
+    assert caps_for(["ledger"]) == caps_for(None)
+    composer = SurfaceComposer(object(), settings, SourceRegistry())
+    parsed = {"components": [{"id": "x", "component": "Text", "text": "hi"}], "archetype": ["ledger"]}
+    assert any("archetype" in e for e in composer._validate(parsed, {}))
+
+
 def test_downsample_keeps_breaks_when_gaps_exceed_the_cap():
     # 500-point alternating valid/missing series (250 gaps): the cap cannot keep
     # every gap, but must keep a representative break for each broken pair —

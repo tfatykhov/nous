@@ -368,6 +368,11 @@ class SurfaceComposer:
                 f"theme {theme!r} is not one of {sorted(_THEMES)} — pick a listed "
                 "theme or omit it for the default"
             )
+        # Archetype selects the grammar caps and is fed to lint_micro_app; a
+        # non-string one would raise TypeError there (same hash trap as theme).
+        archetype = parsed.get("archetype")
+        if archetype is not None and not isinstance(archetype, str):
+            errors.append("archetype must be a string or omitted")
         for key in model_supplied or {}:
             if key in source_data:
                 errors.append(
@@ -607,6 +612,60 @@ def _owning_template(comp_id: str, by_id: dict[str, dict]) -> str | None:
     return None
 
 
+def _chart_shape_errors(ctype: str, comp: dict, path: str, resolved: Any) -> list[str]:
+    """Series-shape (rule 2), single-value (2b) and LineChart-arity (3) checks
+    for ONE resolved chart target. Returned as a list so a repeat can validate
+    every item independently (codex P2)."""
+    errs: list[str] = []
+    if not (isinstance(resolved, dict) and resolved.get("kind") == "series"):
+        shape = (
+            "an array"
+            if isinstance(resolved, list)
+            else "nothing"
+            if resolved is None
+            else type(resolved).__name__
+        )
+        errs.append(
+            f"{ctype} {comp.get('id')!r} binds {path} which resolved to "
+            f"{shape}, not a series — chart paths need a series-shaped source"
+        )
+        return errs
+    # Sparkline and BarChart both read the default `v` key, so a MULTI-series
+    # source (named keys, no `v`) renders "no data" despite valid rows.
+    if ctype in ("Sparkline", "BarChart") and isinstance(resolved.get("keys"), list):
+        errs.append(
+            f"{ctype} {comp.get('id')!r} binds {path}, a multi-series source "
+            f"(keys {sorted(str(k) for k in resolved['keys'])}) — Sparkline/BarChart "
+            "read a single-value (v) series; use LineChart or a single-key source"
+        )
+        return errs
+    if ctype == "LineChart":
+        specs = comp.get("series") or []
+        if not specs:
+            errs.append(f"LineChart {comp.get('id')!r} declares no series — name 1–4 keys")
+        elif len(specs) > 4:
+            errs.append(f"LineChart {comp.get('id')!r} has {len(specs)} series — max 4")
+        # Declared keys are authoritative even when points is empty; else fall
+        # back to the union across ALL points (a per-point non-finite reading is
+        # omitted from that point), never points[0] alone.
+        points = resolved.get("points") or []
+        declared = resolved.get("keys")
+        available = (
+            {str(k) for k in declared}
+            if isinstance(declared, list)
+            else {k for p in points if isinstance(p, dict) for k in p if k != "t"}
+        )
+        if points or isinstance(declared, list):
+            for spec in specs:
+                key = spec.get("key") if isinstance(spec, dict) else None
+                if isinstance(key, str) and key not in available:
+                    errs.append(
+                        f"LineChart {comp.get('id')!r} series key {key!r} is absent "
+                        f"from the series (keys: {sorted(available)})"
+                    )
+    return errs
+
+
 def _binding_rules(
     components: list[dict], source_data: dict, full_model: dict, bindings: list[str]
 ) -> list[str]:
@@ -633,83 +692,32 @@ def _binding_rules(
         path = comp.get("path")
         if not isinstance(path, str) or not path.strip():
             continue  # binding-mandatory already caught this in grammar
+        # A relative chart path resolves the way the renderer resolves it
+        # (pointer.ts `absolute`): an absolute /path from root; inside a repeat
+        # template, against EACH item base; with no scope, from root as /path.
+        # Validate every resolved target — a root lookup would false-reject a
+        # per-item chart (codex round 4), a blanket skip lets `{trend:[]}`
+        # through (round 6), and validating only item 0 lets a later
+        # heterogeneous item through (round 7).
         if path.startswith("/"):
-            resolved = _get_path(full_model, path)
+            targets = [(path, _get_path(full_model, path))]
         else:
-            # A relative chart path resolves the way the renderer resolves it
-            # (pointer.ts `absolute`): inside a repeat template, against the
-            # item base; with no scope, from the model ROOT as `/path`. Validate
-            # it the SAME way — a root lookup would false-reject a per-item chart
-            # (codex round 4), but skipping a root-relative path lets `{trend:[]}`
-            # through (codex round 6).
             source_path = _owning_template(comp.get("id", ""), by_id)
             if source_path is None:
-                resolved = _get_path(full_model, "/" + path)
+                targets = [("/" + path, _get_path(full_model, "/" + path))]
             else:
                 items = _get_path(full_model, source_path)
                 if not isinstance(items, list) or not items:
                     continue  # template has no items yet — nothing to validate
-                resolved = _get_path(full_model, f"{source_path}/0/{path}")
-        # (2) Series-shape (F094 §5 rule 2): a chart bound to a record list
-        # (the mistake the model makes most) — reject naming what it actually
-        # resolved to.
-        if not (isinstance(resolved, dict) and resolved.get("kind") == "series"):
-            shape = (
-                "an array"
-                if isinstance(resolved, list)
-                else "nothing"
-                if resolved is None
-                else type(resolved).__name__
-            )
-            errors.append(
-                f"{ctype} {comp.get('id')!r} binds {path} which resolved to "
-                f"{shape}, not a series — chart paths need a series-shaped source"
-            )
-            continue
-        # (2b) Single-value shape: Sparkline and BarChart both read the default
-        # `v` key, so a MULTI-series source (named keys, no `v`) renders "no
-        # data" despite valid rows (codex P2). `keys` is to_series's multi-series
-        # marker — reject binding one to a single-value chart.
-        if ctype in ("Sparkline", "BarChart") and isinstance(resolved.get("keys"), list):
-            errors.append(
-                f"{ctype} {comp.get('id')!r} binds {path}, a multi-series source "
-                f"(keys {sorted(str(k) for k in resolved['keys'])}) — Sparkline/BarChart "
-                "read a single-value (v) series; use LineChart or a single-key source"
-            )
-            continue
-        # (3) Series-arity (F094 §5 rule 3): a LineChart must declare 1–4 series,
-        # each naming a key the series carries.
-        if ctype == "LineChart":
-            specs = comp.get("series") or []
-            if not specs:
-                errors.append(
-                    f"LineChart {comp.get('id')!r} declares no series — name 1–4 keys"
-                )
-            elif len(specs) > 4:
-                errors.append(f"LineChart {comp.get('id')!r} has {len(specs)} series — max 4")
-            # A per-point non-finite reading is OMITTED from that point (to_series),
-            # and an empty series is a valid empty state — so check declared keys
-            # against the series' own `keys` list, falling back to the union of
-            # keys across ALL points, never points[0] alone (codex P2).
-            points = resolved.get("points") or []
-            declared = resolved.get("keys")
-            if isinstance(declared, list):
-                available = {str(k) for k in declared}
-            else:
-                available = {
-                    k for p in points if isinstance(p, dict) for k in p if k != "t"
-                }
-            # Nothing to check for an empty single-series source (it declares its
-            # emptiness via meta/reason); a declared `keys` list is authoritative
-            # even when points is empty.
-            if points or isinstance(declared, list):
-                for spec in specs:
-                    key = spec.get("key") if isinstance(spec, dict) else None
-                    if isinstance(key, str) and key not in available:
-                        errors.append(
-                            f"LineChart {comp.get('id')!r} series key {key!r} is absent "
-                            f"from the series (keys: {sorted(available)})"
-                        )
+                targets = [
+                    (f"{source_path}/{i}/{path}", _get_path(full_model, f"{source_path}/{i}/{path}"))
+                    for i in range(len(items))
+                ]
+        for tpath, resolved in targets:
+            errs = _chart_shape_errors(ctype, comp, tpath, resolved)
+            if errs:
+                errors.extend(errs)
+                break  # one failing item rejects the chart — no N duplicates
 
     # (4) Over-capacity / under-render (F093 §5.1 / AC7): a record-LIST source
     # bound only by FIXED indices that cover fewer than all records renders a

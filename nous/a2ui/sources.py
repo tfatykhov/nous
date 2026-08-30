@@ -153,47 +153,63 @@ def _stride_pick(idxs: list[int], budget: int) -> list[int]:
     return out
 
 
+def _finite_at(point: dict, key: str) -> bool:
+    v = point.get(key)
+    return isinstance(v, (int, float)) and math.isfinite(v)
+
+
 def _downsample_series(series: dict, target: int) -> dict:
-    """Stride downsample preserving first + last AND every line BREAK (LTTB
-    deferred to F094 P3). Stamps meta.downsampled_from with the ORIGINAL length,
-    carried across repeated downsampling."""
+    """Stride downsample that preserves, PER KEY, first + last, every line
+    BREAK, and the peak + trough (full LTTB deferred to F094 P3). Stamps
+    meta.downsampled_from with the ORIGINAL length, carried across repeats."""
     points = series.get("points") or []
     original = series.get("meta", {}).get("downsampled_from") or len(points)
     if len(points) <= target:
         return series
-    # A point that omits ANY rendered key is a gap for that key's line, and the
-    # renderer breaks the line there. Bridging one is a fidelity lie (codex P1),
-    # and it is PER KEY: a multi-series point carrying `a` but omitting `b` is a
-    # gap for `b`. What the LINE needs is a break, and ONE gap point between two
-    # kept finite points suffices for one — so keep a REPRESENTATIVE gap per
-    # broken pair, not every gap. That preserves every break AND fits the budget
-    # even when gaps outnumber it (the earlier "keep all gaps" then strode the
-    # combined set and dropped some, re-bridging — codex P1 round 6).
     value_keys: set = set()
     for p in points:
         value_keys |= {k for k in p if k != "t"}
-    gap_set = {i for i, p in enumerate(points) if value_keys - set(p)}
+    # A "gap for key k" is any index whose k is not a finite number (a bare {t}
+    # placeholder is a gap for every key; a multi-series point missing only one
+    # key is a gap for that one). Stride only over FULLY finite points; the rest
+    # are gap-boundaries handled by per-key representatives below.
+    gap_by_key = {
+        k: {i for i in range(len(points)) if not _finite_at(points[i], k)}
+        for k in value_keys
+    }
+    gap_set = set().union(*gap_by_key.values()) if gap_by_key else set()
     finite_idx = [i for i in range(len(points)) if i not in gap_set]
 
+    # Peak + trough of EACH key are load-bearing — striding them away hides a
+    # spike/anomaly, and the renderer derives its domain only from kept points
+    # (codex P1). Pin them into the mandatory set alongside the endpoints.
+    mandatory = {0, len(points) - 1}
+    for k in value_keys:
+        vals = [(points[i][k], i) for i in range(len(points)) if _finite_at(points[i], k)]
+        if vals:
+            mandatory.add(min(vals)[1])
+            mandatory.add(max(vals)[1])
+
     def _reps(picked: list[int]) -> set[int]:
-        # One representative gap between each consecutive kept-finite pair that
-        # had a gap between them in the original — enough to break the line.
+        # One representative gap PER KEY between each consecutive kept-finite
+        # pair — a break for key `a` at 251 and one for `b` at 252 in the same
+        # interval must BOTH survive, or that key's line bridges (codex P1).
         reps: set[int] = set()
         for a, b in zip(picked, picked[1:]):
-            rep = next((g for g in range(a + 1, b) if g in gap_set), None)
-            if rep is not None:
-                reps.add(rep)
+            for k in value_keys:
+                rep = next((g for g in range(a + 1, b) if g in gap_by_key[k]), None)
+                if rep is not None:
+                    reps.add(rep)
         return reps
 
-    # Largest finite budget whose (finite + representative gaps + endpoints) set
-    # still fits the target. Binary search — the same shape as _bound_series.
-    ends = {0, len(points) - 1}
+    # Largest finite budget whose (finite + per-key gaps + mandatory) set still
+    # fits target. Binary search — the same shape as _bound_series.
     lo, hi = 2, min(target, max(2, len(finite_idx)))
-    best: set[int] = set(ends)
+    best: set[int] = set(mandatory)
     while lo <= hi:
         mid = (lo + hi) // 2
         picked = _stride_pick(finite_idx, mid)
-        keep = set(picked) | _reps(picked) | ends
+        keep = set(picked) | _reps(picked) | mandatory
         if len(keep) <= target:
             best = keep
             lo = mid + 1
