@@ -861,7 +861,10 @@ async def test_blocked_session_map_prunes_expired_entries(flag_settings) -> None
 
 async def test_resolve_time_retirement_helper() -> None:
     """codex P1: cap eviction resolves surfaces directly (no app.close), so
-    the retirement backstop lives at the single terminal transition."""
+    the retirement backstop lives at the single terminal transition. The
+    block is applied inside the transaction (in-process, no connection);
+    the returned id is cancelled by resolve() AFTER the session closes
+    (codex P1 round-11: nested session acquisition starves the pool)."""
     from nous.a2ui.service import SurfaceService
 
     sub_id = uuid.uuid4()
@@ -872,14 +875,13 @@ async def test_resolve_time_retirement_helper() -> None:
         data_model={"meta": {"pendingAction": {"id": "x", "subtask_id": str(sub_id)}}},
     )
 
-    await svc._retire_pending_action(surface)
+    returned = svc._block_pending_action(surface)
 
-    assert heart.subtasks.cancelled == [sub_id]
+    assert returned == sub_id, "the id to cancel is returned for post-session use"
     assert svc._push_session_blocked(f"subtask-{sub_id.hex[:8]}")
     # Non-micro-app and stamp-less surfaces are untouched.
-    await svc._retire_pending_action(SimpleNamespace(kind="template", data_model={}))
-    await svc._retire_pending_action(SimpleNamespace(kind="micro_app", data_model={}))
-    assert heart.subtasks.cancelled == [sub_id]
+    assert svc._block_pending_action(SimpleNamespace(kind="template", data_model={})) is None
+    assert svc._block_pending_action(SimpleNamespace(kind="micro_app", data_model={})) is None
 
 
 async def test_app_act_handler_flag_off_and_no_heart(settings, flag_settings) -> None:

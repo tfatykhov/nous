@@ -705,6 +705,7 @@ class SurfaceService:
     async def resolve(self, surface_id: str, *, status: str = "resolved") -> None:
         """Terminal transition + teardown envelope."""
         envelope = {"version": "v1.0", "deleteSurface": {"surfaceId": surface_id}}
+        cancel_sub: uuid.UUID | None = None
         async with self._db.session() as session:
             surface = await self._get_own(session, surface_id)
             if surface is None:
@@ -716,8 +717,15 @@ class SurfaceService:
             # action, or its completion recomposes via the dedup_key and
             # recreates the surface that was just torn down. Doing it here,
             # at the single terminal transition, is what makes new resolvers
-            # covered by construction rather than by remembering.
-            await self._retire_pending_action(surface)
+            # covered by construction rather than by remembering. The
+            # session BLOCK is an in-process dict write (no connection), so
+            # it lands BEFORE the terminal commit — the dedup window never
+            # opens. The subtask CANCEL opens its own DB session and
+            # therefore runs after this one closes (codex P1 round-11: a
+            # nested session acquisition holds one pooled connection while
+            # waiting for another — 15 concurrent closes could starve the
+            # whole pool).
+            cancel_sub = self._block_pending_action(surface)
             surface.status = status
             surface.resolved_at = datetime.now(UTC)
             row = A2uiOutbox(agent_id=surface.agent_id, surface_id=surface_id, envelope=envelope)
@@ -725,34 +733,39 @@ class SurfaceService:
             await session.commit()
             seq = row.seq
         self._broadcast(seq, envelope)
+        if cancel_sub is not None:
+            subtasks = getattr(self._heart, "subtasks", None) if self._heart else None
+            if subtasks is not None:
+                try:
+                    await subtasks.cancel(cancel_sub)
+                except Exception:
+                    logger.warning(
+                        "F092.2 resolve-time subtask cancel failed", exc_info=True
+                    )
 
-    async def _retire_pending_action(self, surface: A2uiSurface) -> None:
-        """Cancel + session-block a micro-app's running agent action.
+    def _block_pending_action(self, surface: A2uiSurface) -> uuid.UUID | None:
+        """Session-block a micro-app's running agent action; return the
+        subtask id to cancel once the caller's DB session has closed.
 
         Sibling of actions.py's _retire_action_subtask (which the action
-        handlers use with richer context); this one is the resolve-time
+        handlers use with richer context); this is the resolve-time
         backstop and deliberately lives on the service because the service
-        owns the terminal transition. Best-effort: a cancel failure is
-        logged, the session block always lands (it is the deterministic
-        layer — push_built refuses the blocked session either way).
+        owns the terminal transition. The block is the deterministic layer
+        (push_built refuses the blocked session either way); the deferred
+        cancel is best-effort.
         """
         if (surface.kind or "") != "micro_app":
-            return
+            return None
         pending = ((surface.data_model or {}).get("meta") or {}).get("pendingAction")
         if not isinstance(pending, dict) or not pending.get("subtask_id"):
-            return
+            return None
         try:
             sub_uuid = uuid.UUID(str(pending["subtask_id"]))
         except (TypeError, ValueError):
-            return
-        subtasks = getattr(self._heart, "subtasks", None) if self._heart else None
-        if subtasks is not None:
-            try:
-                await subtasks.cancel(sub_uuid)
-            except Exception:
-                logger.warning("F092.2 resolve-time subtask cancel failed", exc_info=True)
+            return None
         timeout = int(getattr(self._settings, "a2ui_agent_action_timeout_seconds", 300))
         self.block_push_session(f"subtask-{sub_uuid.hex[:8]}", ttl_seconds=timeout + 60)
+        return sub_uuid
 
     async def expire_sweep(self) -> int:
         """Expire overdue surfaces + prune old rows. Returns surfaces expired.
