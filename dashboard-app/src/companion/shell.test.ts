@@ -103,7 +103,11 @@ describe('Companion shell — close-all', () => {
       .mockResolvedValue({ ok: true, message: '', resolved: true });
     const { getByText } = render(Companion);
 
+    // Two-tap confirmation: the first tap only ARMS the button.
     await fireEvent.click(getByText('close all apps (2)'));
+    await settle();
+    expect(spy).not.toHaveBeenCalled();
+    await fireEvent.click(getByText('sure? close 2 apps'));
     await settle();
 
     // Micro-apps only — the decision sweep is not disposable.
@@ -652,5 +656,53 @@ describe('Companion shell — pure title functions are allowed, effectful ones a
     );
     expect(chips).toContain('Record Name');
     vi.unstubAllGlobals();
+  });
+});
+
+describe('Companion shell — destructive actions need a second tap', () => {
+  it('close-all disarms by itself after the timeout', async () => {
+    vi.useFakeTimers();
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:chat:micro_app:bbb002');
+    const spy = vi
+      .spyOn(transport, 'postAction')
+      .mockResolvedValue({ ok: true, message: '', resolved: true });
+    const { getByText } = render(Companion);
+
+    await fireEvent.click(getByText('close all apps (2)'));
+    expect(getByText('sure? close 2 apps')).toBeTruthy();
+    // Walk past the 4s disarm window — the button reverts, nothing fired.
+    vi.advanceTimersByTime(4500);
+    await tick();
+    expect(getByText('close all apps (2)')).toBeTruthy();
+    expect(spy).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+});
+
+describe('Companion shell — close-all confirms the set the user SAW', () => {
+  it('an app arriving during the confirmation window is not swept', async () => {
+    // codex P1: the second tap used to read the LIVE list, so an app that
+    // arrived after arming was irreversibly closed by a confirmation that
+    // never showed it.
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:chat:micro_app:bbb002');
+    const spy = vi
+      .spyOn(transport, 'postAction')
+      .mockResolvedValue({ ok: true, message: '', resolved: true });
+    const { getByText } = render(Companion);
+
+    await fireEvent.click(getByText('close all apps (2)'));
+    // A third app lands while armed…
+    seed('nous:chat:micro_app:ccc003');
+    await settle();
+    // …the confirmation still names the snapshot, and confirming closes ONLY it.
+    await fireEvent.click(getByText('sure? close 2 apps'));
+    await settle();
+
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy).toHaveBeenCalledWith('nous:chat:micro_app:aaa001', 'app.close', 'footer', {});
+    expect(spy).toHaveBeenCalledWith('nous:chat:micro_app:bbb002', 'app.close', 'footer', {});
+    expect(spy).not.toHaveBeenCalledWith('nous:chat:micro_app:ccc003', 'app.close', 'footer', {});
   });
 });

@@ -217,15 +217,46 @@
   // disposable micro-apps (they are rebuilt, not restored, by design).
   const microApps = $derived(feed.filter((s) => kindOf(s.surfaceId) === 'micro_app'));
   let closingAll = $state(false);
+  // Two-tap confirmation, same pattern as the per-app close: this sweeps EVERY
+  // live micro-app in one press, and apps are rebuilt, not restored. First tap
+  // arms ("sure? close N apps", auto-disarms after 4s); second executes.
+  let closeAllArmed = $state(false);
+  let closeAllTimer: ReturnType<typeof setTimeout> | undefined;
+  // SNAPSHOT taken at arm time (codex P1): the confirmation is for the set
+  // the user SAW. An app arriving during the 4s window must not be swept by
+  // a confirmation that never showed it, and an app closing on its own must
+  // not shift the count under the user's finger.
+  let armedIds = $state<string[]>([]);
 
-  async function closeAllApps() {
+  function requestCloseAll() {
+    if (closingAll) return;
+    if (!closeAllArmed) {
+      closeAllArmed = true;
+      armedIds = microApps.map((s) => s.surfaceId);
+      clearTimeout(closeAllTimer);
+      closeAllTimer = setTimeout(() => {
+        closeAllArmed = false;
+        armedIds = [];
+      }, 4000);
+      return;
+    }
+    clearTimeout(closeAllTimer);
+    closeAllArmed = false;
+    void closeAllApps(armedIds);
+    armedIds = [];
+  }
+
+  async function closeAllApps(ids: string[]) {
     if (closingAll) return;
     closingAll = true;
     try {
-      // Sequential on purpose: app.close posts share the server rate limit
-      // with everything else, and each close's footer is its own component.
-      for (const surface of microApps) {
-        await transport.postAction(surface.surfaceId, 'app.close', 'footer', {});
+      // Only surfaces still live from the CONFIRMED snapshot — sequential on
+      // purpose: app.close posts share the server rate limit with everything
+      // else, and each close's footer is its own component.
+      const live = new Set(microApps.map((s) => s.surfaceId));
+      for (const id of ids) {
+        if (!live.has(id)) continue; // closed itself during the window
+        await transport.postAction(id, 'app.close', 'footer', {});
       }
     } finally {
       closingAll = false;
@@ -255,8 +286,17 @@
         </a>
       {/each}
       {#if microApps.length >= 2}
-        <button class="chip close-all" disabled={closingAll} onclick={() => void closeAllApps()}>
-          {closingAll ? 'closing…' : `close all apps (${microApps.length})`}
+        <button
+          class="chip close-all"
+          class:armed={closeAllArmed}
+          disabled={closingAll}
+          onclick={requestCloseAll}
+        >
+          {closingAll
+            ? 'closing…'
+            : closeAllArmed
+              ? `sure? close ${armedIds.length} apps`
+              : `close all apps (${microApps.length})`}
         </button>
       {/if}
     </nav>
@@ -362,6 +402,10 @@
   .chip.active {
     color: var(--accent);
     border-color: var(--accent);
+  }
+  .chip.close-all.armed {
+    color: var(--crit);
+    border-color: var(--crit);
   }
   .chip.close-all {
     margin-left: auto;
