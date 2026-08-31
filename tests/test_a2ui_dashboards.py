@@ -1721,6 +1721,53 @@ def test_prompt_includes_component_usage_block(settings):
     assert _COMPONENT_USAGE_BLOCK in prompt
 
 
+def test_advertised_patterns_actually_validate(settings):
+    """codex P1/P2 on #626, category lock: every concrete shape the
+    WHEN-TO-USE block advertises must pass the FULL validation stack
+    (composer rules + grammar lint + schema probe) — prose recommending a
+    shape the validators reject burns repair rounds on unwinnable errors.
+    And Button must fail BOTH ways (basic catalog requires `action`;
+    _validate rejects any action): if a later change reconciles that, this
+    test fails and the prompt's 'do NOT use Button' line must be updated."""
+    from nous.a2ui.compose import SurfaceComposer
+
+    composer = SurfaceComposer(object(), settings, SourceRegistry())
+
+    def app(extra):
+        return {"title": "t", "archetype": "status", "components": _skel(extra)}
+
+    good = app([
+        {"id": "c", "component": "Column", "children": ["lst", "m"]},
+        {"id": "lst", "component": "List", "children": ["t1"], "direction": "horizontal"},
+        {"id": "t1", "component": "Text", "text": "x"},
+        {"id": "m", "component": "Modal", "trigger": "mt", "content": "mc"},
+        {"id": "mt", "component": "Text", "text": "details"},
+        {"id": "mc", "component": "Text", "text": "the long detail"},
+    ])
+    assert composer._validate(good, {}) == []
+
+    # The old advertised value: schema must reject it, proving the P2 fix.
+    bad_direction = app([
+        {"id": "c", "component": "List", "children": ["t1"], "direction": "row"},
+        {"id": "t1", "component": "Text", "text": "x"},
+    ])
+    assert composer._validate(bad_direction, {}) != []
+
+    # Button without an action: schema rejects (action is required).
+    no_action = app([
+        {"id": "c", "component": "Button", "child": "t1"},
+        {"id": "t1", "component": "Text", "text": "x"},
+    ])
+    assert composer._validate(no_action, {}) != []
+
+    # Button with an action: the composer rejects actions outright.
+    with_action = app([
+        {"id": "c", "component": "Button", "child": "t1", "action": {"event": "app.close"}},
+        {"id": "t1", "component": "Text", "text": "x"},
+    ])
+    assert any("action" in str(e) for e in composer._validate(with_action, {}))
+
+
 def test_tabs_count_is_enforced_not_just_prompted():
     """codex P2: the 2-5 rule was prompt-only — the vendored catalog has only
     minItems:1, so a one-tab control (a Section with extra chrome) or an

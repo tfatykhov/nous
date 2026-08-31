@@ -107,7 +107,7 @@ compose_surface(
 | the same subject two ways | `Tabs` (2-5 alternative views; only one renders at a time) |
 | a Nous decision needing review | `DecisionCard` (+ `ConfidenceMeter`), fed from `unreviewed_decisions` |
 | a running DAG's shape | `DagGraph`, fed from the `dag` source |
-| long secondary detail | `Modal` behind a button, or an `accordion` section |
+| long secondary detail | `Modal` behind a tappable label, or an `accordion` section |
 
 Layouts: `hero` for the one thing that matters, `grid-2`/`grid-3` for peers,
 `rail` for a scrollable strip, `accordion` for long secondary detail collapsed

@@ -283,8 +283,18 @@ def validate_structure(
     for cid, comp in by_id.items():
         action = comp.get("action")
         if isinstance(action, dict):
-            name = (action.get("event") or {}).get("name")
-            if name and name not in allowed:
+            # The canonical shape is {"event": {"name": ...}} (dsl.py). A
+            # string event — a plausible malformed LLM output — used to raise
+            # AttributeError here, escaping both the compose repair loop and
+            # the fallback. Malformed shapes must be validation ERRORS.
+            event = action.get("event")
+            name = event.get("name") if isinstance(event, dict) else None
+            if not name:
+                err(
+                    f"/components/{cid}",
+                    'action must be shaped {"event": {"name": ...}}',
+                )
+            elif name not in allowed:
                 err(
                     f"/components/{cid}",
                     f"action {name!r} not in surface allowed_actions",

@@ -86,7 +86,9 @@ Hard rules (violations are rejected and returned to you to fix):
   read-only.
 - No component id may appear twice, be referenced by two parents, or be
   repeated inside one children array.
-- Buttons may not carry actions (the AppFooter renders the app's controls).
+- Do NOT use Button: its schema requires an `action` and actions are
+  rejected in micro-apps, so every Button fails one way or the other
+  (the AppFooter renders the app's controls natively).
 - Sections whose data came from a provided source key get
   "provenance": "source". Sections showing data YOU supplied (no source
   key behind it) MUST get "provenance": "model".
@@ -147,7 +149,7 @@ _COMPONENT_USAGE: dict[str, str] = {
     ),
     "List": (
         "light repeated children when a table is too heavy; "
-        "direction row|column."
+        "direction vertical|horizontal."
     ),
     "DecisionCard": (
         "one Nous decision; feed from unreviewed_decisions records "
@@ -163,9 +165,9 @@ _COMPONENT_USAGE: dict[str, str] = {
         "never hand-write graph data."
     ),
     "Modal": (
-        "long secondary detail behind a tap: `trigger` (usually a Button) + "
-        "`content` component ids; open/close is renderer-owned, no action "
-        "wiring needed."
+        "long secondary detail behind a tap: `trigger` (a Text or Icon — "
+        "NOT a Button, see above) + `content` component ids; open/close is "
+        "renderer-owned, no action wiring needed."
     ),
 }
 
