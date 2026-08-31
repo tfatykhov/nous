@@ -213,3 +213,41 @@ describe('Companion shell — chip label source precedence', () => {
     expect(chips).not.toContain('app');
   });
 });
+
+describe('Companion shell — chip label resolves a bound header title', () => {
+  it('names the chip from a {path} title, matching what the header renders', () => {
+    // codex P2: `typeof title === 'string'` rejected a DynamicString that
+    // AppHeaderView resolves fine, so the chip fell back to the record title
+    // (or "app") and DISAGREED with the visible header.
+    store.apply(null, {
+      version: 'v1.0',
+      createSurface: {
+        surfaceId: 'nous:chat:micro_app:dyn001',
+        catalogId: 'nous-core',
+        components: [
+          { id: 'root', component: 'Text', text: 'body' },
+          { id: 'header', component: 'AppHeader', title: { path: '/meta/name' } },
+        ],
+        dataModel: { meta: { name: 'Daylight Watch' } },
+        metadata: { extensions: { com_nous_nonce: 'n1' } },
+      },
+    } as never);
+    store.apply(null, {
+      version: 'v1.0',
+      createSurface: {
+        surfaceId: 'nous:sweep:decision_sweep:bbb002',
+        catalogId: 'nous-core',
+        components: [{ id: 'root', component: 'Text', text: 'b' }],
+        dataModel: {},
+        metadata: { extensions: { com_nous_nonce: 'n2' } },
+      },
+    } as never);
+
+    const { container } = render(Companion);
+    const chips = [...container.querySelectorAll('.switcher .chip')].map((c) =>
+      c.textContent?.trim(),
+    );
+    expect(chips).toContain('Daylight Watch');
+    expect(chips).not.toContain('app');
+  });
+});

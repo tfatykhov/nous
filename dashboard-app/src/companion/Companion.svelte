@@ -6,6 +6,7 @@
   // surface ids to 'overview'. The `initialized` guard is copied from it —
   // it stops hashchange listeners stacking across tests and HMR.
   import { onMount } from 'svelte';
+  import { resolveDynamic, toDisplayString } from './functions';
   import InstallPrompt from './InstallPrompt.svelte';
   import Renderer from './Renderer.svelte';
   import { store } from './store.svelte';
@@ -57,11 +58,16 @@
    * needs no server round-trip: it is already in the components we render. */
   function headerTitle(surface: {
     components?: Record<string, { component?: string; title?: unknown }>;
+    dataModel?: unknown;
   }): string {
     for (const comp of Object.values(surface.components ?? {})) {
-      if (comp?.component === 'AppHeader' && typeof comp.title === 'string') {
-        return comp.title;
-      }
+      if (comp?.component !== 'AppHeader') continue;
+      // Resolve exactly as AppHeaderView does. A bare `typeof === 'string'`
+      // check rejected a bound title ({path} or a function call) that the
+      // header itself renders fine — so the chip fell back to the record
+      // title, or to "app", and DISAGREED with the visible header (codex P2).
+      const ctx = { dataModel: (surface.dataModel ?? {}) as Record<string, unknown>, scope: null };
+      return toDisplayString(resolveDynamic(comp.title, ctx));
     }
     return '';
   }
@@ -70,6 +76,7 @@
     surfaceId: string;
     title?: string;
     components?: Record<string, { component?: string; title?: unknown }>;
+    dataModel?: unknown;
   }): string {
     const kind = kindOf(surface.surfaceId);
     // Every composed app's id carries the SAME kind segment ("micro_app"),
