@@ -898,13 +898,33 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
                 subtask_id=sub_id,
             )
         except Exception as exc:
-            # Almost always: no row was committed. The ambiguous tail (commit
-            # succeeded, refresh raised) is covered by retiring the KNOWN id
-            # — cancelling a nonexistent row is a no-op, and the session
-            # block is harmless either way.
-            await _retire_action_subtask(router, {"subtask_id": str(sub_id)})
-            await _clear_pending_stamp(router, surface_id)
-            return ActionResult(ok=False, message=f"could not queue the action: {exc}")
+            # Almost always: no row was committed, retirement confirms the
+            # worker never started, and the stamp is cleared for a clean
+            # retry. The ambiguous tail (commit succeeded, refresh raised)
+            # returns stopped=False — the row is real and a worker may
+            # already be executing it, so the stamp MUST survive (codex P1
+            # round-12: clearing it here re-armed retry into a concurrent
+            # turn) and the watcher takes over: a phantom row (get → None)
+            # makes it clear the stamp shortly; a real one gets the normal
+            # lifecycle.
+            stopped = await _retire_action_subtask(router, {"subtask_id": str(sub_id)})
+            if stopped:
+                await _clear_pending_stamp(router, surface_id)
+                return ActionResult(
+                    ok=False, message=f"could not queue the action: {exc}"
+                )
+            watcher = asyncio.create_task(
+                _watch_agent_action(router, surface_id, sub_id, stamp, timeout)
+            )
+            router._action_watchers.add(watcher)
+            watcher.add_done_callback(router._action_watchers.discard)
+            return ActionResult(
+                ok=False,
+                message=(
+                    "the action may have started despite an error — the app "
+                    "will update, or the controls unlock shortly"
+                ),
+            )
 
         watcher = asyncio.create_task(
             _watch_agent_action(router, surface_id, sub_id, stamp, timeout)

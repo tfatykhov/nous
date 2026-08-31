@@ -752,6 +752,33 @@ async def test_stamp_carries_timeout_and_subtask_id(flag_settings) -> None:
         t.cancel()
 
 
+async def test_ambiguous_create_failure_keeps_the_stamp_and_watches(flag_settings) -> None:
+    """codex P1 round-12: create() raising AFTER its commit (refresh
+    failure) leaves a real, runnable row — retirement returns False and
+    the stamp must SURVIVE, with the watcher taking over, instead of
+    being cleared into an immediate concurrent-turn retry."""
+    from datetime import UTC, datetime
+
+    class _AmbiguousCreate(_FakeSubtasks):
+        async def create(self, task: str, **kwargs: Any):
+            raise RuntimeError("refresh failed after commit")
+
+    heart = SimpleNamespace(
+        subtasks=_AmbiguousCreate(status="running", started_at=datetime.now(UTC))
+    )
+    router = _handler_router(flag_settings, heart=heart)
+    handler = router._handlers["app.act"].fn
+
+    result = await handler(_ctx(router, _surface_stub(), "rebalance"))
+
+    assert not result.ok and "may have started" in result.message
+    pending_writes = [v for p, v in router._service.patches if p == "/meta/pendingAction"]
+    assert pending_writes[-1] is not None, "the stamp must survive the ambiguity"
+    assert router._action_watchers, "the watcher takes over cleanup"
+    for t in router._action_watchers:
+        t.cancel()
+
+
 async def test_app_act_refuses_before_creating_when_the_reserve_write_fails(flag_settings) -> None:
     """codex P1 round-6: a created subtask is runnable the moment its row
     commits, so the guard stamp must be reserved BEFORE create() — a
