@@ -6,7 +6,7 @@
   // surface ids to 'overview'. The `initialized` guard is copied from it —
   // it stops hashchange listeners stacking across tests and HMR.
   import { onMount } from 'svelte';
-  import { resolveDynamic, toDisplayString } from './functions';
+  import { isDataBinding, resolveDynamic, toDisplayString } from './functions';
   import InstallPrompt from './InstallPrompt.svelte';
   import Renderer from './Renderer.svelte';
   import { store } from './store.svelte';
@@ -92,21 +92,25 @@
     const headerId = ids.find((id) => comps[id]?.component === 'AppHeader');
     const header = headerId ? comps[headerId] : undefined;
     if (!header) return '';
-    // Resolve exactly as AppHeaderView does: a bound title ({path} or a
-    // function call) renders fine there, so a `typeof === 'string'` check
-    // would have rejected a title the user can plainly see. Trim HERE, since
-    // a whitespace-only title is truthy and would short-circuit the
-    // record-title fallback, landing back on "app".
+    // Trim whatever we return: a whitespace-only title is truthy and would
+    // short-circuit the record-title fallback, landing back on "app".
+    const raw = header.title;
+    // A LABEL MUST NOT EXECUTE ANYTHING. `title` is a DynamicString, so it may
+    // legitimately hold a function call — and `openUrl` calls `window.open`.
+    // Deriving chips resolves EVERY live surface, twice (label + tooltip), so
+    // a call here would fire unsolicited navigation merely because a surface
+    // exists in the feed (codex P2). Only pure forms are evaluated: a literal
+    // string, or a {path} read of the data model. Anything callable falls back
+    // to the record title. That covers effectful functions we have not written
+    // yet, which a blocklist would not.
+    if (typeof raw === 'string') return raw.trim();
+    if (!isDataBinding(raw)) return '';
     const ctx = { dataModel: (surface.dataModel ?? {}) as Record<string, unknown>, scope: null };
     try {
-      return toDisplayString(resolveDynamic(header.title, ctx)).trim();
+      return toDisplayString(resolveDynamic(raw, ctx)).trim();
     } catch {
-      // A schema-valid title can still THROW here — `{call: "@index"}` raises
-      // deliberately outside a collection scope, and the chip resolves at
-      // scope: null. The switcher resolves EVERY live surface's title, even in
-      // a focused route rendering a different app, so one malformed background
-      // app would take down the whole shell and block navigation away from it
-      // (codex P2). A label is never worth that: fall back instead.
+      // Even a pure read can throw on a hostile model; a label is never worth
+      // the shell, which resolves every background app's title.
       return '';
     }
   }

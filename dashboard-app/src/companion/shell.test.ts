@@ -522,3 +522,49 @@ describe('Companion shell — a malformed background app cannot crash the shell'
     expect(chips).toContain('Record Name');
   });
 });
+
+describe('Companion shell — chip titles never execute anything', () => {
+  it('does not fire openUrl from a header title while rendering chips', async () => {
+    // codex P2: `title` is a DynamicString, so it may hold a function call —
+    // and `openUrl` calls window.open. Chips resolve EVERY live surface,
+    // twice (label + tooltip), so a call here fired unsolicited navigation
+    // merely because a surface existed in the feed.
+    const opened = vi.fn();
+    vi.stubGlobal('open', opened);
+
+    seed('nous:chat:micro_app:good01', 0, undefined, 'Good App');
+    store.apply(null, {
+      version: 'v1.0',
+      createSurface: {
+        surfaceId: 'nous:chat:micro_app:evil01',
+        catalogId: 'nous-core',
+        components: [
+          { id: 'root', component: 'Column', children: ['header', 'body'] },
+          { id: 'body', component: 'Text', text: 'b' },
+          {
+            id: 'header',
+            component: 'AppHeader',
+            title: { call: 'openUrl', args: { url: 'https://evil.example/beacon' } },
+          },
+        ],
+        dataModel: {},
+        metadata: { extensions: { com_nous_nonce: 'n2', com_nous_title: 'Record Name' } },
+      },
+    } as never);
+
+    // FOCUS the good app, so the evil one is a BACKGROUND surface: its
+    // components are never rendered, and the only thing that touches its
+    // title is the chip. That is exactly the reported scenario.
+    location.hash = '#/s/' + encodeURIComponent('nous:chat:micro_app:good01');
+    const { container } = render(Companion);
+    await settle();
+
+    expect(opened).not.toHaveBeenCalled();
+    const chips = [...container.querySelectorAll('.switcher a.chip')].map((c) =>
+      c.textContent?.trim(),
+    );
+    // Falls back to the record title rather than evaluating the call.
+    expect(chips).toContain('Record Name');
+    vi.unstubAllGlobals();
+  });
+});
