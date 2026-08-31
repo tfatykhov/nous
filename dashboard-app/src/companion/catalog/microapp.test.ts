@@ -6,6 +6,7 @@ import AppFooterView from './AppFooterView.svelte';
 import SectionView from './SectionView.svelte';
 import StatRowView from './StatRowView.svelte';
 import TimelineView from './TimelineView.svelte';
+import ModalView from './ModalView.svelte';
 import { store } from '../store.svelte';
 import { transport } from '../transport';
 
@@ -220,6 +221,137 @@ describe('StatRowView', () => {
 
     expect(container.textContent).toContain('Days out');
     expect(container.textContent).toContain('5/5');
+  });
+});
+
+describe('ModalView', () => {
+  // codex P2 on #626: the compose prompt advertises Text/Icon triggers,
+  // which render non-focusable elements — so the wrapper itself must be a
+  // keyboard-operable button, or modal-only detail is pointer-only.
+  function renderModal() {
+    seedSurface({}, [
+      { id: 'mt', component: 'Text', text: 'details' },
+      { id: 'mc', component: 'Text', text: 'the long detail' },
+    ]);
+    return render(ModalView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'm', component: 'Modal', trigger: 'mt', content: 'mc' },
+      },
+    });
+  }
+
+  it('exposes the trigger as a focusable button with dialog semantics', () => {
+    const { container } = renderModal();
+    const trigger = container.querySelector('.trigger');
+    expect(trigger?.getAttribute('role')).toBe('button');
+    expect(trigger?.getAttribute('tabindex')).toBe('0');
+    expect(trigger?.getAttribute('aria-haspopup')).toBe('dialog');
+  });
+
+  it('names a text trigger from its contents and a nameless one via fallback', async () => {
+    // codex P2 round 2 on #626: an Icon trigger renders an aria-hidden SVG,
+    // leaving a focusable button with NO accessible name. Fallback label
+    // fires only when contents provide none — a Text trigger keeps its own
+    // words as the name (a static aria-label would override them).
+    const { container } = renderModal();
+    await settle();
+    expect(container.querySelector('.trigger')?.getAttribute('aria-label')).toBeNull();
+
+    cleanup();
+    seedSurface({}, [
+      { id: 'mt', component: 'Icon', name: 'info' },
+      { id: 'mc', component: 'Text', text: 'the long detail' },
+    ]);
+    const nameless = render(ModalView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'm', component: 'Modal', trigger: 'mt', content: 'mc' },
+      },
+    });
+    await settle();
+    expect(nameless.container.querySelector('.trigger')?.getAttribute('aria-label')).toBe(
+      'Show details',
+    );
+  });
+
+  it('recomputes the fallback label when bound trigger text changes', async () => {
+    // codex round-3 on #626: a data-bound Text trigger can resolve from
+    // empty to populated via updateDataModel without comp changing — the
+    // label logic watches the DOM, not just the component reference.
+    seedSurface({ label: '' }, [
+      { id: 'mt', component: 'Text', text: { path: '/label' } },
+      { id: 'mc', component: 'Text', text: 'the long detail' },
+    ]);
+    const { container } = render(ModalView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'm', component: 'Modal', trigger: 'mt', content: 'mc' },
+      },
+    });
+    await settle();
+    const trigger = container.querySelector('.trigger');
+    expect(trigger?.getAttribute('aria-label')).toBe('Show details');
+
+    store.apply(2, {
+      updateDataModel: { surfaceId: SURFACE, path: '/label', value: 'Trip details' },
+    } as never);
+    await settle();
+    expect(trigger?.getAttribute('aria-label')).toBeNull();
+  });
+
+  it('defers keyboard semantics to an interactive trigger child', async () => {
+    // codex round-4 on #626: a Button trigger (legal outside micro-apps)
+    // is itself a keyboard control — its key activation synthesizes a
+    // click that bubbles to the wrapper's onclick. The wrapper stamping
+    // role/tabindex on top would nest two controls, and preventDefault on
+    // the bubbled keydown would suppress the button's own action.
+    seedSurface({}, [
+      {
+        id: 'mt',
+        component: 'Button',
+        child: 'bl',
+        action: { event: { name: 'x', context: {} } },
+      },
+      { id: 'bl', component: 'Text', text: 'Open' },
+      { id: 'mc', component: 'Text', text: 'the long detail' },
+    ]);
+    const { container } = render(ModalView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'm', component: 'Modal', trigger: 'mt', content: 'mc' },
+      },
+    });
+    await settle();
+    const trigger = container.querySelector('.trigger');
+    expect(trigger?.getAttribute('role')).toBeNull();
+    expect(trigger?.getAttribute('tabindex')).toBeNull();
+    expect(trigger?.getAttribute('aria-label')).toBeNull();
+
+    // Keydown on the child button must NOT be intercepted by the wrapper:
+    // not prevented, and the modal does not open from the raw keydown.
+    const childButton = container.querySelector('button') as HTMLElement;
+    const notPrevented = await fireEvent.keyDown(childButton, { key: 'Enter' });
+    await settle();
+    expect(notPrevented).toBe(true);
+    expect(container.textContent).not.toContain('the long detail');
+
+    // The button's (synthesized) click bubbles to the wrapper and opens.
+    await fireEvent.click(childButton);
+    await settle();
+    expect(container.textContent).toContain('the long detail');
+  });
+
+  it('opens on Enter and Space, not just click', async () => {
+    for (const key of ['Enter', ' ']) {
+      cleanup();
+      const { container } = renderModal();
+      const trigger = container.querySelector('.trigger') as HTMLElement;
+      expect(container.textContent).not.toContain('the long detail');
+      await fireEvent.keyDown(trigger, { key });
+      await settle();
+      expect(container.textContent).toContain('the long detail');
+    }
   });
 });
 

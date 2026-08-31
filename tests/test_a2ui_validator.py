@@ -170,6 +170,42 @@ def test_structure_accepts_a_well_formed_tree() -> None:
     assert validate_structure(components, ["approval.defer"]) == []
 
 
+def test_structure_accepts_the_function_call_action_branch() -> None:
+    # Action is a oneOf in common_types.json: event OR functionCall. The
+    # allowlist governs agent-event names only — a functionCall action is
+    # dispatched through the callAgentFunction trust pipeline and must NOT
+    # be reported as malformed (codex P2 on #626).
+    components = [
+        {"id": "root", "component": "Column", "children": ["btn"]},
+        {
+            "id": "btn",
+            "component": "Button",
+            "child": "label",
+            "action": {"functionCall": {"call": "expandNode", "args": {}}},
+        },
+        {"id": "label", "component": "Text", "text": "More"},
+    ]
+
+    assert validate_structure(components, []) == []
+
+
+def test_structure_rejects_malformed_action_shapes() -> None:
+    # A string event — a plausible malformed LLM output — used to raise
+    # AttributeError, escaping both the compose repair loop and the
+    # fallback. It must be a validation error instead.
+    for bad_action in ({"event": "app.close"}, {}, {"event": None}):
+        components = [
+            {"id": "root", "component": "Column", "children": ["btn"]},
+            {"id": "btn", "component": "Button", "child": "label", "action": bad_action},
+            {"id": "label", "component": "Text", "text": "x"},
+        ]
+
+        errors = validate_structure(components, ["app.close"])
+
+        assert len(errors) == 1, bad_action
+        assert "action must carry" in errors[0]["message"]
+
+
 def test_structure_requires_a_root_component() -> None:
     errors = validate_structure([{"id": "body", "component": "Text", "text": "x"}], [])
 

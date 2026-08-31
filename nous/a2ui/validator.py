@@ -283,11 +283,27 @@ def validate_structure(
     for cid, comp in by_id.items():
         action = comp.get("action")
         if isinstance(action, dict):
-            name = (action.get("event") or {}).get("name")
-            if name and name not in allowed:
+            # Action is a oneOf in common_types.json: an {"event": {"name"}}
+            # branch (dsl.py) governed by the allowed_actions list, or a
+            # {"functionCall": {...}} branch dispatched through the
+            # callAgentFunction trust pipeline (actions.py) — the allowlist
+            # governs agent-event names only, so functionCall passes here.
+            # Anything else — e.g. a string event, a plausible malformed LLM
+            # output — used to raise AttributeError, escaping both the
+            # compose repair loop and the fallback; it must be a validation
+            # ERROR instead.
+            event = action.get("event")
+            name = event.get("name") if isinstance(event, dict) else None
+            if name:
+                if name not in allowed:
+                    err(
+                        f"/components/{cid}",
+                        f"action {name!r} not in surface allowed_actions",
+                    )
+            elif not isinstance(action.get("functionCall"), dict):
                 err(
                     f"/components/{cid}",
-                    f"action {name!r} not in surface allowed_actions",
+                    'action must carry {"event": {"name": ...}} or {"functionCall": {...}}',
                 )
 
     return errors

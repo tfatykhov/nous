@@ -17,7 +17,7 @@ frames:
 tools:
   - compose_surface
   - run_python
-version: "1.0"
+version: "1.1"
 ---
 
 ## When this beats prose
@@ -104,11 +104,22 @@ compose_surface(
 | where does it stand right now | `StatTile` in a `StatRow` |
 | what happened, in order | `Timeline` |
 | the flat facts | `KeyValueTable` |
+| the same subject two ways | `Tabs` (2-5 alternative views; only one renders at a time) |
+| a Nous decision needing review | `DecisionCard` (+ `ConfidenceMeter`), fed from `unreviewed_decisions` |
+| a running DAG's shape | `DagGraph`, fed from the `dag` source |
+| long secondary detail | `Modal` behind a tappable label, or an `accordion` section |
 
 Layouts: `hero` for the one thing that matters, `grid-2`/`grid-3` for peers,
-`rail` for a scrollable strip, `stack` for detail. Pick a `theme` that fits the
-subject — `signal` for alerting, `paper` for reading, `harbor`/`alpine-dusk`
-for ambient, `nous-default` when unsure.
+`rail` for a scrollable strip, `accordion` for long secondary detail collapsed
+until tapped, `stack` for the rest. Pick a `theme` that fits the subject —
+`signal` for alerting, `paper` for reading, `harbor`/`alpine-dusk` for ambient,
+`nous-default` when unsure.
+
+You never author pixels or colors: the composer picks components from a closed
+catalog and the renderer owns geometry, scale, and palette. The full component
+list with required/optional props is generated into the compose prompt from
+the catalog itself, so you do not need to memorize it — state the intent and
+the data, and let compose lay it out.
 
 ## Honesty rules the renderer enforces (do not fight them)
 
