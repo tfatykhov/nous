@@ -17,7 +17,7 @@ frames:
 tools:
   - compose_surface
   - run_python
-version: "1.2"
+version: "1.7"
 ---
 
 ## When this beats prose
@@ -183,9 +183,131 @@ trend reports and scorecards, `harbor`/`alpine-dusk` for ambient,
 
 You never author pixels or colors: the composer picks components from a closed
 catalog and the renderer owns geometry, scale, and palette. The full component
-list with required/optional props is generated into the compose prompt from
-the catalog itself, so you do not need to memorize it — state the intent and
-the data, and let compose lay it out.
+list with required/optional props, and WHEN to use the easy-to-miss ones, is
+generated into the compose prompt from the catalog itself (#626) — so do not
+memorize props here; state the intent and the data and let compose lay it out.
+`Modal`'s trigger must be a `Text` or `Icon`: a `Button` is structurally
+impossible (any component carrying an `action` is rejected).
+
+## Fold instead of scroll — Tabs and accordion
+
+A long stack is the default failure mode: everything equally sized, nothing
+findable. Two ways to fold it, and they are not interchangeable.
+
+**`Tabs` — alternative views of ONE subject.** `tabs: [{title, child}]`, where
+each `child` is a component id in the flat list, exactly like a Section child.
+**2-5 tabs, enforced by the grammar.** Only the active panel renders — an
+inactive chart is unmounted, not hidden, so its bindings do not run. Reach for
+Tabs when the panels answer the same question differently (temps / rain /
+freezing level; by day / by base / by leg). Use separate Sections when the user
+should see both at once — tabs hide things, and hidden things get forgotten.
+
+**`Section.layout: "accordion"` — collapsed until tapped.** For the block that
+must be *present* but not *loud*: the ledger, the raw rows, the appendix. Never
+the headline. Like Tabs, a collapsed panel is not rendered at all.
+
+## Budgets — what actually fits (raised, #623)
+
+- **Components/sections: 40/5 by default — `ledger` and `briefing` archetypes
+  get 80/8.** A 16-day itinerary or a multi-chart dashboard does not fit 40/5;
+  pick the archetype that matches and the caps follow. `MAX_DEPTH` stays 5 for
+  everything (depth is a complexity smell, not expressiveness).
+- **Sources: 40k total, 12k per source.** A 200-point ISO-stamped series
+  (~9.9k) now arrives whole instead of being silently downsampled to ~120
+  points — a full-resolution series is worth asking for. Three series plus
+  records still fit.
+- **Censor scan 48k; compose output 16k tokens** (~80 components). If an app
+  still falls back, it is a contract error, not a size limit — read the lint
+  message rather than trimming content on a guess.
+
+## Name it short — the title becomes the chip
+
+The `AppHeader` title is structurally mandatory (lint requires it as the first
+top-level child) and it is now what **names the app's switcher chip**, so
+several live apps are distinguishable instead of all reading `app`. Precedence:
+AppHeader title → the record title → the curated kind label.
+
+Write it as a **label, not a headline**: `Crypto Note`, not
+`Crypto Note: Six Months, Forward View`. It truncates on a word boundary with
+the full text on hover, so a long title is simply a worse chip. A dynamic title
+(a `{path}` binding) resolves against the app's own data model and works fine —
+the constraint is length, not form.
+
+## Refine options are analytical angles, never commands
+
+A refine option is **not a dispatched action**. Pressing it appends the
+option's LABEL to the intent and re-composes against the **same stored
+`data_sources`**. Nothing else happens. So the only satisfiable option is a
+*different view of data the app already has*:
+
+- Good: `Group by sender` · `Email volume by week` · `Compare attachment types` ·
+  `Shared vs private items` · `Compare market share with last month`
+- Undeliverable: `Export raw data` · `Download CSV` · `Email me a summary` ·
+  `Schedule a weekly digest` · `Save to Drive` · `Share via link` ·
+  `Add to calendar` · `Remind me tomorrow` · `Print this`
+- Also undeliverable **as a refine option** — anything that ACTS. `Export raw
+  data`, `Email me a summary`, `Retry failed nodes`, `Rebalance` are not
+  refinements of a view. That does not mean they are impossible: since F092.2
+  they belong in `agent_actions` (next section). Refine = re-render what is
+  already here; agent_actions = ask the agent to go do something.
+
+The classifier matches command *phrases* — the verb anchored at the start of
+the label, or a construction with no noun reading (`email me`, `save to`,
+`share via`, `schedule a`) — precisely so that legitimate labels containing
+those words survive.
+
+**It drops the option; it does not fail the app.** That is deliberate: no
+lexical rule separates `Print volume by department` (a metric) from
+`Schedule report distribution` (a command), and wiring a heuristic into
+validation made every misjudgement cost the whole app via the repair loop. The
+consequence for you: a bad label costs a button **silently**. Getting refine
+labels right is the author's job, not the validator's.
+
+## `agent_actions` — when a tap should DO something (F092.2)
+
+`compose_surface(agent_actions=[{id, label, instruction}])` puts up to **4**
+accent buttons in the footer. A tap spawns a **background agent turn** that
+runs your stored `instruction` and then recomposes the app. This is the only
+route from the surface back to you — the composed tree itself remains read-only
+(the grammar still bans every input component, and any component carrying an
+`action` is still rejected).
+
+**Flag-gated** (`NOUS_A2UI_AGENT_ACTIONS_ENABLED`, land-dark by default). The
+parameter is advertised in the tool schema **only when the flag is on** — if
+you cannot see `agent_actions` in your own `compose_surface` schema, do not
+send it. On this deployment it is ON.
+
+Writing the instruction — it is the whole contract:
+
+- **Self-contained.** It executes later, in a fresh context, **with nobody in
+  the loop**. It cannot ask a question, and it cannot lean on anything from
+  the turn that composed the app. Name files, ids, and addresses in full.
+- **≤500 chars, label ≤40, slug ids** — validated at the tool layer. The cap is
+  load-bearing: composition is the only moment you are deliberate about what a
+  future unattended turn will do. Say the action, the object, and the finish.
+- **End it by updating this app.** The turn is handed the `dedup_key`, the
+  `data_sources`, and the `agent_actions` to re-declare; recomposing on that
+  same `dedup_key` preserves `surface_id`, replaces the data model wholesale,
+  and **is what clears the pending stamp**. An instruction that acts but never
+  recomposes reads as a failure to the user.
+- **Only declare what you can actually do** with your tools. A button whose
+  turn cannot succeed is worse than no button.
+- **Same trust split as `data_sources`:** actions enter only through YOUR tool
+  call. The inner compose LLM never sees or authors them, and the server stamps
+  only `{id, label}` onto the footer — the instruction never reaches the client.
+
+What the user sees while it runs: buttons disable, the tapped one gets an
+ellipsis, and a second tap is refused server-side (each tap is an LLM turn
+against a 3-slot subtask pool). On failure, timeout, or a turn that finishes
+without recomposing, the footer shows an honest error; and if the process dies
+mid-flight, the client re-enables past the freshness window with "no update
+arrived" rather than spinning forever. You do not have to build any of that —
+but do not paper over it by writing an instruction that "succeeds" without
+recomposing.
+
+Actions survive `refine` and even a `fallback` render (a degraded app most
+needs its "ask the agent" button — a tap can recompose it into a real one).
+They are footer-level only; per-row actions and free-text input are v2.
 
 ## Honesty rules the renderer enforces (do not fight them)
 
@@ -201,6 +323,176 @@ the data, and let compose lay it out.
 - Anything you supplied yourself rather than sourced renders **amber**. If you
   find yourself hand-writing numbers into `dataModel`, that section will be
   marked model-supplied — fold it into the script instead if it should be live.
+- **Children are references, not inline objects.** The grammar is
+  reference-based: a `children` array holds component *ids* (strings). A
+  non-string entry is now a hard lint error naming the count and the key —
+  because before that, a Section whose body held only inline children linted
+  CLEAN and rendered **EMPTY**, reporting `fallback: false, repairs: 0`. The
+  pipeline called a silently truncated app a success. The check lives in
+  `grammar.lint_micro_app`, so it holds on every `push_built` and every
+  recomposition, not just on compose. (The `Repeat` template
+  `{componentId, path}` is a dict, not a child list — unaffected.)
+
+## Shape the source to the component, not the other way round
+
+The bound components have **strict item contracts**, and a source whose records
+use your own field names cannot be bound at all — the model has no reshape
+operator, so it burns all three repair attempts and you get
+`fallback: true`, a markdown degradation:
+
+- `Timeline.items` → `[{at, label, detail?, flag?}]` (`at` is a preformatted
+  string, `flag: true` highlights the row)
+- `KeyValueTable.rows` → `[{key, value}]`, both strings
+- `StatTile.label/value` → preformatted DynamicStrings; bind
+  `/src/0/field` and keep the record count at 1
+- `LineChart.path` → a multi-series object; `BarChart`/`Sparkline.path` → a
+  series whose `t` is the category label
+
+Emit those exact keys **from the script**. Formatting (units, `25° / 15°C`,
+thousands separators) belongs in the producer too — the components render
+preformatted strings and will not do it for you.
+
+Two binding rules bite in practice: every non-empty source **must** be bound by
+something, and a record-list source must be bound by a *template* path
+(`/days`), not fixed indices — indices covering fewer than all records is
+rejected as rendering a partial source as if complete.
+
+## Validate locally before composing
+
+`_validate` is a pure method — run the real thing against real source data and
+iterate until clean, instead of paying an LLM round-trip per mistake:
+
+```python
+from nous.a2ui.compose import SurfaceComposer
+c = SurfaceComposer.__new__(SurfaceComposer)      # no __init__ needed
+errs = c._validate(candidate_app_dict, source_data)
+```
+
+It reports skeleton violations verbatim. The caps that are easy to trip:
+**root must be a Column** with id `root` listing every top-level child;
+**1–5 Sections** (merge extras into one Section wrapping a `Column`);
+**StatRow takes at most 4 children**; `Section.child` is **singular** (one
+component id) while `Row`/`Column`/`List`/`StatRow` take `children`.
+
+Get the structure clean locally, then write the intent to *describe that
+structure* — naming each section, path and series key. The composer reproduces
+it in one or two repairs instead of failing out.
+
+## Images and links: possible, but not the obvious way
+
+Both work in a micro-app. Neither works the way you would first reach for.
+
+**Images** — the `Image` component is real and registered in the renderer.
+Props: `url` (DynamicString, so bind it), `description` (alt text; omit and the
+image is treated as decorative), `fit` (object-fit), `variant`
+(`icon|avatar|smallFeature|mediumFeature|largeFeature|header`). `src` is passed
+through unfiltered and there is no CSP, so any https URL renders.
+
+**Links** — put them in `Text` as markdown, NOT on a `Button`.
+- A `Button` CANNOT be a hyperlink here: `_validate` rejects ANY component
+  carrying an `action` ("micro-app controls live in the AppFooter only").
+  `openUrl` exists as a renderer function but no composed component may invoke it.
+- The catalog's `Text` description claims markdown "without HTML, images, or
+  links". **That description is wrong** — `markdown.ts` parses inline links
+  deliberately (its comment: "The fixture wins — we parse links") and
+  `MarkdownInline.svelte` emits a real `<a target="_blank" rel="noopener">`.
+  Scheme is gated at PARSE time to `http/https/mailto`; a `javascript:` or
+  `data:` href silently degrades to plain text, keeping the label.
+
+So: build the link into the record's markdown field server-side and bind a
+`Text` to it. Google Maps URLs API is stable and constructible from coords:
+`https://www.google.com/maps/search/?api=1&query=LAT,LNG` and
+`.../maps/dir/?api=1&origin=..&destination=..&travelmode=driving[&waypoints=..]`.
+
+**Never hand-assemble an image URL.** Wikimedia thumb URLs embed an
+unguessable md5 shard (`/5/52/`, not the `/6/6e/` you would infer). Resolve via
+the Commons API, then GET each URL and assert `200` + `image/*` BEFORE composing.
+
+## agent_script: exec the file, never `import` it
+
+The script sandbox is a LONG-LIVED process, so `sys.modules` persists between
+runs. `import my_sources` binds whatever was cached the first time — edit the
+file, add a function, and every later run still gets the stale module
+(`AttributeError: module has no attribute 'get'`). Module name collisions are
+possible too.
+
+Use a cache-proof loader instead:
+
+    ns = {}
+    exec(open('/tmp/nous-workspace/<app>/<uniquely_named>.py').read(), ns)
+    result = ns['get']('bases')
+
+Short stored script, canonical logic in one versioned file, always fresh.
+
+## A failing source is SILENT — verify the persisted dataModel
+
+`_script_failure` is deliberately shape-preserving: a broken `records` source
+returns an **empty list**, a broken `series` source an **empty series dict**.
+It never raises and never fails the compose. Therefore:
+
+**`fallback: false, repairs: 0` does NOT mean the app has data.** An app can
+compose perfectly and render entirely empty boxes.
+
+Always close the loop by re-fetching the surface and asserting on lengths:
+
+    curl -s "http://localhost:8000/a2ui/surfaces/<surface_id>"
+    # then assert every records key len > 0 and every series key points > 0
+
+Only then report it as done.
+
+## Depth 5 counts from root — a Card can cost you the image
+
+Repeat templates nest deeper than they look. `root > Section > Column(repeat)
+> template Column > Image` is already depth 5. Wrapping the template in a
+`Card` makes it 6 and fails `nesting depth 6 exceeds 5`. The `Section` is
+already a visual container — drop the Card, keep the image.
+
+Also: caps are per-archetype (see Budgets above). Prefer trimming redundant
+sections to switching archetype just to buy headroom.
+
+## When the composer falls back on a big app
+
+The composer is an LLM transcribing your spec under `max_tokens=8000` and
+`MAX_REPAIRS=2`; a truncated response reads as unparseable JSON and burns a
+round. If it falls back, do NOT just retry — first prove your own tree is legal
+by running the real `_validate` against live source data (see "Validate locally").
+If your tree passes, the spec is too big to transcribe: cut redundant sections
+(content already covered elsewhere) and shorten the intent. A 26-component /
+6-section spec fell back twice; the same app at 23 components / 5 sections
+composed at `repairs: 0`.
+
+
+## Suppress refine options on any hand-shaped app
+
+`app.refine` is not a view toggle. The server takes the app's **stored intent**,
+appends `\n\nRefine request: <label>`, and runs a **full LLM recompose**, then calls
+`update_components` **unconditionally**.
+
+If your intent is a literal build spec — explicit components, ids, binding paths, the
+style that makes the first compose reliable — the appended narrowing instruction is
+self-contradictory and overruns the composer budget. The recompose degrades to the
+markdown fallback, and because there is **no `if composed.fallback` guard**, that dump
+**replaces your working tree**:
+
+- body becomes a markdown copy of your own build spec
+- `AppHeader.title` becomes the **entire intent string** → the switcher chip turns to garbage
+- `refine_options` is wiped to `[]` → the app cannot be refined back
+
+It is irreversible from the UI. Only a fresh `compose_surface` on the same `dedup_key`
+restores it. (Observed live, Italy Trip app, 2026-08-31.)
+
+**Rule:** every hand-shaped app's intent ends with
+
+```
+Return "refine_options": [] — this app offers NO refine options. Do not invent any.
+```
+
+Verify it landed: the composed `AppFooter` must show `"refineOptions": []`.
+
+`refresh` and `close` are safe and should stay. `app.refresh` re-runs the declared
+fetchers only — no LLM, no tree replacement. Offer refine options **only** when the
+intent is a short semantic description the composer can legitimately re-render from.
+
 
 ## Cost and limits
 
