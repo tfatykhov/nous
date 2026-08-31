@@ -50,6 +50,13 @@ class SubtaskManager:
         dag_node_id: UUID | None = None,
         # F062 addition — caller-supplied JSON Schema for the result payload.
         payload_schema: dict | None = None,
+        # F092.2 — caller-supplied primary key. app.act must persist the
+        # retirement identity (the id) durably BEFORE the row becomes
+        # runnable: a committed pending row can be dequeued immediately,
+        # and cancel() does not preempt a worker, so writing the id after
+        # create leaves an untrackable window. Pre-generating the id closes
+        # it: the guard stamp carries the id first, then the row commits.
+        subtask_id: UUID | None = None,
     ) -> Subtask:
         """Create a new pending subtask. Raises ValueError if pending limit reached."""
         pri_val = _PRIORITY_MAP.get(priority, 100)
@@ -68,6 +75,7 @@ class SubtaskManager:
                 )
 
             subtask = Subtask(
+                **({"id": subtask_id} if subtask_id is not None else {}),
                 agent_id=self._agent_id,
                 parent_session_id=parent_session_id,
                 task=task,
