@@ -123,11 +123,31 @@ describe('AppFooterView', () => {
 
     await fireEvent.click(getByText('refresh'));
     await settle();
+    // Two-tap confirmation on the destructive close: the first tap ARMS.
     await fireEvent.click(getByText('close'));
+    await settle();
+    expect(act).not.toHaveBeenCalled();
+    await fireEvent.click(getByText('sure? close'));
     await settle();
 
     expect(rpc).toHaveBeenCalledWith(SURFACE, 'app.refresh', {});
     expect(act).toHaveBeenCalledWith(SURFACE, 'app.close', 'footer', {});
+  });
+
+  it('an armed close disarms by itself after the timeout', async () => {
+    vi.useFakeTimers();
+    const act = vi
+      .spyOn(transport, 'postAction')
+      .mockResolvedValue({ ok: true, message: '', resolved: true });
+    const { getByText } = renderFooter([]);
+
+    await fireEvent.click(getByText('close'));
+    expect(getByText('sure? close')).toBeTruthy();
+    vi.advanceTimersByTime(4500);
+    await tick();
+    expect(getByText('close')).toBeTruthy();
+    expect(act).not.toHaveBeenCalled();
+    vi.useRealTimers();
   });
 
   it('paints a rejected call inline and stays interactive', async () => {

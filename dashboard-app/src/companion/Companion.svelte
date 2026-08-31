@@ -217,6 +217,24 @@
   // disposable micro-apps (they are rebuilt, not restored, by design).
   const microApps = $derived(feed.filter((s) => kindOf(s.surfaceId) === 'micro_app'));
   let closingAll = $state(false);
+  // Two-tap confirmation, same pattern as the per-app close: this sweeps EVERY
+  // live micro-app in one press, and apps are rebuilt, not restored. First tap
+  // arms ("sure? close N apps", auto-disarms after 4s); second executes.
+  let closeAllArmed = $state(false);
+  let closeAllTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function requestCloseAll() {
+    if (closingAll) return;
+    if (!closeAllArmed) {
+      closeAllArmed = true;
+      clearTimeout(closeAllTimer);
+      closeAllTimer = setTimeout(() => (closeAllArmed = false), 4000);
+      return;
+    }
+    clearTimeout(closeAllTimer);
+    closeAllArmed = false;
+    void closeAllApps();
+  }
 
   async function closeAllApps() {
     if (closingAll) return;
@@ -255,8 +273,17 @@
         </a>
       {/each}
       {#if microApps.length >= 2}
-        <button class="chip close-all" disabled={closingAll} onclick={() => void closeAllApps()}>
-          {closingAll ? 'closing…' : `close all apps (${microApps.length})`}
+        <button
+          class="chip close-all"
+          class:armed={closeAllArmed}
+          disabled={closingAll}
+          onclick={requestCloseAll}
+        >
+          {closingAll
+            ? 'closing…'
+            : closeAllArmed
+              ? `sure? close ${microApps.length} apps`
+              : `close all apps (${microApps.length})`}
         </button>
       {/if}
     </nav>
@@ -362,6 +389,10 @@
   .chip.active {
     color: var(--accent);
     border-color: var(--accent);
+  }
+  .chip.close-all.armed {
+    color: var(--crit);
+    border-color: var(--crit);
   }
   .chip.close-all {
     margin-left: auto;

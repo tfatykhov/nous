@@ -55,6 +55,28 @@
     }
   }
 
+  // Two-tap confirmation. close() resolves the surface irreversibly — a
+  // micro-app is REBUILT, not restored, so one stray tap costs a compose the
+  // user may have refined. The first tap ARMS (the button turns into an
+  // explicit "sure? close" and auto-disarms after 4s); only the second tap
+  // executes. Deliberately not window.confirm: a native modal blocks the
+  // whole page and cannot be styled or tested.
+  let armed = $state(false);
+  let disarmTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function requestClose() {
+    if (busy) return;
+    if (!armed) {
+      armed = true;
+      clearTimeout(disarmTimer);
+      disarmTimer = setTimeout(() => (armed = false), 4000);
+      return;
+    }
+    clearTimeout(disarmTimer);
+    armed = false;
+    void close();
+  }
+
   async function close() {
     if (busy) return;
     busy = true;
@@ -82,7 +104,15 @@
         {busy ? 'working…' : 'refresh'}
       </button>
     {/if}
-    <button class="ctl quiet" disabled={busy} onclick={() => void close()}>close</button>
+    <button
+      class="ctl quiet"
+      class:armed
+      disabled={busy}
+      aria-label={armed ? 'confirm close' : 'close app'}
+      onclick={requestClose}
+    >
+      {armed ? 'sure? close' : 'close'}
+    </button>
   </div>
   {#if error}
     <span class="err" role="alert">{error}</span>
@@ -120,6 +150,10 @@
   .ctl:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+  .ctl.armed {
+    color: var(--crit);
+    border-color: var(--crit);
   }
   .ctl.quiet {
     margin-left: auto;
