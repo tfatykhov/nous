@@ -34,6 +34,7 @@ from typing import Any
 
 from nous.handlers import call_background_llm
 
+from .catalog_summary import catalog_property_summary
 from .dsl import BuiltSurface, SurfaceValidationError
 from .grammar import lint_micro_app
 from .sources import SourceRegistry, UnknownSourceError, is_series
@@ -79,12 +80,10 @@ Hard rules (violations are rejected and returned to you to fix):
   wrap multiple components in a Column and point child at it).
 - Budget: 40 components (80 for ledger/briefing), nesting depth max 5.
   Over budget? Use a repeat template (below) or summarize + a refine option.
-- Allowed components ONLY: Text, Image, Icon, Row, Column, List, Card,
-  Tabs, Modal, Divider, Button, StatTile, KeyValueTable, DecisionCard,
-  ConfidenceMeter, MemoryGraph, DagGraph, AppHeader, AppFooter, Section,
-  StatRow, Timeline, Sparkline, LineChart, BarChart. Input components
-  (TextField, Slider, DateTimeInput, CheckBox, ChoicePicker) are BANNED —
-  micro-apps are read-only.
+- Allowed components ONLY: the ones listed under "Component properties"
+  below — nothing else exists. Input components (TextField, Slider,
+  DateTimeInput, CheckBox, ChoicePicker) are BANNED — micro-apps are
+  read-only.
 - No component id may appear twice, be referenced by two parents, or be
   repeated inside one children array.
 - Buttons may not carry actions (the AppFooter renders the app's controls).
@@ -340,7 +339,9 @@ class SurfaceComposer:
             + _GRAMMAR_RULES
             + "\n"
             + _THEME_MENU
-            + "\n\nServer-resolved data available at these data-model keys "
+            + "\n\n"
+            + catalog_property_summary()
+            + "\nServer-resolved data available at these data-model keys "
             + "(bind with {\"path\": \"/<key>/...\"} — do NOT copy the values "
             + "into dataModel, the server injects them; the [series]/[records] "
             + "tag tells you which sources a chart can bind):\n"

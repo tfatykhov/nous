@@ -1234,3 +1234,69 @@ async def test_compose_surface_tool_is_absent_without_composer() -> None:
 
     assert is_error is True
     assert "Unknown tool" in text
+
+
+# ---------------------------------------------------------------------------
+# Catalog property summary (compose prompt)
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_summary_covers_every_allowed_component() -> None:
+    from nous.a2ui.catalog_summary import catalog_property_summary
+    from nous.a2ui.grammar import ALLOWED_COMPONENTS, BANNED_COMPONENTS
+
+    summary = catalog_property_summary()
+
+    for name in ALLOWED_COMPONENTS:
+        assert f"- {name}: required " in summary, f"{name} missing from summary"
+    for name in BANNED_COMPONENTS:
+        assert f"- {name}:" not in summary, f"{name} is banned but summarized"
+
+
+def test_catalog_summary_names_the_properties_that_broke_in_production() -> None:
+    """The 2026-08-30 compose instrumentation: 4 of 6 repair rounds failed on
+    props the model was never shown. ``DecisionCard.decisionId`` was reported
+    verbatim; the "'items' is a required property" message came from the
+    Timeline branch of the anyComponent oneOf (``List`` requires ``children``,
+    not ``items`` — both are now stated)."""
+    from nous.a2ui.catalog_summary import catalog_property_summary
+
+    summary = catalog_property_summary()
+
+    assert "- DecisionCard: required decisionId, description" in summary
+    assert "- Timeline: required items" in summary
+    assert "- List: required children" in summary
+    # The three "unexpected property" rejections were subtitle/title on
+    # components that have no such prop — the preamble says so explicitly.
+    assert "DOES NOT EXIST" in summary
+    assert "- AppHeader: required title, composedAt; optional subtitle" in summary
+
+
+def test_catalog_summary_is_cached_and_within_budget(monkeypatch) -> None:
+    from nous.a2ui import catalog_summary as summary_mod
+
+    summary_mod.catalog_property_summary.cache_clear()
+    first = summary_mod.catalog_property_summary()
+
+    # Second call must not touch the 69 KB of catalog JSON again.
+    def _boom() -> dict:
+        raise AssertionError("catalog re-read on a cached call")
+
+    monkeypatch.setattr(summary_mod, "_component_schemas", _boom)
+    second = summary_mod.catalog_property_summary()
+
+    assert second is first
+    assert len(first) <= summary_mod._TOKEN_BUDGET * summary_mod._CHARS_PER_TOKEN
+
+
+def test_build_prompt_carries_the_catalog_summary(composer: SurfaceComposer) -> None:
+    from nous.a2ui.catalog_summary import catalog_property_summary
+
+    prompt = composer._build_prompt("show me my vacation plans", None, {})
+
+    summary = catalog_property_summary()
+    assert summary in prompt
+    # Ordered after the grammar rules (which now cross-reference it) and
+    # before the source-data block.
+    assert prompt.index("Hard rules") < prompt.index(summary)
+    assert prompt.index(summary) < prompt.index("Server-resolved data")
