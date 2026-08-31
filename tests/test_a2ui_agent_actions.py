@@ -779,6 +779,32 @@ async def test_ambiguous_create_failure_keeps_the_stamp_and_watches(flag_setting
         t.cancel()
 
 
+async def test_fast_finished_committed_row_keeps_the_stamp(flag_settings) -> None:
+    """codex P1 round-13: create() commit-then-raise where a fast worker
+    ALREADY FINISHED — side effects done, possibly the app recomposed. The
+    discriminator is row EXISTENCE (get() -> None proves no commit), not
+    worker liveness: a terminal committed row must route through the
+    ambiguity path, never a clean 'nothing was queued' retry that would
+    duplicate the finished work."""
+
+    class _FastFinishedCreate(_FakeSubtasks):
+        async def create(self, task: str, **kwargs: Any):
+            raise RuntimeError("refresh failed after commit")
+
+    heart = SimpleNamespace(subtasks=_FastFinishedCreate(status="completed"))
+    router = _handler_router(flag_settings, heart=heart)
+    handler = router._handlers["app.act"].fn
+
+    result = await handler(_ctx(router, _surface_stub(), "rebalance"))
+
+    assert not result.ok and "may have started" in result.message
+    pending_writes = [v for p, v in router._service.patches if p == "/meta/pendingAction"]
+    assert pending_writes[-1] is not None, "the stamp must survive"
+    assert router._action_watchers, "the watcher resolves the terminal row honestly"
+    for t in router._action_watchers:
+        t.cancel()
+
+
 async def test_app_act_refuses_before_creating_when_the_reserve_write_fails(flag_settings) -> None:
     """codex P1 round-6: a created subtask is runnable the moment its row
     commits, so the guard stamp must be reserved BEFORE create() — a
@@ -807,6 +833,9 @@ async def test_app_act_clears_the_stamp_when_create_fails(flag_settings) -> None
     class _NoCreateSubtasks(_FakeSubtasks):
         async def create(self, task: str, **kwargs: Any):
             raise RuntimeError("queue full")
+
+        async def get(self, subtask_id):
+            return None  # nothing was committed
 
     heart = SimpleNamespace(subtasks=_NoCreateSubtasks())
     router = _handler_router(flag_settings, heart=heart)

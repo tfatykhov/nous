@@ -898,17 +898,25 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
                 subtask_id=sub_id,
             )
         except Exception as exc:
-            # Almost always: no row was committed, retirement confirms the
-            # worker never started, and the stamp is cleared for a clean
-            # retry. The ambiguous tail (commit succeeded, refresh raised)
-            # returns stopped=False — the row is real and a worker may
-            # already be executing it, so the stamp MUST survive (codex P1
-            # round-12: clearing it here re-armed retry into a concurrent
-            # turn) and the watcher takes over: a phantom row (get → None)
-            # makes it clear the stamp shortly; a real one gets the normal
-            # lifecycle.
-            stopped = await _retire_action_subtask(router, {"subtask_id": str(sub_id)})
-            if stopped:
+            # The discriminator is ROW EXISTENCE, not worker liveness (codex
+            # P1 round-13): a fast worker can have already FINISHED the
+            # committed row — side effects done, possibly the app already
+            # recomposed — and 'stopped' would then read True exactly like
+            # the no-row case, clearing the stamp into a retry that
+            # duplicates those effects. Only get() -> None proves nothing
+            # was committed; anything else (running, terminal, or an
+            # unreadable row) routes through the ambiguity path: retire
+            # best-effort, keep the stamp, and let the watcher resolve it
+            # (running -> normal lifecycle; terminal-without-recompose ->
+            # honest 'finished without updating'; recomposed -> stamp
+            # already gone, watcher no-ops).
+            row_exists = True
+            try:
+                row_exists = await subtasks.get(sub_id) is not None
+            except Exception:
+                logger.warning("F092.2 post-create row check failed", exc_info=True)
+            await _retire_action_subtask(router, {"subtask_id": str(sub_id)})
+            if not row_exists:
                 await _clear_pending_stamp(router, surface_id)
                 return ActionResult(
                     ok=False, message=f"could not queue the action: {exc}"
