@@ -788,6 +788,19 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
         subtasks = getattr(router._heart, "subtasks", None) if router._heart else None
         if subtasks is None:
             return ActionResult(ok=False, message="agent unavailable (no subtask manager wired)")
+        if router._composer is None:
+            # NOUS_A2UI_COMPOSE_ENABLED=false with live action-enabled
+            # surfaces (codex P2): compose_surface is unregistered, so the
+            # turn could perform the action's side effects but never the
+            # REQUIRED final app update — a stale surface until the watcher
+            # reports failure. Refuse before anything runs.
+            return ActionResult(
+                ok=False,
+                message=(
+                    "app updates are unavailable (composer disabled) — "
+                    "the action cannot finish, so it was not started"
+                ),
+            )
         spec = ctx.surface.app_spec or {}
         offered = {
             str(a.get("id")): a

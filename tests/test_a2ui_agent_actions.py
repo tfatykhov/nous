@@ -567,7 +567,11 @@ async def _instant_sleep(_seconds: float) -> None:
 
 def _handler_router(flag_settings, heart=None):
     # ActionRouter.__init__ touches no DB; None is safe for handler units.
-    return ActionRouter(None, flag_settings, _FakeService(None), heart=heart)
+    # composer is a sentinel: app.act refuses outright when it is None
+    # (the action could never perform its required final recompose).
+    return ActionRouter(
+        None, flag_settings, _FakeService(None), heart=heart, composer=SimpleNamespace()
+    )
 
 
 def _ctx(router, surface, action_id: str):
@@ -816,7 +820,9 @@ async def test_app_act_refuses_before_creating_when_the_reserve_write_fails(flag
             raise RuntimeError("transient outage")
 
     heart = SimpleNamespace(subtasks=_FakeSubtasks())
-    failing_router = ActionRouter(None, flag_settings, _FailingService(None), heart=heart)
+    failing_router = ActionRouter(
+        None, flag_settings, _FailingService(None), heart=heart, composer=SimpleNamespace()
+    )
     handler = failing_router._handlers["app.act"].fn
 
     result = await handler(_ctx(failing_router, _surface_stub(), "rebalance"))
@@ -971,6 +977,34 @@ async def test_resolve_time_retirement_helper() -> None:
     assert svc._block_pending_action(SimpleNamespace(kind="micro_app", data_model={})) is None
 
 
+async def test_app_act_refuses_without_a_composer(flag_settings) -> None:
+    """codex P2 round-16: NOUS_A2UI_COMPOSE_ENABLED=false with live
+    action-enabled surfaces — the turn could act but never perform the
+    REQUIRED final recompose, leaving the app stale until the watcher
+    reports failure. Refuse before anything runs."""
+    heart = SimpleNamespace(subtasks=_FakeSubtasks())
+    router = ActionRouter(None, flag_settings, _FakeService(None), heart=heart)
+
+    result = await router._handlers["app.act"].fn(_ctx(router, _surface_stub(), "rebalance"))
+
+    assert not result.ok and "composer disabled" in result.message
+    assert heart.subtasks.created == []
+
+
+def test_is_own_action_push_recognizes_the_action_session() -> None:
+    """codex P2 round-16: the action subtask's recompose must not flip a
+    chat-origin (pull) app to agent origin in the dedup replacement."""
+    from nous.a2ui.service import SurfaceService
+
+    sid = uuid.uuid4()
+    pending = {"subtask_id": str(sid)}
+    assert SurfaceService._is_own_action_push(pending, f"subtask-{sid.hex[:8]}")
+    assert not SurfaceService._is_own_action_push(pending, "chat-1")
+    assert not SurfaceService._is_own_action_push(pending, None)
+    assert not SurfaceService._is_own_action_push(None, f"subtask-{sid.hex[:8]}")
+    assert not SurfaceService._is_own_action_push({"subtask_id": "junk"}, "subtask-aaaa")
+
+
 async def test_app_act_handler_flag_off_and_no_heart(settings, flag_settings) -> None:
     off_router = _handler_router(settings.model_copy(update={"a2ui_agent_actions_enabled": False}))
     result = await off_router._handlers["app.act"].fn(
@@ -1027,7 +1061,9 @@ def fake_heart() -> SimpleNamespace:
 
 @pytest.fixture
 def router(db, act_settings, service, fake_heart):
-    return ActionRouter(db, act_settings, service, heart=fake_heart)
+    return ActionRouter(
+        db, act_settings, service, heart=fake_heart, composer=SimpleNamespace()
+    )
 
 
 async def _surface_row(db, surface_id: str) -> A2uiSurface:

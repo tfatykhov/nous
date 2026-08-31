@@ -349,6 +349,12 @@ class SurfaceService:
 
             if existing is not None:
                 surface_id = existing.surface_id
+                # Captured BEFORE data_model is overwritten: the pending
+                # stamp identifies the action subtask whose recompose this
+                # push may be (see the origin rule below).
+                _old_pending = ((existing.data_model or {}).get("meta") or {}).get(
+                    "pendingAction"
+                )
                 existing.components = built.components
                 existing.data_model = built.data_model
                 existing.title = built.title
@@ -365,7 +371,14 @@ class SurfaceService:
                 # key must read origin="agent" in live_index and the Phase 5
                 # measurement — the row column is authoritative (the origin
                 # embedded in the surface_id is only its minting label).
-                existing.origin = built.origin
+                # ONE exception (F092.2, codex P2): the action subtask's own
+                # recompose runs is_background → origin "agent", but it is a
+                # USER-triggered update of this very app — letting it flip a
+                # chat-origin pull app to "agent" would reclassify pull as
+                # push in the measurement. Recognized by the pushing session
+                # matching the pending stamp's subtask_id.
+                if not self._is_own_action_push(_old_pending, session_id):
+                    existing.origin = built.origin
                 if session_id is not None:
                     existing.session_id = session_id
                 # Fresh clock, NOT the `now` captured in push_built (codex
@@ -742,6 +755,18 @@ class SurfaceService:
                     logger.warning(
                         "F092.2 resolve-time subtask cancel failed", exc_info=True
                     )
+
+    @staticmethod
+    def _is_own_action_push(pending: Any, session_id: str | None) -> bool:
+        """Is this push the pending agent action's own recompose? (F092.2 —
+        matched by the stamp's subtask_id against the subtask session.)"""
+        if not (isinstance(pending, dict) and pending.get("subtask_id") and session_id):
+            return False
+        try:
+            sub_uuid = uuid.UUID(str(pending["subtask_id"]))
+        except (TypeError, ValueError):
+            return False
+        return session_id == f"subtask-{sub_uuid.hex[:8]}"
 
     def _block_pending_action(self, surface: A2uiSurface) -> uuid.UUID | None:
         """Session-block a micro-app's running agent action; return the
