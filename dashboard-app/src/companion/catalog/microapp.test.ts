@@ -6,6 +6,7 @@ import AppFooterView from './AppFooterView.svelte';
 import SectionView from './SectionView.svelte';
 import StatRowView from './StatRowView.svelte';
 import TimelineView from './TimelineView.svelte';
+import ModalView from './ModalView.svelte';
 import { store } from '../store.svelte';
 import { transport } from '../transport';
 
@@ -220,6 +221,44 @@ describe('StatRowView', () => {
 
     expect(container.textContent).toContain('Days out');
     expect(container.textContent).toContain('5/5');
+  });
+});
+
+describe('ModalView', () => {
+  // codex P2 on #626: the compose prompt advertises Text/Icon triggers,
+  // which render non-focusable elements — so the wrapper itself must be a
+  // keyboard-operable button, or modal-only detail is pointer-only.
+  function renderModal() {
+    seedSurface({}, [
+      { id: 'mt', component: 'Text', text: 'details' },
+      { id: 'mc', component: 'Text', text: 'the long detail' },
+    ]);
+    return render(ModalView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'm', component: 'Modal', trigger: 'mt', content: 'mc' },
+      },
+    });
+  }
+
+  it('exposes the trigger as a focusable button with dialog semantics', () => {
+    const { container } = renderModal();
+    const trigger = container.querySelector('.trigger');
+    expect(trigger?.getAttribute('role')).toBe('button');
+    expect(trigger?.getAttribute('tabindex')).toBe('0');
+    expect(trigger?.getAttribute('aria-haspopup')).toBe('dialog');
+  });
+
+  it('opens on Enter and Space, not just click', async () => {
+    for (const key of ['Enter', ' ']) {
+      cleanup();
+      const { container } = renderModal();
+      const trigger = container.querySelector('.trigger') as HTMLElement;
+      expect(container.textContent).not.toContain('the long detail');
+      await fireEvent.keyDown(trigger, { key });
+      await settle();
+      expect(container.textContent).toContain('the long detail');
+    }
   });
 });
 

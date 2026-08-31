@@ -7,9 +7,13 @@
   //  - backdrop click: <dialog> does not close on it. The click lands on the
   //    dialog element itself (the backdrop is its pseudo-element), so a click
   //    whose target IS the dialog means "outside the content".
-  //  - the trigger: it is an arbitrary child, usually a Button, so it cannot
-  //    be wrapped in another <button> (nested interactive elements are
-  //    invalid HTML). A plain wrapper catches the click as it bubbles.
+  //  - the trigger: an arbitrary child — in micro-apps a NON-interactive
+  //    one (Text/Icon; Buttons cannot validate there, see compose.py), so
+  //    the wrapper itself carries the interactive semantics: role="button",
+  //    tabindex, Enter/Space. A real <button> wrapper is not used because a
+  //    hypothetical interactive trigger child would then nest interactive
+  //    elements (invalid HTML); with a role'd div that worst case degrades
+  //    to a redundant tab stop instead.
   //
   // Open state is renderer-local: the catalog gives Modal no bound value.
   import Renderer from '../Renderer.svelte';
@@ -47,16 +51,31 @@
   function onDialogClick(event: MouseEvent) {
     if (event.target === dialog) close();
   }
+
+  function onTriggerKey(event: KeyboardEvent) {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      open();
+    }
+  }
 </script>
 
 <!--
-  No style:flex-grow here, unlike every other adapter: `display: contents`
-  means this wrapper generates no box, so a flex-grow on it would be dead
-  code. The trigger child is the real flex item and honours its own weight.
+  The wrapper needs a real box (inline-flex, not display:contents) so it can
+  take focus and paint a focus ring — a focusable no-box element draws no
+  outline. Cost: a trigger child's own flex weight no longer reaches the
+  parent flex container; keyboard reachability wins over that nicety
+  (codex P2 on #626: Text/Icon triggers were pointer-only, making modal-only
+  detail unreachable without a mouse).
 -->
-<!-- svelte-ignore a11y_click_events_have_key_events -->
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="trigger" onclick={open}>
+<div
+  class="trigger"
+  role="button"
+  tabindex="0"
+  aria-haspopup="dialog"
+  onclick={open}
+  onkeydown={onTriggerKey}
+>
   {#if typeof comp.trigger === 'string'}
     <Renderer {surfaceId} componentId={comp.trigger} {scope} {depth} {ancestors} />
   {/if}
@@ -73,7 +92,13 @@
 
 <style>
   .trigger {
-    display: contents;
+    display: inline-flex;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+  }
+  .trigger:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
   dialog {
     color: var(--text);
