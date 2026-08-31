@@ -193,6 +193,42 @@ async def test_two_empties_outcome_incomplete_no_terminal():
 
 
 @pytest.mark.asyncio
+async def test_row_metadata_caps_attempts_below_the_setting():
+    """F092.2 (codex P1): agent-action subtasks set metadata max_attempts=1
+    because a validation retry re-runs the WHOLE objective — one tap must
+    never execute its side effects twice. A valid second payload exists,
+    but the row cap means it is never requested."""
+    runner = _scripted_runner(scripted_payloads=[None, {
+        "status": "success",
+        "summary": "This would only be reachable on a second attempt "
+                   "which the row cap forbids.",
+        "confidence": 0.8,
+    }])
+    heart = _make_heart_mock()
+    settings = _make_settings(max_attempts=2)
+    subtask = _make_subtask(metadata_={"max_attempts": 1})
+
+    final_text, result = await execute_hardened(
+        subtask, "sess-cap",
+        runner=runner, heart=heart, settings=settings,
+    )
+
+    assert result.ok is False
+    assert result.outcome == "incomplete_no_terminal"
+    kwargs = heart.subtasks.fail.await_args.kwargs
+    assert kwargs["attempts"] == 1, "the row cap must stop the retry"
+    # The cap can only LOWER attempts, never raise them past the setting.
+    settings2 = _make_settings(max_attempts=2)
+    subtask2 = _make_subtask(metadata_={"max_attempts": 5})
+    runner2 = _scripted_runner(scripted_payloads=[None, None, None, None, None])
+    _, result2 = await execute_hardened(
+        subtask2, "sess-cap2",
+        runner=runner2, heart=_make_heart_mock(), settings=settings2,
+    )
+    assert result2.outcome == "incomplete_no_terminal"
+
+
+@pytest.mark.asyncio
 async def test_placeholder_summary_then_valid_retries_to_success():
     runner = _scripted_runner(scripted_payloads=[
         {"summary": "I will research and report back when I find more.", "confidence": 0.5},

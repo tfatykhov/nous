@@ -789,6 +789,13 @@ class SurfaceService:
         except (TypeError, ValueError):
             return None
         timeout = int(getattr(self._settings, "a2ui_agent_action_timeout_seconds", 300))
+        # TTL covers the STAMPED window (codex P2): a restart with a lower
+        # setting must not shrink the block below the persisted row's
+        # actual execution timeout — cancellation does not preempt, and a
+        # worker outliving the block could recreate the closed app.
+        stamped = pending.get("timeout_s")
+        if isinstance(stamped, (int, float)) and stamped > 0:
+            timeout = max(timeout, int(stamped))
         self.block_push_session(f"subtask-{sub_uuid.hex[:8]}", ttl_seconds=timeout + 60)
         return sub_uuid
 

@@ -908,6 +908,10 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
                 metadata={
                     "a2ui_surface_id": surface_id,
                     "a2ui_action_id": action_id,
+                    # F061 hardened retries re-run the WHOLE objective; one
+                    # tap must never execute its side effects twice (codex
+                    # P1 round-17). The executor clamps to this row cap.
+                    "max_attempts": 1,
                 },
                 subtask_id=sub_id,
             )
@@ -1026,6 +1030,13 @@ async def _retire_action_subtask(router: Any, pending: dict) -> bool:
     except (TypeError, ValueError):
         return True
     timeout = int(getattr(router._settings, "a2ui_agent_action_timeout_seconds", 300))
+    # The block TTL must cover the STAMPED execution window (codex P2
+    # round-17): after a restart with a lower setting, the persisted row
+    # still runs for its recorded timeout — a block sized by the new
+    # setting would expire while the un-preempted worker can still push.
+    stamped = pending.get("timeout_s")
+    if isinstance(stamped, (int, float)) and stamped > 0:
+        timeout = max(timeout, int(stamped))
     subtasks = getattr(router._heart, "subtasks", None) if router._heart else None
     stopped = True
     if subtasks is not None:

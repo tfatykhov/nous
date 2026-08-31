@@ -991,6 +991,36 @@ async def test_app_act_refuses_without_a_composer(flag_settings) -> None:
     assert heart.subtasks.created == []
 
 
+async def test_block_ttl_covers_the_stamped_timeout(flag_settings) -> None:
+    """codex P2 round-17: a restart with a LOWER setting must not shrink
+    the push block below the persisted row's actual execution window —
+    cancellation does not preempt, and a worker outliving the block could
+    recreate a closed app."""
+    from nous.a2ui.actions import _retire_action_subtask
+    from nous.a2ui.service import SurfaceService
+
+    sub_id = uuid.uuid4()
+    heart = SimpleNamespace(subtasks=_FakeSubtasks())
+    router = _fake_router(None)
+    router._heart = heart
+    stamped = {"subtask_id": str(sub_id), "timeout_s": 900}
+
+    await _retire_action_subtask(router, stamped)
+
+    # router settings say 300; the stamp says 900 — TTL must be 900 + 60.
+    assert router._service.blocked_sessions == [(f"subtask-{sub_id.hex[:8]}", 960)]
+
+    svc = SurfaceService(None, SimpleNamespace(a2ui_agent_action_timeout_seconds=30), heart=heart)
+    surface = SimpleNamespace(
+        kind="micro_app",
+        data_model={"meta": {"pendingAction": {"id": "x", "subtask_id": str(sub_id), "timeout_s": 900}}},
+    )
+    svc._block_pending_action(surface)
+    deadline = svc._blocked_push_sessions[f"subtask-{sub_id.hex[:8]}"]
+    loop_now = asyncio.get_running_loop().time()
+    assert deadline - loop_now > 900, "resolve-time block sized by the stamp, not the setting"
+
+
 def test_is_own_action_push_recognizes_the_action_session() -> None:
     """codex P2 round-16: the action subtask's recompose must not flip a
     chat-origin (pull) app to agent origin in the dedup replacement."""
