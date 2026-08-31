@@ -22,6 +22,11 @@
   }
 
   const DISMISS_KEY = 'nous-companion-install-dismissed';
+  // A SNOOZE, not a tombstone: the old boolean made one × (or one declined
+  // Chromium prompt — dismiss() fires on that too) hide the affordance
+  // FOREVER, which read as "the install button got lost". Installing is the
+  // durable exit; declining is a "not now".
+  const DISMISS_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
   let deferred = $state<InstallEvent | null>(null);
   let standalone = $state(true);
@@ -31,7 +36,12 @@
 
   function readDismissed(): boolean {
     try {
-      return localStorage.getItem(DISMISS_KEY) === '1';
+      const raw = localStorage.getItem(DISMISS_KEY);
+      if (!raw) return false;
+      // Legacy '1' (the old permanent tombstone) is treated as EXPIRED so
+      // existing users who dismissed once get the affordance back.
+      const at = Number(raw);
+      return Number.isFinite(at) && Date.now() - at < DISMISS_TTL_MS;
     } catch {
       return false; // private mode — just show it
     }
@@ -87,7 +97,7 @@
     dismissed = true;
     showIOSHelp = false;
     try {
-      localStorage.setItem(DISMISS_KEY, '1');
+      localStorage.setItem(DISMISS_KEY, String(Date.now()));
     } catch {
       /* private mode — it just reappears next visit */
     }

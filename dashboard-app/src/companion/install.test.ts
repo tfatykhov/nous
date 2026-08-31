@@ -108,3 +108,38 @@ describe('install affordance', () => {
     expect(container.querySelector('.install')).not.toBeNull();
   });
 });
+
+describe('install affordance — snooze semantics', () => {
+  it('a dismissal EXPIRES after the TTL instead of hiding the button forever', async () => {
+    setUA('Mozilla/5.0 Chrome/120');
+    // Dismissed 15 days ago — past the 14-day snooze.
+    localStorage.setItem(
+      'nous-companion-install-dismissed',
+      String(Date.now() - 15 * 24 * 60 * 60 * 1000),
+    );
+    parkEvent();
+    const { container } = render(InstallPrompt);
+    await tick();
+    expect(container.querySelector('.install')).not.toBeNull();
+  });
+
+  it('treats the legacy permanent "1" tombstone as expired', async () => {
+    // Users who dismissed under the old boolean get the affordance back —
+    // that permanence is exactly what read as "the install button got lost".
+    setUA('Mozilla/5.0 Chrome/120');
+    localStorage.setItem('nous-companion-install-dismissed', '1');
+    parkEvent();
+    const { container } = render(InstallPrompt);
+    await tick();
+    expect(container.querySelector('.install')).not.toBeNull();
+  });
+
+  it('still snoozes within the TTL', async () => {
+    setUA('Mozilla/5.0 Chrome/120');
+    localStorage.setItem('nous-companion-install-dismissed', String(Date.now() - 1000));
+    parkEvent();
+    const { container } = render(InstallPrompt);
+    await tick();
+    expect(container.querySelector('.install')).toBeNull();
+  });
+});
