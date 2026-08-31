@@ -358,3 +358,37 @@ describe('Companion shell — grapheme-cluster truncation', () => {
     }
   });
 });
+
+describe('Companion shell — word boundary measured in graphemes', () => {
+  it('keeps two astral-prefixed names distinguishable', () => {
+    // codex P2: `lastIndexOf` returns a UTF-16 offset compared against a
+    // grapheme-based CHIP_MAX, so astral graphemes before the space made it
+    // look far earlier than it was — and two distinct names collapsed to the
+    // SAME chip, which is the exact failure this PR exists to fix.
+    const seed = (id: string, title: string) =>
+      store.apply(null, {
+        version: 'v1.0',
+        createSurface: {
+          surfaceId: id,
+          catalogId: 'nous-core',
+          components: [
+            { id: 'root', component: 'Text', text: 'b' },
+            { id: 'header', component: 'AppHeader', title },
+          ],
+          dataModel: {},
+          metadata: { extensions: { com_nous_nonce: 'n-' + id } },
+        },
+      } as never);
+
+    seed('nous:chat:micro_app:ast001', '🚀'.repeat(7) + ' AlphaMonitoringDashboard');
+    seed('nous:chat:micro_app:ast002', '🚀'.repeat(7) + ' BetaMonitoringDashboard');
+
+    const { container } = render(Companion);
+    const chips = [...container.querySelectorAll('.switcher .chip')]
+      .map((c) => c.textContent?.trim() ?? '')
+      .filter((c) => c.includes('🚀'));
+
+    expect(chips).toHaveLength(2);
+    expect(chips[0]).not.toBe(chips[1]);
+  });
+});

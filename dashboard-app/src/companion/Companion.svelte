@@ -58,9 +58,15 @@
           )
         : [...t];
     if (units.length <= CHIP_MAX) return t;
-    const cut = units.slice(0, CHIP_MAX).join('');
-    const sp = cut.lastIndexOf(' ');
-    return (sp >= CHIP_MAX - 8 ? cut.slice(0, sp) : cut).replace(/[\s:,\u2014-]+$/, '') + '\u2026';
+    // Find the word boundary in GRAPHEME units too. `lastIndexOf` returns a
+    // UTF-16 offset, which was then compared against the grapheme-based
+    // CHIP_MAX \u2014 mixing units, so astral graphemes before a space made the
+    // space look far earlier than it is. Two distinct names could collapse to
+    // the same truncated chip (codex P2).
+    const kept = units.slice(0, CHIP_MAX);
+    const sp = kept.lastIndexOf(' ');
+    const body = (sp >= CHIP_MAX - 8 ? kept.slice(0, sp) : kept).join('');
+    return body.replace(/[\s:,\u2014-]+$/, '') + '\u2026';
   }
 
   /** An app's AppHeader is structurally mandatory (lint_micro_app: it must
