@@ -120,11 +120,19 @@ class SurfaceService:
             # F092.1 fail-closed at creation, deliberately a fixed subset
             # check rather than a handler-metadata predicate: the action
             # registry grew 8 → 11 verbs in one PR, and a subset against
-            # {"app.close"} cannot drift with it.
-            forbidden = set(built.allowed_actions) - {"app.close"}
+            # a fixed set cannot drift with it. F092.2 widens the set to
+            # app.act ONLY when the flag is on AND app_spec actually
+            # declares agent_actions — allowed_actions is server-built in
+            # compose(), so this guard is a backstop, not the gate.
+            allowed = {"app.close"}
+            if getattr(self._settings, "a2ui_agent_actions_enabled", False) and (
+                built.app_spec or {}
+            ).get("agent_actions"):
+                allowed.add("app.act")
+            forbidden = set(built.allowed_actions) - allowed
             if forbidden:
                 raise ValueError(
-                    f"micro-app surfaces may only offer app.close, got {sorted(forbidden)}"
+                    f"micro-app surfaces may only offer {sorted(allowed)}, got {sorted(forbidden)}"
                 )
             if built.priority > 1:
                 raise ValueError("micro-apps are never blocking: priority must be 0 or 1")

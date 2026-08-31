@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from nous.api.tools import ToolDispatcher, _tool_error
@@ -199,6 +200,42 @@ def _compose_schema_for(composer: Any) -> dict:
     import copy
 
     schema = copy.deepcopy(_COMPOSE_SURFACE_SCHEMA)
+    # F092.2: advertise agent_actions ONLY when the flag is on — the
+    # agent_script lesson: a static schema describing a param the server
+    # rejects makes the model follow the instruction and fail the call.
+    if getattr(getattr(composer, "_settings", None), "a2ui_agent_actions_enabled", False):
+        schema["properties"]["agent_actions"] = {
+            "type": "array",
+            "maxItems": _AGENT_ACTIONS_MAX,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "slug, e.g. 'rebalance'"},
+                    "label": {
+                        "type": "string",
+                        "description": f"Button text, max {_AGENT_ACTION_LABEL_MAX} chars.",
+                    },
+                    "instruction": {
+                        "type": "string",
+                        "description": (
+                            "What YOU should do when the user taps this, max "
+                            f"{_AGENT_ACTION_INSTRUCTION_MAX} chars. Stored "
+                            "with the app and executed later as a background "
+                            "turn with nobody in the loop — write it "
+                            "self-contained, and end by updating this app "
+                            "(you'll be given the dedup_key)."
+                        ),
+                    },
+                },
+                "required": ["id", "label", "instruction"],
+            },
+            "description": (
+                "Footer buttons that let the user ask you to ACT — each tap "
+                "spawns a background turn that follows the stored "
+                "instruction and then updates this app in place. Declare "
+                "only actions you can actually perform with your tools."
+            ),
+        }
     registry = getattr(composer, "_sources", None)
     if registry is None:
         # No composer wired at all — the tool is not registered either.
@@ -224,6 +261,54 @@ def _compose_schema_for(composer: Any) -> dict:
             "Fetcher params (e.g. {q}, {dag_id}, {days})."
         )
     return schema
+
+
+_AGENT_ACTIONS_MAX = 4
+_AGENT_ACTION_LABEL_MAX = 40
+_AGENT_ACTION_INSTRUCTION_MAX = 500
+_AGENT_ACTION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
+
+
+def _normalize_agent_actions(raw: Any) -> list[dict] | str:
+    """Validate + normalize compose_surface's agent_actions. Returns the
+    clean list or an error STRING (caller input error, like data_sources).
+
+    Caps are load-bearing, not cosmetic: the instruction is stored and
+    replayed into a future agent turn with nobody in the loop, so it is
+    bounded at declaration time — the only moment the agent is deliberate
+    about it."""
+    if not isinstance(raw, list):
+        return "agent_actions must be an array of {id, label, instruction}"
+    if len(raw) > _AGENT_ACTIONS_MAX:
+        return f"agent_actions: at most {_AGENT_ACTIONS_MAX} actions"
+    out: list[dict] = []
+    seen: set[str] = set()
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            return f"agent_actions[{i}] must be an object"
+        action_id = str(item.get("id") or "").strip()
+        label = str(item.get("label") or "").strip()
+        instruction = str(item.get("instruction") or "").strip()
+        if not _AGENT_ACTION_ID_RE.match(action_id):
+            return (
+                f"agent_actions[{i}].id must be a slug "
+                "([a-z0-9][a-z0-9_-]{0,39})"
+            )
+        if action_id in seen:
+            return f"agent_actions: duplicate id {action_id!r}"
+        seen.add(action_id)
+        if not label or len(label) > _AGENT_ACTION_LABEL_MAX:
+            return (
+                f"agent_actions[{i}].label required, "
+                f"max {_AGENT_ACTION_LABEL_MAX} chars"
+            )
+        if not instruction or len(instruction) > _AGENT_ACTION_INSTRUCTION_MAX:
+            return (
+                f"agent_actions[{i}].instruction required, "
+                f"max {_AGENT_ACTION_INSTRUCTION_MAX} chars"
+            )
+        out.append({"id": action_id, "label": label, "instruction": instruction})
+    return out
 
 
 def _intent_slug(intent: str) -> str:
@@ -391,6 +476,19 @@ def register_a2ui_tools(
         # its apps must persist as origin="agent" or the push path and the
         # Phase 5 origin-based measurement cannot distinguish push from pull.
         origin = "agent" if kwargs.get("_is_background") else "chat"
+        agent_actions: list[dict] = []
+        if kwargs.get("agent_actions"):
+            settings = getattr(composer, "_settings", None)
+            if not getattr(settings, "a2ui_agent_actions_enabled", False):
+                return _tool_error(
+                    "agent_actions are disabled "
+                    "(NOUS_A2UI_AGENT_ACTIONS_ENABLED=false) — compose "
+                    "without them"
+                )
+            normalized = _normalize_agent_actions(kwargs["agent_actions"])
+            if isinstance(normalized, str):
+                return _tool_error(f"invalid agent_actions: {normalized}")
+            agent_actions = normalized
         try:
             composed = await composer.compose(
                 intent,
@@ -398,6 +496,7 @@ def register_a2ui_tools(
                 data_sources=kwargs.get("data_sources") or [],
                 origin=origin,
                 priority=priority,
+                agent_actions=agent_actions,
             )
         except Exception as exc:
             # UnknownSourceError and fetcher failures land here: the DECLARED

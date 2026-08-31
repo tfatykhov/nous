@@ -101,6 +101,73 @@ describe('AppFooterView', () => {
     });
   }
 
+  // F092.2 agent actions — server-stamped buttons that post app.act.
+  function renderActionFooter(meta: Record<string, unknown> = {}) {
+    seedSurface({ meta });
+    return render(AppFooterView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: {
+          id: 'footer',
+          component: 'AppFooter',
+          refineOptions: [],
+          showRefresh: false,
+          agentActions: [
+            { id: 'rebalance', label: 'Rebalance' },
+            { id: 'escalate', label: 'Escalate' },
+          ],
+        },
+      },
+    });
+  }
+
+  it('agent-action buttons post app.act with the actionId', async () => {
+    const act = vi
+      .spyOn(transport, 'postAction')
+      .mockResolvedValue({ ok: true, message: '', resolved: false });
+    const { getByText } = renderActionFooter();
+
+    await fireEvent.click(getByText('Rebalance'));
+    await settle();
+
+    expect(act).toHaveBeenCalledWith(SURFACE, 'app.act', 'footer', { actionId: 'rebalance' });
+  });
+
+  it('a fresh pendingAction disables all agent-action buttons and marks the busy one', async () => {
+    const act = vi.spyOn(transport, 'postAction');
+    const { getByText } = renderActionFooter({
+      pendingAction: { id: 'rebalance', label: 'Rebalance', at: new Date().toISOString() },
+    });
+
+    const busy = getByText('Rebalance…') as HTMLButtonElement;
+    const other = getByText('Escalate') as HTMLButtonElement;
+    expect(busy.disabled).toBe(true);
+    expect(other.disabled).toBe(true);
+    await fireEvent.click(other);
+    await settle();
+    expect(act).not.toHaveBeenCalled();
+  });
+
+  it('a stale pendingAction re-enables the buttons and renders an honest note', () => {
+    // The watcher is in-process and dies with a restart — the timestamp is
+    // what keeps a dead watcher from becoming an infinite spinner.
+    const staleAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const { getByText, container } = renderActionFooter({
+      pendingAction: { id: 'rebalance', label: 'Rebalance', at: staleAt },
+    });
+
+    expect((getByText('Rebalance') as HTMLButtonElement).disabled).toBe(false);
+    expect(container.querySelector('.stale')?.textContent).toContain('no update');
+  });
+
+  it('renders the server-written actionError', () => {
+    const { container } = renderActionFooter({
+      actionError: 'Rebalance: the action failed',
+    });
+
+    expect(container.querySelector('.err')?.textContent).toContain('the action failed');
+  });
+
   it('refine button calls app.refine with the option id over the RPC channel', async () => {
     const spy = vi
       .spyOn(transport, 'callAgentFunction')

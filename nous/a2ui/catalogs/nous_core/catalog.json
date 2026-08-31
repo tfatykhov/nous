@@ -304,6 +304,25 @@
           "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicValue",
           "description": "Array of {id, label} refine options, validated server-side against the surface's app_spec."
         },
+        "agentActions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label"
+            ]
+          },
+          "description": "F092.2: server-stamped agent-action buttons ({id, label} only — the stored instruction never reaches the client). Each tap posts app.act {actionId}, validated server-side against the surface's app_spec."
+        },
         "showRefresh": {
           "type": "boolean",
           "description": "Render the refresh control (default true)."

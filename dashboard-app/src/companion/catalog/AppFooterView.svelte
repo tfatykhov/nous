@@ -19,6 +19,12 @@
     label: string;
   }
 
+  // F092.2: the server marks an action pending for this long before the
+  // watcher would have failed it; past it the client re-enables the
+  // buttons and renders the stamp as stale ("no update arrived") — the
+  // honest degradation for the watcher's restart hole.
+  const PENDING_STALE_MS = 5 * 60 * 1000;
+
   let {
     surfaceId,
     comp,
@@ -42,6 +48,56 @@
     );
   });
   const showRefresh = $derived(comp.showRefresh !== false);
+
+  // F092.2 agent actions: server-stamped {id, label} list. Pending state is
+  // a server-owned /meta stamp with a timestamp — a successful recompose
+  // replaces the whole model and clears it; the timestamp is what makes a
+  // dead watcher degrade to an honest "no update arrived" instead of an
+  // infinite spinner.
+  const agentActions = $derived.by(() => {
+    const raw = comp.agentActions;
+    if (!Array.isArray(raw)) return [];
+    return (raw as RefineOption[]).filter(
+      (o) => o && typeof o.id === 'string' && typeof o.label === 'string',
+    );
+  });
+  const meta = $derived(
+    ((store.surfaces[surfaceId]?.dataModel ?? {}) as Record<string, unknown>).meta as
+      | Record<string, unknown>
+      | undefined,
+  );
+  const pendingAction = $derived.by(() => {
+    const raw = meta?.pendingAction;
+    if (!raw || typeof raw !== 'object') return null;
+    const p = raw as { id?: unknown; label?: unknown; at?: unknown };
+    return typeof p.id === 'string' && typeof p.at === 'string'
+      ? { id: p.id, label: typeof p.label === 'string' ? p.label : p.id, at: p.at }
+      : null;
+  });
+  let nowTick = $state(Date.now());
+  $effect(() => {
+    if (!pendingAction) return;
+    const t = setInterval(() => (nowTick = Date.now()), 10_000);
+    return () => clearInterval(t);
+  });
+  const pendingFresh = $derived.by(() => {
+    if (!pendingAction) return false;
+    const at = Date.parse(pendingAction.at);
+    return Number.isFinite(at) && nowTick - at < PENDING_STALE_MS;
+  });
+  const actionError = $derived(typeof meta?.actionError === 'string' ? meta.actionError : '');
+
+  async function act(actionId: string) {
+    if (busy || pendingFresh) return;
+    busy = true;
+    error = '';
+    try {
+      const res = await transport.postAction(surfaceId, 'app.act', comp.id, { actionId });
+      if (!res.ok) error = res.message;
+    } finally {
+      busy = false;
+    }
+  }
 
   async function call(name: string, args: Record<string, unknown>) {
     if (busy) return;
@@ -94,6 +150,15 @@
 
 <footer class="app-footer">
   <div class="controls">
+    {#each agentActions as action (action.id)}
+      <button
+        class="ctl act"
+        disabled={busy || pendingFresh}
+        onclick={() => void act(action.id)}
+      >
+        {pendingFresh && pendingAction?.id === action.id ? `${action.label}…` : action.label}
+      </button>
+    {/each}
     {#each refineOptions as option (option.id)}
       <button class="ctl" disabled={busy} onclick={() => void call('app.refine', { id: option.id })}>
         {option.label}
@@ -114,6 +179,14 @@
       {armed ? 'sure? close' : 'close'}
     </button>
   </div>
+  {#if pendingAction && !pendingFresh}
+    <span class="stale">
+      "{pendingAction.label}" got no update — the agent may have failed; tap again to retry.
+    </span>
+  {/if}
+  {#if actionError}
+    <span class="err" role="alert">{actionError}</span>
+  {/if}
   {#if error}
     <span class="err" role="alert">{error}</span>
   {/if}
@@ -160,11 +233,18 @@
     color: var(--crit);
     border-color: var(--crit);
   }
+  .ctl.act {
+    border-color: var(--accent);
+  }
   .ctl.quiet {
     margin-left: auto;
     background: none;
     border-color: transparent;
     color: var(--muted);
+  }
+  .stale {
+    color: var(--warn, var(--muted));
+    font-size: 0.8rem;
   }
   .ctl.quiet:hover:not(:disabled) {
     color: var(--text);

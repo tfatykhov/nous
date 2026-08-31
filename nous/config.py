@@ -2669,6 +2669,34 @@ class Settings(BaseSettings):
             "does not mean unbounded accumulation."
         ),
     )
+    a2ui_agent_actions_enabled: bool = Field(
+        default=False,
+        description=(
+            "F092.2: allow compose_surface to declare agent_actions — footer "
+            "buttons that spawn a background agent turn (subtask) which acts "
+            "on the stored instruction and updates the app in place via "
+            "compose_surface(dedup_key). Default OFF — land-dark: a UI tap "
+            "becomes an LLM turn holding tools, executing an instruction "
+            "stored earlier with nobody in the loop (same exposure-window "
+            "reasoning as NOUS_A2UI_AGENT_SCRIPT_SOURCE_ENABLED and "
+            "NOUS_DAG_CALLBACK_EXECUTION_ENABLED: flipped deliberately by an "
+            "operator, never acquired on deploy). Actions enter ONLY via the "
+            "agent's own tool call — the inner compose LLM cannot author "
+            "them, and the footer renders what the SERVER stamped."
+        ),
+    )
+    a2ui_agent_action_timeout_seconds: int = Field(
+        default=300,
+        ge=30,
+        description=(
+            "F092.2: seconds an app.act subtask may run before the watcher "
+            "marks the action failed on the surface (/meta/actionError) and "
+            "clears the pending state. Also the freshness window for the "
+            "server-side double-tap guard — a second tap inside it is "
+            "rejected, because each tap spawns an LLM turn and "
+            "NOUS_SUBTASK_MAX_CONCURRENT is small."
+        ),
+    )
 
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":
