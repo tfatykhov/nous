@@ -299,6 +299,19 @@ class SurfaceService:
         expires_at: datetime | None,
         _locked_surface_id: str | None = None,
     ) -> str:
+        # F092.2 re-check (codex P1): the entry check in push_built runs
+        # before any lock wait or DB work, so a cancelled action's push
+        # could pass it, wait out the dedup lock while app.close blocked
+        # the session and resolved the surface, and then land here with no
+        # live dedup match — inserting a fresh surface and recreating the
+        # app the user closed. Re-checking after the lock wait, immediately
+        # before the transaction, closes both named interleavings
+        # (block-during-lock-wait and block-between-check-and-lookup).
+        if self._push_session_blocked(session_id):
+            raise PermissionError(
+                "the app this action belonged to was closed by the user — "
+                "do not recreate it; end the task without pushing"
+            )
         async with self._db.session() as session:
             existing = None
             if dedup_key:

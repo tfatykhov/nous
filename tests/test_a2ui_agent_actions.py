@@ -444,6 +444,41 @@ async def test_app_act_handler_allows_retap_after_stale_pending(flag_settings) -
         t.cancel()
 
 
+async def test_stale_retap_retires_the_old_subtask_first(flag_settings) -> None:
+    """codex P1: the stamp's wall-clock window can expire while the old
+    subtask is still QUEUED (its execution timeout starts at dequeue) —
+    accepting the retry without retiring it runs two tool-holding turns
+    for one app, and the old one could later overwrite the retried
+    result."""
+    heart = SimpleNamespace(subtasks=_FakeSubtasks())
+    router = _handler_router(flag_settings, heart=heart)
+    handler = router._handlers["app.act"].fn
+    old_id = uuid.uuid4()
+    surface = _surface_stub(
+        data_model={
+            "meta": {
+                "pendingAction": {
+                    "id": "rebalance",
+                    "at": "2020-01-01T00:00:00+00:00",
+                    "subtask_id": str(old_id),
+                }
+            }
+        }
+    )
+
+    result = await handler(_ctx(router, surface, "escalate"))
+
+    assert result.ok, result.message
+    assert heart.subtasks.cancelled == [old_id]
+    assert router._service.blocked_sessions == [
+        (f"subtask-{old_id.hex[:8]}", flag_settings.a2ui_agent_action_timeout_seconds + 60)
+    ]
+    # And the NEW subtask was spawned after the old one was retired.
+    assert len(heart.subtasks.created) == 1
+    for t in router._action_watchers:
+        t.cancel()
+
+
 async def test_app_close_cancels_running_action_and_blocks_its_push(flag_settings) -> None:
     """codex P1: closing an app mid-action must stop the action — its
     completion recompose would otherwise recreate the closed app (dedup

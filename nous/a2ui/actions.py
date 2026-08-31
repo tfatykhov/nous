@@ -760,25 +760,8 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
         pending = ((ctx.surface.data_model or {}).get(_ACT_META_KEY) or {}).get(
             "pendingAction"
         )
-        if isinstance(pending, dict) and pending.get("subtask_id"):
-            timeout = int(
-                getattr(router._settings, "a2ui_agent_action_timeout_seconds", 300)
-            )
-            try:
-                sub_uuid = UUID(str(pending["subtask_id"]))
-            except (TypeError, ValueError):
-                sub_uuid = None
-            subtasks = getattr(router._heart, "subtasks", None) if router._heart else None
-            if sub_uuid is not None and subtasks is not None:
-                try:
-                    await subtasks.cancel(sub_uuid)
-                except Exception:
-                    logger.warning(
-                        "F092.2 close-time subtask cancel failed", exc_info=True
-                    )
-                router._service.block_push_session(
-                    f"subtask-{sub_uuid.hex[:8]}", ttl_seconds=timeout + 60
-                )
+        if isinstance(pending, dict):
+            await _retire_action_subtask(router, pending)
         return ActionResult(message="app closed", resolve_surface=True)
 
     router.register("app.close", app_close, mutating=False)
@@ -835,6 +818,13 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
                         "wait for the app to update"
                     ),
                 )
+            # STALE stamp (codex P1): the wall-clock window can expire while
+            # the old subtask is still pending — its execution timeout only
+            # starts at DEQUEUE — or mid-turn. Accepting the retry without
+            # retiring it would run two tool-holding turns for one app, and
+            # the old one could later overwrite the retried result. Cancel
+            # it and block its push session before spawning the new one.
+            await _retire_action_subtask(router, pending)
 
         # The dispatch censor pass saw only {title, name, context} — never
         # the stored instruction or the data snapshot that become this
@@ -897,6 +887,36 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
 
 _ACT_META_KEY = "meta"  # compose.py's _META_KEY; server-owned subtree.
 _ACT_TERMINAL = frozenset({"completed", "failed", "cancelled"})
+
+
+async def _retire_action_subtask(router: Any, pending: dict) -> None:
+    """Cancel a pending action's subtask AND block its push session.
+
+    Shared by app.close (the action's app is gone — its completion must not
+    recreate it) and the stale-stamp retry path in app.act (the old turn
+    may still be queued/running; two tool-holding turns for one app, with
+    the old one able to overwrite the retried result, is exactly the state
+    the double-tap guard exists to prevent). Cancel stops a queued subtask
+    outright; the session block is the backstop for a mid-flight worker,
+    which SubtaskManager.cancel does not preempt. Best-effort by design —
+    the push-side block re-check is the deterministic layer.
+    """
+    if not pending.get("subtask_id"):
+        return
+    try:
+        sub_uuid = UUID(str(pending["subtask_id"]))
+    except (TypeError, ValueError):
+        return
+    timeout = int(getattr(router._settings, "a2ui_agent_action_timeout_seconds", 300))
+    subtasks = getattr(router._heart, "subtasks", None) if router._heart else None
+    if subtasks is not None:
+        try:
+            await subtasks.cancel(sub_uuid)
+        except Exception:
+            logger.warning("F092.2 action-subtask cancel failed", exc_info=True)
+    router._service.block_push_session(
+        f"subtask-{sub_uuid.hex[:8]}", ttl_seconds=timeout + 60
+    )
 
 
 def _parse_iso(value: Any) -> datetime | None:
