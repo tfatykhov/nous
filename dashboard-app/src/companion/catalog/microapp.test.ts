@@ -249,6 +249,32 @@ describe('ModalView', () => {
     expect(trigger?.getAttribute('aria-haspopup')).toBe('dialog');
   });
 
+  it('names a text trigger from its contents and a nameless one via fallback', async () => {
+    // codex P2 round 2 on #626: an Icon trigger renders an aria-hidden SVG,
+    // leaving a focusable button with NO accessible name. Fallback label
+    // fires only when contents provide none — a Text trigger keeps its own
+    // words as the name (a static aria-label would override them).
+    const { container } = renderModal();
+    await settle();
+    expect(container.querySelector('.trigger')?.getAttribute('aria-label')).toBeNull();
+
+    cleanup();
+    seedSurface({}, [
+      { id: 'mt', component: 'Icon', name: 'info' },
+      { id: 'mc', component: 'Text', text: 'the long detail' },
+    ]);
+    const nameless = render(ModalView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'm', component: 'Modal', trigger: 'mt', content: 'mc' },
+      },
+    });
+    await settle();
+    expect(nameless.container.querySelector('.trigger')?.getAttribute('aria-label')).toBe(
+      'Show details',
+    );
+  });
+
   it('opens on Enter and Space, not just click', async () => {
     for (const key of ['Enter', ' ']) {
       cleanup();

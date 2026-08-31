@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, fireEvent } from '@testing-library/svelte';
+import { render, fireEvent, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import ConfidenceMeterView from './ConfidenceMeterView.svelte';
 import DecisionCardView from './DecisionCardView.svelte';
@@ -110,6 +110,35 @@ describe('DecisionCardView', () => {
 
     expect(container.querySelector('.card')?.classList.contains('settled')).toBe(false);
     expect(container.querySelector('.outcome')).toBeNull();
+  });
+
+  it('renders the advertised confidence prop, well-formed values only', () => {
+    // codex P2 on #626: the catalog advertises optional confidence (0-1)
+    // but the card never read it — a composed dashboard validated while
+    // silently omitting the calibrated number.
+    function renderCard(confidence: unknown) {
+      cleanup();
+      seedSurface({});
+      return render(DecisionCardView, {
+        props: {
+          surfaceId: SURFACE,
+          comp: {
+            id: 'c',
+            component: 'DecisionCard',
+            decisionId: 'd-1',
+            description: 'Ship it',
+            ...(confidence === undefined ? {} : { confidence }),
+          },
+        },
+      });
+    }
+
+    expect(renderCard(0.85).container.querySelector('.conf')?.textContent).toBe('85% conf');
+    expect(renderCard('0.5').container.querySelector('.conf')?.textContent).toBe('50% conf');
+    // Absence over fabrication: out-of-range / junk / missing render nothing.
+    for (const bad of [undefined, 85, -0.1, 'junk', null]) {
+      expect(renderCard(bad).container.querySelector('.conf'), String(bad)).toBeNull();
+    }
   });
 });
 

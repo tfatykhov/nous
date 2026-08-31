@@ -35,7 +35,21 @@
   } = $props();
 
   let dialog = $state<HTMLDialogElement | null>(null);
+  let triggerEl = $state<HTMLElement | null>(null);
   let isOpen = $state(false);
+
+  // role="button" names itself from its contents, which works for a Text
+  // trigger — but an Icon trigger renders an aria-hidden SVG and no text,
+  // leaving a focusable button with NO accessible name (codex P2 on #626).
+  // Fallback label only when contents provide none, so a Text trigger's
+  // own words stay the name (aria-label would override them).
+  $effect(() => {
+    const el = triggerEl;
+    if (!el) return;
+    void comp.trigger; // re-check when the trigger child changes
+    if (el.textContent?.trim()) el.removeAttribute('aria-label');
+    else el.setAttribute('aria-label', 'Show details');
+  });
 
   function open() {
     isOpen = true;
@@ -69,6 +83,7 @@
   detail unreachable without a mouse).
 -->
 <div
+  bind:this={triggerEl}
   class="trigger"
   role="button"
   tabindex="0"

@@ -27,6 +27,14 @@
   const outcome = $derived(toDisplayString(resolveDynamic(comp.outcome, ctx)));
   const decisionId = $derived(toDisplayString(resolveDynamic(comp.decisionId, ctx)));
   const settled = $derived(outcome !== '' && outcome !== 'pending');
+  // Catalog advertises optional `confidence` (0-1); the card silently
+  // dropped it (codex P2 on #626). Render only a well-formed value —
+  // out-of-range or non-numeric input is omitted, never scaled or guessed.
+  const confidencePct = $derived.by(() => {
+    const raw = resolveDynamic(comp.confidence, ctx);
+    const n = typeof raw === 'number' ? raw : raw == null || raw === '' ? NaN : Number(raw);
+    return Number.isFinite(n) && n >= 0 && n <= 1 ? Math.round(n * 100) : null;
+  });
 </script>
 
 <div class="card" class:settled style:flex-grow={flexGrow(comp.weight)}>
@@ -37,6 +45,9 @@
     {/if}
     {#if category}
       <span class="badge">{category}</span>
+    {/if}
+    {#if confidencePct !== null}
+      <span class="badge conf">{confidencePct}% conf</span>
     {/if}
     {#if settled}
       <span class="badge outcome outcome-{outcome}">{outcome}</span>
