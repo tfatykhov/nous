@@ -43,17 +43,18 @@
 
 <section class="app-section {layout}" class:model={modelSupplied} class:open>
   {#if collapsible}
-    <button
-      class="head toggle"
-      aria-expanded={open}
-      onclick={() => (open = !open)}
-    >
-      <h3>{comp.title}</h3>
-      {#if modelSupplied}
-        <span class="chip">model-supplied</span>
-      {/if}
-      <span class="caret" aria-hidden="true">{open ? '▾' : '▸'}</span>
-    </button>
+    <!-- APG disclosure: the BUTTON goes inside the H3, not the reverse — an
+         h3 inside a button is invalid button content, and screen readers
+         navigating by headings would skip every collapsed section (codex P2). -->
+    <h3 class="head toggle-head">
+      <button class="toggle" aria-expanded={open} onclick={() => (open = !open)}>
+        <span class="title-text">{comp.title}</span>
+        {#if modelSupplied}
+          <span class="chip">model-supplied</span>
+        {/if}
+        <span class="caret" aria-hidden="true">{open ? '▾' : '▸'}</span>
+      </button>
+    </h3>
   {:else}
     <div class="head">
       <h3>{comp.title}</h3>
@@ -78,16 +79,27 @@
     border-left: 3px solid var(--warn);
     padding-left: 0.7rem;
   }
-  .head.toggle {
+  .toggle-head {
+    margin: 0 0 0.45rem;
+  }
+  .toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
     width: 100%;
     background: none;
     border: none;
     padding: 0;
     cursor: pointer;
     text-align: left;
+    /* inherit the h3's type styles so the title looks identical to a plain
+       section heading */
     font: inherit;
+    color: inherit;
+    text-transform: inherit;
+    letter-spacing: inherit;
   }
-  .head.toggle:hover h3 {
+  .toggle:hover .title-text {
     color: var(--text);
   }
   .caret {
