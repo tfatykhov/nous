@@ -1697,3 +1697,20 @@ def test_prompt_teaches_tabs_and_accordion(settings):
     assert "accordion" in _GRAMMAR_RULES
     assert "TABS" in _GRAMMAR_RULES
     assert '"child": "<component id>"' in _GRAMMAR_RULES
+
+
+def test_tabs_count_is_enforced_not_just_prompted():
+    """codex P2: the 2-5 rule was prompt-only — the vendored catalog has only
+    minItems:1, so a one-tab control (a Section with extra chrome) or an
+    overcrowded 6-tab bar passed validation."""
+    def tabs_app(n):
+        return _skel([
+            {"id": "c", "component": "Tabs",
+             "tabs": [{"title": f"v{i}", "child": f"p{i}"} for i in range(n)]},
+            *[{"id": f"p{i}", "component": "Text", "text": str(i)} for i in range(n)],
+        ])
+
+    assert any("2-5" in e for e in grammar.lint_micro_app(tabs_app(1)))
+    assert any("2-5" in e for e in grammar.lint_micro_app(tabs_app(6)))
+    for n in (2, 5):
+        assert grammar.lint_micro_app(tabs_app(n)) == [], n
