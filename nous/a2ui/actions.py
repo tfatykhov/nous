@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -1059,6 +1060,14 @@ def _parse_iso(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+# Case-insensitive (codex P1 round-15): the boundary is interpreted by an
+# LLM, not a case-sensitive XML parser — </APP-DATA> closes it just as
+# effectively as the lowercase spelling.
+_DEFANG_RE = re.compile(
+    r"</(?=app-data|action-instruction|app-config|app-title)", re.IGNORECASE
+)
+
+
 def _defang_delimiters(text: str) -> str:
     """Neutralize closing-delimiter sequences inside embedded content
     (codex P1): a displayed value fetched by an agent_script source can
@@ -1067,12 +1076,7 @@ def _defang_delimiters(text: str) -> str:
     prompt that runs autonomously with tools. A zero-width-free, visible
     mangle (``<\\/``) keeps the content readable while making it unable
     to terminate any of the prompt's tags."""
-    return (
-        text.replace("</app-data", "<\\/app-data")
-        .replace("</action-instruction", "<\\/action-instruction")
-        .replace("</app-config", "<\\/app-config")
-        .replace("</app-title", "<\\/app-title")
-    )
+    return _DEFANG_RE.sub("<\\\\/", text)
 
 
 def _agent_action_prompt(surface: Any, action: dict, timeout: int) -> str:
