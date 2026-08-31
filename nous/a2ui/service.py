@@ -327,6 +327,7 @@ class SurfaceService:
                         existing.nonce,
                         built.priority,
                         (built.app_spec or {}).get("theme"),
+                        built.title,
                     ),
                 ]
                 created = False
@@ -363,6 +364,7 @@ class SurfaceService:
                         nonce,
                         built.priority,
                         (built.app_spec or {}).get("theme"),
+                        built.title,
                     )
                 ]
                 created = True
@@ -408,6 +410,7 @@ class SurfaceService:
         nonce: str,
         priority: int,
         theme: str | None = None,
+        title: str | None = None,
     ) -> dict:
         extensions: dict[str, Any] = {
             "com_nous_nonce": nonce,
@@ -418,6 +421,14 @@ class SurfaceService:
         # when set; absent ⇒ the renderer's nous-default.
         if theme:
             extensions["com_nous_theme"] = theme
+        # The switcher chip for a micro_app is otherwise derived from the id's
+        # kind segment, which is the constant "micro_app" for EVERY composed
+        # app — so N live apps render as N chips all reading "app". The title
+        # rides along the same way theme does; the client shortens it. Sent
+        # for every kind (cheap, and the template chips keep their curated
+        # KIND_LABELS regardless).
+        if title:
+            extensions["com_nous_title"] = title
         return {
             "version": "v1.0",
             "createSurface": {
@@ -889,6 +900,7 @@ class SurfaceService:
             surface.nonce,
             surface.priority,
             (surface.app_spec or {}).get("theme"),
+            surface.title,
         )
         return envelope, int(upto_seq)
 

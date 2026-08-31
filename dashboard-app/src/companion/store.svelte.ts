@@ -26,6 +26,9 @@ export interface SurfaceState {
   /** F093 §3.2 — theme id stamped as data-theme on this surface's root, so
    * two apps in the switcher theme independently. Empty = nous-default. */
   theme: string;
+  /** Human title, used to label this surface's switcher chip. Empty = fall
+   * back to the curated kind label. */
+  title: string;
 }
 
 export type Connection = 'connecting' | 'live' | 'resyncing' | 'error';
@@ -122,6 +125,7 @@ export class SurfaceStore {
         nonce: String(ext['com_nous_nonce'] ?? ''),
         priority: Number(ext['com_nous_priority'] ?? 0),
         theme: String(ext['com_nous_theme'] ?? ''),
+        title: String(ext['com_nous_title'] ?? ''),
       };
     } else if (envelope.updateComponents) {
       const uc = envelope.updateComponents;

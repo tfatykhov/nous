@@ -6,6 +6,7 @@
   // surface ids to 'overview'. The `initialized` guard is copied from it —
   // it stops hashchange listeners stacking across tests and HMR.
   import { onMount } from 'svelte';
+  import { resolveDynamic, toDisplayString } from './functions';
   import InstallPrompt from './InstallPrompt.svelte';
   import Renderer from './Renderer.svelte';
   import { store } from './store.svelte';
@@ -39,9 +40,158 @@
     return surfaceId.split(':')[2] ?? '';
   }
 
-  function chipLabel(surfaceId: string): string {
-    const kind = kindOf(surfaceId);
-    return KIND_LABELS[kind] ?? kind ?? surfaceId.slice(-4);
+  /** Chip labels are ~a dozen characters before they crowd the switcher.
+   * Cut on a word boundary when one is close to the limit, else hard-cut. */
+  const CHIP_MAX = 22;
+  function shorten(title: string): string {
+    const t = title.replace(/\s+/g, ' ').trim();
+    // Cut on GRAPHEME CLUSTERS. `slice` counts UTF-16 units and splits a
+    // surrogate pair; `[...t]` counts code points and still splits a cluster —
+    // a flag is two regional indicators, and a letter plus a combining mark is
+    // two code points that render as one character (codex P2, twice). Only
+    // segmentation gets this right; code points remain the fallback where
+    // Intl.Segmenter is unavailable, since it is still better than units.
+    const units =
+      typeof Intl !== 'undefined' && 'Segmenter' in Intl
+        ? [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(t)].map(
+            (s) => s.segment,
+          )
+        : [...t];
+    if (units.length <= CHIP_MAX) return t;
+    // Find the word boundary in GRAPHEME units too. `lastIndexOf` returns a
+    // UTF-16 offset, which was then compared against the grapheme-based
+    // CHIP_MAX \u2014 mixing units, so astral graphemes before a space made the
+    // space look far earlier than it is. Two distinct names could collapse to
+    // the same truncated chip (codex P2).
+    const kept = units.slice(0, CHIP_MAX);
+    const sp = kept.lastIndexOf(' ');
+    const body = (sp >= CHIP_MAX - 8 ? kept.slice(0, sp) : kept).join('');
+    return body.replace(/[\s:,\u2014-]+$/, '') + '\u2026';
+  }
+
+  // Functions that only READ and format. An allowlist, not a denylist, so a new
+  // effectful function is unsafe by DEFAULT here — the direction that fails
+  // safe. `openUrl` is excluded (it calls window.open) and `@index` too (it
+  // throws at the null scope a chip resolves in).
+  //
+  // `formatString` is ALSO excluded, despite being pure itself: its template
+  // can encode a call as TEXT — `"${openUrl(url:'…')}"` — which the recursive
+  // object check below cannot see, because the payload is a primitive string.
+  // It is the sole entry point to the `${…}` scanner (functions.ts:242), so
+  // excluding it closes that hole outright. The alternative — a second parser
+  // for interpolations — would have to track the real scanner forever, and a
+  // drift there means silent unsolicited navigation. A formatString title
+  // simply falls back to the record title (codex P2).
+  const PURE_TITLE_FNS = new Set([
+    'formatNumber',
+    'formatCurrency',
+    'formatDate',
+    'pluralize',
+    'length',
+    'and',
+    'or',
+    'not',
+    'regex',
+    'numeric',
+    'email',
+  ]);
+
+  /** True when a title can be resolved WITHOUT side effects. Recurses through
+   * arguments, because `{call:"formatString", args:{value:{call:"openUrl"}}}`
+   * is a pure call wrapping an effectful one — checking only the outer name
+   * would wave it straight through. */
+  function isPureTitle(v: unknown, depth = 0): boolean {
+    if (depth > 6) return false;
+    if (v === null || typeof v !== 'object') return true;
+    if (Array.isArray(v)) return v.every((x) => isPureTitle(x, depth + 1));
+    const call = (v as { call?: unknown }).call;
+    if (typeof call === 'string' && !PURE_TITLE_FNS.has(call)) return false;
+    return Object.values(v as Record<string, unknown>).every((x) =>
+      isPureTitle(x, depth + 1),
+    );
+  }
+
+  /** An app's AppHeader is structurally mandatory (lint_micro_app: it must
+   * be the first top-level child) and its title is authored SHORT for
+   * display — "Crypto Note", not the record title "Crypto Note: Six
+   * Months, Forward View". That makes it the better chip label, and it
+   * needs no server round-trip: it is already in the components we render. */
+  function headerTitle(surface: {
+    components?: Record<string, { component?: string; title?: unknown; children?: unknown }>;
+    dataModel?: unknown;
+  }): string {
+    const comps = surface.components ?? {};
+    // Reach the header THROUGH the current root, the way Renderer does.
+    // `updateComponents` merges by id and never deletes, so a refine that
+    // replaces the header under a new id leaves the old one as an invisible
+    // orphan — and scanning by TYPE returns that stale orphan first, since
+    // object insertion order is preserved. The chip would then disagree with
+    // the header actually on screen (codex P2).
+    const rootChildren = comps['root']?.children;
+    const ids = Array.isArray(rootChildren)
+      ? rootChildren.filter((c): c is string => typeof c === 'string')
+      : [];
+    const headerId = ids.find((id) => comps[id]?.component === 'AppHeader');
+    const header = headerId ? comps[headerId] : undefined;
+    if (!header) return '';
+    // Trim whatever we return: a whitespace-only title is truthy and would
+    // short-circuit the record-title fallback, landing back on "app".
+    const raw = header.title;
+    // A LABEL MUST NOT CAUSE EFFECTS. `title` is a DynamicString, so it may
+    // hold a function call — and `openUrl` calls `window.open`. Chips resolve
+    // EVERY live surface, twice (label + tooltip), so an effectful call fires
+    // merely because a surface exists in the feed (codex P2). Only provably
+    // pure titles are evaluated — see isPureTitle, which recurses so a pure
+    // wrapper cannot smuggle an effectful argument. Everything else falls back
+    // to the record title.
+    if (typeof raw === 'string') return raw.trim();
+    if (!isPureTitle(raw)) return '';
+    const ctx = { dataModel: (surface.dataModel ?? {}) as Record<string, unknown>, scope: null };
+    try {
+      return toDisplayString(resolveDynamic(raw, ctx)).trim();
+    } catch {
+      // Even a pure read can throw on a hostile model; a label is never worth
+      // the shell, which resolves every background app's title.
+      return '';
+    }
+  }
+
+  type ChipSurface = {
+    surfaceId: string;
+    title?: string;
+    components?: Record<string, { component?: string; title?: unknown; children?: unknown }>;
+    dataModel?: unknown;
+  };
+
+  /** The FULL (untruncated) name a micro-app chip stands for. Shared by the
+   * label AND the tooltip: the tooltip exists to reveal what truncation hid,
+   * so deriving it from a different string defeats it — a header title that
+   * differs from the record title showed one thing on the chip and another on
+   * hover (codex P2). */
+  function chipName(surface: ChipSurface): string {
+    if (kindOf(surface.surfaceId) !== 'micro_app') return '';
+    return (headerTitle(surface) || surface.title || '').trim();
+  }
+
+  function chipTooltip(surface: ChipSurface): string {
+    const name = chipName(surface) || surface.title || '';
+    return name ? name + ' — ' + surface.surfaceId : surface.surfaceId;
+  }
+
+  function chipLabel(surface: ChipSurface): string {
+    const kind = kindOf(surface.surfaceId);
+    // Every composed app's id carries the SAME kind segment ("micro_app"),
+    // so KIND_LABELS can only ever say "app" — N live apps become N chips
+    // reading "app". Its own title is the only thing that distinguishes
+    // them. Template kinds keep the curated label: it is shorter and more
+    // scannable than their titles, which carry timestamps.
+    if (kind === 'micro_app') {
+      // Header title first (short, authored); the record title from
+      // createSurface metadata is the fallback for a headerless surface.
+      const name = chipName(surface);
+      if (name) return shorten(name);
+    }
+    return KIND_LABELS[kind] ?? kind ?? surface.surfaceId.slice(-4);
   }
 
   let route = $state<View>(parseHash());
@@ -99,9 +249,9 @@
           class="chip"
           class:active={route.view === 'surface' && route.id === surface.surfaceId}
           href={'#/s/' + encodeURIComponent(surface.surfaceId)}
-          title={surface.surfaceId}
+          title={chipTooltip(surface)}
         >
-          {chipLabel(surface.surfaceId)}
+          {chipLabel(surface)}
         </a>
       {/each}
       {#if microApps.length >= 2}
