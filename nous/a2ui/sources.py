@@ -38,18 +38,18 @@ Fetcher = Callable[[dict], Awaitable[Any]]
 # a partial trend reads as a finished one, the §1.1 failure in a new costume).
 _MAX_SERIES_POINTS = 200
 
-# The push censor gate FAILS CLOSED above 20,000 flattened chars, surfacing
-# as an opaque "Surface blocked" (rev-arch #9). Sources bound rows but not
-# characters — ten episode summaries can clear 20k on their own — so
-# resolve() enforces a serialized budget well under the gate, trimming list
-# tails with an EXPLICIT marker rather than a silent cut.
-# Deliberately 16k, not 12k: a 3-chart dashboard (F094 acceptance #7) needs
-# three series to render REAL data, and at ~6k per downsampled 200-point series
-# the old 12k left the third source ~0 chars → a fabricated 2-point trend. 16k
-# fits three (~6k/6k/4k) while staying under the 20k censor gate with ~4k of
-# headroom for the title + components (a chart app's component tree is small).
-_TOTAL_BUDGET_CHARS = 16_000
-_PER_SOURCE_BUDGET_CHARS = 6_000
+# The push censor gate FAILS CLOSED above _CENSOR_MAX_CHARS (48k) flattened
+# chars, surfacing as an opaque "Surface blocked" (rev-arch #9). Sources bound
+# rows but not characters, so resolve() enforces a serialized budget well
+# under that gate, trimming list tails with an EXPLICIT marker, never a silent
+# cut. 40k total / 12k per source (raised from 16k/6k, 2026-08-31, alongside
+# the censor cap 20k→48k): at 6k per source a 200-point ISO-stamped series
+# (~9.9k) was ALWAYS downsampled to ~120 points even alone, and a 3-chart app
+# consumed the whole 16k. 12k fits a full 200-point series undownsampled; 40k
+# fits three of them plus records, with 8k of censor headroom left for the
+# title + component tree.
+_TOTAL_BUDGET_CHARS = 40_000
+_PER_SOURCE_BUDGET_CHARS = 12_000
 
 # Server-owned ceiling on any caller/model-supplied limit (codex P2): the
 # char budget trims AFTER materialization, so a prompted limit in the

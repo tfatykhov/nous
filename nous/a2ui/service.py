@@ -1032,7 +1032,12 @@ class SurfaceService:
 
 _CENSOR_CHUNK_CHARS = 1800
 _CENSOR_CHUNK_OVERLAP = 200
-_CENSOR_MAX_CHARS = 20_000
+# 48k, raised from 20k (2026-08-31): the check below is CHUNKED, so this cap
+# is a cost bound, not a capability bound — worst case ~30 pattern checks per
+# push at 1600-char steps, each one DB round-trip. 20k was sized for prose
+# surfaces; a 3-chart dashboard's data model alone ran ~16k, leaving no room
+# to raise the source budget without pushes failing closed at this gate.
+_CENSOR_MAX_CHARS = 48_000
 
 
 async def check_censors_chunked(heart: Any, text_in: str, *, where: str) -> str | None:

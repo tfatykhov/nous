@@ -114,13 +114,29 @@ async def test_three_chart_app_renders_three_real_series_within_budget():
 
 
 async def test_budget_exhaustion_returns_honest_empty_not_a_fake_trend():
-    # The 4th series has no budget left — it must be an explicit empty series
-    # with a reason, never a 2-point line pretending to be a 200-point trend.
-    reg = await _series_registry("a", "b", "c", "d")
-    out = await reg.resolve([{"key": k, "source": k, "params": {}} for k in ("a", "b", "c", "d")])
-    d = out["d"]
-    assert d["points"] == [] and "reason" in d["meta"]
-    assert "budget" in d["meta"]["reason"]
+    # The series past the total budget must be an explicit empty series with a
+    # reason — never a 2-point line pretending to be a 200-point trend. The
+    # count is DERIVED from the live constants (a fixed "4th source" broke the
+    # moment the budget was raised 16k→40k, because 4 then legitimately fit):
+    # enough full per-source allocations to exceed the total, plus one.
+    import math
+
+    # Sized from the MEASURED series, not the per-source allocation: the test
+    # series serializes well under its 12k allotment, so dividing by the
+    # allocation under-counts and the "exhausted" source still fits.
+    one = to_series(
+        [{"d": f"2026-{i:04d}", "x": float(i)} for i in range(200)], "d", "x"
+    )
+    series_chars = len(json.dumps(one, default=str))
+    n = math.ceil(_TOTAL_BUDGET_CHARS / series_chars) + 2
+    keys = [f"s{i}" for i in range(n)]
+    reg = await _series_registry(*keys)
+    out = await reg.resolve([{"key": k, "source": k, "params": {}} for k in keys])
+    last = out[keys[-1]]
+    assert last["points"] == [] and "reason" in last["meta"]
+    assert "budget" in last["meta"]["reason"]
+    # ...and the early sources still carry real data.
+    assert len(out[keys[0]]["points"]) > 100
 
 
 def test_bound_series_downsamples_never_replaces_with_a_marker():
@@ -1623,3 +1639,61 @@ def test_lint_never_raises_for_inline_children_anywhere(victim):
 
     errs = grammar.lint_micro_app(comps)  # must RETURN, never raise
     assert any("inline child object" in e for e in errs)
+
+
+async def test_full_iso_series_survives_undownsampled():
+    """The point of the 6k→12k per-source raise: a 200-point ISO-stamped
+    series (~9.9k chars) was ALWAYS downsampled to ~120 points even as the
+    only source on the surface. It must now arrive intact."""
+    from datetime import UTC, datetime, timedelta
+
+    base = datetime(2026, 3, 1, tzinfo=UTC)
+    recs = [{"d": base + timedelta(days=i), "x": float(i)} for i in range(200)]
+    reg = SourceRegistry()
+
+    async def fetch(params):
+        return to_series(recs, "d", "x", unit="bpm")
+
+    reg.register("hr", fetch)
+    out = await reg.resolve([{"key": "hr", "source": "hr", "params": {}}])
+    assert len(out["hr"]["points"]) == 200, "still being downsampled below the cap"
+    assert out["hr"]["meta"]["downsampled_from"] is None
+
+
+def test_tabs_pass_the_grammar_with_referenced_children():
+    """Tabs were allowed but never prompted; the grammar must accept the shape
+    the new prompt teaches — tabs: [{title, child-id}] — with the one-parent
+    and reference rules applying to tab children like any other child."""
+    comps = _skel([
+        {"id": "c", "component": "Tabs", "tabs": [
+            {"title": "By day", "child": "t_day"},
+            {"title": "By category", "child": "t_cat"},
+        ]},
+        {"id": "t_day", "component": "Text", "text": "day view"},
+        {"id": "t_cat", "component": "Text", "text": "category view"},
+    ])
+    assert grammar.lint_micro_app(comps) == []
+
+    # A tab child claimed by ANOTHER parent must still be rejected.
+    double = _skel([
+        {"id": "c", "component": "Column", "children": ["tabs1", "t_day"]},
+        {"id": "tabs1", "component": "Tabs", "tabs": [{"title": "d", "child": "t_day"}]},
+        {"id": "t_day", "component": "Text", "text": "x"},
+    ])
+    assert any("parent" in e or "referenced" in e for e in grammar.lint_micro_app(double))
+
+
+def test_accordion_is_a_valid_section_layout():
+    comps = _skel([{"id": "c", "component": "Text", "text": "detail"}])
+    for comp in comps:
+        if comp["id"] == "sec":
+            comp["layout"] = "accordion"
+    assert grammar.lint_micro_app(comps) == []
+
+
+def test_prompt_teaches_tabs_and_accordion(settings):
+    from nous.a2ui.compose import _GRAMMAR_RULES
+
+    assert "accordion" in _GRAMMAR_RULES
+    assert "TABS" in _GRAMMAR_RULES
+    assert '"child": "<component id>"' in _GRAMMAR_RULES

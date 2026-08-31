@@ -28,20 +28,43 @@
   // F093 §6.1 layout enum. hero enlarges the heading; grid/rail turn the
   // child's DIRECT container into a grid/scroll rail via :global below (the
   // child is a Column/Row whose items become the cells). Unknown → stack.
-  const LAYOUTS = ['stack', 'hero', 'grid-2', 'grid-3', 'rail'];
+  const LAYOUTS = ['stack', 'hero', 'grid-2', 'grid-3', 'rail', 'accordion'];
   const layout = $derived(
     typeof comp.layout === 'string' && LAYOUTS.includes(comp.layout) ? comp.layout : 'stack',
   );
+  // Accordion open state is renderer-local, exactly like Tabs selection: the
+  // catalog gives Section no `open` property, so whether a section is
+  // expanded is a view concern that never round-trips the server. Collapsed
+  // by default — the whole point is that long secondary detail stays out of
+  // the way until asked for.
+  let open = $state(false);
+  const collapsible = $derived(layout === 'accordion');
 </script>
 
-<section class="app-section {layout}" class:model={modelSupplied}>
-  <div class="head">
-    <h3>{comp.title}</h3>
-    {#if modelSupplied}
-      <span class="chip">model-supplied</span>
-    {/if}
-  </div>
-  {#if typeof comp.child === 'string'}
+<section class="app-section {layout}" class:model={modelSupplied} class:open>
+  {#if collapsible}
+    <button
+      class="head toggle"
+      aria-expanded={open}
+      onclick={() => (open = !open)}
+    >
+      <h3>{comp.title}</h3>
+      {#if modelSupplied}
+        <span class="chip">model-supplied</span>
+      {/if}
+      <span class="caret" aria-hidden="true">{open ? '▾' : '▸'}</span>
+    </button>
+  {:else}
+    <div class="head">
+      <h3>{comp.title}</h3>
+      {#if modelSupplied}
+        <span class="chip">model-supplied</span>
+      {/if}
+    </div>
+  {/if}
+  <!-- A collapsed panel is NOT rendered at all, mirroring Tabs: an invisible
+       subtree would still run its bindings and effects. -->
+  {#if typeof comp.child === 'string' && (!collapsible || open)}
     <Renderer {surfaceId} componentId={comp.child} {scope} {depth} {ancestors} />
   {/if}
 </section>
@@ -54,6 +77,23 @@
   .app-section.model {
     border-left: 3px solid var(--warn);
     padding-left: 0.7rem;
+  }
+  .head.toggle {
+    width: 100%;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-align: left;
+    font: inherit;
+  }
+  .head.toggle:hover h3 {
+    color: var(--text);
+  }
+  .caret {
+    color: var(--muted);
+    margin-left: auto;
+    font-size: 0.8rem;
   }
   .head {
     display: flex;

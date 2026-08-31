@@ -112,8 +112,16 @@ is rejected.
 
 SECTION LAYOUT via Section "layout": stack (default) | hero (large/primary,
 for the headline section) | grid-2 | grid-3 (N-column grid over the child's
-items) | rail (horizontal scroll). Use hero to create hierarchy — a flat
-stack of equal sections reads as generated.
+items) | rail (horizontal scroll) | accordion (collapsed until tapped — use
+for long secondary detail like raw tables or per-item breakdowns, never for
+the headline section). Use hero to create hierarchy — a flat stack of equal
+sections reads as generated.
+
+TABS for 2-5 ALTERNATIVE views of the same subject (e.g. "By day" vs "By
+category"): Tabs {tabs: [{"title": "...", "child": "<component id>"}]} — each
+child is its own component in the flat list, exactly like a Section child, and
+only the active panel renders. Prefer Tabs over stacking near-duplicate
+sections; prefer separate Sections when the user should see both at once.
 """
 
 _THEME_MENU = "Pick a `theme` (or omit for nous-default):\n" + "\n".join(
@@ -303,7 +311,11 @@ class SurfaceComposer:
                     # well past 4k output tokens; a truncated response reads
                     # as "not parseable JSON" and burns a repair round on
                     # nothing.
-                    max_tokens=8000,
+                    # 16k, raised from 8k (2026-08-31): a ledger/briefing app
+                    # may legitimately carry 80 components (caps_for), and a
+                    # truncated JSON response burns a repair round on a
+                    # response the model got RIGHT but could not finish.
+                    max_tokens=16000,
                 ),
                 timeout=float(self._settings.a2ui_compose_timeout_seconds),
             )
