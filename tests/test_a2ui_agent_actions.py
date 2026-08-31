@@ -470,7 +470,9 @@ async def test_app_act_handler_success_path(flag_settings) -> None:
 
     assert result.ok, result.message
     assert heart.subtasks.created and "<action-instruction>" in heart.subtasks.created[0].task
-    patches = dict(result.data_patches)
+    # The stamp is written directly by the handler (a reconciled patch
+    # failure would leave the subtask running untracked), not via patches.
+    patches = dict(router._service.patches)
     stamp = patches["/meta/pendingAction"]
     assert stamp["id"] == "rebalance" and stamp["at"]
     assert router._action_watchers, "watcher task must be held by a strong ref"
@@ -620,11 +622,58 @@ async def test_stamp_carries_timeout_and_subtask_id(flag_settings) -> None:
 
     result = await handler(_ctx(router, _surface_stub(), "rebalance"))
 
-    stamp = dict(result.data_patches)["/meta/pendingAction"]
+    assert result.ok, result.message
+    stamp = dict(router._service.patches)["/meta/pendingAction"]
     assert stamp["timeout_s"] == flag_settings.a2ui_agent_action_timeout_seconds
     assert stamp["subtask_id"] == str(heart.subtasks.created[0].id)
     for t in router._action_watchers:
         t.cancel()
+
+
+async def test_app_act_cancels_the_subtask_when_the_stamp_write_fails(flag_settings) -> None:
+    """codex P1: the dispatch reconciles patch failures away by design, so
+    a transient stamp-write error would leave the subtask running
+    UNTRACKED — no double-tap guard, no retirement identity, and the
+    watcher reads the absent stamp as success. If the stamp cannot be
+    persisted, the action must not run."""
+
+    class _FailingService(_FakeService):
+        async def update_data(self, surface_id: str, path: str, value: Any) -> None:
+            raise RuntimeError("transient outage")
+
+    heart = SimpleNamespace(subtasks=_FakeSubtasks())
+    failing_router = ActionRouter(None, flag_settings, _FailingService(None), heart=heart)
+    handler = failing_router._handlers["app.act"].fn
+
+    result = await handler(_ctx(failing_router, _surface_stub(), "rebalance"))
+
+    assert not result.ok and "could not start" in result.message
+    created = heart.subtasks.created[-1]
+    assert heart.subtasks.cancelled == [created.id], "the untracked subtask must be cancelled"
+    assert failing_router._action_watchers == set(), "no watcher for a refused action"
+
+
+async def test_resolve_time_retirement_helper() -> None:
+    """codex P1: cap eviction resolves surfaces directly (no app.close), so
+    the retirement backstop lives at the single terminal transition."""
+    from nous.a2ui.service import SurfaceService
+
+    sub_id = uuid.uuid4()
+    heart = SimpleNamespace(subtasks=_FakeSubtasks())
+    svc = SurfaceService(None, SimpleNamespace(a2ui_agent_action_timeout_seconds=120), heart=heart)
+    surface = SimpleNamespace(
+        kind="micro_app",
+        data_model={"meta": {"pendingAction": {"id": "x", "subtask_id": str(sub_id)}}},
+    )
+
+    await svc._retire_pending_action(surface)
+
+    assert heart.subtasks.cancelled == [sub_id]
+    assert svc._push_session_blocked(f"subtask-{sub_id.hex[:8]}")
+    # Non-micro-app and stamp-less surfaces are untouched.
+    await svc._retire_pending_action(SimpleNamespace(kind="template", data_model={}))
+    await svc._retire_pending_action(SimpleNamespace(kind="micro_app", data_model={}))
+    assert heart.subtasks.cancelled == [sub_id]
 
 
 async def test_app_act_handler_flag_off_and_no_heart(settings, flag_settings) -> None:
@@ -664,10 +713,10 @@ def act_settings(settings, a2ui_agent_id: str):
 
 
 @pytest_asyncio.fixture
-async def service(db, act_settings, a2ui_agent_id: str):
+async def service(db, act_settings, a2ui_agent_id: str, fake_heart):
     from nous.a2ui.service import SurfaceService
 
-    svc = SurfaceService(db, act_settings)
+    svc = SurfaceService(db, act_settings, heart=fake_heart)
     yield svc
     async with db.session() as session:
         await session.execute(delete(A2uiAction).where(A2uiAction.agent_id == a2ui_agent_id))
@@ -781,6 +830,24 @@ async def test_app_act_kill_switch_refuses_existing_surfaces(
     assert status == 422
     assert "disabled" in payload["error"]["message"]
     assert fake_heart.subtasks.created == []
+
+
+@pytest.mark.postgres_only
+async def test_cap_eviction_retires_the_running_action(
+    router, service, db, fake_heart
+) -> None:
+    """codex P1: _reconcile_cap resolves the LRU app directly (no
+    app.close), so retirement must live at the terminal transition —
+    resolve() — to cover eviction and every future resolver."""
+    surface_id = await service.push_built(_actioned_built(), dedup_key="app:evict-1")
+    nonce = (await _surface_row(db, surface_id)).nonce
+    await router.handle(_act_body(surface_id, nonce, "rebalance"), content_type=JSON_CT)
+    sub = fake_heart.subtasks.created[0]
+
+    await service.resolve(surface_id)
+
+    assert sub.id in fake_heart.subtasks.cancelled
+    assert service._push_session_blocked(f"subtask-{sub.id.hex[:8]}")
 
 
 @pytest.mark.postgres_only

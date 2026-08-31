@@ -702,6 +702,13 @@ class SurfaceService:
                 raise KeyError(surface_id)
             if surface.status != "live":
                 return
+            # F092.2 (codex P1): EVERY resolver — app.close, cap eviction in
+            # _reconcile_cap, any future sweep — must retire a running agent
+            # action, or its completion recomposes via the dedup_key and
+            # recreates the surface that was just torn down. Doing it here,
+            # at the single terminal transition, is what makes new resolvers
+            # covered by construction rather than by remembering.
+            await self._retire_pending_action(surface)
             surface.status = status
             surface.resolved_at = datetime.now(UTC)
             row = A2uiOutbox(agent_id=surface.agent_id, surface_id=surface_id, envelope=envelope)
@@ -709,6 +716,34 @@ class SurfaceService:
             await session.commit()
             seq = row.seq
         self._broadcast(seq, envelope)
+
+    async def _retire_pending_action(self, surface: A2uiSurface) -> None:
+        """Cancel + session-block a micro-app's running agent action.
+
+        Sibling of actions.py's _retire_action_subtask (which the action
+        handlers use with richer context); this one is the resolve-time
+        backstop and deliberately lives on the service because the service
+        owns the terminal transition. Best-effort: a cancel failure is
+        logged, the session block always lands (it is the deterministic
+        layer — push_built refuses the blocked session either way).
+        """
+        if (surface.kind or "") != "micro_app":
+            return
+        pending = ((surface.data_model or {}).get("meta") or {}).get("pendingAction")
+        if not isinstance(pending, dict) or not pending.get("subtask_id"):
+            return
+        try:
+            sub_uuid = uuid.UUID(str(pending["subtask_id"]))
+        except (TypeError, ValueError):
+            return
+        subtasks = getattr(self._heart, "subtasks", None) if self._heart else None
+        if subtasks is not None:
+            try:
+                await subtasks.cancel(sub_uuid)
+            except Exception:
+                logger.warning("F092.2 resolve-time subtask cancel failed", exc_info=True)
+        timeout = int(getattr(self._settings, "a2ui_agent_action_timeout_seconds", 300))
+        self.block_push_session(f"subtask-{sub_uuid.hex[:8]}", ttl_seconds=timeout + 60)
 
     async def expire_sweep(self) -> int:
         """Expire overdue surfaces + prune old rows. Returns surfaces expired.

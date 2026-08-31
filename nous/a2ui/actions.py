@@ -858,22 +858,37 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
             # non-default setting — announcing retry while the server still
             # 422s, or spinning long after the server considered it stale).
             "timeout_s": timeout,
-            # app.close uses this to cancel the running action (codex P1);
-            # the client ignores it.
+            # close/eviction/retap retirement uses this to cancel the
+            # running action; the client ignores it.
             "subtask_id": str(sub.id),
         }
+        # Write the stamp HERE, not via data_patches (codex P1): the
+        # dispatch reconciles patch failures away by design, so a transient
+        # update_data error would leave the subtask running UNTRACKED — no
+        # double-tap guard, no retirement identity, and the watcher would
+        # read the absent stamp as a successful recompose. If the stamp
+        # cannot be persisted the action must not run. Safe to write
+        # directly: handle() holds the surface lock through dispatch.
+        try:
+            await router._service.update_data(
+                ctx.surface.surface_id, f"/{_ACT_META_KEY}/pendingAction", stamp
+            )
+            await router._service.update_data(
+                ctx.surface.surface_id, f"/{_ACT_META_KEY}/actionError", None
+            )
+        except Exception:
+            logger.exception("F092.2 pending stamp write failed — cancelling action")
+            await _retire_action_subtask(router, {"subtask_id": str(sub.id)})
+            return ActionResult(
+                ok=False,
+                message="could not start the action (state write failed) — try again",
+            )
         watcher = asyncio.create_task(
             _watch_agent_action(router, ctx.surface.surface_id, sub.id, stamp, timeout)
         )
         router._action_watchers.add(watcher)
         watcher.add_done_callback(router._action_watchers.discard)
-        return ActionResult(
-            message=f"working on: {stamp['label']}",
-            data_patches=[
-                (f"/{_ACT_META_KEY}/pendingAction", stamp),
-                (f"/{_ACT_META_KEY}/actionError", None),
-            ],
-        )
+        return ActionResult(message=f"working on: {stamp['label']}")
 
     router.register("app.act", app_act, mutating=True)
 
