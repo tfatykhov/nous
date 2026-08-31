@@ -803,14 +803,9 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
 
         # Server-side double-tap guard (client disabling buttons is UX, not
         # a control): a fresh pendingAction on this surface rejects the tap.
-        pending = ((ctx.surface.data_model or {}).get(_ACT_META_KEY) or {}).get(
-            "pendingAction"
-        )
-        if isinstance(pending, dict):
-            started = _parse_iso(pending.get("at"))
-            if started is not None and (
-                datetime.now(UTC) - started
-            ).total_seconds() < timeout:
+        pending = _pending_stamp(ctx.surface)
+        if pending is not None:
+            if _stamp_is_fresh(pending, settings):
                 return ActionResult(
                     ok=False,
                     message=(
@@ -887,6 +882,19 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
 
 _ACT_META_KEY = "meta"  # compose.py's _META_KEY; server-owned subtree.
 _ACT_TERMINAL = frozenset({"completed", "failed", "cancelled"})
+
+
+def _pending_stamp(surface: Any) -> dict | None:
+    pending = ((surface.data_model or {}).get(_ACT_META_KEY) or {}).get("pendingAction")
+    return pending if isinstance(pending, dict) else None
+
+
+def _stamp_is_fresh(stamp: dict, settings: Any) -> bool:
+    started = _parse_iso(stamp.get("at"))
+    if started is None:
+        return False
+    timeout = int(getattr(settings, "a2ui_agent_action_timeout_seconds", 300))
+    return (datetime.now(UTC) - started).total_seconds() < timeout
 
 
 async def _retire_action_subtask(router: Any, pending: dict) -> None:
@@ -1013,6 +1021,14 @@ async def _watch_agent_action(
                 note = f"the action {status}"
             else:
                 note = "no update arrived in time"
+                # Non-terminal past the deadline (codex P1): a saturated
+                # worker pool can keep the subtask QUEUED this whole time —
+                # its execution timeout starts at dequeue. Clearing the
+                # stamp destroys the subtask_id identity that retap
+                # retirement relies on, so the next tap would queue a
+                # DUPLICATE turn while this one can still dequeue later.
+                # Retire (cancel + session block) BEFORE clearing.
+                await _retire_action_subtask(router, stamp)
             await router._service.update_data(
                 surface_id, f"/{_ACT_META_KEY}/pendingAction", None
             )
@@ -1062,9 +1078,29 @@ def _register_micro_app_functions(router: ActionRouter) -> None:
         if row.nonce != snapshot.nonce or row.updated_at != snapshot.updated_at:
             raise ValueError("the app changed while this call was in flight — try again")
 
+    async def _gate_pending_action(ctx: ActionContext) -> None:
+        """F092.2 (codex P1): refine replaces the whole data model and
+        refresh overwrites /meta — either erases pendingAction WITHOUT
+        cancelling its subtask, so the old turn could later overwrite the
+        user's newer app state while a second action launches
+        concurrently. Fresh action -> refuse (the honest answer while a
+        turn is running); stale -> retire it first, exactly like a retap.
+        Server-side because client button-disabling is UX, not a control.
+        """
+        pending = _pending_stamp(ctx.surface)
+        if pending is None:
+            return
+        if _stamp_is_fresh(pending, router._settings):
+            raise ValueError(
+                f"an agent action ({str(pending.get('label') or pending.get('id'))!r}) "
+                "is running on this app — wait for it to finish or close the app"
+            )
+        await _retire_action_subtask(router, pending)
+
     async def app_refresh(ctx: ActionContext) -> Any:
         if router._composer is None:
             raise ValueError("micro-app composer unavailable")
+        await _gate_pending_action(ctx)
         spec = ctx.surface.app_spec or {}
         # Re-runs the DECLARED sources only — no LLM. With model-supplied
         # data, "refresh" would replay whatever the model said last time;
@@ -1092,6 +1128,7 @@ def _register_micro_app_functions(router: ActionRouter) -> None:
     async def app_refine(ctx: ActionContext) -> Any:
         if router._composer is None:
             raise ValueError("micro-app composer unavailable")
+        await _gate_pending_action(ctx)
         spec = ctx.surface.app_spec or {}
         options = {
             str(o.get("id")): o for o in spec.get("refine_options") or [] if isinstance(o, dict)

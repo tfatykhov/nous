@@ -167,13 +167,24 @@
         {pendingFresh && pendingAction?.id === action.id ? `${action.label}…` : action.label}
       </button>
     {/each}
+    <!-- refine/refresh disabled while an action runs: the server refuses
+         them anyway (they'd erase the pending stamp without stopping the
+         turn) — the disable just keeps the UI honest about it. -->
     {#each refineOptions as option (option.id)}
-      <button class="ctl" disabled={busy} onclick={() => void call('app.refine', { id: option.id })}>
+      <button
+        class="ctl"
+        disabled={busy || pendingFresh}
+        onclick={() => void call('app.refine', { id: option.id })}
+      >
         {option.label}
       </button>
     {/each}
     {#if showRefresh}
-      <button class="ctl" disabled={busy} onclick={() => void call('app.refresh', {})}>
+      <button
+        class="ctl"
+        disabled={busy || pendingFresh}
+        onclick={() => void call('app.refresh', {})}
+      >
         {busy ? 'working…' : 'refresh'}
       </button>
     {/if}

@@ -315,6 +315,7 @@ def _fake_router(pending: dict | None, status: str = "failed") -> SimpleNamespac
     return SimpleNamespace(
         _service=_FakeService(pending),
         _heart=SimpleNamespace(subtasks=_FakeSubtasks(status)),
+        _settings=SimpleNamespace(a2ui_agent_action_timeout_seconds=300),
     )
 
 
@@ -345,6 +346,81 @@ async def test_watcher_noops_after_successful_recompose(monkeypatch) -> None:
     monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
     await _watch_agent_action(router, "a2ui-x", uuid.uuid4(), stamp, timeout=1)
     assert router._service.patches == []
+
+
+async def test_watcher_retires_a_still_queued_subtask_before_clearing(monkeypatch) -> None:
+    """codex P1: a saturated worker pool can keep the subtask QUEUED past
+    the deadline (its execution timeout starts at dequeue). Clearing the
+    stamp destroys the subtask_id that retap retirement needs — the next
+    tap would queue a DUPLICATE turn while this one can still dequeue.
+    The watcher must cancel + block before clearing."""
+    sub_id = uuid.uuid4()
+    stamp = {
+        "id": "rebalance",
+        "label": "Rebalance",
+        "at": "2026-08-31T00:00:00+00:00",
+        "subtask_id": str(sub_id),
+    }
+    # timeout < -30 puts the deadline in the past: the poll loop never runs,
+    # status stays non-terminal, and the retire-before-clear branch fires.
+    router = _fake_router(pending=dict(stamp), status="pending")
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+    await _watch_agent_action(router, "a2ui-x", sub_id, stamp, timeout=-31)
+    assert router._heart.subtasks.cancelled == [sub_id]
+    assert router._service.blocked_sessions, "push session must be blocked"
+    patches = dict(router._service.patches)
+    assert patches["/meta/pendingAction"] is None
+
+
+async def test_refresh_and_refine_reject_while_an_action_is_fresh(flag_settings) -> None:
+    """codex P1: refine replaces the whole data model and refresh
+    overwrites /meta — either would erase pendingAction WITHOUT stopping
+    the turn, letting the old turn overwrite the user's newer app state
+    while a second action launches concurrently."""
+    from datetime import UTC, datetime
+
+    heart = SimpleNamespace(subtasks=_FakeSubtasks())
+    router = ActionRouter(
+        None, flag_settings, _FakeService(None), heart=heart, composer=SimpleNamespace()
+    )
+    surface = _surface_stub(
+        data_model={
+            "meta": {
+                "pendingAction": {
+                    "id": "rebalance",
+                    "label": "Rebalance",
+                    "at": datetime.now(UTC).isoformat(timespec="seconds"),
+                }
+            }
+        }
+    )
+    for fn_name in ("app.refresh", "app.refine"):
+        with pytest.raises(ValueError, match="is running on this app"):
+            await router._functions[fn_name].fn(_ctx(router, surface, ""))
+
+
+async def test_refresh_retires_a_stale_action_before_proceeding(flag_settings) -> None:
+    heart = SimpleNamespace(subtasks=_FakeSubtasks())
+    old_id = uuid.uuid4()
+    router = ActionRouter(
+        None, flag_settings, _FakeService(None), heart=heart, composer=SimpleNamespace()
+    )
+    surface = _surface_stub(
+        data_model={
+            "meta": {
+                "pendingAction": {
+                    "id": "rebalance",
+                    "at": "2020-01-01T00:00:00+00:00",
+                    "subtask_id": str(old_id),
+                }
+            }
+        }
+    )
+    # The fake composer lacks refresh_data, so the call fails AFTER the
+    # gate — what matters is that the stale subtask was retired first.
+    with pytest.raises(Exception):
+        await router._functions["app.refresh"].fn(_ctx(router, surface, ""))
+    assert heart.subtasks.cancelled == [old_id]
 
 
 async def test_watcher_noops_when_a_newer_action_is_pending(monkeypatch) -> None:
