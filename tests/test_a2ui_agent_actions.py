@@ -124,6 +124,41 @@ def test_footer_stamp_never_leaks_instruction(flag_settings) -> None:
     assert "instruction" not in json.dumps(stamped)
 
 
+def test_footer_stamp_strips_model_authored_actions(flag_settings) -> None:
+    # codex P2: the catalog schema admits agentActions, so the compose LLM
+    # can author phantom buttons — with no declared actions app.act is not
+    # in allowed_actions and every tap would 403. The server list is the
+    # only truth: overwrite when present, strip when empty.
+    composer = SurfaceComposer(object(), flag_settings, SourceRegistry())
+    stamped = composer._with_footer_options(
+        [
+            {
+                "id": "footer",
+                "component": "AppFooter",
+                "agentActions": [{"id": "phantom", "label": "Fake"}],
+            }
+        ],
+        [],
+        has_sources=False,
+        agent_actions=[],
+    )
+    assert "agentActions" not in stamped[0]
+
+    overwritten = composer._with_footer_options(
+        [
+            {
+                "id": "footer",
+                "component": "AppFooter",
+                "agentActions": [{"id": "phantom", "label": "Fake"}],
+            }
+        ],
+        [],
+        has_sources=False,
+        agent_actions=_ACTIONS,
+    )
+    assert [a["id"] for a in overwritten[0]["agentActions"]] == ["rebalance", "escalate"]
+
+
 # ---------------------------------------------------------------------------
 # Tool schema gating
 # ---------------------------------------------------------------------------
@@ -237,6 +272,10 @@ class _FakeService:
         self.pending = pending
         self.patches: list[tuple[str, Any]] = []
         self.locked: list[str] = []
+        self.blocked_sessions: list[tuple[str, float]] = []
+
+    def block_push_session(self, session_id: str, ttl_seconds: float) -> None:
+        self.blocked_sessions.append((session_id, ttl_seconds))
 
     @asynccontextmanager
     async def surface_lock(self, surface_id: str):
@@ -257,6 +296,7 @@ class _FakeSubtasks:
     def __init__(self, status: str = "failed"):
         self._status = status
         self.created: list[Any] = []
+        self.cancelled: list[Any] = []
 
     async def create(self, task: str, **kwargs: Any):
         sub = SimpleNamespace(id=uuid.uuid4(), status="pending", task=task, kwargs=kwargs)
@@ -265,6 +305,10 @@ class _FakeSubtasks:
 
     async def get(self, subtask_id):
         return SimpleNamespace(id=subtask_id, status=self._status)
+
+    async def cancel(self, subtask_id) -> bool:
+        self.cancelled.append(subtask_id)
+        return True
 
 
 def _fake_router(pending: dict | None, status: str = "failed") -> SimpleNamespace:
@@ -396,6 +440,78 @@ async def test_app_act_handler_allows_retap_after_stale_pending(flag_settings) -
     result = await handler(_ctx(router, surface, "rebalance"))
 
     assert result.ok, result.message
+    for t in router._action_watchers:
+        t.cancel()
+
+
+async def test_app_close_cancels_running_action_and_blocks_its_push(flag_settings) -> None:
+    """codex P1: closing an app mid-action must stop the action — its
+    completion recompose would otherwise recreate the closed app (dedup
+    matches live surfaces only). Layer 1 cancels the subtask; layer 2
+    blocks the subtask's own push session, since a mid-flight worker is
+    not preempted."""
+    heart = SimpleNamespace(subtasks=_FakeSubtasks())
+    router = _handler_router(flag_settings, heart=heart)
+    handler = router._handlers["app.close"].fn
+    sub_id = uuid.uuid4()
+    surface = _surface_stub(
+        data_model={
+            "meta": {
+                "pendingAction": {
+                    "id": "rebalance",
+                    "at": "2026-08-31T00:00:00+00:00",
+                    "subtask_id": str(sub_id),
+                }
+            }
+        }
+    )
+
+    result = await handler(_ctx(router, surface, ""))
+
+    assert result.resolve_surface
+    assert heart.subtasks.cancelled == [sub_id]
+    assert router._service.blocked_sessions == [
+        (f"subtask-{sub_id.hex[:8]}", flag_settings.a2ui_agent_action_timeout_seconds + 60)
+    ]
+
+
+async def test_app_close_without_pending_action_is_unchanged(flag_settings) -> None:
+    heart = SimpleNamespace(subtasks=_FakeSubtasks())
+    router = _handler_router(flag_settings, heart=heart)
+    handler = router._handlers["app.close"].fn
+
+    result = await handler(_ctx(router, _surface_stub(), ""))
+
+    assert result.resolve_surface
+    assert heart.subtasks.cancelled == []
+    assert router._service.blocked_sessions == []
+
+
+async def test_blocked_push_session_refuses_push(flag_settings) -> None:
+    from nous.a2ui.service import SurfaceService
+
+    svc = SurfaceService(None, flag_settings)  # block check raises before DB
+    svc.block_push_session("subtask-deadbeef", ttl_seconds=60)
+    with pytest.raises(PermissionError, match="closed by the user"):
+        await svc.push_built(_actioned_built(), session_id="subtask-deadbeef")
+    # Other sessions are untouched — the reject path for THIS built is the
+    # flag-off guard further down, proving the session gate let it through.
+    svc2 = SurfaceService(None, flag_settings)
+    svc2.block_push_session("subtask-deadbeef", ttl_seconds=60)
+    with pytest.raises(ValueError):
+        await svc2.push_built(_actioned_built(app_spec_actions=False), session_id="chat-1")
+
+
+async def test_stamp_carries_timeout_and_subtask_id(flag_settings) -> None:
+    heart = SimpleNamespace(subtasks=_FakeSubtasks())
+    router = _handler_router(flag_settings, heart=heart)
+    handler = router._handlers["app.act"].fn
+
+    result = await handler(_ctx(router, _surface_stub(), "rebalance"))
+
+    stamp = dict(result.data_patches)["/meta/pendingAction"]
+    assert stamp["timeout_s"] == flag_settings.a2ui_agent_action_timeout_seconds
+    assert stamp["subtask_id"] == str(heart.subtasks.created[0].id)
     for t in router._action_watchers:
         t.cancel()
 

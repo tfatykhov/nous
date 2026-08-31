@@ -548,6 +548,12 @@ class SurfaceComposer:
                 comp = {**comp, "refineOptions": refine_options, "showRefresh": has_sources}
                 if agent_buttons:
                     comp["agentActions"] = agent_buttons
+                else:
+                    # ALWAYS overwrite, never merely add (codex P2): the
+                    # catalog schema admits the prop, so the compose LLM can
+                    # author phantom buttons whose every tap would fail with
+                    # ACTION_NOT_ALLOWED — the server list is the only truth.
+                    comp.pop("agentActions", None)
             out.append(comp)
         return out
 

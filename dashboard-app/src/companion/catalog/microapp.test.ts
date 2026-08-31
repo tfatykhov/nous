@@ -160,6 +160,23 @@ describe('AppFooterView', () => {
     expect(container.querySelector('.stale')?.textContent).toContain('no update');
   });
 
+  it('derives the stale window from the stamp timeout_s, not a hardcoded client value', () => {
+    // codex P2: the server's freshness guard uses the configurable
+    // timeout; a hardcoded client window drifts from any non-default value.
+    const twoMinAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+    // timeout_s=60: 2 minutes ago is already stale despite the 5-min fallback.
+    const short = renderActionFooter({
+      pendingAction: { id: 'rebalance', label: 'Rebalance', at: twoMinAgo, timeout_s: 60 },
+    });
+    expect((short.getByText('Rebalance') as HTMLButtonElement).disabled).toBe(false);
+    cleanup();
+    // timeout_s=600: 2 minutes ago is still fresh well past nothing.
+    const long = renderActionFooter({
+      pendingAction: { id: 'rebalance', label: 'Rebalance', at: twoMinAgo, timeout_s: 600 },
+    });
+    expect((long.getByText('Rebalance…') as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it('renders the server-written actionError', () => {
     const { container } = renderActionFooter({
       actionError: 'Rebalance: the action failed',

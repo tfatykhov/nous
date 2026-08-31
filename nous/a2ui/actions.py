@@ -747,6 +747,38 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
     """
 
     async def app_close(ctx: ActionContext) -> ActionResult:
+        # F092.2 (codex P1): closing an app with a running agent action must
+        # also stop the action — otherwise its completion recomposes via the
+        # dedup_key, and dedup matches LIVE surfaces only, so the push would
+        # RECREATE the app the user just closed. Two layers, both
+        # best-effort-with-a-deterministic-backstop:
+        #   1. cancel the subtask (stops a queued/early one outright);
+        #   2. block the subtask's own push session for the action window —
+        #      a mid-flight worker is not preempted (SubtaskManager.cancel
+        #      contract), and this is what stops ITS late compose_surface
+        #      without touching legitimate re-creates from chat.
+        pending = ((ctx.surface.data_model or {}).get(_ACT_META_KEY) or {}).get(
+            "pendingAction"
+        )
+        if isinstance(pending, dict) and pending.get("subtask_id"):
+            timeout = int(
+                getattr(router._settings, "a2ui_agent_action_timeout_seconds", 300)
+            )
+            try:
+                sub_uuid = UUID(str(pending["subtask_id"]))
+            except (TypeError, ValueError):
+                sub_uuid = None
+            subtasks = getattr(router._heart, "subtasks", None) if router._heart else None
+            if sub_uuid is not None and subtasks is not None:
+                try:
+                    await subtasks.cancel(sub_uuid)
+                except Exception:
+                    logger.warning(
+                        "F092.2 close-time subtask cancel failed", exc_info=True
+                    )
+                router._service.block_push_session(
+                    f"subtask-{sub_uuid.hex[:8]}", ttl_seconds=timeout + 60
+                )
         return ActionResult(message="app closed", resolve_surface=True)
 
     router.register("app.close", app_close, mutating=False)
@@ -836,6 +868,14 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
             "id": action_id,
             "label": str(action.get("label") or action_id),
             "at": datetime.now(UTC).isoformat(timespec="seconds"),
+            # Client derives its stale window from the SERVER's configured
+            # timeout (codex P2: a hardcoded client 5-min drifted from any
+            # non-default setting — announcing retry while the server still
+            # 422s, or spinning long after the server considered it stale).
+            "timeout_s": timeout,
+            # app.close uses this to cancel the running action (codex P1);
+            # the client ignores it.
+            "subtask_id": str(sub.id),
         }
         watcher = asyncio.create_task(
             _watch_agent_action(router, ctx.surface.surface_id, sub.id, stamp, timeout)

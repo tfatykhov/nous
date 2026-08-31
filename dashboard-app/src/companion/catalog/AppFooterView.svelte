@@ -19,11 +19,14 @@
     label: string;
   }
 
-  // F092.2: the server marks an action pending for this long before the
-  // watcher would have failed it; past it the client re-enables the
-  // buttons and renders the stamp as stale ("no update arrived") — the
-  // honest degradation for the watcher's restart hole.
-  const PENDING_STALE_MS = 5 * 60 * 1000;
+  // F092.2 fallback only: the pending stamp carries the server's own
+  // timeout_s (a hardcoded client window drifts from any non-default
+  // NOUS_A2UI_AGENT_ACTION_TIMEOUT_SECONDS — announcing retry while the
+  // server still rejects, or spinning long after it considers the stamp
+  // stale). Past the window the client re-enables the buttons and renders
+  // the stamp as stale — the honest degradation for the watcher's restart
+  // hole.
+  const PENDING_STALE_FALLBACK_MS = 5 * 60 * 1000;
 
   let {
     surfaceId,
@@ -69,10 +72,15 @@
   const pendingAction = $derived.by(() => {
     const raw = meta?.pendingAction;
     if (!raw || typeof raw !== 'object') return null;
-    const p = raw as { id?: unknown; label?: unknown; at?: unknown };
-    return typeof p.id === 'string' && typeof p.at === 'string'
-      ? { id: p.id, label: typeof p.label === 'string' ? p.label : p.id, at: p.at }
-      : null;
+    const p = raw as { id?: unknown; label?: unknown; at?: unknown; timeout_s?: unknown };
+    if (typeof p.id !== 'string' || typeof p.at !== 'string') return null;
+    const timeoutS = typeof p.timeout_s === 'number' && p.timeout_s > 0 ? p.timeout_s : null;
+    return {
+      id: p.id,
+      label: typeof p.label === 'string' ? p.label : p.id,
+      at: p.at,
+      staleMs: timeoutS !== null ? timeoutS * 1000 : PENDING_STALE_FALLBACK_MS,
+    };
   });
   let nowTick = $state(Date.now());
   $effect(() => {
@@ -83,7 +91,7 @@
   const pendingFresh = $derived.by(() => {
     if (!pendingAction) return false;
     const at = Date.parse(pendingAction.at);
-    return Number.isFinite(at) && nowTick - at < PENDING_STALE_MS;
+    return Number.isFinite(at) && nowTick - at < pendingAction.staleMs;
   });
   const actionError = $derived(typeof meta?.actionError === 'string' ? meta.actionError : '');
 

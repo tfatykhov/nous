@@ -76,6 +76,34 @@ class SurfaceService:
         # completed action and contradictory no_objection evidence. One lock
         # registry means expiry waits for in-flight actions and vice versa.
         self._surface_locks: dict[str, _LockEntry] = {}
+        # F092.2: session_id -> monotonic deadline. app.close on a surface
+        # with a running agent action cancels the subtask, but a mid-flight
+        # worker is not preempted (SubtaskManager.cancel contract) — its
+        # compose_surface would land AFTER the close, and dedup matches only
+        # LIVE surfaces, so the completion would recreate the app the user
+        # just closed. Blocking the cancelled subtask's own push session is
+        # the precise guard: legitimate re-creates from chat are untouched.
+        # In-process only (restart loses it) — same class as the action
+        # watcher; the block's whole reason to exist dies with the worker.
+        self._blocked_push_sessions: dict[str, float] = {}
+
+    def block_push_session(self, session_id: str, ttl_seconds: float) -> None:
+        """Refuse push_built from this session for ttl_seconds (F092.2)."""
+        if not session_id:
+            return
+        loop = asyncio.get_running_loop()
+        self._blocked_push_sessions[session_id] = loop.time() + ttl_seconds
+
+    def _push_session_blocked(self, session_id: str | None) -> bool:
+        if not session_id:
+            return False
+        deadline = self._blocked_push_sessions.get(session_id)
+        if deadline is None:
+            return False
+        if asyncio.get_running_loop().time() >= deadline:
+            self._blocked_push_sessions.pop(session_id, None)
+            return False
+        return True
 
     @asynccontextmanager
     async def surface_lock(self, surface_id: str) -> AsyncIterator[None]:
@@ -115,6 +143,14 @@ class SurfaceService:
         UNIQUE index on (agent_id, dedup_key) WHERE live (codex P2): the
         loser's insert raises and retries once down the update path.
         """
+        if self._push_session_blocked(session_id):
+            # F092.2: this session belongs to a cancelled agent-action
+            # subtask whose app the user closed mid-action — its completion
+            # push would recreate the closed app (dedup matches live only).
+            raise PermissionError(
+                "the app this action belonged to was closed by the user — "
+                "do not recreate it; end the task without pushing"
+            )
         built.validate()
         if built.kind == "micro_app":
             # F092.1 fail-closed at creation, deliberately a fixed subset
