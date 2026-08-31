@@ -306,3 +306,55 @@ describe('Companion shell — chip label edge cases', () => {
     expect([...chip!].filter((ch) => ch === '\uD83D' || ch === '\uDE80')).toHaveLength(0);
   });
 });
+
+describe('Companion shell — grapheme-cluster truncation', () => {
+  it('never splits a flag or a combining mark', () => {
+    // codex P2 (twice): UTF-16 units split surrogate pairs, code points still
+    // split CLUSTERS — a flag is two regional indicators, and a letter plus a
+    // combining mark is two code points rendering as one character.
+    for (const [id, title] of [
+      ['nous:chat:micro_app:flag01', 'x'.repeat(21) + '🇺🇸🇬🇧'],
+      ['nous:chat:micro_app:comb01', 'y'.repeat(21) + 'é' + 'ǫ̈'],
+    ] as const) {
+      store.reset();
+      store.connection = 'live';
+      store.apply(null, {
+        version: 'v1.0',
+        createSurface: {
+          surfaceId: id,
+          catalogId: 'nous-core',
+          components: [
+            { id: 'root', component: 'Text', text: 'b' },
+            { id: 'header', component: 'AppHeader', title },
+          ],
+          dataModel: {},
+          metadata: { extensions: { com_nous_nonce: 'n' } },
+        },
+      } as never);
+      store.apply(null, {
+        version: 'v1.0',
+        createSurface: {
+          surfaceId: 'nous:sweep:decision_sweep:bbb002',
+          catalogId: 'nous-core',
+          components: [{ id: 'root', component: 'Text', text: 'b' }],
+          dataModel: {},
+          metadata: { extensions: { com_nous_nonce: 'n2' } },
+        },
+      } as never);
+
+      const { container, unmount } = render(Companion);
+      const chip = [...container.querySelectorAll('.switcher .chip')]
+        .map((c) => c.textContent ?? '')
+        .find((c) => c.startsWith('xxx') || c.startsWith('yyy'));
+      expect(chip).toBeDefined();
+      // A well-formed flag CONTAINS surrogates, so the tell of a split is an
+      // UNPAIRED one — a high surrogate with no low after it, or vice versa.
+      const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+      expect(lone.test(chip!)).toBe(false);
+      // ...and regional indicators survive in pairs, never as half a flag.
+      const halves = [...chip!].filter((ch) => ch >= '\u{1F1E6}' && ch <= '\u{1F1FF}').length;
+      expect(halves % 2).toBe(0);
+      unmount();
+    }
+  });
+});

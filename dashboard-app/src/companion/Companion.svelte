@@ -45,12 +45,20 @@
   const CHIP_MAX = 22;
   function shorten(title: string): string {
     const t = title.replace(/\s+/g, ' ').trim();
-    // Count and cut by CODE POINTS: `slice` works in UTF-16 units, so a cut
-    // landing inside an emoji or other surrogate pair split the character and
-    // rendered a replacement glyph (codex P2).
-    const points = [...t];
-    if (points.length <= CHIP_MAX) return t;
-    const cut = points.slice(0, CHIP_MAX).join('');
+    // Cut on GRAPHEME CLUSTERS. `slice` counts UTF-16 units and splits a
+    // surrogate pair; `[...t]` counts code points and still splits a cluster —
+    // a flag is two regional indicators, and a letter plus a combining mark is
+    // two code points that render as one character (codex P2, twice). Only
+    // segmentation gets this right; code points remain the fallback where
+    // Intl.Segmenter is unavailable, since it is still better than units.
+    const units =
+      typeof Intl !== 'undefined' && 'Segmenter' in Intl
+        ? [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(t)].map(
+            (s) => s.segment,
+          )
+        : [...t];
+    if (units.length <= CHIP_MAX) return t;
+    const cut = units.slice(0, CHIP_MAX).join('');
     const sp = cut.lastIndexOf(' ');
     return (sp >= CHIP_MAX - 8 ? cut.slice(0, sp) : cut).replace(/[\s:,\u2014-]+$/, '') + '\u2026';
   }
