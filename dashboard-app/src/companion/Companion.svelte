@@ -69,12 +69,20 @@
     return body.replace(/[\s:,\u2014-]+$/, '') + '\u2026';
   }
 
-  // Functions that only READ and format. `openUrl` is the counter-example and
-  // the reason this is an allowlist rather than a denylist: a new effectful
-  // function is unsafe by DEFAULT here, which is the direction that fails
-  // safe. `@index` is excluded too — it throws at the null scope a chip uses.
+  // Functions that only READ and format. An allowlist, not a denylist, so a new
+  // effectful function is unsafe by DEFAULT here — the direction that fails
+  // safe. `openUrl` is excluded (it calls window.open) and `@index` too (it
+  // throws at the null scope a chip resolves in).
+  //
+  // `formatString` is ALSO excluded, despite being pure itself: its template
+  // can encode a call as TEXT — `"${openUrl(url:'…')}"` — which the recursive
+  // object check below cannot see, because the payload is a primitive string.
+  // It is the sole entry point to the `${…}` scanner (functions.ts:242), so
+  // excluding it closes that hole outright. The alternative — a second parser
+  // for interpolations — would have to track the real scanner forever, and a
+  // drift there means silent unsolicited navigation. A formatString title
+  // simply falls back to the record title (codex P2).
   const PURE_TITLE_FNS = new Set([
-    'formatString',
     'formatNumber',
     'formatCurrency',
     'formatDate',

@@ -587,10 +587,10 @@ describe('Companion shell — pure title functions are allowed, effectful ones a
     } as never);
   }
 
-  it('names the chip from a pure formatString, matching the header', async () => {
+  it('names the chip from a pure formatter, matching the header', async () => {
     seedTitle(
       'nous:chat:micro_app:pure01',
-      { call: 'formatString', args: { value: '${/meta/name} dashboard' } },
+      { call: 'pluralize', args: { value: 3, one: 'alert', other: 'alerts' } },
       'Record Name',
     );
     seed('nous:sweep:decision_sweep:bbb002');
@@ -599,7 +599,33 @@ describe('Companion shell — pure title functions are allowed, effectful ones a
     const chips = [...container.querySelectorAll('.switcher a.chip')].map((c) =>
       c.textContent?.trim(),
     );
-    expect(chips).toContain('Ops dashboard');
+    // Resolved from the pure function, not the record-title fallback.
+    expect(chips).toContain('alerts');
+    expect(chips).not.toContain('Record Name');
+  });
+
+  it('does not evaluate a formatString title — its template can hide a call', async () => {
+    // `"${openUrl(url:'…')}"` is a PRIMITIVE to the object walk, so recursion
+    // cannot see it. formatString is the only entry to the ${…} scanner, so it
+    // is excluded outright rather than re-parsed (codex P2).
+    const opened = vi.fn();
+    vi.stubGlobal('open', opened);
+    seedTitle(
+      'nous:chat:micro_app:tmpl01',
+      { call: 'formatString', args: { value: "${openUrl(url:'https://evil.example/x')}" } },
+      'Record Name',
+    );
+    seed('nous:chat:micro_app:good01', 0, undefined, 'Good App');
+    location.hash = '#/s/' + encodeURIComponent('nous:chat:micro_app:good01');
+    const { container } = render(Companion);
+    await settle();
+
+    expect(opened).not.toHaveBeenCalled();
+    const chips = [...container.querySelectorAll('.switcher a.chip')].map((c) =>
+      c.textContent?.trim(),
+    );
+    expect(chips).toContain('Record Name');
+    vi.unstubAllGlobals();
   });
 
   it('refuses a pure wrapper smuggling an effectful argument', async () => {
