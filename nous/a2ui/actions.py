@@ -921,7 +921,17 @@ def _stamp_is_fresh(stamp: dict, settings: Any) -> bool:
     started = _parse_iso(stamp.get("at"))
     if started is None:
         return False
-    timeout = int(getattr(settings, "a2ui_agent_action_timeout_seconds", 300))
+    # The STAMPED timeout wins (codex P2): the client derives its window
+    # from timeout_s persisted at tap time, so if the setting changes
+    # across a restart, judging existing attempts by the new setting makes
+    # the two disagree — retry offered but 422'd, or withheld after the
+    # server would accept it. The setting is the fallback for legacy
+    # stamps only.
+    stamped = stamp.get("timeout_s")
+    if isinstance(stamped, (int, float)) and stamped > 0:
+        timeout = float(stamped)
+    else:
+        timeout = float(getattr(settings, "a2ui_agent_action_timeout_seconds", 300))
     return (datetime.now(UTC) - started).total_seconds() < timeout
 
 

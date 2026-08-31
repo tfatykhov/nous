@@ -720,6 +720,36 @@ def test_prompt_defangs_closing_delimiters() -> None:
     assert "<\\/app-data" in prompt, "the injected close must be visibly defanged"
 
 
+def test_stamp_freshness_honors_the_stamped_timeout(flag_settings) -> None:
+    """codex P2: the client judges freshness by the PERSISTED timeout_s, so
+    the server must too — a setting change across a restart would
+    otherwise make the two disagree about when retry is allowed."""
+    from datetime import UTC, datetime, timedelta
+
+    from nous.a2ui.actions import _stamp_is_fresh
+
+    two_min_ago = (datetime.now(UTC) - timedelta(minutes=2)).isoformat(timespec="seconds")
+    # Stamped 60s: stale at 2 min even though the setting says 300s.
+    assert not _stamp_is_fresh({"at": two_min_ago, "timeout_s": 60}, flag_settings)
+    # Stamped 600s: still fresh at 2 min regardless of the setting.
+    assert _stamp_is_fresh({"at": two_min_ago, "timeout_s": 600}, flag_settings)
+    # Legacy stamp without timeout_s falls back to the setting (300s).
+    assert _stamp_is_fresh({"at": two_min_ago}, flag_settings)
+
+
+async def test_blocked_session_map_prunes_expired_entries(flag_settings) -> None:
+    """codex P2: entries were removed only when THEIR exact session was
+    re-checked after expiry — a cancelled queued action never pushes, so
+    the map grew unbounded. Pruning happens on write."""
+    from nous.a2ui.service import SurfaceService
+
+    svc = SurfaceService(None, flag_settings)
+    svc.block_push_session("subtask-dead0001", ttl_seconds=-1)  # already expired
+    svc.block_push_session("subtask-dead0002", ttl_seconds=60)
+    assert "subtask-dead0001" not in svc._blocked_push_sessions
+    assert "subtask-dead0002" in svc._blocked_push_sessions
+
+
 async def test_resolve_time_retirement_helper() -> None:
     """codex P1: cap eviction resolves surfaces directly (no app.close), so
     the retirement backstop lives at the single terminal transition."""

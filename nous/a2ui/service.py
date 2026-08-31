@@ -92,7 +92,16 @@ class SurfaceService:
         if not session_id:
             return
         loop = asyncio.get_running_loop()
-        self._blocked_push_sessions[session_id] = loop.time() + ttl_seconds
+        now = loop.time()
+        # Prune on write (codex P2): an entry is otherwise removed only if
+        # ITS exact session is checked after expiry — but a cancelled
+        # queued action never pushes at all, so most entries would live
+        # forever and the map grows unbounded in a long-lived process.
+        # Bounded cost: the map holds one entry per recent retirement.
+        expired = [sid for sid, dl in self._blocked_push_sessions.items() if now >= dl]
+        for sid in expired:
+            self._blocked_push_sessions.pop(sid, None)
+        self._blocked_push_sessions[session_id] = now + ttl_seconds
 
     def _push_session_blocked(self, session_id: str | None) -> bool:
         if not session_id:
