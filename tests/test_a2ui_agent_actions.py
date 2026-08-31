@@ -320,7 +320,8 @@ def _fake_router(pending: dict | None, status: str = "failed") -> SimpleNamespac
 
 
 async def test_watcher_clears_pending_and_reports_failure(monkeypatch) -> None:
-    stamp = {"id": "rebalance", "label": "Rebalance", "at": "2026-08-31T00:00:00+00:00"}
+    stamp = {"id": "rebalance", "label": "Rebalance", "at": "2026-08-31T00:00:00+00:00",
+             "subtask_id": str(uuid.uuid4())}
     router = _fake_router(pending=dict(stamp), status="failed")
     monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
     await _watch_agent_action(router, "a2ui-x", uuid.uuid4(), stamp, timeout=1)
@@ -330,7 +331,8 @@ async def test_watcher_clears_pending_and_reports_failure(monkeypatch) -> None:
 
 
 async def test_watcher_reports_finished_without_update(monkeypatch) -> None:
-    stamp = {"id": "rebalance", "label": "Rebalance", "at": "2026-08-31T00:00:00+00:00"}
+    stamp = {"id": "rebalance", "label": "Rebalance", "at": "2026-08-31T00:00:00+00:00",
+             "subtask_id": str(uuid.uuid4())}
     router = _fake_router(pending=dict(stamp), status="completed")
     monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
     await _watch_agent_action(router, "a2ui-x", uuid.uuid4(), stamp, timeout=1)
@@ -341,7 +343,8 @@ async def test_watcher_reports_finished_without_update(monkeypatch) -> None:
 async def test_watcher_noops_after_successful_recompose(monkeypatch) -> None:
     # A recompose replaced the model wholesale — the stamp is gone, so the
     # watcher must not write anything (it would clobber the fresh app).
-    stamp = {"id": "rebalance", "label": "Rebalance", "at": "2026-08-31T00:00:00+00:00"}
+    stamp = {"id": "rebalance", "label": "Rebalance", "at": "2026-08-31T00:00:00+00:00",
+             "subtask_id": str(uuid.uuid4())}
     router = _fake_router(pending=None, status="completed")
     monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
     await _watch_agent_action(router, "a2ui-x", uuid.uuid4(), stamp, timeout=1)
@@ -424,8 +427,13 @@ async def test_refresh_retires_a_stale_action_before_proceeding(flag_settings) -
 
 
 async def test_watcher_noops_when_a_newer_action_is_pending(monkeypatch) -> None:
-    stamp = {"id": "rebalance", "label": "Rebalance", "at": "2026-08-31T00:00:00+00:00"}
-    newer = {"id": "escalate", "label": "Escalate", "at": "2026-08-31T00:10:00+00:00"}
+    # Ownership is by subtask_id — a SAME-second retap of the SAME action id
+    # still reads as a different action (codex P2: seconds-precision 'at'
+    # made an (id, at) predicate collide).
+    stamp = {"id": "rebalance", "label": "Rebalance", "at": "2026-08-31T00:00:00+00:00",
+             "subtask_id": str(uuid.uuid4())}
+    newer = {"id": "rebalance", "label": "Rebalance", "at": "2026-08-31T00:00:00+00:00",
+             "subtask_id": str(uuid.uuid4())}
     router = _fake_router(pending=newer, status="failed")
     monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
     await _watch_agent_action(router, "a2ui-x", uuid.uuid4(), stamp, timeout=1)
@@ -630,12 +638,11 @@ async def test_stamp_carries_timeout_and_subtask_id(flag_settings) -> None:
         t.cancel()
 
 
-async def test_app_act_cancels_the_subtask_when_the_stamp_write_fails(flag_settings) -> None:
-    """codex P1: the dispatch reconciles patch failures away by design, so
-    a transient stamp-write error would leave the subtask running
-    UNTRACKED — no double-tap guard, no retirement identity, and the
-    watcher reads the absent stamp as success. If the stamp cannot be
-    persisted, the action must not run."""
+async def test_app_act_refuses_before_creating_when_the_reserve_write_fails(flag_settings) -> None:
+    """codex P1 round-6: a created subtask is runnable the moment its row
+    commits, so the guard stamp must be reserved BEFORE create() — a
+    failure here refuses with NO subtask ever existing (cancel-on-failure
+    cannot preempt a dequeued worker)."""
 
     class _FailingService(_FakeService):
         async def update_data(self, surface_id: str, path: str, value: Any) -> None:
@@ -648,9 +655,58 @@ async def test_app_act_cancels_the_subtask_when_the_stamp_write_fails(flag_setti
     result = await handler(_ctx(failing_router, _surface_stub(), "rebalance"))
 
     assert not result.ok and "could not start" in result.message
-    created = heart.subtasks.created[-1]
-    assert heart.subtasks.cancelled == [created.id], "the untracked subtask must be cancelled"
+    assert heart.subtasks.created == [], "no subtask may exist without its guard stamp"
     assert failing_router._action_watchers == set(), "no watcher for a refused action"
+
+
+async def test_app_act_clears_the_stamp_when_create_fails(flag_settings) -> None:
+    """A reserved stamp with no subtask behind it would freeze the footer
+    for the whole window (codex P2) — the create-failure path clears it."""
+
+    class _NoCreateSubtasks(_FakeSubtasks):
+        async def create(self, task: str, **kwargs: Any):
+            raise RuntimeError("queue full")
+
+    heart = SimpleNamespace(subtasks=_NoCreateSubtasks())
+    router = _handler_router(flag_settings, heart=heart)
+    handler = router._handlers["app.act"].fn
+
+    result = await handler(_ctx(router, _surface_stub(), "rebalance"))
+
+    assert not result.ok and "could not queue" in result.message
+    # Writes: actionError None, pendingAction stamp, pendingAction None (clear).
+    pending_writes = [v for p, v in router._service.patches if p == "/meta/pendingAction"]
+    assert pending_writes[-1] is None, "the reserved stamp must be cleared"
+    assert router._action_watchers == set()
+
+
+async def test_app_act_completion_failure_retires_and_clears(flag_settings) -> None:
+    """Phase-2 failure (subtask exists, identity write fails): retire the
+    subtask AND clear the reserved stamp — an action either runs tracked
+    or does not run."""
+
+    class _Phase2FailService(_FakeService):
+        def __init__(self) -> None:
+            super().__init__(None)
+            self._pending_writes = 0
+
+        async def update_data(self, surface_id: str, path: str, value: Any) -> None:
+            if path == "/meta/pendingAction" and value is not None and "subtask_id" in value:
+                raise RuntimeError("transient outage")
+            await super().update_data(surface_id, path, value)
+
+    heart = SimpleNamespace(subtasks=_FakeSubtasks())
+    router = ActionRouter(None, flag_settings, _Phase2FailService(), heart=heart)
+    handler = router._handlers["app.act"].fn
+
+    result = await handler(_ctx(router, _surface_stub(), "rebalance"))
+
+    assert not result.ok and "could not start" in result.message
+    created = heart.subtasks.created[-1]
+    assert heart.subtasks.cancelled == [created.id]
+    pending_writes = [v for p, v in router._service.patches if p == "/meta/pendingAction"]
+    assert pending_writes[-1] is None, "the reserved stamp must be cleared"
+    assert router._action_watchers == set()
 
 
 async def test_resolve_time_retirement_helper() -> None:

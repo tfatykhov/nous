@@ -835,20 +835,18 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
         if rejection is not None:
             return ActionResult(ok=False, message=rejection)
 
-        try:
-            sub = await subtasks.create(
-                task=prompt,
-                frame_type="task",
-                timeout=timeout,
-                notify=False,
-                metadata={
-                    "a2ui_surface_id": ctx.surface.surface_id,
-                    "a2ui_action_id": action_id,
-                },
-            )
-        except Exception as exc:
-            return ActionResult(ok=False, message=f"could not queue the action: {exc}")
-
+        # Stamp writes are direct, not data_patches (the dispatch reconciles
+        # patch failures away by design), and TWO-PHASE around the create
+        # (codex P1 round-6): a created subtask is runnable the moment its
+        # row commits — a worker can dequeue it before any later write — so
+        # the guard stamp must already exist when create() commits, and
+        # cancel-on-failure cannot be the only line (cancel does not preempt
+        # a dequeued worker). Phase 1 reserves the slot; phase 2 completes
+        # it with the retirement identity. Safe to write directly: handle()
+        # holds the surface lock through dispatch. Every failure path clears
+        # what it wrote — a stuck fresh stamp with no watcher would freeze
+        # the footer for the whole window (codex P2).
+        surface_id = ctx.surface.surface_id
         stamp = {
             "id": action_id,
             "label": str(action.get("label") or action_id),
@@ -858,33 +856,54 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
             # non-default setting — announcing retry while the server still
             # 422s, or spinning long after the server considered it stale).
             "timeout_s": timeout,
-            # close/eviction/retap retirement uses this to cancel the
-            # running action; the client ignores it.
-            "subtask_id": str(sub.id),
         }
-        # Write the stamp HERE, not via data_patches (codex P1): the
-        # dispatch reconciles patch failures away by design, so a transient
-        # update_data error would leave the subtask running UNTRACKED — no
-        # double-tap guard, no retirement identity, and the watcher would
-        # read the absent stamp as a successful recompose. If the stamp
-        # cannot be persisted the action must not run. Safe to write
-        # directly: handle() holds the surface lock through dispatch.
         try:
             await router._service.update_data(
-                ctx.surface.surface_id, f"/{_ACT_META_KEY}/pendingAction", stamp
+                surface_id, f"/{_ACT_META_KEY}/actionError", None
             )
             await router._service.update_data(
-                ctx.surface.surface_id, f"/{_ACT_META_KEY}/actionError", None
+                surface_id, f"/{_ACT_META_KEY}/pendingAction", stamp
             )
         except Exception:
-            logger.exception("F092.2 pending stamp write failed — cancelling action")
+            logger.exception("F092.2 pending stamp reserve failed — refusing action")
+            await _clear_pending_stamp(router, surface_id)
+            return ActionResult(
+                ok=False,
+                message="could not start the action (state write failed) — try again",
+            )
+
+        try:
+            sub = await subtasks.create(
+                task=prompt,
+                frame_type="task",
+                timeout=timeout,
+                notify=False,
+                metadata={
+                    "a2ui_surface_id": surface_id,
+                    "a2ui_action_id": action_id,
+                },
+            )
+        except Exception as exc:
+            await _clear_pending_stamp(router, surface_id)
+            return ActionResult(ok=False, message=f"could not queue the action: {exc}")
+
+        # Phase 2: complete the stamp with the retirement identity
+        # (close/eviction/retap cancellation key; the client ignores it).
+        stamp["subtask_id"] = str(sub.id)
+        try:
+            await router._service.update_data(
+                surface_id, f"/{_ACT_META_KEY}/pendingAction", stamp
+            )
+        except Exception:
+            logger.exception("F092.2 stamp completion failed — retiring action")
             await _retire_action_subtask(router, {"subtask_id": str(sub.id)})
+            await _clear_pending_stamp(router, surface_id)
             return ActionResult(
                 ok=False,
                 message="could not start the action (state write failed) — try again",
             )
         watcher = asyncio.create_task(
-            _watch_agent_action(router, ctx.surface.surface_id, sub.id, stamp, timeout)
+            _watch_agent_action(router, surface_id, sub.id, stamp, timeout)
         )
         router._action_watchers.add(watcher)
         watcher.add_done_callback(router._action_watchers.discard)
@@ -910,6 +929,18 @@ def _stamp_is_fresh(stamp: dict, settings: Any) -> bool:
         return False
     timeout = int(getattr(settings, "a2ui_agent_action_timeout_seconds", 300))
     return (datetime.now(UTC) - started).total_seconds() < timeout
+
+
+async def _clear_pending_stamp(router: Any, surface_id: str) -> None:
+    """Best-effort stamp removal on an app.act failure path. A leftover
+    fresh stamp with no watcher freezes the footer for the whole window
+    and makes the server answer 'already working' about nothing."""
+    try:
+        await router._service.update_data(
+            surface_id, f"/{_ACT_META_KEY}/pendingAction", None
+        )
+    except Exception:
+        logger.warning("F092.2 failed to clear pending stamp", exc_info=True)
 
 
 async def _retire_action_subtask(router: Any, pending: dict) -> None:
@@ -1023,10 +1054,14 @@ async def _watch_agent_action(
             envelope, _seq = snap
             model = (envelope.get("createSurface") or {}).get("dataModel") or {}
             pending = (model.get(_ACT_META_KEY) or {}).get("pendingAction")
+            # Ownership by subtask_id, the unique identity (codex P2): the
+            # 'at' timestamp has seconds precision, so a fast complete +
+            # same-second retap of the same action produces a NEW stamp
+            # that an (id, at) predicate mistakes for its own — clearing
+            # the new action's pending state.
             if not (
                 isinstance(pending, dict)
-                and pending.get("id") == stamp["id"]
-                and pending.get("at") == stamp["at"]
+                and pending.get("subtask_id") == stamp.get("subtask_id")
             ):
                 return
 
