@@ -1325,3 +1325,301 @@ async def test_decoding_never_happens_on_the_event_loop():
         assert out["result"] == {"ok": 3}
     finally:
         _api_tools._JSON_DECODER_CLS = original_cls
+
+
+# ---------------------------------------------------------------------------
+# Issue #620 — two accept-and-degrade gaps
+# ---------------------------------------------------------------------------
+
+
+def test_inline_child_objects_are_a_repair_error_not_a_silent_drop():
+    """#620 gap 2: `children` is reference-based, so inline child OBJECTS were
+    filtered out by _children_of and nothing complained — no dangling ref (it
+    never existed), no depth accounting. The section the model believed it
+    filled validated clean and rendered EMPTY, with repairs:0."""
+    comps = _skel([
+        {"id": "c", "component": "Column",
+         "children": [{"component": "Text", "text": "invisible"}]},
+    ])
+    errs = grammar.lint_micro_app(comps)
+    assert any("inline child object" in e for e in errs)
+
+    # A mixed array is caught too — the id ref alone used to make it look fine.
+    mixed = _skel([
+        {"id": "c", "component": "Column", "children": ["t1", {"component": "Text"}]},
+        {"id": "t1", "component": "Text", "text": "visible"},
+    ])
+    assert any("inline child object" in e for e in grammar.lint_micro_app(mixed))
+
+
+def test_id_reference_children_still_pass():
+    ok = _skel([
+        {"id": "c", "component": "Column", "children": ["t1"]},
+        {"id": "t1", "component": "Text", "text": "visible"},
+    ])
+    assert grammar.lint_micro_app(ok) == []
+
+
+def test_repeat_template_children_are_not_mistaken_for_inline_objects():
+    """The {componentId, path} template is a DICT, not a list — it must keep
+    working (F093 §6.2) rather than tripping the new list check."""
+    comps = _skel([
+        {"id": "c", "component": "Column",
+         "children": {"componentId": "row", "path": "/items"}},
+        {"id": "row", "component": "Text", "text": {"path": "name"}},
+    ])
+    assert not any("inline child" in e for e in grammar.lint_micro_app(comps))
+
+
+def test_undeliverable_refine_options_are_rejected():
+    """#620 gap 1: a refine option is not a dispatched action — app_refine
+    appends its LABEL to the intent and re-composes against the SAME sources.
+    A button promising a file or a message is unsatisfiable by construction,
+    yet rendered pixel-identical to a real capability."""
+    from nous.a2ui.compose import _refine_capability_errors
+
+    for label in ("Export raw data", "Download CSV", "Email me a summary",
+                  "Schedule a weekly digest"):
+        errs = _refine_capability_errors([{"id": "x", "label": label}])
+        assert errs, f"{label!r} should be rejected"
+        assert "RE-RENDERS" in errs[0]
+
+
+def test_legitimate_refine_options_still_pass():
+    from nous.a2ui.compose import _refine_capability_errors
+
+    for label in ("Compare periods", "Show only blockers", "Group by category",
+                  "Last 7 days"):
+        assert _refine_capability_errors([{"id": "x", "label": label}]) == [], label
+
+
+def test_capability_gate_matches_commands_not_substrings():
+    """codex P2: raw containment read "Group by sender" as send, "Email volume
+    by week" as email and "Compare attachment types" as attach — all valid
+    analytical labels for mail/file dashboards. Rejecting them is WORSE than
+    the bug: repeated false matches burn the repair loop into a markdown
+    fallback. Only command phrases count."""
+    from nous.a2ui.compose import _refine_capability_errors
+
+    for label in ("Group by sender", "Email volume by week",
+                  "Compare attachment types", "Shared vs private items",
+                  "Attachment size breakdown", "Sender leaderboard"):
+        assert _refine_capability_errors([{"id": "x", "label": label}]) == [], label
+
+    # ...while the phrasings that genuinely promise a capability still fail.
+    for label in ("Send me the report", "Save to Drive", "Share via link",
+                  "Subscribe to updates", "Notify me on change"):
+        assert _refine_capability_errors([{"id": "x", "label": label}]), label
+
+
+def test_leading_imperatives_without_a_pronoun_are_caught():
+    """codex P2 round 2: requiring a pronoun ("email ME") missed the commonest
+    imperative forms — "Email the report", "Notify the team", "Send report to
+    Alice", "Schedule monthly digest" — which are just as undeliverable."""
+    from nous.a2ui.compose import _refine_capability_errors
+
+    for label in ("Email the report", "Notify the team", "Send report to Alice",
+                  "Schedule monthly digest", "Post this to Slack",
+                  "Deliver the digest to ops"):
+        assert _refine_capability_errors([{"id": "x", "label": label}]), label
+
+    # The same verbs used as NOUN MODIFIERS remain valid analytics.
+    for label in ("Email volume by week", "Send rate by hour",
+                  "Notifications per day", "Sender leaderboard"):
+        assert _refine_capability_errors([{"id": "x", "label": label}]) == [], label
+
+
+def test_lint_never_raises_on_inline_children_in_a_statrow():
+    """codex P2: the inline-child error was recorded and then execution fell
+    into the StatRow loop, where `by_id.get(dict)` raises TypeError. Lint runs
+    BEFORE schema validation, so that escaped _validate and took the repair
+    loop and the guaranteed fallback with it — a crash strictly worse than the
+    silent drop being fixed. A lint pass must always RETURN errors, never raise."""
+    comps = [
+        {"id": "root", "component": "Column",
+         "children": ["header", "stats", "sec", "footer"]},
+        {"id": "header", "component": "AppHeader", "title": "t",
+         "composedAt": {"path": "/meta/composedAt"}},
+        {"id": "stats", "component": "StatRow",
+         "children": [{"component": "StatTile", "label": "x"}]},
+        {"id": "sec", "component": "Section", "title": "S", "child": "b"},
+        {"id": "b", "component": "Text", "text": "x"},
+        {"id": "footer", "component": "AppFooter"},
+    ]
+    errs = grammar.lint_micro_app(comps)  # must not raise
+    assert any("inline child object" in e for e in errs)
+
+
+def test_delivery_target_only_counts_in_an_imperative_clause():
+    """codex P2: matching a delivery target ANYWHERE rejected "Compare email
+    volume to last month" — from `email` through `to l` — which is a
+    comparison, not a send."""
+    from nous.a2ui.compose import _refine_capability_errors
+
+    assert _refine_capability_errors(
+        [{"id": "x", "label": "Compare email volume to last month"}]
+    ) == []
+    assert _refine_capability_errors([{"id": "x", "label": "Send report to Alice"}])
+
+
+def test_file_generation_imperatives_are_caught():
+    """codex P2: no component emits a file, so "Generate CSV" / "Create a PDF"
+    / "Open in Excel" are as undeliverable as "Export" — pressing one just
+    recomposes the same data."""
+    from nous.a2ui.compose import _refine_capability_errors
+
+    for label in ("Generate CSV", "Create a PDF", "Open in Excel",
+                  "Produce an xlsx", "Build a spreadsheet"):
+        assert _refine_capability_errors([{"id": "x", "label": label}]), label
+
+
+def test_share_matching_is_start_anchored():
+    """codex P2: "share with" anywhere rejected "Compare market share with last
+    month" — analysis, not delivery."""
+    from nous.a2ui.compose import _refine_capability_errors
+
+    for label in ("Compare market share with last month", "Market share by region",
+                  "Share of voice trend"):
+        assert _refine_capability_errors([{"id": "x", "label": label}]) == [], label
+    for label in ("Share via link", "Share with team", "Share to Slack"):
+        assert _refine_capability_errors([{"id": "x", "label": label}]), label
+
+
+# The full capability matrix. Four review rounds each found the same defect in
+# a different token, so the rule became categorical — a verb counts as a
+# command only when it OPENS the label (the sole exception being a pronoun
+# object, which is imperative in every reading). This table is the guard
+# against the next token being added unanchored.
+_UNDELIVERABLE = [
+    "Export raw data", "Download CSV", "Email me a summary", "Email the report",
+    "Notify the team", "Send report to Alice", "Schedule monthly digest",
+    "Schedule a weekly digest", "Save to Drive", "Share via link",
+    "Share with team", "Subscribe to updates", "Generate CSV", "Create a PDF",
+    "Open in Excel", "Remind me tomorrow", "Notify me on change",
+    # Leading action verb with a BARE object — enumerating the words that may
+    # follow could never keep up, so a leading action verb is a command unless
+    # the label reads analytically.
+    "Email report", "Notify stakeholders", "Remind Alice", "Schedule digest",
+    "Post to Slack", "Deliver weekly",
+    # A deliverable OBJECT is not an analytical marker, and "by <weekday>" is a
+    # deadline rather than a grouping.
+    "Email summary", "Send overview", "Schedule review by Monday",
+    # Calendar/reminder commands — no component writes a calendar either.
+    "Add to calendar", "Set a reminder", "Create calendar event", "Book a slot",
+    "Print this", "Upload the file",
+    # Mutations — a micro-app is read-only by construction (the grammar bans
+    # every input component), so these are as undeliverable as an export.
+    "Archive completed tasks", "Delete old records", "Approve request",
+    "Mark all as read", "Dismiss warnings", "Cancel the run", "Retry failed nodes",
+]
+
+_ANALYTICAL = [
+    "Group by sender", "Email volume by week", "Send rate by hour",
+    "Compare attachment types", "Compare market share with last month",
+    "Market share by region", "Share of voice trend",
+    "Compare subscribe vs purchase conversion", "Subscribe clicks by source",
+    "Subscribe-to-purchase funnel", "On-call schedule this month",
+    "Schedule adherence by team", "Compare save to disk latency",
+    "Compare export as csv counts", "Compare email volume to last month",
+    "Compare periods", "Last 7 days", "Notifications per day",
+    "Sender leaderboard", "Create-time distribution",
+    # ...and the same verbs reading analytically must still survive.
+    "Subscribe clicks by source", "Subscribe-to-purchase funnel",
+    "Email open rate", "Notification volume trend",
+    "Schedule adherence by team", "Delivery rate by day",
+    # The file/print verbs are metrics when the label reads analytically.
+    "Print volume by department", "Download counts by file type",
+    "Export trends by month", "Event volume by day", "Meeting count per team",
+    "Calendar density heatmap",
+    # The same mutation verbs reading analytically are metrics.
+    "Approval rate by reviewer", "Delete volume per day", "Resolution time trend",
+    "Close rate by team", "Retry rate by node",
+]
+
+
+@pytest.mark.parametrize("label", _UNDELIVERABLE)
+def test_undeliverable_labels_are_rejected(label):
+    from nous.a2ui.compose import _refine_capability_errors
+
+    assert _refine_capability_errors([{"id": "x", "label": label}]), label
+
+
+@pytest.mark.parametrize("label", _ANALYTICAL)
+def test_analytical_labels_are_never_rejected(label):
+    """A false positive is worse than a false negative here: repeated
+    rejection exhausts the repair loop and replaces a valid dashboard with the
+    markdown fallback — losing the whole app to police one button."""
+    from nous.a2ui.compose import _refine_capability_errors
+
+    assert _refine_capability_errors([{"id": "x", "label": label}]) == [], label
+
+
+def test_undeliverable_options_are_dropped_not_failed():
+    """#620 + 8 review rounds: no lexical rule separates "Print volume by
+    department" (a metric) from "Schedule report distribution across teams" (a
+    command) — same shape, semantic difference. So the classifier is treated as
+    a HEURISTIC: it drops the option instead of failing validation. Wiring a
+    heuristic into _validate made every misjudgement cost the whole app, since
+    repeated rejections exhaust the repair loop into the markdown fallback."""
+    from nous.a2ui.compose import _clean_refine_options
+
+    kept = _clean_refine_options([
+        {"id": "a", "label": "Export raw data"},
+        {"id": "b", "label": "Compare periods"},
+        {"id": "c", "label": "Email me a summary"},
+        {"id": "d", "label": "Group by category"},
+    ])
+    assert [o["label"] for o in kept] == ["Compare periods", "Group by category"]
+
+
+def test_capability_heuristic_never_reaches_the_repair_loop(settings):
+    """A misjudged label must never be able to cost the whole app."""
+    from nous.a2ui.compose import SurfaceComposer
+    from nous.a2ui.sources import SourceRegistry
+
+    composer = SurfaceComposer(object(), settings, SourceRegistry())
+    parsed = {
+        "components": [{"id": "x", "component": "Text", "text": "hi"}],
+        "refine_options": [{"id": "a", "label": "Email me the report"}],
+    }
+    assert not any("refine" in e.lower() for e in composer._validate(parsed, {}))
+
+
+def test_command_pattern_never_matches_the_empty_string():
+    """A regex assembled from `|`-joined fragments will match EVERYTHING if a
+    branch is ever removed and leaves a leading `|` — an empty first
+    alternative. That happened while editing and silently rejected all 22
+    analytical labels; this asserts the shape rather than the behaviour."""
+    from nous.a2ui.compose import _REFINE_COMMAND_RE
+
+    assert _REFINE_COMMAND_RE.search("") is None
+    assert not _REFINE_COMMAND_RE.pattern.startswith("|")
+
+
+@pytest.mark.parametrize("victim", ["root", "stats", "body", "sec"])
+def test_lint_never_raises_for_inline_children_anywhere(victim):
+    """CATEGORY test. An inline child object was fixed once for StatRow and
+    then crashed again at the root skeleton lookup — `x in by_id` HASHES x, so
+    every by_id access keyed by a child value is the same latent TypeError.
+    Lint runs before schema validation, so such a crash escapes _validate and
+    takes the repair loop AND the guaranteed fallback with it. This sweeps
+    every child-bearing position instead of chasing them one at a time."""
+    inline = {"component": "Text", "text": "inline"}
+    comps = [
+        {"id": "root", "component": "Column",
+         "children": ["header", "stats", "sec", "footer"]},
+        {"id": "header", "component": "AppHeader", "title": "t",
+         "composedAt": {"path": "/meta/composedAt"}},
+        {"id": "stats", "component": "StatRow", "children": ["t1"]},
+        {"id": "t1", "component": "StatTile", "label": "x", "value": "1"},
+        {"id": "sec", "component": "Section", "title": "S", "child": "body"},
+        {"id": "body", "component": "Column", "children": ["t2"]},
+        {"id": "t2", "component": "Text", "text": "x"},
+        {"id": "footer", "component": "AppFooter"},
+    ]
+    for comp in comps:
+        if comp["id"] == victim:
+            comp["children"] = [*comp.get("children", []), inline]
+
+    errs = grammar.lint_micro_app(comps)  # must RETURN, never raise
+    assert any("inline child object" in e for e in errs)

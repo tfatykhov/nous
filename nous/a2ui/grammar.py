@@ -165,6 +165,27 @@ def lint_micro_app(
                 f"component {ctype!r} ({comp.get('id')}) is outside the "
                 "micro-app catalog subset"
             )
+        # Issue #620 gap 2 — the grammar is REFERENCE-based: a `children`
+        # array holds component ids. When the model emits inline child
+        # OBJECTS instead (a very common LLM failure), `_children_of` filtered
+        # them out and nothing complained: no dangling ref (the ref never
+        # existed), no depth accounting, no repair error. The section the
+        # model believed it filled validated clean and rendered EMPTY, and the
+        # pipeline reported success with repairs:0. Accept-and-degrade is the
+        # exact class the _validate codex guards were written to remove, so
+        # this is a hard error like an unknown theme — not a silent drop.
+        for key in _CHILD_KEYS:
+            value = comp.get(key)
+            if not isinstance(value, list):
+                continue
+            inline = sum(1 for v in value if not isinstance(v, str))
+            if inline:
+                errors.append(
+                    f"{ctype} {comp.get('id')!r} has {inline} inline child "
+                    f"object(s) in `{key}` — children must be component ID "
+                    "strings; define each child as its own component and "
+                    "reference it by id"
+                )
         if ctype == "Section":
             title = comp.get("title")
             if not isinstance(title, str) or not title.strip():
@@ -208,6 +229,14 @@ def lint_micro_app(
             # only bounds children to <=4 strings, so a Text or Card ref
             # would otherwise render arbitrary content in the summary grid.
             for kid in comp.get("children") or []:
+                if not isinstance(kid, str):
+                    # An inline child object is already reported above; feeding
+                    # the dict to `by_id.get` raises `TypeError: unhashable
+                    # type` — and lint runs BEFORE schema validation, so that
+                    # escapes _validate entirely, taking the repair loop and
+                    # the guaranteed fallback with it (codex P2). A lint pass
+                    # must always return errors, never raise.
+                    continue
                 kid_type = (by_id.get(kid) or {}).get("component")
                 if kid_type is not None and kid_type != "StatTile":
                     errors.append(
@@ -248,7 +277,12 @@ def lint_micro_app(
         order = [
             by_id[cid].get("component")
             for cid in root.get("children") or []
-            if cid in by_id
+            # `cid in by_id` HASHES cid, so an inline child object raises
+            # TypeError here — the same crash already fixed for StatRow, in a
+            # second place (codex P2). Lint runs before schema validation, so
+            # it would escape _validate and take the repair loop and fallback
+            # with it. The inline children are reported above; skip them here.
+            if isinstance(cid, str) and cid in by_id
         ]
         skeleton_error = _skeleton_error(order, max_sections)
         if skeleton_error:

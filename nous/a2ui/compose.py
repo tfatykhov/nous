@@ -129,7 +129,11 @@ Respond with ONLY a JSON object (no prose, no code fence) shaped:
   "theme": "<one of the listed theme ids>",  // optional; omit for nous-default
   "components": [ ... A2UI component objects, each with "id" and "component" ... ],
   "dataModel": { ... ONLY the subtrees you are supplying yourself ... },
-  "refine_options": [ {"id": "slug", "label": "Button label"} ]  // 0-4 predefined drill-downs
+  "refine_options": [ {"id": "slug", "label": "Button label"} ]  // 0-4. Each RE-RENDERS
+  // the SAME data sources from a different angle (narrower window, one grouping, one section
+  // expanded). There is no component that exports, downloads, emails, notifies or schedules,
+  // so a button promising one cannot work and will be dropped — label them as VIEWS
+  // ("Last 7 days", "Group by category"), never as actions ("Email report").
 }
 """
 
@@ -790,7 +794,163 @@ def _parse_json_object(raw: str) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+# Issue #620 gap 1 — verbs the micro-app grammar cannot perform under ANY
+# model response. A refine option is not a dispatched action: `app_refine`
+# appends the option's LABEL to the intent and re-composes against the SAME
+# stored data_sources, so a button promising a file or a message is
+# unsatisfiable by construction. F092.1 makes invented DATA visible (amber
+# provenance); there was no equivalent for invented CAPABILITY, so a fake
+# button was pixel-identical to a real one and surfaced a raw ValueError on
+# press. Rejecting at compose is consistent with an unknown theme being a hard
+# error rather than a silent default.
+# Matched as COMMAND PHRASES, never bare substrings (codex P2). Containment
+# alone reads "Group by sender" as send, "Email volume by week" as email, and
+# "Compare attachment types" as attach — all legitimate analytical labels for
+# mail/file dashboards. Rejecting those is worse than the bug being fixed:
+# repeated false matches burn the repair loop and force a markdown fallback.
+# So: imperative verbs only where they can ONLY be imperative — anchored at
+# the start of the label, or in a phrase that has no noun reading.
+_REFINE_COMMAND_RE = re.compile(
+    # Imperative only where it can ONLY be imperative: anchored at the START of
+    # the label, or inside a phrase with no noun reading ("email me", "save to").
+    # So "Group by sender", "Email volume by week" and "Compare attachment
+    # types" all pass — those are analytical labels for mail/file dashboards,
+    # and rejecting them would burn the repair loop into a markdown fallback.
+    # A label OPENING with the verb is still rejected even when a noun reading
+    # exists ("Export trends by month"): leading-imperative is the strongest
+    # signal available, and a rephrase costs one repair round while an
+    # undeliverable button costs the user a raw ValueError.
+    # NOTE: export/download/print/upload deliberately live in
+    # _LEADING_ACTION_RE instead, so the analytical exemption applies to them
+    # too — "Print volume by department" and "Download counts by file type" are
+    # metrics, while "Export raw data" and "Print this" still fail (codex P2).
+    # A leading messaging/scheduling verb followed by a determiner, possessive
+    # or cadence word is imperative — "Email the report", "Notify the team",
+    # "Schedule monthly digest". Followed by a measurement noun it is a noun
+    # modifier and passes: "Email volume by week", "Send rate by hour".
+    r"^\s*(?:e-?mail|send|notify|remind|text|share|schedule|deliver|post)\s+"
+    r"(?:me|us|it|them|the|a|an|this|that|these|those|my|our|all|everyone|team|"
+    r"daily|weekly|monthly|quarterly|nightly|hourly)\b"
+    # A delivery target, but only when the verb OPENS the label — i.e. it is an
+    # imperative clause: "Send report to Alice", "Email summary to ops". Not
+    # anywhere, which matched "Compare email volume to last month" from `email`
+    # through `to l` and rejected a perfectly good comparison (codex P2).
+    r"|^\s*(?:e-?mail|send|deliver|post)\b[^,;]*\bto\s+\w"
+    # The ONLY unanchored branch, and safe because the pronoun object makes it
+    # imperative in every reading: "notify me", "send us". A bare noun after
+    # the same verb ("send rate", "email volume") is analysis and passes.
+    r"|\b(?:e-?mail|send|notify|remind|text)\s+(?:me|us|it|them)\b"
+    # Everything below is START-ANCHORED. Four review rounds each found the
+    # same defect in a different token — "Group by sender", "Email volume by
+    # week", "Compare market share with last month", "Compare subscribe vs
+    # purchase" — so the rule is now categorical rather than per-word: a verb
+    # only counts as a command when it OPENS the label. Mid-label it is a noun
+    # naming a metric or an event, and rejecting those burns the repair loop
+    # into a markdown fallback, losing the whole app to save one button.
+    r"|^\s*schedule\s+(?:a|an|the|this|daily|weekly|monthly|quarterly)\b"
+    r"|^\s*save\s+(?:to|as)\b"
+    r"|^\s*(?:export|download)\s+as\b"
+    r"|^\s*share\s+(?:via|with|to)\b"
+    r"|^\s*subscribe\s+(?:to|me|us)\b"
+    # File-generation imperatives — "Generate CSV", "Create a PDF", "Open in
+    # Excel". No component emits a file, so these are as undeliverable as
+    # export; pressing one just recomposes the same data (codex P2).
+    r"|^\s*(?:generate|create|produce|make|open|render|build)\b[^,;]{0,24}"
+    r"\b(?:csv|pdf|xlsx?|excel|spreadsheet|zip|docx?)\b"
+    # Calendar/reminder imperatives — "Add to calendar", "Set a reminder",
+    # "Create calendar event", "Book a slot". None open with a delivery verb,
+    # and `create` only matched the file branch (codex P2). A micro-app has no
+    # component that writes a calendar any more than it has one that emails.
+    r"|^\s*(?:add|create|make|set|book|schedule)\b[^,;]{0,24}"
+    r"\b(?:calendar|reminder|event|invite|meeting|appointment|slot)\b",
+    re.IGNORECASE,
+)
+
+
+# A delivery/scheduling verb OPENING the label, with any object at all —
+# "Email report", "Notify stakeholders", "Remind Alice", "Schedule digest".
+# Enumerating the objects that may follow could never keep up (codex P2), so
+# the default for a leading action verb is INVERTED: it is a command unless
+# the label reads analytically.
+_LEADING_ACTION_RE = re.compile(
+    r"^\s*(?:e-?mail|send|notify|remind|text|share|schedule|deliver|post|subscribe"
+    r"|export|download|print|upload"
+    # MUTATION verbs (codex P2). A micro-app is read-only by construction —
+    # the grammar bans every input component — so "Archive completed tasks",
+    # "Delete old records", "Approve request" and "Mark all as read" are as
+    # undeliverable as an export. The analytical exemption still applies:
+    # "Approval rate by reviewer" and "Delete volume per day" are metrics.
+    r"|archive|delete|remove|approve|reject|dismiss|resolve|close|acknowledge"
+    r"|mark|assign|rename|edit|update|merge|cancel|retry|restart|snooze|mute"
+    r"|clear|purge|reset)\b",
+    re.IGNORECASE,
+)
+
+# ...and this is what "reads analytically" means. These markers are what a
+# metric label has and an imperative does not: a grouping ("by week"), a
+# comparison ("vs"), or a measurement noun. "Email volume by week" and "Send
+# rate by hour" survive; "Email report" does not.
+_ANALYTICAL_RE = re.compile(
+    # "by" groups — unless it introduces a DEADLINE ("Schedule review by
+    # Monday"), which is a command, not a grouping (codex P2).
+    r"\bby\b(?!\s+(?:mon|tues?|wed|thur?s?|fri|sat|sun|tomorrow|today|tonight|"
+    r"eod|eow|noon|midnight|next|end\b|\d))"
+    r"|\b(?:per|vs\.?|versus|between|across|over)\b"
+    # Measurement nouns only. Deliberately NOT summary/overview/report/digest:
+    # those are things you would EMAIL, so listing them as analytical exempted
+    # "Email summary" and "Send overview" — the exemption was swallowing the
+    # very commands it sits behind (codex P2).
+    r"|\b(?:trend|trends|rate|rates|volume|count|counts|total|totals|share of|"
+    r"ratio|average|median|mean|percentile|growth|distribution|breakdown|"
+    r"histogram|funnel|leaderboard|activity|latency|throughput|adherence|"
+    r"conversion|split|mix|cohort|heatmap)\b",
+    re.IGNORECASE,
+)
+
+
+def _refine_capability_errors(raw: Any) -> list[str]:
+    """Repair errors for refine options promising capabilities that do not
+    exist. Checked on the RAW model output, before _clean_refine_options
+    quietly normalizes it."""
+    errors: list[str] = []
+    if not isinstance(raw, list):
+        return errors
+    for opt in raw[:4]:
+        if not isinstance(opt, dict):
+            continue
+        label = str(opt.get("label") or "").strip()
+        match = _REFINE_COMMAND_RE.search(label)
+        if match is None:
+            leading = _LEADING_ACTION_RE.match(label)
+            if leading and not _ANALYTICAL_RE.search(label):
+                match = leading
+        if match:
+            errors.append(
+                f"refine option {label!r} promises {match.group(0).strip()!r}, which no "
+                "micro-app component can do — refine RE-RENDERS the existing data "
+                "sources, it cannot export, send or schedule anything. Offer a "
+                "different view of the same data instead."
+            )
+    return errors
+
+
 def _clean_refine_options(raw: Any) -> list[dict]:
+    """Normalize the model's refine options, dropping any the system cannot
+    deliver.
+
+    A capability failure DROPS the option rather than failing validation
+    (issue #620). Eight review rounds established that no lexical rule
+    separates "Print volume by department" (a metric) from "Schedule report
+    distribution across teams" (a command) — they are the same shape, and the
+    distinction is semantic. So the classifier is treated as what it is: a
+    heuristic. Wiring a heuristic into `_validate` made every misjudgement
+    cost the WHOLE APP, because repeated rejections exhaust the repair loop
+    into the markdown fallback. Dropping instead bounds the blast radius to
+    one button: a false positive loses an option nobody may have wanted, a
+    false negative leaves today's behaviour. The prompt, which now states that
+    refine re-renders existing sources, is what actually prevents these at
+    source; this is the backstop.
+    """
     if not isinstance(raw, list):
         return []
     out = []
@@ -799,8 +959,13 @@ def _clean_refine_options(raw: Any) -> list[dict]:
             continue
         oid = str(opt.get("id") or "").strip()
         label = str(opt.get("label") or "").strip()
-        if oid and label:
-            out.append({"id": oid[:60], "label": label[:80]})
+        if not (oid and label):
+            continue
+        undeliverable = _refine_capability_errors([opt])
+        if undeliverable:
+            logger.info("F092.1 dropped refine option: %s", undeliverable[0])
+            continue
+        out.append({"id": oid[:60], "label": label[:80]})
     return out
 
 
