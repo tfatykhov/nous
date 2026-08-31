@@ -485,3 +485,40 @@ describe('Companion shell — tooltip reveals what the chip truncated', () => {
     expect(header.startsWith(text.slice(0, -1))).toBe(true);
   });
 });
+
+describe('Companion shell — a malformed background app cannot crash the shell', () => {
+  it('falls back when a header title throws, and still renders the focused app', async () => {
+    // codex P2: `{call: "@index"}` throws by design outside a collection
+    // scope, and chips resolve at scope: null. The switcher resolves EVERY
+    // live surface, so one bad background app took down the whole shell —
+    // including the ability to navigate away from it.
+    seed('nous:chat:micro_app:good01', 0, undefined, 'Good App');
+    store.apply(null, {
+      version: 'v1.0',
+      createSurface: {
+        surfaceId: 'nous:chat:micro_app:bad001',
+        catalogId: 'nous-core',
+        components: [
+          { id: 'root', component: 'Column', children: ['header', 'body'] },
+          { id: 'body', component: 'Text', text: 'b' },
+          { id: 'header', component: 'AppHeader', title: { call: '@index' } },
+        ],
+        dataModel: {},
+        metadata: { extensions: { com_nous_nonce: 'n2', com_nous_title: 'Record Name' } },
+      },
+    } as never);
+
+    location.hash = '#/s/' + encodeURIComponent('nous:chat:micro_app:good01');
+    const { container } = render(Companion);
+    await settle();
+
+    // The shell rendered, the focused app is on screen, and the bad app fell
+    // back to its record title rather than exploding.
+    expect(container.querySelector('section.surface')).not.toBeNull();
+    const chips = [...container.querySelectorAll('.switcher a.chip')].map((c) =>
+      c.textContent?.trim(),
+    );
+    expect(chips).toContain('Good App');
+    expect(chips).toContain('Record Name');
+  });
+});

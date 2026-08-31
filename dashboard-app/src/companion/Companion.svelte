@@ -98,7 +98,17 @@
     // a whitespace-only title is truthy and would short-circuit the
     // record-title fallback, landing back on "app".
     const ctx = { dataModel: (surface.dataModel ?? {}) as Record<string, unknown>, scope: null };
-    return toDisplayString(resolveDynamic(header.title, ctx)).trim();
+    try {
+      return toDisplayString(resolveDynamic(header.title, ctx)).trim();
+    } catch {
+      // A schema-valid title can still THROW here — `{call: "@index"}` raises
+      // deliberately outside a collection scope, and the chip resolves at
+      // scope: null. The switcher resolves EVERY live surface's title, even in
+      // a focused route rendering a different app, so one malformed background
+      // app would take down the whole shell and block navigation away from it
+      // (codex P2). A label is never worth that: fall back instead.
+      return '';
+    }
   }
 
   type ChipSurface = {
