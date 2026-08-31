@@ -2925,55 +2925,16 @@ def create_subtask_tools(
                     settings.subtask_max_timeout,
                 )
 
-            # F078 (R3): Check censors on subtask task text at creation time.
-            # Subtasks are non-interactive so censor checks are skipped during
-            # execution (pre_turn) — the spawn gate is the ONLY censor enforcement
-            # the background path gets, so it must honor the new tiers:
-            #   abort / refuse -> REJECT the subtask (the autonomous-exfil path).
-            #   steer          -> do NOT reject; inject the directive into the task.
-            # Email censors are `steer`, so daily email subtasks pass unaffected.
-            try:
-                from nous.heart.censor_actions import CensorActionExecutor
-                _steer_directives: list[str] = []
-                matches = await heart.check_censors(task)
-                for match in matches:
-                    if match.action in ("abort", "refuse"):
-                        # F031: refuse may downgrade to steer via unblock_pattern.
-                        unblocked = False
-                        if match.trigger_action and match.unblock_pattern:
-                            executor = CensorActionExecutor(heart)
-                            action_result = await executor.execute(match.trigger_action)
-                            if action_result:
-                                import re
-                                try:
-                                    if re.search(match.unblock_pattern, action_result, re.IGNORECASE):
-                                        unblocked = True
-                                except re.error:
-                                    pass
-                        if not unblocked:
-                            reason = match.reason or match.trigger_pattern
-                            msg = f"Subtask rejected by censor: {reason}"
-                            if match.action_instruction:
-                                msg += f"\n{match.action_instruction}"
-                            return _tool_error(msg)
-                        # downgraded refuse -> treat as steer directive below
-                        directive = match.action_instruction or match.reason
-                        if directive:
-                            _steer_directives.append(directive)
-                    elif match.action == "steer":
-                        logger.info("Censor STEER on subtask creation: %s", match.trigger_pattern)
-                        directive = match.action_instruction or match.reason
-                        if directive:
-                            _steer_directives.append(directive)
-                # Inject steer directives into the task text so the subtask honors them.
-                if _steer_directives:
-                    task = task + "\n\n## Active Guidance\n" + "\n".join(
-                        f"- {d}" for d in _steer_directives
-                    )
-            except Exception:
-                # The spawn gate is the ONLY censor enforcement a subtask gets (the exfil
-                # path) — a swallowed failure here is a silent enforcement gap, so WARN.
-                logger.warning("Censor check failed during spawn_task, proceeding", exc_info=True)
+            # F078 (R3): the spawn gate is the ONLY censor enforcement the
+            # background path gets. Extracted to gate_subtask_task (F092.2)
+            # so app.act — which also creates subtasks directly — runs the
+            # SAME gate instead of re-deriving this control flow. Email
+            # censors are `steer`, so daily email subtasks pass unaffected.
+            from nous.heart.censor_actions import gate_subtask_task
+
+            rejection, task = await gate_subtask_task(heart, task)
+            if rejection is not None:
+                return _tool_error(rejection)
 
             # F062: persist payload_schema only when BOTH flags are on
             # (Codex round-9 P2). Without F061 hardening the legacy executor

@@ -804,9 +804,23 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
                     ),
                 )
 
+        # The dispatch censor pass saw only {title, name, context} — never
+        # the stored instruction or the data snapshot that become this
+        # subtask's prompt (codex P1). Run the SAME spawn gate spawn_task
+        # uses (abort/refuse reject with F031 unblock downgrade, steer
+        # injects guidance) over the full prompt; a direct
+        # SubtaskManager.create must never bypass the background path's
+        # only censor enforcement.
+        from nous.heart.censor_actions import gate_subtask_task
+
+        prompt = _agent_action_prompt(ctx.surface, action, timeout)
+        rejection, prompt = await gate_subtask_task(router._heart, prompt)
+        if rejection is not None:
+            return ActionResult(ok=False, message=rejection)
+
         try:
             sub = await subtasks.create(
-                task=_agent_action_prompt(ctx.surface, action, timeout),
+                task=prompt,
                 frame_type="task",
                 timeout=timeout,
                 notify=False,
@@ -913,34 +927,40 @@ async def _watch_agent_action(
 
         # Only act if the pending stamp is still OURS: a successful
         # recompose replaced the data model wholesale (meta rebuilt), so
-        # the stamp is gone and there is nothing to clean up.
-        snap = await router._service.snapshot(surface_id)
-        if snap is None:
-            return
-        envelope, _seq = snap
-        model = (envelope.get("createSurface") or {}).get("dataModel") or {}
-        pending = (model.get(_ACT_META_KEY) or {}).get("pendingAction")
-        if not (
-            isinstance(pending, dict)
-            and pending.get("id") == stamp["id"]
-            and pending.get("at") == stamp["at"]
-        ):
-            return
+        # the stamp is gone and there is nothing to clean up. The check
+        # and both writes hold the per-surface lock (codex P2) — dedup
+        # replacement and a retap's dispatch write serialize on the same
+        # lock, so a newer stamp or a fresh recompose landing between the
+        # snapshot and the writes can no longer be clobbered with a stale
+        # failure note.
+        async with router._service.surface_lock(surface_id):
+            snap = await router._service.snapshot(surface_id)
+            if snap is None:
+                return
+            envelope, _seq = snap
+            model = (envelope.get("createSurface") or {}).get("dataModel") or {}
+            pending = (model.get(_ACT_META_KEY) or {}).get("pendingAction")
+            if not (
+                isinstance(pending, dict)
+                and pending.get("id") == stamp["id"]
+                and pending.get("at") == stamp["at"]
+            ):
+                return
 
-        if status == "completed":
-            note = "the agent finished without updating the app"
-        elif status in ("failed", "cancelled"):
-            note = f"the action {status}"
-        else:
-            note = "no update arrived in time"
-        await router._service.update_data(
-            surface_id, f"/{_ACT_META_KEY}/pendingAction", None
-        )
-        await router._service.update_data(
-            surface_id,
-            f"/{_ACT_META_KEY}/actionError",
-            f"{stamp.get('label') or stamp['id']}: {note}",
-        )
+            if status == "completed":
+                note = "the agent finished without updating the app"
+            elif status in ("failed", "cancelled"):
+                note = f"the action {status}"
+            else:
+                note = "no update arrived in time"
+            await router._service.update_data(
+                surface_id, f"/{_ACT_META_KEY}/pendingAction", None
+            )
+            await router._service.update_data(
+                surface_id,
+                f"/{_ACT_META_KEY}/actionError",
+                f"{stamp.get('label') or stamp['id']}: {note}",
+            )
     except Exception:
         logger.exception("F092.2 agent-action watcher failed for %s", surface_id)
 

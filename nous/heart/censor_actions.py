@@ -153,3 +153,64 @@ class CensorActionExecutor:
             for sc in schedules:
                 lines.append(f"  - [schedule] {sc.task[:80]} ({sc.cron_expr})")
         return "\n".join(lines)
+
+
+async def gate_subtask_task(heart: Any, task: str) -> tuple[str | None, str]:
+    """F078 (R3) spawn gate, shared: censor-check a subtask's task text at
+    creation time. Subtasks are non-interactive, so censor checks are
+    skipped during execution (pre_turn) — this gate is the ONLY censor
+    enforcement the background path gets. Tiers:
+
+      abort / refuse -> REJECT (the autonomous-exfil path), unless an F031
+                        unblock_pattern downgrades the refuse to steer.
+      steer          -> do NOT reject; inject the directive into the task.
+
+    Returns ``(rejection_message, effective_task)``: rejection_message is
+    None when the subtask may proceed, and effective_task carries any
+    injected steer guidance. Extracted from spawn_task (F092.2) so every
+    path that creates a subtask directly — spawn_task, app.act — runs the
+    SAME gate; a second caller must never re-derive this control flow.
+
+    Fails OPEN with a WARN, matching the original gate: a censor-infra
+    error must not brick every background task, but it is a silent
+    enforcement gap and is logged loudly.
+    """
+    try:
+        steer_directives: list[str] = []
+        matches = await heart.check_censors(task)
+        for match in matches:
+            if match.action in ("abort", "refuse"):
+                # F031: refuse may downgrade to steer via unblock_pattern.
+                unblocked = False
+                if match.trigger_action and match.unblock_pattern:
+                    executor = CensorActionExecutor(heart)
+                    action_result = await executor.execute(match.trigger_action)
+                    if action_result:
+                        import re
+
+                        try:
+                            if re.search(match.unblock_pattern, action_result, re.IGNORECASE):
+                                unblocked = True
+                        except re.error:
+                            pass
+                if not unblocked:
+                    reason = match.reason or match.trigger_pattern
+                    msg = f"Subtask rejected by censor: {reason}"
+                    if match.action_instruction:
+                        msg += f"\n{match.action_instruction}"
+                    return msg, task
+                directive = match.action_instruction or match.reason
+                if directive:
+                    steer_directives.append(directive)
+            elif match.action == "steer":
+                logger.info("Censor STEER on subtask creation: %s", match.trigger_pattern)
+                directive = match.action_instruction or match.reason
+                if directive:
+                    steer_directives.append(directive)
+        if steer_directives:
+            task = task + "\n\n## Active Guidance\n" + "\n".join(
+                f"- {d}" for d in steer_directives
+            )
+    except Exception:
+        logger.warning("Censor check failed during subtask gate, proceeding", exc_info=True)
+    return None, task

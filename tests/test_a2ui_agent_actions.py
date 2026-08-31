@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 import uuid
 from types import SimpleNamespace
 from typing import Any
@@ -235,6 +236,12 @@ class _FakeService:
     def __init__(self, pending: dict | None):
         self.pending = pending
         self.patches: list[tuple[str, Any]] = []
+        self.locked: list[str] = []
+
+    @asynccontextmanager
+    async def surface_lock(self, surface_id: str):
+        self.locked.append(surface_id)
+        yield
 
     async def snapshot(self, surface_id: str):
         model: dict = {"meta": {}}
@@ -508,8 +515,11 @@ async def test_app_act_double_tap_rejected_serverside(
 
     # One tap = one LLM turn against a 3-slot worker pool — the second tap
     # must be refused while the first is fresh, whatever button it came from.
-    assert status == 200 and payload.get("ok") is False
-    assert "already working" in payload.get("message", "")
+    # ok=False maps to HTTP 422 with the spec error envelope (codex P2 —
+    # the first revision asserted a 200 {ok, message} shape that the
+    # dispatch never produces).
+    assert status == 422
+    assert "already working" in payload["error"]["message"]
     assert len(fake_heart.subtasks.created) == 1
 
 
@@ -522,8 +532,8 @@ async def test_app_act_unknown_action_rejected(router, service, db, fake_heart) 
         _act_body(surface_id, nonce, "not-declared"), content_type=JSON_CT
     )
 
-    assert payload.get("ok") is False
-    assert "not offered" in payload.get("message", "")
+    assert status == 422
+    assert "not offered" in payload["error"]["message"]
     assert fake_heart.subtasks.created == []
 
 
@@ -541,8 +551,8 @@ async def test_app_act_kill_switch_refuses_existing_surfaces(
         _act_body(surface_id, nonce, "rebalance"), content_type=JSON_CT
     )
 
-    assert payload.get("ok") is False
-    assert "disabled" in payload.get("message", "")
+    assert status == 422
+    assert "disabled" in payload["error"]["message"]
     assert fake_heart.subtasks.created == []
 
 
