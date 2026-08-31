@@ -6,7 +6,7 @@
   // surface ids to 'overview'. The `initialized` guard is copied from it —
   // it stops hashchange listeners stacking across tests and HMR.
   import { onMount } from 'svelte';
-  import { isDataBinding, resolveDynamic, toDisplayString } from './functions';
+  import { resolveDynamic, toDisplayString } from './functions';
   import InstallPrompt from './InstallPrompt.svelte';
   import Renderer from './Renderer.svelte';
   import { store } from './store.svelte';
@@ -69,6 +69,40 @@
     return body.replace(/[\s:,\u2014-]+$/, '') + '\u2026';
   }
 
+  // Functions that only READ and format. `openUrl` is the counter-example and
+  // the reason this is an allowlist rather than a denylist: a new effectful
+  // function is unsafe by DEFAULT here, which is the direction that fails
+  // safe. `@index` is excluded too — it throws at the null scope a chip uses.
+  const PURE_TITLE_FNS = new Set([
+    'formatString',
+    'formatNumber',
+    'formatCurrency',
+    'formatDate',
+    'pluralize',
+    'length',
+    'and',
+    'or',
+    'not',
+    'regex',
+    'numeric',
+    'email',
+  ]);
+
+  /** True when a title can be resolved WITHOUT side effects. Recurses through
+   * arguments, because `{call:"formatString", args:{value:{call:"openUrl"}}}`
+   * is a pure call wrapping an effectful one — checking only the outer name
+   * would wave it straight through. */
+  function isPureTitle(v: unknown, depth = 0): boolean {
+    if (depth > 6) return false;
+    if (v === null || typeof v !== 'object') return true;
+    if (Array.isArray(v)) return v.every((x) => isPureTitle(x, depth + 1));
+    const call = (v as { call?: unknown }).call;
+    if (typeof call === 'string' && !PURE_TITLE_FNS.has(call)) return false;
+    return Object.values(v as Record<string, unknown>).every((x) =>
+      isPureTitle(x, depth + 1),
+    );
+  }
+
   /** An app's AppHeader is structurally mandatory (lint_micro_app: it must
    * be the first top-level child) and its title is authored SHORT for
    * display — "Crypto Note", not the record title "Crypto Note: Six
@@ -95,16 +129,15 @@
     // Trim whatever we return: a whitespace-only title is truthy and would
     // short-circuit the record-title fallback, landing back on "app".
     const raw = header.title;
-    // A LABEL MUST NOT EXECUTE ANYTHING. `title` is a DynamicString, so it may
-    // legitimately hold a function call — and `openUrl` calls `window.open`.
-    // Deriving chips resolves EVERY live surface, twice (label + tooltip), so
-    // a call here would fire unsolicited navigation merely because a surface
-    // exists in the feed (codex P2). Only pure forms are evaluated: a literal
-    // string, or a {path} read of the data model. Anything callable falls back
-    // to the record title. That covers effectful functions we have not written
-    // yet, which a blocklist would not.
+    // A LABEL MUST NOT CAUSE EFFECTS. `title` is a DynamicString, so it may
+    // hold a function call — and `openUrl` calls `window.open`. Chips resolve
+    // EVERY live surface, twice (label + tooltip), so an effectful call fires
+    // merely because a surface exists in the feed (codex P2). Only provably
+    // pure titles are evaluated — see isPureTitle, which recurses so a pure
+    // wrapper cannot smuggle an effectful argument. Everything else falls back
+    // to the record title.
     if (typeof raw === 'string') return raw.trim();
-    if (!isDataBinding(raw)) return '';
+    if (!isPureTitle(raw)) return '';
     const ctx = { dataModel: (surface.dataModel ?? {}) as Record<string, unknown>, scope: null };
     try {
       return toDisplayString(resolveDynamic(raw, ctx)).trim();

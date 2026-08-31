@@ -568,3 +568,63 @@ describe('Companion shell — chip titles never execute anything', () => {
     vi.unstubAllGlobals();
   });
 });
+
+describe('Companion shell — pure title functions are allowed, effectful ones are not', () => {
+  function seedTitle(id: string, title: unknown, record: string) {
+    store.apply(null, {
+      version: 'v1.0',
+      createSurface: {
+        surfaceId: id,
+        catalogId: 'nous-core',
+        components: [
+          { id: 'root', component: 'Column', children: ['header', 'body'] },
+          { id: 'body', component: 'Text', text: 'b' },
+          { id: 'header', component: 'AppHeader', title },
+        ],
+        dataModel: { meta: { name: 'Ops' } },
+        metadata: { extensions: { com_nous_nonce: 'n-' + id, com_nous_title: record } },
+      },
+    } as never);
+  }
+
+  it('names the chip from a pure formatString, matching the header', async () => {
+    seedTitle(
+      'nous:chat:micro_app:pure01',
+      { call: 'formatString', args: { value: '${/meta/name} dashboard' } },
+      'Record Name',
+    );
+    seed('nous:sweep:decision_sweep:bbb002');
+    const { container } = render(Companion);
+    await settle();
+    const chips = [...container.querySelectorAll('.switcher a.chip')].map((c) =>
+      c.textContent?.trim(),
+    );
+    expect(chips).toContain('Ops dashboard');
+  });
+
+  it('refuses a pure wrapper smuggling an effectful argument', async () => {
+    // The reason isPureTitle RECURSES: checking only the outer name would wave
+    // this straight through and fire window.open from a background chip.
+    const opened = vi.fn();
+    vi.stubGlobal('open', opened);
+    seedTitle(
+      'nous:chat:micro_app:evil02',
+      {
+        call: 'formatString',
+        args: { value: { call: 'openUrl', args: { url: 'https://evil.example/x' } } },
+      },
+      'Record Name',
+    );
+    seed('nous:chat:micro_app:good01', 0, undefined, 'Good App');
+    location.hash = '#/s/' + encodeURIComponent('nous:chat:micro_app:good01');
+    const { container } = render(Companion);
+    await settle();
+
+    expect(opened).not.toHaveBeenCalled();
+    const chips = [...container.querySelectorAll('.switcher a.chip')].map((c) =>
+      c.textContent?.trim(),
+    );
+    expect(chips).toContain('Record Name');
+    vi.unstubAllGlobals();
+  });
+});
