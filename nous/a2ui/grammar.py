@@ -199,6 +199,20 @@ def lint_micro_app(
                     f"{ctype} {comp.get('id')!r} has no `path` — a chart with no "
                     "bound series is meaningless (F094 §5)"
                 )
+        if ctype == "Tabs":
+            # The prompt teaches "2-5 ALTERNATIVE views"; without this the rule
+            # was prompt-only (codex P2) — the vendored basic catalog carries
+            # only minItems:1, and a one-tab control is a section with extra
+            # chrome while 6+ tabs stop fitting a phone-width tab bar. Enforced
+            # HERE rather than the catalog because vendored catalogs are pinned
+            # byte-identical (catalogs/VENDORED.md).
+            n_tabs = len(comp.get("tabs") or []) if isinstance(comp.get("tabs"), list) else 0
+            if not 2 <= n_tabs <= 5:
+                errors.append(
+                    f"Tabs {comp.get('id')!r} has {n_tabs} tab(s) — use 2-5 "
+                    "alternative views; one view is just a Section, and more "
+                    "than five do not fit a tab bar"
+                )
         if ctype == "LineChart":
             # Data-free arity, so the repair loop leads with THIS clean message
             # instead of the schema's maxItems error — which reads "remove path

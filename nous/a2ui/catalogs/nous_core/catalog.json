@@ -347,9 +347,10 @@
             "hero",
             "grid-2",
             "grid-3",
-            "rail"
+            "rail",
+            "accordion"
           ],
-          "description": "How the section's child lays out (default stack). hero = large/primary for visual hierarchy; grid-2/grid-3 = N-column grid over the child's items; rail = horizontal scroll. The renderer owns the CSS."
+          "description": "How the section's child lays out (default stack). hero = large/primary for visual hierarchy; grid-2/grid-3 = N-column grid over the child's items; rail = horizontal scroll; accordion = collapsed until the user taps the title (long secondary detail, never the headline). The renderer owns the CSS."
         },
         "weight": {
           "type": "number",

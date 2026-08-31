@@ -1,6 +1,6 @@
 /// <reference types="node" />
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, cleanup } from '@testing-library/svelte';
+import { render, cleanup, fireEvent } from '@testing-library/svelte';
 import { readFileSync } from 'node:fs';
 import Companion from './Companion.svelte';
 import SectionView from './catalog/SectionView.svelte';
@@ -132,4 +132,67 @@ describe('theme contrast (F093 R2 — themes are code, so they get tests)', () =
       expect(contrast(t['--text'], t['--surface'])).toBeGreaterThanOrEqual(4.5);
     });
   }
+});
+
+describe('Section.layout accordion', () => {
+  function renderAccordion() {
+    store.reset();
+    store.apply(null, {
+      version: 'v1.0',
+      createSurface: {
+        surfaceId: SURFACE,
+        catalogId: 'nous-core',
+        components: [
+          { id: 'b', component: 'Text', text: 'hidden detail' },
+        ],
+        dataModel: {},
+      },
+    } as never);
+    return render(SectionView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 's', component: 'Section', title: 'Raw data', child: 'b', layout: 'accordion' },
+      },
+    });
+  }
+
+  it('starts collapsed and does not render the panel subtree at all', () => {
+    const { container } = renderAccordion();
+    const btn = container.querySelector('button.toggle');
+    expect(btn?.getAttribute('aria-expanded')).toBe('false');
+    // Mirrors Tabs: a collapsed panel is not merely hidden — its subtree does
+    // not run.
+    expect(container.textContent).not.toContain('hidden detail');
+  });
+
+  it('expands on click and collapses again', async () => {
+    const { container } = renderAccordion();
+    const btn = container.querySelector('button.toggle') as HTMLButtonElement;
+    await fireEvent.click(btn);
+    expect(btn.getAttribute('aria-expanded')).toBe('true');
+    expect(container.textContent).toContain('hidden detail');
+    await fireEvent.click(btn);
+    expect(container.textContent).not.toContain('hidden detail');
+  });
+
+  it('non-accordion layouts keep a plain, non-interactive heading', () => {
+    store.reset();
+    store.apply(null, {
+      version: 'v1.0',
+      createSurface: {
+        surfaceId: SURFACE,
+        catalogId: 'nous-core',
+        components: [{ id: 'b', component: 'Text', text: 'always visible' }],
+        dataModel: {},
+      },
+    } as never);
+    const { container } = render(SectionView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 's', component: 'Section', title: 'S', child: 'b', layout: 'stack' },
+      },
+    });
+    expect(container.querySelector('button.toggle')).toBeNull();
+    expect(container.textContent).toContain('always visible');
+  });
 });
