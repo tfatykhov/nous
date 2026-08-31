@@ -293,8 +293,9 @@ class _FakeService:
 
 
 class _FakeSubtasks:
-    def __init__(self, status: str = "failed"):
+    def __init__(self, status: str = "failed", started_at: Any = None):
         self._status = status
+        self._started_at = started_at
         self.created: list[Any] = []
         self.cancelled: list[Any] = []
 
@@ -309,7 +310,12 @@ class _FakeSubtasks:
         return sub
 
     async def get(self, subtask_id):
-        return SimpleNamespace(id=subtask_id, status=self._status)
+        return SimpleNamespace(
+            id=subtask_id,
+            status=self._status,
+            started_at=self._started_at,
+            timeout_seconds=60,
+        )
 
     async def cancel(self, subtask_id) -> bool:
         self.cancelled.append(subtask_id)
@@ -429,6 +435,73 @@ async def test_refresh_retires_a_stale_action_before_proceeding(flag_settings) -
     with pytest.raises(Exception):
         await router._functions["app.refresh"].fn(_ctx(router, surface, ""))
     assert heart.subtasks.cancelled == [old_id]
+
+
+async def test_stale_retap_refuses_while_the_old_worker_may_still_run(flag_settings) -> None:
+    """codex P1 round-9: cancel() does not preempt a dequeued worker — a
+    stale retry while the old turn is mid-execution would run two
+    tool-holding turns concurrently. started_at (set only by dequeue) +
+    the row's own execution window is the discriminator; the refusal
+    self-heals once the worker's wait_for fires."""
+    from datetime import UTC, datetime
+
+    heart = SimpleNamespace(
+        subtasks=_FakeSubtasks(status="cancelled", started_at=datetime.now(UTC))
+    )
+    router = _handler_router(flag_settings, heart=heart)
+    handler = router._handlers["app.act"].fn
+    old_id = uuid.uuid4()
+    surface = _surface_stub(
+        data_model={
+            "meta": {
+                "pendingAction": {
+                    "id": "rebalance",
+                    "at": "2020-01-01T00:00:00+00:00",
+                    "subtask_id": str(old_id),
+                }
+            }
+        }
+    )
+
+    result = await handler(_ctx(router, surface, "escalate"))
+
+    assert not result.ok and "still finishing" in result.message
+    assert heart.subtasks.created == [], "no second turn while the first may run"
+    # Past the execution window the same retap succeeds (self-healing).
+    from datetime import timedelta
+
+    heart2 = SimpleNamespace(
+        subtasks=_FakeSubtasks(
+            status="cancelled", started_at=datetime.now(UTC) - timedelta(seconds=200)
+        )
+    )
+    router2 = _handler_router(flag_settings, heart=heart2)
+    result2 = await router2._handlers["app.act"].fn(_ctx(router2, surface, "escalate"))
+    assert result2.ok, result2.message
+    for t in router2._action_watchers:
+        t.cancel()
+
+
+async def test_watcher_keeps_the_stamp_while_the_worker_may_still_run(monkeypatch) -> None:
+    """codex P1 round-9: clearing the stamp while a dequeued worker is
+    executing re-enables the buttons into a concurrent-turns hole. Keep
+    it; write only the honest note."""
+    from datetime import UTC, datetime
+
+    sub_id = uuid.uuid4()
+    stamp = {
+        "id": "rebalance",
+        "label": "Rebalance",
+        "at": "2026-08-31T00:00:00+00:00",
+        "subtask_id": str(sub_id),
+    }
+    router = _fake_router(pending=dict(stamp), status="running")
+    router._heart.subtasks._started_at = datetime.now(UTC)
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+    await _watch_agent_action(router, "a2ui-x", sub_id, stamp, timeout=-31)
+    patches = dict(router._service.patches)
+    assert "/meta/pendingAction" not in patches, "stamp must be kept"
+    assert "still finishing" in patches["/meta/actionError"]
 
 
 async def test_watcher_noops_when_a_newer_action_is_pending(monkeypatch) -> None:

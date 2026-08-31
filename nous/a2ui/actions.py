@@ -817,9 +817,19 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
             # the old subtask is still pending — its execution timeout only
             # starts at DEQUEUE — or mid-turn. Accepting the retry without
             # retiring it would run two tool-holding turns for one app, and
-            # the old one could later overwrite the retried result. Cancel
-            # it and block its push session before spawning the new one.
-            await _retire_action_subtask(router, pending)
+            # the old one could later overwrite the retried result. Retire
+            # first — and if a dequeued worker may STILL be executing
+            # (cancel does not preempt), refuse the retry outright: the
+            # worker is bounded by its own execution timeout, so this
+            # refusal self-heals on a later tap (codex P1 round-9).
+            if not await _retire_action_subtask(router, pending):
+                return ActionResult(
+                    ok=False,
+                    message=(
+                        "the previous action is still finishing — "
+                        "try again in a moment"
+                    ),
+                )
 
         # The dispatch censor pass saw only {title, name, context} — never
         # the stored instruction or the data snapshot that become this
@@ -947,34 +957,57 @@ async def _clear_pending_stamp(router: Any, surface_id: str) -> None:
         logger.warning("F092.2 failed to clear pending stamp", exc_info=True)
 
 
-async def _retire_action_subtask(router: Any, pending: dict) -> None:
+async def _retire_action_subtask(router: Any, pending: dict) -> bool:
     """Cancel a pending action's subtask AND block its push session.
 
-    Shared by app.close (the action's app is gone — its completion must not
-    recreate it) and the stale-stamp retry path in app.act (the old turn
-    may still be queued/running; two tool-holding turns for one app, with
-    the old one able to overwrite the retried result, is exactly the state
-    the double-tap guard exists to prevent). Cancel stops a queued subtask
-    outright; the session block is the backstop for a mid-flight worker,
-    which SubtaskManager.cancel does not preempt. Best-effort by design —
-    the push-side block re-check is the deterministic layer.
+    Shared by app.close / eviction (the action's app is gone — its
+    completion must not recreate it) and the stale-stamp retry paths.
+    Cancel stops a queued subtask outright; the session block is the
+    backstop for a mid-flight worker, which SubtaskManager.cancel does not
+    preempt.
+
+    Returns True when the old action is provably STOPPED — it never
+    dequeued (started_at is set only by dequeue, never by cancel), it
+    reached a genuine terminal status on its own, or its execution window
+    has fully elapsed (the worker's asyncio.wait_for has fired by then).
+    Returns False while a worker may still be executing: RETRY paths must
+    then refuse, or two tool-holding turns run concurrently (codex P1 —
+    cancel() only flips the row's status; completed_at is stamped by
+    cancel itself, so status/started_at/elapsed is the discriminator, not
+    completed_at). Close/eviction ignore the return: the app is going
+    away regardless, and the session block covers the push.
     """
     if not pending.get("subtask_id"):
-        return
+        return True
     try:
         sub_uuid = UUID(str(pending["subtask_id"]))
     except (TypeError, ValueError):
-        return
+        return True
     timeout = int(getattr(router._settings, "a2ui_agent_action_timeout_seconds", 300))
     subtasks = getattr(router._heart, "subtasks", None) if router._heart else None
+    stopped = True
     if subtasks is not None:
         try:
             await subtasks.cancel(sub_uuid)
+            post = await subtasks.get(sub_uuid)
+            if post is not None and getattr(post, "status", None) not in (
+                "completed",
+                "failed",
+            ):
+                started = getattr(post, "started_at", None)
+                if started is not None:
+                    if started.tzinfo is None:
+                        started = started.replace(tzinfo=UTC)
+                    window = int(getattr(post, "timeout_seconds", None) or timeout) + 60
+                    elapsed = (datetime.now(UTC) - started).total_seconds()
+                    stopped = elapsed > window
         except Exception:
             logger.warning("F092.2 action-subtask cancel failed", exc_info=True)
+            stopped = False
     router._service.block_push_session(
         f"subtask-{sub_uuid.hex[:8]}", ttl_seconds=timeout + 60
     )
+    return stopped
 
 
 def _parse_iso(value: Any) -> datetime | None:
@@ -1097,8 +1130,19 @@ async def _watch_agent_action(
                 # stamp destroys the subtask_id identity that retap
                 # retirement relies on, so the next tap would queue a
                 # DUPLICATE turn while this one can still dequeue later.
-                # Retire (cancel + session block) BEFORE clearing.
-                await _retire_action_subtask(router, stamp)
+                # Retire (cancel + session block) BEFORE clearing — and if
+                # a dequeued worker may STILL be executing (codex P1
+                # round-9), KEEP the stamp: a retap then routes through the
+                # stale path, which refuses until the worker's own timeout
+                # fires, and the stamp self-heals on the tap after that.
+                if not await _retire_action_subtask(router, stamp):
+                    await router._service.update_data(
+                        surface_id,
+                        f"/{_ACT_META_KEY}/actionError",
+                        f"{stamp.get('label') or stamp['id']}: still finishing — "
+                        "controls unlock when it stops",
+                    )
+                    return
             await router._service.update_data(
                 surface_id, f"/{_ACT_META_KEY}/pendingAction", None
             )
@@ -1165,7 +1209,11 @@ def _register_micro_app_functions(router: ActionRouter) -> None:
                 f"an agent action ({str(pending.get('label') or pending.get('id'))!r}) "
                 "is running on this app — wait for it to finish or close the app"
             )
-        await _retire_action_subtask(router, pending)
+        if not await _retire_action_subtask(router, pending):
+            raise ValueError(
+                "the previous agent action is still finishing — "
+                "try again in a moment"
+            )
 
     async def app_refresh(ctx: ActionContext) -> Any:
         if router._composer is None:
