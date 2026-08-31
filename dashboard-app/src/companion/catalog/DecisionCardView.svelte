@@ -30,9 +30,17 @@
   // Catalog advertises optional `confidence` (0-1); the card silently
   // dropped it (codex P2 on #626). Render only a well-formed value —
   // out-of-range or non-numeric input is omitted, never scaled or guessed.
+  // Only a number or a non-blank numeric string qualifies: Number() alone
+  // coerces false/[]/whitespace to 0 and true to 1 — plausible-looking
+  // confidences fabricated from junk (codex round-3).
   const confidencePct = $derived.by(() => {
     const raw = resolveDynamic(comp.confidence, ctx);
-    const n = typeof raw === 'number' ? raw : raw == null || raw === '' ? NaN : Number(raw);
+    const n =
+      typeof raw === 'number'
+        ? raw
+        : typeof raw === 'string' && raw.trim() !== ''
+          ? Number(raw)
+          : NaN;
     return Number.isFinite(n) && n >= 0 && n <= 1 ? Math.round(n * 100) : null;
   });
 </script>

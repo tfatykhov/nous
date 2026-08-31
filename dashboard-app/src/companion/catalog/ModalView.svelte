@@ -42,13 +42,24 @@
   // trigger — but an Icon trigger renders an aria-hidden SVG and no text,
   // leaving a focusable button with NO accessible name (codex P2 on #626).
   // Fallback label only when contents provide none, so a Text trigger's
-  // own words stay the name (aria-label would override them).
+  // own words stay the name (aria-label would override them). The name
+  // derives from the DOM, so watch the DOM: a data-bound Text trigger can
+  // resolve from empty to populated via updateDataModel without comp
+  // changing at all (codex round-3) — a reactive-deps-only effect would
+  // keep the stale fallback label. aria-label is set on the wrapper
+  // itself and attributes are not observed, so applying never re-fires
+  // the observer.
   $effect(() => {
     const el = triggerEl;
     if (!el) return;
-    void comp.trigger; // re-check when the trigger child changes
-    if (el.textContent?.trim()) el.removeAttribute('aria-label');
-    else el.setAttribute('aria-label', 'Show details');
+    const apply = () => {
+      if (el.textContent?.trim()) el.removeAttribute('aria-label');
+      else el.setAttribute('aria-label', 'Show details');
+    };
+    apply();
+    const mo = new MutationObserver(apply);
+    mo.observe(el, { childList: true, subtree: true, characterData: true });
+    return () => mo.disconnect();
   });
 
   function open() {

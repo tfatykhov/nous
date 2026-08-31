@@ -275,6 +275,31 @@ describe('ModalView', () => {
     );
   });
 
+  it('recomputes the fallback label when bound trigger text changes', async () => {
+    // codex round-3 on #626: a data-bound Text trigger can resolve from
+    // empty to populated via updateDataModel without comp changing — the
+    // label logic watches the DOM, not just the component reference.
+    seedSurface({ label: '' }, [
+      { id: 'mt', component: 'Text', text: { path: '/label' } },
+      { id: 'mc', component: 'Text', text: 'the long detail' },
+    ]);
+    const { container } = render(ModalView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'm', component: 'Modal', trigger: 'mt', content: 'mc' },
+      },
+    });
+    await settle();
+    const trigger = container.querySelector('.trigger');
+    expect(trigger?.getAttribute('aria-label')).toBe('Show details');
+
+    store.apply(2, {
+      updateDataModel: { surfaceId: SURFACE, path: '/label', value: 'Trip details' },
+    } as never);
+    await settle();
+    expect(trigger?.getAttribute('aria-label')).toBeNull();
+  });
+
   it('opens on Enter and Space, not just click', async () => {
     for (const key of ['Enter', ' ']) {
       cleanup();

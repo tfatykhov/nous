@@ -135,9 +135,11 @@ describe('DecisionCardView', () => {
 
     expect(renderCard(0.85).container.querySelector('.conf')?.textContent).toBe('85% conf');
     expect(renderCard('0.5').container.querySelector('.conf')?.textContent).toBe('50% conf');
-    // Absence over fabrication: out-of-range / junk / missing render nothing.
-    for (const bad of [undefined, 85, -0.1, 'junk', null]) {
-      expect(renderCard(bad).container.querySelector('.conf'), String(bad)).toBeNull();
+    // Absence over fabrication: out-of-range / junk / missing render
+    // nothing. false/[]/whitespace would coerce to 0 and true to 1 via
+    // Number() — plausible fabricated confidences (codex round-3).
+    for (const bad of [undefined, 85, -0.1, 'junk', null, false, true, '  ', []]) {
+      expect(renderCard(bad).container.querySelector('.conf'), JSON.stringify(bad)).toBeNull();
     }
   });
 });
