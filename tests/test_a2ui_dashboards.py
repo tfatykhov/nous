@@ -1699,6 +1699,28 @@ def test_prompt_teaches_tabs_and_accordion(settings):
     assert '"child": "<component id>"' in _GRAMMAR_RULES
 
 
+def test_component_usage_keys_are_real_components():
+    """Every WHEN-TO-USE key must be a real allowed component so a catalog
+    rename can't leave the prompt teaching a component that no longer
+    exists. Subset only — full coverage is NOT required: layout primitives
+    are self-evident and MemoryGraph is deliberately excluded (no registered
+    source produces memory nodes/edges a composed app could bind)."""
+    from nous.a2ui.compose import _COMPONENT_USAGE, _COMPONENT_USAGE_BLOCK
+
+    assert set(_COMPONENT_USAGE) <= set(grammar.ALLOWED_COMPONENTS)
+    assert "MemoryGraph" not in _COMPONENT_USAGE
+    for name in _COMPONENT_USAGE:
+        assert f"- {name}:" in _COMPONENT_USAGE_BLOCK
+
+
+def test_prompt_includes_component_usage_block(settings):
+    from nous.a2ui.compose import _COMPONENT_USAGE_BLOCK, SurfaceComposer
+
+    composer = SurfaceComposer(object(), settings, SourceRegistry())
+    prompt = composer._build_prompt("test intent", None, {})
+    assert _COMPONENT_USAGE_BLOCK in prompt
+
+
 def test_tabs_count_is_enforced_not_just_prompted():
     """codex P2: the 2-5 rule was prompt-only — the vendored catalog has only
     minItems:1, so a one-tab control (a Section with extra chrome) or an

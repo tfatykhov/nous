@@ -128,6 +128,51 @@ _THEME_MENU = "Pick a `theme` (or omit for nous-default):\n" + "\n".join(
     f"- {tid}: {desc}" for tid, desc in _THEMES.items()
 )
 
+# Judgement lines for components whose property list alone doesn't tell the
+# model WHEN to reach for them or what data shape they consume. Deliberately
+# sparse: layout primitives (Row, Column, Card, Divider, Icon, Image, Text)
+# are self-evident from their property lines, and charts/Repeat/Section/Tabs
+# have their own blocks above. MemoryGraph is deliberately ABSENT — no
+# registered source produces memory nodes/edges, so a composed app cannot
+# feed it honestly (it belongs to the Phase 2 memory_graph template).
+# A test asserts every key here is a real ALLOWED_COMPONENTS name.
+_COMPONENT_USAGE: dict[str, str] = {
+    "Timeline": (
+        "time-ordered events (the briefing spine); items = "
+        "[{at, label, detail?, flag?}] — flag=true highlights an entry."
+    ),
+    "KeyValueTable": (
+        "attribute pairs for ONE thing (ledger per-item detail); "
+        "rows = [{key, value}]."
+    ),
+    "List": (
+        "light repeated children when a table is too heavy; "
+        "direction row|column."
+    ),
+    "DecisionCard": (
+        "one Nous decision; feed from unreviewed_decisions records "
+        "(id→decisionId, description, confidence, stakes, category), "
+        "usually as a repeat template — never invent a decisionId."
+    ),
+    "ConfidenceMeter": (
+        "a 0-1 confidence as a meter; pairs with DecisionCard or a stat."
+    ),
+    "DagGraph": (
+        "DAG topology + node status; bind nodes/edges from the `dag` source "
+        "(nodes = [{name, status, node_type}], edges = [{from, to}]) — "
+        "never hand-write graph data."
+    ),
+    "Modal": (
+        "long secondary detail behind a tap: `trigger` (usually a Button) + "
+        "`content` component ids; open/close is renderer-owned, no action "
+        "wiring needed."
+    ),
+}
+
+_COMPONENT_USAGE_BLOCK = "WHEN TO USE (easy-to-miss components):\n" + "\n".join(
+    f"- {name}: {tip}" for name, tip in _COMPONENT_USAGE.items()
+)
+
 _RESPONSE_SHAPE = """\
 Respond with ONLY a JSON object (no prose, no code fence) shaped:
 {
@@ -353,7 +398,9 @@ class SurfaceComposer:
             + _THEME_MENU
             + "\n\n"
             + catalog_property_summary()
-            + "\nServer-resolved data available at these data-model keys "
+            + "\n"
+            + _COMPONENT_USAGE_BLOCK
+            + "\n\nServer-resolved data available at these data-model keys "
             + "(bind with {\"path\": \"/<key>/...\"} — do NOT copy the values "
             + "into dataModel, the server injects them; the [series]/[records] "
             + "tag tells you which sources a chart can bind):\n"
