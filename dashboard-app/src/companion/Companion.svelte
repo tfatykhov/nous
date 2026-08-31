@@ -294,7 +294,12 @@
   .shell {
     max-width: 720px;
     margin: 0 auto;
-    padding: 1rem 1rem calc(2rem + env(safe-area-inset-bottom));
+    /* black-translucent + viewport-fit=cover extends the viewport UNDER the
+       status bar / notch / Dynamic Island once installed, so the top needs
+       its inset exactly like the bottom already had (codex P2). Left/right
+       cover landscape notches. env() is 0 in a normal browser tab. */
+    padding: calc(1rem + env(safe-area-inset-top)) calc(1rem + env(safe-area-inset-right))
+      calc(2rem + env(safe-area-inset-bottom)) calc(1rem + env(safe-area-inset-left));
     display: flex;
     flex-direction: column;
     gap: 1rem;

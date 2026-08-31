@@ -4,7 +4,15 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/dashboard/v2/favicon.svg" />
     <link rel="manifest" href="/dashboard/v2/companion.webmanifest" />
-    <link rel="apple-touch-icon" href="/dashboard/v2/icons/apple-touch-icon.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/dashboard/v2/icons/apple-touch-icon.png" />
+    <!-- Without apple-mobile-web-app-capable, iOS/iPadOS "Add to Home Screen"
+         creates a BOOKMARK that opens in a Safari tab — the manifest's
+         display:standalone alone is not honoured there. The generic
+         mobile-web-app-capable is the successor spelling Chromium reads. -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Nous" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#0b0b10" />
