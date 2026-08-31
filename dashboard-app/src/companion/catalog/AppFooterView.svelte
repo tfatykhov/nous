@@ -151,7 +151,12 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
-  .ctl.armed {
+  /* .quiet's rule appears later at equal specificity and was overriding both
+     declarations, so the armed state showed only a text change (codex P2).
+     Match the compound class and pin hover too. */
+  .ctl.armed,
+  .ctl.quiet.armed,
+  .ctl.quiet.armed:hover:not(:disabled) {
     color: var(--crit);
     border-color: var(--crit);
   }
