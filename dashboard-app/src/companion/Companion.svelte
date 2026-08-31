@@ -101,12 +101,29 @@
     return toDisplayString(resolveDynamic(header.title, ctx)).trim();
   }
 
-  function chipLabel(surface: {
+  type ChipSurface = {
     surfaceId: string;
     title?: string;
-    components?: Record<string, { component?: string; title?: unknown }>;
+    components?: Record<string, { component?: string; title?: unknown; children?: unknown }>;
     dataModel?: unknown;
-  }): string {
+  };
+
+  /** The FULL (untruncated) name a micro-app chip stands for. Shared by the
+   * label AND the tooltip: the tooltip exists to reveal what truncation hid,
+   * so deriving it from a different string defeats it — a header title that
+   * differs from the record title showed one thing on the chip and another on
+   * hover (codex P2). */
+  function chipName(surface: ChipSurface): string {
+    if (kindOf(surface.surfaceId) !== 'micro_app') return '';
+    return (headerTitle(surface) || surface.title || '').trim();
+  }
+
+  function chipTooltip(surface: ChipSurface): string {
+    const name = chipName(surface) || surface.title || '';
+    return name ? name + ' — ' + surface.surfaceId : surface.surfaceId;
+  }
+
+  function chipLabel(surface: ChipSurface): string {
     const kind = kindOf(surface.surfaceId);
     // Every composed app's id carries the SAME kind segment ("micro_app"),
     // so KIND_LABELS can only ever say "app" — N live apps become N chips
@@ -116,8 +133,8 @@
     if (kind === 'micro_app') {
       // Header title first (short, authored); the record title from
       // createSurface metadata is the fallback for a headerless surface.
-      const name = headerTitle(surface) || surface.title || '';
-      if (name.trim()) return shorten(name);
+      const name = chipName(surface);
+      if (name) return shorten(name);
     }
     return KIND_LABELS[kind] ?? kind ?? surface.surfaceId.slice(-4);
   }
@@ -177,7 +194,7 @@
           class="chip"
           class:active={route.view === 'surface' && route.id === surface.surfaceId}
           href={'#/s/' + encodeURIComponent(surface.surfaceId)}
-          title={surface.title ? surface.title + ' \u2014 ' + surface.surfaceId : surface.surfaceId}
+          title={chipTooltip(surface)}
         >
           {chipLabel(surface)}
         </a>

@@ -460,3 +460,28 @@ describe('Companion shell — header resolved through the current root', () => {
     expect(chips).not.toContain('Stale Name');
   });
 });
+
+describe('Companion shell — tooltip reveals what the chip truncated', () => {
+  it('hovers the header title, not a divergent record title', async () => {
+    // codex P2: the chip shortened `headerTitle` while the tooltip used
+    // `surface.title`, so hovering a truncated chip showed a DIFFERENT string
+    // — defeating the one job a tooltip has here.
+    const header = 'Quarterly Revenue Breakdown By Region';
+    seed('nous:chat:micro_app:tip001', 0, 'A totally different record title', header);
+    seed('nous:sweep:decision_sweep:bbb002');
+
+    const { container } = render(Companion);
+    await settle();
+    const chip = [...container.querySelectorAll('.switcher a.chip')].find((c) =>
+      c.getAttribute('href')?.includes('tip001'),
+    )!;
+    const text = chip.textContent!.trim();
+    const tip = chip.getAttribute('title')!;
+
+    expect(text.endsWith('…')).toBe(true);
+    // The tooltip reveals the FULL header title the chip cut down.
+    expect(tip).toContain(header);
+    expect(tip).not.toContain('A totally different record title');
+    expect(header.startsWith(text.slice(0, -1))).toBe(true);
+  });
+});
