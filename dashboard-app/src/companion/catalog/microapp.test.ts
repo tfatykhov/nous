@@ -300,6 +300,48 @@ describe('ModalView', () => {
     expect(trigger?.getAttribute('aria-label')).toBeNull();
   });
 
+  it('defers keyboard semantics to an interactive trigger child', async () => {
+    // codex round-4 on #626: a Button trigger (legal outside micro-apps)
+    // is itself a keyboard control — its key activation synthesizes a
+    // click that bubbles to the wrapper's onclick. The wrapper stamping
+    // role/tabindex on top would nest two controls, and preventDefault on
+    // the bubbled keydown would suppress the button's own action.
+    seedSurface({}, [
+      {
+        id: 'mt',
+        component: 'Button',
+        child: 'bl',
+        action: { event: { name: 'x', context: {} } },
+      },
+      { id: 'bl', component: 'Text', text: 'Open' },
+      { id: 'mc', component: 'Text', text: 'the long detail' },
+    ]);
+    const { container } = render(ModalView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'm', component: 'Modal', trigger: 'mt', content: 'mc' },
+      },
+    });
+    await settle();
+    const trigger = container.querySelector('.trigger');
+    expect(trigger?.getAttribute('role')).toBeNull();
+    expect(trigger?.getAttribute('tabindex')).toBeNull();
+    expect(trigger?.getAttribute('aria-label')).toBeNull();
+
+    // Keydown on the child button must NOT be intercepted by the wrapper:
+    // not prevented, and the modal does not open from the raw keydown.
+    const childButton = container.querySelector('button') as HTMLElement;
+    const notPrevented = await fireEvent.keyDown(childButton, { key: 'Enter' });
+    await settle();
+    expect(notPrevented).toBe(true);
+    expect(container.textContent).not.toContain('the long detail');
+
+    // The button's (synthesized) click bubbles to the wrapper and opens.
+    await fireEvent.click(childButton);
+    await settle();
+    expect(container.textContent).toContain('the long detail');
+  });
+
   it('opens on Enter and Space, not just click', async () => {
     for (const key of ['Enter', ' ']) {
       cleanup();

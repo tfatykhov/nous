@@ -49,11 +49,23 @@
   // keep the stale fallback label. aria-label is set on the wrapper
   // itself and attributes are not observed, so applying never re-fires
   // the observer.
+  //
+  // The same walk decides WHOSE keyboard semantics apply (codex round-4):
+  // an INTERACTIVE trigger child (a Button outside micro-apps) already
+  // gives keyboard access — its own key activation synthesizes a click
+  // that bubbles to the wrapper's onclick — so the wrapper stamping
+  // role/tabindex on top would nest two keyboard controls, and its
+  // preventDefault on the bubbled keydown would suppress the child
+  // button's action. Wrapper semantics apply only to non-interactive
+  // triggers (Text/Icon), which is what micro-apps can express.
+  let interactiveChild = $state(false);
   $effect(() => {
     const el = triggerEl;
     if (!el) return;
     const apply = () => {
-      if (el.textContent?.trim()) el.removeAttribute('aria-label');
+      interactiveChild =
+        el.querySelector('button, a[href], input, select, textarea, [tabindex]') != null;
+      if (interactiveChild || el.textContent?.trim()) el.removeAttribute('aria-label');
       else el.setAttribute('aria-label', 'Show details');
     };
     apply();
@@ -93,14 +105,19 @@
   (codex P2 on #626: Text/Icon triggers were pointer-only, making modal-only
   detail unreachable without a mouse).
 -->
+<!-- The compiler can't see the conditional role: when the attributes are
+     stamped the element IS interactive, and when they aren't the child is. -->
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <div
   bind:this={triggerEl}
   class="trigger"
-  role="button"
-  tabindex="0"
-  aria-haspopup="dialog"
+  role={interactiveChild ? undefined : 'button'}
+  tabindex={interactiveChild ? undefined : 0}
+  aria-haspopup={interactiveChild ? undefined : 'dialog'}
   onclick={open}
-  onkeydown={onTriggerKey}
+  onkeydown={interactiveChild ? undefined : onTriggerKey}
 >
   {#if typeof comp.trigger === 'string'}
     <Renderer {surfaceId} componentId={comp.trigger} {scope} {depth} {ancestors} />
