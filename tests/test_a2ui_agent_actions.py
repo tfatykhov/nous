@@ -504,6 +504,42 @@ async def test_watcher_keeps_the_stamp_while_the_worker_may_still_run(monkeypatc
     assert "still finishing" in patches["/meta/actionError"]
 
 
+async def test_watcher_keeps_stamp_for_cancelled_but_running_worker(monkeypatch) -> None:
+    """codex P1 round-10: a stale retry retires a dequeued action — row
+    'cancelled', worker still executing. The watcher's terminal branch
+    must apply the SAME discriminator as retirement, or it clears the
+    stamp the refusal path just preserved."""
+    from datetime import UTC, datetime, timedelta
+
+    sub_id = uuid.uuid4()
+    stamp = {
+        "id": "rebalance",
+        "label": "Rebalance",
+        "at": "2026-08-31T00:00:00+00:00",
+        "subtask_id": str(sub_id),
+    }
+    router = _fake_router(pending=dict(stamp), status="cancelled")
+    router._heart.subtasks._started_at = datetime.now(UTC)
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+    await _watch_agent_action(router, "a2ui-x", sub_id, stamp, timeout=1)
+    patches = dict(router._service.patches)
+    assert "/meta/pendingAction" not in patches, "stamp must be kept"
+    assert "still finishing" in patches["/meta/actionError"]
+
+    # Cancelled-from-pending (never dequeued) clears normally.
+    router2 = _fake_router(pending=dict(stamp), status="cancelled")
+    await _watch_agent_action(router2, "a2ui-x", sub_id, stamp, timeout=1)
+    patches2 = dict(router2._service.patches)
+    assert patches2["/meta/pendingAction"] is None
+
+    # Cancelled-from-running whose execution window elapsed clears too.
+    router3 = _fake_router(pending=dict(stamp), status="cancelled")
+    router3._heart.subtasks._started_at = datetime.now(UTC) - timedelta(seconds=200)
+    await _watch_agent_action(router3, "a2ui-x", sub_id, stamp, timeout=1)
+    patches3 = dict(router3._service.patches)
+    assert patches3["/meta/pendingAction"] is None
+
+
 async def test_watcher_noops_when_a_newer_action_is_pending(monkeypatch) -> None:
     # Ownership is by subtask_id — a SAME-second retap of the SAME action id
     # still reads as a different action (codex P2: seconds-precision 'at'

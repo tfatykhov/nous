@@ -990,17 +990,7 @@ async def _retire_action_subtask(router: Any, pending: dict) -> bool:
         try:
             await subtasks.cancel(sub_uuid)
             post = await subtasks.get(sub_uuid)
-            if post is not None and getattr(post, "status", None) not in (
-                "completed",
-                "failed",
-            ):
-                started = getattr(post, "started_at", None)
-                if started is not None:
-                    if started.tzinfo is None:
-                        started = started.replace(tzinfo=UTC)
-                    window = int(getattr(post, "timeout_seconds", None) or timeout) + 60
-                    elapsed = (datetime.now(UTC) - started).total_seconds()
-                    stopped = elapsed > window
+            stopped = not _worker_may_still_run(post, timeout)
         except Exception:
             logger.warning("F092.2 action-subtask cancel failed", exc_info=True)
             stopped = False
@@ -1008,6 +998,29 @@ async def _retire_action_subtask(router: Any, pending: dict) -> bool:
         f"subtask-{sub_uuid.hex[:8]}", ttl_seconds=timeout + 60
     )
     return stopped
+
+
+def _worker_may_still_run(sub: Any, fallback_timeout: int) -> bool:
+    """The ONE discriminator for 'is a worker possibly still executing this
+    subtask' — shared by retirement and the watcher's cancelled branch so
+    the two can never disagree (codex P1 round-10: the watcher treated
+    every cancelled row as safe to unlock, including cancelled-while-
+    running ones the retry path had just refused over). completed/failed
+    means the worker terminated itself; started_at is set only by dequeue
+    (cancel stamps completed_at even on running rows, so that field cannot
+    discriminate); past the row's own execution window the worker's
+    wait_for has fired."""
+    if sub is None:
+        return False
+    if getattr(sub, "status", None) in ("completed", "failed"):
+        return False
+    started = getattr(sub, "started_at", None)
+    if started is None:
+        return False
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    window = int(getattr(sub, "timeout_seconds", None) or fallback_timeout) + 60
+    return (datetime.now(UTC) - started).total_seconds() <= window
 
 
 def _parse_iso(value: Any) -> datetime | None:
@@ -1121,6 +1134,22 @@ async def _watch_agent_action(
             if status == "completed":
                 note = "the agent finished without updating the app"
             elif status in ("failed", "cancelled"):
+                # A cancelled row is NOT automatically safe to unlock (codex
+                # P1 round-10): a stale retry/refine retiring a dequeued
+                # action marks it cancelled while its worker keeps
+                # executing. Same discriminator as retirement — clearing
+                # here while the retry path refuses would reopen the
+                # concurrent-turns hole the refusal exists to close.
+                if status == "cancelled":
+                    post = await router._heart.subtasks.get(subtask_id)
+                    if _worker_may_still_run(post, timeout):
+                        await router._service.update_data(
+                            surface_id,
+                            f"/{_ACT_META_KEY}/actionError",
+                            f"{stamp.get('label') or stamp['id']}: still finishing — "
+                            "controls unlock when it stops",
+                        )
+                        return
                 note = f"the action {status}"
             else:
                 note = "no update arrived in time"
