@@ -15,8 +15,16 @@ function seed(surfaceId: string, priority = 0, title?: string, headerTitle?: str
     createSurface: {
       surfaceId,
       catalogId: 'nous-core',
+      // Grammar-shaped: lint_micro_app mandates root = Column whose FIRST
+      // child is the AppHeader, and the chip resolves the header through root
+      // (as Renderer does) rather than scanning by type.
       components: [
-        { id: 'root', component: 'Text', text: `body of ${surfaceId}` },
+        {
+          id: 'root',
+          component: 'Column',
+          children: [...(headerTitle ? ['header'] : []), 'body'],
+        },
+        { id: 'body', component: 'Text', text: `body of ${surfaceId}` },
         ...(headerTitle
           ? [{ id: 'header', component: 'AppHeader', title: headerTitle }]
           : []),
@@ -225,7 +233,8 @@ describe('Companion shell — chip label resolves a bound header title', () => {
         surfaceId: 'nous:chat:micro_app:dyn001',
         catalogId: 'nous-core',
         components: [
-          { id: 'root', component: 'Text', text: 'body' },
+          { id: 'root', component: 'Column', children: ['header', 'body'] },
+          { id: 'body', component: 'Text', text: 'body' },
           { id: 'header', component: 'AppHeader', title: { path: '/meta/name' } },
         ],
         dataModel: { meta: { name: 'Daylight Watch' } },
@@ -260,7 +269,12 @@ describe('Companion shell — chip label edge cases', () => {
         surfaceId: id,
         catalogId: 'nous-core',
         components: [
-          { id: 'root', component: 'Text', text: 'b' },
+          {
+            id: 'root',
+            component: 'Column',
+            children: [...(opts.header !== undefined ? ['header'] : []), 'body'],
+          },
+          { id: 'body', component: 'Text', text: 'b' },
           ...(opts.header !== undefined
             ? [{ id: 'header', component: 'AppHeader', title: opts.header }]
             : []),
@@ -324,7 +338,8 @@ describe('Companion shell — grapheme-cluster truncation', () => {
           surfaceId: id,
           catalogId: 'nous-core',
           components: [
-            { id: 'root', component: 'Text', text: 'b' },
+            { id: 'root', component: 'Column', children: ['header', 'body'] },
+            { id: 'body', component: 'Text', text: 'b' },
             { id: 'header', component: 'AppHeader', title },
           ],
           dataModel: {},
@@ -372,7 +387,8 @@ describe('Companion shell — word boundary measured in graphemes', () => {
           surfaceId: id,
           catalogId: 'nous-core',
           components: [
-            { id: 'root', component: 'Text', text: 'b' },
+            { id: 'root', component: 'Column', children: ['header', 'body'] },
+            { id: 'body', component: 'Text', text: 'b' },
             { id: 'header', component: 'AppHeader', title },
           ],
           dataModel: {},
@@ -390,5 +406,57 @@ describe('Companion shell — word boundary measured in graphemes', () => {
 
     expect(chips).toHaveLength(2);
     expect(chips[0]).not.toBe(chips[1]);
+  });
+});
+
+describe('Companion shell — header resolved through the current root', () => {
+  it('ignores a stale orphan header left behind by a refine', async () => {
+    // codex P2: `updateComponents` merges by id and NEVER deletes, so a refine
+    // that replaces the header under a new id leaves the old one as an
+    // invisible orphan. Scanning by TYPE returned that orphan first (insertion
+    // order), so the chip disagreed with the header actually on screen.
+    store.apply(null, {
+      version: 'v1.0',
+      createSurface: {
+        surfaceId: 'nous:chat:micro_app:orph01',
+        catalogId: 'nous-core',
+        components: [
+          { id: 'root', component: 'Column', children: ['header_old', 'body'] },
+          { id: 'body', component: 'Text', text: 'b' },
+          { id: 'header_old', component: 'AppHeader', title: 'Stale Name' },
+        ],
+        dataModel: {},
+        metadata: { extensions: { com_nous_nonce: 'n1' } },
+      },
+    } as never);
+    // The refine: a new root pointing at a NEW header. The old one lingers.
+    store.apply(null, {
+      version: 'v1.0',
+      updateComponents: {
+        surfaceId: 'nous:chat:micro_app:orph01',
+        components: [
+          { id: 'root', component: 'Column', children: ['header_new', 'body'] },
+          { id: 'header_new', component: 'AppHeader', title: 'Fresh Name' },
+        ],
+      },
+    } as never);
+    store.apply(null, {
+      version: 'v1.0',
+      createSurface: {
+        surfaceId: 'nous:sweep:decision_sweep:bbb002',
+        catalogId: 'nous-core',
+        components: [{ id: 'root', component: 'Text', text: 'b' }],
+        dataModel: {},
+        metadata: { extensions: { com_nous_nonce: 'n2' } },
+      },
+    } as never);
+
+    const { container } = render(Companion);
+    await settle();
+    const chips = [...container.querySelectorAll('.switcher a.chip')].map((c) =>
+      c.textContent?.trim(),
+    );
+    expect(chips).toContain('Fresh Name');
+    expect(chips).not.toContain('Stale Name');
   });
 });

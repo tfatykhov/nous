@@ -75,22 +75,30 @@
    * Months, Forward View". That makes it the better chip label, and it
    * needs no server round-trip: it is already in the components we render. */
   function headerTitle(surface: {
-    components?: Record<string, { component?: string; title?: unknown }>;
+    components?: Record<string, { component?: string; title?: unknown; children?: unknown }>;
     dataModel?: unknown;
   }): string {
-    for (const comp of Object.values(surface.components ?? {})) {
-      if (comp?.component !== 'AppHeader') continue;
-      // Resolve exactly as AppHeaderView does. A bare `typeof === 'string'`
-      // check rejected a bound title ({path} or a function call) that the
-      // header itself renders fine — so the chip fell back to the record
-      // title, or to "app", and DISAGREED with the visible header (codex P2).
-      const ctx = { dataModel: (surface.dataModel ?? {}) as Record<string, unknown>, scope: null };
-      // Trim HERE, not at the call site: a whitespace-only title is truthy, so
-      // `headerTitle(...) || surface.title` would short-circuit on it and skip
-      // a perfectly good record title, landing back on "app" (codex P2).
-      return toDisplayString(resolveDynamic(comp.title, ctx)).trim();
-    }
-    return '';
+    const comps = surface.components ?? {};
+    // Reach the header THROUGH the current root, the way Renderer does.
+    // `updateComponents` merges by id and never deletes, so a refine that
+    // replaces the header under a new id leaves the old one as an invisible
+    // orphan — and scanning by TYPE returns that stale orphan first, since
+    // object insertion order is preserved. The chip would then disagree with
+    // the header actually on screen (codex P2).
+    const rootChildren = comps['root']?.children;
+    const ids = Array.isArray(rootChildren)
+      ? rootChildren.filter((c): c is string => typeof c === 'string')
+      : [];
+    const headerId = ids.find((id) => comps[id]?.component === 'AppHeader');
+    const header = headerId ? comps[headerId] : undefined;
+    if (!header) return '';
+    // Resolve exactly as AppHeaderView does: a bound title ({path} or a
+    // function call) renders fine there, so a `typeof === 'string'` check
+    // would have rejected a title the user can plainly see. Trim HERE, since
+    // a whitespace-only title is truthy and would short-circuit the
+    // record-title fallback, landing back on "app".
+    const ctx = { dataModel: (surface.dataModel ?? {}) as Record<string, unknown>, scope: null };
+    return toDisplayString(resolveDynamic(header.title, ctx)).trim();
   }
 
   function chipLabel(surface: {
