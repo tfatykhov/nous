@@ -151,6 +151,15 @@ async def execute_hardened(
     reason on incomplete_blocked.
     """
     max_attempts: int = settings.subtask_max_attempts
+    # F092.2 (codex P1): a row may cap its own attempts via metadata.
+    # Agent-action subtasks set 1: a validation retry re-runs the WHOLE
+    # objective, so a first attempt that performed the action's external
+    # side effects but emitted a malformed final report would replay
+    # those side effects — one tap must never execute twice. Clamped by
+    # the global setting; never raises it.
+    _row_cap = (getattr(subtask, "metadata_", None) or {}).get("max_attempts")
+    if isinstance(_row_cap, int) and _row_cap >= 1:
+        max_attempts = min(max_attempts, _row_cap)
     min_summary: int = settings.subtask_report_min_summary_chars
 
     collector = SubtaskReportCollector()

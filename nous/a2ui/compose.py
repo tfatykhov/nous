@@ -221,8 +221,12 @@ class SurfaceComposer:
         data_sources: list[dict] | None = None,
         origin: str = "chat",
         priority: int = 0,
+        agent_actions: list[dict] | None = None,
     ) -> ComposedApp:
         data_sources = list(data_sources or [])
+        # F092.2: pre-validated by the TOOL layer (caller input, like
+        # data_sources) — the inner compose LLM never sees or authors these.
+        agent_actions = list(agent_actions or [])
         # 1. Server-resolved data first. An unknown source here is the
         # CALLER's error (the agent declared it), not a repair case.
         source_data = await self._sources.resolve(data_sources)
@@ -264,7 +268,10 @@ class SurfaceComposer:
                 MAX_REPAIRS + 1,
                 errors[:3],
             )
-            return self._fallback(intent, composed_at, data_sources, source_data, origin, priority)
+            return self._fallback(
+                intent, composed_at, data_sources, source_data, origin, priority,
+                agent_actions=agent_actions,
+            )
 
         data_model = self._merge_data_model(parsed, source_data, composed_at)
         provenance = {
@@ -276,9 +283,13 @@ class SurfaceComposer:
             origin=origin,
             title=str(parsed.get("title") or intent)[:200],
             priority=min(int(priority), 1),
-            allowed_actions=["app.close"],
+            # F092.2: app.act joins the allowlist only when the agent declared
+            # actions — allowed_actions is SERVER-constructed, so the compose
+            # LLM cannot widen it (push_built's fail-closed guard holds).
+            allowed_actions=["app.close"] + (["app.act"] if agent_actions else []),
             components=self._with_footer_options(
-                parsed["components"], refine_options, has_sources=bool(data_sources)
+                parsed["components"], refine_options,
+                has_sources=bool(data_sources), agent_actions=agent_actions,
             ),
             data_model=data_model,
             expires_in=None,
@@ -294,6 +305,11 @@ class SurfaceComposer:
             # to today's render (F093 §3.1).
             "theme": str(parsed.get("theme") or _DEFAULT_THEME),
         }
+        if agent_actions:
+            # Full records incl. instruction live here (server truth for
+            # app.act validation + the subtask prompt); the footer gets only
+            # {id, label}.
+            app_spec["agent_actions"] = agent_actions
         built.app_spec = app_spec
         return ComposedApp(built=built, app_spec=app_spec, fallback=False, repairs=repairs)
 
@@ -513,17 +529,31 @@ class SurfaceComposer:
         refine_options: list[dict],
         *,
         has_sources: bool,
+        agent_actions: list[dict] | None = None,
     ) -> list[dict]:
         """The footer renders what the SERVER validated, not what the model
         drew: refineOptions is overwritten from the cleaned list so the
         buttons and the app_spec allowlist cannot diverge, and the refresh
         control is withheld from apps with no sources — refresh on an
         unsourced app could only restamp content that did not move
-        (codex P2)."""
+        (codex P2). F092.2 agentActions follow the same rule: only {id,
+        label} reaches the client (the instruction is server truth), and
+        only via this stamp — the compose LLM cannot author them."""
+        agent_buttons = [
+            {"id": a["id"], "label": a["label"]} for a in (agent_actions or [])
+        ]
         out = []
         for comp in components:
             if comp.get("id") == "footer":
                 comp = {**comp, "refineOptions": refine_options, "showRefresh": has_sources}
+                if agent_buttons:
+                    comp["agentActions"] = agent_buttons
+                else:
+                    # ALWAYS overwrite, never merely add (codex P2): the
+                    # catalog schema admits the prop, so the compose LLM can
+                    # author phantom buttons whose every tap would fail with
+                    # ACTION_NOT_ALLOWED — the server list is the only truth.
+                    comp.pop("agentActions", None)
             out.append(comp)
         return out
 
@@ -535,8 +565,17 @@ class SurfaceComposer:
         source_data: dict,
         origin: str,
         priority: int,
+        agent_actions: list[dict] | None = None,
     ) -> ComposedApp:
-        """Grammar-conforming markdown fallback — degraded, never broken."""
+        """Grammar-conforming markdown fallback — degraded, never broken.
+
+        F092.2: declared agent actions survive the fallback — the action's
+        job is "ask the agent to act on this app", which is exactly what a
+        degraded render most needs (a tap can recompose it into a real one).
+        Dropping them here would also make a refine-that-falls-back silently
+        strip the buttons while app_spec still declares them.
+        """
+        agent_actions = list(agent_actions or [])
         body = f"Could not compose a structured app for:\n\n**{intent}**"
         if source_data:
             body += "\n\nRaw data:\n```\n" + json.dumps(source_data, default=str)[:3000] + "\n```"
@@ -545,7 +584,7 @@ class SurfaceComposer:
             origin=origin,
             title=intent[:120],
             priority=min(int(priority), 1),
-            allowed_actions=["app.close"],
+            allowed_actions=["app.close"] + (["app.act"] if agent_actions else []),
             components=[
                 {
                     "id": "root",
@@ -568,6 +607,11 @@ class SurfaceComposer:
                     "component": "AppFooter",
                     "refineOptions": [],
                     "showRefresh": bool(data_sources),
+                    **(
+                        {"agentActions": [{"id": a["id"], "label": a["label"]} for a in agent_actions]}
+                        if agent_actions
+                        else {}
+                    ),
                 },
             ],
             data_model={_META_KEY: {"composedAt": composed_at}, **source_data},
@@ -581,6 +625,8 @@ class SurfaceComposer:
             "data_sources": data_sources,
             "provenance": {} if source_data else {"body": "model"},
         }
+        if agent_actions:
+            app_spec["agent_actions"] = agent_actions
         built.app_spec = app_spec
         return ComposedApp(built=built, app_spec=app_spec, fallback=True, repairs=MAX_REPAIRS)
 

@@ -76,6 +76,43 @@ class SurfaceService:
         # completed action and contradictory no_objection evidence. One lock
         # registry means expiry waits for in-flight actions and vice versa.
         self._surface_locks: dict[str, _LockEntry] = {}
+        # F092.2: session_id -> monotonic deadline. app.close on a surface
+        # with a running agent action cancels the subtask, but a mid-flight
+        # worker is not preempted (SubtaskManager.cancel contract) — its
+        # compose_surface would land AFTER the close, and dedup matches only
+        # LIVE surfaces, so the completion would recreate the app the user
+        # just closed. Blocking the cancelled subtask's own push session is
+        # the precise guard: legitimate re-creates from chat are untouched.
+        # In-process only (restart loses it) — same class as the action
+        # watcher; the block's whole reason to exist dies with the worker.
+        self._blocked_push_sessions: dict[str, float] = {}
+
+    def block_push_session(self, session_id: str, ttl_seconds: float) -> None:
+        """Refuse push_built from this session for ttl_seconds (F092.2)."""
+        if not session_id:
+            return
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        # Prune on write (codex P2): an entry is otherwise removed only if
+        # ITS exact session is checked after expiry — but a cancelled
+        # queued action never pushes at all, so most entries would live
+        # forever and the map grows unbounded in a long-lived process.
+        # Bounded cost: the map holds one entry per recent retirement.
+        expired = [sid for sid, dl in self._blocked_push_sessions.items() if now >= dl]
+        for sid in expired:
+            self._blocked_push_sessions.pop(sid, None)
+        self._blocked_push_sessions[session_id] = now + ttl_seconds
+
+    def _push_session_blocked(self, session_id: str | None) -> bool:
+        if not session_id:
+            return False
+        deadline = self._blocked_push_sessions.get(session_id)
+        if deadline is None:
+            return False
+        if asyncio.get_running_loop().time() >= deadline:
+            self._blocked_push_sessions.pop(session_id, None)
+            return False
+        return True
 
     @asynccontextmanager
     async def surface_lock(self, surface_id: str) -> AsyncIterator[None]:
@@ -115,16 +152,32 @@ class SurfaceService:
         UNIQUE index on (agent_id, dedup_key) WHERE live (codex P2): the
         loser's insert raises and retries once down the update path.
         """
+        if self._push_session_blocked(session_id):
+            # F092.2: this session belongs to a cancelled agent-action
+            # subtask whose app the user closed mid-action — its completion
+            # push would recreate the closed app (dedup matches live only).
+            raise PermissionError(
+                "the app this action belonged to was closed by the user — "
+                "do not recreate it; end the task without pushing"
+            )
         built.validate()
         if built.kind == "micro_app":
             # F092.1 fail-closed at creation, deliberately a fixed subset
             # check rather than a handler-metadata predicate: the action
             # registry grew 8 → 11 verbs in one PR, and a subset against
-            # {"app.close"} cannot drift with it.
-            forbidden = set(built.allowed_actions) - {"app.close"}
+            # a fixed set cannot drift with it. F092.2 widens the set to
+            # app.act ONLY when the flag is on AND app_spec actually
+            # declares agent_actions — allowed_actions is server-built in
+            # compose(), so this guard is a backstop, not the gate.
+            allowed = {"app.close"}
+            if getattr(self._settings, "a2ui_agent_actions_enabled", False) and (
+                built.app_spec or {}
+            ).get("agent_actions"):
+                allowed.add("app.act")
+            forbidden = set(built.allowed_actions) - allowed
             if forbidden:
                 raise ValueError(
-                    f"micro-app surfaces may only offer app.close, got {sorted(forbidden)}"
+                    f"micro-app surfaces may only offer {sorted(allowed)}, got {sorted(forbidden)}"
                 )
             if built.priority > 1:
                 raise ValueError("micro-apps are never blocking: priority must be 0 or 1")
@@ -255,6 +308,19 @@ class SurfaceService:
         expires_at: datetime | None,
         _locked_surface_id: str | None = None,
     ) -> str:
+        # F092.2 re-check (codex P1): the entry check in push_built runs
+        # before any lock wait or DB work, so a cancelled action's push
+        # could pass it, wait out the dedup lock while app.close blocked
+        # the session and resolved the surface, and then land here with no
+        # live dedup match — inserting a fresh surface and recreating the
+        # app the user closed. Re-checking after the lock wait, immediately
+        # before the transaction, closes both named interleavings
+        # (block-during-lock-wait and block-between-check-and-lookup).
+        if self._push_session_blocked(session_id):
+            raise PermissionError(
+                "the app this action belonged to was closed by the user — "
+                "do not recreate it; end the task without pushing"
+            )
         async with self._db.session() as session:
             existing = None
             if dedup_key:
@@ -283,6 +349,12 @@ class SurfaceService:
 
             if existing is not None:
                 surface_id = existing.surface_id
+                # Captured BEFORE data_model is overwritten: the pending
+                # stamp identifies the action subtask whose recompose this
+                # push may be (see the origin rule below).
+                _old_pending = ((existing.data_model or {}).get("meta") or {}).get(
+                    "pendingAction"
+                )
                 existing.components = built.components
                 existing.data_model = built.data_model
                 existing.title = built.title
@@ -299,7 +371,14 @@ class SurfaceService:
                 # key must read origin="agent" in live_index and the Phase 5
                 # measurement — the row column is authoritative (the origin
                 # embedded in the surface_id is only its minting label).
-                existing.origin = built.origin
+                # ONE exception (F092.2, codex P2): the action subtask's own
+                # recompose runs is_background → origin "agent", but it is a
+                # USER-triggered update of this very app — letting it flip a
+                # chat-origin pull app to "agent" would reclassify pull as
+                # push in the measurement. Recognized by the pushing session
+                # matching the pending stamp's subtask_id.
+                if not self._is_own_action_push(_old_pending, session_id):
+                    existing.origin = built.origin
                 if session_id is not None:
                     existing.session_id = session_id
                 # Fresh clock, NOT the `now` captured in push_built (codex
@@ -639,12 +718,27 @@ class SurfaceService:
     async def resolve(self, surface_id: str, *, status: str = "resolved") -> None:
         """Terminal transition + teardown envelope."""
         envelope = {"version": "v1.0", "deleteSurface": {"surfaceId": surface_id}}
+        cancel_sub: uuid.UUID | None = None
         async with self._db.session() as session:
             surface = await self._get_own(session, surface_id)
             if surface is None:
                 raise KeyError(surface_id)
             if surface.status != "live":
                 return
+            # F092.2 (codex P1): EVERY resolver — app.close, cap eviction in
+            # _reconcile_cap, any future sweep — must retire a running agent
+            # action, or its completion recomposes via the dedup_key and
+            # recreates the surface that was just torn down. Doing it here,
+            # at the single terminal transition, is what makes new resolvers
+            # covered by construction rather than by remembering. The
+            # session BLOCK is an in-process dict write (no connection), so
+            # it lands BEFORE the terminal commit — the dedup window never
+            # opens. The subtask CANCEL opens its own DB session and
+            # therefore runs after this one closes (codex P1 round-11: a
+            # nested session acquisition holds one pooled connection while
+            # waiting for another — 15 concurrent closes could starve the
+            # whole pool).
+            cancel_sub = self._block_pending_action(surface)
             surface.status = status
             surface.resolved_at = datetime.now(UTC)
             row = A2uiOutbox(agent_id=surface.agent_id, surface_id=surface_id, envelope=envelope)
@@ -652,6 +746,58 @@ class SurfaceService:
             await session.commit()
             seq = row.seq
         self._broadcast(seq, envelope)
+        if cancel_sub is not None:
+            subtasks = getattr(self._heart, "subtasks", None) if self._heart else None
+            if subtasks is not None:
+                try:
+                    await subtasks.cancel(cancel_sub)
+                except Exception:
+                    logger.warning(
+                        "F092.2 resolve-time subtask cancel failed", exc_info=True
+                    )
+
+    @staticmethod
+    def _is_own_action_push(pending: Any, session_id: str | None) -> bool:
+        """Is this push the pending agent action's own recompose? (F092.2 —
+        matched by the stamp's subtask_id against the subtask session.)"""
+        if not (isinstance(pending, dict) and pending.get("subtask_id") and session_id):
+            return False
+        try:
+            sub_uuid = uuid.UUID(str(pending["subtask_id"]))
+        except (TypeError, ValueError):
+            return False
+        return session_id == f"subtask-{sub_uuid.hex[:8]}"
+
+    def _block_pending_action(self, surface: A2uiSurface) -> uuid.UUID | None:
+        """Session-block a micro-app's running agent action; return the
+        subtask id to cancel once the caller's DB session has closed.
+
+        Sibling of actions.py's _retire_action_subtask (which the action
+        handlers use with richer context); this is the resolve-time
+        backstop and deliberately lives on the service because the service
+        owns the terminal transition. The block is the deterministic layer
+        (push_built refuses the blocked session either way); the deferred
+        cancel is best-effort.
+        """
+        if (surface.kind or "") != "micro_app":
+            return None
+        pending = ((surface.data_model or {}).get("meta") or {}).get("pendingAction")
+        if not isinstance(pending, dict) or not pending.get("subtask_id"):
+            return None
+        try:
+            sub_uuid = uuid.UUID(str(pending["subtask_id"]))
+        except (TypeError, ValueError):
+            return None
+        timeout = int(getattr(self._settings, "a2ui_agent_action_timeout_seconds", 300))
+        # TTL covers the STAMPED window (codex P2): a restart with a lower
+        # setting must not shrink the block below the persisted row's
+        # actual execution timeout — cancellation does not preempt, and a
+        # worker outliving the block could recreate the closed app.
+        stamped = pending.get("timeout_s")
+        if isinstance(stamped, (int, float)) and stamped > 0:
+            timeout = max(timeout, int(stamped))
+        self.block_push_session(f"subtask-{sub_uuid.hex[:8]}", ttl_seconds=timeout + 60)
+        return sub_uuid
 
     async def expire_sweep(self) -> int:
         """Expire overdue surfaces + prune old rows. Returns surfaces expired.
