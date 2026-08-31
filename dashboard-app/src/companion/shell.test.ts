@@ -251,3 +251,58 @@ describe('Companion shell — chip label resolves a bound header title', () => {
     expect(chips).not.toContain('app');
   });
 });
+
+describe('Companion shell — chip label edge cases', () => {
+  function seedApp(id: string, opts: { header?: unknown; title?: string; dm?: unknown } = {}) {
+    store.apply(null, {
+      version: 'v1.0',
+      createSurface: {
+        surfaceId: id,
+        catalogId: 'nous-core',
+        components: [
+          { id: 'root', component: 'Text', text: 'b' },
+          ...(opts.header !== undefined
+            ? [{ id: 'header', component: 'AppHeader', title: opts.header }]
+            : []),
+        ],
+        dataModel: opts.dm ?? {},
+        metadata: {
+          extensions: {
+            com_nous_nonce: 'n-' + id,
+            ...(opts.title ? { com_nous_title: opts.title } : {}),
+          },
+        },
+      },
+    } as never);
+  }
+
+  it('falls through a whitespace header title to the record title', () => {
+    // codex P2: a whitespace title is TRUTHY, so `headerTitle() || title`
+    // short-circuited on it and the chip landed back on "app".
+    seedApp('nous:chat:micro_app:ws0001', { header: '   ', title: 'Trend Fit' });
+    seedApp('nous:sweep:decision_sweep:bbb002');
+
+    const { container } = render(Companion);
+    const chips = [...container.querySelectorAll('.switcher .chip')].map((c) =>
+      c.textContent?.trim(),
+    );
+    expect(chips).toContain('Trend Fit');
+    expect(chips).not.toContain('app');
+  });
+
+  it('never splits a multi-unit grapheme when truncating', () => {
+    // `slice` counts UTF-16 units, so a cut inside a surrogate pair rendered a
+    // replacement glyph. 30 rockets, no spaces — forces the hard cut.
+    seedApp('nous:chat:micro_app:emo001', { header: '🚀'.repeat(30) });
+    seedApp('nous:sweep:decision_sweep:bbb002');
+
+    const { container } = render(Companion);
+    const chip = [...container.querySelectorAll('.switcher .chip')]
+      .map((c) => c.textContent?.trim())
+      .find((c) => c?.includes('🚀'));
+    expect(chip).toBeDefined();
+    expect(chip).not.toContain('�');
+    // every rocket kept whole
+    expect([...chip!].filter((ch) => ch === '\uD83D' || ch === '\uDE80')).toHaveLength(0);
+  });
+});

@@ -45,8 +45,12 @@
   const CHIP_MAX = 22;
   function shorten(title: string): string {
     const t = title.replace(/\s+/g, ' ').trim();
-    if (t.length <= CHIP_MAX) return t;
-    const cut = t.slice(0, CHIP_MAX);
+    // Count and cut by CODE POINTS: `slice` works in UTF-16 units, so a cut
+    // landing inside an emoji or other surrogate pair split the character and
+    // rendered a replacement glyph (codex P2).
+    const points = [...t];
+    if (points.length <= CHIP_MAX) return t;
+    const cut = points.slice(0, CHIP_MAX).join('');
     const sp = cut.lastIndexOf(' ');
     return (sp >= CHIP_MAX - 8 ? cut.slice(0, sp) : cut).replace(/[\s:,\u2014-]+$/, '') + '\u2026';
   }
@@ -67,7 +71,10 @@
       // header itself renders fine — so the chip fell back to the record
       // title, or to "app", and DISAGREED with the visible header (codex P2).
       const ctx = { dataModel: (surface.dataModel ?? {}) as Record<string, unknown>, scope: null };
-      return toDisplayString(resolveDynamic(comp.title, ctx));
+      // Trim HERE, not at the call site: a whitespace-only title is truthy, so
+      // `headerTitle(...) || surface.title` would short-circuit on it and skip
+      // a perfectly good record title, landing back on "app" (codex P2).
+      return toDisplayString(resolveDynamic(comp.title, ctx)).trim();
     }
     return '';
   }
