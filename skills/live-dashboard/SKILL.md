@@ -309,6 +309,30 @@ Actions survive `refine` and even a `fallback` render (a degraded app most
 needs its "ask the agent" button — a tap can recompose it into a real one).
 They are footer-level only; per-row actions and free-text input are v2.
 
+**On a hand-authored (literal) app the instruction MUST NOT say
+`compose_surface`.** The server's stock action prompt tells the turn to
+recompose that way — correct for an LLM-composed app, destructive for an
+authored tree, which it re-derives from a prose intent (this is how `app.refine`
+destroyed the Italy Trip app on 2026-08-31). Point the instruction at your own
+builder instead:
+
+    run_python: import sys;sys.path.insert(0,'/tmp/nous-workspace/a2ui');
+    import publish_literal as P;P.publish('<path>','<dedup_key>')
+    NEVER call compose_surface - it would replace this authored tree.
+
+The republish still replaces components + dataModel wholesale on the dedup_key,
+so the pendingAction stamp clears exactly as the honesty contract requires.
+
+Declare the actions in the app **module** — an `agent_actions()` beside
+`build()`/`data_sources()` — not at the publish call. A republish then restores
+the buttons from the file, which a 500-char instruction could never re-declare.
+`publish_literal` picks it up and stamps `allowed_actions`, the footer
+`{id,label}` and `app_spec.agent_actions` (instructions stay server-side).
+
+Keep the instruction short by putting the real work in a **versioned script**
+(`sync_only.sh`, `warm_wx.sh`) and naming it — the rationale lives in the
+script's comments where 500 chars cannot reach.
+
 ## Honesty rules the renderer enforces (do not fight them)
 
 - A gap in the data draws a **break in the line**, never a bridge. Do not
@@ -439,6 +463,31 @@ Always close the loop by re-fetching the surface and asserting on lengths:
     # then assert every records key len > 0 and every series key points > 0
 
 Only then report it as done.
+
+### The commonest cause of a wholly-empty app: script-slot contention
+
+An `agent_script` source will not start when
+`run_python_active_runs() >= max_concurrent - INTERACTIVE_RESERVE`
+(live: `4 - 2 = 2`). It yields to interactive use and returns its empty value
+with the reason `"N script slots already in use"`.
+
+This bites hardest on `publish_literal`, which **runs inside a `run_python`
+worker and blocks it for the whole resolve** — so it holds one of the two
+slots itself, leaving exactly one for its own sources. One other concurrent
+script and every source on the surface comes back empty, while the publish
+still reports `lint [] / validate [] / published True`.
+
+Observed twice on `app:italy-vacation` (2026-09-01): both blank republishes
+were caused by *polling the surface with `run_python`* while the action turn
+was republishing. **Never poll with `run_python` during a publish — poll with
+`bash`/`curl`.**
+
+Only a `series` failure carries its reason (records fail to a bare `[]`, reason
+log-only), so one contended series identifies a contended *pass*. `publish_literal`
+now retries the resolve 3× and, if contention persists, **refuses to publish**:
+leaving yesterday's data with an honest upstream failure beats replacing a
+populated app with a blank one. Check `report["empty_sources"]` and
+`report["resolve_attempts"]`.
 
 ## Depth 5 counts from root — a Card can cost you the image
 
