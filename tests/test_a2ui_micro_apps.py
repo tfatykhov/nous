@@ -1308,11 +1308,22 @@ def test_build_prompt_carries_the_catalog_summary(composer: SurfaceComposer) -> 
 
 
 class _FakeFindingStore:
+    """Mirrors the real store: ingest() derives the fingerprint from the
+    finding's own text — the caller never chooses it."""
+
     def __init__(self, fingerprints: list[str]) -> None:
-        self._fps = fingerprints
+        self._fps = list(fingerprints)
+        self.ingested: list[Any] = []
 
     def to_list(self) -> list[dict[str, Any]]:
         return [{"fingerprint": fp, "summary": "x"} for fp in self._fps]
+
+    def ingest(self, finding: Any) -> str:
+        self.ingested.append(finding)
+        fp = finding.fingerprint()
+        if fp not in self._fps:
+            self._fps.append(fp)
+        return "TRIAGE"
 
 
 class _FakeHeartbeatRunner:
@@ -1340,48 +1351,132 @@ def _findings_dispatcher(store: Any):
     return dispatcher, service
 
 
-async def _push_finding(dispatcher: Any, fingerprint: str):
+async def _push_findings(dispatcher: Any, findings: list[dict[str, Any]]):
     """dispatch returns (content, is_error)."""
     return await dispatcher.dispatch(
         "push_surface",
-        {
-            "template": "heartbeat_findings",
-            "params": {"findings": [{"fingerprint": fingerprint, "message": "PR #568 open"}]},
-        },
+        {"template": "heartbeat_findings", "params": {"findings": findings}},
     )
 
 
-async def test_heartbeat_findings_rejects_invented_fingerprint() -> None:
+def _rendered_fingerprints(built: Any) -> set[str]:
+    """Fingerprints the user can actually act on. actions.py gates on the
+    data model AND dispatches on the button's context, so both must agree —
+    assert on the intersection so a mismatch cannot pass."""
+    offered = set((built.data_model or {}).get("findings", {}))
+    on_buttons = {
+        c["action"]["event"]["context"]["fingerprint"]
+        for c in built.components
+        if c.get("component") == "Button" and "fingerprint" in c.get("action", {}).get("event", {}).get("context", {})
+    }
+    assert offered == on_buttons, f"data model {offered} != buttons {on_buttons}"
+    return offered
+
+
+async def test_heartbeat_findings_registers_invented_fingerprint() -> None:
     """The Sep 1 2026 field bug: a card was pushed with the made-up
     fingerprint 'pr-568-open'. It rendered normally and every button
-    dead-ended at "finding 'pr-568-open' not found" on the user's click,
-    because actions.py resolves fingerprints against the live finding
-    store. Reject at push time, not at tap time."""
-    dispatcher, service = _findings_dispatcher(_FakeFindingStore(["f41f9f0af9e54af0"]))
+    dead-ended at "finding 'pr-568-open' not found" on the user's click.
+    Rejecting the push killed the dead button but dropped the item; now the
+    item is REGISTERED and rendered under its real derived fingerprint."""
+    store = _FakeFindingStore(["f41f9f0af9e54af0"])
+    dispatcher, service = _findings_dispatcher(store)
 
-    content, is_error = await _push_finding(dispatcher, "pr-568-open")
+    content, is_error = await _push_findings(
+        dispatcher, [{"fingerprint": "pr-568-open", "message": "PR #568 open"}]
+    )
 
-    assert is_error, "invented fingerprint must be rejected"
-    assert "pr-568-open" in content
-    assert "approval_gate" in content, "must redirect a CHOICE to the right template"
-    assert not service.pushed, "no dead card may reach the user"
+    assert not is_error, content
+    assert service.pushed, "the item must still reach the user"
+    assert len(store.ingested) == 1, "unknown item must be registered, not dropped"
+    rendered = _rendered_fingerprints(service.pushed[0])
+    assert "pr-568-open" not in rendered, "the invented slug must never be rendered"
+    derived = store.ingested[0].fingerprint()
+    assert rendered == {derived}
+    assert derived in {f["fingerprint"] for f in store.to_list()}, "button must resolve"
+
+
+async def test_heartbeat_findings_registers_item_with_no_fingerprint() -> None:
+    """The caller should not have to supply an id at all."""
+    store = _FakeFindingStore([])
+    dispatcher, service = _findings_dispatcher(store)
+
+    content, is_error = await _push_findings(dispatcher, [{"message": "disk 91% full"}])
+
+    assert not is_error, content
+    assert len(store.ingested) == 1
+    assert _rendered_fingerprints(service.pushed[0]) == {store.ingested[0].fingerprint()}
+
+
+async def test_heartbeat_findings_registration_is_idempotent() -> None:
+    """A recurring card re-pushing the same text must not stack duplicates."""
+    store = _FakeFindingStore([])
+    dispatcher, _service = _findings_dispatcher(store)
+
+    await _push_findings(dispatcher, [{"message": "disk 91% full"}])
+    await _push_findings(dispatcher, [{"message": "disk 91% full"}])
+
+    assert len({f.fingerprint() for f in store.ingested}) == 1
+    assert len(store.to_list()) == 1
+
+
+async def test_heartbeat_findings_maps_unsupported_urgency() -> None:
+    """Finding.urgency is a 3-value Literal; the card showed 'medium'."""
+    store = _FakeFindingStore([])
+    dispatcher, _service = _findings_dispatcher(store)
+
+    _content, is_error = await _push_findings(
+        dispatcher, [{"message": "PR #568 open", "urgency": "medium"}]
+    )
+
+    assert not is_error
+    assert store.ingested[0].urgency == "normal"
+
+
+async def test_heartbeat_findings_keeps_agent_items_out_of_check_buckets() -> None:
+    """check_name keys escalation and tuner reputation — agent-authored
+    items must not pollute a real check's bucket."""
+    store = _FakeFindingStore([])
+    dispatcher, _service = _findings_dispatcher(store)
+
+    await _push_findings(dispatcher, [{"message": "PR #568 open", "check": "facts"}])
+
+    assert store.ingested[0].check_name == "agent:facts"
+
+
+async def test_heartbeat_findings_rejects_blank_message() -> None:
+    """An item registered by its own text needs text."""
+    store = _FakeFindingStore([])
+    dispatcher, service = _findings_dispatcher(store)
+
+    _content, is_error = await _push_findings(dispatcher, [{"fingerprint": "made-up"}])
+
+    assert is_error
+    assert not service.pushed
 
 
 async def test_heartbeat_findings_accepts_real_fingerprint() -> None:
-    """The guard must not break legitimate heartbeat triage."""
-    dispatcher, service = _findings_dispatcher(_FakeFindingStore(["f41f9f0af9e54af0"]))
+    """A genuine heartbeat finding must pass through untouched."""
+    store = _FakeFindingStore(["f41f9f0af9e54af0"])
+    dispatcher, service = _findings_dispatcher(store)
 
-    content, is_error = await _push_finding(dispatcher, "f41f9f0af9e54af0")
+    content, is_error = await _push_findings(
+        dispatcher, [{"fingerprint": "f41f9f0af9e54af0", "message": "PR #568 open"}]
+    )
 
     assert not is_error, f"real fingerprint must pass, got {content}"
-    assert service.pushed, "a valid finding card must actually be pushed"
+    assert service.pushed
+    assert not store.ingested, "an existing finding must not be re-registered"
+    assert _rendered_fingerprints(service.pushed[0]) == {"f41f9f0af9e54af0"}
 
 
 async def test_heartbeat_findings_rejected_when_store_missing() -> None:
     """No finding store == every button fails; the card is dead on arrival."""
     dispatcher, service = _findings_dispatcher(None)
 
-    _content, is_error = await _push_finding(dispatcher, "f41f9f0af9e54af0")
+    _content, is_error = await _push_findings(
+        dispatcher, [{"fingerprint": "f41f9f0af9e54af0", "message": "x"}]
+    )
 
     assert is_error
     assert not service.pushed

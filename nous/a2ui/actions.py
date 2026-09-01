@@ -567,7 +567,17 @@ def _register_default_handlers(router: ActionRouter) -> None:
             return ActionResult(ok=False, message=f"finding {fingerprint!r} is not on this surface")
         ok = getattr(store, verb)(fingerprint)
         if not ok:
-            return ActionResult(ok=False, message=f"finding {fingerprint!r} not found")
+            # The store is in-memory (F034.1) and a surface lives 72h, so a
+            # card can outlive the findings it renders across a restart. Say
+            # that, rather than a bare "not found" the user can't act on.
+            return ActionResult(
+                ok=False,
+                message=(
+                    f"finding {fingerprint[:12]} is no longer tracked "
+                    "(the heartbeat finding store resets on restart) — "
+                    "nothing to triage"
+                ),
+            )
         if verb == "resolve":
             try:
                 from nous.heartbeat.schemas import OutcomeSignal

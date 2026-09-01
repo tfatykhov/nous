@@ -45,8 +45,18 @@ _PUSH_SURFACE_SCHEMA = {
                 "action_review: post-hoc review of an action already taken "
                 "(params: title, did, why, cost, compensation={revertible,"
                 "handler,note}, trace_id). "
-                "heartbeat_findings: triage list (params: findings=[{"
-                "fingerprint,message,urgency,check}], title). "
+                "heartbeat_findings: triage list whose buttons are FIXED "
+                "to Acknowledge/Resolve/Dismiss (params: findings=[{message,"
+                "urgency,check,fingerprint?}], title). Use it for items you "
+                "want to TRIAGE, never to ask a question — 'Acknowledge' is "
+                "not an answer to 'A or B'. Offer a CHOICE between "
+                "alternatives with approval_gate options=[{id,label}] "
+                "instead. Pass a 16-hex fingerprint from GET /heartbeat/"
+                "findings to triage an existing heartbeat finding; omit it "
+                "and the item is registered as a new tracked finding under "
+                "its own message text so its buttons work too. Never invent "
+                "a fingerprint: they are derived, not chosen, and a made-up "
+                "one is ignored. "
                 "decision_sweep: unreviewed-decision review cards, ALWAYS "
                 "self-sourced from the brain — decision rows in params are "
                 "ignored (optional: max_age_days, max_decisions, title). "
@@ -331,6 +341,11 @@ def _intent_slug(intent: str) -> str:
     return f"{slug[:40] or 'app'}-{digest}"
 
 
+_FINDING_URGENCIES = ("high", "normal", "low")
+_URGENCY_ALIASES = {"medium": "normal", "moderate": "normal", "critical": "high",
+                    "urgent": "high", "info": "low", "informational": "low"}
+
+
 def register_a2ui_tools(
     dispatcher: ToolDispatcher,
     surface_service: Any,
@@ -363,14 +378,17 @@ def register_a2ui_tools(
             # default rather than bouncing the model.
             dedup_key = "heartbeat:findings"
 
-        # Fingerprints MUST exist in the live finding store (F092 P1).
-        # This template is thin presentation over the F034.1 lifecycle: its
-        # ONLY verbs are acknowledge/resolve/dismiss against a fingerprint
-        # the heartbeat runner already tracks. A caller-invented id renders
-        # a perfectly normal card whose every button dead-ends at "finding
-        # not found" on the USER's click — the same fabricate-over-a-real-id
-        # hazard decision_sweep and dag_monitor self-source to prevent. Fail
-        # here, loudly, on the push instead of silently on the tap.
+        # Every rendered button MUST resolve against the live finding store
+        # (F092 P1). This template is thin presentation over the F034.1
+        # lifecycle: its ONLY verbs are acknowledge/resolve/dismiss against a
+        # fingerprint the store already tracks, and Finding.fingerprint() is
+        # DERIVED (sha256 of check:source:summary) — a caller cannot choose
+        # one. A hand-written slug therefore renders a perfectly normal card
+        # whose every button dead-ends at "not found" on the USER's click.
+        # Rejecting the push fixed the dead button but excluded the item from
+        # the card entirely. So: adopt a real fingerprint when the caller
+        # supplies one, otherwise REGISTER the item as a tracked finding and
+        # render its derived fingerprint. All items get working buttons.
         if template == "heartbeat_findings":
             findings = params.get("findings") or []
             if not findings:
@@ -387,17 +405,51 @@ def register_a2ui_tools(
                 known = {str(f.get("fingerprint")) for f in store.to_list()}
             except Exception as exc:  # pragma: no cover - defensive
                 return _tool_error(f"Could not read the finding store: {exc}")
-            bogus = [str(f.get("fingerprint")) for f in findings if str(f.get("fingerprint")) not in known]
-            if bogus:
-                return _tool_error(
-                    "Unknown finding fingerprint(s): "
-                    + ", ".join(repr(b) for b in bogus[:5])
-                    + ". heartbeat_findings only triages findings the heartbeat runner "
-                    "already tracks (16-hex fingerprints from GET /heartbeat/findings); "
-                    "its buttons are fixed to acknowledge/resolve/dismiss. To offer a "
-                    "CHOICE between alternatives, push template='approval_gate' with "
-                    "options=[{id,label}] instead."
+
+            from nous.heartbeat.schemas import Finding as _Finding
+
+            normalized: list[dict] = []
+            for item in findings:
+                row = dict(item)
+                fp = str(row.get("fingerprint") or "")
+                if fp and fp in known:
+                    normalized.append(row)
+                    continue
+                message = str(row.get("message") or "").strip()
+                if not message:
+                    return _tool_error(
+                        "Every finding needs a non-empty 'message': an item with no "
+                        "known fingerprint is registered under its own text, so blank "
+                        "text leaves nothing to track."
+                    )
+                # Finding.urgency is a 3-value Literal; the model reaches for
+                # "medium"/"critical" often enough to be worth mapping rather
+                # than bouncing.
+                urgency = str(row.get("urgency") or "normal").strip().lower()
+                if urgency not in _FINDING_URGENCIES:
+                    urgency = _URGENCY_ALIASES.get(urgency, "normal")
+                # Namespaced check_name keeps agent-authored items out of the
+                # real checks' escalation and tuner-reputation buckets, which
+                # are keyed by check_name.
+                raw_check = str(row.get("check") or "").strip()
+                finding = _Finding(
+                    source=raw_check or "agent",
+                    summary=message,
+                    urgency=urgency,
+                    check_name=f"agent:{raw_check or 'adhoc'}",
                 )
+                try:
+                    # Idempotent: the fingerprint derives from the text, so a
+                    # recurring card re-pushing the same item bumps seen_count
+                    # instead of duplicating it.
+                    store.ingest(finding)
+                except Exception as exc:  # pragma: no cover - defensive
+                    return _tool_error(f"Could not register finding {message[:40]!r}: {exc}")
+                row["fingerprint"] = finding.fingerprint()
+                row["urgency"] = urgency
+                known.add(row["fingerprint"])
+                normalized.append(row)
+            params["findings"] = normalized
 
         # Self-sourcing templates — ALWAYS, not as a fallback (codex P1 x2):
         # the DB is the only source of truth for actionable rows. A caller-
