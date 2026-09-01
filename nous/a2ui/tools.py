@@ -337,6 +337,7 @@ def register_a2ui_tools(
     brain: Any = None,
     dag_store: Any = None,
     composer: Any = None,
+    heartbeat_runner: Any = None,
 ) -> None:
     """Register the push_surface tool against a live SurfaceService.
 
@@ -361,6 +362,42 @@ def register_a2ui_tools(
             # exactly the spam dedup exists to prevent. Derive the stable
             # default rather than bouncing the model.
             dedup_key = "heartbeat:findings"
+
+        # Fingerprints MUST exist in the live finding store (F092 P1).
+        # This template is thin presentation over the F034.1 lifecycle: its
+        # ONLY verbs are acknowledge/resolve/dismiss against a fingerprint
+        # the heartbeat runner already tracks. A caller-invented id renders
+        # a perfectly normal card whose every button dead-ends at "finding
+        # not found" on the USER's click — the same fabricate-over-a-real-id
+        # hazard decision_sweep and dag_monitor self-source to prevent. Fail
+        # here, loudly, on the push instead of silently on the tap.
+        if template == "heartbeat_findings":
+            findings = params.get("findings") or []
+            if not findings:
+                return _tool_error(
+                    "heartbeat_findings needs a non-empty findings list."
+                )
+            store = getattr(heartbeat_runner, "finding_store", None) if heartbeat_runner else None
+            if store is None:
+                return _tool_error(
+                    "heartbeat_findings is unavailable: no live finding store, so "
+                    "every button on the card would fail. Use a different template."
+                )
+            try:
+                known = {str(f.get("fingerprint")) for f in store.to_list()}
+            except Exception as exc:  # pragma: no cover - defensive
+                return _tool_error(f"Could not read the finding store: {exc}")
+            bogus = [str(f.get("fingerprint")) for f in findings if str(f.get("fingerprint")) not in known]
+            if bogus:
+                return _tool_error(
+                    "Unknown finding fingerprint(s): "
+                    + ", ".join(repr(b) for b in bogus[:5])
+                    + ". heartbeat_findings only triages findings the heartbeat runner "
+                    "already tracks (16-hex fingerprints from GET /heartbeat/findings); "
+                    "its buttons are fixed to acknowledge/resolve/dismiss. To offer a "
+                    "CHOICE between alternatives, push template='approval_gate' with "
+                    "options=[{id,label}] instead."
+                )
 
         # Self-sourcing templates — ALWAYS, not as a fallback (codex P1 x2):
         # the DB is the only source of truth for actionable rows. A caller-

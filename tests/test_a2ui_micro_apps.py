@@ -1300,3 +1300,88 @@ def test_build_prompt_carries_the_catalog_summary(composer: SurfaceComposer) -> 
     # before the source-data block.
     assert prompt.index("Hard rules") < prompt.index(summary)
     assert prompt.index(summary) < prompt.index("Server-resolved data")
+
+
+# ---------------------------------------------------------------------------
+# heartbeat_findings fingerprint validation (Sep 1 2026 field bug)
+# ---------------------------------------------------------------------------
+
+
+class _FakeFindingStore:
+    def __init__(self, fingerprints: list[str]) -> None:
+        self._fps = fingerprints
+
+    def to_list(self) -> list[dict[str, Any]]:
+        return [{"fingerprint": fp, "summary": "x"} for fp in self._fps]
+
+
+class _FakeHeartbeatRunner:
+    def __init__(self, store: Any) -> None:
+        self.finding_store = store
+
+
+class _PushBuiltService:
+    def __init__(self) -> None:
+        self.pushed: list[Any] = []
+
+    async def push_built(self, built: Any, **kwargs: Any) -> str:
+        self.pushed.append(built)
+        return "surface-123"
+
+
+def _findings_dispatcher(store: Any):
+    from nous.a2ui.tools import register_a2ui_tools
+    from nous.api.tools import ToolDispatcher
+
+    dispatcher = ToolDispatcher()
+    service = _PushBuiltService()
+    runner = _FakeHeartbeatRunner(store) if store is not None else None
+    register_a2ui_tools(dispatcher, service, heartbeat_runner=runner)
+    return dispatcher, service
+
+
+async def _push_finding(dispatcher: Any, fingerprint: str):
+    """dispatch returns (content, is_error)."""
+    return await dispatcher.dispatch(
+        "push_surface",
+        {
+            "template": "heartbeat_findings",
+            "params": {"findings": [{"fingerprint": fingerprint, "message": "PR #568 open"}]},
+        },
+    )
+
+
+async def test_heartbeat_findings_rejects_invented_fingerprint() -> None:
+    """The Sep 1 2026 field bug: a card was pushed with the made-up
+    fingerprint 'pr-568-open'. It rendered normally and every button
+    dead-ended at "finding 'pr-568-open' not found" on the user's click,
+    because actions.py resolves fingerprints against the live finding
+    store. Reject at push time, not at tap time."""
+    dispatcher, service = _findings_dispatcher(_FakeFindingStore(["f41f9f0af9e54af0"]))
+
+    content, is_error = await _push_finding(dispatcher, "pr-568-open")
+
+    assert is_error, "invented fingerprint must be rejected"
+    assert "pr-568-open" in content
+    assert "approval_gate" in content, "must redirect a CHOICE to the right template"
+    assert not service.pushed, "no dead card may reach the user"
+
+
+async def test_heartbeat_findings_accepts_real_fingerprint() -> None:
+    """The guard must not break legitimate heartbeat triage."""
+    dispatcher, service = _findings_dispatcher(_FakeFindingStore(["f41f9f0af9e54af0"]))
+
+    content, is_error = await _push_finding(dispatcher, "f41f9f0af9e54af0")
+
+    assert not is_error, f"real fingerprint must pass, got {content}"
+    assert service.pushed, "a valid finding card must actually be pushed"
+
+
+async def test_heartbeat_findings_rejected_when_store_missing() -> None:
+    """No finding store == every button fails; the card is dead on arrival."""
+    dispatcher, service = _findings_dispatcher(None)
+
+    _content, is_error = await _push_finding(dispatcher, "f41f9f0af9e54af0")
+
+    assert is_error
+    assert not service.pushed
