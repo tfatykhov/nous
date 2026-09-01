@@ -479,6 +479,21 @@ async def test_companion_redirects_to_the_built_entry(
     assert response.headers["location"] == "/dashboard/v2/companion.html"
 
 
+async def test_root_redirects_to_the_dashboard(
+    dashboard_dist_present: None, brain, heart, cognitive, db, settings
+) -> None:
+    """The oauth2-proxy/Traefik front door returns users to the URL they
+    originally requested — for a bare hostname that is `/`, which 404'd
+    and made every post-login visit start with typing /dashboard."""
+    app = create_app(MockAgentRunner(), brain, heart, cognitive, db, settings)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/")
+
+    assert response.status_code in (302, 307)
+    assert response.headers["location"].startswith("/dashboard/v2/")
+
+
 async def test_companion_per_app_deep_link_redirects_into_the_hash_router(
     dashboard_dist_present: None, brain, heart, cognitive, db, settings
 ) -> None:
