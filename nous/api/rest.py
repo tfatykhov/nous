@@ -3244,6 +3244,13 @@ def create_app(
         # variants listed explicitly to avoid auto-slash-redirect ambiguity.
         routes.append(Route("/dashboard", _dashboard_redirect))
         routes.append(Route("/dashboard/", _dashboard_redirect))
+        # Root lands on the dashboard: the oauth2-proxy/Traefik front door
+        # returns users to the URL they originally requested — for a bare
+        # `nous.fatykhov.us` that is `/`, which otherwise 404s and makes
+        # every post-login visit start with typing /dashboard by hand.
+        # Exact-match Route, so no API path is shadowed; guarded by the
+        # build-exists check like the other dashboard routes.
+        routes.append(Route("/", _dashboard_redirect))
         # F092: companion entry — both slash variants, exact-match Routes
         # (same rationale as the /dashboard pair above).
         routes.append(Route("/companion", _companion_redirect))
