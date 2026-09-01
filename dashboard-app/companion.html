@@ -3,7 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/dashboard/v2/favicon.svg" />
-    <link rel="manifest" href="/dashboard/v2/companion.webmanifest" />
+    <!-- use-credentials is LOAD-BEARING behind oauth2-proxy: browsers fetch
+         the manifest WITHOUT cookies by default, so the proxy answered 401,
+         Chrome concluded there is no valid manifest, and Add-to-Home-Screen
+         silently degraded to a browser-tab bookmark (prod diagnosis
+         2026-09-01). With use-credentials the fetch carries the session
+         cookie of the already-authenticated user. Icons are still fetched
+         uncredentialed by the browser process — those need a proxy
+         skip-auth rule (see F092.2 deploy notes). -->
+    <link rel="manifest" href="/dashboard/v2/companion.webmanifest" crossorigin="use-credentials" />
     <link rel="apple-touch-icon" sizes="180x180" href="/dashboard/v2/icons/apple-touch-icon.png" />
     <!-- Without apple-mobile-web-app-capable, iOS/iPadOS "Add to Home Screen"
          creates a BOOKMARK that opens in a Safari tab — the manifest's
