@@ -49,6 +49,15 @@
     const resolved = resolveDynamic(comp.items, ctx);
     return splitTruncation(Array.isArray(resolved) ? resolved : []);
   });
+  // A ScoreCard row is "label + figure" by default, and .rv is styled as one:
+  // right-aligned, tabular, semibold mono. Prose values ("deposit paid ·
+  // EUR811.44 balance at check-in") in that treatment wrap into a right-aligned
+  // block, which steals the whole row and squeezes the label into a ragged
+  // 3-line column (browser check 2026-09-02). When ANY row is prose the card
+  // switches to stacked rows for ALL of them: mixed modes inside one card read
+  // as breakage, and consistency beats a per-row optimum.
+  const proseRows = $derived(rows.some((r) => r.value.length > 16));
+
   const rows = $derived.by((): Row[] => {
     return split.rows.map((row) => {
       const r = (typeof row === 'object' && row !== null ? row : {}) as Record<string, unknown>;
@@ -71,7 +80,7 @@
     {#if caption}<div class="caption">{caption}</div>{/if}
   {/if}
   {#if rows.length > 0}
-    <ul>
+    <ul class:prose={proseRows}>
       {#each rows as row, i (i)}
         <li style:--row-ink={row.ink}>
           <span class="rl">{row.label}</span>
@@ -190,6 +199,25 @@
     font-variant-numeric: tabular-nums;
     font-size: 0.8rem;
     font-weight: 600;
+  }
+
+  /* Stacked mode: label above, value below, both full width and left-aligned,
+     value in the UI face because it is a sentence, not a figure. */
+  ul.prose li {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.1rem;
+  }
+  ul.prose .rl {
+    flex: 1 1 auto;
+  }
+  ul.prose .rv {
+    text-align: left;
+    margin-left: 0;
+    font-family: var(--font-ui);
+    font-variant-numeric: normal;
+    font-weight: 500;
+    font-size: 0.82rem;
   }
   .note,
   .omitted {
