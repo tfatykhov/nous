@@ -263,6 +263,7 @@ def AppHeader(
     composedAt: Any,
     subtitle: Any = None,
     staleAfterS: float | None = None,
+    note: Any = None,
 ) -> dict:
     return _clean(
         {
@@ -272,6 +273,7 @@ def AppHeader(
             "subtitle": subtitle,
             "composedAt": composedAt,
             "staleAfterS": staleAfterS,
+            "note": note,
         }
     )
 
@@ -294,6 +296,7 @@ def Section(
     child: str,
     provenance: str | None = None,
     layout: str | None = None,
+    caption: Any = None,
 ) -> dict:
     return _clean(
         {
@@ -303,6 +306,7 @@ def Section(
             "child": child,
             "provenance": provenance,
             "layout": layout,
+            "caption": caption,
         }
     )
 
@@ -318,8 +322,105 @@ def Timeline(id: str, *, items: Any) -> dict:
 # --- F094 chart primitives (binding-mandatory; renderer-owned SVG) --------
 
 
-def Sparkline(id: str, *, path: str, label: str | None = None, tone: str | None = None) -> dict:
-    return _clean({"id": id, "component": "Sparkline", "path": path, "label": label, "tone": tone})
+def Sparkline(
+    id: str,
+    *,
+    path: str,
+    label: str | None = None,
+    tone: str | None = None,
+    trendline: bool | None = None,
+) -> dict:
+    return _clean(
+        {
+            "id": id,
+            "component": "Sparkline",
+            "path": path,
+            "label": label,
+            "tone": tone,
+            "trendline": trendline,
+        }
+    )
+
+
+# --- F096 report vocabulary (tone ∈ neutral|ok|warn|crit; values preformatted) --
+
+
+def MetricCard(
+    id: str,
+    *,
+    label: Any,
+    value: Any,
+    unit: Any = None,
+    delta: Any = None,
+    tone: str | None = None,
+    caption: Any = None,
+    trend: str | None = None,
+    trendline: bool | None = None,
+    footnote: Any = None,
+) -> dict:
+    return _clean(
+        {
+            "id": id,
+            "component": "MetricCard",
+            "label": label,
+            "value": value,
+            "unit": unit,
+            "delta": delta,
+            "tone": tone,
+            "caption": caption,
+            "trend": trend,
+            "trendline": trendline,
+            "footnote": footnote,
+        }
+    )
+
+
+def ScoreCard(
+    id: str,
+    *,
+    title: Any,
+    status: Any,
+    tone: str | None = None,
+    value: Any = None,
+    unit: Any = None,
+    caption: Any = None,
+    items: Any = None,
+    note: Any = None,
+) -> dict:
+    return _clean(
+        {
+            "id": id,
+            "component": "ScoreCard",
+            "title": title,
+            "status": status,
+            "tone": tone,
+            "value": value,
+            "unit": unit,
+            "caption": caption,
+            "items": items,
+            "note": note,
+        }
+    )
+
+
+def DeltaList(id: str, *, rows: Any, empty_text: str | None = None) -> dict:
+    return _clean({"id": id, "component": "DeltaList", "rows": rows, "emptyText": empty_text})
+
+
+def DataTable(id: str, *, columns: list[dict], rows: Any, empty_text: str | None = None) -> dict:
+    return _clean(
+        {
+            "id": id,
+            "component": "DataTable",
+            "columns": columns,
+            "rows": rows,
+            "emptyText": empty_text,
+        }
+    )
+
+
+def ChipRow(id: str, *, items: Any) -> dict:
+    return {"id": id, "component": "ChipRow", "items": items}
 
 
 def LineChart(

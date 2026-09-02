@@ -306,8 +306,10 @@ helper returns the serialized size of what it kept so `spent` stays exact.
 **Budget arithmetic the recipe must respect.** At the default 12k per-source budget a 17-metric
 source with 56-point sparks lands at ~8–12 points per spark after fitting — too coarse for a
 trendline or a focus window. So the recipe (§8.3) builds **one source per section panel**
-(4–6 metrics each): six metrics × 56 date-stamped points ≈ 10.3k + fields ≈ 11.7k, which fits
-undownsampled; four such panels ≈ 40k, the surface total. AC4 states the expected points.
+(4–6 metrics each). Measured 2026-09-01: a fully-captioned record with a 56-point date-stamped
+spark serializes to ~2.06k (`json.dumps` escapes `↓ → ·` to `\uXXXX`), so **five** metrics
+(~10.3k) fit untouched and **six** (~12.4k) lose at most a couple of points per spark — never a
+record. Four such panels ≈ 40k, the surface total. AC4 states the expected points.
 
 ### 6.2 `to_series(..., focus_from=)`
 New keyword; stamps `meta.focus_from = _iso(focus_from)` when given. Documented in the skill recipe.
@@ -457,7 +459,8 @@ recipe.
    keeps every record with downsampled sparks (`meta.downsampled_from` set); a list that cannot
    fit even at the 2-point minimum pops records, with the marker; a record carrying a malformed
    nested series (`points: null`, `meta: "bad"`) leaves `resolve()` returning, never raising.
-   A six-metric, 56-point, date-stamped source fits the 12k per-source budget undownsampled.
+   A five-metric, 56-point, date-stamped, fully-captioned source fits the 12k per-source
+   budget undownsampled; a six-metric one keeps all six records at ≥50 points each.
 5. **Focus window.** `to_series(..., focus_from=date(...))` stores a string; it survives
    `_downsample_series`; `readSeries` yields `focusFrom`; the partial emits the shaded `<rect>`
    from the first point at or after it.

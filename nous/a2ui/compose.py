@@ -36,7 +36,7 @@ from nous.handlers import call_background_llm
 
 from .catalog_summary import catalog_property_summary
 from .dsl import BuiltSurface, SurfaceValidationError
-from .grammar import lint_micro_app
+from .grammar import _children_of, lint_micro_app
 from .sources import SourceRegistry, UnknownSourceError, is_series
 
 logger = logging.getLogger(__name__)
@@ -631,13 +631,41 @@ class SurfaceComposer:
         return ComposedApp(built=built, app_spec=app_spec, fallback=True, repairs=MAX_REPAIRS)
 
 
-_CHART_COMPONENTS = frozenset({"Sparkline", "LineChart", "BarChart"})
+# F094 charts + F096 MetricCard.trend: the ONE string-path prop each carries
+# (a bare string, not a {path:…} DynamicValue). The series-shape rule runs on
+# every entry; `_collect_bindings` counts them for the unread-source rule.
+_SERIES_PATH_PROPS: dict[str, str] = {
+    "Sparkline": "path",
+    "LineChart": "path",
+    "BarChart": "path",
+    "MetricCard": "trend",
+}
+_CHART_COMPONENTS = frozenset(_SERIES_PATH_PROPS)
+# Components that read the default `v` key — a multi-series (`keys`) source
+# renders "no data" on them despite valid rows, so it is named at compose.
+_SINGLE_VALUE_CONSUMERS = frozenset({"Sparkline", "BarChart", "MetricCard"})
+# F096 §7.2 array rule: the DynamicValue prop each list component expects to
+# resolve to an array of row OBJECTS. Timeline/KeyValueTable join because they
+# are the same class (bound to a series they rendered nothing, silently).
+_ARRAY_VALUE_PROPS: dict[str, str] = {
+    "DeltaList": "rows",
+    "DataTable": "rows",
+    "ChipRow": "items",
+    "ScoreCard": "items",
+    "Timeline": "items",
+    "KeyValueTable": "rows",
+}
+# Data props that may legitimately resolve to NOTHING for an item: a count
+# mixed into a grid of trended metrics has no `trend`; a goal with no
+# evidence rows has no `items`. Absent/None is a STATE there, not an error.
+_OPTIONAL_DATA_PROPS = frozenset({("MetricCard", "trend"), ("ScoreCard", "items")})
 
 
 def _collect_bindings(components: list[dict]) -> list[str]:
     """Every data-model path any component binds — DynamicValue {path:…}
-    anywhere in the component, a chart's string `path`, and a Repeat
-    template's `path`. Used by the unread-source and over-capacity rules."""
+    anywhere in the component, a chart's string `path` (or a MetricCard's
+    `trend`), and a Repeat template's `path`. Used by the unread-source and
+    over-capacity rules."""
     paths: list[str] = []
 
     def walk(value: Any) -> None:
@@ -653,9 +681,11 @@ def _collect_bindings(components: list[dict]) -> list[str]:
 
     for comp in components:
         walk(comp)
-        # A chart's `path` is a plain string prop, not a {path:…} binding.
-        if comp.get("component") in _CHART_COMPONENTS and isinstance(comp.get("path"), str):
-            paths.append(comp["path"])
+        # A chart's `path` / a MetricCard's `trend` is a plain string prop,
+        # not a {path:…} binding.
+        prop = _SERIES_PATH_PROPS.get(comp.get("component"))
+        if prop is not None and isinstance(comp.get(prop), str):
+            paths.append(comp[prop])
     return paths
 
 
@@ -685,20 +715,6 @@ def _is_nonempty(value: Any) -> bool:
     return value is not None
 
 
-def _child_ids(comp: dict) -> list[str]:
-    """Component ids this component references — a `child` string, a `children`
-    list of strings, or a Repeat template's `children.componentId`."""
-    out: list[str] = []
-    if isinstance(comp.get("child"), str):
-        out.append(comp["child"])
-    children = comp.get("children")
-    if isinstance(children, list):
-        out += [c for c in children if isinstance(c, str)]
-    elif isinstance(children, dict) and isinstance(children.get("componentId"), str):
-        out.append(children["componentId"])
-    return out
-
-
 def _containing_templates(comp_id: str, by_id: dict[str, dict]) -> list[str]:
     """The source paths of every Repeat template whose subtree contains
     ``comp_id``. A Repeat template is a component whose ``children`` is a
@@ -706,7 +722,16 @@ def _containing_templates(comp_id: str, by_id: dict[str, dict]) -> list[str]:
     (pointer.ts `absolute`). More than one means NESTED scopes — the renderer
     composes each template path against its parent scope, which this static
     resolver does not model, so a nested chart is left to the renderer rather
-    than validated against a wrong path (codex P2)."""
+    than validated against a wrong path (codex P2).
+
+    The subtree walk is the grammar's ``_children_of`` — child, children,
+    trigger, content AND tabs[].child. A chart-only walker that followed only
+    child/children (F096 review) would leave a KeyValueTable inside a
+    ``Modal.content`` inside a Repeat outside its template, resolve its
+    relative path from ROOT and false-reject a shape the prompt itself
+    recommends. One walker for the grammar and the resolver, so they cannot
+    disagree.
+    """
     found: list[str] = []
     for comp in by_id.values():
         children = comp.get("children")
@@ -723,10 +748,117 @@ def _containing_templates(comp_id: str, by_id: dict[str, dict]) -> list[str]:
             seen.add(cid)
             node = by_id.get(cid)
             if node:
-                stack.extend(_child_ids(node))
+                stack.extend(_children_of(node))
         if comp_id in seen:
             found.append(children["path"])
     return found
+
+
+def _resolve_path_targets(
+    comp: dict, path: str, by_id: dict[str, dict], full_model: dict
+) -> list[tuple[str, Any]] | None:
+    """The ONE resolver behind every data-aware rule (F096 §7.2): where a
+    component's path prop lands, resolved the way the renderer resolves it
+    (pointer.ts `absolute`).
+
+    - an absolute ``/path`` → one target from root;
+    - a relative path with no enclosing Repeat → one target, ``/path`` from root;
+    - inside exactly one Repeat template → one target PER ITEM (validating only
+      item 0 let a later heterogeneous item through — codex round 7);
+    - nested templates, or a template whose array has no items yet → ``None``
+      (left to the renderer — nothing to validate against).
+    """
+    if path.startswith("/"):
+        return [(path, _get_path(full_model, path))]
+    templates = _containing_templates(str(comp.get("id", "")), by_id)
+    if len(templates) > 1:
+        return None
+    if not templates:
+        return [("/" + path, _get_path(full_model, "/" + path))]
+    source_path = templates[0]
+    items = _get_path(full_model, source_path)
+    if not isinstance(items, list) or not items:
+        return None
+    return [
+        (f"{source_path}/{i}/{path}", _get_path(full_model, f"{source_path}/{i}/{path}"))
+        for i in range(len(items))
+    ]
+
+
+def _shape_name(value: Any) -> str:
+    if is_series(value):
+        return "a series"
+    if isinstance(value, list):
+        return "an array"
+    if value is None:
+        return "nothing"
+    return type(value).__name__
+
+
+def _array_rule_errors(
+    ctype: str, comp: dict, prop: str, by_id: dict[str, dict], full_model: dict
+) -> list[str]:
+    """F096 §7.2 array rule for a DynamicValue prop that must be a list of row
+    objects (possibly empty). Absent → the caller skipped us; a ``{call}``
+    FunctionCall → renderer-owned, skip; a ``{path}`` binding resolving to
+    None → error for a required prop, skip for an optional one; anything else
+    (resolved or literal) must be a list whose entries are all objects."""
+    cid = str(comp.get("id", ""))
+    value = comp.get(prop)
+    optional = (ctype, prop) in _OPTIONAL_DATA_PROPS
+    if isinstance(value, dict) and "call" in value:
+        return []
+    if isinstance(value, dict) and isinstance(value.get("path"), str):
+        targets = _resolve_path_targets(comp, value["path"], by_id, full_model)
+        if targets is None:
+            return []
+    else:
+        targets = [(f"{cid}.{prop} (literal)", value)]
+    for tpath, resolved in targets:
+        if resolved is None:
+            if optional:
+                continue
+            return [
+                f"{ctype} {cid!r} binds {tpath} which resolved to nothing — "
+                f"{prop} needs an array of rows"
+            ]
+        if not isinstance(resolved, list) or not all(isinstance(r, dict) for r in resolved):
+            return [
+                f"{ctype} {cid!r} binds {tpath} which resolved to "
+                f"{_shape_name(resolved)}, not an array of rows"
+            ]
+    return []
+
+
+def _column_rule_errors(comp: dict, by_id: dict[str, dict], full_model: dict) -> list[str]:
+    """F096 §7.2 column rule: when DataTable.rows resolves to a non-empty list
+    of row objects, every declared column key must appear in at least one row
+    — an all-empty column is the F093 §1.1 partial render in a new costume.
+    Runs only on rows that would pass the array rule; malformed columns are
+    the grammar's to name."""
+    cid = str(comp.get("id", ""))
+    cols = comp.get("columns")
+    rows_value = comp.get("rows")
+    if not isinstance(cols, list) or not (
+        isinstance(rows_value, dict) and isinstance(rows_value.get("path"), str)
+    ):
+        return []
+    targets = _resolve_path_targets(comp, rows_value["path"], by_id, full_model) or []
+    errors: list[str] = []
+    for tpath, rows in targets:
+        if not isinstance(rows, list) or not rows or not all(isinstance(r, dict) for r in rows):
+            continue
+        for col in cols:
+            key = col.get("key") if isinstance(col, dict) else None
+            if isinstance(key, str) and key and not any(key in r for r in rows):
+                errors.append(
+                    f"DataTable {cid!r} column {key!r} is absent from every row of "
+                    f"{tpath} — an empty column is a partial render; fix the key "
+                    "or drop the column"
+                )
+        if errors:
+            break
+    return errors
 
 
 def _chart_shape_errors(ctype: str, comp: dict, path: str, resolved: Any) -> list[str]:
@@ -757,7 +889,7 @@ def _chart_shape_errors(ctype: str, comp: dict, path: str, resolved: Any) -> lis
         return errs
     # Sparkline and BarChart both read the default `v` key, so a MULTI-series
     # source (named keys, no `v`) renders "no data" despite valid rows.
-    if ctype in ("Sparkline", "BarChart") and isinstance(resolved.get("keys"), list):
+    if ctype in _SINGLE_VALUE_CONSUMERS and isinstance(resolved.get("keys"), list):
         errs.append(
             f"{ctype} {comp.get('id')!r} binds {path}, a multi-series source "
             f"(keys {sorted(str(k) for k in resolved['keys'])}) — Sparkline/BarChart "
@@ -812,40 +944,30 @@ def _binding_rules(
     by_id = {c["id"]: c for c in components if isinstance(c.get("id"), str)}
     for comp in components:
         ctype = comp.get("component")
-        if ctype not in _CHART_COMPONENTS:
-            continue
-        path = comp.get("path")
-        if not isinstance(path, str) or not path.strip():
-            continue  # binding-mandatory already caught this in grammar
-        # A relative chart path resolves the way the renderer resolves it
-        # (pointer.ts `absolute`): an absolute /path from root; inside a repeat
-        # template, against EACH item base; with no scope, from root as /path.
-        # Validate every resolved target — a root lookup would false-reject a
-        # per-item chart (codex round 4), a blanket skip lets `{trend:[]}`
-        # through (round 6), and validating only item 0 lets a later
-        # heterogeneous item through (round 7).
-        if path.startswith("/"):
-            targets = [(path, _get_path(full_model, path))]
-        else:
-            templates = _containing_templates(comp.get("id", ""), by_id)
-            if len(templates) > 1:
-                continue  # nested scopes — the renderer composes; leave to it
-            if not templates:
-                targets = [("/" + path, _get_path(full_model, "/" + path))]
-            else:
-                source_path = templates[0]
-                items = _get_path(full_model, source_path)
-                if not isinstance(items, list) or not items:
-                    continue  # template has no items yet — nothing to validate
-                targets = [
-                    (f"{source_path}/{i}/{path}", _get_path(full_model, f"{source_path}/{i}/{path}"))
-                    for i in range(len(items))
-                ]
-        for tpath, resolved in targets:
-            errs = _chart_shape_errors(ctype, comp, tpath, resolved)
-            if errs:
-                errors.extend(errs)
-                break  # one failing item rejects the chart — no N duplicates
+        # (2)/(3) Series rules — charts and MetricCard.trend, through the ONE
+        # resolver: a root lookup would false-reject a per-item chart (codex
+        # round 4), a blanket skip lets `{trend:[]}` through (round 6), and
+        # validating only item 0 lets a later heterogeneous item through
+        # (round 7). An optional series prop resolving to nothing for an item
+        # is the no-trend state (F096 §3.1), not an error.
+        prop = _SERIES_PATH_PROPS.get(ctype)
+        if prop is not None:
+            path = comp.get(prop)
+            if isinstance(path, str) and path.strip():  # blank: grammar's job
+                targets = _resolve_path_targets(comp, path, by_id, full_model)
+                for tpath, resolved in targets or []:
+                    if resolved is None and (ctype, prop) in _OPTIONAL_DATA_PROPS:
+                        continue
+                    errs = _chart_shape_errors(ctype, comp, tpath, resolved)
+                    if errs:
+                        errors.extend(errs)
+                        break  # one failing item rejects the chart — no N duplicates
+        # (2c) Array rule + (2d) column rule (F096 §7.2).
+        aprop = _ARRAY_VALUE_PROPS.get(ctype)
+        if aprop is not None and aprop in comp:
+            errors.extend(_array_rule_errors(ctype, comp, aprop, by_id, full_model))
+        if ctype == "DataTable":
+            errors.extend(_column_rule_errors(comp, by_id, full_model))
 
     # (4) Over-capacity / under-render (F093 §5.1 / AC7): a record-LIST source
     # bound only by FIXED indices that cover fewer than all records renders a

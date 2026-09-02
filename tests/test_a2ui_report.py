@@ -99,3 +99,39 @@ def test_report_affordances_on_existing_components_validate() -> None:
     assert validate_envelope(_envelope(bad_tone))
     bad_layout = [dict(c, layout="masonry") if c["id"] == "s" else c for c in components]
     assert validate_envelope(_envelope(bad_layout))
+
+
+# ---------------------------------------------------------------------------
+# DSL helpers (spec §8.2)
+# ---------------------------------------------------------------------------
+
+
+def test_dsl_helpers_emit_the_schema_shape_and_drop_none() -> None:
+    from nous.a2ui import dsl
+
+    assert dsl.MetricCard("m", label="L", value="1") == {
+        "id": "m", "component": "MetricCard", "label": "L", "value": "1"
+    }
+    full = dsl.MetricCard(
+        "m", label="L", value="1", unit="s", delta="↓1", tone="ok", caption="c",
+        trend="trend", trendline=True, footnote="f",
+    )
+    assert full["trend"] == "trend" and full["trendline"] is True
+    assert dsl.ScoreCard("s", title="T", status="ok") == {
+        "id": "s", "component": "ScoreCard", "title": "T", "status": "ok"
+    }
+    assert dsl.DeltaList("d", rows={"path": "/r"}, empty_text="none") == {
+        "id": "d", "component": "DeltaList", "rows": {"path": "/r"}, "emptyText": "none"
+    }
+    cols = [{"key": "a", "label": "A", "align": "end"}]
+    assert dsl.DataTable("t", columns=cols, rows={"path": "/r"}) == {
+        "id": "t", "component": "DataTable", "columns": cols, "rows": {"path": "/r"}
+    }
+    assert dsl.ChipRow("c", items={"path": "/i"}) == {
+        "id": "c", "component": "ChipRow", "items": {"path": "/i"}
+    }
+    assert dsl.Section("s", title="T", child="c", caption={"path": "/w"})["caption"] == {"path": "/w"}
+    assert "caption" not in dsl.Section("s", title="T", child="c")
+    assert dsl.AppHeader("h", title="T", composedAt={"path": "/m"}, note="n")["note"] == "n"
+    assert dsl.Sparkline("sp", path="/s", trendline=True)["trendline"] is True
+    assert "trendline" not in dsl.Sparkline("sp", path="/s")

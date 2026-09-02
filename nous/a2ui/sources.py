@@ -231,11 +231,17 @@ def is_series(value: Any) -> bool:
     return isinstance(value, dict) and value.get("kind") == "series"
 
 
-def _bound_series(series: dict, budget: int) -> tuple[dict, int]:
+def _bound_series(
+    series: dict,
+    budget: int,
+    *,
+    exhausted_reason: str = "char budget exhausted — earlier series on this surface used it",
+) -> tuple[dict, int]:
     """Fit a series under the char budget by downsampling points. Returns the
     (possibly downsampled) series and its serialized size — or, when even the
     2-point minimum does not fit, an honest empty series, NEVER a downsampled
-    stub that exceeds its budget."""
+    stub that exceeds its budget. ``exhausted_reason`` is what that empty
+    series says (F096: a spark nested in a record names the record's budget)."""
     points = series.get("points") or []
     size = len(json.dumps(series, default=str))
     if size <= budget:
@@ -260,10 +266,7 @@ def _bound_series(series: dict, budget: int) -> tuple[dict, int]:
     # trend, the §1.1 "published a false statement" failure. An explicit empty
     # series with a reason is honest; the stub is not (rev-be/codex P1). It also
     # keeps `spent` accurate — the old stub overran _TOTAL_BUDGET_CHARS.
-    empty = empty_series(
-        "char budget exhausted — earlier series on this surface used it",
-        unit=str(series.get("unit", "")),
-    )
+    empty = empty_series(exhausted_reason, unit=str(series.get("unit", "")))
     return empty, len(json.dumps(empty, default=str))
 
 
@@ -357,9 +360,16 @@ def to_series(
     *,
     unit: str = "",
     value_keys: list[str] | None = None,
+    focus_from: Any = None,
 ) -> dict:
     """General normalizer: a record list → the F094 series contract, so any
     existing record-list fetcher becomes chartable without a rewrite.
+
+    - ``focus_from`` (F096 §4.3): the start of the comparison window the
+      source computed ("last 28 days vs the 28 before"); stamped as
+      ``meta.focus_from`` through ``_iso`` (a ``date`` must never reach JSONB)
+      so the renderer shades the plot from that point. Series META, not a
+      component prop — the window boundary belongs to whoever computed it.
 
     - Sorts ascending by ``t_key``.
     - Single-series (``value_keys`` None): each point is ``{t, v}`` from
@@ -402,6 +412,8 @@ def to_series(
         "unit": unit,
         "meta": {"dropped": dropped, "downsampled_from": None},
     }
+    if focus_from is not None:
+        result["meta"]["focus_from"] = _iso(focus_from)
     if value_keys:
         result["keys"] = list(value_keys)
     if len(points) > _MAX_SERIES_POINTS:
@@ -470,6 +482,14 @@ def _bound(value: Any, budget: int) -> tuple[Any, int]:
     if size <= budget:
         return value, size
     if isinstance(value, list):
+        # F096 §6.1 — a metric grid is a record list with a series INSIDE each
+        # record. Shorten those sparks first; only then drop records. A metric
+        # with a coarser spark is still a true metric; a missing metric is a
+        # missing fact.
+        value = _shrink_embedded_series(value, budget)
+        size = len(json.dumps(value, default=str))
+        if size <= budget:
+            return value, size
         trimmed = list(value)
         while trimmed and len(json.dumps(trimmed, default=str)) > max(budget - 80, 0):
             trimmed.pop()
@@ -478,6 +498,40 @@ def _bound(value: Any, budget: int) -> tuple[Any, int]:
         return trimmed, len(json.dumps(trimmed, default=str))
     marker = {"_truncated": True, "reason": f"value exceeded {budget} chars"}
     return marker, len(json.dumps(marker))
+
+
+def _shrink_embedded_series(items: list, budget: int) -> list:
+    """Downsample every VALID ``{kind: "series"}`` nested one level inside the
+    records of ``items`` so the list fits ``budget`` — before any record is
+    dropped (F096 §6.1). Each series gets an equal share of what is left after
+    the records' other fields.
+
+    Only values passing ``_is_valid_series`` are touched: ``_downsample_series``
+    raises on a malformed one (``points: null``, ``meta: "bad"``), and a raise
+    here is a 500 out of ``resolve()`` where compose-time ``_chart_shape_errors``
+    and render-time ``readSeries`` already degrade the same value honestly.
+    Returns a new list; the input records are not mutated.
+    """
+    slots = [
+        (i, k)
+        for i, rec in enumerate(items)
+        if isinstance(rec, dict)
+        for k, v in rec.items()
+        if _is_valid_series(v)
+    ]
+    if not slots:
+        return items
+    out = [dict(r) if isinstance(r, dict) else r for r in items]
+    series_chars = sum(len(json.dumps(items[i][k], default=str)) for i, k in slots)
+    fixed = len(json.dumps(items, default=str)) - series_chars
+    share = max(0, (budget - fixed) // len(slots))
+    for i, k in slots:
+        out[i][k], _ = _bound_series(
+            items[i][k],
+            share,
+            exhausted_reason="char budget exhausted for this record's series",
+        )
+    return out
 
 
 # A stored dashboard script is agent-authored code, not prose — cap it so a

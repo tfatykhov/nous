@@ -1839,3 +1839,187 @@ def test_metriccard_blank_trend_is_named_and_absent_trend_is_fine():
 def test_report_components_are_allowed_in_micro_apps():
     for name in ("MetricCard", "ScoreCard", "DeltaList", "DataTable", "ChipRow"):
         assert name in grammar.ALLOWED_COMPONENTS, name
+
+
+# ---------------------------------------------------------------------------
+# F096 sources — focus_from and the series-aware _bound (spec §6.1 / §6.2 / AC4)
+# ---------------------------------------------------------------------------
+
+
+def _metric_records(n: int, points: int, **fields):
+    from nous.a2ui.sources import to_series
+
+    rows = [{"t": f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}", "v": float(i)} for i in range(points)]
+    return [{"label": f"m{i}", "value": "1", **fields, "trend": to_series(rows, "t", "v")} for i in range(n)]
+
+
+def test_to_series_focus_from_is_iso_and_survives_downsampling():
+    from datetime import date
+
+    from nous.a2ui.sources import to_series
+
+    rows = [{"t": f"2026-08-{d:02d}", "v": float(d)} for d in range(1, 29)]
+    s = to_series(rows * 10, "t", "v", focus_from=date(2026, 8, 4))  # 280 → downsampled
+    assert s["meta"]["focus_from"] == "2026-08-04"
+    assert s["meta"]["downsampled_from"] == 280
+    assert "focus_from" not in to_series(rows, "t", "v")["meta"]
+
+
+def test_bound_shortens_embedded_series_before_dropping_records():
+    from nous.a2ui import sources as src
+
+    recs = _metric_records(6, 200)
+    out, size = src._bound(recs, 12_000)
+    assert size <= 12_000
+    assert len(out) == 6 and not any(r.get("_truncated") for r in out)
+    assert all(r["trend"]["meta"]["downsampled_from"] == 200 for r in out)
+    assert recs[0]["trend"]["meta"]["downsampled_from"] is None, "input not mutated"
+
+
+def test_bound_pops_records_only_when_sparks_cannot_shrink_enough():
+    from nous.a2ui import sources as src
+
+    recs = _metric_records(200, 3)  # sparks already minimal
+    out, size = src._bound(recs, 3_000)
+    assert size <= 3_000
+    assert out[-1]["_truncated"] is True and out[-1]["omitted"] > 0
+
+
+def test_bound_leaves_malformed_embedded_series_untouched_and_never_raises():
+    from nous.a2ui import sources as src
+
+    recs = _metric_records(6, 200)
+    recs[0]["trend"] = {"kind": "series", "points": None}
+    recs[1]["trend"] = {"kind": "series", "points": [{"t": "x", "v": 1}], "meta": "bad"}
+    out, _ = src._bound(recs, 12_000)
+    assert out[0]["trend"] == {"kind": "series", "points": None}
+    assert out[1]["trend"]["meta"] == "bad"
+    assert out[2]["trend"]["meta"]["downsampled_from"] == 200
+
+
+def test_panel_sized_metric_source_fits_the_per_source_budget():
+    """The recipe's shape (spec §6.1 / AC4): one source per section panel.
+    Measured 2026-09-01: a fully-captioned 56-point metric record serializes
+    to ~2.06k (json.dumps escapes ↓ → · to \\uXXXX), so five fit the 12k
+    per-source budget untouched and six lose at most a couple of points per
+    spark — never a record."""
+    from nous.a2ui import sources as src
+
+    fields = dict(
+        unit="s", delta="↓0.6 s · improving", tone="ok",
+        caption="5.9 → 5.3 (28d median, n=28)", footnote="last 2026-09-01",
+    )
+    five, size5 = src._bound(_metric_records(5, 56, **fields), src._PER_SOURCE_BUDGET_CHARS)
+    assert size5 <= src._PER_SOURCE_BUDGET_CHARS
+    assert all(r["trend"]["meta"]["downsampled_from"] is None for r in five)
+
+    six, size6 = src._bound(_metric_records(6, 56, **fields), src._PER_SOURCE_BUDGET_CHARS)
+    assert size6 <= src._PER_SOURCE_BUDGET_CHARS
+    assert len(six) == 6 and not any(r.get("_truncated") for r in six)
+    assert all(len(r["trend"]["points"]) >= 50 for r in six)
+
+
+# ---------------------------------------------------------------------------
+# F096 compose validation — shared resolver, array + column rules (spec §7.2)
+# ---------------------------------------------------------------------------
+
+
+def _series(n=3, keys=None):
+    from nous.a2ui.sources import to_series
+
+    rows = [{"t": f"2026-08-{d:02d}", "v": float(d), "a": 1.0, "b": 2.0} for d in range(1, n + 1)]
+    return to_series(rows, "t", "v", value_keys=keys)
+
+
+def _rules(comps, model):
+    return _binding_rules(comps, model, model, _collect_bindings(comps))
+
+
+def _repeat_skel(template_id, template, extra=()):
+    """Skeleton whose Section body is a Column repeating `template` over /metrics."""
+    return _skel([
+        {"id": "c", "component": "Column", "children": {"componentId": template_id, "path": "/metrics"}},
+        template,
+        *extra,
+    ])
+
+
+def test_metriccard_trend_bound_to_records_or_multi_series_is_named():
+    comps = _skel([{"id": "c", "component": "MetricCard", "label": "L", "value": "1", "trend": "/metrics"}])
+    errs = _rules(comps, {"metrics": [{"label": "x"}]})
+    assert any("MetricCard 'c' binds /metrics" in e and "not a series" in e for e in errs), errs
+    errs = _rules(comps, {"metrics": _series(keys=["a", "b"])})
+    assert any("MetricCard 'c'" in e and "multi-series" in e for e in errs), errs
+    assert _rules(comps, {"metrics": _series()}) == []
+
+
+def test_metriccard_without_trend_in_a_mixed_grid_is_a_state_not_an_error():
+    """A count mixed into a grid of trended metrics under one Repeat (spec §3.1)."""
+    comps = _repeat_skel("m", {"id": "m", "component": "MetricCard", "label": {"path": "label"}, "value": {"path": "value"}, "trend": "trend"})
+    model = {"metrics": [{"label": "a", "value": "1", "trend": _series()}, {"label": "b", "value": "2"}]}
+    assert _rules(comps, model) == []
+    bad = {"metrics": [{"label": "a", "value": "1", "trend": _series()}, {"label": "b", "value": "2", "trend": [1, 2]}]}
+    errs = _rules(comps, bad)
+    assert any("MetricCard 'm' binds /metrics/1/trend" in e for e in errs), errs
+
+
+def test_deltalist_bound_to_a_series_is_named_and_an_empty_list_passes():
+    comps = _skel([{"id": "c", "component": "DeltaList", "rows": {"path": "/movers"}}])
+    errs = _rules(comps, {"movers": _series()})
+    assert any("DeltaList 'c' binds /movers" in e and "a series, not an array of rows" in e for e in errs), errs
+    assert _rules(comps, {"movers": []}) == []
+    assert _rules(comps, {"movers": [{"label": "x", "delta": "↑1"}]}) == []
+    errs = _rules(comps, {"movers": None})
+    assert any("resolved to nothing" in e for e in errs), errs
+
+
+def test_scorecard_items_absent_or_none_pass_but_a_string_is_named():
+    comps = _repeat_skel("s", {"id": "s", "component": "ScoreCard", "title": {"path": "title"}, "status": "ok", "items": {"path": "items"}})
+    model = {"metrics": [{"title": "a", "items": [{"label": "l", "value": "v"}]}, {"title": "b"}]}
+    assert _rules(comps, model) == []
+    bad = {"metrics": [{"title": "a", "items": "nope"}]}
+    errs = _rules(comps, bad)
+    assert any("ScoreCard 's' binds /metrics/0/items" in e and "str, not an array" in e for e in errs), errs
+    no_items = _skel([{"id": "c", "component": "ScoreCard", "title": "T", "status": "ok"}])
+    assert _rules(no_items, {}) == []
+
+
+def test_array_rule_skips_function_calls_and_rejects_literal_non_arrays():
+    call = _skel([{"id": "c", "component": "ChipRow", "items": {"call": "lanes"}}])
+    assert _rules(call, {}) == []
+    literal_ok = _skel([{"id": "c", "component": "ChipRow", "items": [{"label": "a", "value": "today"}]}])
+    assert _rules(literal_ok, {}) == []
+    literal_bad = _skel([{"id": "c", "component": "Timeline", "items": {"at": "x"}}])
+    errs = _rules(literal_bad, {})
+    assert any("Timeline 'c'" in e and "not an array of rows" in e for e in errs), errs
+
+
+def test_datatable_column_absent_from_every_row_is_named():
+    cols = [{"key": "night", "label": "Night"}, {"key": "facts", "label": "Facts", "align": "end"}]
+    comps = _skel([{"id": "c", "component": "DataTable", "columns": cols, "rows": {"path": "/sleep"}}])
+    rows = [{"night": "2026-08-31", "facts": 14}, {"night": "2026-08-30"}]
+    assert _rules(comps, {"sleep": rows}) == []
+    errs = _rules(comps, {"sleep": [{"night": "2026-08-31"}]})
+    assert any("column 'facts' is absent from every row" in e for e in errs), errs
+    assert _rules(comps, {"sleep": []}) == []
+
+
+def test_resolver_follows_modal_content_inside_a_repeat():
+    """AC9: the resolver walks the same child keys as the grammar (trigger,
+    content, tabs) — a KeyValueTable behind a Modal inside a Repeat resolves
+    its relative rows per item instead of from root."""
+    comps = _repeat_skel(
+        "card",
+        {"id": "card", "component": "Column", "children": ["title", "more"]},
+        extra=[
+            {"id": "title", "component": "Text", "text": {"path": "label"}},
+            {"id": "more", "component": "Modal", "trigger": "hint", "content": "kv"},
+            {"id": "hint", "component": "Text", "text": "details"},
+            {"id": "kv", "component": "KeyValueTable", "rows": {"path": "attrs"}},
+        ],
+    )
+    good = {"metrics": [{"label": "a", "attrs": [{"key": "k", "value": "v"}]}, {"label": "b", "attrs": []}]}
+    assert _rules(comps, good) == []
+    bad = {"metrics": [{"label": "a", "attrs": _series()}]}
+    errs = _rules(comps, bad)
+    assert any("KeyValueTable 'kv' binds /metrics/0/attrs" in e and "a series" in e for e in errs), errs
