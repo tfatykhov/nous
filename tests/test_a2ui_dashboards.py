@@ -1999,6 +1999,20 @@ def test_validation_resolver_decodes_rfc6901_tokens_like_the_renderer():
     assert _rules(rows, model) == []
 
 
+def test_validation_resolver_rejects_negative_and_non_integer_indices():
+    """codex P2 on #630: Python's list[-1] would validate `/rows/-1/items`
+    against the LAST row while the renderer's getPointer resolves undefined."""
+    from nous.a2ui.compose import _get_path
+
+    model = {"rows": [{"items": [{"label": "l", "value": "v"}]}]}
+    assert _get_path(model, "/rows/0/items") == model["rows"][0]["items"]
+    assert _get_path(model, "/rows/-1/items") is None
+    assert _get_path(model, "/rows/x/items") is None
+    assert _get_path(model, "/rows/1/items") is None
+    comp = _skel([{"id": "c", "component": "DeltaList", "rows": {"path": "/rows/-1/items"}}])
+    assert any("resolved to nothing" in e for e in _rules(comp, model))
+
+
 def test_datatable_column_rule_covers_literal_rows():
     """Review P2: the array rule validates literal arrays, so the column rule must too."""
     cols = [{"key": "night", "label": "Night"}, {"key": "facts", "label": "Facts"}]

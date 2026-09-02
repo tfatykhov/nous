@@ -96,7 +96,7 @@
     font-size: 0.74rem;
     padding: 0.35rem 0.5rem;
     border-bottom: 1px solid var(--border);
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
   td {
     padding: 0.45rem 0.5rem;
@@ -107,12 +107,14 @@
   tr:last-child td {
     border-bottom: 0;
   }
+  /* No nowrap here: a long preformatted identifier in an end-aligned cell
+     must wrap like any other cell, or a six-column table widens past the
+     phone-width surface (codex P2 on #630). */
   th.end,
   td.end {
     text-align: right;
     font-family: var(--font-numeric);
     font-variant-numeric: tabular-nums;
-    white-space: nowrap;
   }
   td.secondary {
     color: var(--muted);

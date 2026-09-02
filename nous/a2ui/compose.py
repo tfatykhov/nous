@@ -773,9 +773,15 @@ def _get_path(model: dict, path: str) -> Any:
         if isinstance(cur, dict):
             cur = cur.get(seg)
         elif isinstance(cur, list):
+            # Only a non-negative integer token indexes a list, matching the
+            # renderer's getPointer (Number(token) on a JS array): Python's
+            # `cur[-1]` would validate `/rows/-1/items` against the LAST row
+            # while the client resolves undefined (codex P2 on #630).
+            if not seg.isdigit():
+                return None
             try:
                 cur = cur[int(seg)]
-            except (ValueError, IndexError):
+            except IndexError:
                 return None
         else:
             return None
