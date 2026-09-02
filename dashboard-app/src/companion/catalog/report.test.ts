@@ -269,6 +269,13 @@ describe('DataTableView', () => {
     expect(cells[1].classList.contains('end')).toBe(true);
     expect(cells[2].classList.contains('secondary')).toBe(true);
     expect(cells[2].textContent).toBe('indoor cardio, rowing');
+    // browser check on a 390px phone: "2026-08-31" wrapped as "2026-/08-31"
+    // because a hyphen is a break opportunity — single-token cells get
+    // `token` (nowrap); multi-word cells keep wrapping at spaces.
+    expect(cells[0].classList.contains('token')).toBe(false); // "week of 2026-08-31"
+    expect(cells[1].classList.contains('token')).toBe(true); // "2"
+    expect(cells[2].classList.contains('token')).toBe(false);
+    expect(container.querySelector('.scroll table.dtable')).not.toBeNull();
     // a missing field is an empty cell, never a throw
     expect(container.querySelectorAll('tbody tr')[1].querySelectorAll('td')[2].textContent).toBe('');
   });

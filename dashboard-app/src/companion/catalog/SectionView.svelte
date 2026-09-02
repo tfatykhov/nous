@@ -164,6 +164,21 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0.6rem;
   }
+  /* Two fixed columns on a 390px phone are ~155px each — a DeltaList row
+     (label · delta · from → to) collapsed its label to one letter per line
+     in the F096 browser check. Collapse to one column when the SECTION is
+     narrower than ~520px (a container query, not a viewport one: the
+     surface is also narrow in the switcher's split views), the way the
+     reference report does at ≤760px. The renderer owns breakpoints. */
+  .app-section.grid-2 {
+    container-type: inline-size;
+  }
+  @container (max-width: 520px) {
+    .app-section.grid-2 > :global(.col),
+    .app-section.grid-2 > :global(.row) {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
   .app-section.grid-3 > :global(.col),
   .app-section.grid-3 > :global(.row) {
     display: grid;
@@ -187,7 +202,11 @@
     letter-spacing: 0.04em;
     text-align: right;
     text-transform: none;
-    white-space: nowrap;
+    /* A long caption wraps on a phone instead of forcing the TITLE to wrap
+       (browser check: "a stale lane silently freezes its trend" broke the
+       "Data freshness" heading in two). */
+    max-width: 58%;
+    overflow-wrap: anywhere;
   }
   .toggle .caption + .caret {
     margin-left: 0;
