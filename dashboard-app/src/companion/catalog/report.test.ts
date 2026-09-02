@@ -208,6 +208,68 @@ describe('ScoreCardView', () => {
     expect(container.querySelector('.caption')?.textContent).toBe('Fat mass · ↓0.4 vs prior 28d');
     expect(container.querySelector('ul')).toBeNull();
   });
+
+  it('semantic prose detection: short prose stays stacked, long figure stays inline', () => {
+    // "payment pending" (15 chars) must not inherit figure styling
+    seed({ items: [{ label: 'Status', value: 'payment pending' }] });
+    const proseResult = mount(ScoreCardView, {
+      id: 's', component: 'ScoreCard', title: 'T', status: 'S', tone: 'neutral',
+      items: { path: '/items' },
+    });
+    expect(proseResult.container.querySelector('ul.prose')).not.toBeNull();
+    cleanup();
+
+    // "EUR 1,234,567.89" (17 chars) and ISO datetime must not be forced into stacked mode
+    seed({
+      items: [
+        { label: 'Revenue', value: 'EUR 1,234,567.89' },
+        { label: 'As of', value: '2026-09-02T15:40:43Z' },
+      ],
+    });
+    const figResult = mount(ScoreCardView, {
+      id: 's', component: 'ScoreCard', title: 'T', status: 'S', tone: 'neutral',
+      items: { path: '/items' },
+    });
+    expect(figResult.container.querySelector('ul.prose')).toBeNull();
+  });
+
+  it('explicit row format="prose" overrides figure inference', () => {
+    // A figure-shaped value ("42") forced to prose by the producer
+    seed({ items: [{ label: 'Note', value: '42', format: 'prose' }] });
+    const { container } = mount(ScoreCardView, {
+      id: 's', component: 'ScoreCard', title: 'T', status: 'S', tone: 'neutral',
+      items: { path: '/items' },
+    });
+    expect(container.querySelector('ul.prose')).not.toBeNull();
+  });
+
+  it('explicit row format="figure" overrides prose inference', () => {
+    // A prose-shaped value ("payment pending") forced to figure treatment by the producer
+    seed({ items: [{ label: 'Label', value: 'payment pending', format: 'figure' }] });
+    const { container } = mount(ScoreCardView, {
+      id: 's', component: 'ScoreCard', title: 'T', status: 'S', tone: 'neutral',
+      items: { path: '/items' },
+    });
+    expect(container.querySelector('ul.prose')).toBeNull();
+  });
+
+  it('card-level format="prose" forces stacked mode for all figure-shaped rows', () => {
+    seed({ items: [{ label: 'HR', value: '65.0 bpm' }, { label: 'SpO₂', value: '99%' }] });
+    const { container } = mount(ScoreCardView, {
+      id: 's', component: 'ScoreCard', title: 'T', status: 'S', tone: 'neutral',
+      format: 'prose', items: { path: '/items' },
+    });
+    expect(container.querySelector('ul.prose')).not.toBeNull();
+  });
+
+  it('card-level format="figure" prevents stacked mode even with prose-shaped rows', () => {
+    seed({ items: [{ label: 'Status', value: 'payment pending' }] });
+    const { container } = mount(ScoreCardView, {
+      id: 's', component: 'ScoreCard', title: 'T', status: 'S', tone: 'neutral',
+      format: 'figure', items: { path: '/items' },
+    });
+    expect(container.querySelector('ul.prose')).toBeNull();
+  });
 });
 
 describe('DeltaListView', () => {

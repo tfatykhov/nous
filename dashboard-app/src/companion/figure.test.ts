@@ -1,0 +1,112 @@
+import { describe, it, expect } from 'vitest';
+import { isFigureValue } from './figure';
+
+// Required cases from the Codex P2 finding on PR #632, plus coverage for
+// patterns that a 16-char cutoff could not distinguish.
+
+describe('isFigureValue', () => {
+  // ── prose ──────────────────────────────────────────────────────────────────
+
+  it('"payment pending" is prose (short text, no numeric structure)', () => {
+    // 15 chars — the old heuristic would have classified this as a figure
+    expect(isFigureValue('payment pending')).toBe(false);
+  });
+
+  it('"deposit paid · EUR811.44 balance at check-in" is prose (multi-part sentence)', () => {
+    expect(isFigureValue('deposit paid · EUR811.44 balance at check-in')).toBe(false);
+  });
+
+  it('free-form text with embedded numbers is still prose', () => {
+    expect(isFigureValue('approved 3 of 5 requests')).toBe(false);
+    expect(isFigureValue('down 4% from last week')).toBe(false);
+  });
+
+  // ── figures ────────────────────────────────────────────────────────────────
+
+  it('"EUR 1,234,567.89" is a figure (3-letter currency code + number)', () => {
+    // 17 chars — the old heuristic would have forced prose mode
+    expect(isFigureValue('EUR 1,234,567.89')).toBe(true);
+  });
+
+  it('"-12.5%" is a figure (signed percentage)', () => {
+    expect(isFigureValue('-12.5%')).toBe(true);
+  });
+
+  it('"2026-09-02T15:40:43Z" is a figure (ISO datetime is a scalar datum, not prose)', () => {
+    // A timestamp is a preformatted moment in time — right-aligned tabular
+    // treatment is correct; it should not force prose mode on the whole card.
+    expect(isFigureValue('2026-09-02T15:40:43Z')).toBe(true);
+  });
+
+  it('"—" is a figure (em-dash placeholder)', () => {
+    expect(isFigureValue('—')).toBe(true);
+  });
+
+  // ── additional figure patterns ─────────────────────────────────────────────
+
+  it('plain integers and decimals are figures', () => {
+    expect(isFigureValue('42')).toBe(true);
+    expect(isFigureValue('3.14')).toBe(true);
+    expect(isFigureValue('-7')).toBe(true);
+    expect(isFigureValue('+1.5')).toBe(true);
+  });
+
+  it('number with short unit is a figure', () => {
+    expect(isFigureValue('65.0 bpm')).toBe(true);
+    expect(isFigureValue('3 kg')).toBe(true);
+    expect(isFigureValue('5 km')).toBe(true);
+    expect(isFigureValue('12 h')).toBe(true);
+    expect(isFigureValue('98.6°')).toBe(true);
+  });
+
+  it('currency-symbol-prefixed number is a figure', () => {
+    expect(isFigureValue('$1,234.56')).toBe(true);
+    expect(isFigureValue('€42')).toBe(true);
+    expect(isFigureValue('£100')).toBe(true);
+  });
+
+  it('ratio is a figure', () => {
+    expect(isFigureValue('12/30')).toBe(true);
+    expect(isFigureValue('3/4')).toBe(true);
+  });
+
+  it('ISO date (date-only) is a figure', () => {
+    expect(isFigureValue('2026-09-02')).toBe(true);
+  });
+
+  it('time of day is a figure', () => {
+    expect(isFigureValue('14:30')).toBe(true);
+    expect(isFigureValue('2:30 PM')).toBe(true);
+    expect(isFigureValue('08:05:00')).toBe(true);
+  });
+
+  it('compact duration is a figure', () => {
+    expect(isFigureValue('45s')).toBe(true);
+    expect(isFigureValue('1h 30m')).toBe(true);
+    expect(isFigureValue('2d')).toBe(true);
+  });
+
+  it('dash placeholders are figures', () => {
+    expect(isFigureValue('-')).toBe(true);
+    expect(isFigureValue('–')).toBe(true);
+    expect(isFigureValue('—')).toBe(true);
+    expect(isFigureValue('N/A')).toBe(true);
+    expect(isFigureValue('n/a')).toBe(true);
+  });
+
+  it('empty string does not force prose mode', () => {
+    expect(isFigureValue('')).toBe(true);
+    expect(isFigureValue('   ')).toBe(true);
+  });
+
+  // ── length is not the deciding factor ─────────────────────────────────────
+
+  it('length does not determine the result in either direction', () => {
+    // Short (15 chars) but prose
+    expect(isFigureValue('payment pending')).toBe(false);
+    // Long (17 chars) but figure
+    expect(isFigureValue('EUR 1,234,567.89')).toBe(true);
+    // Long ISO datetime — figure, not prose
+    expect(isFigureValue('2026-09-02T15:40:43Z')).toBe(true);
+  });
+});

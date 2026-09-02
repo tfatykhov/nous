@@ -8,6 +8,7 @@
   import { store } from '../store.svelte';
   import { flexGrow, omittedNote, resolveDynamic, splitTruncation, toDisplayString } from '../functions';
   import { normalizeTone, toneInkVar } from '../chart';
+  import { isFigureValue } from '../figure';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
 
@@ -15,6 +16,8 @@
     label: string;
     value: string;
     ink: string;
+    /** Explicit producer hint; undefined means use isFigureValue inference. */
+    format?: 'figure' | 'prose';
   }
 
   let {
@@ -49,24 +52,39 @@
     const resolved = resolveDynamic(comp.items, ctx);
     return splitTruncation(Array.isArray(resolved) ? resolved : []);
   });
-  // A ScoreCard row is "label + figure" by default, and .rv is styled as one:
-  // right-aligned, tabular, semibold mono. Prose values ("deposit paid ·
-  // EUR811.44 balance at check-in") in that treatment wrap into a right-aligned
-  // block, which steals the whole row and squeezes the label into a ragged
-  // 3-line column (browser check 2026-09-02). When ANY row is prose the card
-  // switches to stacked rows for ALL of them: mixed modes inside one card read
-  // as breakage, and consistency beats a per-row optimum.
-  const proseRows = $derived(rows.some((r) => r.value.length > 16));
-
   const rows = $derived.by((): Row[] => {
     return split.rows.map((row) => {
       const r = (typeof row === 'object' && row !== null ? row : {}) as Record<string, unknown>;
+      const fmt = r.format === 'figure' || r.format === 'prose' ? r.format : undefined;
       return {
         label: toDisplayString(r.label),
         value: toDisplayString(r.value),
         ink: toneInkVar(normalizeTone(r.tone)),
+        format: fmt,
       };
     });
+  });
+
+  // A ScoreCard row is "label + figure" by default, and .rv is styled as one:
+  // right-aligned, tabular, semibold mono. Prose values ("deposit paid ·
+  // EUR811.44 balance at check-in") in that treatment wrap into a right-aligned
+  // block, which steals the whole row and squeezes the label (fix c3cced9).
+  // When ANY row is prose the card switches ALL rows to stacked mode: mixed
+  // modes inside one card read as breakage, and consistency beats a per-row
+  // optimum. Classification is semantic (isFigureValue), not by length — a
+  // short prose value like "payment pending" must not inherit figure styling,
+  // and a long figure like "EUR 1,234,567.89" or an ISO timestamp must not be
+  // forced into stacked mode. A per-row `format` field or card-level
+  // `comp.format` overrides the inference when the heuristic guesses wrong.
+  const cardFormat = $derived(
+    comp.format === 'figure' ? 'figure' : comp.format === 'prose' ? 'prose' : undefined,
+  );
+  const proseRows = $derived.by(() => {
+    if (cardFormat === 'figure') return false;
+    if (cardFormat === 'prose') return true;
+    return rows.some(
+      (r) => r.format === 'prose' || (r.format !== 'figure' && !isFigureValue(r.value)),
+    );
   });
 </script>
 
