@@ -58,7 +58,13 @@
 </script>
 
 {#if columns.length > 0 && rows.length > 0}
-  <table class="dtable" style:flex-grow={flexGrow(comp.weight)}>
+  <!-- The scroll box is what keeps a wide table from widening the PAGE: cells
+       wrap at word boundaries, numbers and dates never break mid-token, and
+       a six-column table on a 390px phone scrolls inside its own box
+       (F096 browser check: `overflow-wrap: anywhere` split "212" into
+       "21/2" and dates across lines). -->
+  <div class="scroll" style:flex-grow={flexGrow(comp.weight)}>
+  <table class="dtable">
     <thead>
       <tr>
         <!-- Keyed by INDEX, not col.key: the grammar rejects duplicate keys at
@@ -74,12 +80,18 @@
       {#each rows as row, i (i)}
         <tr>
           {#each columns as col, j (j)}
-            <td class:end={col.end} class:secondary={col.secondary}>{toDisplayString(row[col.key])}</td>
+            {@const text = toDisplayString(row[col.key])}
+            <!-- A single-token cell (a date, a count, an id) never breaks:
+                 browsers treat "-" as a break opportunity, so "2026-08-31"
+                 wrapped as "2026-/08-31" on a phone. Multi-word cells still
+                 wrap at spaces; the scroll box takes any overflow. -->
+            <td class:end={col.end} class:secondary={col.secondary} class:token={!/\s/.test(text)}>{text}</td>
           {/each}
         </tr>
       {/each}
     </tbody>
   </table>
+  </div>
 {:else if columns.length > 0 && split.omitted === null}
   <div class="empty">{emptyText}</div>
 {/if}
@@ -88,6 +100,11 @@
 {/if}
 
 <style>
+  .scroll {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+  }
   .dtable {
     width: 100%;
     border-collapse: collapse;
@@ -101,25 +118,31 @@
     font-size: 0.74rem;
     padding: 0.35rem 0.5rem;
     border-bottom: 1px solid var(--border);
-    overflow-wrap: anywhere;
+    white-space: nowrap;
   }
   td {
     padding: 0.45rem 0.5rem;
     border-bottom: 1px solid var(--border);
     vertical-align: top;
-    overflow-wrap: anywhere;
+    /* Wrap at spaces only — never inside a token (a date split as "2026-/
+       08-31" or a count as "21/2" misreads). The scroll box above absorbs a
+       table whose unbreakable tokens do not fit the surface. */
+    overflow-wrap: normal;
   }
   tr:last-child td {
     border-bottom: 0;
   }
-  /* No nowrap here: a long preformatted identifier in an end-aligned cell
-     must wrap like any other cell, or a six-column table widens past the
-     phone-width surface (codex P2 on #630). */
+  /* Figures and dates are single tokens: keep them whole (a broken "21/2"
+     misreads as two numbers); the scroll box, not the page, takes the width. */
   th.end,
   td.end {
     text-align: right;
     font-family: var(--font-numeric);
     font-variant-numeric: tabular-nums;
+  }
+  td.end,
+  td.token {
+    white-space: nowrap;
   }
   td.secondary {
     color: var(--muted);

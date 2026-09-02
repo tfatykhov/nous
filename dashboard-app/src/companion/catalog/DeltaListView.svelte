@@ -81,7 +81,10 @@
   }
   li {
     display: grid;
-    grid-template-columns: 1fr auto auto;
+    /* The label column keeps a floor: with a bare 1fr next to two auto
+       columns, a narrow container gave it ~0px and `overflow-wrap: anywhere`
+       then broke the label one letter per line (F096 browser check). */
+    grid-template-columns: minmax(5rem, 1fr) auto auto;
     gap: 0.75rem;
     align-items: center;
     padding: 0.45rem 0;
