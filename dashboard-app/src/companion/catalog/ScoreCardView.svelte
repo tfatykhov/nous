@@ -98,6 +98,7 @@
   }
   .head {
     display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
     align-items: center;
     gap: 0.6rem;
@@ -108,6 +109,9 @@
     font-size: 1.15rem;
     font-weight: 600;
     letter-spacing: -0.01em;
+    /* Basis floor: a long title beside a nowrap status pill would otherwise
+       collapse to 0px and break per character, same as the item rows did. */
+    flex: 1 1 8rem;
     min-width: 0;
     overflow-wrap: anywhere;
   }
@@ -153,8 +157,15 @@
   }
   li {
     display: flex;
+    /* The value used to be `flex: 0 0 auto`, so a long prose value ate the
+       whole row, left the label 0px, and `overflow-wrap: anywhere` then broke
+       it one letter per line while the value still overflowed the card.
+       Wrapping + a label basis floor means a value that cannot share the line
+       drops to its own full-width line instead (same fix as DeltaList). */
+    flex-wrap: wrap;
     justify-content: space-between;
-    gap: 0.6rem;
+    align-items: baseline;
+    gap: 0.1rem 0.6rem;
     padding: 0.3rem 0;
     border-bottom: 1px dashed var(--border);
     font-size: 0.85rem;
@@ -164,11 +175,16 @@
   }
   .rl {
     color: var(--muted);
+    flex: 1 1 7rem;
     min-width: 0;
     overflow-wrap: anywhere;
   }
   .rv {
-    flex: 0 0 auto;
+    flex: 0 1 auto;
+    min-width: 0;
+    margin-left: auto;
+    text-align: right;
+    overflow-wrap: break-word;
     color: var(--row-ink);
     font-family: var(--font-numeric);
     font-variant-numeric: tabular-nums;

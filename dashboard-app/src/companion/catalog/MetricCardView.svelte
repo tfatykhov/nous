@@ -108,6 +108,7 @@
   }
   .top {
     display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
     align-items: center;
     gap: 0.5rem;
@@ -116,6 +117,8 @@
     color: var(--muted);
     font-size: 0.8rem;
     letter-spacing: 0.03em;
+    /* Basis floor beside the nowrap delta pill (see ScoreCardView). */
+    flex: 1 1 6rem;
     min-width: 0;
     overflow-wrap: anywhere;
   }
