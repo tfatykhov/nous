@@ -73,7 +73,7 @@ def test_report_affordances_on_existing_components_validate() -> None:
             "component": "AppHeader",
             "title": "T",
             "composedAt": {"path": "/meta/composedAt"},
-            "note": {"path": "/meta/reach"},
+            "note": {"path": "/summary/reach"},
         },
         {
             "id": "s",
@@ -81,7 +81,7 @@ def test_report_affordances_on_existing_components_validate() -> None:
             "title": "Goals",
             "child": "m",
             "layout": "cards",
-            "caption": {"path": "/meta/window"},
+            "caption": {"path": "/summary/window"},
         },
         {"id": "sp", "component": "Sparkline", "path": "/series", "trendline": True},
         {

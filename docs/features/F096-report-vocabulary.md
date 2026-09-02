@@ -1,7 +1,7 @@
 ---
 feature: F096
 title: Report Vocabulary — scorecards, metric cards, movers, tables and chips for micro-apps
-status: implemented 2026-09-01 on feat/F096-report-vocabulary — 3-lens adversarial spec review (29 findings folded) → built → PR under CI + codex review
+status: shipped 2026-09-02 — PR #630 (3-lens adversarial spec review: 29 findings folded; 2 internal reviewers + codex loop on the code)
 depends_on: F093 §2/§4 (renderer-owned taste, semantic tokens), F094 (series contract, Sparkline), F092.1 Phase 3 (compose/grammar/sources), F095 (agent_script sources)
 supersedes: nothing — additive to F093/F094
 author: Nous
