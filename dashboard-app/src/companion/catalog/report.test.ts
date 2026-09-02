@@ -10,6 +10,8 @@ import DataTableView from './DataTableView.svelte';
 import ChipRowView from './ChipRowView.svelte';
 import SectionView from './SectionView.svelte';
 import AppHeaderView from './AppHeaderView.svelte';
+import TimelineView from './TimelineView.svelte';
+import KeyValueTableView from './KeyValueTableView.svelte';
 import { store } from '../store.svelte';
 
 // F096 report-vocabulary adapters. Same harness discipline as
@@ -387,6 +389,49 @@ describe('whole-feature report app (F096 AC1)', () => {
     expect(container.querySelectorAll('table.dtable tbody tr').length).toBe(sleep.length);
     expect(container.querySelectorAll('table.dtable th').length).toBe(4);
     expect(container.querySelector('.ph')).toBeNull();
+  });
+});
+
+describe('server truncation marker (F096 §6.1 — codex P2 on #630)', () => {
+  // `_bound` appends {_truncated, omitted} to a record list it could not fit.
+  // That entry is NOT a record: it must never render as a blank card/row, and
+  // the omitted count must be visible.
+  const marker = { _truncated: true, omitted: 3 };
+
+  it('DeltaList, DataTable, ChipRow, Timeline and KeyValueTable skip it and say how many were cut', () => {
+    seed({
+      rows: [{ label: 'a', delta: '↑1', key: 'k', value: 'v', at: 't', night: 'n' }, marker],
+    });
+    const cases: [unknown, Record<string, unknown>, string][] = [
+      [DeltaListView, { id: 'd', component: 'DeltaList', rows: { path: '/rows' } }, 'li:not(.none)'],
+      [
+        DataTableView,
+        { id: 't', component: 'DataTable', columns: [{ key: 'night', label: 'N' }], rows: { path: '/rows' } },
+        'tbody tr',
+      ],
+      [ChipRowView, { id: 'c', component: 'ChipRow', items: { path: '/rows' } }, '.chip:not(.omitted)'],
+      [TimelineView, { id: 'tl', component: 'Timeline', items: { path: '/rows' } }, 'li'],
+      [KeyValueTableView, { id: 'kv', component: 'KeyValueTable', rows: { path: '/rows' } }, 'tr'],
+    ];
+    for (const [View, comp, rowSel] of cases) {
+      const { container } = mount(View, comp);
+      expect(container.querySelectorAll(rowSel).length, comp.component as string).toBe(1);
+      expect(container.querySelector('.omitted')?.textContent, comp.component as string).toContain(
+        '3 more',
+      );
+      cleanup();
+    }
+  });
+
+  it('a repeat template skips the marker and keeps real item scopes', () => {
+    seed({ metrics: [{ label: 'a', value: '1' }, { label: 'b', value: '2' }, marker] }, [
+      { id: 'col', component: 'Column', children: { componentId: 'm', path: '/metrics' } },
+      { id: 'm', component: 'MetricCard', label: { path: 'label' }, value: { path: 'value' } },
+    ]);
+    const { container } = render(Renderer, { props: { surfaceId: SURFACE, componentId: 'col' } });
+    expect(container.querySelectorAll('.metric').length).toBe(2);
+    expect(container.textContent).toContain('b');
+    expect(container.querySelector('.omitted')?.textContent).toContain('3 more');
   });
 });
 

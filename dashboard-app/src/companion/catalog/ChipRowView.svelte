@@ -3,7 +3,7 @@
   // lane health, environment flags): uppercase muted label, tone-coloured
   // value, muted detail. Values are preformatted; tones closed at render.
   import { store } from '../store.svelte';
-  import { flexGrow, resolveDynamic, toDisplayString } from '../functions';
+  import { flexGrow, omittedNote, resolveDynamic, splitTruncation, toDisplayString } from '../functions';
   import { normalizeTone, toneInkVar } from '../chart';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
@@ -28,10 +28,12 @@
   } = $props();
 
   const ctx = $derived({ dataModel: store.surfaces[surfaceId]?.dataModel ?? {}, scope });
-  const chips = $derived.by((): Chip[] => {
+  const split = $derived.by(() => {
     const resolved = resolveDynamic(comp.items, ctx);
-    if (!Array.isArray(resolved)) return [];
-    return resolved.map((row) => {
+    return splitTruncation(Array.isArray(resolved) ? resolved : []);
+  });
+  const chips = $derived.by((): Chip[] => {
+    return split.rows.map((row) => {
       const r = (typeof row === 'object' && row !== null ? row : {}) as Record<string, unknown>;
       return {
         label: toDisplayString(r.label),
@@ -52,6 +54,9 @@
         {#if chip.detail}<span class="dt">· {chip.detail}</span>{/if}
       </div>
     {/each}
+    {#if split.omitted !== null}
+      <div class="chip omitted">{omittedNote(split.omitted)}</div>
+    {/if}
   </div>
 {/if}
 
@@ -87,5 +92,10 @@
   .dt {
     color: var(--muted);
     margin-left: 0.3rem;
+  }
+  .chip.omitted {
+    color: var(--muted);
+    font-style: italic;
+    border-style: dashed;
   }
 </style>

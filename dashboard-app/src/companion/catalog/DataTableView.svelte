@@ -6,7 +6,7 @@
   // never widens the page. No sorting/filtering/formatting: cells are shown
   // as the agent formatted them.
   import { store } from '../store.svelte';
-  import { flexGrow, resolveDynamic, toDisplayString } from '../functions';
+  import { flexGrow, omittedNote, resolveDynamic, splitTruncation, toDisplayString } from '../functions';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
 
@@ -42,10 +42,12 @@
         secondary: c.secondary === true,
       }));
   });
-  const rows = $derived.by((): Record<string, unknown>[] => {
+  const split = $derived.by(() => {
     const resolved = resolveDynamic(comp.rows, ctx);
-    if (!Array.isArray(resolved)) return [];
-    return resolved.filter((r) => typeof r === 'object' && r !== null) as Record<
+    return splitTruncation(Array.isArray(resolved) ? resolved : []);
+  });
+  const rows = $derived.by((): Record<string, unknown>[] => {
+    return split.rows.filter((r) => typeof r === 'object' && r !== null) as Record<
       string,
       unknown
     >[];
@@ -80,6 +82,9 @@
   </table>
 {:else if columns.length > 0}
   <div class="empty">{emptyText}</div>
+{/if}
+{#if split.omitted !== null}
+  <div class="omitted">{omittedNote(split.omitted)}</div>
 {/if}
 
 <style>
@@ -119,10 +124,14 @@
   td.secondary {
     color: var(--muted);
   }
-  .empty {
+  .empty,
+  .omitted {
     color: var(--muted);
     font-size: 0.85rem;
     font-style: italic;
     padding: 0.4rem 0;
+  }
+  .omitted {
+    font-size: 0.78rem;
   }
 </style>

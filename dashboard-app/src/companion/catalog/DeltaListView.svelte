@@ -4,7 +4,7 @@
   // moves" is the good news the page exists to show, so it renders emptyText.
   // Strings are preformatted; row tones are closed by normalizeTone.
   import { store } from '../store.svelte';
-  import { flexGrow, resolveDynamic, toDisplayString } from '../functions';
+  import { flexGrow, omittedNote, resolveDynamic, splitTruncation, toDisplayString } from '../functions';
   import { normalizeTone, toneInkVar } from '../chart';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
@@ -34,10 +34,12 @@
       ? comp.emptyText
       : 'nothing to report',
   );
-  const rows = $derived.by((): Row[] => {
+  const split = $derived.by(() => {
     const resolved = resolveDynamic(comp.rows, ctx);
-    if (!Array.isArray(resolved)) return [];
-    return resolved.map((row) => {
+    return splitTruncation(Array.isArray(resolved) ? resolved : []);
+  });
+  const rows = $derived.by((): Row[] => {
+    return split.rows.map((row) => {
       const r = (typeof row === 'object' && row !== null ? row : {}) as Record<string, unknown>;
       const from = toDisplayString(r.from);
       const to = toDisplayString(r.to);
@@ -62,6 +64,9 @@
         <span class="r">{row.range}</span>
       </li>
     {/each}
+  {/if}
+  {#if split.omitted !== null}
+    <li class="none"><span class="omitted">{omittedNote(split.omitted)}</span></li>
   {/if}
 </ul>
 
@@ -108,9 +113,13 @@
     text-align: right;
     white-space: nowrap;
   }
-  .empty {
+  .empty,
+  .omitted {
     color: var(--muted);
     font-size: 0.85rem;
     font-style: italic;
+  }
+  .omitted {
+    font-size: 0.78rem;
   }
 </style>

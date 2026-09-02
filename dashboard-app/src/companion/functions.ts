@@ -38,6 +38,37 @@ export function isDataBinding(v: unknown): v is { path: string } {
   );
 }
 
+/** The server's char-budget truncation marker, appended to a record-list
+ * source that could not fit (`sources.py::_bound`): `{_truncated: true,
+ * omitted: N}`. It is NOT a record — rendered through a repeat template or a
+ * row loop it would be a blank card / blank row and the omitted count would
+ * never be shown (codex P2 on #630). */
+export function isTruncationMarker(v: unknown): v is { _truncated: true; omitted?: unknown } {
+  return typeof v === 'object' && v !== null && (v as { _truncated?: unknown })._truncated === true;
+}
+
+/** Split a resolved source array into its real rows and the count the server
+ * omitted (null when the array carries no marker). Every array-consuming
+ * adapter and the repeat expansion use this, so a truncated source always
+ * renders "…and N more not shown" instead of a blank entry. */
+export function splitTruncation(rows: unknown[]): { rows: unknown[]; omitted: number | null } {
+  let omitted: number | null = null;
+  const kept = rows.filter((r) => {
+    if (!isTruncationMarker(r)) return true;
+    omitted = (omitted ?? 0) + (typeof r.omitted === 'number' && r.omitted > 0 ? r.omitted : 0);
+    return false;
+  });
+  return { rows: kept, omitted };
+}
+
+/** The user-facing line for a truncated source. */
+export function omittedNote(omitted: number | null): string {
+  if (omitted === null) return '';
+  return omitted > 0
+    ? `…and ${omitted} more not shown (source over budget)`
+    : '…more not shown (source over budget)';
+}
+
 /** Resolve any Dynamic* value: literal | {path} | FunctionCall. */
 export function resolveDynamic(value: unknown, ctx: EvalContext): unknown {
   if (isDataBinding(value)) {

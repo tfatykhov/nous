@@ -282,11 +282,24 @@ export function rollingMean(
  * (codex P2 on #630) — and lexically only as a fallback for unparseable `t`. */
 export function focusStartIndex(points: SeriesPoint[], focusFrom: string | null): number | null {
   if (!focusFrom) return null;
-  const target = Date.parse(focusFrom);
+  const target = parseInstant(focusFrom);
   const idx = points.findIndex((p) => {
     if (!p || typeof p !== 'object' || typeof p.t !== 'string') return false;
-    const ts = Date.parse(p.t);
+    const ts = parseInstant(p.t);
     return Number.isFinite(target) && Number.isFinite(ts) ? ts >= target : p.t >= focusFrom;
   });
   return idx === -1 ? null : idx;
+}
+
+const NAIVE_DATETIME = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
+
+/** `Date.parse` with the PRODUCER's convention: a datetime with no UTC
+ * offset is UTC (`to_series` sorts naive values as UTC and `_iso` keeps them
+ * offset-less), whereas `Date.parse` reads such a string as browser-local
+ * time — in New York a 00:30 point compared as 04:30Z and the focus window
+ * shaded the wrong point (codex P2 on #630). Date-only strings already parse
+ * as UTC; anything else is passed through. */
+export function parseInstant(t: string): number {
+  const s = t.trim();
+  return Date.parse(NAIVE_DATETIME.test(s) ? s.replace(' ', 'T') + 'Z' : s);
 }

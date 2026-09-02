@@ -4,7 +4,7 @@
   // to no rows rather than throwing: a surface streamed in pieces legitimately
   // renders before its data model arrives.
   import { store } from '../store.svelte';
-  import { flexGrow, resolveDynamic, toDisplayString } from '../functions';
+  import { flexGrow, omittedNote, resolveDynamic, splitTruncation, toDisplayString } from '../functions';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
 
@@ -21,10 +21,13 @@
   } = $props();
 
   const ctx = $derived({ dataModel: store.surfaces[surfaceId]?.dataModel ?? {}, scope });
-  const rows = $derived.by(() => {
+  // F096: a truncated source's trailing marker is not a row (codex P2 on #630).
+  const split = $derived.by(() => {
     const resolved = resolveDynamic(comp.rows, ctx);
-    if (!Array.isArray(resolved)) return [];
-    return resolved.map((row) => {
+    return splitTruncation(Array.isArray(resolved) ? resolved : []);
+  });
+  const rows = $derived.by(() => {
+    return split.rows.map((row) => {
       const record = (typeof row === 'object' && row !== null ? row : {}) as Record<string, unknown>;
       return { key: toDisplayString(record.key), value: toDisplayString(record.value) };
     });
@@ -42,6 +45,9 @@
       {/each}
     </tbody>
   </table>
+{/if}
+{#if split.omitted !== null}
+  <div class="omitted">{omittedNote(split.omitted)}</div>
 {/if}
 
 <style>
@@ -67,5 +73,11 @@
     font-weight: 500;
     white-space: nowrap;
     width: 1%;
+  }
+  .omitted {
+    color: var(--muted);
+    font-size: 0.78rem;
+    font-style: italic;
+    padding: 0.35rem 0.5rem;
   }
 </style>

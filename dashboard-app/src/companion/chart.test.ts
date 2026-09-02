@@ -17,6 +17,7 @@ import {
   trendWindow,
   rollingMean,
   focusStartIndex,
+  parseInstant,
   type SeriesPoint,
 } from './chart';
 
@@ -229,6 +230,20 @@ describe('F096 sparkline additions (renderer-owned)', () => {
     // unparseable labels (a categorical axis) fall back to string order
     const labels: SeriesPoint[] = [{ t: 'alpha', v: 1 }, { t: 'beta', v: 2 }];
     expect(focusStartIndex(labels, 'b')).toBe(1);
+  });
+
+  it('reads an offset-less datetime as UTC, like the producer (never browser-local)', () => {
+    // to_series sorts naive values as UTC and _iso keeps them offset-less;
+    // Date.parse would read them as local time and shade the wrong point.
+    expect(parseInstant('2026-09-01T00:30:00')).toBe(Date.parse('2026-09-01T00:30:00Z'));
+    expect(parseInstant('2026-09-01 00:30:00')).toBe(Date.parse('2026-09-01T00:30:00Z'));
+    expect(parseInstant('2026-09-01T00:30:00+01:00')).toBe(Date.parse('2026-09-01T00:30:00+01:00'));
+    expect(parseInstant('2026-09-01')).toBe(Date.parse('2026-09-01'));
+    const naive: SeriesPoint[] = [
+      { t: '2026-09-01T00:30:00', v: 1 },
+      { t: '2026-09-01T01:30:00', v: 2 },
+    ];
+    expect(focusStartIndex(naive, '2026-09-01T01:00:00Z')).toBe(1);
   });
 
   it('readSeries exposes meta.focus_from as focusFrom, null when absent or not a string', () => {

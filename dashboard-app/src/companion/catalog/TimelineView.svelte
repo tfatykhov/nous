@@ -5,7 +5,7 @@
   // `at`-keyed each would be a duplicate-key crash. Non-array resolves to
   // no rows, never throws: a surface can render before its data arrives.
   import { store } from '../store.svelte';
-  import { resolveDynamic, toDisplayString } from '../functions';
+  import { omittedNote, resolveDynamic, splitTruncation, toDisplayString } from '../functions';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
 
@@ -29,10 +29,13 @@
   } = $props();
 
   const ctx = $derived({ dataModel: store.surfaces[surfaceId]?.dataModel ?? {}, scope });
-  const items = $derived.by(() => {
+  // F096: a truncated source's trailing marker is not an entry (codex P2 on #630).
+  const split = $derived.by(() => {
     const resolved = resolveDynamic(comp.items, ctx);
-    if (!Array.isArray(resolved)) return [];
-    return resolved.map((row): TimelineItem => {
+    return splitTruncation(Array.isArray(resolved) ? resolved : []);
+  });
+  const items = $derived.by(() => {
+    return split.rows.map((row): TimelineItem => {
       const record = (typeof row === 'object' && row !== null ? row : {}) as Record<
         string,
         unknown
@@ -62,8 +65,17 @@
     {/each}
   </ol>
 {/if}
+{#if split.omitted !== null}
+  <div class="omitted">{omittedNote(split.omitted)}</div>
+{/if}
 
 <style>
+  .omitted {
+    color: var(--muted);
+    font-size: 0.78rem;
+    font-style: italic;
+    padding: 0.35rem 0 0 0.7rem;
+  }
   .timeline {
     list-style: none;
     margin: 0;
