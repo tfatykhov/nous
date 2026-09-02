@@ -74,6 +74,12 @@ ALLOWED_COMPONENTS = frozenset(
         "Sparkline",
         "LineChart",
         "BarChart",
+        # F096 report vocabulary
+        "MetricCard",
+        "ScoreCard",
+        "DeltaList",
+        "DataTable",
+        "ChipRow",
     }
 )
 
@@ -118,18 +124,27 @@ def _template_children(component: dict) -> list[dict]:
 
 # F093 §6.3 — list-heavy archetypes get a larger budget. MAX_DEPTH stays
 # 5 for all (depth is a complexity smell, not an expressiveness need).
-_ROOMY_ARCHETYPES = frozenset({"ledger", "briefing"})
+# F096 §5 — `report` is a third tier: the reference trend report already
+# needs eight panels (goals, movers, four source grids, table, freshness) and
+# a method note makes nine, so ledger/briefing's 8 sections had zero headroom.
+_ARCHETYPE_CAPS: dict[str, tuple[int, int]] = {
+    "ledger": (80, 8),
+    "briefing": (80, 8),
+    "report": (80, 10),
+}
+_ROOMY_ARCHETYPES = frozenset(_ARCHETYPE_CAPS)
 
 
 def caps_for(archetype: str | None) -> tuple[int, int]:
     """(max_components, max_sections) for an archetype. Default 40/5;
     ledger/briefing get 80/8 (a 16-day itinerary or a metrics dashboard
-    does not fit 40/5, and Repeat keeps the component count low anyway)."""
+    does not fit 40/5, and Repeat keeps the component count low anyway);
+    report gets 80/10."""
     # `in` would hash the value — a non-string archetype (a model emitting an
     # object/array) raises TypeError, which escapes _validate's repair loop and
     # the guaranteed fallback (codex P2). A non-string is simply not roomy.
-    if isinstance(archetype, str) and archetype in _ROOMY_ARCHETYPES:
-        return 80, 8
+    if isinstance(archetype, str) and archetype in _ARCHETYPE_CAPS:
+        return _ARCHETYPE_CAPS[archetype]
     return MAX_COMPONENTS, MAX_SECTIONS
 
 
@@ -223,6 +238,49 @@ def lint_micro_app(
             if n_series > 4:
                 errors.append(
                     f"LineChart {comp.get('id')!r} declares {n_series} series — max 4"
+                )
+        if ctype == "DataTable":
+            # F096 §7.1 — data-free column checks with type guards at every
+            # step: lint runs BEFORE schema validation, so a raise here would
+            # escape the repair loop AND the markdown fallback (the class fixed
+            # four times already above). The clean messages lead; the schema's
+            # maxItems / additionalProperties backstop.
+            cols = comp.get("columns")
+            if not isinstance(cols, list):
+                errors.append(
+                    f"DataTable {comp.get('id')!r} columns must be a list of "
+                    "{key, label} objects"
+                )
+            else:
+                keys: list[str] = []
+                for i, col in enumerate(cols):
+                    key = col.get("key") if isinstance(col, dict) else None
+                    if not isinstance(key, str) or not key.strip():
+                        errors.append(
+                            f"DataTable {comp.get('id')!r} column #{i} has no "
+                            "non-empty string key"
+                        )
+                    else:
+                        keys.append(key)
+                if len(cols) > 6:
+                    errors.append(
+                        f"DataTable {comp.get('id')!r} has {len(cols)} columns — "
+                        "max 6 (a phone-width table)"
+                    )
+                dupes = sorted({k for k in keys if keys.count(k) > 1})
+                if dupes:
+                    errors.append(
+                        f"DataTable {comp.get('id')!r} has duplicate column keys: {dupes}"
+                    )
+        if ctype == "MetricCard" and "trend" in comp:
+            # F096 §3.1 — `trend` is optional, but a PRESENT blank path resolves
+            # to the root of the data model (pointer.ts `absolute('')` → '/')
+            # and renders a bogus empty chart on a card that should have none.
+            trend = comp.get("trend")
+            if not isinstance(trend, str) or not trend.strip():
+                errors.append(
+                    f"MetricCard {comp.get('id')!r} has a blank trend — omit "
+                    "trend for a count"
                 )
         for tmpl in _template_children(comp):
             # F093 §6.2 Repeat: a template child must name a real component

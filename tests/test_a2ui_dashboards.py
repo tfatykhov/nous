@@ -1783,3 +1783,59 @@ def test_tabs_count_is_enforced_not_just_prompted():
     assert any("2-5" in e for e in grammar.lint_micro_app(tabs_app(6)))
     for n in (2, 5):
         assert grammar.lint_micro_app(tabs_app(n)) == [], n
+
+
+# ---------------------------------------------------------------------------
+# F096 report vocabulary — grammar (spec §5 caps, §7.1 lint)
+# ---------------------------------------------------------------------------
+
+
+def test_report_archetype_gets_the_widest_caps():
+    """The reference report already needs eight panels plus a method note, so
+    `report` is a third tier above ledger/briefing's 80/8 (spec §5)."""
+    assert grammar.caps_for("report") == (80, 10)
+    assert grammar.caps_for("ledger") == (80, 8)
+    assert grammar.caps_for(["report"]) == grammar.caps_for(None)
+
+
+def _table(columns):
+    return _skel([{"id": "c", "component": "DataTable", "columns": columns, "rows": {"path": "/rows"}}])
+
+
+@pytest.mark.parametrize(
+    "columns",
+    [
+        "a,b",
+        [{"key": "a", "label": "A"}, "b"],
+        [{"label": "x"}],
+        [{"key": "", "label": "A"}, {"key": "b", "label": "B"}],
+        [{"key": None, "label": "A"}],
+    ],
+)
+def test_datatable_columns_lint_returns_errors_never_raises(columns):
+    """Lint runs BEFORE schema validation, so a raise here escapes the repair
+    loop and the fallback — the class fixed four times already in grammar.py."""
+    errs = grammar.lint_micro_app(_table(columns))
+    assert any("DataTable 'c'" in e for e in errs), errs
+
+
+def test_datatable_seven_columns_and_duplicates_are_named():
+    seven = [{"key": f"k{i}", "label": str(i)} for i in range(7)]
+    dup = [{"key": "k", "label": "1"}, {"key": "k", "label": "2"}]
+    assert any("max 6" in e for e in grammar.lint_micro_app(_table(seven)))
+    assert any("duplicate column keys" in e for e in grammar.lint_micro_app(_table(dup)))
+    assert grammar.lint_micro_app(_table([{"key": "a", "label": "A"}, {"key": "b", "label": "B"}])) == []
+
+
+def test_metriccard_blank_trend_is_named_and_absent_trend_is_fine():
+    blank = _skel([{"id": "c", "component": "MetricCard", "label": "L", "value": "1", "trend": " "}])
+    assert any("blank trend" in e for e in grammar.lint_micro_app(blank))
+    count = _skel([{"id": "c", "component": "MetricCard", "label": "L", "value": "1"}])
+    assert grammar.lint_micro_app(count) == []
+    bound = _skel([{"id": "c", "component": "MetricCard", "label": "L", "value": "1", "trend": "/hr"}])
+    assert grammar.lint_micro_app(bound) == []
+
+
+def test_report_components_are_allowed_in_micro_apps():
+    for name in ("MetricCard", "ScoreCard", "DeltaList", "DataTable", "ChipRow"):
+        assert name in grammar.ALLOWED_COMPONENTS, name
