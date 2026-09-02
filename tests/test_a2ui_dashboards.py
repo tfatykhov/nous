@@ -682,7 +682,7 @@ async def test_theme_survives_dedup_replacement(service, db):
 
 
 def test_theme_enum_is_closed():
-    assert set(_THEMES) == {"nous-default", "alpine-dusk", "harbor", "paper", "signal"}
+    assert set(_THEMES) == {"nous-default", "alpine-dusk", "harbor", "paper", "signal", "report"}
 
 
 # ---------------------------------------------------------------------------
@@ -1783,3 +1783,351 @@ def test_tabs_count_is_enforced_not_just_prompted():
     assert any("2-5" in e for e in grammar.lint_micro_app(tabs_app(6)))
     for n in (2, 5):
         assert grammar.lint_micro_app(tabs_app(n)) == [], n
+
+
+# ---------------------------------------------------------------------------
+# F096 report vocabulary — grammar (spec §5 caps, §7.1 lint)
+# ---------------------------------------------------------------------------
+
+
+def test_report_archetype_gets_the_widest_caps():
+    """The reference report already needs eight panels plus a method note, so
+    `report` is a third tier above ledger/briefing's 80/8 (spec §5)."""
+    assert grammar.caps_for("report") == (80, 10)
+    assert grammar.caps_for("ledger") == (80, 8)
+    assert grammar.caps_for(["report"]) == grammar.caps_for(None)
+
+
+def _table(columns):
+    return _skel([{"id": "c", "component": "DataTable", "columns": columns, "rows": {"path": "/rows"}}])
+
+
+@pytest.mark.parametrize(
+    "columns",
+    [
+        "a,b",
+        [{"key": "a", "label": "A"}, "b"],
+        [{"label": "x"}],
+        [{"key": "", "label": "A"}, {"key": "b", "label": "B"}],
+        [{"key": None, "label": "A"}],
+    ],
+)
+def test_datatable_columns_lint_returns_errors_never_raises(columns):
+    """Lint runs BEFORE schema validation, so a raise here escapes the repair
+    loop and the fallback — the class fixed four times already in grammar.py."""
+    errs = grammar.lint_micro_app(_table(columns))
+    assert any("DataTable 'c'" in e for e in errs), errs
+
+
+def test_datatable_seven_columns_and_duplicates_are_named():
+    seven = [{"key": f"k{i}", "label": str(i)} for i in range(7)]
+    dup = [{"key": "k", "label": "1"}, {"key": "k", "label": "2"}]
+    assert any("max 6" in e for e in grammar.lint_micro_app(_table(seven)))
+    assert any("duplicate column keys" in e for e in grammar.lint_micro_app(_table(dup)))
+    assert grammar.lint_micro_app(_table([{"key": "a", "label": "A"}, {"key": "b", "label": "B"}])) == []
+
+
+def test_metriccard_blank_trend_is_named_and_absent_trend_is_fine():
+    blank = _skel([{"id": "c", "component": "MetricCard", "label": "L", "value": "1", "trend": " "}])
+    assert any("blank trend" in e for e in grammar.lint_micro_app(blank))
+    count = _skel([{"id": "c", "component": "MetricCard", "label": "L", "value": "1"}])
+    assert grammar.lint_micro_app(count) == []
+    bound = _skel([{"id": "c", "component": "MetricCard", "label": "L", "value": "1", "trend": "/hr"}])
+    assert grammar.lint_micro_app(bound) == []
+
+
+def test_report_components_are_allowed_in_micro_apps():
+    for name in ("MetricCard", "ScoreCard", "DeltaList", "DataTable", "ChipRow"):
+        assert name in grammar.ALLOWED_COMPONENTS, name
+
+
+# ---------------------------------------------------------------------------
+# F096 sources — focus_from and the series-aware _bound (spec §6.1 / §6.2 / AC4)
+# ---------------------------------------------------------------------------
+
+
+def _metric_records(n: int, points: int, **fields):
+    from nous.a2ui.sources import to_series
+
+    rows = [{"t": f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}", "v": float(i)} for i in range(points)]
+    return [{"label": f"m{i}", "value": "1", **fields, "trend": to_series(rows, "t", "v")} for i in range(n)]
+
+
+def test_to_series_focus_from_is_iso_and_survives_downsampling():
+    from datetime import date
+
+    from nous.a2ui.sources import to_series
+
+    rows = [{"t": f"2026-08-{d:02d}", "v": float(d)} for d in range(1, 29)]
+    s = to_series(rows * 10, "t", "v", focus_from=date(2026, 8, 4))  # 280 → downsampled
+    assert s["meta"]["focus_from"] == "2026-08-04"
+    assert s["meta"]["downsampled_from"] == 280
+    assert "focus_from" not in to_series(rows, "t", "v")["meta"]
+
+
+def test_bound_shortens_embedded_series_before_dropping_records():
+    from nous.a2ui import sources as src
+
+    recs = _metric_records(6, 200)
+    out, size = src._bound(recs, 12_000)
+    assert size <= 12_000
+    assert len(out) == 6 and not any(r.get("_truncated") for r in out)
+    assert all(r["trend"]["meta"]["downsampled_from"] == 200 for r in out)
+    assert recs[0]["trend"]["meta"]["downsampled_from"] is None, "input not mutated"
+
+
+def test_bound_pops_records_only_when_sparks_cannot_shrink_enough():
+    from nous.a2ui import sources as src
+
+    recs = _metric_records(200, 3)  # sparks already minimal
+    out, size = src._bound(recs, 3_000)
+    assert size <= 3_000
+    assert out[-1]["_truncated"] is True and out[-1]["omitted"] > 0
+
+
+def test_bound_reallocates_the_series_budget_to_the_surviving_records():
+    """codex P2 on #630: shrinking over ALL records and popping the tail after
+    left the retained cards with emptied trends although full ones fit in the
+    space the dropped records freed."""
+    from nous.a2ui import sources as src
+
+    recs = _metric_records(10, 200, caption="x" * 1500)  # fixed fields alone exceed 12k
+    out, size = src._bound(recs, 12_000)
+    assert size <= 12_000
+    assert out[-1]["_truncated"] is True and out[-1]["omitted"] > 0
+    kept = out[:-1]
+    assert kept, "some records must survive"
+    assert all(len(r["trend"]["points"]) >= 2 for r in kept), "survivors keep a real trend"
+
+
+def test_to_series_orders_mixed_offsets_chronologically():
+    """codex P2 on #630: a lexical sort put 00:00Z before 00:30+01:00 (23:30Z
+    the day before), and the renderer shades the focus window as a suffix."""
+    from datetime import date
+
+    from nous.a2ui.sources import to_series
+
+    rows = [
+        {"t": "2026-09-01T00:00:00Z", "v": 2.0},
+        {"t": "2026-09-01T00:30:00+01:00", "v": 1.0},
+        {"t": "2026-09-01T02:00:00Z", "v": 3.0},
+    ]
+    assert [p["v"] for p in to_series(rows, "t", "v")["points"]] == [1.0, 2.0, 3.0]
+    mixed = [{"t": date(2026, 9, 2), "v": 2.0}, {"t": "2026-09-01", "v": 1.0}, {"t": "week 3", "v": 9.0}]
+    assert [p["v"] for p in to_series(mixed, "t", "v")["points"]] == [1.0, 2.0, 9.0]
+
+
+def test_bound_leaves_malformed_embedded_series_untouched_and_never_raises():
+    from nous.a2ui import sources as src
+
+    recs = _metric_records(6, 200)
+    recs[0]["trend"] = {"kind": "series", "points": None}
+    recs[1]["trend"] = {"kind": "series", "points": [{"t": "x", "v": 1}], "meta": "bad"}
+    out, _ = src._bound(recs, 12_000)
+    assert out[0]["trend"] == {"kind": "series", "points": None}
+    assert out[1]["trend"]["meta"] == "bad"
+    assert out[2]["trend"]["meta"]["downsampled_from"] == 200
+
+
+def test_panel_sized_metric_source_fits_the_per_source_budget():
+    """The recipe's shape (spec §6.1 / AC4): one source per section panel.
+    Measured 2026-09-01: a fully-captioned 56-point metric record serializes
+    to ~2.06k (json.dumps escapes ↓ → · to \\uXXXX), so five fit the 12k
+    per-source budget untouched and six lose at most a couple of points per
+    spark — never a record."""
+    from nous.a2ui import sources as src
+
+    fields = dict(
+        unit="s", delta="↓0.6 s · improving", tone="ok",
+        caption="5.9 → 5.3 (28d median, n=28)", footnote="last 2026-09-01",
+    )
+    five, size5 = src._bound(_metric_records(5, 56, **fields), src._PER_SOURCE_BUDGET_CHARS)
+    assert size5 <= src._PER_SOURCE_BUDGET_CHARS
+    assert all(r["trend"]["meta"]["downsampled_from"] is None for r in five)
+
+    six, size6 = src._bound(_metric_records(6, 56, **fields), src._PER_SOURCE_BUDGET_CHARS)
+    assert size6 <= src._PER_SOURCE_BUDGET_CHARS
+    assert len(six) == 6 and not any(r.get("_truncated") for r in six)
+    assert all(len(r["trend"]["points"]) >= 50 for r in six)
+
+
+# ---------------------------------------------------------------------------
+# F096 compose validation — shared resolver, array + column rules (spec §7.2)
+# ---------------------------------------------------------------------------
+
+
+def _series(n=3, keys=None):
+    from nous.a2ui.sources import to_series
+
+    rows = [{"t": f"2026-08-{d:02d}", "v": float(d), "a": 1.0, "b": 2.0} for d in range(1, n + 1)]
+    return to_series(rows, "t", "v", value_keys=keys)
+
+
+def _rules(comps, model):
+    return _binding_rules(comps, model, model, _collect_bindings(comps))
+
+
+def _repeat_skel(template_id, template, extra=()):
+    """Skeleton whose Section body is a Column repeating `template` over /metrics."""
+    return _skel([
+        {"id": "c", "component": "Column", "children": {"componentId": template_id, "path": "/metrics"}},
+        template,
+        *extra,
+    ])
+
+
+def test_metriccard_trend_bound_to_records_or_multi_series_is_named():
+    comps = _skel([{"id": "c", "component": "MetricCard", "label": "L", "value": "1", "trend": "/metrics"}])
+    errs = _rules(comps, {"metrics": [{"label": "x"}]})
+    assert any("MetricCard 'c' binds /metrics" in e and "not a series" in e for e in errs), errs
+    errs = _rules(comps, {"metrics": _series(keys=["a", "b"])})
+    assert any("MetricCard 'c'" in e and "multi-series" in e for e in errs), errs
+    assert _rules(comps, {"metrics": _series()}) == []
+
+
+def test_metriccard_without_trend_in_a_mixed_grid_is_a_state_not_an_error():
+    """A count mixed into a grid of trended metrics under one Repeat (spec §3.1)."""
+    card = {"id": "m", "component": "MetricCard", "label": {"path": "label"}, "value": {"path": "value"}}
+    comps = _repeat_skel("m", {**card, "trend": "trend"})
+    model = {"metrics": [{"label": "a", "value": "1", "trend": _series()}, {"label": "b", "value": "2"}]}
+    assert _rules(comps, model) == []
+    bad = {"metrics": [{"label": "a", "value": "1", "trend": _series()}, {"label": "b", "value": "2", "trend": [1, 2]}]}
+    errs = _rules(comps, bad)
+    assert any("MetricCard 'm' binds /metrics/1/trend" in e for e in errs), errs
+
+
+def test_optional_data_props_are_only_optional_per_item():
+    """Review P3: 'resolves to nothing is a state' holds for a repeat ITEM (a
+    count with no trend); an absolute or template-less path pointing at
+    nothing is a typo and must be named."""
+    typo = _skel([{"id": "c", "component": "MetricCard", "label": "L", "value": "1", "trend": "/typo"}])
+    errs = _rules(typo, {"metrics": []})
+    assert any("MetricCard 'c' binds /typo" in e and "nothing" in e for e in errs), errs
+    relative = _skel([{"id": "c", "component": "MetricCard", "label": "L", "value": "1", "trend": "typo"}])
+    assert any("nothing" in e for e in _rules(relative, {}))
+    sc = _skel([{"id": "c", "component": "ScoreCard", "title": "T", "status": "s", "items": {"path": "/gone"}}])
+    assert any("ScoreCard 'c' binds /gone" in e for e in _rules(sc, {}))
+
+
+def test_metriccard_multi_series_error_names_metriccard():
+    comps = _skel([{"id": "c", "component": "MetricCard", "label": "L", "value": "1", "trend": "/m"}])
+    errs = _rules(comps, {"m": _series(keys=["a", "b"])})
+    assert any("MetricCard reads a single-value" in e for e in errs), errs
+    assert not any("Sparkline/BarChart" in e for e in errs)
+
+
+def test_validation_resolver_decodes_rfc6901_tokens_like_the_renderer():
+    """codex P2 on #630: pointer.ts unescapes ~1 → '/' then ~0 → '~'; the
+    validator's _get_path looked the encoded token up literally, rejecting a
+    binding that renders fine."""
+    from nous.a2ui.compose import _get_path
+
+    model = {"source": {"a/b": _series(), "x~y": [{"label": "l", "delta": "d"}]}}
+    assert _get_path(model, "/source/a~1b") is model["source"]["a/b"]
+    assert _get_path(model, "/source/x~0y") is model["source"]["x~y"]
+    chart = _skel([{"id": "c", "component": "Sparkline", "path": "/source/a~1b"}])
+    assert _rules(chart, model) == []
+    rows = _skel([{"id": "c", "component": "DeltaList", "rows": {"path": "/source/x~0y"}}])
+    assert _rules(rows, model) == []
+
+
+def test_validation_resolver_rejects_negative_and_non_integer_indices():
+    """codex P2 on #630: Python's list[-1] would validate `/rows/-1/items`
+    against the LAST row while the renderer's getPointer resolves undefined."""
+    from nous.a2ui.compose import _get_path
+
+    model = {"rows": [{"items": [{"label": "l", "value": "v"}]}]}
+    assert _get_path(model, "/rows/0/items") == model["rows"][0]["items"]
+    assert _get_path(model, "/rows/-1/items") is None
+    assert _get_path(model, "/rows/x/items") is None
+    assert _get_path(model, "/rows/1/items") is None
+    comp = _skel([{"id": "c", "component": "DeltaList", "rows": {"path": "/rows/-1/items"}}])
+    assert any("resolved to nothing" in e for e in _rules(comp, model))
+
+
+def test_validation_ignores_the_truncation_marker_like_the_renderer():
+    """codex P2 on #630: `_bound`'s trailing {_truncated, omitted} entry is not
+    a record — the column rule must not count it as a row missing every key,
+    and a per-item rule under a Repeat must not resolve against it."""
+    marker = {"_truncated": True, "omitted": 4}
+    cols = [{"key": "night", "label": "Night"}]
+    table = _skel([{"id": "c", "component": "DataTable", "columns": cols, "rows": {"path": "/sleep"}}])
+    assert _rules(table, {"sleep": [marker]}) == []
+    assert _rules(table, {"sleep": [{"night": "x"}, marker]}) == []
+    # a required per-item prop (Timeline.items) inside a Repeat over a truncated list
+    comps = _repeat_skel("card", {"id": "card", "component": "Timeline", "items": {"path": "events"}})
+    model = {"metrics": [{"events": [{"at": "t", "label": "l"}]}, marker]}
+    assert _rules(comps, model) == []
+    only_marker = {"metrics": [marker]}
+    assert _rules(comps, only_marker) == []
+
+
+def test_datatable_column_rule_covers_literal_rows():
+    """Review P2: the array rule validates literal arrays, so the column rule must too."""
+    cols = [{"key": "night", "label": "Night"}, {"key": "facts", "label": "Facts"}]
+    comps = _skel([{"id": "c", "component": "DataTable", "columns": cols, "rows": [{"night": "2026-08-31"}]}])
+    errs = _rules(comps, {})
+    assert any("column 'facts' is absent from every row" in e for e in errs), errs
+
+
+def test_deltalist_bound_to_a_series_is_named_and_an_empty_list_passes():
+    comps = _skel([{"id": "c", "component": "DeltaList", "rows": {"path": "/movers"}}])
+    errs = _rules(comps, {"movers": _series()})
+    assert any("DeltaList 'c' binds /movers" in e and "a series, not an array of rows" in e for e in errs), errs
+    assert _rules(comps, {"movers": []}) == []
+    assert _rules(comps, {"movers": [{"label": "x", "delta": "↑1"}]}) == []
+    errs = _rules(comps, {"movers": None})
+    assert any("resolved to nothing" in e for e in errs), errs
+
+
+def test_scorecard_items_absent_or_none_pass_but_a_string_is_named():
+    card = {"id": "s", "component": "ScoreCard", "title": {"path": "title"}, "status": "ok", "items": {"path": "items"}}
+    comps = _repeat_skel("s", card)
+    model = {"metrics": [{"title": "a", "items": [{"label": "l", "value": "v"}]}, {"title": "b"}]}
+    assert _rules(comps, model) == []
+    bad = {"metrics": [{"title": "a", "items": "nope"}]}
+    errs = _rules(comps, bad)
+    assert any("ScoreCard 's' binds /metrics/0/items" in e and "str, not an array" in e for e in errs), errs
+    no_items = _skel([{"id": "c", "component": "ScoreCard", "title": "T", "status": "ok"}])
+    assert _rules(no_items, {}) == []
+
+
+def test_array_rule_skips_function_calls_and_rejects_literal_non_arrays():
+    call = _skel([{"id": "c", "component": "ChipRow", "items": {"call": "lanes"}}])
+    assert _rules(call, {}) == []
+    literal_ok = _skel([{"id": "c", "component": "ChipRow", "items": [{"label": "a", "value": "today"}]}])
+    assert _rules(literal_ok, {}) == []
+    literal_bad = _skel([{"id": "c", "component": "Timeline", "items": {"at": "x"}}])
+    errs = _rules(literal_bad, {})
+    assert any("Timeline 'c'" in e and "not an array of rows" in e for e in errs), errs
+
+
+def test_datatable_column_absent_from_every_row_is_named():
+    cols = [{"key": "night", "label": "Night"}, {"key": "facts", "label": "Facts", "align": "end"}]
+    comps = _skel([{"id": "c", "component": "DataTable", "columns": cols, "rows": {"path": "/sleep"}}])
+    rows = [{"night": "2026-08-31", "facts": 14}, {"night": "2026-08-30"}]
+    assert _rules(comps, {"sleep": rows}) == []
+    errs = _rules(comps, {"sleep": [{"night": "2026-08-31"}]})
+    assert any("column 'facts' is absent from every row" in e for e in errs), errs
+    assert _rules(comps, {"sleep": []}) == []
+
+
+def test_resolver_follows_modal_content_inside_a_repeat():
+    """AC9: the resolver walks the same child keys as the grammar (trigger,
+    content, tabs) — a KeyValueTable behind a Modal inside a Repeat resolves
+    its relative rows per item instead of from root."""
+    comps = _repeat_skel(
+        "card",
+        {"id": "card", "component": "Column", "children": ["title", "more"]},
+        extra=[
+            {"id": "title", "component": "Text", "text": {"path": "label"}},
+            {"id": "more", "component": "Modal", "trigger": "hint", "content": "kv"},
+            {"id": "hint", "component": "Text", "text": "details"},
+            {"id": "kv", "component": "KeyValueTable", "rows": {"path": "attrs"}},
+        ],
+    )
+    good = {"metrics": [{"label": "a", "attrs": [{"key": "k", "value": "v"}]}, {"label": "b", "attrs": []}]}
+    assert _rules(comps, good) == []
+    bad = {"metrics": [{"label": "a", "attrs": _series()}]}
+    errs = _rules(comps, bad)
+    assert any("KeyValueTable 'kv' binds /metrics/0/attrs" in e and "a series" in e for e in errs), errs

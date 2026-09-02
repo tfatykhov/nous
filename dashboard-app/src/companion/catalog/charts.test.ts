@@ -75,8 +75,11 @@ describe('SparklineView', () => {
     seed({ hr: series([62, null, 58, 61]) });
     const { container } = renderSpark('/hr');
     // index 0 is isolated (gap at 1) → a dot; 58-61 is a real segment → a line.
+    // (F096 adds an end dot — `circle.end` — on top of the last real reading;
+    // it is excluded here so the isolated-reading count stays what it means.)
     expect(container.querySelectorAll('polyline').length).toBe(1);
-    expect(container.querySelectorAll('circle').length).toBe(1);
+    expect(container.querySelectorAll('circle:not(.end)').length).toBe(1);
+    expect(container.querySelectorAll('circle.end').length).toBe(1);
     expect(container.textContent).toContain('1 gap');
   });
 
@@ -86,7 +89,51 @@ describe('SparklineView', () => {
     seed({ hr: series([62, null, 58]) });
     const { container } = renderSpark('/hr');
     expect(container.querySelectorAll('polyline').length).toBe(0);
-    expect(container.querySelectorAll('circle').length).toBe(2);
+    expect(container.querySelectorAll('circle:not(.end)').length).toBe(2);
+    // F096: the last reading is already an isolated dot — no end dot on top.
+    expect(container.querySelectorAll('circle.end').length).toBe(0);
+  });
+
+  it('F096: marks the current reading with one end dot and never a fill', () => {
+    seed({ hr: series([62, 60, 58, 61]) });
+    const { container } = renderSpark('/hr');
+    expect(container.querySelectorAll('circle.end').length).toBe(1);
+    expect(container.querySelector('polygon')).toBeNull(); // not zero-based ⇒ no area
+  });
+
+  it('F096: shades the focus window from the source-declared meta.focus_from', () => {
+    seed({ hr: series([62, 60, 58, 61, 59, 57], 'bpm', { focus_from: '2026-08-04' }) });
+    const { container } = renderSpark('/hr');
+    const rect = container.querySelector('rect.focus');
+    expect(rect).not.toBeNull();
+    // index 3 of 6 on a 260-wide viewBox with 6px pad: 6 + 248*3/5 = 154.8
+    expect(rect?.getAttribute('x')).toBe('154.8');
+    expect(rect?.getAttribute('width')).toBe('105.2');
+    seed({ hr: series([62, 60, 58], 'bpm', { focus_from: '2027-01-01' }) });
+    expect(renderSpark('/hr').container.querySelector('rect.focus')).toBeNull(); // no point in window
+  });
+
+  it('F096: trendline draws the rolling mean over a faint raw line, never across a gap', () => {
+    seed({ hr: series([62, 60, 58, 61, 59, 57, null, 55, 54, 56]) });
+    const { container } = renderSpark('/hr', { trendline: true });
+    const raw = container.querySelectorAll('polyline.raw');
+    const main = container.querySelectorAll('polyline:not(.raw)');
+    expect(raw.length).toBe(2); // two runs either side of the gap
+    expect(main.length).toBe(2); // the mean breaks at the same gap
+    expect(container.querySelectorAll('circle.end').length).toBe(1);
+  });
+
+  it('F096: with a trendline the end dot marks the last RAW reading, not the last mean', () => {
+    // [1, 10, 1]: the rolling mean ends at 4; the current reading is 1 — the
+    // dot must sit on the raw line's last point (codex P2 on #630).
+    seed({ hr: series([1, 10, 1]) });
+    const { container } = renderSpark('/hr', { trendline: true });
+    const dot = container.querySelector('circle.end');
+    const raw = container.querySelector('polyline.raw')?.getAttribute('points') ?? '';
+    const lastRaw = raw.split(' ').pop();
+    expect(`${dot?.getAttribute('cx')},${dot?.getAttribute('cy')}`).toBe(lastRaw);
+    const mean = container.querySelector('polyline:not(.raw)')?.getAttribute('points') ?? '';
+    expect(mean.split(' ').pop()).not.toBe(lastRaw);
   });
 
   it('shows a break marker when the domain excludes zero', () => {

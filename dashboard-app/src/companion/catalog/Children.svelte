@@ -6,6 +6,7 @@
   import { store } from '../store.svelte';
   import { absolute, type Scope } from '../pointer';
   import { getPointer } from '../pointer';
+  import { isTruncationMarker, omittedNote } from '../functions';
 
   let {
     surfaceId,
@@ -33,6 +34,19 @@
     const value = getPointer(surface.dataModel, templateBase);
     return Array.isArray(value) ? value : [];
   });
+  // The server's char-budget marker is the LAST array entry, not a record:
+  // expanding the template over it would render a blank card and hide the
+  // omitted count (codex P2 on #630). Item indices are preserved for the
+  // real records so their scopes still point at the right array slot.
+  const omitted = $derived.by(() => {
+    let n: number | null = null;
+    for (const item of templateItems) {
+      if (isTruncationMarker(item)) {
+        n = (n ?? 0) + (typeof item.omitted === 'number' && item.omitted > 0 ? item.omitted : 0);
+      }
+    }
+    return n;
+  });
 </script>
 
 {#if Array.isArray(children)}
@@ -40,13 +54,26 @@
     <Renderer {surfaceId} componentId={childId} {scope} {depth} {ancestors} />
   {/each}
 {:else if template}
-  {#each templateItems as _, i (i)}
-    <Renderer
-      {surfaceId}
-      componentId={template.componentId}
-      scope={{ base: `${templateBase}/${i}`, index: i }}
-      {depth}
-      {ancestors}
-    />
+  {#each templateItems as item, i (i)}
+    {#if !isTruncationMarker(item)}
+      <Renderer
+        {surfaceId}
+        componentId={template.componentId}
+        scope={{ base: `${templateBase}/${i}`, index: i }}
+        {depth}
+        {ancestors}
+      />
+    {/if}
   {/each}
+  {#if omitted !== null}
+    <div class="omitted">{omittedNote(omitted)}</div>
+  {/if}
 {/if}
+
+<style>
+  .omitted {
+    color: var(--muted);
+    font-size: 0.78rem;
+    font-style: italic;
+  }
+</style>

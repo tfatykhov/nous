@@ -41,6 +41,11 @@ import TimelineView from './TimelineView.svelte';
 import SparklineView from './SparklineView.svelte';
 import LineChartView from './LineChartView.svelte';
 import BarChartView from './BarChartView.svelte';
+import MetricCardView from './MetricCardView.svelte';
+import ScoreCardView from './ScoreCardView.svelte';
+import DeltaListView from './DeltaListView.svelte';
+import DataTableView from './DataTableView.svelte';
+import ChipRowView from './ChipRowView.svelte';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const registry: Record<string, Component<any>> = {
@@ -80,4 +85,10 @@ export const registry: Record<string, Component<any>> = {
   Sparkline: SparklineView,
   LineChart: LineChartView,
   BarChart: BarChartView,
+  // F096 report vocabulary
+  MetricCard: MetricCardView,
+  ScoreCard: ScoreCardView,
+  DeltaList: DeltaListView,
+  DataTable: DataTableView,
+  ChipRow: ChipRowView,
 };

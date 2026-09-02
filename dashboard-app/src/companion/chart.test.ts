@@ -13,6 +13,11 @@ import {
   lineSegments,
   formatTick,
   ticks,
+  toneInkVar,
+  trendWindow,
+  rollingMean,
+  focusStartIndex,
+  parseInstant,
   type SeriesPoint,
 } from './chart';
 
@@ -170,5 +175,82 @@ describe('tick formatting + values', () => {
   it('produces evenly spaced ticks across the domain', () => {
     const t = ticks({ min: 0, max: 100, zeroBreak: false }, 3);
     expect(t).toEqual([0, 50, 100]);
+  });
+});
+
+describe('F096 sparkline additions (renderer-owned)', () => {
+  it('ink maps neutral to --soft while the stroke keeps the axis grey', () => {
+    expect(toneInkVar('neutral')).toBe('var(--soft)');
+    expect(toneInkVar('crit')).toBe('var(--crit)');
+    expect(toneVar('neutral')).toBe('var(--chart-axis)');
+  });
+
+  it('trend window is renderer-owned: max(3, n/8)', () => {
+    expect(trendWindow(10)).toBe(3);
+    expect(trendWindow(56)).toBe(7);
+    expect(trendWindow(200)).toBe(25);
+  });
+
+  it('rolling mean never bridges a gap — the window resets per run', () => {
+    // [1, 3, gap, 5, 7] window 2: run A = 1, (1+3)/2; run B restarts at 5.
+    const finite = seriesValues(pts([1, 3, null, 5, 7]));
+    expect(rollingMean(finite, 2)).toEqual([
+      { i: 0, v: 1 },
+      { i: 1, v: 2 },
+      { i: 3, v: 5 },
+      { i: 4, v: 6 },
+    ]);
+    // indices survive, so lineSegments splits the mean at the same gap
+    expect(lineSegments(rollingMean(finite, 2), (i) => i, (v) => v).length).toBe(2);
+  });
+
+  it('rolling mean with window 1 is the identity', () => {
+    const finite = seriesValues(pts([4, 8, 6]));
+    expect(rollingMean(finite, 1)).toEqual(finite);
+  });
+
+  it('focus start is the first point at or after meta.focus_from', () => {
+    const points = pts([1, 2, 3, 4]);
+    expect(focusStartIndex(points, '2026-08-03')).toBe(2);
+    expect(focusStartIndex(points, '2026-08-02T12:00:00Z')).toBe(2); // between 02 and 03
+    expect(focusStartIndex(points, '2027-01-01')).toBeNull();
+    expect(focusStartIndex(points, null)).toBeNull();
+    expect(focusStartIndex([{} as SeriesPoint, ...points], '2026-08-01')).toBe(1); // gap placeholder skipped
+  });
+
+  it('focus start compares chronologically across UTC offsets, lexically only as a fallback', () => {
+    // 00:30+01:00 is 23:30Z the day BEFORE — lexically it sorts after 00:00Z.
+    const offsets: SeriesPoint[] = [
+      { t: '2026-09-01T00:30:00+01:00', v: 1 },
+      { t: '2026-09-01T00:00:00Z', v: 2 },
+      { t: '2026-09-01T02:00:00Z', v: 3 },
+    ];
+    expect(focusStartIndex(offsets, '2026-09-01T00:00:00Z')).toBe(1);
+    expect(focusStartIndex(offsets, '2026-08-31T23:00:00Z')).toBe(0);
+    // unparseable labels (a categorical axis) fall back to string order
+    const labels: SeriesPoint[] = [{ t: 'alpha', v: 1 }, { t: 'beta', v: 2 }];
+    expect(focusStartIndex(labels, 'b')).toBe(1);
+  });
+
+  it('reads an offset-less datetime as UTC, like the producer (never browser-local)', () => {
+    // to_series sorts naive values as UTC and _iso keeps them offset-less;
+    // Date.parse would read them as local time and shade the wrong point.
+    expect(parseInstant('2026-09-01T00:30:00')).toBe(Date.parse('2026-09-01T00:30:00Z'));
+    expect(parseInstant('2026-09-01 00:30:00')).toBe(Date.parse('2026-09-01T00:30:00Z'));
+    expect(parseInstant('2026-09-01T00:30:00+01:00')).toBe(Date.parse('2026-09-01T00:30:00+01:00'));
+    expect(parseInstant('2026-09-01')).toBe(Date.parse('2026-09-01'));
+    const naive: SeriesPoint[] = [
+      { t: '2026-09-01T00:30:00', v: 1 },
+      { t: '2026-09-01T01:30:00', v: 2 },
+    ];
+    expect(focusStartIndex(naive, '2026-09-01T01:00:00Z')).toBe(1);
+  });
+
+  it('readSeries exposes meta.focus_from as focusFrom, null when absent or not a string', () => {
+    const base = { kind: 'series', points: pts([1, 2]), unit: '' };
+    expect(readSeries({ ...base, meta: { focus_from: '2026-08-02' } }).focusFrom).toBe('2026-08-02');
+    expect(readSeries({ ...base, meta: { focus_from: 42 } }).focusFrom).toBeNull();
+    expect(readSeries(base).focusFrom).toBeNull();
+    expect(readSeries([1, 2]).focusFrom).toBeNull();
   });
 });
