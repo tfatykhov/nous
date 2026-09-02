@@ -766,6 +766,10 @@ def _get_path(model: dict, path: str) -> Any:
     for seg in path.strip("/").split("/"):
         if seg == "":
             continue
+        # RFC 6901 token decoding, ~1 → '/' THEN ~0 → '~' — the renderer's
+        # pointer.ts unescapes the same way, so a binding to a key containing
+        # '/' or '~' resolves here exactly as it renders (codex P2 on #630).
+        seg = seg.replace("~1", "/").replace("~0", "~")
         if isinstance(cur, dict):
             cur = cur.get(seg)
         elif isinstance(cur, list):

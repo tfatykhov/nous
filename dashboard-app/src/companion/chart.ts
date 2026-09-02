@@ -275,13 +275,18 @@ export function rollingMean(
   return out;
 }
 
-/** Index of the first point whose `t` is at or after `focusFrom` (ISO-8601
- * strings compare lexically), or null when there is no window or no such
- * point. The sparkline shades from that index to the end. */
+/** Index of the first point whose `t` is at or after `focusFrom`, or null
+ * when there is no window or no such point. The sparkline shades from that
+ * index to the end. Compared CHRONOLOGICALLY when both sides parse as
+ * timestamps — ISO strings with different UTC offsets do not order lexically
+ * (codex P2 on #630) — and lexically only as a fallback for unparseable `t`. */
 export function focusStartIndex(points: SeriesPoint[], focusFrom: string | null): number | null {
   if (!focusFrom) return null;
-  const idx = points.findIndex(
-    (p) => p && typeof p === 'object' && typeof p.t === 'string' && p.t >= focusFrom,
-  );
+  const target = Date.parse(focusFrom);
+  const idx = points.findIndex((p) => {
+    if (!p || typeof p !== 'object' || typeof p.t !== 'string') return false;
+    const ts = Date.parse(p.t);
+    return Number.isFinite(target) && Number.isFinite(ts) ? ts >= target : p.t >= focusFrom;
+  });
   return idx === -1 ? null : idx;
 }

@@ -54,11 +54,16 @@
   const rawSegments = $derived(trendline ? lineSegments(finite, x, y) : []);
   const segments = $derived(lineSegments(main, x, y));
   const focusIdx = $derived(focusStartIndex(series.points, series.focusFrom));
-  const last = $derived(main.length ? main[main.length - 1] : null);
+  // The end dot marks the CURRENT READING — the last raw finite point, never
+  // the last rolling mean: with trendline on, [1, 10, 1] must dot 1, not 4
+  // (codex P2 on #630). rollingMean preserves indices, so isolation is the
+  // same question either way.
+  const last = $derived(finite.length ? finite[finite.length - 1] : null);
   // An isolated final reading (previous index is a gap) is already drawn as a
   // dot by the segment loop; an end dot on top of it would double-dot.
   const lastIsolated = $derived(
-    main.length === 1 || (main.length > 1 && main[main.length - 1].i !== main[main.length - 2].i + 1),
+    finite.length === 1 ||
+      (finite.length > 1 && finite[finite.length - 1].i !== finite[finite.length - 2].i + 1),
   );
 </script>
 

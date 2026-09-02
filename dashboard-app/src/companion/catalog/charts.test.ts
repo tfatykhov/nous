@@ -123,6 +123,19 @@ describe('SparklineView', () => {
     expect(container.querySelectorAll('circle.end').length).toBe(1);
   });
 
+  it('F096: with a trendline the end dot marks the last RAW reading, not the last mean', () => {
+    // [1, 10, 1]: the rolling mean ends at 4; the current reading is 1 — the
+    // dot must sit on the raw line's last point (codex P2 on #630).
+    seed({ hr: series([1, 10, 1]) });
+    const { container } = renderSpark('/hr', { trendline: true });
+    const dot = container.querySelector('circle.end');
+    const raw = container.querySelector('polyline.raw')?.getAttribute('points') ?? '';
+    const lastRaw = raw.split(' ').pop();
+    expect(`${dot?.getAttribute('cx')},${dot?.getAttribute('cy')}`).toBe(lastRaw);
+    const mean = container.querySelector('polyline:not(.raw)')?.getAttribute('points') ?? '';
+    expect(mean.split(' ').pop()).not.toBe(lastRaw);
+  });
+
   it('shows a break marker when the domain excludes zero', () => {
     seed({ hr: series([58, 62, 60, 61]) });
     const { container } = renderSpark('/hr');

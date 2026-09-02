@@ -211,10 +211,24 @@ describe('F096 sparkline additions (renderer-owned)', () => {
   it('focus start is the first point at or after meta.focus_from', () => {
     const points = pts([1, 2, 3, 4]);
     expect(focusStartIndex(points, '2026-08-03')).toBe(2);
-    expect(focusStartIndex(points, '2026-08-02T12:00:00')).toBe(2); // between 02 and 03
+    expect(focusStartIndex(points, '2026-08-02T12:00:00Z')).toBe(2); // between 02 and 03
     expect(focusStartIndex(points, '2027-01-01')).toBeNull();
     expect(focusStartIndex(points, null)).toBeNull();
     expect(focusStartIndex([{} as SeriesPoint, ...points], '2026-08-01')).toBe(1); // gap placeholder skipped
+  });
+
+  it('focus start compares chronologically across UTC offsets, lexically only as a fallback', () => {
+    // 00:30+01:00 is 23:30Z the day BEFORE — lexically it sorts after 00:00Z.
+    const offsets: SeriesPoint[] = [
+      { t: '2026-09-01T00:30:00+01:00', v: 1 },
+      { t: '2026-09-01T00:00:00Z', v: 2 },
+      { t: '2026-09-01T02:00:00Z', v: 3 },
+    ];
+    expect(focusStartIndex(offsets, '2026-09-01T00:00:00Z')).toBe(1);
+    expect(focusStartIndex(offsets, '2026-08-31T23:00:00Z')).toBe(0);
+    // unparseable labels (a categorical axis) fall back to string order
+    const labels: SeriesPoint[] = [{ t: 'alpha', v: 1 }, { t: 'beta', v: 2 }];
+    expect(focusStartIndex(labels, 'b')).toBe(1);
   });
 
   it('readSeries exposes meta.focus_from as focusFrom, null when absent or not a string', () => {

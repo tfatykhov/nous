@@ -1984,6 +1984,21 @@ def test_metriccard_multi_series_error_names_metriccard():
     assert not any("Sparkline/BarChart" in e for e in errs)
 
 
+def test_validation_resolver_decodes_rfc6901_tokens_like_the_renderer():
+    """codex P2 on #630: pointer.ts unescapes ~1 → '/' then ~0 → '~'; the
+    validator's _get_path looked the encoded token up literally, rejecting a
+    binding that renders fine."""
+    from nous.a2ui.compose import _get_path
+
+    model = {"source": {"a/b": _series(), "x~y": [{"label": "l", "delta": "d"}]}}
+    assert _get_path(model, "/source/a~1b") is model["source"]["a/b"]
+    assert _get_path(model, "/source/x~0y") is model["source"]["x~y"]
+    chart = _skel([{"id": "c", "component": "Sparkline", "path": "/source/a~1b"}])
+    assert _rules(chart, model) == []
+    rows = _skel([{"id": "c", "component": "DeltaList", "rows": {"path": "/source/x~0y"}}])
+    assert _rules(rows, model) == []
+
+
 def test_datatable_column_rule_covers_literal_rows():
     """Review P2: the array rule validates literal arrays, so the column rule must too."""
     cols = [{"key": "night", "label": "Night"}, {"key": "facts", "label": "Facts"}]
