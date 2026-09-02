@@ -39,7 +39,10 @@
   const delta = $derived(toDisplayString(resolveDynamic(comp.delta, ctx)));
   const caption = $derived(toDisplayString(resolveDynamic(comp.caption, ctx)));
   const footnote = $derived(toDisplayString(resolveDynamic(comp.footnote, ctx)));
-  const tone = $derived(normalizeTone(comp.tone));
+  // `tone` may be a literal or a {path} binding (a repeat template's cards
+  // each carry their own record's tone); normalizeTone closes the resolved
+  // value — unknown ⇒ neutral, never a literal colour.
+  const tone = $derived(normalizeTone(resolveDynamic(comp.tone, ctx)));
   const trendline = $derived(comp.trendline === true);
 
   // `trend` is a bare string path (like Sparkline.path), scope-aware inside a

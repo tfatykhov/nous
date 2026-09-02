@@ -186,14 +186,16 @@ _COMPONENT_USAGE: dict[str, str] = {
     ),
     "MetricCard": (
         "one metric's story inside a section: label, value, unit?, delta "
-        "(pill text) + tone ∈ neutral|ok|warn|crit, caption (from → to), "
-        "trend = series path (bare string), trendline?, footnote. Grid them "
-        "with Section layout cards + a repeat template."
+        "(pill text) + tone ∈ neutral|ok|warn|crit (a literal, or {\"path\": "
+        "\"tone\"} so each repeated card carries its record's tone), caption "
+        "(from → to), trend = series path (bare string), trendline?, footnote. "
+        "Grid them with Section layout cards + a repeat template."
     ),
     "ScoreCard": (
-        "a verdict on an objective: title, status (pill text) + tone, "
-        "value?/unit?/caption?, items = [{label, value, tone?}] evidence "
-        "rows, note. No value is fine — the verdict plus evidence is the card."
+        "a verdict on an objective: title, status (pill text) + tone (literal "
+        "or {\"path\": …}), value?/unit?/caption?, items = [{label, value, "
+        "tone?}] evidence rows, note. No value is fine — the verdict plus "
+        "evidence is the card."
     ),
     "DeltaList": (
         "ranked movers: rows = [{label, delta, from?, to?, tone?}]; set "

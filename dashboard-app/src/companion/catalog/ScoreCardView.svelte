@@ -36,7 +36,9 @@
   const unit = $derived(toDisplayString(resolveDynamic(comp.unit, ctx)));
   const caption = $derived(toDisplayString(resolveDynamic(comp.caption, ctx)));
   const note = $derived(toDisplayString(resolveDynamic(comp.note, ctx)));
-  const tone = $derived(normalizeTone(comp.tone));
+  // Literal or {path} binding (per-record tone under a repeat template);
+  // normalizeTone closes the resolved value.
+  const tone = $derived(normalizeTone(resolveDynamic(comp.tone, ctx)));
   // Non-array (absent, None for this item, a wrong shape) ⇒ no rows, never a
   // throw: a goal with no evidence rows is a legal state (spec §3.2).
   const rows = $derived.by((): Row[] => {

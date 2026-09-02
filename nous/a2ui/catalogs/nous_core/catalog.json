@@ -603,14 +603,31 @@
           "description": "The change pill text, preformatted, e.g. '↓4.3 bpm · improving'."
         },
         "tone": {
-          "type": "string",
-          "enum": [
-            "neutral",
-            "ok",
-            "warn",
-            "crit"
-          ],
-          "description": "What the delta MEANS (default neutral): colours the pill and the embedded trend, never the value."
+          "description": "What the delta MEANS (default neutral): colours the pill and the embedded trend, never the value. Either a literal from the enum or a {\"path\": …} binding (so each card of a repeat template carries its own record's tone); the renderer maps an unknown resolved value to neutral.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "neutral",
+                "ok",
+                "warn",
+                "crit"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            }
+          ]
         },
         "caption": {
           "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
@@ -655,14 +672,31 @@
           "description": "The verdict word(s), rendered as an uppercase pill, e.g. 'on track' / 'slipping'."
         },
         "tone": {
-          "type": "string",
-          "enum": [
-            "neutral",
-            "ok",
-            "warn",
-            "crit"
-          ],
-          "description": "What the verdict MEANS (default neutral): colours the top rule and the status pill."
+          "description": "What the verdict MEANS (default neutral): colours the top rule and the status pill. Either a literal from the enum or a {\"path\": …} binding (so each card of a repeat template carries its own record's tone); the renderer maps an unknown resolved value to neutral.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "neutral",
+                "ok",
+                "warn",
+                "crit"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            }
+          ]
         },
         "value": {
           "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",

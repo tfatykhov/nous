@@ -89,7 +89,12 @@ review surface. `skills/live-dashboard/SKILL.md` documents the recipe instead (�
 All five live in the `nous-core` catalog and the micro-app grammar's `ALLOWED_COMPONENTS`,
 and every schema carries the universal `weight` property (the catalog summary promises it on
 every component and the envelope would reject it otherwise). `tone` everywhere is the F094
-enum `neutral | ok | warn | crit` (default `neutral`). **Where a tone lands:** text and pills
+enum `neutral | ok | warn | crit` (default `neutral`). **On `MetricCard` and `ScoreCard` the
+tone may also be a bare `{path}` binding** — a metric grid or goal list is ONE template under
+a Repeat, and a literal-only tone would paint every card in the grid the same colour, while
+the reference page has good/bad/flat cards side by side. The schema keeps the literal closed
+(enum) and admits only a `{path}` object (no `call`, no extra keys); the renderer closes the
+resolved value with `normalizeTone` (unknown → `neutral`, never a literal colour). **Where a tone lands:** text and pills
 map to `--soft` / `--ok` / `--warn` / `--crit`; a chart stroke maps through the existing
 `toneVar` (`neutral` → `--chart-axis`), so a neutral card shows a soft pill over an axis-grey
 spark — the two greys are deliberate (a pill is ink, a line is a mark). `StatTile` keeps its

@@ -101,6 +101,18 @@ def test_report_affordances_on_existing_components_validate() -> None:
     assert validate_envelope(_envelope(bad_layout))
 
 
+def test_card_tone_may_be_a_path_binding_but_the_literal_stays_closed() -> None:
+    """A metric grid is ONE template under a Repeat, so a literal-only tone
+    would paint every card the same; MetricCard/ScoreCard admit a bare
+    {path} binding (closed at render by normalizeTone) while a literal must
+    still be in the enum and anything else is rejected."""
+    for name, base in (("MetricCard", {"label": "L", "value": "1"}), ("ScoreCard", {"title": "T", "status": "s"})):
+        ok = {"id": "c", "component": name, **base, "tone": {"path": "tone"}}
+        assert validate_envelope(_envelope(_surface(ok))) == [], name
+        for bad in ("purple", {"path": ""}, {"path": "tone", "color": "red"}, {"call": "x"}, 3):
+            assert validate_envelope(_envelope(_surface({**ok, "tone": bad}))), (name, bad)
+
+
 # ---------------------------------------------------------------------------
 # DSL helpers (spec §8.2)
 # ---------------------------------------------------------------------------
@@ -205,3 +217,232 @@ def test_compose_surface_tool_offers_the_report_archetype_and_records_shape() ->
     assert "report" in arch["enum"] and "report (" in arch["description"]
     params = _COMPOSE_SURFACE_SCHEMA["properties"]["data_sources"]["items"]["properties"]["params"]
     assert "TOP-LEVEL" in params["description"] and "embed a `trend` series" in params["description"]
+
+
+# ---------------------------------------------------------------------------
+# Whole-feature fixture (spec §9 AC1) — every new component, cards layout,
+# caption, note, a Repeat over metric records with embedded series (one
+# record WITHOUT a trend), a ScoreCard record WITHOUT items, trendline,
+# focus_from, archetype + theme `report`. Exported as JSON for the Svelte
+# whole-app render test (`python -m tests.test_a2ui_report` prints it).
+# ---------------------------------------------------------------------------
+
+
+def report_app_components() -> list[dict]:
+    from nous.a2ui import dsl
+
+    return [
+        {
+            "id": "root",
+            "component": "Column",
+            "children": ["header", "goals", "movers", "retrieval", "sleep", "lanes", "footer"],
+        },
+        dsl.AppHeader(
+            "header",
+            title="Memory & decisions — trend report",
+            subtitle="every metric judged over the last 28 days against the 28 before",
+            composedAt={"path": "/meta/composedAt"},
+            note={"path": "/meta/reach"},
+        ),
+        dsl.Section("goals", title="Goals", child="goals-col", layout="cards", caption={"path": "/meta/window"}, provenance="source"),
+        {"id": "goals-col", "component": "Column", "children": {"componentId": "goal", "path": "/goals"}},
+        dsl.ScoreCard(
+            "goal",
+            title={"path": "title"},
+            status={"path": "status"},
+            tone={"path": "tone"},
+            value={"path": "value"},
+            unit={"path": "unit"},
+            caption={"path": "caption"},
+            items={"path": "items"},
+            note={"path": "note"},
+        ),
+        dsl.Section("movers", title="Movers", child="movers-row", layout="grid-2", caption="significant moves", provenance="source"),
+        {"id": "movers-row", "component": "Row", "children": ["up", "down"]},
+        dsl.DeltaList("up", rows={"path": "/up"}),
+        dsl.DeltaList("down", rows={"path": "/down"}, empty_text="no significant adverse moves"),
+        dsl.Section("retrieval", title="Retrieval", child="ret-col", layout="cards", caption="retrieval_log", provenance="source"),
+        {"id": "ret-col", "component": "Column", "children": {"componentId": "metric", "path": "/retrieval"}},
+        dsl.MetricCard(
+            "metric",
+            label={"path": "label"},
+            value={"path": "value"},
+            unit={"path": "unit"},
+            delta={"path": "delta"},
+            tone={"path": "tone"},
+            caption={"path": "caption"},
+            trend="trend",
+            trendline=True,
+            footnote={"path": "footnote"},
+        ),
+        dsl.Section("sleep", title="Sleep cycles", child="sleep-table", layout="accordion", caption="last 4 nights", provenance="source"),
+        dsl.DataTable(
+            "sleep-table",
+            columns=[
+                {"key": "night", "label": "Night"},
+                {"key": "facts", "label": "Facts merged", "align": "end"},
+                {"key": "edges", "label": "Edges", "align": "end"},
+                {"key": "phases", "label": "Phases", "secondary": True},
+            ],
+            rows={"path": "/sleep"},
+            empty_text="no sleep cycles in window",
+        ),
+        dsl.Section("lanes", title="Data freshness", child="lanes-col", caption="a stale lane silently freezes its trend", provenance="source"),
+        {"id": "lanes-col", "component": "Column", "children": ["chips", "method"]},
+        dsl.ChipRow("chips", items={"path": "/lanes"}),
+        {
+            "id": "method",
+            "component": "Text",
+            "text": "Trend method: last 28 days vs the 28 before; means for counts, medians for latency.",
+            "variant": "caption",
+        },
+        dsl.AppFooter("footer"),
+    ]
+
+
+def report_app_sources() -> dict:
+    """The server-resolved sources: one record list per panel (spec §6.1)."""
+    from datetime import date, timedelta
+
+    from nous.a2ui.sources import to_series
+
+    start = date(2026, 7, 7)
+
+    def spark(values: list[float | None]) -> dict:
+        rows = [{"t": start + timedelta(days=i), "v": v} for i, v in enumerate(values)]
+        return to_series(rows, "t", "v", unit="s", focus_from=date(2026, 8, 4))
+
+    latency = [6.0 - i * 0.02 + (0.3 if i % 7 == 0 else 0.0) for i in range(56)]
+    failed: list[float | None] = [1.0 + (i % 5) * 0.4 for i in range(56)]
+    failed[19] = failed[20] = None  # a real gap: the scheduler was down
+    return {
+        "goals": [
+            {
+                "title": "Decision quality", "status": "on track", "tone": "ok",
+                "value": "0.24", "unit": "Brier", "caption": "28d mean · ↓0.03 vs prior 28d",
+                "items": [
+                    {"label": "Brier score", "value": "↓0.03", "tone": "ok"},
+                    {"label": "Reviewed within 7d", "value": "↑6 %", "tone": "ok"},
+                    {"label": "Avg confidence", "value": "↑0.02", "tone": "neutral"},
+                ],
+                "note": "Brier is the honest scoreboard — confidence alone can't tell calibration from bravado.",
+            },
+            {
+                "title": "Reliability", "status": "slipping", "tone": "crit",
+                "items": [
+                    {"label": "DAG nodes failed", "value": "↑0.8 /day", "tone": "crit"},
+                    {"label": "Reaper fires", "value": "↑3", "tone": "crit"},
+                ],
+                "note": "Latency is improving but the failure lanes moved the wrong way.",
+            },
+            # No evidence rows: the verdict alone is a legal card (spec §3.2).
+            {"title": "Memory growth", "status": "no change", "tone": "neutral", "value": "41", "unit": "facts/day"},
+        ],
+        "up": [
+            {"label": "Recall p50 latency", "delta": "↓0.6 s", "from": "5.9", "to": "5.3", "tone": "ok"},
+            {"label": "Reviewed within 7d", "delta": "↑6 %", "from": "61", "to": "67", "tone": "ok"},
+            {"label": "Brier score", "delta": "↓0.03", "from": "0.27", "to": "0.24", "tone": "ok"},
+        ],
+        "down": [],
+        "retrieval": [
+            {"label": "Recall p50", "value": "5.3", "unit": "s", "delta": "↓0.6 s · improving", "tone": "ok",
+             "caption": "5.9 → 5.3 (28d median, n=28)", "footnote": "last 2026-09-01", "trend": spark(latency)},
+            {"label": "Nodes failed", "value": "2", "unit": "/day", "delta": "↑0.8 · worsening", "tone": "crit",
+             "caption": "1.1 → 1.9 (28d mean, n=26) · 2 gaps", "footnote": "last 2026-09-01", "trend": spark(failed)},
+            {"label": "Rendered candidates", "value": "24", "delta": "↑1 · holding steady", "tone": "neutral",
+             "caption": "23 → 24 (28d mean, n=28)", "footnote": "last 2026-09-01",
+             "trend": spark([22.0 + (i % 4) for i in range(56)])},
+            # A count mixed into the grid: no trend (spec §3.1).
+            {"label": "Open DAGs", "value": "3", "delta": "", "tone": "neutral", "caption": "right now", "footnote": ""},
+        ],
+        "sleep": [
+            {"night": "2026-08-31", "facts": "14", "edges": "212", "phases": "reflect, stale-scan, graph backfill"},
+            {"night": "2026-08-30", "facts": "9", "edges": "188", "phases": "reflect, contradictions"},
+            {"night": "2026-08-29", "facts": "21", "edges": "301", "phases": "reflect, stale-scan, key sweep"},
+            {"night": "2026-08-28", "facts": "0", "edges": "40", "phases": "reflect"},
+        ],
+        "lanes": [
+            {"label": "retrieval_log", "value": "today", "detail": "14d window", "tone": "ok"},
+            {"label": "eval_runs", "value": "3d ago", "detail": "regression baseline", "tone": "warn"},
+            {"label": "consolidation_cycles", "value": "today", "detail": "audit on", "tone": "ok"},
+        ],
+    }
+
+
+REPORT_APP_META = {
+    "composedAt": "2026-09-01T13:00:00Z",
+    "reach": "data through 2026-09-01",
+    "window": "28d vs prior 28d",
+}
+
+
+def report_app_fixture_json() -> str:
+    """The Svelte whole-app test's input: components + the FULL data model."""
+    import json
+
+    return json.dumps(
+        {
+            "components": report_app_components(),
+            "dataModel": {"meta": REPORT_APP_META, **report_app_sources()},
+        },
+        ensure_ascii=False,
+        indent=1,
+    )
+
+
+def test_whole_feature_report_app_passes_every_gate() -> None:
+    """AC1: lint → _validate (grammar + data-aware rules + probe schema) →
+    validate_envelope on the built surface, with every record kept by the
+    per-source budget."""
+    from nous.a2ui import sources as src
+    from nous.a2ui.compose import SurfaceComposer
+    from nous.a2ui.grammar import lint_micro_app
+    from nous.a2ui.sources import SourceRegistry
+    from nous.config import Settings
+
+    comps = report_app_components()
+    sources = report_app_sources()
+    assert lint_micro_app(comps, archetype="report") == []
+
+    composer = SurfaceComposer(None, Settings(_env_file=None), SourceRegistry())
+    parsed = {
+        "title": "Memory & decisions — trend report",
+        "archetype": "report",
+        "theme": "report",
+        "components": comps,
+        "dataModel": {},
+        "refine_options": [{"id": "last-7", "label": "Last 7 days"}],
+    }
+    assert composer._validate(parsed, sources) == []
+
+    envelope = _envelope(comps, data_model={"meta": REPORT_APP_META, **sources})
+    assert validate_envelope(envelope) == []
+
+    # Every panel source fits its budget with every record intact (§6.1).
+    for key, value in sources.items():
+        bounded, size = src._bound(value, src._PER_SOURCE_BUDGET_CHARS)
+        assert size <= src._PER_SOURCE_BUDGET_CHARS, key
+        assert len(bounded) == len(value) and not any(
+            isinstance(r, dict) and r.get("_truncated") for r in bounded
+        ), key
+    for rec in sources["retrieval"][:3]:
+        assert rec["trend"]["meta"]["focus_from"] == "2026-08-04"
+        assert rec["trend"]["meta"]["downsampled_from"] is None
+
+
+def test_whole_feature_fixture_json_is_current() -> None:
+    """The Svelte whole-app test renders the exported JSON; a stale export
+    would test yesterday's fixture. Regenerate with
+    `PYTHONPATH=. uv run python tests/test_a2ui_report.py > dashboard-app/src/companion/catalog/__fixtures__/f096-report-app.json`."""
+    from pathlib import Path
+
+    exported = Path(__file__).resolve().parents[1] / "dashboard-app/src/companion/catalog/__fixtures__/f096-report-app.json"
+    assert exported.exists(), "fixture JSON not exported"
+    assert exported.read_text(encoding="utf-8").strip() == report_app_fixture_json().strip()
+
+
+if __name__ == "__main__":  # pragma: no cover — fixture export for vitest
+    import sys
+
+    sys.stdout.reconfigure(encoding="utf-8")
+    print(report_app_fixture_json())

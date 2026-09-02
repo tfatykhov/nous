@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { render, cleanup } from '@testing-library/svelte';
+import Renderer from '../Renderer.svelte';
 import MetricCardView from './MetricCardView.svelte';
 import ScoreCardView from './ScoreCardView.svelte';
 import DeltaListView from './DeltaListView.svelte';
@@ -119,17 +121,37 @@ describe('MetricCardView', () => {
     expect(bad.container.querySelector('.state')?.textContent).toContain('not a series');
   });
 
-  it('resolves a relative trend per item inside a repeat scope and honours trendline + focus', () => {
-    seed({ metrics: [{ trend: series([1, 2, 3, 4, 5, 6, 7, 8], { focus_from: '2026-08-05' }) }] });
+  it('resolves a relative trend and a bound tone per item inside a repeat scope', () => {
+    seed({
+      metrics: [
+        { tone: 'crit', trend: series([1, 2, 3, 4, 5, 6, 7, 8], { focus_from: '2026-08-05' }) },
+        { tone: 'purple' },
+      ],
+    });
     const { container } = render(MetricCardView, {
       props: {
         surfaceId: SURFACE,
-        comp: { ...card, trend: 'trend', trendline: true },
+        comp: { ...card, trend: 'trend', trendline: true, tone: { path: 'tone' } },
         scope: { base: '/metrics/0', index: 0 },
       },
     });
     expect(container.querySelector('rect.focus')).not.toBeNull();
     expect(container.querySelectorAll('polyline.raw').length).toBe(1);
+    expect((container.querySelector('.metric') as HTMLElement).style.getPropertyValue('--ink')).toBe(
+      'var(--crit)',
+    );
+    cleanup();
+    // an unknown resolved tone closes to neutral — never a literal colour
+    const second = render(MetricCardView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { ...card, tone: { path: 'tone' } },
+        scope: { base: '/metrics/1', index: 1 },
+      },
+    });
+    expect(
+      (second.container.querySelector('.metric') as HTMLElement).style.getPropertyValue('--ink'),
+    ).toBe('var(--soft)');
   });
 });
 
@@ -316,6 +338,34 @@ describe('Section caption + cards layout (F096 §4.1 / §4.2)', () => {
       caption: 'retrieval_log',
     });
     expect(container.querySelector('button.toggle .caption')?.textContent).toBe('retrieval_log');
+  });
+});
+
+describe('whole-feature report app (F096 AC1)', () => {
+  // The fixture is exported from tests/test_a2ui_report.py (the python side
+  // asserts the export is current), so both harnesses render ONE app.
+  const fixture = JSON.parse(
+    readFileSync('src/companion/catalog/__fixtures__/f096-report-app.json', 'utf-8'),
+  ) as { components: Record<string, unknown>[]; dataModel: Record<string, unknown> };
+
+  it('renders every record through every new component with no placeholder', () => {
+    seed(fixture.dataModel, fixture.components);
+    const { container } = render(Renderer, { props: { surfaceId: SURFACE, componentId: 'root' } });
+    const retrieval = fixture.dataModel.retrieval as unknown[];
+    const goals = fixture.dataModel.goals as unknown[];
+    expect(container.querySelectorAll('.metric').length).toBe(retrieval.length);
+    expect(container.querySelectorAll('.score').length).toBe(goals.length);
+    // three trended metrics draw; the count card has no chart region
+    expect(container.querySelectorAll('.metric svg').length).toBe(retrieval.length - 1);
+    expect(container.querySelectorAll('.metric rect.focus').length).toBe(retrieval.length - 1);
+    expect(container.querySelectorAll('section.app-section.cards').length).toBe(2);
+    expect(container.querySelector('.deltas .empty')?.textContent).toBe('no significant adverse moves');
+    expect(container.querySelectorAll('.chip').length).toBe(3);
+    expect(container.querySelector('.app-header .note')?.textContent).toBe('data through 2026-09-01');
+    expect(container.querySelector('.ph')).toBeNull();
+    // the accordion keeps the raw table collapsed until tapped
+    expect(container.querySelector('table.dtable')).toBeNull();
+    expect(container.querySelector('button.toggle .caption')?.textContent).toBe('last 4 nights');
   });
 });
 
