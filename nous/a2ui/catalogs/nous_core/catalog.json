@@ -282,6 +282,10 @@
           "type": "number",
           "description": "Seconds after composedAt before the stamp degrades to amber."
         },
+        "note": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "F096: a data-reach line under the freshness stamp, e.g. 'data through 2026-09-01' — the stamp says when the app was composed, the note says how far the data reaches. Bind it (e.g. /meta/reach) so refresh can restamp it."
+        },
         "weight": {
           "type": "number",
           "description": "The relative weight of this component within a Row or Column."
@@ -359,6 +363,10 @@
           ],
           "description": "Where this section's data came from. 'model' renders the amber model-supplied treatment regardless of age."
         },
+        "caption": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "F096: right-aligned qualifier in the section head — source attribution ('Garmin', 'retrieval_log'), the comparison window, a count. Put attribution HERE, not in the title."
+        },
         "layout": {
           "type": "string",
           "enum": [
@@ -367,9 +375,10 @@
             "grid-2",
             "grid-3",
             "rail",
-            "accordion"
+            "accordion",
+            "cards"
           ],
-          "description": "How the section's child lays out (default stack). hero = large/primary for visual hierarchy; grid-2/grid-3 = N-column grid over the child's items; rail = horizontal scroll; accordion = collapsed until the user taps the title (long secondary detail, never the headline). The renderer owns the CSS."
+          "description": "How the section's child lays out (default stack). hero = large/primary for visual hierarchy; grid-2/grid-3 = N-column grid over the child's items; cards = auto-fit grid of ≥220px cards for MetricCard/ScoreCard grids; rail = horizontal scroll; accordion = collapsed until the user taps the title (long secondary detail, never the headline). grid-N and cards reshape a DIRECT Column/Row child (a list of cards, or a repeat template of one card). The renderer owns the CSS."
         },
         "weight": {
           "type": "number",
@@ -452,6 +461,10 @@
             "crit"
           ],
           "description": "What the series MEANS (default neutral). The renderer maps it to a theme token — you never pick a colour."
+        },
+        "trendline": {
+          "type": "boolean",
+          "description": "F096: draw the renderer-owned rolling mean as the main line with the raw series faint behind it (default false). The window size is not yours to pick."
         },
         "weight": {
           "type": "number",
@@ -565,6 +578,229 @@
         "component",
         "path"
       ]
+    },
+    "MetricCard": {
+      "type": "object",
+      "description": "F096: one metric's full story inside a section — label, headline value (+unit), a tone-coloured delta pill, the comparison caption, an optional embedded trend sparkline and a footnote. The VALUE is never coloured; tone lands on the pill and the trend (a number is a fact, a direction is an opinion). Values arrive PREFORMATTED (the StatTile contract): the agent already chose the decimals and the unit; the renderer never rounds, re-signs or adds units. Use StatTile only for the ≤4 headline tiles in the StatRow.",
+      "properties": {
+        "component": {
+          "const": "MetricCard"
+        },
+        "label": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "What the number measures."
+        },
+        "value": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "The headline figure, preformatted."
+        },
+        "unit": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Rendered small beside the value, e.g. 'bpm'."
+        },
+        "delta": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "The change pill text, preformatted, e.g. '↓4.3 bpm · improving'."
+        },
+        "tone": {
+          "type": "string",
+          "enum": [
+            "neutral",
+            "ok",
+            "warn",
+            "crit"
+          ],
+          "description": "What the delta MEANS (default neutral): colours the pill and the embedded trend, never the value."
+        },
+        "caption": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "The comparison line under the value, e.g. '68.9 → 64.6 (28d avg, n=28)'."
+        },
+        "trend": {
+          "type": "string",
+          "description": "Data-model path to a series object ({kind:series, points:[{t,v}]}) — a BARE STRING like Sparkline.path (not {\"path\": …}), relative to the item inside a repeat template. Omit it for a count: a count is not a series, and a blank path is rejected."
+        },
+        "trendline": {
+          "type": "boolean",
+          "description": "Draw the renderer-owned rolling mean over the faint raw series (default false). The window size is not yours to pick."
+        },
+        "footnote": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Small right-aligned line under the trend, e.g. 'last 2026-09-01'."
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": [
+        "component",
+        "label",
+        "value"
+      ]
+    },
+    "ScoreCard": {
+      "type": "object",
+      "description": "F096: a verdict on an objective with its evidence — title, an uppercase status pill, an optional headline value, evidence rows each carrying their own tone, and an italic note. Tone drives the top rule and the pill. A card with no value is legal: the verdict plus evidence is the content. Values arrive PREFORMATTED (the StatTile contract): the agent already chose the decimals and the unit; the renderer never rounds, re-signs or adds units.",
+      "properties": {
+        "component": {
+          "const": "ScoreCard"
+        },
+        "title": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "The objective, e.g. 'Lose fat'."
+        },
+        "status": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "The verdict word(s), rendered as an uppercase pill, e.g. 'on track' / 'slipping'."
+        },
+        "tone": {
+          "type": "string",
+          "enum": [
+            "neutral",
+            "ok",
+            "warn",
+            "crit"
+          ],
+          "description": "What the verdict MEANS (default neutral): colours the top rule and the status pill."
+        },
+        "value": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Optional headline figure, preformatted."
+        },
+        "unit": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Rendered small beside the value."
+        },
+        "caption": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "The comparison line under the value."
+        },
+        "items": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicValue",
+          "description": "Path to an array of {label, value, tone?} evidence rows — value preformatted (e.g. '↓0.4 kg'), tone ∈ neutral|ok|warn|crit colours that row's value."
+        },
+        "note": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Italic muted footer — what this card's numbers can and cannot tell you."
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": [
+        "component",
+        "title",
+        "status"
+      ]
+    },
+    "DeltaList": {
+      "type": "object",
+      "description": "F096: ranked movers — one row per metric that moved: label · tone-coloured delta · from → to. An EMPTY list is a state, never a blank block: it renders emptyText in italics ('no significant adverse moves' is the good news). Values arrive PREFORMATTED (the StatTile contract): the agent already chose the decimals and the unit; the renderer never rounds, re-signs or adds units.",
+      "properties": {
+        "component": {
+          "const": "DeltaList"
+        },
+        "rows": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicValue",
+          "description": "Path to an array of {label, delta, from?, to?, tone?} rows in the order to show — delta/from/to preformatted strings, tone ∈ neutral|ok|warn|crit."
+        },
+        "emptyText": {
+          "type": "string",
+          "description": "Shown muted italic when rows is empty (default 'nothing to report')."
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": [
+        "component",
+        "rows"
+      ]
+    },
+    "DataTable": {
+      "type": "object",
+      "description": "F096: a real table over record rows — columns is a LITERAL array (never a binding) naming which record fields to show; align:end right-aligns in tabular figures (numbers, dates); secondary marks a de-emphasised supporting column. Max 6 columns (a phone-width table); long cells wrap, the table never widens the page. No sorting, filtering or cell formatting. Values arrive PREFORMATTED (the StatTile contract): the agent already chose the decimals and the unit; the renderer never rounds, re-signs or adds units.",
+      "properties": {
+        "component": {
+          "const": "DataTable"
+        },
+        "columns": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "description": "1-6 column specs, in order: key = the record field to show, label = the header text.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string",
+                "minLength": 1
+              },
+              "label": {
+                "type": "string"
+              },
+              "align": {
+                "type": "string",
+                "enum": [
+                  "start",
+                  "end"
+                ],
+                "description": "end right-aligns in tabular figures — use for numbers and dates (default start)."
+              },
+              "secondary": {
+                "type": "boolean",
+                "description": "A de-emphasised supporting column (default false); the renderer owns the treatment."
+              }
+            },
+            "required": [
+              "key",
+              "label"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "rows": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicValue",
+          "description": "Path to an array of record objects; each column's key is read from every row."
+        },
+        "emptyText": {
+          "type": "string",
+          "description": "Shown muted italic when there are no rows."
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": [
+        "component",
+        "columns",
+        "rows"
+      ]
+    },
+    "ChipRow": {
+      "type": "object",
+      "description": "F096: a wrapping row of labelled status chips — data freshness, lane health, environment flags. Each chip: uppercase muted label, tone-coloured value, muted detail. Values arrive PREFORMATTED (the StatTile contract): the agent already chose the decimals and the unit; the renderer never rounds, re-signs or adds units.",
+      "properties": {
+        "component": {
+          "const": "ChipRow"
+        },
+        "items": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicValue",
+          "description": "Path to an array of {label, value, detail?, tone?} chips — value preformatted (e.g. 'today', '8d ago'), tone ∈ neutral|ok|warn|crit colours it."
+        },
+        "weight": {
+          "type": "number",
+          "description": "The relative weight of this component within a Row or Column."
+        }
+      },
+      "required": [
+        "component",
+        "items"
+      ]
     }
   },
   "functions": {},
@@ -618,6 +854,21 @@
         },
         {
           "$ref": "#/components/BarChart"
+        },
+        {
+          "$ref": "#/components/MetricCard"
+        },
+        {
+          "$ref": "#/components/ScoreCard"
+        },
+        {
+          "$ref": "#/components/DeltaList"
+        },
+        {
+          "$ref": "#/components/DataTable"
+        },
+        {
+          "$ref": "#/components/ChipRow"
         }
       ],
       "discriminator": {
