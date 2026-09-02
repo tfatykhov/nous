@@ -20,6 +20,11 @@ export interface ReadSeries {
   /** Explicit empty-series reason (missing db, drifted schema — F094 R5). */
   reason?: string;
   downsampledFrom: number | null;
+  /** F096 §4.3 — source-declared start of the comparison window
+   * (meta.focus_from, ISO string); the sparkline shades from the first point
+   * at or after it. Series META, never a component prop: the window
+   * boundary belongs to whoever computed the comparison. */
+  focusFrom: string | null;
   /** When ok=false, a short note on what the path actually resolved to, so
    * the adapter can render a defensive state rather than throw. The
    * compose-time series-shape rule normally prevents this, but the renderer
@@ -39,7 +44,7 @@ export function readSeries(value: unknown): ReadSeries {
     const v = value as {
       points: unknown[];
       unit?: unknown;
-      meta?: { reason?: unknown; downsampled_from?: unknown };
+      meta?: { reason?: unknown; downsampled_from?: unknown; focus_from?: unknown };
     };
     // Model-supplied series pass the compose shape check (kind only), so a
     // malformed point such as `null` or a bare string can reach here; a later
@@ -56,6 +61,7 @@ export function readSeries(value: unknown): ReadSeries {
       reason: typeof v.meta?.reason === 'string' ? v.meta.reason : undefined,
       downsampledFrom:
         typeof v.meta?.downsampled_from === 'number' ? v.meta.downsampled_from : null,
+      focusFrom: typeof v.meta?.focus_from === 'string' ? v.meta.focus_from : null,
     };
   }
   const shape = Array.isArray(value)
@@ -63,7 +69,7 @@ export function readSeries(value: unknown): ReadSeries {
     : value === null || value === undefined
       ? 'nothing'
       : typeof value;
-  return { ok: false, points: [], unit: '', downsampledFrom: null, shape };
+  return { ok: false, points: [], unit: '', downsampledFrom: null, focusFrom: null, shape };
 }
 
 export type Tone = 'neutral' | 'ok' | 'warn' | 'crit';
@@ -79,6 +85,15 @@ export function normalizeTone(raw: unknown): Tone {
  * to the axis grey (a series that means nothing gets a neutral hue). */
 export function toneVar(tone: Tone): string {
   return tone === 'neutral' ? 'var(--chart-axis)' : `var(--${tone})`;
+}
+
+/** A tone → the INK token for text and pills (F096 §3). A chart stroke maps
+ * neutral to the axis grey; ink maps it to --soft, which every theme keeps
+ * lighter than --muted so a neutral pill never reads weaker than its own
+ * caption. Two greys on a neutral card are deliberate: a pill is ink, a line
+ * is a mark. */
+export function toneInkVar(tone: Tone): string {
+  return tone === 'neutral' ? 'var(--soft)' : `var(--${tone})`;
 }
 
 /** Nth series colour from the renderer-owned ramp (1-based clamp to 4). */
@@ -220,4 +235,53 @@ export function ticks(domain: Domain, count = 3): number[] {
     out.push(domain.min + (span * k) / (count - 1));
   }
   return out;
+}
+
+// --- F096 §4.3 sparkline additions --------------------------------------
+
+/** Renderer-owned trendline window: the model can ask for "trend through
+ * the noise" (`trendline: true`) but never tunes the smoothing constant. */
+export function trendWindow(n: number): number {
+  return Math.max(3, Math.round(n / 8));
+}
+
+/** Trailing rolling mean over the finite points, computed PER RUN of
+ * consecutive indices — a gap resets the window, so the smoothed line breaks
+ * exactly where the raw line breaks and never bridges a dropped reading.
+ * Indices are preserved, so `lineSegments` splits it at the same gaps. */
+export function rollingMean(
+  finite: { i: number; v: number }[],
+  window: number,
+): { i: number; v: number }[] {
+  const w = Math.max(1, Math.floor(window));
+  const out: { i: number; v: number }[] = [];
+  let run: { i: number; v: number }[] = [];
+  const flush = () => {
+    for (let k = 0; k < run.length; k++) {
+      const lo = Math.max(0, k - w + 1);
+      let sum = 0;
+      for (let j = lo; j <= k; j++) sum += run[j].v;
+      out.push({ i: run[k].i, v: sum / (k - lo + 1) });
+    }
+    run = [];
+  };
+  let prev = -2;
+  for (const p of finite) {
+    if (p.i !== prev + 1 && run.length) flush();
+    run.push(p);
+    prev = p.i;
+  }
+  flush();
+  return out;
+}
+
+/** Index of the first point whose `t` is at or after `focusFrom` (ISO-8601
+ * strings compare lexically), or null when there is no window or no such
+ * point. The sparkline shades from that index to the end. */
+export function focusStartIndex(points: SeriesPoint[], focusFrom: string | null): number | null {
+  if (!focusFrom) return null;
+  const idx = points.findIndex(
+    (p) => p && typeof p === 'object' && typeof p.t === 'string' && p.t >= focusFrom,
+  );
+  return idx === -1 ? null : idx;
 }

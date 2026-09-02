@@ -36,6 +36,9 @@
   const composedAt = $derived(toDisplayString(resolveDynamic(comp.composedAt, ctx)));
   const staleAfterS = $derived(typeof comp.staleAfterS === 'number' ? comp.staleAfterS : 3600);
   const freshness = $derived(formatFreshness(composedAt, nowMs, staleAfterS));
+  // F096 §4.4 — the data-reach line ("data through 2026-09-01"): the stamp
+  // says when the app was composed, the note says how far the data reaches.
+  const note = $derived(toDisplayString(resolveDynamic(comp.note, ctx)));
 </script>
 
 <header class="app-header">
@@ -45,7 +48,10 @@
       <p class="subtitle">{subtitle}</p>
     {/if}
   </div>
-  <span class="stamp" class:stale={freshness.stale}>{freshness.label}</span>
+  <span class="meta">
+    <span class="stamp" class:stale={freshness.stale}>{freshness.label}</span>
+    {#if note}<span class="note">{note}</span>{/if}
+  </span>
 </header>
 
 <style>
@@ -66,6 +72,12 @@
     color: var(--muted);
     font-size: 0.88rem;
   }
+  .meta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    text-align: right;
+  }
   .stamp {
     color: var(--muted);
     font-size: 0.75rem;
@@ -73,5 +85,10 @@
   }
   .stamp.stale {
     color: var(--warn);
+  }
+  .note {
+    color: var(--muted);
+    font-size: 0.72rem;
+    white-space: nowrap;
   }
 </style>

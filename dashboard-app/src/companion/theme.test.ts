@@ -117,13 +117,21 @@ describe('theme contrast (F093 R2 — themes are code, so they get tests)', () =
     themes[m[1]] = { ...themes['nous-default'], ...parseVars(m[2]) };
   }
 
-  it('parsed all five themes', () => {
-    expect(Object.keys(themes).sort()).toEqual(
-      ['alpine-dusk', 'harbor', 'nous-default', 'paper', 'signal'].sort(),
-    );
+  const ALL = ['nous-default', 'alpine-dusk', 'harbor', 'paper', 'signal', 'report'];
+
+  it('parsed all six themes', () => {
+    expect(Object.keys(themes).sort()).toEqual([...ALL].sort());
   });
 
-  for (const name of ['nous-default', 'alpine-dusk', 'harbor', 'paper', 'signal']) {
+  it('report: --soft is lighter than --muted so a neutral pill never reads weaker than its caption', () => {
+    // F096 §5 — caught on the design canvas: the reference's "flat" slate
+    // (#94a3b8) is the neutral ink, and it sits ABOVE muted (#8d99ae).
+    const t = themes['report'];
+    expect(luminance(t['--soft'])).toBeGreaterThan(luminance(t['--muted']));
+    expect(contrast(t['--soft'], t['--surface'])).toBeGreaterThanOrEqual(4.5);
+  });
+
+  for (const name of ALL) {
     it(`${name}: --text on --bg meets AA (≥4.5:1)`, () => {
       const t = themes[name];
       // hex-only pairs (the token values are all hex)

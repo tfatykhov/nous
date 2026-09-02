@@ -38,6 +38,13 @@
   /* --font-display defaults to the UI font (no visual change under
      nous-default); themes may swap in a serif for editorial character. */
   --font-display: var(--font-ui);
+  /* F096 §4.5 — every FIGURE (MetricCard/ScoreCard values, deltas, table
+     numbers, the sparkline current value) renders in this face with
+     tabular-nums. A var() alias is safe at :root only because no theme
+     changes its mono stack (signal re-declares an identical one); a theme
+     that does MUST re-declare --font-numeric in its own block, for the
+     inheritance reason documented under [data-theme] below. */
+  --font-numeric: var(--font-mono);
 
   /* F093 §1(a) — the three hardcoded literals migrate here so themes
      re-skin them too. */
@@ -190,6 +197,38 @@
   --chart-grid: #24242e;
   --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
   --font-display: 'JetBrains Mono', 'Cascadia Code', monospace;
+}
+
+[data-theme='report'] {
+  /* F096 §5 — cool slate dark with a serif display, for trend reports,
+     scorecards and periodic reviews. Palette lifted from the hand-authored
+     health trend report this vocabulary generalizes. System serif faces:
+     no webfont, no load cost. --soft is deliberately LIGHTER than --muted
+     so a neutral pill or delta never reads weaker than its own caption. */
+  --bg: #0a0c11;
+  --surface: #131822;
+  --surface-hover: #182030;
+  --border: #212b3b;
+  --accent: #7c9cd0;
+  --accent-dim: #4f6fa0;
+  --accent-glow: rgba(124, 156, 208, 0.15);
+  --text: #e9edf5;
+  --muted: #8d99ae;
+  --ok: #4ade80;
+  --warn: #fbbf24;
+  --crit: #fb7185;
+  --locked: #94a3b8;
+  --soft: #94a3b8;
+  --on-accent: #0a0c11;
+  --scrim: rgba(10, 12, 17, 0.74);
+  --node-decision: #c4b5fd;
+  --series-1: #f0abfc;
+  --series-2: #4ade80;
+  --series-3: #fbbf24;
+  --series-4: #60a5fa;
+  --chart-axis: #8d99ae;
+  --chart-grid: #212b3b;
+  --font-display: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
 }
 
 html {

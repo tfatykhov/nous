@@ -5,6 +5,8 @@
   // provenance === 'model': data no registered source produced, rendered
   // amber with a chip so the gap is visible, never silent.
   import Renderer from '../Renderer.svelte';
+  import { store } from '../store.svelte';
+  import { resolveDynamic, toDisplayString } from '../functions';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
 
@@ -28,10 +30,15 @@
   // F093 §6.1 layout enum. hero enlarges the heading; grid/rail turn the
   // child's DIRECT container into a grid/scroll rail via :global below (the
   // child is a Column/Row whose items become the cells). Unknown → stack.
-  const LAYOUTS = ['stack', 'hero', 'grid-2', 'grid-3', 'rail', 'accordion'];
+  // F096 §4.2 adds `cards`: an auto-fit grid of ≥220px MetricCards/ScoreCards.
+  const LAYOUTS = ['stack', 'hero', 'grid-2', 'grid-3', 'rail', 'accordion', 'cards'];
   const layout = $derived(
     typeof comp.layout === 'string' && LAYOUTS.includes(comp.layout) ? comp.layout : 'stack',
   );
+  // F096 §4.1 — a DynamicString qualifier in the head: source attribution,
+  // the comparison window, a count. Bound or literal; absent ⇒ nothing.
+  const ctx = $derived({ dataModel: store.surfaces[surfaceId]?.dataModel ?? {}, scope });
+  const caption = $derived(toDisplayString(resolveDynamic(comp.caption, ctx)));
   // Accordion open state is renderer-local, exactly like Tabs selection: the
   // catalog gives Section no `open` property, so whether a section is
   // expanded is a view concern that never round-trips the server. Collapsed
@@ -52,6 +59,9 @@
         {#if modelSupplied}
           <span class="chip">model-supplied</span>
         {/if}
+        {#if caption}
+          <span class="caption">{caption}</span>
+        {/if}
         <span class="caret" aria-hidden="true">{open ? '▾' : '▸'}</span>
       </button>
     </h3>
@@ -60,6 +70,9 @@
       <h3>{comp.title}</h3>
       {#if modelSupplied}
         <span class="chip">model-supplied</span>
+      {/if}
+      {#if caption}
+        <span class="caption">{caption}</span>
       {/if}
     </div>
   {/if}
@@ -156,6 +169,28 @@
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 0.6rem;
+  }
+  /* F096 §4.2 cards: grid-3's 140px is sized for tiles; a MetricCard with a
+     56px sparkline needs ~220px or its caption wraps twice and the chart
+     becomes a smear. One column on a phone, two at the shell's 720px max. */
+  .app-section.cards > :global(.col),
+  .app-section.cards > :global(.row) {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0.6rem;
+  }
+  /* F096 §4.1 caption: the right-aligned qualifier (source, window, count). */
+  .caption {
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    text-align: right;
+    text-transform: none;
+    white-space: nowrap;
+  }
+  .toggle .caption + .caret {
+    margin-left: 0;
   }
   .app-section.rail > :global(.col),
   .app-section.rail > :global(.row) {
