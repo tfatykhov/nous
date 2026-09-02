@@ -152,6 +152,22 @@ returns (`{"reach": "data through …", "window": "28d vs prior 28d"}`), never
 to `/meta`, which the server owns and fills with `composedAt` only — and
 pick the `report` theme.
 
+**Tone is bindable on the cards and only on the cards.** `MetricCard.tone` and
+`ScoreCard.tone` accept `{"path": "tone"}`, so one repeat template gives every
+card its own verdict colour, resolved on every refresh. `StatTile.intent`
+(`neutral|good|bad|warn` — a *different* vocabulary) and `Sparkline.tone` are
+**literal props the renderer never resolves as bindings**: a StatRow's colour
+has to be read at build time from the same source record the tiles bind, and
+it is a snapshot until the next publish. Before F096 that limitation forced a
+whole workaround — N hand-authored Sparklines with baked tones, kept honest by
+a daily republish. Do not carry that pattern into a new app: use MetricCards.
+
+**Indexed pointers are fine when the array is generated from a static table.**
+`/summary/0/goals/2/status` is safe if the goals list comes from a constant in
+your script, and it buys you N *authored* cards you can put in N tabs — which
+a repeat template cannot do, since it is one component. Never index into a
+list whose length depends on data availability.
+
 ## Choosing the shape of the app
 
 | The question | Component |
@@ -206,10 +222,27 @@ should see both at once — tabs hide things, and hidden things get forgotten.
 must be *present* but not *loud*: the ledger, the raw rows, the appendix. Never
 the headline. Like Tabs, a collapsed panel is not rendered at all.
 
+**A report can be tabs the whole way down, and the depth arithmetic is exact.**
+`root(1) > Section(2) > Tabs(3) > Column-repeat(4) > MetricCard(5)` lands on
+`MAX_DEPTH` with nothing to spare — a card grid folds under Tabs precisely
+because F096 made the card a LEAF. A two-component card (a Column of StatTile +
+Sparkline) needs six and will not go. So: fold a metric grid, a movers pair
+(Working / Slipping), goals (one ScoreCard per tab) and the supporting lane
+(raw table / freshness chips / method note) into four tabbed Sections, and the
+whole report is one card-height tall with a StatRow above it holding the
+glance. That is ~32 components instead of ~50 stacked ones.
+
+**`Section.layout` does not reach through `Tabs`.** `cards` / `grid-2` reshape
+a DIRECT Column or Row child only; a tabbed section's cards stack vertically.
+That is the trade — fold *or* grid, per section. Fold when the panels are
+alternatives (four metric groups), grid when they are peers you compare at a
+glance (three goals side by side on a wide screen).
+
 ## Budgets — what actually fits (raised, #623)
 
-- **Components/sections: 40/5 by default — `ledger` and `briefing` archetypes
-  get 80/8.** A 16-day itinerary or a multi-chart dashboard does not fit 40/5;
+- **Components/sections: 40/5 by default — `ledger` and `briefing` get 80/8,
+  `report` gets 80/10** (#630: goals, movers, four source grids, table,
+  freshness and a method note is nine panels before you have added anything). A 16-day itinerary or a multi-chart dashboard does not fit 40/5;
   pick the archetype that matches and the caps follow. `MAX_DEPTH` stays 5 for
   everything (depth is a complexity smell, not expressiveness).
 - **Sources: 40k total, 12k per source.** A 200-point ISO-stamped series
