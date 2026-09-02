@@ -1964,6 +1964,34 @@ def test_metriccard_without_trend_in_a_mixed_grid_is_a_state_not_an_error():
     assert any("MetricCard 'm' binds /metrics/1/trend" in e for e in errs), errs
 
 
+def test_optional_data_props_are_only_optional_per_item():
+    """Review P3: 'resolves to nothing is a state' holds for a repeat ITEM (a
+    count with no trend); an absolute or template-less path pointing at
+    nothing is a typo and must be named."""
+    typo = _skel([{"id": "c", "component": "MetricCard", "label": "L", "value": "1", "trend": "/typo"}])
+    errs = _rules(typo, {"metrics": []})
+    assert any("MetricCard 'c' binds /typo" in e and "nothing" in e for e in errs), errs
+    relative = _skel([{"id": "c", "component": "MetricCard", "label": "L", "value": "1", "trend": "typo"}])
+    assert any("nothing" in e for e in _rules(relative, {}))
+    sc = _skel([{"id": "c", "component": "ScoreCard", "title": "T", "status": "s", "items": {"path": "/gone"}}])
+    assert any("ScoreCard 'c' binds /gone" in e for e in _rules(sc, {}))
+
+
+def test_metriccard_multi_series_error_names_metriccard():
+    comps = _skel([{"id": "c", "component": "MetricCard", "label": "L", "value": "1", "trend": "/m"}])
+    errs = _rules(comps, {"m": _series(keys=["a", "b"])})
+    assert any("MetricCard reads a single-value" in e for e in errs), errs
+    assert not any("Sparkline/BarChart" in e for e in errs)
+
+
+def test_datatable_column_rule_covers_literal_rows():
+    """Review P2: the array rule validates literal arrays, so the column rule must too."""
+    cols = [{"key": "night", "label": "Night"}, {"key": "facts", "label": "Facts"}]
+    comps = _skel([{"id": "c", "component": "DataTable", "columns": cols, "rows": [{"night": "2026-08-31"}]}])
+    errs = _rules(comps, {})
+    assert any("column 'facts' is absent from every row" in e for e in errs), errs
+
+
 def test_deltalist_bound_to_a_series_is_named_and_an_empty_list_passes():
     comps = _skel([{"id": "c", "component": "DeltaList", "rows": {"path": "/movers"}}])
     errs = _rules(comps, {"movers": _series()})

@@ -852,6 +852,13 @@ def _resolve_path_targets(
     ]
 
 
+def _is_per_item(comp: dict, path: str, by_id: dict[str, dict]) -> bool:
+    """True when ``path`` is relative AND the component sits inside exactly one
+    Repeat template — the only case where "resolves to nothing" is a legal
+    per-item state rather than a broken binding."""
+    return not path.startswith("/") and len(_containing_templates(str(comp.get("id", "")), by_id)) == 1
+
+
 def _shape_name(value: Any) -> str:
     if is_series(value):
         return "a series"
@@ -872,10 +879,14 @@ def _array_rule_errors(
     (resolved or literal) must be a list whose entries are all objects."""
     cid = str(comp.get("id", ""))
     value = comp.get(prop)
-    optional = (ctype, prop) in _OPTIONAL_DATA_PROPS
+    optional = False
     if isinstance(value, dict) and "call" in value:
         return []
     if isinstance(value, dict) and isinstance(value.get("path"), str):
+        # "Resolves to nothing is a state" holds PER ITEM under a Repeat (a
+        # goal with no evidence rows); an absolute or template-less path that
+        # points at nothing is a typo, not a state (review P3).
+        optional = (ctype, prop) in _OPTIONAL_DATA_PROPS and _is_per_item(comp, value["path"], by_id)
         targets = _resolve_path_targets(comp, value["path"], by_id, full_model)
         if targets is None:
             return []
@@ -906,11 +917,16 @@ def _column_rule_errors(comp: dict, by_id: dict[str, dict], full_model: dict) ->
     cid = str(comp.get("id", ""))
     cols = comp.get("columns")
     rows_value = comp.get("rows")
-    if not isinstance(cols, list) or not (
-        isinstance(rows_value, dict) and isinstance(rows_value.get("path"), str)
-    ):
+    if not isinstance(cols, list):
         return []
-    targets = _resolve_path_targets(comp, rows_value["path"], by_id, full_model) or []
+    if isinstance(rows_value, dict) and isinstance(rows_value.get("path"), str):
+        targets = _resolve_path_targets(comp, rows_value["path"], by_id, full_model) or []
+    elif isinstance(rows_value, list):
+        # A literal rows array is checked the same way (review P2) — the
+        # array rule already validates literals, so must this one.
+        targets = [(f"{cid}.rows (literal)", rows_value)]
+    else:
+        return []
     errors: list[str] = []
     for tpath, rows in targets:
         if not isinstance(rows, list) or not rows or not all(isinstance(r, dict) for r in rows):
@@ -959,8 +975,8 @@ def _chart_shape_errors(ctype: str, comp: dict, path: str, resolved: Any) -> lis
     if ctype in _SINGLE_VALUE_CONSUMERS and isinstance(resolved.get("keys"), list):
         errs.append(
             f"{ctype} {comp.get('id')!r} binds {path}, a multi-series source "
-            f"(keys {sorted(str(k) for k in resolved['keys'])}) — Sparkline/BarChart "
-            "read a single-value (v) series; use LineChart or a single-key source"
+            f"(keys {sorted(str(k) for k in resolved['keys'])}) — {ctype} "
+            "reads a single-value (v) series; use LineChart or a single-key source"
         )
         return errs
     if ctype == "LineChart":
@@ -1022,8 +1038,9 @@ def _binding_rules(
             path = comp.get(prop)
             if isinstance(path, str) and path.strip():  # blank: grammar's job
                 targets = _resolve_path_targets(comp, path, by_id, full_model)
+                per_item = (ctype, prop) in _OPTIONAL_DATA_PROPS and _is_per_item(comp, path, by_id)
                 for tpath, resolved in targets or []:
-                    if resolved is None and (ctype, prop) in _OPTIONAL_DATA_PROPS:
+                    if resolved is None and per_item:
                         continue
                     errs = _chart_shape_errors(ctype, comp, tpath, resolved)
                     if errs:
