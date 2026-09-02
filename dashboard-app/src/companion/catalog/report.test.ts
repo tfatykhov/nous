@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { render, cleanup } from '@testing-library/svelte';
+import { render, fireEvent, cleanup } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import Renderer from '../Renderer.svelte';
 import MetricCardView from './MetricCardView.svelte';
 import ScoreCardView from './ScoreCardView.svelte';
@@ -270,6 +271,19 @@ describe('DataTableView', () => {
     expect(container.querySelectorAll('tbody tr')[1].querySelectorAll('td')[2].textContent).toBe('');
   });
 
+  it('survives duplicate column keys without a keyed-each crash', () => {
+    // The grammar rejects duplicates at compose time, but the renderer never
+    // trusts its input: Svelte's keyed each throws in prod on a duplicate key
+    // and would take down the whole surface (review P1; LineChart precedent).
+    seed({ log: [{ a: '1' }] });
+    const { container } = mount(DataTableView, {
+      ...table,
+      columns: [{ key: 'a', label: 'A' }, { key: 'a', label: 'A again' }],
+    });
+    expect(container.querySelectorAll('th').length).toBe(2);
+    expect(container.querySelectorAll('td').length).toBe(2);
+  });
+
   it('renders emptyText when there are no rows and caps columns at six', () => {
     seed({ log: [] });
     const empty = mount(DataTableView, { ...table, emptyText: 'no sessions logged' });
@@ -348,11 +362,12 @@ describe('whole-feature report app (F096 AC1)', () => {
     readFileSync('src/companion/catalog/__fixtures__/f096-report-app.json', 'utf-8'),
   ) as { components: Record<string, unknown>[]; dataModel: Record<string, unknown> };
 
-  it('renders every record through every new component with no placeholder', () => {
+  it('renders every record through every new component with no placeholder', async () => {
     seed(fixture.dataModel, fixture.components);
     const { container } = render(Renderer, { props: { surfaceId: SURFACE, componentId: 'root' } });
     const retrieval = fixture.dataModel.retrieval as unknown[];
     const goals = fixture.dataModel.goals as unknown[];
+    const sleep = fixture.dataModel.sleep as unknown[];
     expect(container.querySelectorAll('.metric').length).toBe(retrieval.length);
     expect(container.querySelectorAll('.score').length).toBe(goals.length);
     // three trended metrics draw; the count card has no chart region
@@ -363,9 +378,15 @@ describe('whole-feature report app (F096 AC1)', () => {
     expect(container.querySelectorAll('.chip').length).toBe(3);
     expect(container.querySelector('.app-header .note')?.textContent).toBe('data through 2026-09-01');
     expect(container.querySelector('.ph')).toBeNull();
-    // the accordion keeps the raw table collapsed until tapped
+    // the accordion keeps the raw table collapsed until tapped — so open it,
+    // or AC1's "every record" claim would never cover the DataTable (review P2)
     expect(container.querySelector('table.dtable')).toBeNull();
     expect(container.querySelector('button.toggle .caption')?.textContent).toBe('last 4 nights');
+    await fireEvent.click(container.querySelector('button.toggle') as HTMLElement);
+    await tick();
+    expect(container.querySelectorAll('table.dtable tbody tr').length).toBe(sleep.length);
+    expect(container.querySelectorAll('table.dtable th').length).toBe(4);
+    expect(container.querySelector('.ph')).toBeNull();
   });
 });
 

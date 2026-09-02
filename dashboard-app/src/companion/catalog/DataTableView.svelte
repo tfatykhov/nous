@@ -59,7 +59,11 @@
   <table class="dtable" style:flex-grow={flexGrow(comp.weight)}>
     <thead>
       <tr>
-        {#each columns as col (col.key)}
+        <!-- Keyed by INDEX, not col.key: the grammar rejects duplicate keys at
+             compose time, but the renderer never trusts its input, and Svelte's
+             keyed each throws on a duplicate key in prod too — one bad table
+             would take down the whole surface (the LineChart series precedent). -->
+        {#each columns as col, i (i)}
           <th class:end={col.end} class:secondary={col.secondary}>{col.label}</th>
         {/each}
       </tr>
@@ -67,7 +71,7 @@
     <tbody>
       {#each rows as row, i (i)}
         <tr>
-          {#each columns as col (col.key)}
+          {#each columns as col, j (j)}
             <td class:end={col.end} class:secondary={col.secondary}>{toDisplayString(row[col.key])}</td>
           {/each}
         </tr>
