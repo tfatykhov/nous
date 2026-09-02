@@ -6,7 +6,7 @@
   // A card with no value is legal: the verdict plus evidence is the content.
   // Values are preformatted; row tones are closed by normalizeTone at render.
   import { store } from '../store.svelte';
-  import { flexGrow, resolveDynamic, toDisplayString } from '../functions';
+  import { flexGrow, omittedNote, resolveDynamic, splitTruncation, toDisplayString } from '../functions';
   import { normalizeTone, toneInkVar } from '../chart';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
@@ -41,10 +41,14 @@
   const tone = $derived(normalizeTone(resolveDynamic(comp.tone, ctx)));
   // Non-array (absent, None for this item, a wrong shape) ⇒ no rows, never a
   // throw: a goal with no evidence rows is a legal state (spec §3.2).
-  const rows = $derived.by((): Row[] => {
+  // A server-bounded evidence list may end in the truncation marker (codex
+  // P2 on #630): not a row — filtered, and its count shown.
+  const split = $derived.by(() => {
     const resolved = resolveDynamic(comp.items, ctx);
-    if (!Array.isArray(resolved)) return [];
-    return resolved.map((row) => {
+    return splitTruncation(Array.isArray(resolved) ? resolved : []);
+  });
+  const rows = $derived.by((): Row[] => {
+    return split.rows.map((row) => {
       const r = (typeof row === 'object' && row !== null ? row : {}) as Record<string, unknown>;
       return {
         label: toDisplayString(r.label),
@@ -74,6 +78,7 @@
       {/each}
     </ul>
   {/if}
+  {#if split.omitted !== null}<p class="omitted">{omittedNote(split.omitted)}</p>{/if}
   {#if note}<p class="note">{note}</p>{/if}
 </div>
 
@@ -165,7 +170,8 @@
     font-size: 0.8rem;
     font-weight: 600;
   }
-  .note {
+  .note,
+  .omitted {
     margin: 0;
     color: var(--muted);
     font-size: 0.74rem;

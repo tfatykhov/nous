@@ -423,6 +423,23 @@ describe('server truncation marker (F096 §6.1 — codex P2 on #630)', () => {
     }
   });
 
+  it('ScoreCard evidence filters the marker; a marker-only ChipRow still reports the omission', () => {
+    seed({ items: [{ label: 'l', value: 'v' }, marker], only: [marker] });
+    const score = mount(ScoreCardView, {
+      id: 's',
+      component: 'ScoreCard',
+      title: 'T',
+      status: 'ok',
+      items: { path: '/items' },
+    });
+    expect(score.container.querySelectorAll('li').length).toBe(1);
+    expect(score.container.querySelector('.omitted')?.textContent).toContain('3 more');
+    cleanup();
+    const chips = mount(ChipRowView, { id: 'c', component: 'ChipRow', items: { path: '/only' } });
+    expect(chips.container.querySelectorAll('.chip:not(.omitted)').length).toBe(0);
+    expect(chips.container.querySelector('.omitted')?.textContent).toContain('3 more');
+  });
+
   it('a repeat template skips the marker and keeps real item scopes', () => {
     seed({ metrics: [{ label: 'a', value: '1' }, { label: 'b', value: '2' }, marker] }, [
       { id: 'col', component: 'Column', children: { componentId: 'm', path: '/metrics' } },

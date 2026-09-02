@@ -45,7 +45,10 @@
   });
 </script>
 
-{#if chips.length > 0}
+<!-- Open the container when there is EITHER a chip or an omission to report:
+     a source too large for even its first record yields a marker-only array,
+     and a blank section would conceal that data was dropped (codex P2). -->
+{#if chips.length > 0 || split.omitted !== null}
   <div class="chips" style:flex-grow={flexGrow(comp.weight)}>
     {#each chips as chip, i (i)}
       <div class="chip" style:--ink={chip.ink}>
