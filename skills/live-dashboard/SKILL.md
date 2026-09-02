@@ -17,7 +17,7 @@ frames:
 tools:
   - compose_surface
   - run_python
-version: "1.7"
+version: "1.8"
 ---
 
 ## When this beats prose
@@ -232,11 +232,52 @@ Sparkline) needs six and will not go. So: fold a metric grid, a movers pair
 whole report is one card-height tall with a StatRow above it holding the
 glance. That is ~32 components instead of ~50 stacked ones.
 
+**A tab panel can be RICH, as long as every child is a leaf.** The depth rule
+cuts both ways and the generous half is easy to miss: `root(1) > Section(2) >
+Tabs(3) > Column(4) > leaf(5)` means one tab can hold an `Image` + a second
+`Image` + a `ScoreCard` + a `Text` **side by side in one Column** — four
+components, all at depth 5, all legal. What it cannot hold is a *repeat*
+(`Column-repeat(5) > template(6)`). So the question is never "is this panel too
+complex for a tab", it is **"does this panel contain a list?"** A five-card
+photo gallery with a per-item verdict and links folds into five tabs
+beautifully; the same five items as a repeat template does not fold at all and
+has to stay its own Section one level shallower.
+
+**Tab by the axis the reader will ACT on, not only by subject.** Tabs are for
+alternative views of one subject — but "when can I do this" is a view. Twelve
+open to-do items stacked as cards is a scroll nobody finishes; the same twelve
+tiered into `Before you fly / At the car / In person / On the day` is four
+short panels, and the first one is the only one that matters tonight. Group by
+urgency, by owner, or by deadline whenever that is the question being asked.
+
 **`Section.layout` does not reach through `Tabs`.** `cards` / `grid-2` reshape
 a DIRECT Column or Row child only; a tabbed section's cards stack vertically.
 That is the trade — fold *or* grid, per section. Fold when the panels are
 alternatives (four metric groups), grid when they are peers you compare at a
 glance (three goals side by side on a wide screen).
+
+## Never let an app hold its own copy of a number
+
+The most expensive bug in a long-lived dashboard is not a crash, it is a
+**private copy of a figure that was corrected somewhere else**. An authored app
+that hardcodes `"596 km / 8h31"` in its source file keeps rendering it,
+confidently and forever, after the route it describes was rerouted and every
+other artefact regenerated. Nothing errors. Nothing looks stale. The freshness
+stamp is honest — the app really was composed a minute ago — and the number is
+still wrong.
+
+So: **derive every aggregate at refresh time from the one content model**, and
+let the app own nothing but the layout. If two apps present the same subject,
+they must call the SAME function for any verdict — a shared `wx_tone(window)`
+rather than a copy in each source file — or one will eventually show amber
+where the other shows green and neither will be provably wrong.
+
+The corollary is a cheap, high-value component: a **`ChipRow` naming each data
+lane and its age** pays for itself the first time it catches its own plumbing.
+On the Italy rebuild the map-tile chip read *"re-mirroring"* forever because
+the served-assets path in the freshness check was wrong by one directory level
+— a bug invisible in the images themselves, which were fine. A lane indicator
+that can catch its own wiring is worth five components.
 
 ## Budgets — what actually fits (raised, #623)
 
