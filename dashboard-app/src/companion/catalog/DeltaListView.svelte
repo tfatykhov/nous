@@ -54,7 +54,9 @@
 </script>
 
 <ul class="deltas" style:flex-grow={flexGrow(comp.weight)}>
-  {#if rows.length === 0}
+  <!-- A marker-only source is TRUNCATED, not empty: the omission note alone
+       says what happened; emptyText would call a cut list "nothing" (codex P2). -->
+  {#if rows.length === 0 && split.omitted === null}
     <li class="none"><span class="empty">{emptyText}</span></li>
   {:else}
     {#each rows as row, i (i)}

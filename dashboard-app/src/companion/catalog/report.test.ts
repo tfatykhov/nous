@@ -440,6 +440,23 @@ describe('server truncation marker (F096 §6.1 — codex P2 on #630)', () => {
     expect(chips.container.querySelector('.omitted')?.textContent).toContain('3 more');
   });
 
+  it('a marker-only source is truncated, not empty: no emptyText, just the note', () => {
+    seed({ only: [marker] });
+    const dl = mount(DeltaListView, { id: 'd', component: 'DeltaList', rows: { path: '/only' }, emptyText: 'none' });
+    expect(dl.container.querySelector('.empty')).toBeNull();
+    expect(dl.container.querySelector('.omitted')?.textContent).toContain('3 more');
+    cleanup();
+    const dt = mount(DataTableView, {
+      id: 't',
+      component: 'DataTable',
+      columns: [{ key: 'a', label: 'A' }],
+      rows: { path: '/only' },
+      emptyText: 'none',
+    });
+    expect(dt.container.querySelector('.empty')).toBeNull();
+    expect(dt.container.querySelector('.omitted')?.textContent).toContain('3 more');
+  });
+
   it('a repeat template skips the marker and keeps real item scopes', () => {
     seed({ metrics: [{ label: 'a', value: '1' }, { label: 'b', value: '2' }, marker] }, [
       { id: 'col', component: 'Column', children: { componentId: 'm', path: '/metrics' } },

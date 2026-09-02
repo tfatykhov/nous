@@ -80,7 +80,7 @@
       {/each}
     </tbody>
   </table>
-{:else if columns.length > 0}
+{:else if columns.length > 0 && split.omitted === null}
   <div class="empty">{emptyText}</div>
 {/if}
 {#if split.omitted !== null}

@@ -2045,6 +2045,23 @@ def test_validation_resolver_rejects_negative_and_non_integer_indices():
     assert any("resolved to nothing" in e for e in _rules(comp, model))
 
 
+def test_validation_ignores_the_truncation_marker_like_the_renderer():
+    """codex P2 on #630: `_bound`'s trailing {_truncated, omitted} entry is not
+    a record — the column rule must not count it as a row missing every key,
+    and a per-item rule under a Repeat must not resolve against it."""
+    marker = {"_truncated": True, "omitted": 4}
+    cols = [{"key": "night", "label": "Night"}]
+    table = _skel([{"id": "c", "component": "DataTable", "columns": cols, "rows": {"path": "/sleep"}}])
+    assert _rules(table, {"sleep": [marker]}) == []
+    assert _rules(table, {"sleep": [{"night": "x"}, marker]}) == []
+    # a required per-item prop (Timeline.items) inside a Repeat over a truncated list
+    comps = _repeat_skel("card", {"id": "card", "component": "Timeline", "items": {"path": "events"}})
+    model = {"metrics": [{"events": [{"at": "t", "label": "l"}]}, marker]}
+    assert _rules(comps, model) == []
+    only_marker = {"metrics": [marker]}
+    assert _rules(comps, only_marker) == []
+
+
 def test_datatable_column_rule_covers_literal_rows():
     """Review P2: the array rule validates literal arrays, so the column rule must too."""
     cols = [{"key": "night", "label": "Night"}, {"key": "facts", "label": "Facts"}]

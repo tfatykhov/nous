@@ -860,10 +860,23 @@ def _resolve_path_targets(
     items = _get_path(full_model, source_path)
     if not isinstance(items, list) or not items:
         return None
-    return [
+    # The renderer's repeat expansion skips the truncation marker, so a
+    # per-item rule must too — or a required per-item prop reads "resolved
+    # to nothing" against an entry that never renders.
+    targets = [
         (f"{source_path}/{i}/{path}", _get_path(full_model, f"{source_path}/{i}/{path}"))
         for i in range(len(items))
+        if not _is_truncation_marker(items[i])
     ]
+    return targets or None
+
+
+def _is_truncation_marker(value: Any) -> bool:
+    """`_bound`'s trailing ``{_truncated: true, omitted: N}`` on a record list
+    it could not fit. It is not a record: the renderer skips it and shows the
+    omitted count, so validation must not resolve per-item props against it
+    or count it as a row (codex P2 on #630)."""
+    return isinstance(value, dict) and value.get("_truncated") is True
 
 
 def _is_per_item(comp: dict, path: str, by_id: dict[str, dict]) -> bool:
@@ -943,7 +956,10 @@ def _column_rule_errors(comp: dict, by_id: dict[str, dict], full_model: dict) ->
         return []
     errors: list[str] = []
     for tpath, rows in targets:
-        if not isinstance(rows, list) or not rows or not all(isinstance(r, dict) for r in rows):
+        if not isinstance(rows, list):
+            continue
+        rows = [r for r in rows if not _is_truncation_marker(r)]
+        if not rows or not all(isinstance(r, dict) for r in rows):
             continue
         for col in cols:
             key = col.get("key") if isinstance(col, dict) else None
