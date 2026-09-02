@@ -34,6 +34,8 @@
   const status = $derived(toDisplayString(resolveDynamic(comp.status, ctx)));
   const value = $derived(toDisplayString(resolveDynamic(comp.value, ctx)));
   const unit = $derived(toDisplayString(resolveDynamic(comp.unit, ctx)));
+  // %, ° and friends are set tight against the number; kg/bpm/ms keep the gap.
+  const unitTight = $derived(/^[%°‰′″]/.test(unit));
   const caption = $derived(toDisplayString(resolveDynamic(comp.caption, ctx)));
   const note = $derived(toDisplayString(resolveDynamic(comp.note, ctx)));
   // Literal or {path} binding (per-record tone under a repeat template);
@@ -65,7 +67,7 @@
     <span class="status">{status}</span>
   </div>
   {#if value}
-    <div class="value">{value}{#if unit}<span class="unit">{unit}</span>{/if}</div>
+    <div class="value">{value}{#if unit}<span class="unit" class:tight={unitTight}>{unit}</span>{/if}</div>
     {#if caption}<div class="caption">{caption}</div>{/if}
   {/if}
   {#if rows.length > 0}
@@ -136,6 +138,9 @@
     font-family: var(--font-ui);
     font-size: 0.85rem;
     font-weight: 400;
+  }
+  .unit.tight {
+    margin-left: 0;
   }
   .caption {
     color: var(--muted);

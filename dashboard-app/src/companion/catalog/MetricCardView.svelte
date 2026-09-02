@@ -36,6 +36,8 @@
   const label = $derived(toDisplayString(resolveDynamic(comp.label, ctx)));
   const value = $derived(toDisplayString(resolveDynamic(comp.value, ctx)));
   const unit = $derived(toDisplayString(resolveDynamic(comp.unit, ctx)));
+  // %, ° and friends are set tight against the number; kg/bpm/ms keep the gap.
+  const unitTight = $derived(/^[%°‰′″]/.test(unit));
   const delta = $derived(toDisplayString(resolveDynamic(comp.delta, ctx)));
   const caption = $derived(toDisplayString(resolveDynamic(comp.caption, ctx)));
   const footnote = $derived(toDisplayString(resolveDynamic(comp.footnote, ctx)));
@@ -71,7 +73,7 @@
     <span class="label">{label}</span>
     {#if delta}<span class="pill">{delta}</span>{/if}
   </div>
-  <div class="value">{value}{#if unit}<span class="unit">{unit}</span>{/if}</div>
+  <div class="value">{value}{#if unit}<span class="unit" class:tight={unitTight}>{unit}</span>{/if}</div>
   {#if caption}<div class="caption">{caption}</div>{/if}
   {#if series}
     {#if !series.ok}
@@ -144,6 +146,9 @@
     font-family: var(--font-ui);
     font-size: 0.82rem;
     font-weight: 400;
+  }
+  .unit.tight {
+    margin-left: 0;
   }
   .caption,
   .state,
