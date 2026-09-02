@@ -536,12 +536,12 @@ async def test_unknown_fingerprint_fails_the_action_and_audits_it(
         content_type=JSON,
     )
     assert status == 422
-    assert "not found" in payload["error"]["message"]
+    assert "no longer tracked" in payload["error"]["message"]
 
     audits = await _audits(db, a2ui_agent_id)
     assert [a.status for a in audits] == ["rejected", "rejected"]
     assert "not on this surface" in audits[0].rejection_reason
-    assert "not found" in audits[1].rejection_reason
+    assert "no longer tracked" in audits[1].rejection_reason
 
 
 async def test_handler_exception_is_a_500_not_a_silent_success(

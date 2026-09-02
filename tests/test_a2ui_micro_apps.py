@@ -1435,13 +1435,15 @@ async def test_heartbeat_findings_maps_unsupported_urgency() -> None:
 
 async def test_heartbeat_findings_keeps_agent_items_out_of_check_buckets() -> None:
     """check_name keys escalation and tuner reputation — agent-authored
-    items must not pollute a real check's bucket."""
+    items must not pollute a real check's bucket. The name now includes a
+    per-message digest suffix to prevent digit-variant collisions, so we
+    assert the 'agent:<check>:' prefix rather than an exact match."""
     store = _FakeFindingStore([])
     dispatcher, _service = _findings_dispatcher(store)
 
     await _push_findings(dispatcher, [{"message": "PR #568 open", "check": "facts"}])
 
-    assert store.ingested[0].check_name == "agent:facts"
+    assert store.ingested[0].check_name.startswith("agent:facts:")
 
 
 async def test_heartbeat_findings_rejects_blank_message() -> None:
@@ -1479,4 +1481,80 @@ async def test_heartbeat_findings_rejected_when_store_missing() -> None:
     )
 
     assert is_error
+    assert not service.pushed
+
+
+# ---------------------------------------------------------------------------
+# Item 2 regression: digit-variant fingerprint collision
+# ---------------------------------------------------------------------------
+
+
+async def test_heartbeat_findings_digit_variants_get_distinct_fingerprints() -> None:
+    """Two findings whose text differs only in a digit must not share a
+    fingerprint. Finding.fingerprint() normalises digit runs to 'N', so
+    'PR #568 open' and 'PR #569 open' would collide under the old
+    check_name — the second button silently resolved the first finding."""
+    store = _FakeFindingStore([])
+    dispatcher, service = _findings_dispatcher(store)
+
+    _content, is_error = await _push_findings(
+        dispatcher,
+        [
+            {"message": "PR #568 open", "check": "prs"},
+            {"message": "PR #569 open", "check": "prs"},
+        ],
+    )
+
+    assert not is_error
+    fps = {f.fingerprint() for f in store.ingested}
+    assert len(fps) == 2, "digit variants must produce distinct fingerprints"
+    assert len(_rendered_fingerprints(service.pushed[0])) == 2, "both must render"
+
+
+async def test_heartbeat_findings_same_message_is_idempotent_across_pushes() -> None:
+    """The identical message re-pushed must yield the same fingerprint and
+    not grow the store — the second push adopts the already-registered fp."""
+    store = _FakeFindingStore([])
+    dispatcher, _service = _findings_dispatcher(store)
+
+    await _push_findings(dispatcher, [{"message": "PR #568 open"}])
+    await _push_findings(dispatcher, [{"message": "PR #568 open"}])
+
+    fps = {f.fingerprint() for f in store.ingested}
+    assert len(fps) == 1, "same message must produce one tracked finding"
+    assert len(store.to_list()) == 1
+
+
+# ---------------------------------------------------------------------------
+# Item 3 regression: findings must not be ingested when the push is blocked
+# ---------------------------------------------------------------------------
+
+
+async def test_heartbeat_findings_not_ingested_when_push_is_blocked() -> None:
+    """If push_built raises (censor block or other failure), the finding
+    store must be left unchanged — rejected prose must not appear in
+    GET /heartbeat/findings."""
+    store = _FakeFindingStore([])
+
+    class _BlockingService:
+        def __init__(self) -> None:
+            self.pushed: list[Any] = []
+
+        async def push_built(self, built: Any, **kwargs: Any) -> str:
+            raise PermissionError("censor blocked")
+
+    from nous.a2ui.tools import register_a2ui_tools
+    from nous.api.tools import ToolDispatcher
+
+    dispatcher = ToolDispatcher()
+    service = _BlockingService()
+    register_a2ui_tools(dispatcher, service, heartbeat_runner=_FakeHeartbeatRunner(store))
+
+    _content, is_error = await dispatcher.dispatch(
+        "push_surface",
+        {"template": "heartbeat_findings", "params": {"findings": [{"message": "disk 91% full"}]}},
+    )
+
+    assert is_error
+    assert not store.ingested, "finding must not enter the store when the push is blocked"
     assert not service.pushed

@@ -9,6 +9,7 @@ ratchet untouched. The only nous/api/tools.py edit for F092 is the
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -378,6 +379,12 @@ def register_a2ui_tools(
             # default rather than bouncing the model.
             dedup_key = "heartbeat:findings"
 
+        # Findings registered into the store AFTER a successful push (Item 3).
+        # Pre-push ingestion would expose rejected prose in GET /heartbeat/findings
+        # if a censor or validation failure blocks the push.
+        _pending_ingest: list = []
+        _pending_store = None
+
         # Every rendered button MUST resolve against the live finding store
         # (F092 P1). This template is thin presentation over the F034.1
         # lifecycle: its ONLY verbs are acknowledge/resolve/dismiss against a
@@ -430,26 +437,36 @@ def register_a2ui_tools(
                     urgency = _URGENCY_ALIASES.get(urgency, "normal")
                 # Namespaced check_name keeps agent-authored items out of the
                 # real checks' escalation and tuner-reputation buckets, which
-                # are keyed by check_name.
+                # are keyed by check_name. A per-message digest in the name
+                # ensures two items differing only in digits (e.g. "PR #568
+                # open" vs "PR #569 open") derive distinct fingerprints even
+                # after Finding.fingerprint()'s digit normalisation pass.
                 raw_check = str(row.get("check") or "").strip()
+                msg_digest = hashlib.sha256(message.encode()).hexdigest()[:8]
                 finding = _Finding(
                     source=raw_check or "agent",
                     summary=message,
                     urgency=urgency,
-                    check_name=f"agent:{raw_check or 'adhoc'}",
+                    check_name=f"agent:{raw_check or 'adhoc'}:{msg_digest}",
                 )
-                try:
-                    # Idempotent: the fingerprint derives from the text, so a
-                    # recurring card re-pushing the same item bumps seen_count
-                    # instead of duplicating it.
-                    store.ingest(finding)
-                except Exception as exc:  # pragma: no cover - defensive
-                    return _tool_error(f"Could not register finding {message[:40]!r}: {exc}")
-                row["fingerprint"] = finding.fingerprint()
+                fp = finding.fingerprint()
+                if fp in known:
+                    # Fingerprint derived from this exact message is already
+                    # tracked (same item from a prior push) — adopt unchanged
+                    # without queuing another ingest.
+                    row["fingerprint"] = fp
+                    row["urgency"] = urgency
+                    normalized.append(row)
+                    continue
+                row["fingerprint"] = fp
                 row["urgency"] = urgency
-                known.add(row["fingerprint"])
+                known.add(fp)
+                # Defer ingest until the push succeeds (Item 3): a blocked or
+                # failed push must leave the finding store unchanged.
+                _pending_ingest.append(finding)
                 normalized.append(row)
             params["findings"] = normalized
+            _pending_store = store
 
         # Self-sourcing templates — ALWAYS, not as a fallback (codex P1 x2):
         # the DB is the only source of truth for actionable rows. A caller-
@@ -538,6 +555,15 @@ def register_a2ui_tools(
         except Exception as exc:
             logger.exception("push_surface failed")
             return _tool_error(f"Failed to push surface: {exc}")
+        # Push succeeded — register any new agent-authored findings now.
+        # Doing this before the push would expose rejected prose via
+        # GET /heartbeat/findings if a censor or failure blocked the push.
+        if _pending_store is not None:
+            for _f in _pending_ingest:
+                try:
+                    _pending_store.ingest(_f)
+                except Exception as _exc:  # pragma: no cover - defensive
+                    logger.warning("Could not register finding %r: %s", _f.summary[:40], _exc)
         return {
             "is_error": False,
             "content": [
