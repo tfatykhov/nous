@@ -244,7 +244,10 @@ def report_app_components() -> list[dict]:
             composedAt={"path": "/meta/composedAt"},
             note={"path": "/meta/reach"},
         ),
-        dsl.Section("goals", title="Goals", child="goals-col", layout="cards", caption={"path": "/meta/window"}, provenance="source"),
+        dsl.Section(
+            "goals", title="Goals", child="goals-col", layout="cards",
+            caption={"path": "/meta/window"}, provenance="source",
+        ),
         {"id": "goals-col", "component": "Column", "children": {"componentId": "goal", "path": "/goals"}},
         dsl.ScoreCard(
             "goal",
@@ -257,11 +260,17 @@ def report_app_components() -> list[dict]:
             items={"path": "items"},
             note={"path": "note"},
         ),
-        dsl.Section("movers", title="Movers", child="movers-row", layout="grid-2", caption="significant moves", provenance="source"),
+        dsl.Section(
+            "movers", title="Movers", child="movers-row", layout="grid-2",
+            caption="significant moves", provenance="source",
+        ),
         {"id": "movers-row", "component": "Row", "children": ["up", "down"]},
         dsl.DeltaList("up", rows={"path": "/up"}),
         dsl.DeltaList("down", rows={"path": "/down"}, empty_text="no significant adverse moves"),
-        dsl.Section("retrieval", title="Retrieval", child="ret-col", layout="cards", caption="retrieval_log", provenance="source"),
+        dsl.Section(
+            "retrieval", title="Retrieval", child="ret-col", layout="cards",
+            caption="retrieval_log", provenance="source",
+        ),
         {"id": "ret-col", "component": "Column", "children": {"componentId": "metric", "path": "/retrieval"}},
         dsl.MetricCard(
             "metric",
@@ -275,7 +284,10 @@ def report_app_components() -> list[dict]:
             trendline=True,
             footnote={"path": "footnote"},
         ),
-        dsl.Section("sleep", title="Sleep cycles", child="sleep-table", layout="accordion", caption="last 4 nights", provenance="source"),
+        dsl.Section(
+            "sleep", title="Sleep cycles", child="sleep-table", layout="accordion",
+            caption="last 4 nights", provenance="source",
+        ),
         dsl.DataTable(
             "sleep-table",
             columns=[
@@ -287,7 +299,10 @@ def report_app_components() -> list[dict]:
             rows={"path": "/sleep"},
             empty_text="no sleep cycles in window",
         ),
-        dsl.Section("lanes", title="Data freshness", child="lanes-col", caption="a stale lane silently freezes its trend", provenance="source"),
+        dsl.Section(
+            "lanes", title="Data freshness", child="lanes-col",
+            caption="a stale lane silently freezes its trend", provenance="source",
+        ),
         {"id": "lanes-col", "component": "Column", "children": ["chips", "method"]},
         dsl.ChipRow("chips", items={"path": "/lanes"}),
         {
@@ -353,7 +368,8 @@ def report_app_sources() -> dict:
              "caption": "23 → 24 (28d mean, n=28)", "footnote": "last 2026-09-01",
              "trend": spark([22.0 + (i % 4) for i in range(56)])},
             # A count mixed into the grid: no trend (spec §3.1).
-            {"label": "Open DAGs", "value": "3", "delta": "", "tone": "neutral", "caption": "right now", "footnote": ""},
+            {"label": "Open DAGs", "value": "3", "delta": "", "tone": "neutral",
+             "caption": "right now", "footnote": ""},
         ],
         "sleep": [
             {"night": "2026-08-31", "facts": "14", "edges": "212", "phases": "reflect, stale-scan, graph backfill"},
@@ -368,6 +384,8 @@ def report_app_sources() -> dict:
         ],
     }
 
+
+FIXTURE_JSON = "dashboard-app/src/companion/catalog/__fixtures__/f096-report-app.json"
 
 REPORT_APP_META = {
     "composedAt": "2026-09-01T13:00:00Z",
@@ -433,10 +451,10 @@ def test_whole_feature_report_app_passes_every_gate() -> None:
 def test_whole_feature_fixture_json_is_current() -> None:
     """The Svelte whole-app test renders the exported JSON; a stale export
     would test yesterday's fixture. Regenerate with
-    `PYTHONPATH=. uv run python tests/test_a2ui_report.py > dashboard-app/src/companion/catalog/__fixtures__/f096-report-app.json`."""
+    `PYTHONPATH=. uv run python tests/test_a2ui_report.py > <FIXTURE_JSON>`."""
     from pathlib import Path
 
-    exported = Path(__file__).resolve().parents[1] / "dashboard-app/src/companion/catalog/__fixtures__/f096-report-app.json"
+    exported = Path(__file__).resolve().parents[1] / FIXTURE_JSON
     assert exported.exists(), "fixture JSON not exported"
     assert exported.read_text(encoding="utf-8").strip() == report_app_fixture_json().strip()
 

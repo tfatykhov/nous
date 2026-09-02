@@ -1955,7 +1955,8 @@ def test_metriccard_trend_bound_to_records_or_multi_series_is_named():
 
 def test_metriccard_without_trend_in_a_mixed_grid_is_a_state_not_an_error():
     """A count mixed into a grid of trended metrics under one Repeat (spec §3.1)."""
-    comps = _repeat_skel("m", {"id": "m", "component": "MetricCard", "label": {"path": "label"}, "value": {"path": "value"}, "trend": "trend"})
+    card = {"id": "m", "component": "MetricCard", "label": {"path": "label"}, "value": {"path": "value"}}
+    comps = _repeat_skel("m", {**card, "trend": "trend"})
     model = {"metrics": [{"label": "a", "value": "1", "trend": _series()}, {"label": "b", "value": "2"}]}
     assert _rules(comps, model) == []
     bad = {"metrics": [{"label": "a", "value": "1", "trend": _series()}, {"label": "b", "value": "2", "trend": [1, 2]}]}
@@ -1974,7 +1975,8 @@ def test_deltalist_bound_to_a_series_is_named_and_an_empty_list_passes():
 
 
 def test_scorecard_items_absent_or_none_pass_but_a_string_is_named():
-    comps = _repeat_skel("s", {"id": "s", "component": "ScoreCard", "title": {"path": "title"}, "status": "ok", "items": {"path": "items"}})
+    card = {"id": "s", "component": "ScoreCard", "title": {"path": "title"}, "status": "ok", "items": {"path": "items"}}
+    comps = _repeat_skel("s", card)
     model = {"metrics": [{"title": "a", "items": [{"label": "l", "value": "v"}]}, {"title": "b"}]}
     assert _rules(comps, model) == []
     bad = {"metrics": [{"title": "a", "items": "nope"}]}
