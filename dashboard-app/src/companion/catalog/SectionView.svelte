@@ -172,6 +172,12 @@
      reference report does at ≤760px. The renderer owns breakpoints. */
   .app-section.grid-2 {
     container-type: inline-size;
+    /* A size container's inline size cannot depend on its contents, so as a
+       NON-stretched flex item (root Column with align start/center/end) the
+       section would shrink to its padding and its grid would overflow (codex
+       P2 on #631). A definite width resolves against the root instead. */
+    width: 100%;
+    min-width: 0;
   }
   @container (max-width: 520px) {
     .app-section.grid-2 > :global(.col),
