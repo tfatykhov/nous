@@ -22,7 +22,7 @@
     "path": "/meta/composedAt"
    },
    "note": {
-    "path": "/meta/reach"
+    "path": "/summary/reach"
    }
   },
   {
@@ -33,7 +33,7 @@
    "provenance": "source",
    "layout": "cards",
    "caption": {
-    "path": "/meta/window"
+    "path": "/summary/window"
    }
   },
   {
@@ -223,7 +223,9 @@
  ],
  "dataModel": {
   "meta": {
-   "composedAt": "2026-09-01T13:00:00Z",
+   "composedAt": "2026-09-01T13:00:00Z"
+  },
+  "summary": {
    "reach": "data through 2026-09-01",
    "window": "28d vs prior 28d"
   },

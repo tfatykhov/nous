@@ -171,6 +171,7 @@ def test_prompt_carries_the_report_block_and_both_tone_enums() -> None:
         "intent ∈ neutral|good|bad|warn",
         "tone ∈ neutral|ok|warn|crit",
         "layout cards",
+        "/meta is server-owned",
         "- report —",
         '"report"',  # response-shape archetype union
         "- report: cool slate dark",
@@ -242,11 +243,13 @@ def report_app_components() -> list[dict]:
             title="Memory & decisions — trend report",
             subtitle="every metric judged over the last 28 days against the 28 before",
             composedAt={"path": "/meta/composedAt"},
-            note={"path": "/meta/reach"},
+            # /meta is server-owned (composedAt only) — the data-reach line and
+            # the comparison window come from a SOURCE the script returns.
+            note={"path": "/summary/reach"},
         ),
         dsl.Section(
             "goals", title="Goals", child="goals-col", layout="cards",
-            caption={"path": "/meta/window"}, provenance="source",
+            caption={"path": "/summary/window"}, provenance="source",
         ),
         {"id": "goals-col", "component": "Column", "children": {"componentId": "goal", "path": "/goals"}},
         dsl.ScoreCard(
@@ -331,6 +334,8 @@ def report_app_sources() -> dict:
     failed: list[float | None] = [1.0 + (i % 5) * 0.4 for i in range(56)]
     failed[19] = failed[20] = None  # a real gap: the scheduler was down
     return {
+        # A small dict source: the report's own metadata, re-resolved on refresh.
+        "summary": {"reach": "data through 2026-09-01", "window": "28d vs prior 28d"},
         "goals": [
             {
                 "title": "Decision quality", "status": "on track", "tone": "ok",
@@ -387,11 +392,10 @@ def report_app_sources() -> dict:
 
 FIXTURE_JSON = "dashboard-app/src/companion/catalog/__fixtures__/f096-report-app.json"
 
-REPORT_APP_META = {
-    "composedAt": "2026-09-01T13:00:00Z",
-    "reach": "data through 2026-09-01",
-    "window": "28d vs prior 28d",
-}
+# Exactly what `_merge_data_model` writes: the server owns /meta and puts
+# ONLY composedAt there (codex P2 on #630 — an earlier draft bound the note
+# to /meta/reach, which resolves empty in a real compose).
+REPORT_APP_META = {"composedAt": "2026-09-01T13:00:00Z"}
 
 
 def report_app_fixture_json() -> str:
@@ -436,13 +440,20 @@ def test_whole_feature_report_app_passes_every_gate() -> None:
     envelope = _envelope(comps, data_model={"meta": REPORT_APP_META, **sources})
     assert validate_envelope(envelope) == []
 
+    # A /meta/* binding other than composedAt is named, not shipped blank.
+    meta_bound = {**parsed, "components": [
+        dict(c, note={"path": "/meta/reach"}) if c["id"] == "header" else c for c in comps
+    ]}
+    assert any("server-owned /meta" in e for e in composer._validate(meta_bound, sources))
+
     # Every panel source fits its budget with every record intact (§6.1).
     for key, value in sources.items():
         bounded, size = src._bound(value, src._PER_SOURCE_BUDGET_CHARS)
         assert size <= src._PER_SOURCE_BUDGET_CHARS, key
-        assert len(bounded) == len(value) and not any(
-            isinstance(r, dict) and r.get("_truncated") for r in bounded
-        ), key
+        if isinstance(value, list):
+            assert len(bounded) == len(value) and not any(
+                isinstance(r, dict) and r.get("_truncated") for r in bounded
+            ), key
     for rec in sources["retrieval"][:3]:
         assert rec["trend"]["meta"]["focus_from"] == "2026-08-04"
         assert rec["trend"]["meta"]["downsampled_from"] is None

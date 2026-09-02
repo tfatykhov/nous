@@ -168,6 +168,10 @@ REPORT apps (the `report` archetype; also any metric grid or scorecard):
 - Packing: both movers lists under ONE Section (layout grid-2, a Row of two
   DeltaLists); freshness chips and the method note under ONE Section; one
   Section per source grid. Source attribution goes in Section "caption".
+- /meta is server-owned and holds ONLY composedAt. AppHeader.note ("data
+  through …") and a bound Section.caption must bind a SOURCE field (e.g.
+  {"path": "/summary/reach"}) or be literals — a /meta/* binding resolves
+  empty and is rejected.
 """
 
 # Judgement lines for components whose property list alone doesn't tell the
@@ -1022,6 +1026,17 @@ def _binding_rules(
                 f"source {key!r} resolved data but no component binds /{key} — "
                 "bind it (a chart, a repeat template, or a field) instead of "
                 "inlining values"
+            )
+
+    # (1b) /meta is server-owned and `_merge_data_model` writes ONLY composedAt
+    # there, so any other /meta/* binding resolves empty on every compose and
+    # refresh — a note bound to /meta/reach would render blank forever (codex
+    # P2 on #630). Name it, instead of letting the app ship a silent hole.
+    for b in bindings:
+        if b.startswith(f"/{_META_KEY}/") and b != f"/{_META_KEY}/composedAt":
+            errors.append(
+                f"binding {b} targets server-owned /{_META_KEY}, which holds only "
+                "composedAt — bind a source field (e.g. /summary/reach) or use a literal"
             )
 
     by_id = {c["id"]: c for c in components if isinstance(c.get("id"), str)}

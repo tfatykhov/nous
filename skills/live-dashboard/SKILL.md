@@ -147,7 +147,10 @@ the same way (`status`, `tone`, `items` = the evidence rows); movers are two
 one an `emptyText` — an empty list is good news, not a missing section); the
 raw lane is a `DataTable` behind an `accordion`; lane health is a `ChipRow`.
 Put source attribution in `Section.caption`, the data-reach line in
-`AppHeader.note`, and pick the `report` theme.
+`AppHeader.note` — bound to a field of a small `summary` source your script
+returns (`{"reach": "data through …", "window": "28d vs prior 28d"}`), never
+to `/meta`, which the server owns and fills with `composedAt` only — and
+pick the `report` theme.
 
 ## Choosing the shape of the app
 

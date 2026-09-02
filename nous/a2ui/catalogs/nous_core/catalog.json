@@ -284,7 +284,7 @@
         },
         "note": {
           "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
-          "description": "F096: a data-reach line under the freshness stamp, e.g. 'data through 2026-09-01' — the stamp says when the app was composed, the note says how far the data reaches. Bind it (e.g. /meta/reach) so refresh can restamp it."
+          "description": "F096: a data-reach line under the freshness stamp, e.g. 'data through 2026-09-01' — the stamp says when the app was composed, the note says how far the data reaches. Bind it to a SOURCE field (e.g. /summary/reach) so refresh re-resolves it — /meta is server-owned and holds only composedAt, so a /meta/* binding resolves empty."
         },
         "weight": {
           "type": "number",
@@ -365,7 +365,7 @@
         },
         "caption": {
           "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
-          "description": "F096: right-aligned qualifier in the section head — source attribution ('Garmin', 'retrieval_log'), the comparison window, a count. Put attribution HERE, not in the title."
+          "description": "F096: right-aligned qualifier in the section head — source attribution ('Garmin', 'retrieval_log'), the comparison window, a count. Put attribution HERE, not in the title. A literal, or a binding to a source field — never /meta/*, which holds only composedAt."
         },
         "layout": {
           "type": "string",

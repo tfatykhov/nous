@@ -188,10 +188,14 @@ Chip: uppercase muted label, tone-coloured value, muted detail. Wraps.
 ## 4. Change 2 — affordances on existing components (P1)
 
 ### 4.1 `Section.caption`
-Optional **DynamicString** (consistent with `AppHeader.note`; a bound window like
-`/meta/window` must not burn a repair round) rendered right-aligned, small and muted in the
-section head — source attribution (`retrieval_log`), the comparison window, a count. The
-reference uses one on every panel; without it the composer inlines the source name into the title.
+Optional **DynamicString** (consistent with `AppHeader.note`; a bound window must not burn a
+repair round) rendered right-aligned, small and muted in the section head — source attribution
+(`retrieval_log`), the comparison window, a count. The reference uses one on every panel;
+without it the composer inlines the source name into the title. **A binding targets a source
+field** (e.g. `/summary/window` from a small dict source the script returns), never `/meta/*`:
+`/meta` is server-owned and `_merge_data_model` writes only `composedAt` there, so a `/meta/*`
+binding would resolve empty on every compose and refresh. `_binding_rules` names any such
+binding (codex P2 on #630).
 
 ### 4.2 `Section.layout: "cards"`
 Adds one value to the F093 §6.1 enum: an auto-fit grid of `minmax(220px, 1fr)`. `grid-3` is
@@ -237,7 +241,9 @@ takes a resolved series + tone + trendline flag; `SparklineView` adds its head/f
 ### 4.4 `AppHeader.note`
 Optional DynamicString under the freshness stamp, right-aligned and muted: `data through
 2026-09-01`. The stamp says when the app was composed; the note says how far the data reaches.
-They are different facts and the reference shows both.
+They are different facts and the reference shows both. Bound to a **source** field
+(`/summary/reach`) so refresh re-resolves it — not to `/meta`, which holds only `composedAt`
+(§4.1).
 
 ### 4.5 `--font-numeric` token
 New `:root` token `--font-numeric: var(--font-mono)`; every figure in the five components and
