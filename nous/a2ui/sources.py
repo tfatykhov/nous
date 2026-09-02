@@ -389,7 +389,7 @@ def to_series(
     - Caps to ``_MAX_SERIES_POINTS`` by downsampling (``meta.downsampled_from``).
     """
     keys = value_keys or [v_key]
-    ordered = sorted(records, key=lambda r: str(r.get(t_key, "")))
+    ordered = sorted(records, key=lambda r: _chrono_key(r.get(t_key, "")))
     points: list[dict] = []
     dropped = 0
     for rec in ordered:
@@ -419,6 +419,32 @@ def to_series(
     if len(points) > _MAX_SERIES_POINTS:
         result = _downsample_series(result, _MAX_SERIES_POINTS)
     return result
+
+
+def _chrono_key(t: Any) -> tuple:
+    """Sort key for ``to_series``: CHRONOLOGICAL for datetimes, dates and
+    ISO-8601 strings (any UTC offset; a naive value is taken as UTC), plain
+    string order only for values that do not parse. A lexical sort put
+    ``00:00Z`` before ``00:30+01:00`` (= 23:30Z the day before), and the
+    renderer shades the focus window as a SUFFIX of the point order, so a
+    non-chronological series shaded the wrong points (codex P2 on #630).
+    Parseable values sort before unparseable ones."""
+    from datetime import UTC, date, datetime
+
+    if isinstance(t, datetime):
+        dt = t
+    elif isinstance(t, date):
+        dt = datetime(t.year, t.month, t.day)
+    elif isinstance(t, str):
+        try:
+            dt = datetime.fromisoformat(t.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return (1, t)
+    else:
+        return (1, str(t))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return (0, dt.timestamp())
 
 
 def empty_series(reason: str, *, unit: str = "") -> dict:
@@ -486,13 +512,16 @@ def _bound(value: Any, budget: int) -> tuple[Any, int]:
         # record. Shorten those sparks first; only then drop records. A metric
         # with a coarser spark is still a true metric; a missing metric is a
         # missing fact.
-        value = _shrink_embedded_series(value, budget)
-        size = len(json.dumps(value, default=str))
+        shrunk = _shrink_embedded_series(value, budget)
+        size = len(json.dumps(shrunk, default=str))
         if size <= budget:
-            return value, size
-        trimmed = list(value)
-        while trimmed and len(json.dumps(trimmed, default=str)) > max(budget - 80, 0):
-            trimmed.pop()
+            return shrunk, size
+        # Not every record fits. Re-allocate the series budget to the records
+        # that SURVIVE: shrinking first over all records and popping the tail
+        # afterwards left the retained cards with emptied trends although
+        # full ones now fit in the freed space (codex P2 on #630). The
+        # marker's 80 chars are reserved up front.
+        trimmed = list(_fit_prefix(value, max(budget - 80, 0)))
         omitted = len(value) - len(trimmed)
         trimmed.append({"_truncated": True, "omitted": omitted})
         return trimmed, len(json.dumps(trimmed, default=str))
@@ -532,6 +561,51 @@ def _shrink_embedded_series(items: list, budget: int) -> list:
             exhausted_reason="char budget exhausted for this record's series",
         )
     return out
+
+
+def _emptied_any(original: list, shrunk: list) -> bool:
+    """True when the share was so small that a series which HAD points came
+    back as the honest empty series — a chart saying 'budget exhausted'
+    where a trend existed."""
+    for rec, out in zip(original, shrunk):
+        if not isinstance(rec, dict):
+            continue
+        for k, v in rec.items():
+            if _is_valid_series(v) and v.get("points") and not (out.get(k) or {}).get("points"):
+                return True
+    return False
+
+
+def _fit_prefix(items: list, room: int) -> list:
+    """The largest prefix of ``items`` that fits ``room`` once the series
+    budget is re-allocated to that prefix alone — preferring a prefix whose
+    sparks all keep their points over a longer one whose sparks were emptied.
+    Both properties are monotone in the prefix length (fewer records ⇒ fewer
+    fixed chars AND a larger per-series share), so two binary searches."""
+
+    def attempt(k: int) -> tuple[list, bool]:
+        cand = _shrink_embedded_series(items[:k], room)
+        return cand, len(json.dumps(cand, default=str)) <= room
+
+    best_any: list = []
+    lo, hi = 0, len(items)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        cand, ok = attempt(mid)
+        if ok:
+            lo, best_any = mid, cand
+        else:
+            hi = mid - 1
+    best_full: list | None = None
+    lo2, hi2 = 0, lo
+    while lo2 < hi2:
+        mid = (lo2 + hi2 + 1) // 2
+        cand, ok = attempt(mid)
+        if ok and not _emptied_any(items[:mid], cand):
+            lo2, best_full = mid, cand
+        else:
+            hi2 = mid - 1
+    return best_full if best_full else best_any
 
 
 # A stored dashboard script is agent-authored code, not prose — cap it so a

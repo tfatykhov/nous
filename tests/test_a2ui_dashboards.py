@@ -1885,6 +1885,38 @@ def test_bound_pops_records_only_when_sparks_cannot_shrink_enough():
     assert out[-1]["_truncated"] is True and out[-1]["omitted"] > 0
 
 
+def test_bound_reallocates_the_series_budget_to_the_surviving_records():
+    """codex P2 on #630: shrinking over ALL records and popping the tail after
+    left the retained cards with emptied trends although full ones fit in the
+    space the dropped records freed."""
+    from nous.a2ui import sources as src
+
+    recs = _metric_records(10, 200, caption="x" * 1500)  # fixed fields alone exceed 12k
+    out, size = src._bound(recs, 12_000)
+    assert size <= 12_000
+    assert out[-1]["_truncated"] is True and out[-1]["omitted"] > 0
+    kept = out[:-1]
+    assert kept, "some records must survive"
+    assert all(len(r["trend"]["points"]) >= 2 for r in kept), "survivors keep a real trend"
+
+
+def test_to_series_orders_mixed_offsets_chronologically():
+    """codex P2 on #630: a lexical sort put 00:00Z before 00:30+01:00 (23:30Z
+    the day before), and the renderer shades the focus window as a suffix."""
+    from datetime import date
+
+    from nous.a2ui.sources import to_series
+
+    rows = [
+        {"t": "2026-09-01T00:00:00Z", "v": 2.0},
+        {"t": "2026-09-01T00:30:00+01:00", "v": 1.0},
+        {"t": "2026-09-01T02:00:00Z", "v": 3.0},
+    ]
+    assert [p["v"] for p in to_series(rows, "t", "v")["points"]] == [1.0, 2.0, 3.0]
+    mixed = [{"t": date(2026, 9, 2), "v": 2.0}, {"t": "2026-09-01", "v": 1.0}, {"t": "week 3", "v": 9.0}]
+    assert [p["v"] for p in to_series(mixed, "t", "v")["points"]] == [1.0, 2.0, 9.0]
+
+
 def test_bound_leaves_malformed_embedded_series_untouched_and_never_raises():
     from nous.a2ui import sources as src
 
