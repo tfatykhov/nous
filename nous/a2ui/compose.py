@@ -52,6 +52,7 @@ _THEMES: dict[str, str] = {
     "harbor": "cool blue-grey — status, ops, monitoring dashboards",
     "paper": "warm light with a serif display — reading, briefings, digests",
     "signal": "high-contrast dark with an electric accent — alerts, dense data",
+    "report": "cool slate dark with a serif display — trend reports, scorecards, periodic reviews",
 }
 _DEFAULT_THEME = "nous-default"
 
@@ -63,6 +64,10 @@ Pick ONE archetype and fill it:
   conditions summary, linked sources. (sailing forecast, weekly digest)
 - ledger — "list of things with attributes": KeyValueTable per item,
   drill-down per row offered as a refine option. (bookings, decisions)
+- report — "how are things moving vs the prior window": ScoreCards for the
+  goals, DeltaLists of movers, MetricCard grids per source, a DataTable of
+  the raw lane, a freshness ChipRow. (health trends, calibration review,
+  weekly ops report) See REPORT below.
 """
 
 _GRAMMAR_RULES = """\
@@ -78,8 +83,9 @@ Hard rules (violations are rejected and returned to you to fix):
 - Every Section has a non-empty title and exactly one body component via
   "child" (a single component id STRING — Section has no "children" array;
   wrap multiple components in a Column and point child at it).
-- Budget: 40 components (80 for ledger/briefing), nesting depth max 5.
-  Over budget? Use a repeat template (below) or summarize + a refine option.
+- Budget: 40 components and 5 Sections (ledger/briefing: 80 and 8; report:
+  80 and 10), nesting depth max 5. Over budget? Use a repeat template
+  (below) or summarize + a refine option.
 - Allowed components ONLY: the ones listed under "Component properties"
   below — nothing else exists. Input components (TextField, Slider,
   DateTimeInput, CheckBox, ChoicePicker) are BANNED — micro-apps are
@@ -114,10 +120,15 @@ is rejected.
 
 SECTION LAYOUT via Section "layout": stack (default) | hero (large/primary,
 for the headline section) | grid-2 | grid-3 (N-column grid over the child's
-items) | rail (horizontal scroll) | accordion (collapsed until tapped — use
-for long secondary detail like raw tables or per-item breakdowns, never for
-the headline section). Use hero to create hierarchy — a flat stack of equal
-sections reads as generated.
+items) | cards (auto-fit grid of MetricCards/ScoreCards) | rail (horizontal
+scroll) | accordion (collapsed until tapped — use for long secondary detail
+like raw tables or per-item breakdowns, never for the headline section).
+grid-N and cards reshape the section's DIRECT Column/Row child, so that child
+must be a Column or Row (a list of cards, or a repeat template of one card).
+Use hero to create hierarchy — a flat stack of equal sections reads as
+generated. Section "caption" (optional, may be a binding) is the right-aligned
+qualifier in the head — put source attribution and the comparison window
+THERE, never in the title.
 
 TABS for 2-5 ALTERNATIVE views of the same subject (e.g. "By day" vs "By
 category"): Tabs {tabs: [{"title": "...", "child": "<component id>"}]} — each
@@ -130,6 +141,35 @@ _THEME_MENU = "Pick a `theme` (or omit for nous-default):\n" + "\n".join(
     f"- {tid}: {desc}" for tid, desc in _THEMES.items()
 )
 
+# F096 §8.1 — the shapes the grammar and the data rules would otherwise
+# reject. Written as the shape to EMIT, because every item here was a real
+# failure mode in review: ScoreCards at root or in the StatRow (skeleton
+# error), `trend` as a {path} object (schema error), a records source with
+# per-item series declared as `shape: series` (whole grid becomes one empty
+# series), attribution in the title, one Section per list (cap blown).
+_REPORT_RULES = """\
+REPORT apps (the `report` archetype; also any metric grid or scorecard):
+- Goals: ONE Section (layout cards) → a Column → the ScoreCards (or a repeat
+  template over the goals array). Metric grid: ONE Section (layout cards) →
+  a Column whose "children" is {"componentId": "<one MetricCard>", "path":
+  "/<metrics>"}. ScoreCards and MetricCards are NEVER StatRow children and
+  NEVER root children — the StatRow holds StatTiles only.
+- Inside that MetricCard template, "trend": "trend" is a BARE STRING like
+  Sparkline.path — NOT {"path": "trend"} — relative to the item. Omit trend
+  for a count (a count is not a series). DataTable "columns" is a literal
+  array, never a binding.
+- A [records] source whose records each carry a series (tagged "each
+  carries a series at: <key>") is chartable PER ITEM through that template.
+- Tone colours the judgement, not the reading: MetricCard.tone lands on the
+  delta pill and the trend, never the value; ScoreCard.tone on the status
+  pill and its rule; each DeltaList/ScoreCard row carries its own tone.
+- A DeltaList with no rows is a STATE — give it "emptyText" ("no significant
+  adverse moves" is the good news). Never drop the section.
+- Packing: both movers lists under ONE Section (layout grid-2, a Row of two
+  DeltaLists); freshness chips and the method note under ONE Section; one
+  Section per source grid. Source attribution goes in Section "caption".
+"""
+
 # Judgement lines for components whose property list alone doesn't tell the
 # model WHEN to reach for them or what data shape they consume. Deliberately
 # sparse: layout primitives (Row, Column, Card, Divider, Icon, Image, Text)
@@ -139,6 +179,35 @@ _THEME_MENU = "Pick a `theme` (or omit for nous-default):\n" + "\n".join(
 # feed it honestly (it belongs to the Phase 2 memory_graph template).
 # A test asserts every key here is a real ALLOWED_COMPONENTS name.
 _COMPONENT_USAGE: dict[str, str] = {
+    "StatTile": (
+        "headline tile, StatRow only (≤4); intent ∈ neutral|good|bad|warn "
+        "(NOT tone — it colours the VALUE). Anything inside a Section is a "
+        "MetricCard."
+    ),
+    "MetricCard": (
+        "one metric's story inside a section: label, value, unit?, delta "
+        "(pill text) + tone ∈ neutral|ok|warn|crit, caption (from → to), "
+        "trend = series path (bare string), trendline?, footnote. Grid them "
+        "with Section layout cards + a repeat template."
+    ),
+    "ScoreCard": (
+        "a verdict on an objective: title, status (pill text) + tone, "
+        "value?/unit?/caption?, items = [{label, value, tone?}] evidence "
+        "rows, note. No value is fine — the verdict plus evidence is the card."
+    ),
+    "DeltaList": (
+        "ranked movers: rows = [{label, delta, from?, to?, tone?}]; set "
+        "emptyText — an empty list is a state, not a missing section."
+    ),
+    "DataTable": (
+        "a real table: columns = literal [{key, label, align?: start|end, "
+        "secondary?}] (1-6), rows = path to record objects; align end for "
+        "numbers/dates, secondary for a supporting column."
+    ),
+    "ChipRow": (
+        "labelled status chips (data freshness, lane health): items = "
+        "[{label, value, detail?, tone?}]."
+    ),
     "Timeline": (
         "time-ordered events (the briefing spine); items = "
         "[{at, label, detail?, flag?}] — flag=true highlights an entry."
@@ -179,7 +248,7 @@ _RESPONSE_SHAPE = """\
 Respond with ONLY a JSON object (no prose, no code fence) shaped:
 {
   "title": "...",
-  "archetype": "status" | "briefing" | "ledger",
+  "archetype": "status" | "briefing" | "ledger" | "report",
   "theme": "<one of the listed theme ids>",  // optional; omit for nous-default
   "components": [ ... A2UI component objects, each with "id" and "component" ... ],
   "dataModel": { ... ONLY the subtrees you are supplying yourself ... },
@@ -393,13 +462,7 @@ class SurfaceComposer:
         self, intent: str, archetype: str | None, source_data: dict
     ) -> str:
         if source_data:
-            # Mark each source's kind so the model binds series to charts and
-            # record lists to repeats/fields BEFORE it guesses (F094 §5).
-            marked = {
-                f"{k} [{'series — chartable' if is_series(v) else 'records'}]": _sample(v)
-                for k, v in source_data.items()
-            }
-            source_desc = json.dumps(marked, default=str)[:4000]
+            source_desc = _source_description(source_data)
         else:
             source_desc = (
                 "(none — any data you show is model-supplied and must be marked "
@@ -412,6 +475,8 @@ class SurfaceComposer:
             + _ARCHETYPES
             + "\n"
             + _GRAMMAR_RULES
+            + "\n"
+            + _REPORT_RULES
             + "\n"
             + _THEME_MENU
             + "\n\n"
@@ -1197,6 +1262,40 @@ def _clean_refine_options(raw: Any) -> list[dict]:
             continue
         out.append({"id": oid[:60], "label": label[:80]})
     return out
+
+
+# Per-SOURCE cap on the prompt's data sample. A single 4000-char cap over the
+# whole block (pre-F096) cut the LAST sources mid-JSON once an app declared
+# 5-7 of them — a report is the first archetype that does — so the model
+# guessed those shapes. 800 chars each keeps every source visible; the
+# structure is what matters, `_sample` already drops the bulk.
+_SOURCE_SAMPLE_CHARS = 800
+
+
+def _source_tag(value: Any) -> str:
+    """The [kind] marker the model binds against (F094 §5, F096 §8.1): a
+    top-level series is chartable; a record list whose records carry a series
+    is chartable PER ITEM through a repeat template, and the tag names the
+    key so the model does not have to find it in a truncated sample."""
+    if is_series(value):
+        return "series — chartable"
+    if isinstance(value, list):
+        first = next((r for r in value if isinstance(r, dict)), None)
+        if first is not None:
+            keys = sorted(k for k, v in first.items() if is_series(v))
+            if keys:
+                return f"records; each carries a series at: {', '.join(keys)}"
+    return "records"
+
+
+def _source_description(source_data: dict) -> str:
+    parts = []
+    for key, value in source_data.items():
+        sample = json.dumps(_sample(value), default=str, ensure_ascii=False)
+        if len(sample) > _SOURCE_SAMPLE_CHARS:
+            sample = sample[:_SOURCE_SAMPLE_CHARS] + " …(truncated)"
+        parts.append(f'"{key}" [{_source_tag(value)}]: {sample}')
+    return "{\n" + ",\n".join(parts) + "\n}"
 
 
 def _sample(value: Any) -> Any:

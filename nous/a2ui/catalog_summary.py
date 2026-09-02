@@ -40,6 +40,12 @@ _COMPONENT_ORDER = (
     "AppFooter",
     "StatRow",
     "StatTile",
+    # F096 report vocabulary — what a report app is made of
+    "MetricCard",
+    "ScoreCard",
+    "DeltaList",
+    "DataTable",
+    "ChipRow",
     # layout + text
     "Column",
     "Row",

@@ -101,11 +101,13 @@ _COMPOSE_SURFACE_SCHEMA = {
         },
         "archetype": {
             "type": "string",
-            "enum": ["status", "briefing", "ledger"],
+            "enum": ["status", "briefing", "ledger", "report"],
             "description": (
                 "Optional layout archetype: status (where does X stand), "
                 "briefing (what's happening in window W), ledger (list of "
-                "things with attributes). Omit to let the composer pick."
+                "things with attributes), report (how are things moving vs "
+                "the prior window — scorecards, movers, metric grids with "
+                "trends). Omit to let the composer pick."
             ),
         },
         "data_sources": {
@@ -135,12 +137,16 @@ _COMPOSE_SURFACE_SCHEMA = {
                             "to a variable named `result`, and `shape` declares "
                             "what it produces so a later failure returns a "
                             "value the app's existing bindings still accept "
-                            "(refresh does not re-validate). Use \"series\" for "
-                            "any chart, and set `series_keys` to the keys your "
-                            "chart binds (`[\"v\"]` for a Sparkline/BarChart, the "
-                            "LineChart's series keys otherwise) so a later "
-                            "refresh cannot silently drop one and leave the "
-                            "chart empty. It may "
+                            "(refresh does not re-validate). Use \"series\" ONLY "
+                            "when the TOP-LEVEL `result` is one series, and set "
+                            "`series_keys` to the keys your chart binds (`[\"v\"]` "
+                            "for a Sparkline/BarChart, the LineChart's series keys "
+                            "otherwise) so a later refresh cannot silently drop one "
+                            "and leave the chart empty. Use \"records\" for a LIST "
+                            "— including a metric-grid list whose records each "
+                            "embed a `trend` series (to_series per record); "
+                            "declaring that list \"series\" turns the whole grid "
+                            "into one empty series. It may "
                             "import and fetch anything, so an external API or "
                             "link needs no new code and no new env var. It is "
                             "STORED and RE-RUN on every refresh, which is what "

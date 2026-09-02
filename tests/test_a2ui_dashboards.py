@@ -682,7 +682,7 @@ async def test_theme_survives_dedup_replacement(service, db):
 
 
 def test_theme_enum_is_closed():
-    assert set(_THEMES) == {"nous-default", "alpine-dusk", "harbor", "paper", "signal"}
+    assert set(_THEMES) == {"nous-default", "alpine-dusk", "harbor", "paper", "signal", "report"}
 
 
 # ---------------------------------------------------------------------------

@@ -135,3 +135,73 @@ def test_dsl_helpers_emit_the_schema_shape_and_drop_none() -> None:
     assert dsl.AppHeader("h", title="T", composedAt={"path": "/m"}, note="n")["note"] == "n"
     assert dsl.Sparkline("sp", path="/s", trendline=True)["trendline"] is True
     assert "trendline" not in dsl.Sparkline("sp", path="/s")
+
+
+# ---------------------------------------------------------------------------
+# Prompt, summary, tool schema (spec §8.1 / §8.2 / §5)
+# ---------------------------------------------------------------------------
+
+
+def _composer():
+    from types import SimpleNamespace
+
+    from nous.a2ui.compose import SurfaceComposer
+    from nous.a2ui.sources import SourceRegistry
+
+    return SurfaceComposer(None, SimpleNamespace(), SourceRegistry())
+
+
+def test_prompt_carries_the_report_block_and_both_tone_enums() -> None:
+    prompt = _composer()._build_prompt("28-day trend report", "report", {})
+    for needle in (
+        "REPORT apps",
+        "BARE STRING",
+        "intent ∈ neutral|good|bad|warn",
+        "tone ∈ neutral|ok|warn|crit",
+        "layout cards",
+        "- report —",
+        '"report"',  # response-shape archetype union
+        "- report: cool slate dark",
+        "NEVER root children",
+    ):
+        assert needle in prompt, needle
+
+
+def test_source_description_is_capped_per_source_and_tags_embedded_series() -> None:
+    from nous.a2ui.sources import to_series
+
+    metrics = [{"label": "m", "trend": to_series([{"t": "2026-08-01", "v": 1.0}], "t", "v")}]
+    big = [{"k": "x" * 5000}] * 3
+    prompt = _composer()._build_prompt("x", None, {"metrics": metrics, "big": big, "tail": [{"a": 1}]})
+    assert '"metrics" [records; each carries a series at: trend]' in prompt
+    assert '"tail" [records]' in prompt  # the last source survives the cap
+    assert "…(truncated)" in prompt
+    assert '"series — chartable"' not in prompt  # tags are unquoted markers
+    series_only = _composer()._build_prompt("x", None, {"hr": to_series([{"t": "2026-08-01", "v": 1.0}], "t", "v")})
+    assert '"hr" [series — chartable]' in series_only
+    # ensure_ascii=False: the arrows the recipe writes stay one char each
+    arrows = _composer()._build_prompt("x", None, {"m": [{"delta": "↓0.6 s · improving"}]})
+    assert "↓0.6 s · improving" in arrows and "\\u2193" not in arrows
+
+
+def test_catalog_summary_names_the_report_components() -> None:
+    from nous.a2ui.catalog_summary import catalog_property_summary
+
+    summary = catalog_property_summary()
+    assert "- MetricCard: required label, value" in summary
+    assert "- ScoreCard: required title, status" in summary
+    assert "- DeltaList: required rows" in summary
+    assert "- DataTable: required columns, rows" in summary
+    assert "- ChipRow: required items" in summary
+    assert "- Section: required title, child; optional provenance, caption, layout" in summary
+    assert "- Sparkline: required path; optional label, tone, trendline" in summary
+    assert "- AppHeader: required title, composedAt; optional subtitle, staleAfterS, note" in summary
+
+
+def test_compose_surface_tool_offers_the_report_archetype_and_records_shape() -> None:
+    from nous.a2ui.tools import _COMPOSE_SURFACE_SCHEMA
+
+    arch = _COMPOSE_SURFACE_SCHEMA["properties"]["archetype"]
+    assert "report" in arch["enum"] and "report (" in arch["description"]
+    params = _COMPOSE_SURFACE_SCHEMA["properties"]["data_sources"]["items"]["properties"]["params"]
+    assert "TOP-LEVEL" in params["description"] and "embed a `trend` series" in params["description"]
