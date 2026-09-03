@@ -1548,7 +1548,11 @@ class _PushBuiltService:
     def __init__(self) -> None:
         self.pushed: list[Any] = []
 
-    async def push_built(self, built: Any, **kwargs: Any) -> str:
+    async def push_built(self, built: Any, *, pre_broadcast: Any = None, **kwargs: Any) -> str:
+        # Call pre_broadcast before "broadcast" to mirror the real push_built contract
+        # (P2-1: fingerprints registered before the surface is visible to clients).
+        if pre_broadcast is not None:
+            pre_broadcast()
         self.pushed.append(built)
         return "surface-123"
 
