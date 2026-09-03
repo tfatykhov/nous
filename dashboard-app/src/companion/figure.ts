@@ -10,6 +10,9 @@
 //   compound duration: 1h 30m, 2d 3h, 45s
 //   number with optional sign, currency symbol or 3-letter code, thousands
 //               separators, decimal, and a short trailing unit (kg, km, %, °…)
+//   directional delta: ↓0.03, ↑6 %, ↑0.8 /day, ▲3 — a leading arrow (↑↓▲▼)
+//               or Unicode minus (−) followed by a bare number, a special
+//               unit symbol, an alpha unit, or a /rate suffix
 //
 // ISO datetimes are figures, not prose: they are preformatted scalar datums
 // (a moment in time), not descriptive sentences. The old 16-char heuristic
@@ -35,7 +38,23 @@ const NUMBER = /^[€$£¥₹฿₩]?[+-]?\d[\d,.]*([%°‰′″]|\s?[A-Za-z]{1
 // Covers: EUR 1,234,567.89, USD100.
 const CURRENCY_CODE = /^[A-Z]{3}\s?[+-]?\d[\d,.]*([%°‰′″]|\s?[A-Za-z]{1,5})?$/;
 
-const PATTERNS = [PLACEHOLDER, ISO_DATE, TIME_OF_DAY, RATIO, DURATION, NUMBER, CURRENCY_CODE];
+// Directional delta marker (↑ ↓ ▲ ▼ or Unicode minus −) followed by a number
+// and an optional unit or /rate suffix. Covers: ↓0.03, ↑6 %, ↑0.8 /day, ▲3.
+// ASCII +/- are already handled by NUMBER; this pattern covers the arrow chars
+// and Unicode minus that NUMBER's [+-] class cannot match.
+const DIRECTIONAL =
+  /^[↑↓▲▼−]\s?\d[\d,.]*(\s?[%°‰′″]|\s?[A-Za-z]{1,5}|\s?\/[A-Za-z]{1,10})?$/;
+
+const PATTERNS = [
+  PLACEHOLDER,
+  ISO_DATE,
+  TIME_OF_DAY,
+  RATIO,
+  DURATION,
+  NUMBER,
+  CURRENCY_CODE,
+  DIRECTIONAL,
+];
 
 /** Returns true when the value is figure-shaped (number, date, time, ratio,
  *  placeholder).  An empty string is treated as a figure so it does not

@@ -109,4 +109,42 @@ describe('isFigureValue', () => {
     // Long ISO datetime — figure, not prose
     expect(isFigureValue('2026-09-02T15:40:43Z')).toBe(true);
   });
+
+  // ── directional delta figures (P2-1 Codex finding on PR #632) ─────────────
+  // Every value from the f096-report-app fixture that carries a leading arrow.
+
+  it('fixture values ↓0.03, ↑6 %, ↑0.02 are figures', () => {
+    expect(isFigureValue('↓0.03')).toBe(true);
+    expect(isFigureValue('↑6 %')).toBe(true);
+    expect(isFigureValue('↑0.02')).toBe(true);
+  });
+
+  it('fixture value ↑0.8 /day is a figure (rate suffix)', () => {
+    expect(isFigureValue('↑0.8 /day')).toBe(true);
+  });
+
+  it('fixture value ↑3 is a figure (bare integer delta)', () => {
+    expect(isFigureValue('↑3')).toBe(true);
+  });
+
+  it('all four arrow glyphs and Unicode minus are accepted', () => {
+    expect(isFigureValue('↑1.5')).toBe(true);
+    expect(isFigureValue('↓1.5')).toBe(true);
+    expect(isFigureValue('▲1.5')).toBe(true);
+    expect(isFigureValue('▼1.5')).toBe(true);
+    expect(isFigureValue('−1.5')).toBe(true); // U+2212 Unicode minus, not ASCII -
+  });
+
+  it('directional marker with /rate suffix variants', () => {
+    expect(isFigureValue('↑0.8 /day')).toBe(true);
+    expect(isFigureValue('↓1.2 /week')).toBe(true);
+    expect(isFigureValue('▲3 /month')).toBe(true);
+  });
+
+  it('arrow-prefixed values that are still prose are not classified as figures', () => {
+    // A full sentence with an embedded arrow is prose, not a delta figure.
+    expect(isFigureValue('↑ improving trend over last 30 days')).toBe(false);
+    // Two numbers after the arrow — cannot be a single delta
+    expect(isFigureValue('↑6 and ↓3')).toBe(false);
+  });
 });
