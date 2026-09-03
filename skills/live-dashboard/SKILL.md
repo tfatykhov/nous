@@ -468,7 +468,9 @@ errs = c._validate(candidate_app_dict, source_data)
 
 It reports skeleton violations verbatim. The caps that are easy to trip:
 **root must be a Column** with id `root` listing every top-level child;
-**1–5 Sections** (merge extras into one Section wrapping a `Column`);
+**Sections** — the allowed count is archetype-specific: default 1–5, ledger/briefing
+1–8, report 1–10 (merge extras into one Section wrapping a `Column` if you exceed
+the cap for your archetype — don't switch archetype just to gain headroom);
 **StatRow takes at most 4 children**; `Section.child` is **singular** (one
 component id) while `Row`/`Column`/`List`/`StatRow` take `children`.
 
@@ -575,14 +577,13 @@ sections to switching archetype just to buy headroom.
 
 ## When the composer falls back on a big app
 
-The composer is an LLM transcribing your spec under `max_tokens=8000` and
+The composer is an LLM transcribing your spec under `max_tokens=16000` and
 `MAX_REPAIRS=2`; a truncated response reads as unparseable JSON and burns a
 round. If it falls back, do NOT just retry — first prove your own tree is legal
 by running the real `_validate` against live source data (see "Validate locally").
-If your tree passes, the spec is too big to transcribe: cut redundant sections
-(content already covered elsewhere) and shorten the intent. A 26-component /
-6-section spec fell back twice; the same app at 23 components / 5 sections
-composed at `repairs: 0`.
+If your tree passes, simplify the nesting structure (fewer depth levels) rather
+than cutting content — a deeply nested tree is harder for the LLM to reproduce
+faithfully than a flatter one of equivalent component count.
 
 
 ## Suppress refine options on any hand-shaped app
