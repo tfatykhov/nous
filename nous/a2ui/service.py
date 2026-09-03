@@ -530,6 +530,14 @@ class SurfaceService:
                     dedup_key=dedup_key,
                     session_id=session_id,
                     notify=notify,
+                    # F092.3 (codex P1): the flag MUST survive this hop.
+                    # This is precisely the race the guard exists for — a
+                    # fallback and a healthy compose both saw no row, the
+                    # healthy one won the insert, and the retry now takes
+                    # the update-in-place path against it. Dropping the
+                    # flag here would let the degraded render overwrite the
+                    # app that just got published.
+                    refuse_fallback_overwrite=refuse_fallback_overwrite,
                     _dedup_retry=True,
                 )
             seqs = [row.seq for row in rows]

@@ -625,6 +625,88 @@ async def test_stale_lock_identity_reenters_for_the_current_winner(service, db) 
     assert row.nonce != old_nonce
 
 
+async def test_fallback_push_is_refused_against_a_live_healthy_app(service, db) -> None:
+    """F092.3: the guard runs under the SAME lock/transaction that performs
+    the replacement, so a degraded render never lands on a healthy app."""
+    from nous.a2ui.service import FallbackOverwriteRefused
+
+    surface_id = await service.push_built(
+        _micro_app(title="authored report"), dedup_key="app:guard"
+    )
+    before = await _surface_row(db, surface_id)
+    old_nonce, old_title = before.nonce, before.title
+
+    stub = _micro_app(title="Could not compose")
+    stub.app_spec = {**(stub.app_spec or {}), "archetype": "fallback"}
+    with pytest.raises(FallbackOverwriteRefused) as excinfo:
+        await service.push_built(
+            stub, dedup_key="app:guard", refuse_fallback_overwrite=True
+        )
+    assert "PRESERVED" in str(excinfo.value)
+
+    row = await _surface_row(db, surface_id)
+    assert row.title == old_title, "the healthy app survived"
+    assert row.nonce == old_nonce, "no replacement happened — nonce not rotated"
+
+
+async def test_fallback_flag_survives_the_insert_race_retry(service, db) -> None:
+    """Codex P1 (F092.3): a fallback and a healthy compose can BOTH observe
+    no row for a fresh dedup_key. If the healthy insert wins, the fallback
+    hits the IntegrityError retry — which re-enters push_built and lands on
+    the update-in-place path. Dropping ``refuse_fallback_overwrite`` on that
+    hop would let the degraded stub overwrite the app that just published,
+    which is exactly the race the guard exists for.
+    """
+    from contextlib import asynccontextmanager
+
+    from nous.a2ui.service import FallbackOverwriteRefused
+
+    opened: list[int] = []
+    winner: dict[str, str] = {}
+    orig_session = service._db.session
+
+    @asynccontextmanager
+    async def racing_session():
+        async with orig_session() as session:
+            opened.append(1)
+            # Session 1 is push_built's read-only preliminary dedup lookup;
+            # session 2 is the write transaction. Slipping the healthy
+            # producer in immediately BEFORE its flush reproduces the real
+            # race: a genuine unique-violation IntegrityError, not a faked
+            # one — the winner's row is committed while this insert is
+            # still unwritten.
+            if len(opened) == 2:
+                orig_flush = session.flush
+
+                async def flush_after_losing_the_race(*args, **kwargs):
+                    if not winner:
+                        winner["id"] = await service.push_built(
+                            _micro_app(title="healthy winner"),
+                            dedup_key="app:race-p1",
+                        )
+                    return await orig_flush(*args, **kwargs)
+
+                session.flush = flush_after_losing_the_race  # type: ignore[method-assign]
+            yield session
+
+    stub = _micro_app(title="Could not compose")
+    stub.app_spec = {**(stub.app_spec or {}), "archetype": "fallback"}
+
+    service._db.session = racing_session  # type: ignore[method-assign]
+    try:
+        with pytest.raises(FallbackOverwriteRefused):
+            await service.push_built(
+                stub, dedup_key="app:race-p1", refuse_fallback_overwrite=True
+            )
+    finally:
+        service._db.session = orig_session  # type: ignore[method-assign]
+
+    assert winner, "the race hook ran — the retry path was actually exercised"
+    row = await _surface_row(db, winner["id"])
+    assert row.title == "healthy winner", "the winner survived its loser's retry"
+    assert row.status == "live"
+
+
 async def test_dedup_update_does_not_evict(service, db) -> None:
     first = await service.push_built(_micro_app(title="first"), dedup_key="app:one")
     second = await service.push_built(_micro_app(title="second"), dedup_key="app:two")
