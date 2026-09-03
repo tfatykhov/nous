@@ -24,7 +24,7 @@ import asyncio
 import logging
 import secrets
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
@@ -183,6 +183,7 @@ class SurfaceService:
         session_id: str | None = None,
         notify: bool | None = None,
         refuse_fallback_overwrite: bool = False,
+        pre_broadcast: Callable[[], None] | None = None,
         _dedup_retry: bool = False,
         _race_retries: int = 0,
     ) -> str:
@@ -269,6 +270,7 @@ class SurfaceService:
                         now=now,
                         expires_at=expires_at,
                         refuse_fallback_overwrite=refuse_fallback_overwrite,
+                        pre_broadcast=pre_broadcast,
                         _race_retries=_race_retries,
                         _locked_surface_id=existing_id,
                     )
@@ -283,6 +285,7 @@ class SurfaceService:
                 now=now,
                 expires_at=expires_at,
                 refuse_fallback_overwrite=refuse_fallback_overwrite,
+                pre_broadcast=pre_broadcast,
                 _race_retries=_race_retries,
             )
         if built.kind == "micro_app":
@@ -309,6 +312,7 @@ class SurfaceService:
         notify: bool | None,
         _dedup_retry: bool,
         refuse_fallback_overwrite: bool = False,
+        pre_broadcast: Callable[[], None] | None = None,
         agent_id: str,
         now: datetime,
         expires_at: datetime | None,
@@ -323,6 +327,7 @@ class SurfaceService:
                 notify=notify,
                 _dedup_retry=_dedup_retry,
                 refuse_fallback_overwrite=refuse_fallback_overwrite,
+                pre_broadcast=pre_broadcast,
                 agent_id=agent_id,
                 now=now,
                 expires_at=expires_at,
@@ -344,6 +349,7 @@ class SurfaceService:
                 session_id=session_id,
                 notify=notify,
                 refuse_fallback_overwrite=refuse_fallback_overwrite,
+                pre_broadcast=pre_broadcast,
                 _dedup_retry=_dedup_retry,
                 _race_retries=_race_retries + 1,
             )
@@ -357,6 +363,7 @@ class SurfaceService:
         notify: bool | None,
         _dedup_retry: bool,
         refuse_fallback_overwrite: bool = False,
+        pre_broadcast: Callable[[], None] | None = None,
         agent_id: str,
         now: datetime,
         expires_at: datetime | None,
@@ -517,6 +524,19 @@ class SurfaceService:
                 await session.flush()
                 rows = [A2uiOutbox(agent_id=agent_id, surface_id=surface_id, envelope=env) for env in envelopes]
                 session.add_all(rows)
+                # Second flush allocates outbox seq values (BIGSERIAL/RETURNING)
+                # before commit, so pre_broadcast can run inside the transaction
+                # and seqs are captured atomically with the commit.
+                await session.flush()
+                seqs = [row.seq for row in rows]
+                # pre_broadcast runs inside the open transaction: if it raises,
+                # the session __aexit__ rolls back and the surface is never
+                # committed — a failed ingest fails the push rather than leaving
+                # a live card with dead buttons (P2-1). On success, commit and
+                # broadcast follow immediately so clients never see the surface
+                # before its fingerprints are registered in the finding store.
+                if pre_broadcast is not None:
+                    pre_broadcast()
                 await session.commit()
             except IntegrityError:
                 # Lost the dedup race: another producer inserted the same
@@ -538,9 +558,9 @@ class SurfaceService:
                     # flag here would let the degraded render overwrite the
                     # app that just got published.
                     refuse_fallback_overwrite=refuse_fallback_overwrite,
+                    pre_broadcast=pre_broadcast,
                     _dedup_retry=True,
                 )
-            seqs = [row.seq for row in rows]
 
         for seq, env in zip(seqs, envelopes):
             self._broadcast(seq, env)

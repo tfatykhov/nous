@@ -385,6 +385,7 @@ def register_a2ui_tools(
         # if a censor or validation failure blocks the push.
         _pending_ingest: list = []
         _pending_store = None
+        within_push_fps: set[str] = set()
 
         # Every rendered button MUST resolve against the live finding store
         # (F092 P1). This template is thin presentation over the F034.1
@@ -451,19 +452,19 @@ def register_a2ui_tools(
                     check_name=f"agent:{raw_check or 'adhoc'}:{msg_digest}",
                 )
                 fp = finding.fingerprint()
-                if fp in known:
-                    # Fingerprint derived from this exact message is already
-                    # tracked (same item from a prior push) — adopt unchanged
-                    # without queuing another ingest.
+                if fp in within_push_fps:
+                    # Same item appears twice in this push — skip duplicate.
                     row["fingerprint"] = fp
                     row["urgency"] = urgency
                     normalized.append(row)
                     continue
+                within_push_fps.add(fp)
                 row["fingerprint"] = fp
                 row["urgency"] = urgency
-                known.add(fp)
-                # Defer ingest until the push succeeds (Item 3): a blocked or
-                # failed push must leave the finding store unchanged.
+                # Always ingest: handles RESOLVED->NEW lifecycle transitions.
+                # A finding already in the store may be RESOLVED; skipping
+                # ingest would leave it in that state while the surface renders
+                # live buttons for it (P2-2).
                 _pending_ingest.append(finding)
                 normalized.append(row)
             params["findings"] = normalized
@@ -544,27 +545,25 @@ def register_a2ui_tools(
             return _tool_error(f"Surface failed validation: {exc.errors[:2]}")
         except (KeyError, ValueError, TypeError) as exc:
             return _tool_error(f"Bad params for {template}: {exc}")
+        def _do_ingest() -> None:
+            for _f in _pending_ingest:
+                _pending_store.ingest(_f)  # type: ignore[union-attr]
+
+        pre_broadcast_hook = _do_ingest if _pending_store is not None else None
+
         try:
             surface_id = await surface_service.push_built(
                 built,
                 dedup_key=dedup_key,
                 session_id=kwargs.get("_session_id"),
                 notify=kwargs.get("notify"),
+                pre_broadcast=pre_broadcast_hook,
             )
         except PermissionError as exc:
             return _tool_error(f"Surface blocked: {exc}")
         except Exception as exc:
             logger.exception("push_surface failed")
             return _tool_error(f"Failed to push surface: {exc}")
-        # Push succeeded — register any new agent-authored findings now.
-        # Doing this before the push would expose rejected prose via
-        # GET /heartbeat/findings if a censor or failure blocked the push.
-        if _pending_store is not None:
-            for _f in _pending_ingest:
-                try:
-                    _pending_store.ingest(_f)
-                except Exception as _exc:  # pragma: no cover - defensive
-                    logger.warning("Could not register finding %r: %s", _f.summary[:40], _exc)
         return {
             "is_error": False,
             "content": [
