@@ -19,6 +19,7 @@ from nous.api.tools import ToolDispatcher, _tool_error
 
 from .builders import TEMPLATES
 from .dsl import SurfaceValidationError
+from .service import FallbackOverwriteRefused
 
 logger = logging.getLogger(__name__)
 
@@ -630,7 +631,14 @@ def register_a2ui_tools(
                 dedup_key=dedup_key,
                 session_id=kwargs.get("_session_id"),
                 notify=kwargs.get("notify"),
+                # F092.3: a compose failure is a failure of the NEW render,
+                # not evidence the app on screen is worthless. Marking the
+                # push degraded lets the service refuse it under the dedup
+                # lock rather than blanking a live authored app.
+                refuse_fallback_overwrite=composed.fallback,
             )
+        except FallbackOverwriteRefused as exc:
+            return _tool_error(str(exc))
         except PermissionError as exc:
             return _tool_error(f"Surface blocked: {exc}")
         except Exception as exc:

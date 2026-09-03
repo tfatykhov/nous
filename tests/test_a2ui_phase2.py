@@ -719,7 +719,7 @@ class _CapturingService:
     def __init__(self) -> None:
         self.pushed: list[tuple[Any, str | None]] = []
 
-    async def push_built(self, built, dedup_key=None, session_id=None, notify=None):
+    async def push_built(self, built, dedup_key=None, session_id=None, notify=None, **kwargs):
         self.pushed.append((built, dedup_key))
         return "nous:test:kind:0001"
 

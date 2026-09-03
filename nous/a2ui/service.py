@@ -47,6 +47,48 @@ class _DedupRaceRetry(Exception):
     connection is released, then push_built re-enters via the locked path
     (codex round 7)."""
 
+
+class FallbackOverwriteRefused(Exception):
+    """A degraded compose fallback would have replaced a healthy live app.
+
+    Raised from INSIDE the per-surface dedup lock, in the same transaction
+    that read the row it protects (codex P2): the guard's first shape was a
+    read in its own session BEFORE push_built, which is a TOCTOU — the probe
+    could see nothing (or a stub), another producer could publish a real app,
+    and the fallback would then replace it. Deciding refusal where the
+    replacement is decided makes the two one atomic step.
+    """
+
+
+# The markdown fallback renders exactly this many components (root, header,
+# section, body, footer). A live app with more than this carries real
+# authored content, so replacing it with a fallback is a net loss.
+_FALLBACK_COMPONENT_COUNT = 5
+
+
+def _overwrite_refusal(existing: A2uiSurface, dedup_key: str | None) -> str | None:
+    """Refusal message when a fallback push would destroy ``existing``.
+
+    None means the push may proceed: the live app is itself a degraded
+    fallback, which a retry can only improve.
+    """
+    spec = existing.app_spec or {}
+    components = len(existing.components or [])
+    archetype = str(spec.get("archetype") or "")
+    if archetype == "fallback" and components <= _FALLBACK_COMPONENT_COUNT:
+        return None
+    hint = str(spec.get("update_hint") or "")
+    return (
+        "composition failed and the existing app was PRESERVED: "
+        f"{dedup_key!r} is live with {components} components "
+        f"(archetype {archetype or 'unknown'}), and the fallback render "
+        "would have replaced it with a degraded stub. Nothing was "
+        "published. Retry with a simpler intent or fewer sources"
+        + (f", or update it in place: {hint}" if hint else "")
+        + ". Do not report this action as successful."
+    )
+
+
 logger = logging.getLogger(__name__)
 
 _LAG_WINDOW_SECONDS = 2
@@ -140,6 +182,7 @@ class SurfaceService:
         dedup_key: str | None = None,
         session_id: str | None = None,
         notify: bool | None = None,
+        refuse_fallback_overwrite: bool = False,
         _dedup_retry: bool = False,
         _race_retries: int = 0,
     ) -> str:
@@ -151,6 +194,11 @@ class SurfaceService:
         Two producers racing the same key are serialized by the partial
         UNIQUE index on (agent_id, dedup_key) WHERE live (codex P2): the
         loser's insert raises and retries once down the update path.
+
+        ``refuse_fallback_overwrite`` marks this push as a DEGRADED render:
+        if it would replace a healthy live app it raises
+        :class:`FallbackOverwriteRefused` instead, evaluated under the same
+        per-surface lock as the replacement it protects.
         """
         if self._push_session_blocked(session_id):
             # F092.2: this session belongs to a cancelled agent-action
@@ -220,6 +268,7 @@ class SurfaceService:
                         agent_id=agent_id,
                         now=now,
                         expires_at=expires_at,
+                        refuse_fallback_overwrite=refuse_fallback_overwrite,
                         _race_retries=_race_retries,
                         _locked_surface_id=existing_id,
                     )
@@ -233,6 +282,7 @@ class SurfaceService:
                 agent_id=agent_id,
                 now=now,
                 expires_at=expires_at,
+                refuse_fallback_overwrite=refuse_fallback_overwrite,
                 _race_retries=_race_retries,
             )
         if built.kind == "micro_app":
@@ -258,6 +308,7 @@ class SurfaceService:
         session_id: str | None,
         notify: bool | None,
         _dedup_retry: bool,
+        refuse_fallback_overwrite: bool = False,
         agent_id: str,
         now: datetime,
         expires_at: datetime | None,
@@ -271,6 +322,7 @@ class SurfaceService:
                 session_id=session_id,
                 notify=notify,
                 _dedup_retry=_dedup_retry,
+                refuse_fallback_overwrite=refuse_fallback_overwrite,
                 agent_id=agent_id,
                 now=now,
                 expires_at=expires_at,
@@ -291,6 +343,7 @@ class SurfaceService:
                 dedup_key=dedup_key,
                 session_id=session_id,
                 notify=notify,
+                refuse_fallback_overwrite=refuse_fallback_overwrite,
                 _dedup_retry=_dedup_retry,
                 _race_retries=_race_retries + 1,
             )
@@ -303,6 +356,7 @@ class SurfaceService:
         session_id: str | None,
         notify: bool | None,
         _dedup_retry: bool,
+        refuse_fallback_overwrite: bool = False,
         agent_id: str,
         now: datetime,
         expires_at: datetime | None,
@@ -348,6 +402,14 @@ class SurfaceService:
                 raise _DedupRaceRetry
 
             if existing is not None:
+                if refuse_fallback_overwrite:
+                    # F092.3 (codex P2): evaluated HERE — same lock, same
+                    # transaction, same row that is about to be overwritten
+                    # — so no producer can slip a healthy app in between the
+                    # check and the replacement.
+                    refusal = _overwrite_refusal(existing, dedup_key)
+                    if refusal is not None:
+                        raise FallbackOverwriteRefused(refusal)
                 surface_id = existing.surface_id
                 # Captured BEFORE data_model is overwritten: the pending
                 # stamp identifies the action subtask whose recompose this
@@ -468,6 +530,14 @@ class SurfaceService:
                     dedup_key=dedup_key,
                     session_id=session_id,
                     notify=notify,
+                    # F092.3 (codex P1): the flag MUST survive this hop.
+                    # This is precisely the race the guard exists for — a
+                    # fallback and a healthy compose both saw no row, the
+                    # healthy one won the insert, and the retry now takes
+                    # the update-in-place path against it. Dropping the
+                    # flag here would let the degraded render overwrite the
+                    # app that just got published.
+                    refuse_fallback_overwrite=refuse_fallback_overwrite,
                     _dedup_retry=True,
                 )
             seqs = [row.seq for row in rows]
