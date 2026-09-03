@@ -965,6 +965,33 @@ class SurfaceService:
 
     # ---------------------------------------------------------------- reads
 
+    async def live_app_summary(self, dedup_key: str) -> dict | None:
+        """The agent's live surface under ``dedup_key``, or None.
+
+        Read-only shape used by the compose tool's overwrite guard: enough
+        to tell a real app from a degraded one WITHOUT loading envelopes.
+        """
+        async with self._db.session() as session:
+            row = (
+                await session.execute(
+                    select(A2uiSurface).where(
+                        A2uiSurface.agent_id == self._settings.agent_id,
+                        A2uiSurface.dedup_key == dedup_key,
+                        A2uiSurface.status == "live",
+                    )
+                )
+            ).scalar_one_or_none()
+        if row is None:
+            return None
+        spec = row.app_spec or {}
+        return {
+            "surface_id": row.surface_id,
+            "title": row.title,
+            "archetype": str(spec.get("archetype") or ""),
+            "components": len(row.components or []),
+            "update_hint": str(spec.get("update_hint") or ""),
+        }
+
     async def live_index(self) -> dict:
         """Feed index for cold-start hydration. Never includes the nonce.
 

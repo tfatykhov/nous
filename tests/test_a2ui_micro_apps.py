@@ -1179,6 +1179,94 @@ class _CapturingService:
         return "nous:chat:micro_app:0001"
 
 
+class _FallbackComposer(_FakeComposer):
+    """Composer whose every compose degrades to the markdown fallback."""
+
+    async def compose(self, intent: str, **kwargs: Any) -> ComposedApp:
+        self.compose_calls.append(intent)
+        built = _micro_app(title="Could not compose")
+        built.app_spec = {**(built.app_spec or {}), "archetype": "fallback"}
+        return ComposedApp(built=built, app_spec=built.app_spec, fallback=True, repairs=3)
+
+
+class _ServiceWithLiveApp(_CapturingService):
+    def __init__(self, existing: dict | None) -> None:
+        super().__init__()
+        self.existing = existing
+        self.probed: list[str] = []
+
+    async def live_app_summary(self, dedup_key: str) -> dict | None:
+        self.probed.append(dedup_key)
+        return self.existing
+
+
+async def test_fallback_never_overwrites_a_healthy_app() -> None:
+    """F092.3: a compose failure must not destroy the app already on
+    screen. The real incident: one tap on an agent action recomposed a
+    53-component authored app into a 5-component JSON dump."""
+    from nous.a2ui.tools import register_a2ui_tools
+    from nous.api.tools import ToolDispatcher
+
+    dispatcher = ToolDispatcher()
+    service = _ServiceWithLiveApp(
+        {
+            "surface_id": "s1",
+            "title": "Italy Trip",
+            "archetype": "report",
+            "components": 53,
+            "update_hint": "call P.pub('trip')",
+        }
+    )
+    register_a2ui_tools(dispatcher, service, composer=_FallbackComposer())
+
+    text, is_error = await dispatcher.dispatch(
+        "compose_surface", {"intent": "x", "dedup_key": "app:italy-vacation"}
+    )
+
+    assert is_error
+    assert "PRESERVED" in text and "53 components" in text
+    assert "call P.pub('trip')" in text  # the caller is told the right path
+    assert service.pushed == []  # nothing published — the app survives
+    assert service.probed == ["app:italy-vacation"]
+
+
+async def test_fallback_publishes_when_there_is_nothing_to_destroy() -> None:
+    from nous.a2ui.tools import register_a2ui_tools
+    from nous.api.tools import ToolDispatcher
+
+    for existing in (None, {"archetype": "fallback", "components": 5}):
+        dispatcher = ToolDispatcher()
+        service = _ServiceWithLiveApp(existing)
+        register_a2ui_tools(dispatcher, service, composer=_FallbackComposer())
+
+        text, is_error = await dispatcher.dispatch(
+            "compose_surface", {"intent": "x", "dedup_key": "app:new"}
+        )
+
+        assert not is_error, text
+        assert json.loads(text)["fallback"] is True
+        assert len(service.pushed) == 1
+
+
+async def test_overwrite_guard_is_skipped_when_the_service_cannot_answer() -> None:
+    """The guard must never be the reason a push fails."""
+    from nous.a2ui.tools import register_a2ui_tools
+    from nous.api.tools import ToolDispatcher
+
+    class _Exploding(_CapturingService):
+        async def live_app_summary(self, dedup_key: str) -> dict | None:
+            raise RuntimeError("db down")
+
+    dispatcher = ToolDispatcher()
+    service = _Exploding()
+    register_a2ui_tools(dispatcher, service, composer=_FallbackComposer())
+
+    text, is_error = await dispatcher.dispatch("compose_surface", {"intent": "x"})
+
+    assert not is_error, text
+    assert len(service.pushed) == 1
+
+
 async def test_compose_surface_tool_defaults_the_dedup_key(fake_composer) -> None:
     from nous.a2ui.tools import register_a2ui_tools
     from nous.api.tools import ToolDispatcher

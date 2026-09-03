@@ -193,6 +193,54 @@ _COMPOSE_SURFACE_SCHEMA = {
 }
 
 
+# The markdown fallback renders exactly this many components (root, header,
+# section, body, footer). An existing app with more than this is carrying
+# real authored content — see `_fallback_would_destroy`.
+_FALLBACK_COMPONENT_COUNT = 5
+
+
+async def _fallback_would_destroy(surface_service: Any, dedup_key: str) -> str | None:
+    """Guard: never replace a healthy app with a composition fallback.
+
+    A compose failure is a failure of the NEW render, not evidence that the
+    app currently on screen is worthless. Pushing the degraded markdown
+    fallback over a live, populated app under the same dedup_key destroys
+    it — the user loses a working surface and gets a JSON dump. That is
+    strictly worse than leaving the existing app in place and telling the
+    caller the recomposition failed (F092.3).
+
+    Returns the refusal message, or None when the push may proceed (no live
+    app under this key, or the live one is itself a degraded fallback that
+    a retry can only improve).
+    """
+    probe = getattr(surface_service, "live_app_summary", None)
+    if probe is None:  # service without the read (older fake/test doubles)
+        return None
+    try:
+        existing = await probe(dedup_key)
+    except Exception:  # a guard must never be the reason a push fails
+        logger.warning("F092.3 overwrite guard probe failed", exc_info=True)
+        return None
+    if not existing:
+        return None
+    if (
+        existing.get("archetype") == "fallback"
+        and int(existing.get("components") or 0) <= _FALLBACK_COMPONENT_COUNT
+    ):
+        return None
+    hint = str(existing.get("update_hint") or "")
+    return (
+        "composition failed and the existing app was PRESERVED: "
+        f"{dedup_key!r} is live with {existing.get('components')} components "
+        f"(archetype {existing.get('archetype') or 'unknown'!s}), and the "
+        "fallback render would have replaced it with a degraded stub. "
+        "Nothing was published. Retry with a simpler intent or fewer "
+        "sources"
+        + (f", or update it in place: {hint}" if hint else "")
+        + ". Do not report this action as successful."
+    )
+
+
 def _compose_schema_for(composer: Any) -> dict:
     """The compose schema with its source guidance built from the LIVE registry.
 
@@ -509,6 +557,10 @@ def register_a2ui_tools(
             # sources are the caller's input, so the caller gets the error.
             return _tool_error(f"compose failed: {exc}")
         dedup_key = kwargs.get("dedup_key") or f"app:{_intent_slug(intent)}"
+        if composed.fallback:
+            refusal = await _fallback_would_destroy(surface_service, dedup_key)
+            if refusal is not None:
+                return _tool_error(refusal)
         try:
             surface_id = await surface_service.push_built(
                 composed.built,
