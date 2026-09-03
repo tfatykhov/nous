@@ -1173,9 +1173,20 @@ async def test_micro_app_functions_report_unavailable_without_composer(
 class _CapturingService:
     def __init__(self) -> None:
         self.pushed: list[tuple[Any, str | None]] = []
+        self.calls: list[str] = []
+        self.degraded: list[bool] = []
 
-    async def push_built(self, built, dedup_key=None, session_id=None, notify=None):
+    async def push_built(
+        self,
+        built,
+        dedup_key=None,
+        session_id=None,
+        notify=None,
+        refuse_fallback_overwrite=False,
+    ):
+        self.calls.append("push_built")
         self.pushed.append((built, dedup_key))
+        self.degraded.append(refuse_fallback_overwrite)
         return "nous:chat:micro_app:0001"
 
 
@@ -1189,15 +1200,24 @@ class _FallbackComposer(_FakeComposer):
         return ComposedApp(built=built, app_spec=built.app_spec, fallback=True, repairs=3)
 
 
-class _ServiceWithLiveApp(_CapturingService):
-    def __init__(self, existing: dict | None) -> None:
-        super().__init__()
-        self.existing = existing
-        self.probed: list[str] = []
+class _RefusingService(_CapturingService):
+    """Stands in for the real service refusing the push under its lock."""
 
-    async def live_app_summary(self, dedup_key: str) -> dict | None:
-        self.probed.append(dedup_key)
-        return self.existing
+    async def push_built(self, built, **kwargs):
+        self.calls.append("push_built")
+        self.degraded.append(kwargs.get("refuse_fallback_overwrite", False))
+        if kwargs.get("refuse_fallback_overwrite"):
+            from nous.a2ui.service import FallbackOverwriteRefused
+
+            raise FallbackOverwriteRefused(
+                "composition failed and the existing app was PRESERVED: "
+                "'app:italy-vacation' is live with 53 components (archetype "
+                "report), and the fallback render would have replaced it "
+                "with a degraded stub. Nothing was published. Retry with a "
+                "simpler intent or fewer sources, or update it in place: "
+                "call P.pub('trip'). Do not report this action as successful."
+            )
+        return await super().push_built(built, **kwargs)
 
 
 async def test_fallback_never_overwrites_a_healthy_app() -> None:
@@ -1208,15 +1228,7 @@ async def test_fallback_never_overwrites_a_healthy_app() -> None:
     from nous.api.tools import ToolDispatcher
 
     dispatcher = ToolDispatcher()
-    service = _ServiceWithLiveApp(
-        {
-            "surface_id": "s1",
-            "title": "Italy Trip",
-            "archetype": "report",
-            "components": 53,
-            "update_hint": "call P.pub('trip')",
-        }
-    )
+    service = _RefusingService()
     register_a2ui_tools(dispatcher, service, composer=_FallbackComposer())
 
     text, is_error = await dispatcher.dispatch(
@@ -1226,45 +1238,76 @@ async def test_fallback_never_overwrites_a_healthy_app() -> None:
     assert is_error
     assert "PRESERVED" in text and "53 components" in text
     assert "call P.pub('trip')" in text  # the caller is told the right path
+    assert "Do not report this action as successful." in text
+    # The service's own refusal reaches the caller verbatim — not swallowed
+    # into the generic "Failed to push composed app" wrapper.
+    assert "Failed to push composed app" not in text
     assert service.pushed == []  # nothing published — the app survives
-    assert service.probed == ["app:italy-vacation"]
 
 
-async def test_fallback_publishes_when_there_is_nothing_to_destroy() -> None:
+async def test_degraded_pushes_are_marked_and_healthy_ones_are_not() -> None:
+    """Codex P2: the guard cannot be a pre-flight read in the tool — that is
+    a TOCTOU. The tool's whole job is to MARK the push degraded; the service
+    decides under the same lock that performs the replacement."""
     from nous.a2ui.tools import register_a2ui_tools
     from nous.api.tools import ToolDispatcher
-
-    for existing in (None, {"archetype": "fallback", "components": 5}):
-        dispatcher = ToolDispatcher()
-        service = _ServiceWithLiveApp(existing)
-        register_a2ui_tools(dispatcher, service, composer=_FallbackComposer())
-
-        text, is_error = await dispatcher.dispatch(
-            "compose_surface", {"intent": "x", "dedup_key": "app:new"}
-        )
-
-        assert not is_error, text
-        assert json.loads(text)["fallback"] is True
-        assert len(service.pushed) == 1
-
-
-async def test_overwrite_guard_is_skipped_when_the_service_cannot_answer() -> None:
-    """The guard must never be the reason a push fails."""
-    from nous.a2ui.tools import register_a2ui_tools
-    from nous.api.tools import ToolDispatcher
-
-    class _Exploding(_CapturingService):
-        async def live_app_summary(self, dedup_key: str) -> dict | None:
-            raise RuntimeError("db down")
 
     dispatcher = ToolDispatcher()
-    service = _Exploding()
+    service = _CapturingService()
     register_a2ui_tools(dispatcher, service, composer=_FallbackComposer())
+    text, is_error = await dispatcher.dispatch(
+        "compose_surface", {"intent": "x", "dedup_key": "app:new"}
+    )
+    assert not is_error, text
+    assert json.loads(text)["fallback"] is True
+    assert service.degraded == [True]
+    # exactly one service call: no separate probe to race against
+    assert service.calls == ["push_built"]
+
+
+async def test_a_healthy_compose_is_never_marked_degraded(fake_composer) -> None:
+    from nous.a2ui.tools import register_a2ui_tools
+    from nous.api.tools import ToolDispatcher
+
+    dispatcher = ToolDispatcher()
+    service = _CapturingService()
+    register_a2ui_tools(dispatcher, service, composer=fake_composer)
 
     text, is_error = await dispatcher.dispatch("compose_surface", {"intent": "x"})
 
     assert not is_error, text
-    assert len(service.pushed) == 1
+    assert service.degraded == [False]
+
+
+def test_overwrite_refusal_spares_only_apps_that_are_already_stubs() -> None:
+    """The helper the service applies to the locked row."""
+    from nous.a2ui.service import _overwrite_refusal
+
+    class _Row:
+        def __init__(self, components, spec):
+            self.components = components
+            self.app_spec = spec
+
+    healthy = _Row(
+        [{"c": i} for i in range(53)],
+        {"archetype": "report", "update_hint": "call P.pub('trip')"},
+    )
+    msg = _overwrite_refusal(healthy, "app:italy-vacation")
+    assert msg and "53 components" in msg and "call P.pub('trip')" in msg
+    assert "'app:italy-vacation'" in msg
+
+    # An existing degraded stub may be replaced: a retry can only improve it.
+    stub = _Row([{"c": i} for i in range(5)], {"archetype": "fallback"})
+    assert _overwrite_refusal(stub, "app:x") is None
+
+    # A fallback ARCHETYPE carrying real content is still worth protecting.
+    fat = _Row([{"c": i} for i in range(40)], {"archetype": "fallback"})
+    assert _overwrite_refusal(fat, "app:x") is not None
+
+    # No hint declared: still refused, just without the update path.
+    bare = _Row([{"c": i} for i in range(20)], {"archetype": "report"})
+    bare_msg = _overwrite_refusal(bare, "app:x")
+    assert bare_msg and "update it in place" not in bare_msg
 
 
 async def test_compose_surface_tool_defaults_the_dedup_key(fake_composer) -> None:
