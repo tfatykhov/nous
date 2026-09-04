@@ -6,6 +6,8 @@
 
 Prior round: job 22c61422 (REVISE, 4×P1 + 2×P2). This review assesses Chimera v2's response.
 
+**Inputs reviewed.** *Document 1* — the Chimera v2 design note (the sections cited below are its §1, §2.1, §3.4 and the §8 comparison table). *Document 2* — the Chimera v2 build/eval plan (its §1.4 crash matrix and the eval-isolation gate). Both were supplied as attachments to review job efa75623, as their v1 predecessors were to job 22c61422, and **neither is archived in this repository** — the quotations below are verbatim from those inputs but cannot be re-checked from the repo alone. The nearest archived successor is `chimera-v3-proposal.docx` (author's Google Drive, My Drive, dated 2026-07-25), which post-dates this review; whether it takes up the blocking fixes is not assessed here, and the fixes below should be applied against whichever Chimera document is current.
+
 ---
 
 ## 1. Fact-check pass
@@ -73,7 +75,7 @@ Document 1 swaps Cortex from Hopfield/DAM to Gated DeltaNet and calls the Hopfie
 
 Doc 1 §3.4: composites are "assembled from citable parts" by binding role-filler tuples and "read out each bound component separately." VSA's own literature says this readout degrades with the number of bound components:
 
-- Unbinding recovers *filler + noise*; the noise variance **accumulates with the number of bindings in the bundle** (SNR ≈ 1/m per dimension for m pairs; residual crosstalk ≈ 1/√d) — [VSA survey](https://link.springer.com/article/10.1007/s10462-021-10110-3), [HRR analyses](https://www.emergentmind.com/topics/holographic-reduced-representations-hrrs). Clean unbinding of a superposed bundle is limited to a small number of pairs at practical dimensions **unless a cleanup memory is used**.
+- Unbinding recovers *filler + noise*, and the noise **accumulates with the number of bindings in the bundle**: for unit-norm HRR vectors, unbinding one pair out of a bundle of *m* leaves crosstalk from the other *m − 1* pairs whose variances add, so the noise amplitude on the readout grows as ≈ √(m/d) and the power SNR falls as ≈ d/m (a per-pair crosstalk of ≈ 1/√d describes only the *m* = 1 case) — [VSA survey](https://link.springer.com/article/10.1007/s10462-021-10110-3), [HRR analyses](https://www.emergentmind.com/topics/holographic-reduced-representations-hrrs). Clean unbinding of a superposed bundle is limited to a small number of pairs at practical dimensions **unless a cleanup memory is used**.
 
 So the v2 "composite = citable parts" claim holds only for small composites and only *with a cleanup step*. The document supplies exactly one cleanup memory: the Symbolic Ledger (Postgres), which "every Cortex composite must decode back to." **That is the tell.** The exactness in the citation path is coming from the Postgres lookup, not from the DeltaNet/VSA state preserving the parts faithfully. Which raises the question round 1 asked in a different form: *if Postgres is doing the exact recall, what is the DeltaNet+VSA layer buying you over the RRF+cross-encoder retrieval Nous already runs?* Doc 1 §1 concedes the sharp-regime answer ("not meaningfully different from what Nous's retrieval already does today") — and the VSA composite path, once you require ledger cleanup on every readout, collapses toward the same concession. This is P1 #1 wearing new vocabulary, not P1 #1 dissolved.
 
