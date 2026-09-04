@@ -40,9 +40,10 @@ const DURATION = /^(\d+\s?[dhms]\s?)+$/;
 const SIGN = String.raw`[+\-−]`;
 
 // A currency symbol, optionally COMPOUND as locale formatters emit it:
-// R$ (BRL), CA$ / US$ / A$ / HK$ (disambiguated dollars) — up to three
-// capitals glued to the symbol.
-const SYMBOL = String.raw`(?:[A-Z]{1,3})?[€$£¥₹฿₩]`;
+// R$ (BRL), CA$ / US$ / A$ / HK$ (disambiguated dollars), or symbol-first in
+// French-style locales (fr-FR USD is "$US") — up to three capitals glued to
+// one side of the symbol.
+const SYMBOL = String.raw`(?:[A-Z]{1,3}[€$£¥₹฿₩]|[€$£¥₹฿₩](?:[A-Z]{1,3})?)`;
 
 // A threshold / approximation marker may lead a figure: "<5%", "≥95 bpm",
 // "≤1.2 ms", "~42", "±0.3 kg". Optional whitespace after it ("< 5").
@@ -109,7 +110,14 @@ const PATTERNS = [
  *  Explicit producer hints (`format: 'figure' | 'prose'` on a row or on the
  *  ScoreCard component) override this inference and are applied by the
  *  caller, not here. */
+// Invisible bidirectional formatting controls that RTL-locale formatters
+// embed (ar-EG emits U+061C before a minus, U+200F before a positive value):
+// ALM, LRM/RLM, the embedding/override controls and the isolate controls.
+// They carry no figure/prose information, so they are dropped before the
+// anchored patterns see the string.
+const BIDI_MARKS = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+
 export function isFigureValue(value: string): boolean {
-  const v = value.trim();
+  const v = value.replace(BIDI_MARKS, '').trim();
   return v === '' || PATTERNS.some((re) => re.test(v));
 }

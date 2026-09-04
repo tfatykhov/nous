@@ -132,6 +132,14 @@ describe('isFigureValue', () => {
     expect(isFigureValue('1e+')).toBe(false);
   });
 
+  it('symbol-first compound currency affixes and RTL bidi marks are handled', () => {
+    expect(isFigureValue('1 234,56 $US')).toBe(true); // fr-FR USD
+    expect(isFigureValue('$US 5')).toBe(true);
+    expect(isFigureValue('؜-١٬٢٣٤٫٥٦')).toBe(true); // ar-EG negative: ALM before the minus
+    expect(isFigureValue('‏١٬٢٣٤٫٥٦ US$')).toBe(true); // ar-EG USD: RLM prefix
+    expect(isFigureValue('‏مرحبا')).toBe(false);
+  });
+
   it('"—" is a figure (em-dash placeholder)', () => {
     expect(isFigureValue('—')).toBe(true);
   });
