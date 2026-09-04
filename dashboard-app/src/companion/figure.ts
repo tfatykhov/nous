@@ -49,16 +49,24 @@ const SYMBOL = String.raw`(?:[A-Z]{1,3}[€$£¥₹฿₩]|[€$£¥₹฿₩](?
 // "≤1.2 ms", "~42", "±0.3 kg". Optional whitespace after it ("< 5").
 const COMPARE = String.raw`(?:[<>≤≥~≈±]\s?)?`;
 
+// Percent-family glyphs as locales emit them: ASCII and full-width percent,
+// Arabic percent U+066A, per-mille (‰, Arabic U+0609), per-myriad (‱, Arabic
+// U+060A). tr-TR puts the percent sign BEFORE the number ("%12"), so the
+// glyph is admitted as a prefix too.
+const PERCENT = String.raw`[%％٪‰؉‱؊]`;
+
 // One optional unit suffix, shared by every numeric pattern so a unit
 // accepted after "↑0.8" is also accepted after "0.8" (codex on #632):
-//   a special symbol (%, °, ‰, ′, ″) with an optional short scale letter
-//   (°C, °F), a short alpha unit optionally compounded with a slash (kg,
-//   bpm, km/h, EUR), a bare /rate (/day, /wk), or a SUFFIX currency symbol
-//   as locale formatters emit it ("42 €", de-DE "1.234,56 €" — `\s` also
-//   matches the no-break space Intl puts there). A bare `e`/`E` is NOT a
-//   unit: it is a dangling exponent marker ("1e", "1e6e"), and letting the
-//   alpha branch swallow it would classify malformed notation as a figure.
-const UNIT = String.raw`(\s?[%°‰′″][A-Za-z]{0,2}|\s?(?![eE](?:$|\/))[A-Za-z]{1,5}(\/[A-Za-z]{1,10})?|\s?\/[A-Za-z]{1,10}|\s?${SYMBOL})?`;
+//   a percent-family glyph or a special symbol (°, ′, ″) with an optional
+//   short scale letter (°C, °F); a short alpha unit in ANY script (kg, bpm,
+//   ru "км", de "Mio.", ja "万"), optionally compounded with a slash (km/h)
+//   or ending in an abbreviation period; a bare /rate (/day, /wk); or a
+//   SUFFIX currency symbol as locale formatters emit it ("42 €", de-DE
+//   "1.234,56 €" — `\s` also matches the no-break space Intl puts there).
+//   A bare `e`/`E` is NOT a unit: it is a dangling exponent marker ("1e",
+//   "1e6e"), and letting the alpha branch swallow it would classify
+//   malformed notation as a figure.
+const UNIT = String.raw`(\s?(?:${PERCENT}|[°′″])[A-Za-z]{0,2}|\s?(?![eE](?:$|\/))\p{L}{1,5}(?:\/\p{L}{1,10}|\.)?|\s?\/\p{L}{1,10}|\s?${SYMBOL})?`;
 
 // Digits with optional grouping and decimal separators, ending on a digit.
 // A digit is any Unicode decimal digit (\p{Nd}, `u` flag) — ar-EG and fa-IR
@@ -71,20 +79,22 @@ const UNIT = String.raw`(\s?[%°‰′″][A-Za-z]{0,2}|\s?(?![eE](?:$|\/))[A-Za
 // 1.2e-6, 1E+09) follows the mantissa.
 const DIGITS = String.raw`\p{Nd}(?:[\p{Nd}.,'’\s\u066b\u066c]*\p{Nd})?(?:[eE][+\-−]?\p{Nd}+)?`;
 
-// Optional PREFIX currency symbol (space optional: "€ 42") with a sign on
-// either side, digits, optional unit (which may be a SUFFIX symbol: "42 €").
-// Covers: 42, -12.5%, $1,234.56, -$1,234.56, $-5, 42 €, 65.0 bpm, 0.8 /day.
-const NUMBER = new RegExp(
-  String.raw`^${COMPARE}(?:${SIGN}?(?:${SYMBOL}\s?)?|${SYMBOL}\s?${SIGN}?)${DIGITS}${UNIT}$`,
-  'u',
-);
+// Accounting style wraps a negative in parentheses — "($1,234.56)",
+// "(1 234,56 $US)" — so every numeric core is also accepted inside one
+// matching pair of outer parentheses.
+const accounting = (core: string) => String.raw`^(?:${core}|\(${core}\))$`;
+
+// Optional PREFIX currency symbol (space optional: "€ 42") or prefix percent
+// glyph, with a sign on either side of the symbol, digits, optional unit
+// (which may be a SUFFIX symbol: "42 €"). Covers: 42, -12.5%, %12,
+// $1,234.56, -$1,234.56, $-5, 42 €, ($1,234.56), 65.0 bpm, 0.8 /day.
+const NUMBER_CORE = String.raw`${COMPARE}(?:${PERCENT}\s?)?(?:${SIGN}?(?:${SYMBOL}\s?)?|${SYMBOL}\s?${SIGN}?)${DIGITS}${UNIT}`;
+const NUMBER = new RegExp(accounting(NUMBER_CORE), 'u');
 
 // 3-letter ISO currency code (space optional) with a sign on either side.
-// Covers: EUR 1,234,567.89, USD100, -EUR 5, EUR -5, EUR 5 /mo.
-const CURRENCY_CODE = new RegExp(
-  String.raw`^${COMPARE}(?:${SIGN}?[A-Z]{3}\s?|[A-Z]{3}\s?${SIGN}?)${DIGITS}${UNIT}$`,
-  'u',
-);
+// Covers: EUR 1,234,567.89, USD100, -EUR 5, EUR -5, (EUR 5), EUR 5 /mo.
+const CURRENCY_CODE_CORE = String.raw`${COMPARE}(?:${SIGN}?[A-Z]{3}\s?|[A-Z]{3}\s?${SIGN}?)${DIGITS}${UNIT}`;
+const CURRENCY_CODE = new RegExp(accounting(CURRENCY_CODE_CORE), 'u');
 
 // Directional delta marker (↑ ↓ ▲ ▼ or Unicode minus −) followed by a number
 // and an optional unit. Covers: ↓0.03, ↑6 %, ↑0.8 /day, ▲3. ASCII +/- are

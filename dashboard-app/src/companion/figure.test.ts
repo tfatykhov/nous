@@ -96,7 +96,9 @@ describe('isFigureValue', () => {
     expect(isFigureValue('١٬٢٣٤٫٥٦')).toBe(true); // ar-EG Intl output
     expect(isFigureValue('۱۲۳')).toBe(true); // fa-IR digits
     expect(isFigureValue('↑١٢ km')).toBe(true);
-    expect(isFigureValue('١٢ نفر')).toBe(false); // digits followed by prose
+    // Units are short letters in any script, so a 3-letter Arabic word reads
+    // as a unit (exactly as 'km' does); prose is a longer word.
+    expect(isFigureValue('١٢ كيلومترات')).toBe(false);
   });
 
   it('threshold and approximation markers before a number are figures', () => {
@@ -138,6 +140,22 @@ describe('isFigureValue', () => {
     expect(isFigureValue('؜-١٬٢٣٤٫٥٦')).toBe(true); // ar-EG negative: ALM before the minus
     expect(isFigureValue('‏١٬٢٣٤٫٥٦ US$')).toBe(true); // ar-EG USD: RLM prefix
     expect(isFigureValue('‏مرحبا')).toBe(false);
+  });
+
+  it('locale percent glyphs, accounting negatives and non-Latin units are figures', () => {
+    expect(isFigureValue('%12')).toBe(true); // tr-TR percent prefix
+    expect(isFigureValue('١٢٪')).toBe(true); // ar-EG percent U+066A
+    expect(isFigureValue('12 ‰')).toBe(true);
+    expect(isFigureValue('($1,234.56)')).toBe(true); // currencySign: accounting
+    expect(isFigureValue('(US$1,234.56)')).toBe(true);
+    expect(isFigureValue('(1 234,56 $US)')).toBe(true);
+    expect(isFigureValue('(EUR 5)')).toBe(true);
+    expect(isFigureValue('12 км')).toBe(true); // ru-RU unit style
+    expect(isFigureValue('1,2 Mio.')).toBe(true); // de compact notation
+    expect(isFigureValue('1.2万')).toBe(true); // ja compact notation
+    expect(isFigureValue('(12')).toBe(false);
+    expect(isFigureValue('12)')).toBe(false);
+    expect(isFigureValue('12 километров')).toBe(false); // a word, not a unit
   });
 
   it('"—" is a figure (em-dash placeholder)', () => {
