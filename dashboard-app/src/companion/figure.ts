@@ -26,8 +26,12 @@ const PLACEHOLDER = /^([—–−-]{1,3}|[Nn]\/[Aa]|TBD)$/;
 
 // Zone suffix: `Z` or an offset (`+00:00`, `-04:00`, `+0200`) — aware-datetime
 // serializers emit the offset form, not `Z`.
-const ISO_DATE =
-  /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?([.,]\d+)?(Z|[+-]\d{2}:?\d{2})?)?$/;
+// A range of two values joined by a dash — Intl formatRange output for
+// numbers ("3–5"), clocks ("10:00–11:00") and dates alike.
+const ranged = (core: string) => String.raw`${core}(?:\s?[–—-]\s?${core})?`;
+
+const ISO_DATE_CORE = String.raw`\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?([.,]\d+)?(Z|[+-]\d{2}:?\d{2})?)?`;
+const ISO_DATE = new RegExp(String.raw`^${ranged(ISO_DATE_CORE)}$`);
 
 // A clock time in any script's digits (fa "۱۴:۳۰", bn "২:৩০"), optionally
 // followed by a day period — Latin "AM"/"p.m." or a locale's own one-to-two
@@ -35,25 +39,21 @@ const ISO_DATE =
 // optional tail of a date.
 const DAY_PERIOD = String.raw`(?:\s?(?:[APap]\.?[Mm]\.?|\p{L}\p{M}*(?:\p{L}\p{M}*)?\.?))?`;
 const CLOCK = String.raw`\p{Nd}{1,2}:\p{Nd}{2}(?::\p{Nd}{2})?${DAY_PERIOD}`;
-const TIME_OF_DAY = new RegExp(String.raw`^${CLOCK}$`, 'u');
+const TIME_OF_DAY = new RegExp(String.raw`^${ranged(CLOCK)}$`, 'u');
 
 // A localized numeric date: three digit fields joined by one separator kind
 // (en-US 9/4/2026, en-GB 04/09/2026, de 04.09.2026, ISO-ish 2026/09/04), with
 // an optional time of day after a space or comma.
 const TIME_SUFFIX = String.raw`(?:[ ,]+${CLOCK})?`;
-const NUMERIC_DATE = new RegExp(
-  String.raw`^\p{Nd}{1,4}([./-])\p{Nd}{1,2}\1\p{Nd}{1,4}${TIME_SUFFIX}$`,
-  'u',
-);
+const NUMERIC_DATE_CORE = String.raw`\p{Nd}{1,4}(?:[./-])\p{Nd}{1,2}(?:[./-])\p{Nd}{1,4}${TIME_SUFFIX}`;
+const NUMERIC_DATE = new RegExp(String.raw`^${ranged(NUMERIC_DATE_CORE)}$`, 'u');
 
 // A localized date with a month WORD (any script, optionally abbreviated with
 // a period): en-US "Sep 4, 2026", en-GB "4 Sept 2026", de "4. Sept. 2026",
 // fr "4 sept. 2026", plus the same optional time of day.
 const MONTH = String.raw`\p{L}[\p{L}\p{M}]{2,11}\.?`;
-const WORDY_DATE = new RegExp(
-  String.raw`^(?:${MONTH} \p{Nd}{1,2},? \p{Nd}{4}|\p{Nd}{1,2}\.? ${MONTH} \p{Nd}{4})${TIME_SUFFIX}$`,
-  'u',
-);
+const WORDY_DATE_CORE = String.raw`(?:${MONTH} \p{Nd}{1,2},? \p{Nd}{4}|\p{Nd}{1,2}\.? ${MONTH} \p{Nd}{4})${TIME_SUFFIX}`;
+const WORDY_DATE = new RegExp(String.raw`^${ranged(WORDY_DATE_CORE)}$`, 'u');
 
 const RATIO = /^\p{Nd}+\/\p{Nd}+$/u;
 
@@ -109,10 +109,10 @@ export function isTightUnit(unit: string): boolean {
 // Devanagari, Bengali, Thai and friends the vowel signs are marks, not
 // letters, so hi-IN "मेगाबाइट" would otherwise fail on its second character.
 const WORD = String.raw`\p{L}[\p{L}\p{M}]{0,19}`;
-const UNIT = String.raw`(\s?(?:${PERCENT}|[°′″])[A-Za-z]{0,2}|\s?(?![eE](?:$|\/))${WORD}(?:\/${WORD}|\.|(?:\s${WORD}){1,2})?|\s?\/${WORD}|\s?${SYMBOL})?`;
+const UNIT = String.raw`(\s?(?:${PERCENT}|[°′″])[A-Za-z]{0,2}|\s?(?![eE](?:$|\/))${WORD}\.?(?:\/${WORD}\.?|(?:\s${WORD}){1,2})?|\s?\/${WORD}\.?|\s?${SYMBOL})?`;
 // With a prefix word present the suffix may carry at most two words, so a
 // value never exceeds three words around its number.
-const UNIT_AFTER_PREFIX = String.raw`(\s?(?:${PERCENT}|[°′″])[A-Za-z]{0,2}|\s?(?![eE](?:$|\/))${WORD}(?:\/${WORD}|\.|\s${WORD})?|\s?\/${WORD}|\s?${SYMBOL})?`;
+const UNIT_AFTER_PREFIX = String.raw`(\s?(?:${PERCENT}|[°′″])[A-Za-z]{0,2}|\s?(?![eE](?:$|\/))${WORD}\.?(?:\/${WORD}\.?|\s${WORD})?|\s?\/${WORD}\.?|\s?${SYMBOL})?`;
 
 // Digits with optional grouping and decimal separators, ending on a digit.
 // A digit is any Unicode decimal digit (\p{Nd}, `u` flag) — ar-EG and fa-IR
@@ -134,7 +134,7 @@ const MANTISSA = String.raw`(?:${DIGITS}|∞|NaN)`;
 // two cores joined by a dash (Intl.NumberFormat.formatRange: "3–5", "$3 – $5",
 // "10%–20%"); and the accounting style that wraps a negative in parentheses
 // ("($1,234.56)", "(1 234,56 $US)").
-const shaped = (core: string) => String.raw`(?:${core}(?:\s?[–—-]\s?${core})?|\(${core}\))`;
+const shaped = (core: string) => String.raw`(?:${ranged(core)}|\(${core}\))`;
 const shapes = (core: string) => String.raw`^${shaped(core)}$`;
 
 // Leading affixes, then the mantissa, then the unit. The sign sits either

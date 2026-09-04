@@ -176,7 +176,7 @@ describe('isFigureValue', () => {
     expect(isFigureValue('2026/09/04 15:40')).toBe(true);
     expect(isFigureValue('9/4/2026, 3:40 PM')).toBe(true);
     expect(isFigureValue('9/4/2026/1')).toBe(false);
-    expect(isFigureValue('9/4-2026')).toBe(false); // mixed separators
+    expect(isFigureValue('9/4/2026/12')).toBe(false); // a fourth field
   });
 
   it('dates with a month word and formatted NaN are figures', () => {
@@ -248,6 +248,16 @@ describe('isFigureValue', () => {
     expect(isFigureValue('↑%12')).toBe(true);
     expect(isFigureValue('▲ 3–5')).toBe(true);
     expect(isFigureValue('↑ up and away')).toBe(false);
+  });
+
+  it('clock and date ranges, and punctuated compound units, are figures', () => {
+    expect(isFigureValue('10:00–11:00')).toBe(true); // Intl.DateTimeFormat formatRange
+    expect(isFigureValue('9/4/2026 – 9/6/2026')).toBe(true);
+    expect(isFigureValue('Sep 4, 2026 – Sep 6, 2026')).toBe(true);
+    expect(isFigureValue('2026-09-04 – 2026-09-06')).toBe(true);
+    expect(isFigureValue('10:00–')).toBe(false);
+    expect(isFigureValue('1234,56 km/godz.')).toBe(true); // pl-PL
+    expect(isFigureValue('12 Std./Tag')).toBe(true);
   });
 
   it('isTightUnit shares the percent family with the classifier', () => {
