@@ -132,6 +132,10 @@ def test_dsl_helpers_emit_the_schema_shape_and_drop_none() -> None:
     assert dsl.ScoreCard("s", title="T", status="ok") == {
         "id": "s", "component": "ScoreCard", "title": "T", "status": "ok"
     }
+    # The card-level row-mode override is reachable through the helper and
+    # is the schema enum's spelling (codex on #632).
+    assert dsl.ScoreCard("s", title="T", status="ok", format="prose")["format"] == "prose"
+    assert dsl.ScoreCard("s", title="T", status="ok", format="figure")["format"] == "figure"
     assert dsl.DeltaList("d", rows={"path": "/r"}, empty_text="none") == {
         "id": "d", "component": "DeltaList", "rows": {"path": "/r"}, "emptyText": "none"
     }
