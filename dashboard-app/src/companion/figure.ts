@@ -93,15 +93,20 @@ export function isTightUnit(unit: string): boolean {
 // One optional unit suffix, shared by every numeric pattern so a unit
 // accepted after "↑0.8" is also accepted after "0.8" (codex on #632):
 //   a percent-family glyph or a special symbol (°, ′, ″) with an optional
-//   short scale letter (°C, °F); a short alpha unit in ANY script (kg, bpm,
-//   ru "км", de "Mio.", ja "万"), optionally compounded with a slash (km/h)
-//   or ending in an abbreviation period; a bare /rate (/day, /wk); or a
-//   SUFFIX currency symbol as locale formatters emit it ("42 €", de-DE
-//   "1.234,56 €" — `\s` also matches the no-break space Intl puts there).
+//   short scale letter (°C, °F); a unit WORD in any script — abbreviated
+//   (kg, bpm, ru "км", de "Mio.", ja "万") or spelled out as
+//   `unitDisplay: "long"` emits it ("kilometers", "kilometers per hour": up
+//   to three words) — optionally compounded with a slash (km/h) or ending in
+//   an abbreviation period; a bare /rate (/day, /wk); or a SUFFIX currency
+//   symbol as locale formatters emit it ("42 €", de-DE "1.234,56 €" — `\s`
+//   also matches the no-break space Intl puts there). The figure/prose line
+//   is therefore: a number followed by at most three words is a figure; a
+//   longer tail is prose.
 //   A bare `e`/`E` is NOT a unit: it is a dangling exponent marker ("1e",
-//   "1e6e"), and letting the alpha branch swallow it would classify
+//   "1e6e"), and letting the word branch swallow it would classify
 //   malformed notation as a figure.
-const UNIT = String.raw`(\s?(?:${PERCENT}|[°′″])[A-Za-z]{0,2}|\s?(?![eE](?:$|\/))\p{L}{1,5}(?:\/\p{L}{1,10}|\.)?|\s?\/\p{L}{1,10}|\s?${SYMBOL})?`;
+const WORD = String.raw`\p{L}{1,20}`;
+const UNIT = String.raw`(\s?(?:${PERCENT}|[°′″])[A-Za-z]{0,2}|\s?(?![eE](?:$|\/))${WORD}(?:\/${WORD}|\.|(?:\s${WORD}){1,2})?|\s?\/${WORD}|\s?${SYMBOL})?`;
 
 // Digits with optional grouping and decimal separators, ending on a digit.
 // A digit is any Unicode decimal digit (\p{Nd}, `u` flag) — ar-EG and fa-IR

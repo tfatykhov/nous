@@ -89,16 +89,15 @@ describe('isFigureValue', () => {
     expect(isFigureValue('1 234,56 €')).toBe(true); // ru-RU no-break space
     expect(isFigureValue("1'234.56")).toBe(true); // de-CH apostrophe
     expect(isFigureValue('1 234')).toBe(true);
-    expect(isFigureValue('1 234 people')).toBe(false);
+    expect(isFigureValue('1 234 people')).toBe(true); // number + one word
   });
 
   it('non-Latin decimal digits and their locale separators are figures', () => {
     expect(isFigureValue('١٬٢٣٤٫٥٦')).toBe(true); // ar-EG Intl output
     expect(isFigureValue('۱۲۳')).toBe(true); // fa-IR digits
     expect(isFigureValue('↑١٢ km')).toBe(true);
-    // Units are short letters in any script, so a 3-letter Arabic word reads
-    // as a unit (exactly as 'km' does); prose is a longer word.
-    expect(isFigureValue('١٢ كيلومترات')).toBe(false);
+    // A unit is a word in any script, so digits + one word is a figure.
+    expect(isFigureValue('١٢ كيلومترات')).toBe(true);
   });
 
   it('threshold and approximation markers before a number are figures', () => {
@@ -155,7 +154,7 @@ describe('isFigureValue', () => {
     expect(isFigureValue('1.2万')).toBe(true); // ja compact notation
     expect(isFigureValue('(12')).toBe(false);
     expect(isFigureValue('12)')).toBe(false);
-    expect(isFigureValue('12 километров')).toBe(false); // a word, not a unit
+    expect(isFigureValue('12 километров')).toBe(true); // spelled-out unit
   });
 
   it('signed prefix percents and formatted infinity are figures', () => {
@@ -216,6 +215,14 @@ describe('isFigureValue', () => {
     expect(isFigureValue('٤/٩/٢٠٢٦ ٢:٣٠ م')).toBe(true); // date + localized time
     expect(isFigureValue('١٢/٣٠')).toBe(true); // ratio in Arabic digits
     expect(isFigureValue('2:30 later')).toBe(false);
+  });
+
+  it('spelled-out units are figures; a sentence after the number is prose', () => {
+    expect(isFigureValue('12.3 kilometers')).toBe(true); // unitDisplay: long
+    expect(isFigureValue('12.3 kilometers per hour')).toBe(true);
+    expect(isFigureValue('5 minutes')).toBe(true);
+    expect(isFigureValue('3 items in the basket')).toBe(false); // four words
+    expect(isFigureValue('12 apples, 3 pears')).toBe(false);
   });
 
   it('isTightUnit shares the percent family with the classifier', () => {
