@@ -64,8 +64,9 @@ const UNIT = String.raw`(\s?[%°‰′″][A-Za-z]{0,2}|\s?[A-Za-z]{1,5}(\/[A-Za
 // 1'234.56), the Arabic separators U+066C / U+066B (١٬٢٣٤٫٥٦), or a space —
 // fr-FR uses U+202F, ru-RU U+00A0, hand-typed data a plain space — all of
 // which `\s` matches. Ending on a digit is what lets UNIT's own optional
-// whitespace claim the gap before a suffix.
-const DIGITS = String.raw`\p{Nd}(?:[\p{Nd}.,'’\s\u066b\u066c]*\p{Nd})?`;
+// whitespace claim the gap before a suffix. An optional exponent (1e6,
+// 1.2e-6, 1E+09) follows the mantissa.
+const DIGITS = String.raw`\p{Nd}(?:[\p{Nd}.,'’\s\u066b\u066c]*\p{Nd})?(?:[eE][+\-−]?\p{Nd}+)?`;
 
 // Optional PREFIX currency symbol (space optional: "€ 42") with a sign on
 // either side, digits, optional unit (which may be a SUFFIX symbol: "42 €").

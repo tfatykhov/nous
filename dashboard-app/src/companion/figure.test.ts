@@ -118,6 +118,15 @@ describe('isFigureValue', () => {
     expect(isFigureValue('ABCD$5')).toBe(false);
   });
 
+  it('scientific notation is a figure', () => {
+    expect(isFigureValue('1e6')).toBe(true);
+    expect(isFigureValue('1.2e-6')).toBe(true);
+    expect(isFigureValue('1E+09')).toBe(true);
+    expect(isFigureValue('3e8 m/s')).toBe(true);
+    expect(isFigureValue('1e')).toBe(false);
+    expect(isFigureValue('1e6e')).toBe(false);
+  });
+
   it('"—" is a figure (em-dash placeholder)', () => {
     expect(isFigureValue('—')).toBe(true);
   });
