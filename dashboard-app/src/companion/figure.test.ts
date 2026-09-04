@@ -158,6 +158,18 @@ describe('isFigureValue', () => {
     expect(isFigureValue('12 километров')).toBe(false); // a word, not a unit
   });
 
+  it('signed prefix percents and formatted infinity are figures', () => {
+    expect(isFigureValue('-%12')).toBe(true); // tr-TR negative percent
+    expect(isFigureValue('+%12')).toBe(true); // signDisplay: always
+    expect(isFigureValue('-%-12')).toBe(false);
+    expect(isFigureValue('∞')).toBe(true);
+    expect(isFigureValue('-∞')).toBe(true);
+    expect(isFigureValue('$∞')).toBe(true);
+    expect(isFigureValue('∞%')).toBe(true);
+    expect(isFigureValue('↑∞')).toBe(true);
+    expect(isFigureValue('infinity')).toBe(false);
+  });
+
   it('"—" is a figure (em-dash placeholder)', () => {
     expect(isFigureValue('—')).toBe(true);
   });

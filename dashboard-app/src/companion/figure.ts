@@ -79,28 +79,33 @@ const UNIT = String.raw`(\s?(?:${PERCENT}|[°′″])[A-Za-z]{0,2}|\s?(?![eE](?:
 // 1.2e-6, 1E+09) follows the mantissa.
 const DIGITS = String.raw`\p{Nd}(?:[\p{Nd}.,'’\s\u066b\u066c]*\p{Nd})?(?:[eE][+\-−]?\p{Nd}+)?`;
 
+// What sits where the number goes: digits, or the infinity a formatter emits
+// for a non-finite metric ("∞", "-∞", "$∞", "∞%") — same affixes apply.
+const MANTISSA = String.raw`(?:${DIGITS}|∞)`;
+
 // Accounting style wraps a negative in parentheses — "($1,234.56)",
 // "(1 234,56 $US)" — so every numeric core is also accepted inside one
 // matching pair of outer parentheses.
 const accounting = (core: string) => String.raw`^(?:${core}|\(${core}\))$`;
 
-// Optional PREFIX currency symbol (space optional: "€ 42") or prefix percent
-// glyph, with a sign on either side of the symbol, digits, optional unit
-// (which may be a SUFFIX symbol: "42 €"). Covers: 42, -12.5%, %12,
-// $1,234.56, -$1,234.56, $-5, 42 €, ($1,234.56), 65.0 bpm, 0.8 /day.
-const NUMBER_CORE = String.raw`${COMPARE}(?:${PERCENT}\s?)?(?:${SIGN}?(?:${SYMBOL}\s?)?|${SYMBOL}\s?${SIGN}?)${DIGITS}${UNIT}`;
+// Leading affixes, then the mantissa, then the unit. The sign sits either
+// BEFORE the prefix affixes (tr-TR "-%12", Intl "-$1,234.56") or AFTER a
+// currency symbol ("$-5"), never on both sides ("-$-5" is not a figure).
+// Covers: 42, -12.5%, %12, -%12, $1,234.56, -$1,234.56, $-5, 42 €,
+// ($1,234.56), ∞, 65.0 bpm, 0.8 /day.
+const NUMBER_CORE = String.raw`${COMPARE}(?:${SIGN}?(?:${PERCENT}\s?)?(?:${SYMBOL}\s?)?|(?:${PERCENT}\s?)?${SYMBOL}\s?${SIGN}?)${MANTISSA}${UNIT}`;
 const NUMBER = new RegExp(accounting(NUMBER_CORE), 'u');
 
 // 3-letter ISO currency code (space optional) with a sign on either side.
 // Covers: EUR 1,234,567.89, USD100, -EUR 5, EUR -5, (EUR 5), EUR 5 /mo.
-const CURRENCY_CODE_CORE = String.raw`${COMPARE}(?:${SIGN}?[A-Z]{3}\s?|[A-Z]{3}\s?${SIGN}?)${DIGITS}${UNIT}`;
+const CURRENCY_CODE_CORE = String.raw`${COMPARE}(?:${SIGN}?[A-Z]{3}\s?|[A-Z]{3}\s?${SIGN}?)${MANTISSA}${UNIT}`;
 const CURRENCY_CODE = new RegExp(accounting(CURRENCY_CODE_CORE), 'u');
 
 // Directional delta marker (↑ ↓ ▲ ▼ or Unicode minus −) followed by a number
 // and an optional unit. Covers: ↓0.03, ↑6 %, ↑0.8 /day, ▲3. ASCII +/- are
 // already handled by NUMBER; this pattern covers the arrow chars and Unicode
 // minus that NUMBER's [+-] class cannot match.
-const DIRECTIONAL = new RegExp(String.raw`^[↑↓▲▼−]\s?${DIGITS}${UNIT}$`, 'u');
+const DIRECTIONAL = new RegExp(String.raw`^[↑↓▲▼−]\s?${MANTISSA}${UNIT}$`, 'u');
 
 const PATTERNS = [
   PLACEHOLDER,
