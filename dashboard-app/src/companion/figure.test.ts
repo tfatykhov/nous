@@ -234,6 +234,13 @@ describe('isFigureValue', () => {
     expect(isFigureValue('speed 12.3 kilometers per hour')).toBe(false); // four words
   });
 
+  it('unit words, month names and day periods in combining-mark scripts are figures', () => {
+    expect(isFigureValue('12.3 मेगाबाइट')).toBe(true); // hi-IN unitDisplay: long
+    expect(isFigureValue('4 सितंबर 2026')).toBe(true); // hi-IN month name
+    expect(isFigureValue('২:৩০ পূর্বাহ্ণ')).toBe(false); // a long day-period word is not a two-letter marker
+    expect(isFigureValue('12 กิโลเมตร')).toBe(true); // th-TH
+  });
+
   it('isTightUnit shares the percent family with the classifier', () => {
     for (const u of ['%', '％', '٪', '‰', '°C', '′']) expect(isTightUnit(u)).toBe(true);
     for (const u of ['kg', 'bpm', '€', '']) expect(isTightUnit(u)).toBe(false);

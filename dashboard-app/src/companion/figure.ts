@@ -33,7 +33,7 @@ const ISO_DATE =
 // followed by a day period — Latin "AM"/"p.m." or a locale's own one-to-two
 // letter marker (ar "م" / "ص"). One definition, used standalone and as the
 // optional tail of a date.
-const DAY_PERIOD = String.raw`(?:\s?(?:[APap]\.?[Mm]\.?|\p{L}{1,2}\.?))?`;
+const DAY_PERIOD = String.raw`(?:\s?(?:[APap]\.?[Mm]\.?|\p{L}\p{M}*(?:\p{L}\p{M}*)?\.?))?`;
 const CLOCK = String.raw`\p{Nd}{1,2}:\p{Nd}{2}(?::\p{Nd}{2})?${DAY_PERIOD}`;
 const TIME_OF_DAY = new RegExp(String.raw`^${CLOCK}$`, 'u');
 
@@ -49,7 +49,7 @@ const NUMERIC_DATE = new RegExp(
 // A localized date with a month WORD (any script, optionally abbreviated with
 // a period): en-US "Sep 4, 2026", en-GB "4 Sept 2026", de "4. Sept. 2026",
 // fr "4 sept. 2026", plus the same optional time of day.
-const MONTH = String.raw`\p{L}{3,9}\.?`;
+const MONTH = String.raw`\p{L}[\p{L}\p{M}]{2,11}\.?`;
 const WORDY_DATE = new RegExp(
   String.raw`^(?:${MONTH} \p{Nd}{1,2},? \p{Nd}{4}|\p{Nd}{1,2}\.? ${MONTH} \p{Nd}{4})${TIME_SUFFIX}$`,
   'u',
@@ -105,7 +105,10 @@ export function isTightUnit(unit: string): boolean {
 //   A bare `e`/`E` is NOT a unit: it is a dangling exponent marker ("1e",
 //   "1e6e"), and letting the word branch swallow it would classify
 //   malformed notation as a figure.
-const WORD = String.raw`\p{L}{1,20}`;
+// A word is a letter followed by letters or COMBINING MARKS (\p{M}): in
+// Devanagari, Bengali, Thai and friends the vowel signs are marks, not
+// letters, so hi-IN "मेगाबाइट" would otherwise fail on its second character.
+const WORD = String.raw`\p{L}[\p{L}\p{M}]{0,19}`;
 const UNIT = String.raw`(\s?(?:${PERCENT}|[°′″])[A-Za-z]{0,2}|\s?(?![eE](?:$|\/))${WORD}(?:\/${WORD}|\.|(?:\s${WORD}){1,2})?|\s?\/${WORD}|\s?${SYMBOL})?`;
 // With a prefix word present the suffix may carry at most two words, so a
 // value never exceeds three words around its number.
