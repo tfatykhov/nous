@@ -46,6 +46,18 @@ describe('isFigureValue', () => {
     expect(isFigureValue('2026-09-02T15:40:43+')).toBe(false);
   });
 
+  it('rates and compound units are figures with or without a direction marker', () => {
+    // The unit suffix is one shared definition: whatever "↑0.8 /day" accepts,
+    // "0.8 /day" accepts too (codex on #632).
+    expect(isFigureValue('0.8 /day')).toBe(true);
+    expect(isFigureValue('3/wk')).toBe(true);
+    expect(isFigureValue('12 km/h')).toBe(true);
+    expect(isFigureValue('EUR 5 /mo')).toBe(true);
+    expect(isFigureValue('↑0.8 /day')).toBe(true);
+    // A slash followed by prose is not a rate.
+    expect(isFigureValue('0.8 / day of rest')).toBe(false);
+  });
+
   it('"—" is a figure (em-dash placeholder)', () => {
     expect(isFigureValue('—')).toBe(true);
   });

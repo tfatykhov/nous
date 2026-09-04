@@ -9,7 +9,8 @@
 //   ratio        : 12/30
 //   compound duration: 1h 30m, 2d 3h, 45s
 //   number with optional sign, currency symbol or 3-letter code, thousands
-//               separators, decimal, and a short trailing unit (kg, km, %, °…)
+//               separators, decimal, and a short trailing unit (kg, km, %, °…),
+//               a compound unit (km/h) or a /rate suffix (0.8 /day, 3/wk)
 //   directional delta: ↓0.03, ↑6 %, ↑0.8 /day, ▲3 — a leading arrow (↑↓▲▼)
 //               or Unicode minus (−) followed by a bare number, a special
 //               unit symbol, an alpha unit, or a /rate suffix
@@ -32,21 +33,28 @@ const RATIO = /^\d+\/\d+$/;
 // One or more <digits><unit-char> groups, e.g. "1h 30m", "2d", "45s".
 const DURATION = /^(\d+\s?[dhms]\s?)+$/;
 
-// Optional currency symbol, optional sign, digits with optional thousands
-// separators and decimal, optional short trailing unit (≤5 alpha chars or a
-// special symbol). Covers: 42, -12.5%, $1,234.56, 65.0 bpm.
-const NUMBER = /^[€$£¥₹฿₩]?[+-]?\d[\d,.]*([%°‰′″]|\s?[A-Za-z]{1,5})?$/;
+// One optional unit suffix, shared by every numeric pattern so a unit
+// accepted after "↑0.8" is also accepted after "0.8" (codex on #632):
+//   a special symbol (%, °, ‰, ′, ″), a short alpha unit optionally compounded
+//   with a slash (kg, bpm, km/h), or a bare /rate (/day, /wk).
+const UNIT = String.raw`(\s?[%°‰′″]|\s?[A-Za-z]{1,5}(\/[A-Za-z]{1,10})?|\s?\/[A-Za-z]{1,10})?`;
+
+// Digits with optional thousands separators and decimal.
+const DIGITS = String.raw`\d[\d,.]*`;
+
+// Optional currency symbol, optional sign, digits, optional unit.
+// Covers: 42, -12.5%, $1,234.56, 65.0 bpm, 0.8 /day, 12 km/h.
+const NUMBER = new RegExp(String.raw`^[€$£¥₹฿₩]?[+-]?${DIGITS}${UNIT}$`);
 
 // 3-letter ISO currency code (space optional) followed by a number.
-// Covers: EUR 1,234,567.89, USD100.
-const CURRENCY_CODE = /^[A-Z]{3}\s?[+-]?\d[\d,.]*([%°‰′″]|\s?[A-Za-z]{1,5})?$/;
+// Covers: EUR 1,234,567.89, USD100, EUR 5 /mo.
+const CURRENCY_CODE = new RegExp(String.raw`^[A-Z]{3}\s?[+-]?${DIGITS}${UNIT}$`);
 
 // Directional delta marker (↑ ↓ ▲ ▼ or Unicode minus −) followed by a number
-// and an optional unit or /rate suffix. Covers: ↓0.03, ↑6 %, ↑0.8 /day, ▲3.
-// ASCII +/- are already handled by NUMBER; this pattern covers the arrow chars
-// and Unicode minus that NUMBER's [+-] class cannot match.
-const DIRECTIONAL =
-  /^[↑↓▲▼−]\s?\d[\d,.]*(\s?[%°‰′″]|\s?[A-Za-z]{1,5}|\s?\/[A-Za-z]{1,10})?$/;
+// and an optional unit. Covers: ↓0.03, ↑6 %, ↑0.8 /day, ▲3. ASCII +/- are
+// already handled by NUMBER; this pattern covers the arrow chars and Unicode
+// minus that NUMBER's [+-] class cannot match.
+const DIRECTIONAL = new RegExp(String.raw`^[↑↓▲▼−]\s?${DIGITS}${UNIT}$`);
 
 const PATTERNS = [
   PLACEHOLDER,
