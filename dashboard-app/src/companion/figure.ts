@@ -43,13 +43,23 @@ const UNIT = String.raw`(\s?[%°‰′″][A-Za-z]{0,2}|\s?[A-Za-z]{1,5}(\/[A-Za
 // Digits with optional thousands separators and decimal.
 const DIGITS = String.raw`\d[\d,.]*`;
 
-// Optional currency symbol, optional sign, digits, optional unit.
-// Covers: 42, -12.5%, $1,234.56, 65.0 bpm, 0.8 /day, 12 km/h.
-const NUMBER = new RegExp(String.raw`^[€$£¥₹฿₩]?[+-]?${DIGITS}${UNIT}$`);
+// A sign (ASCII or Unicode minus) may sit on EITHER side of a currency
+// prefix — Intl.NumberFormat emits "-$1,234.56", hand-written data "$-5" —
+// but not on both: `-$-5` is not a figure.
+const SIGN = String.raw`[+\-−]`;
+const SYMBOL = String.raw`[€$£¥₹฿₩]`;
 
-// 3-letter ISO currency code (space optional) followed by a number.
-// Covers: EUR 1,234,567.89, USD100, EUR 5 /mo.
-const CURRENCY_CODE = new RegExp(String.raw`^[A-Z]{3}\s?[+-]?${DIGITS}${UNIT}$`);
+// Optional currency symbol with a sign on either side, digits, optional unit.
+// Covers: 42, -12.5%, $1,234.56, -$1,234.56, $-5, 65.0 bpm, 0.8 /day, 12 km/h.
+const NUMBER = new RegExp(
+  String.raw`^(?:${SIGN}?${SYMBOL}?|${SYMBOL}${SIGN}?)${DIGITS}${UNIT}$`,
+);
+
+// 3-letter ISO currency code (space optional) with a sign on either side.
+// Covers: EUR 1,234,567.89, USD100, -EUR 5, EUR -5, EUR 5 /mo.
+const CURRENCY_CODE = new RegExp(
+  String.raw`^(?:${SIGN}?[A-Z]{3}\s?|[A-Z]{3}\s?${SIGN}?)${DIGITS}${UNIT}$`,
+);
 
 // Directional delta marker (↑ ↓ ▲ ▼ or Unicode minus −) followed by a number
 // and an optional unit. Covers: ↓0.03, ↑6 %, ↑0.8 /day, ▲3. ASCII +/- are

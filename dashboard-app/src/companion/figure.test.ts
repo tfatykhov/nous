@@ -65,6 +65,16 @@ describe('isFigureValue', () => {
     expect(isFigureValue('16 °Celsius')).toBe(false);
   });
 
+  it('a sign on either side of a currency prefix is a figure, on both sides is not', () => {
+    // Intl.NumberFormat puts the sign before the symbol; hand-written data after it.
+    expect(isFigureValue('-$1,234.56')).toBe(true);
+    expect(isFigureValue('−$3')).toBe(true);
+    expect(isFigureValue('$-5')).toBe(true);
+    expect(isFigureValue('-EUR 5')).toBe(true);
+    expect(isFigureValue('EUR -5')).toBe(true);
+    expect(isFigureValue('-$-5')).toBe(false);
+  });
+
   it('"—" is a figure (em-dash placeholder)', () => {
     expect(isFigureValue('—')).toBe(true);
   });
