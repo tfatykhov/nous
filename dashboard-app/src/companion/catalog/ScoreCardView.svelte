@@ -8,6 +8,7 @@
   import { store } from '../store.svelte';
   import { flexGrow, omittedNote, resolveDynamic, splitTruncation, toDisplayString } from '../functions';
   import { normalizeTone, toneInkVar } from '../chart';
+  import { isFigureValue, isTightUnit } from '../figure';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
 
@@ -15,6 +16,8 @@
     label: string;
     value: string;
     ink: string;
+    /** Explicit producer hint; undefined means use isFigureValue inference. */
+    format?: 'figure' | 'prose';
   }
 
   let {
@@ -34,6 +37,9 @@
   const status = $derived(toDisplayString(resolveDynamic(comp.status, ctx)));
   const value = $derived(toDisplayString(resolveDynamic(comp.value, ctx)));
   const unit = $derived(toDisplayString(resolveDynamic(comp.unit, ctx)));
+  // %, ° and friends (any locale's percent glyph) are set tight against the
+  // number; kg/bpm/ms keep the gap. Same definition as the figure classifier.
+  const unitTight = $derived(isTightUnit(unit));
   const caption = $derived(toDisplayString(resolveDynamic(comp.caption, ctx)));
   const note = $derived(toDisplayString(resolveDynamic(comp.note, ctx)));
   // Literal or {path} binding (per-record tone under a repeat template);
@@ -50,12 +56,36 @@
   const rows = $derived.by((): Row[] => {
     return split.rows.map((row) => {
       const r = (typeof row === 'object' && row !== null ? row : {}) as Record<string, unknown>;
+      const fmt = r.format === 'figure' || r.format === 'prose' ? r.format : undefined;
       return {
         label: toDisplayString(r.label),
         value: toDisplayString(r.value),
         ink: toneInkVar(normalizeTone(r.tone)),
+        format: fmt,
       };
     });
+  });
+
+  // A ScoreCard row is "label + figure" by default, and .rv is styled as one:
+  // right-aligned, tabular, semibold mono. Prose values ("deposit paid ·
+  // EUR811.44 balance at check-in") in that treatment wrap into a right-aligned
+  // block, which steals the whole row and squeezes the label (fix c3cced9).
+  // When ANY row is prose the card switches ALL rows to stacked mode: mixed
+  // modes inside one card read as breakage, and consistency beats a per-row
+  // optimum. Classification is semantic (isFigureValue), not by length — a
+  // short prose value like "payment pending" must not inherit figure styling,
+  // and a long figure like "EUR 1,234,567.89" or an ISO timestamp must not be
+  // forced into stacked mode. A per-row `format` field or card-level
+  // `comp.format` overrides the inference when the heuristic guesses wrong.
+  const cardFormat = $derived(
+    comp.format === 'figure' ? 'figure' : comp.format === 'prose' ? 'prose' : undefined,
+  );
+  const proseRows = $derived.by(() => {
+    if (cardFormat === 'figure') return false;
+    if (cardFormat === 'prose') return true;
+    return rows.some(
+      (r) => r.format === 'prose' || (r.format !== 'figure' && !isFigureValue(r.value)),
+    );
   });
 </script>
 
@@ -65,11 +95,11 @@
     <span class="status">{status}</span>
   </div>
   {#if value}
-    <div class="value">{value}{#if unit}<span class="unit">{unit}</span>{/if}</div>
+    <div class="value">{value}{#if unit}<span class="unit" class:tight={unitTight}>{unit}</span>{/if}</div>
     {#if caption}<div class="caption">{caption}</div>{/if}
   {/if}
   {#if rows.length > 0}
-    <ul>
+    <ul class:prose={proseRows}>
       {#each rows as row, i (i)}
         <li style:--row-ink={row.ink}>
           <span class="rl">{row.label}</span>
@@ -96,6 +126,7 @@
   }
   .head {
     display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
     align-items: center;
     gap: 0.6rem;
@@ -106,11 +137,18 @@
     font-size: 1.15rem;
     font-weight: 600;
     letter-spacing: -0.01em;
+    /* Basis floor: a long title beside a nowrap status pill would otherwise
+       collapse to 0px and break per character, same as the item rows did. */
+    flex: 1 1 8rem;
     min-width: 0;
     overflow-wrap: anywhere;
   }
   .status {
     flex: 0 0 auto;
+    /* Alone on a wrapped flex line, space-between would park the pill on
+       the LEFT; an auto margin keeps it right-aligned whether it shares the
+       line with the title or not. */
+    margin-left: auto;
     font-size: 0.66rem;
     font-weight: 700;
     letter-spacing: 0.09em;
@@ -137,6 +175,9 @@
     font-size: 0.85rem;
     font-weight: 400;
   }
+  .unit.tight {
+    margin-left: 0;
+  }
   .caption {
     color: var(--muted);
     font-size: 0.78rem;
@@ -148,8 +189,15 @@
   }
   li {
     display: flex;
+    /* The value used to be `flex: 0 0 auto`, so a long prose value ate the
+       whole row, left the label 0px, and `overflow-wrap: anywhere` then broke
+       it one letter per line while the value still overflowed the card.
+       Wrapping + a label basis floor means a value that cannot share the line
+       drops to its own full-width line instead (same fix as DeltaList). */
+    flex-wrap: wrap;
     justify-content: space-between;
-    gap: 0.6rem;
+    align-items: baseline;
+    gap: 0.1rem 0.6rem;
     padding: 0.3rem 0;
     border-bottom: 1px dashed var(--border);
     font-size: 0.85rem;
@@ -159,16 +207,40 @@
   }
   .rl {
     color: var(--muted);
+    flex: 1 1 7rem;
     min-width: 0;
     overflow-wrap: anywhere;
   }
   .rv {
-    flex: 0 0 auto;
+    flex: 0 1 auto;
+    min-width: 0;
+    margin-left: auto;
+    text-align: right;
+    overflow-wrap: break-word;
     color: var(--row-ink);
     font-family: var(--font-numeric);
     font-variant-numeric: tabular-nums;
     font-size: 0.8rem;
     font-weight: 600;
+  }
+
+  /* Stacked mode: label above, value below, both full width and left-aligned,
+     value in the UI face because it is a sentence, not a figure. */
+  ul.prose li {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.1rem;
+  }
+  ul.prose .rl {
+    flex: 1 1 auto;
+  }
+  ul.prose .rv {
+    text-align: left;
+    margin-left: 0;
+    font-family: var(--font-ui);
+    font-variant-numeric: normal;
+    font-weight: 500;
+    font-size: 0.82rem;
   }
   .note,
   .omitted {

@@ -386,7 +386,10 @@ def ScoreCard(
     caption: Any = None,
     items: Any = None,
     note: Any = None,
+    format: str | None = None,
 ) -> dict:
+    """``format`` ("figure" | "prose") overrides the renderer's per-row
+    figure/prose inference for the whole card; omit to let it infer."""
     return _clean(
         {
             "id": id,
@@ -399,6 +402,7 @@ def ScoreCard(
             "caption": caption,
             "items": items,
             "note": note,
+            "format": format,
         }
     )
 

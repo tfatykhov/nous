@@ -198,8 +198,12 @@ _COMPONENT_USAGE: dict[str, str] = {
     "ScoreCard": (
         "a verdict on an objective: title, status (pill text) + tone (literal "
         "or {\"path\": …}), value?/unit?/caption?, items = [{label, value, "
-        "tone?}] evidence rows, note. No value is fine — the verdict plus "
-        "evidence is the card."
+        "tone?, format?}] evidence rows, note. No value is fine — the verdict "
+        "plus evidence is the card. The renderer lays each row out as "
+        "label+figure or stacked prose by classifying the value; format?: "
+        "\"figure\" | \"prose\" (on the card, or per row) is the ONLY accepted "
+        "override, for when that inference misreads a value — omit it "
+        "otherwise."
     ),
     "DeltaList": (
         "ranked movers: rows = [{label, delta, from?, to?, tone?}]; set "

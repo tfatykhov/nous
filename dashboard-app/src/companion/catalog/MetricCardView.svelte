@@ -17,6 +17,7 @@
     toneInkVar,
   } from '../chart';
   import SparkSvg from './SparkSvg.svelte';
+  import { isTightUnit } from '../figure';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
 
@@ -36,6 +37,9 @@
   const label = $derived(toDisplayString(resolveDynamic(comp.label, ctx)));
   const value = $derived(toDisplayString(resolveDynamic(comp.value, ctx)));
   const unit = $derived(toDisplayString(resolveDynamic(comp.unit, ctx)));
+  // %, ° and friends (any locale's percent glyph) are set tight against the
+  // number; kg/bpm/ms keep the gap. Same definition as the figure classifier.
+  const unitTight = $derived(isTightUnit(unit));
   const delta = $derived(toDisplayString(resolveDynamic(comp.delta, ctx)));
   const caption = $derived(toDisplayString(resolveDynamic(comp.caption, ctx)));
   const footnote = $derived(toDisplayString(resolveDynamic(comp.footnote, ctx)));
@@ -71,7 +75,7 @@
     <span class="label">{label}</span>
     {#if delta}<span class="pill">{delta}</span>{/if}
   </div>
-  <div class="value">{value}{#if unit}<span class="unit">{unit}</span>{/if}</div>
+  <div class="value">{value}{#if unit}<span class="unit" class:tight={unitTight}>{unit}</span>{/if}</div>
   {#if caption}<div class="caption">{caption}</div>{/if}
   {#if series}
     {#if !series.ok}
@@ -106,6 +110,7 @@
   }
   .top {
     display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
     align-items: center;
     gap: 0.5rem;
@@ -114,11 +119,15 @@
     color: var(--muted);
     font-size: 0.8rem;
     letter-spacing: 0.03em;
+    /* Basis floor beside the nowrap delta pill (see ScoreCardView). */
+    flex: 1 1 6rem;
     min-width: 0;
     overflow-wrap: anywhere;
   }
   .pill {
     flex: 0 0 auto;
+    /* Right-aligned even when wrapped onto its own line (see ScoreCardView). */
+    margin-left: auto;
     font-size: 0.68rem;
     line-height: 1.4;
     padding: 0.1rem 0.5rem;
@@ -144,6 +153,9 @@
     font-family: var(--font-ui);
     font-size: 0.82rem;
     font-weight: 400;
+  }
+  .unit.tight {
+    margin-left: 0;
   }
   .caption,
   .state,

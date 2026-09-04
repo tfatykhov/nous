@@ -326,3 +326,61 @@ def test_served_catalog_ids_match_what_surfaces_declare() -> None:
     """
     assert load_catalog("basic")["$id"] == BASIC_CATALOG_ID
     assert load_catalog("nous-core")["$id"] == NOUS_CORE_CATALOG_ID
+
+
+# ---------------------------------------------------------------------------
+# P2-2 regression: ScoreCard format override (Codex finding on PR #632)
+# ---------------------------------------------------------------------------
+
+
+def _scorecard_envelope(extra_props: dict | None = None) -> dict:
+    """A minimal ScoreCard surface envelope for validator round-trips."""
+    comp: dict[str, Any] = {
+        "id": "root",
+        "component": "ScoreCard",
+        "title": "Lose fat",
+        "status": "on track",
+        "tone": "ok",
+    }
+    if extra_props:
+        comp.update(extra_props)
+    return _envelope([comp], catalog_id=NOUS_CORE_CATALOG_ID)
+
+
+@pytest.mark.parametrize("fmt", ["figure", "prose"])
+def test_scorecard_format_override_passes_strict_validation(fmt: str) -> None:
+    """A ScoreCard envelope carrying ``format`` must pass the strict envelope
+    validator.
+
+    Before this fix the nous_core catalog schema did not declare a ``format``
+    property on ScoreCard; because the Component wrapper uses
+    ``unevaluatedProperties: false``, any unknown property caused a
+    VALIDATION_FAILED error and the card-level format override was unreachable
+    in production envelopes.
+    """
+    envelope = _scorecard_envelope({"format": fmt})
+
+    errors = validate_envelope(envelope)
+
+    assert errors == [], f"Expected no errors for format={fmt!r}, got: {errors}"
+
+
+def test_scorecard_without_format_still_passes() -> None:
+    """Omitting ``format`` is valid — inference is the default."""
+    errors = validate_envelope(_scorecard_envelope())
+    assert errors == []
+
+
+def test_scorecard_format_invalid_value_is_rejected() -> None:
+    """A value outside the enum ('auto', 'mixed', …) must be rejected.
+
+    This guards against silent fallback — if the schema accepted arbitrary
+    strings the renderer's ``comp.format === 'figure'`` check would silently
+    ignore them, masking typos as "use inference".
+    """
+    envelope = _scorecard_envelope({"format": "auto"})
+
+    errors = validate_envelope(envelope)
+
+    assert len(errors) == 1
+    assert errors[0]["code"] == "VALIDATION_FAILED"

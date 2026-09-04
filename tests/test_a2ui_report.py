@@ -132,6 +132,10 @@ def test_dsl_helpers_emit_the_schema_shape_and_drop_none() -> None:
     assert dsl.ScoreCard("s", title="T", status="ok") == {
         "id": "s", "component": "ScoreCard", "title": "T", "status": "ok"
     }
+    # The card-level row-mode override is reachable through the helper and
+    # is the schema enum's spelling (codex on #632).
+    assert dsl.ScoreCard("s", title="T", status="ok", format="prose")["format"] == "prose"
+    assert dsl.ScoreCard("s", title="T", status="ok", format="figure")["format"] == "figure"
     assert dsl.DeltaList("d", rows={"path": "/r"}, empty_text="none") == {
         "id": "d", "component": "DeltaList", "rows": {"path": "/r"}, "emptyText": "none"
     }
@@ -475,3 +479,13 @@ if __name__ == "__main__":  # pragma: no cover — fixture export for vitest
 
     sys.stdout.reconfigure(encoding="utf-8")
     print(report_app_fixture_json())
+
+
+def test_scorecard_composer_guidance_names_the_format_override() -> None:
+    """The composer can only use the row-mode override if its guidance says the
+    prop exists and which two values the validator accepts (codex on #632)."""
+    from nous.a2ui.compose import _COMPONENT_USAGE
+
+    text = _COMPONENT_USAGE["ScoreCard"]
+    assert "format" in text
+    assert '"figure"' in text and '"prose"' in text

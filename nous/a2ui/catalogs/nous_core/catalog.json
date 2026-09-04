@@ -721,6 +721,14 @@
         "weight": {
           "type": "number",
           "description": "The relative weight of this component within a Row or Column."
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "figure",
+            "prose"
+          ],
+          "description": "Producer override for the row-mode inference. 'figure' forces inline tabular layout for all rows even when values are prose-shaped; 'prose' forces stacked layout even when all values are figure-shaped. Omit to let the renderer infer from the row values."
         }
       },
       "required": [
