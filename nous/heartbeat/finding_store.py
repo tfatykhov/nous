@@ -238,13 +238,37 @@ class FindingStore:
             for fp in fingerprints
         }
 
-    def restore(self, snapshot: Mapping[str, TrackedFinding | None]) -> None:
-        """Undo ingests by restoring a :meth:`snapshot` taken before them."""
+    def restore(
+        self,
+        snapshot: Mapping[str, TrackedFinding | None],
+        *,
+        expected: Mapping[str, TrackedFinding | None] | None = None,
+    ) -> list[str]:
+        """Undo ingests by restoring a :meth:`snapshot` taken before them.
+
+        ``expected`` is the image of the same fingerprints taken right AFTER
+        the ingests being undone. When given, a fingerprint is restored only
+        while its current record still equals that image - i.e. nothing else
+        has touched it since: not a user acknowledge/resolve/dismiss through
+        REST or the companion, not the heartbeat runner's own ingest or
+        sweep, not another push. Every mutation path changes some field
+        (state, last_seen, seen_count, outcome, absent_ticks ...), so
+        dataclass equality is the version check and no caller has to take a
+        lock. A record that moved on is left alone: the later mutation is
+        real work, and erasing it to tidy up a failed push would be worse
+        than the orphaned registration it would tidy. Returns the
+        fingerprints left alone for that reason.
+        """
+        skipped: list[str] = []
         for fp, tracked in snapshot.items():
+            if expected is not None and self._findings.get(fp) != expected.get(fp):
+                skipped.append(fp)
+                continue
             if tracked is None:
                 self._findings.pop(fp, None)
             else:
                 self._findings[fp] = tracked
+        return skipped
 
     # ------------------------------------------------------------------
     # Maintenance

@@ -16,8 +16,11 @@ Round 3  a push that fails AFTER the hook ran is compensated: the prior
 Round 4  the lifecycle's SUPPRESS verdict is honoured on the card: the store
        is PROBED (ingest -> read state -> restore) before the surface is
        built, only items left NEW render, suppressed ones are reported, an
-       all-suppressed push registers nothing, and concurrent pushes are
-       serialized so one push's compensation cannot clobber another's.
+       all-suppressed push registers nothing, and compensation is CONDITIONAL
+       on the post-ingest image so a failed push never erases what another
+       writer (a concurrent push, a user action, the runner) did meanwhile.
+Round 5  an adopted real fingerprint renders the STORED finding, never the
+       caller's row - the buttons act on the stored record.
 """
 
 from __future__ import annotations
@@ -408,12 +411,13 @@ async def test_round4_mixed_push_renders_only_open_items_and_reports_the_rest() 
     assert store.get_tracked(acked).state == FindingState.ACKNOWLEDGED
 
 
-async def test_round4_concurrent_pushes_serialize_compensation() -> None:
+async def test_round4_concurrent_pushes_do_not_clobber_each_other() -> None:
     """Two pushes with different dedup keys carrying the same fingerprint: the
-    first parks in commit and then fails; the second succeeds. Unserialized,
-    the first push's restore (snapshot: 'not tracked') would DELETE the record
-    the second push just published a live card against. Under the lock the
-    second push cannot start until the first has compensated."""
+    first parks in commit and then fails; the second runs ahead and succeeds.
+    An unconditional restore of the first push's snapshot ('not tracked')
+    would DELETE the record the second push just published a live card
+    against. The restore is conditional on the post-ingest image, and the
+    second push's ingest changed that image, so the record survives."""
     store = _store()
 
     class _FirstCommitStalls:
@@ -446,17 +450,69 @@ async def test_round4_concurrent_pushes_serialize_compensation() -> None:
     first = asyncio.create_task(_push_rows(dispatcher, [{"message": "disk 91% full"}], dedup_key="a"))
     while service.calls < 1:
         await asyncio.sleep(0)
-    second = asyncio.create_task(_push_rows(dispatcher, [{"message": "disk 91% full"}], dedup_key="b"))
-    await asyncio.sleep(0.01)
-    assert service.calls == 1, "the second push must wait for the first to finish"
+    second = await _push_rows(dispatcher, [{"message": "disk 91% full"}], dedup_key="b")
+    assert not second[1], second[0]
+    assert len(service.pushed) == 1, "the second push ran ahead and published"
     service.gate.set()
-
-    (_, first_error), (second_content, second_error) = await asyncio.gather(first, second)
+    _, first_error = await first
 
     assert first_error, "the stalled push failed at commit"
-    assert not second_error, second_content
-    assert len(service.pushed) == 1
     rows = store.to_list()
     assert len(rows) == 1, "the live card's finding must still be tracked"
     assert rows[0]["state"] == "new"
     assert _rendered(service) == {rows[0]["fingerprint"]}
+
+
+async def test_round5_user_action_during_failing_commit_is_preserved() -> None:
+    """A user acknowledges the finding (REST / companion button) while the
+    push is parked in a commit that then fails. The compensation must not
+    restore the pre-ingest image over the user's action."""
+    store = _store()
+
+    class _UserActsThenCommitFails:
+        async def push_built(
+            self,
+            built: Any,
+            *,
+            pre_broadcast: Any = None,
+            pre_broadcast_rollback: Any = None,
+            **kwargs: Any,
+        ) -> str:
+            if pre_broadcast is not None:
+                pre_broadcast()
+            (fp,) = set((built.data_model or {}).get("findings", {}))
+            assert store.acknowledge(fp), "the finding is registered by now"
+            if pre_broadcast_rollback is not None:
+                pre_broadcast_rollback()
+            raise RuntimeError("commit failed")
+
+    dispatcher, _ = _make_dispatcher(store, _UserActsThenCommitFails())
+
+    _, is_error = await _push(dispatcher, "disk 91% full")
+
+    assert is_error
+    rows = store.to_list()
+    assert len(rows) == 1, "the acknowledged record must survive the failed push"
+    assert rows[0]["state"] == "acknowledged"
+
+
+async def test_round5_adopted_fingerprint_renders_the_stored_finding() -> None:
+    """The buttons act on the stored record, so the card must show the stored
+    record - a caller row with a different message, urgency or check must
+    not be able to have the user triage one issue while mutating another."""
+    store = _store()
+    fp = _seed(store, "disk 91% full", check="disk-check")
+    dispatcher, service = _make_dispatcher(store)
+
+    content, is_error = await _push_rows(
+        dispatcher,
+        [{"fingerprint": fp, "message": "something else entirely", "urgency": "high", "check": "fake"}],
+    )
+
+    assert not is_error, content
+    assert _rendered(service) == {fp}
+    rendered = json.dumps(service.pushed[0].components)
+    assert "disk 91% full" in rendered
+    assert "something else entirely" not in rendered
+    assert "fake" not in rendered
+    assert "disk-check" in rendered

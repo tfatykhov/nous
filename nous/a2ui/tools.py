@@ -9,7 +9,6 @@ ratchet untouched. The only nous/api/tools.py edit for F092 is the
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -370,22 +369,7 @@ def register_a2ui_tools(
     NOUS_A2UI_COMPOSE_ENABLED=false) leaves it unregistered.
     """
 
-    # heartbeat_findings mutates the in-memory FindingStore around a fallible
-    # DB transaction (snapshot -> ingest -> commit -> restore on failure).
-    # Two such pushes interleaving on one fingerprint would let the failing
-    # push's restore overwrite the state a concurrent push just committed a
-    # live card against (codex round 4), so probe, build, transaction and
-    # compensation run under ONE lock. Other templates never touch the store
-    # and skip it.
-    _findings_lock = asyncio.Lock()
-
     async def push_surface(**kwargs) -> dict:
-        if kwargs.get("template") == "heartbeat_findings":
-            async with _findings_lock:
-                return await _push_surface_unlocked(**kwargs)
-        return await _push_surface_unlocked(**kwargs)
-
-    async def _push_surface_unlocked(**kwargs) -> dict:
         template = kwargs.get("template", "")
         builder = TEMPLATES.get(template)
         if builder is None:
@@ -454,7 +438,23 @@ def register_a2ui_tools(
                     if fp in within_push_fps:
                         continue
                     within_push_fps.add(fp)
-                    candidates.append((row, tracked.finding))
+                    stored = tracked.finding
+                    # Render the STORED finding, never the caller's row: the
+                    # buttons act on the stored record, so caller-supplied
+                    # message/urgency/check would let a stale or fabricated
+                    # row have the user triage one issue while the lifecycle
+                    # of another is mutated (codex round 5).
+                    candidates.append(
+                        (
+                            {
+                                "fingerprint": fp,
+                                "message": stored.summary,
+                                "urgency": stored.urgency,
+                                "check": stored.check_name,
+                            },
+                            stored,
+                        )
+                    )
                     continue
                 message = str(row.get("message") or "").strip()
                 if not message:
@@ -640,26 +640,42 @@ def register_a2ui_tools(
         # fingerprints, ingest, and restore that snapshot if the surrounding
         # push fails after the hook ran. Without this, a commit failure leaves
         # an orphaned finding visible at GET /heartbeat/findings for a surface
-        # that was never published (codex round 3).
-        _ingest_snapshot: dict = {}
+        # that was never published (codex round 3). The restore is CONDITIONAL
+        # on the image taken right after the ingest: the commit is an await,
+        # and in that window a user can acknowledge/resolve/dismiss through
+        # REST or the companion, the heartbeat runner can re-ingest or sweep,
+        # and another push can ingest the same fingerprint - none of which
+        # take a lock here, and none of which a failed push may erase (codex
+        # rounds 4 and 5). A record that moved on is left as it is.
+        _ingest_before: dict = {}
+        _ingest_after: dict = {}
 
         def _do_ingest() -> None:
             store_ = _pending_store
             if store_ is None:  # pragma: no cover - hook not wired without a store
                 return
-            _ingest_snapshot.clear()
-            _ingest_snapshot.update(
-                store_.snapshot({_f.fingerprint() for _f in _pending_ingest})
-            )
+            fps = {_f.fingerprint() for _f in _pending_ingest}
+            _ingest_before.clear()
+            _ingest_before.update(store_.snapshot(fps))
             for _f in _pending_ingest:
                 store_.ingest(_f)
+            _ingest_after.clear()
+            _ingest_after.update(store_.snapshot(fps))
 
         def _undo_ingest() -> None:
             store_ = _pending_store
-            if store_ is None or not _ingest_snapshot:
+            if store_ is None or not _ingest_before:
                 return
-            store_.restore(_ingest_snapshot)
-            _ingest_snapshot.clear()
+            left = store_.restore(_ingest_before, expected=_ingest_after)
+            if left:
+                logger.warning(
+                    "heartbeat_findings push failed after ingest; %d finding(s) were "
+                    "changed by another writer meanwhile and were left as-is: %s",
+                    len(left),
+                    left,
+                )
+            _ingest_before.clear()
+            _ingest_after.clear()
 
         pre_broadcast_hook = _do_ingest if _pending_store is not None else None
         pre_broadcast_rollback = _undo_ingest if _pending_store is not None else None
