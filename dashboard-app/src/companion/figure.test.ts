@@ -208,6 +208,16 @@ describe('isFigureValue', () => {
     expect(isFigureValue('¢99')).toBe(true);
   });
 
+  it('times in any script with localized day periods are figures', () => {
+    expect(isFigureValue('۱۴:۳۰')).toBe(true); // fa-IR
+    expect(isFigureValue('২:৩০ PM')).toBe(true); // bn-BD
+    expect(isFigureValue('٢:٣٠ م')).toBe(true); // ar-EG day period
+    expect(isFigureValue('2:30 p.m.')).toBe(true);
+    expect(isFigureValue('٤/٩/٢٠٢٦ ٢:٣٠ م')).toBe(true); // date + localized time
+    expect(isFigureValue('١٢/٣٠')).toBe(true); // ratio in Arabic digits
+    expect(isFigureValue('2:30 later')).toBe(false);
+  });
+
   it('isTightUnit shares the percent family with the classifier', () => {
     for (const u of ['%', '％', '٪', '‰', '°C', '′']) expect(isTightUnit(u)).toBe(true);
     for (const u of ['kg', 'bpm', '€', '']) expect(isTightUnit(u)).toBe(false);

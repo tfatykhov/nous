@@ -7,7 +7,7 @@
 //   ISO date/datetime : 2026-09-02, 2026-09-02T15:40:43Z, 2026-09-02T15:40:43+00:00
 //   localized date : 9/4/2026, 04/09/2026, 04.09.2026, 2026/09/04 15:40,
 //               Sep 4, 2026, 4 Sept 2026, 4. Sept. 2026
-//   time of day  : 14:30, 2:30 PM
+//   time of day  : 14:30, 2:30 PM, ۱۴:۳۰, ٢:٣٠ م
 //   ratio        : 12/30
 //   compound duration: 1h 30m, 2d 3h, 45s
 //   number with optional comparison marker (<, ≥, ~, ±), sign, currency
@@ -29,12 +29,18 @@ const PLACEHOLDER = /^([—–−-]{1,3}|[Nn]\/[Aa]|TBD)$/;
 const ISO_DATE =
   /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?([.,]\d+)?(Z|[+-]\d{2}:?\d{2})?)?$/;
 
-const TIME_OF_DAY = /^\d{1,2}:\d{2}(:\d{2})?(\s?[APap][Mm])?$/;
+// A clock time in any script's digits (fa "۱۴:۳۰", bn "২:৩০"), optionally
+// followed by a day period — Latin "AM"/"p.m." or a locale's own one-to-two
+// letter marker (ar "م" / "ص"). One definition, used standalone and as the
+// optional tail of a date.
+const DAY_PERIOD = String.raw`(?:\s?(?:[APap]\.?[Mm]\.?|\p{L}{1,2}\.?))?`;
+const CLOCK = String.raw`\p{Nd}{1,2}:\p{Nd}{2}(?::\p{Nd}{2})?${DAY_PERIOD}`;
+const TIME_OF_DAY = new RegExp(String.raw`^${CLOCK}$`, 'u');
 
 // A localized numeric date: three digit fields joined by one separator kind
 // (en-US 9/4/2026, en-GB 04/09/2026, de 04.09.2026, ISO-ish 2026/09/04), with
 // an optional time of day after a space or comma.
-const TIME_SUFFIX = String.raw`(?:[ ,]+\p{Nd}{1,2}:\p{Nd}{2}(?::\p{Nd}{2})?(?:\s?[APap][Mm])?)?`;
+const TIME_SUFFIX = String.raw`(?:[ ,]+${CLOCK})?`;
 const NUMERIC_DATE = new RegExp(
   String.raw`^\p{Nd}{1,4}([./-])\p{Nd}{1,2}\1\p{Nd}{1,4}${TIME_SUFFIX}$`,
   'u',
@@ -49,10 +55,10 @@ const WORDY_DATE = new RegExp(
   'u',
 );
 
-const RATIO = /^\d+\/\d+$/;
+const RATIO = /^\p{Nd}+\/\p{Nd}+$/u;
 
 // One or more <digits><unit-char> groups, e.g. "1h 30m", "2d", "45s".
-const DURATION = /^(\d+\s?[dhms]\s?)+$/;
+const DURATION = /^(\p{Nd}+\s?[dhms]\s?)+$/u;
 
 // A sign (ASCII or Unicode minus) may sit on EITHER side of a currency
 // prefix — Intl.NumberFormat emits "-$1,234.56", hand-written data "$-5" —
