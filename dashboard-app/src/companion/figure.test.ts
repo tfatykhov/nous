@@ -194,6 +194,20 @@ describe('isFigureValue', () => {
     expect(isFigureValue('not a number')).toBe(false);
   });
 
+  it('formatted ranges and any Unicode currency symbol are figures', () => {
+    expect(isFigureValue('3–5')).toBe(true); // Intl formatRange
+    expect(isFigureValue('3-5')).toBe(true);
+    expect(isFigureValue('$3 – $5')).toBe(true);
+    expect(isFigureValue('10%–20%')).toBe(true);
+    expect(isFigureValue('EUR 3–EUR 5')).toBe(true);
+    expect(isFigureValue('3–')).toBe(false);
+    expect(isFigureValue('3–5–7')).toBe(false);
+    expect(isFigureValue('-1\u00a0234,56 ₽')).toBe(true); // ru-RU
+    expect(isFigureValue('-1,234.56 ₪')).toBe(true); // he-IL
+    expect(isFigureValue('-1.235 ₫')).toBe(true); // vi-VN
+    expect(isFigureValue('¢99')).toBe(true);
+  });
+
   it('isTightUnit shares the percent family with the classifier', () => {
     for (const u of ['%', '％', '٪', '‰', '°C', '′']) expect(isTightUnit(u)).toBe(true);
     for (const u of ['kg', 'bpm', '€', '']) expect(isTightUnit(u)).toBe(false);

@@ -59,11 +59,12 @@ const DURATION = /^(\d+\s?[dhms]\s?)+$/;
 // but not on both: `-$-5` is not a figure.
 const SIGN = String.raw`[+\-−]`;
 
-// A currency symbol, optionally COMPOUND as locale formatters emit it:
-// R$ (BRL), CA$ / US$ / A$ / HK$ (disambiguated dollars), or symbol-first in
-// French-style locales (fr-FR USD is "$US") — up to three capitals glued to
-// one side of the symbol.
-const SYMBOL = String.raw`(?:[A-Z]{1,3}[€$£¥₹฿₩]|[€$£¥₹฿₩](?:[A-Z]{1,3})?)`;
+// A currency symbol — ANY Unicode currency symbol (\p{Sc}: $, €, £, ¥, ₽,
+// ₪, ₫, ₹, ฿, ₩, ¢, …), not a hand-picked subset — optionally COMPOUND as
+// locale formatters emit it: R$ (BRL), CA$ / US$ / A$ / HK$ (disambiguated
+// dollars), or symbol-first in French-style locales (fr-FR USD is "$US") —
+// up to three capitals glued to one side of the symbol.
+const SYMBOL = String.raw`(?:[A-Z]{1,3}\p{Sc}|\p{Sc}(?:[A-Z]{1,3})?)`;
 
 // A threshold / approximation marker may lead a figure: "<5%", "≥95 bpm",
 // "≤1.2 ms", "~42", "±0.3 kg". Optional whitespace after it ("< 5").
@@ -112,10 +113,12 @@ const DIGITS = String.raw`\p{Nd}(?:[\p{Nd}.,'’\s\u066b\u066c]*\p{Nd})?(?:[eE][
 // for an indeterminate one — with the same affixes as digits.
 const MANTISSA = String.raw`(?:${DIGITS}|∞|NaN)`;
 
-// Accounting style wraps a negative in parentheses — "($1,234.56)",
-// "(1 234,56 $US)" — so every numeric core is also accepted inside one
-// matching pair of outer parentheses.
-const accounting = (core: string) => String.raw`^(?:${core}|\(${core}\))$`;
+// Three shapes for every numeric core: the core itself; a formatted RANGE of
+// two cores joined by a dash (Intl.NumberFormat.formatRange: "3–5", "$3 – $5",
+// "10%–20%"); and the accounting style that wraps a negative in parentheses
+// ("($1,234.56)", "(1 234,56 $US)").
+const shapes = (core: string) =>
+  String.raw`^(?:${core}(?:\s?[–—-]\s?${core})?|\(${core}\))$`;
 
 // Leading affixes, then the mantissa, then the unit. The sign sits either
 // BEFORE the prefix affixes (tr-TR "-%12", Intl "-$1,234.56") or AFTER a
@@ -123,12 +126,12 @@ const accounting = (core: string) => String.raw`^(?:${core}|\(${core}\))$`;
 // Covers: 42, -12.5%, %12, -%12, $1,234.56, -$1,234.56, $-5, 42 €,
 // ($1,234.56), ∞, 65.0 bpm, 0.8 /day.
 const NUMBER_CORE = String.raw`${COMPARE}(?:${SIGN}?(?:${PERCENT}\s?)?(?:${SYMBOL}\s?)?|(?:${PERCENT}\s?)?${SYMBOL}\s?${SIGN}?)${MANTISSA}${UNIT}`;
-const NUMBER = new RegExp(accounting(NUMBER_CORE), 'u');
+const NUMBER = new RegExp(shapes(NUMBER_CORE), 'u');
 
 // 3-letter ISO currency code (space optional) with a sign on either side.
 // Covers: EUR 1,234,567.89, USD100, -EUR 5, EUR -5, (EUR 5), EUR 5 /mo.
 const CURRENCY_CODE_CORE = String.raw`${COMPARE}(?:${SIGN}?[A-Z]{3}\s?|[A-Z]{3}\s?${SIGN}?)${MANTISSA}${UNIT}`;
-const CURRENCY_CODE = new RegExp(accounting(CURRENCY_CODE_CORE), 'u');
+const CURRENCY_CODE = new RegExp(shapes(CURRENCY_CODE_CORE), 'u');
 
 // Directional delta marker (↑ ↓ ▲ ▼ or Unicode minus −) followed by a number
 // and an optional unit. Covers: ↓0.03, ↑6 %, ↑0.8 /day, ▲3. ASCII +/- are
