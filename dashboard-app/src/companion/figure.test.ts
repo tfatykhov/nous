@@ -241,6 +241,15 @@ describe('isFigureValue', () => {
     expect(isFigureValue('12 กิโลเมตร')).toBe(true); // th-TH
   });
 
+  it('a directional marker takes the full affix grammar', () => {
+    expect(isFigureValue('↓$5')).toBe(true);
+    expect(isFigureValue('↑€1,200')).toBe(true);
+    expect(isFigureValue('↓EUR 5')).toBe(true);
+    expect(isFigureValue('↑%12')).toBe(true);
+    expect(isFigureValue('▲ 3–5')).toBe(true);
+    expect(isFigureValue('↑ up and away')).toBe(false);
+  });
+
   it('isTightUnit shares the percent family with the classifier', () => {
     for (const u of ['%', '％', '٪', '‰', '°C', '′']) expect(isTightUnit(u)).toBe(true);
     for (const u of ['kg', 'bpm', '€', '']) expect(isTightUnit(u)).toBe(false);

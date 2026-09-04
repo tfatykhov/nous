@@ -134,8 +134,8 @@ const MANTISSA = String.raw`(?:${DIGITS}|∞|NaN)`;
 // two cores joined by a dash (Intl.NumberFormat.formatRange: "3–5", "$3 – $5",
 // "10%–20%"); and the accounting style that wraps a negative in parentheses
 // ("($1,234.56)", "(1 234,56 $US)").
-const shapes = (core: string) =>
-  String.raw`^(?:${core}(?:\s?[–—-]\s?${core})?|\(${core}\))$`;
+const shaped = (core: string) => String.raw`(?:${core}(?:\s?[–—-]\s?${core})?|\(${core}\))`;
+const shapes = (core: string) => String.raw`^${shaped(core)}$`;
 
 // Leading affixes, then the mantissa, then the unit. The sign sits either
 // BEFORE the prefix affixes (tr-TR "-%12", Intl "-$1,234.56") or AFTER a
@@ -154,11 +154,14 @@ const NUMBER = new RegExp(shapes(NUMBER_CORE), 'u');
 const CURRENCY_CODE_CORE = String.raw`${COMPARE}(?:${SIGN}?[A-Z]{3}\s?|[A-Z]{3}\s?${SIGN}?)${MANTISSA}${UNIT}`;
 const CURRENCY_CODE = new RegExp(shapes(CURRENCY_CODE_CORE), 'u');
 
-// Directional delta marker (↑ ↓ ▲ ▼ or Unicode minus −) followed by a number
-// and an optional unit. Covers: ↓0.03, ↑6 %, ↑0.8 /day, ▲3. ASCII +/- are
-// already handled by NUMBER; this pattern covers the arrow chars and Unicode
-// minus that NUMBER's [+-] class cannot match.
-const DIRECTIONAL = new RegExp(String.raw`^[↑↓▲▼−]\s?${MANTISSA}${UNIT}$`, 'u');
+// Directional delta marker (↑ ↓ ▲ ▼) followed by a complete numeric value —
+// the SAME affix grammar as an unmarked figure, so "↓$5", "↑€1,200",
+// "↓EUR 5" and "↑%12" are figures exactly as their unmarked forms are.
+// A leading Unicode minus is already a SIGN inside the cores.
+const DIRECTIONAL = new RegExp(
+  String.raw`^[↑↓▲▼]\s?(?:${shaped(NUMBER_CORE)}|${shaped(CURRENCY_CODE_CORE)})$`,
+  'u',
+);
 
 const PATTERNS = [
   PLACEHOLDER,
