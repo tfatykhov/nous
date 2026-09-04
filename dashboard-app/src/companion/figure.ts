@@ -107,6 +107,9 @@ export function isTightUnit(unit: string): boolean {
 //   malformed notation as a figure.
 const WORD = String.raw`\p{L}{1,20}`;
 const UNIT = String.raw`(\s?(?:${PERCENT}|[°′″])[A-Za-z]{0,2}|\s?(?![eE](?:$|\/))${WORD}(?:\/${WORD}|\.|(?:\s${WORD}){1,2})?|\s?\/${WORD}|\s?${SYMBOL})?`;
+// With a prefix word present the suffix may carry at most two words, so a
+// value never exceeds three words around its number.
+const UNIT_AFTER_PREFIX = String.raw`(\s?(?:${PERCENT}|[°′″])[A-Za-z]{0,2}|\s?(?![eE](?:$|\/))${WORD}(?:\/${WORD}|\.|\s${WORD})?|\s?\/${WORD}|\s?${SYMBOL})?`;
 
 // Digits with optional grouping and decimal separators, ending on a digit.
 // A digit is any Unicode decimal digit (\p{Nd}, `u` flag) — ar-EG and fa-IR
@@ -136,7 +139,11 @@ const shapes = (core: string) =>
 // currency symbol ("$-5"), never on both sides ("-$-5" is not a figure).
 // Covers: 42, -12.5%, %12, -%12, $1,234.56, -$1,234.56, $-5, 42 €,
 // ($1,234.56), ∞, 65.0 bpm, 0.8 /day.
-const NUMBER_CORE = String.raw`${COMPARE}(?:${SIGN}?(?:${PERCENT}\s?)?(?:${SYMBOL}\s?)?|(?:${PERCENT}\s?)?${SYMBOL}\s?${SIGN}?)${MANTISSA}${UNIT}`;
+// Some locales put a unit WORD before the number (ja "時速 12.3 キロメートル",
+// zh/ko similar), so one leading word is admitted ahead of the affixes; the
+// "at most three words around a number" line still bounds the whole value.
+const AFFIXES = String.raw`${COMPARE}(?:${SIGN}?(?:${PERCENT}\s?)?(?:${SYMBOL}\s?)?|(?:${PERCENT}\s?)?${SYMBOL}\s?${SIGN}?)${MANTISSA}`;
+const NUMBER_CORE = String.raw`(?:${AFFIXES}${UNIT}|${WORD}\s${AFFIXES}${UNIT_AFTER_PREFIX})`;
 const NUMBER = new RegExp(shapes(NUMBER_CORE), 'u');
 
 // 3-letter ISO currency code (space optional) with a sign on either side.

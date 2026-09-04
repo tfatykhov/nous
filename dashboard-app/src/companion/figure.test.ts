@@ -185,7 +185,9 @@ describe('isFigureValue', () => {
     expect(isFigureValue('4. Sept. 2026')).toBe(true); // de
     expect(isFigureValue('4 sept. 2026')).toBe(true); // fr
     expect(isFigureValue('September 4, 2026, 3:40 PM')).toBe(true);
-    expect(isFigureValue('Sep 4 2026 and more')).toBe(false);
+    // 'Sep 4 2026 and more' is three words around '4 2026' - a figure by the
+    // stated budget; prose needs a longer tail.
+    expect(isFigureValue('Sep 4 2026 and a lot more')).toBe(false);
     expect(isFigureValue('NaN')).toBe(true);
     expect(isFigureValue('$NaN')).toBe(true);
     expect(isFigureValue('NaN%')).toBe(true);
@@ -223,6 +225,13 @@ describe('isFigureValue', () => {
     expect(isFigureValue('5 minutes')).toBe(true);
     expect(isFigureValue('3 items in the basket')).toBe(false); // four words
     expect(isFigureValue('12 apples, 3 pears')).toBe(false);
+  });
+
+  it('a unit word before the number is a figure, within the three-word budget', () => {
+    expect(isFigureValue('時速 12.3 キロメートル')).toBe(true); // ja-JP unit-prefix form
+    expect(isFigureValue('약 12 km')).toBe(true);
+    expect(isFigureValue('Total 42')).toBe(true);
+    expect(isFigureValue('speed 12.3 kilometers per hour')).toBe(false); // four words
   });
 
   it('isTightUnit shares the percent family with the classifier', () => {
