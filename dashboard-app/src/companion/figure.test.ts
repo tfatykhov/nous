@@ -185,9 +185,7 @@ describe('isFigureValue', () => {
     expect(isFigureValue('4. Sept. 2026')).toBe(true); // de
     expect(isFigureValue('4 sept. 2026')).toBe(true); // fr
     expect(isFigureValue('September 4, 2026, 3:40 PM')).toBe(true);
-    // 'Sep 4 2026 and more' is three words around '4 2026' - a figure by the
-    // stated budget; prose needs a longer tail.
-    expect(isFigureValue('Sep 4 2026 and a lot more')).toBe(false);
+    expect(isFigureValue('Sep 4 2026 and more')).toBe(false);
     expect(isFigureValue('NaN')).toBe(true);
     expect(isFigureValue('$NaN')).toBe(true);
     expect(isFigureValue('NaN%')).toBe(true);
@@ -222,16 +220,22 @@ describe('isFigureValue', () => {
   it('spelled-out units are figures; a sentence after the number is prose', () => {
     expect(isFigureValue('12.3 kilometers')).toBe(true); // unitDisplay: long
     expect(isFigureValue('12.3 kilometers per hour')).toBe(true);
+    expect(isFigureValue('12,3 Kilometer pro Stunde')).toBe(true); // de
+    expect(isFigureValue('12,3 kilómetros por hora')).toBe(true); // es
     expect(isFigureValue('5 minutes')).toBe(true);
-    expect(isFigureValue('3 items in the basket')).toBe(false); // four words
+    // A multi-word tail is a unit only through a locale connector ("per");
+    // any other run of words is a sentence.
+    expect(isFigureValue('42 requests still pending')).toBe(false);
+    expect(isFigureValue('5 days ago')).toBe(false);
+    expect(isFigureValue('3 items in the basket')).toBe(false);
     expect(isFigureValue('12 apples, 3 pears')).toBe(false);
   });
 
-  it('a unit word before the number is a figure, within the three-word budget', () => {
+  it('a unit word before the number is a figure; a phrase after it is not', () => {
     expect(isFigureValue('時速 12.3 キロメートル')).toBe(true); // ja-JP unit-prefix form
     expect(isFigureValue('약 12 km')).toBe(true);
     expect(isFigureValue('Total 42')).toBe(true);
-    expect(isFigureValue('speed 12.3 kilometers per hour')).toBe(false); // four words
+    expect(isFigureValue('speed 12.3 kilometers per hour')).toBe(false); // leading word + phrase
   });
 
   it('unit words, month names and day periods in combining-mark scripts are figures', () => {
@@ -265,9 +269,7 @@ describe('isFigureValue', () => {
     expect(isFigureValue('Sep 4 – 6, 2026')).toBe(true); // en-US
     expect(isFigureValue('04.–06.09.2026')).toBe(true); // de-DE
     expect(isFigureValue('9/4 – 9/6/2026')).toBe(true);
-    // '4 – Sept 2026' is a numeric range whose right side is 'Sept 2026'
-    // (word + number) - a figure by the word budget; prose is a sentence.
-    expect(isFigureValue('4 – 6 Sept 2026 and much later still')).toBe(false);
+    expect(isFigureValue('4 – 6 Sept 2026 and later')).toBe(false);
   });
 
   it('degree scale letters in any script are figures', () => {

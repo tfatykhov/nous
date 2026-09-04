@@ -105,13 +105,13 @@ export function isTightUnit(unit: string): boolean {
 //   a percent-family glyph or a special symbol (°, ′, ″) with an optional
 //   short scale letter in any script (°C, °F, ar "°م"); a unit WORD in any script — abbreviated
 //   (kg, bpm, ru "км", de "Mio.", ja "万") or spelled out as
-//   `unitDisplay: "long"` emits it ("kilometers", "kilometers per hour": up
-//   to three words) — optionally compounded with a slash (km/h) or ending in
-//   an abbreviation period; a bare /rate (/day, /wk); or a SUFFIX currency
-//   symbol as locale formatters emit it ("42 €", de-DE "1.234,56 €" — `\s`
-//   also matches the no-break space Intl puts there). The figure/prose line
-//   is therefore: a number followed by at most three words is a figure; a
-//   longer tail is prose.
+//   `unitDisplay: "long"` emits it ("kilometers", or "X per Y" through a
+//   locale connector — see CONNECTOR) — optionally compounded with a slash
+//   (km/h) or ending in an abbreviation period; a bare /rate (/day, /wk);
+//   or a SUFFIX currency symbol as locale formatters emit it ("42 €", de-DE
+//   "1.234,56 €" — `\s` also matches the no-break space Intl puts there).
+//   The figure/prose line is therefore: a number followed by ONE unit word
+//   (or "X per Y") is a figure; any other run of words is prose.
 //   A bare `e`/`E` is NOT a unit: it is a dangling exponent marker ("1e",
 //   "1e6e"), and letting the word branch swallow it would classify
 //   malformed notation as a figure.
@@ -119,10 +119,17 @@ export function isTightUnit(unit: string): boolean {
 // Devanagari, Bengali, Thai and friends the vowel signs are marks, not
 // letters, so hi-IN "मेगाबाइट" would otherwise fail on its second character.
 const WORD = String.raw`\p{L}[\p{L}\p{M}]{0,19}`;
-const UNIT = String.raw`(\s?(?:${PERCENT}|[°′″])(?:\p{L}\p{M}*){0,2}|\s?(?![eE](?:$|\/))${WORD}\.?(?:\/${WORD}\.?|(?:\s${WORD}){1,2})?|\s?\/${WORD}\.?|\s?${SYMBOL})?`;
-// With a prefix word present the suffix may carry at most two words, so a
-// value never exceeds three words around its number.
-const UNIT_AFTER_PREFIX = String.raw`(\s?(?:${PERCENT}|[°′″])(?:\p{L}\p{M}*){0,2}|\s?(?![eE](?:$|\/))${WORD}\.?(?:\/${WORD}\.?|\s${WORD})?|\s?\/${WORD}\.?|\s?${SYMBOL})?`;
+
+// A multi-word unit is "X per Y", never an arbitrary run of words: the
+// connector is what `unitDisplay: "long"` emits between the two parts —
+// en "per", de "pro", fr "par", es/pt "por", it "al"/"all", ru "в"/"на",
+// pl "na" — so "kilometers per hour" is a unit and "requests still pending"
+// is prose.
+const CONNECTOR = String.raw`(?:per|pro|par|por|al|all|na|в|на|за)`;
+const UNIT = String.raw`(\s?(?:${PERCENT}|[°′″])(?:\p{L}\p{M}*){0,2}|\s?(?![eE](?:$|\/))${WORD}\.?(?:\/${WORD}\.?|\s${CONNECTOR}\s${WORD}\.?)?|\s?\/${WORD}\.?|\s?${SYMBOL})?`;
+// With a prefix word present the suffix is a single unit word (ja "時速 12.3
+// キロメートル"): a leading word plus a phrase is a sentence.
+const UNIT_AFTER_PREFIX = String.raw`(\s?(?:${PERCENT}|[°′″])(?:\p{L}\p{M}*){0,2}|\s?(?![eE](?:$|\/))${WORD}\.?(?:\/${WORD}\.?)?|\s?\/${WORD}\.?|\s?${SYMBOL})?`;
 
 // Digits with optional grouping and decimal separators, ending on a digit.
 // A digit is any Unicode decimal digit (\p{Nd}, `u` flag) — ar-EG and fa-IR
@@ -153,8 +160,7 @@ const shapes = (core: string) => String.raw`^${shaped(core)}$`;
 // Covers: 42, -12.5%, %12, -%12, $1,234.56, -$1,234.56, $-5, 42 €,
 // ($1,234.56), ∞, 65.0 bpm, 0.8 /day.
 // Some locales put a unit WORD before the number (ja "時速 12.3 キロメートル",
-// zh/ko similar), so one leading word is admitted ahead of the affixes; the
-// "at most three words around a number" line still bounds the whole value.
+// zh/ko similar), so one leading word is admitted ahead of the affixes.
 const AFFIXES = String.raw`${COMPARE}(?:${SIGN}?(?:${PERCENT}\s?)?(?:${SYMBOL}\s?)?|(?:${PERCENT}\s?)?${SYMBOL}\s?${SIGN}?)${MANTISSA}`;
 const NUMBER_CORE = String.raw`(?:${AFFIXES}${UNIT}|${WORD}\s${AFFIXES}${UNIT_AFTER_PREFIX})`;
 const NUMBER = new RegExp(shapes(NUMBER_CORE), 'u');
