@@ -184,6 +184,7 @@ class SurfaceService:
         notify: bool | None = None,
         refuse_fallback_overwrite: bool = False,
         pre_broadcast: Callable[[], None] | None = None,
+        pre_broadcast_rollback: Callable[[], None] | None = None,
         _dedup_retry: bool = False,
         _race_retries: int = 0,
     ) -> str:
@@ -271,6 +272,7 @@ class SurfaceService:
                         expires_at=expires_at,
                         refuse_fallback_overwrite=refuse_fallback_overwrite,
                         pre_broadcast=pre_broadcast,
+                        pre_broadcast_rollback=pre_broadcast_rollback,
                         _race_retries=_race_retries,
                         _locked_surface_id=existing_id,
                     )
@@ -286,6 +288,7 @@ class SurfaceService:
                 expires_at=expires_at,
                 refuse_fallback_overwrite=refuse_fallback_overwrite,
                 pre_broadcast=pre_broadcast,
+                pre_broadcast_rollback=pre_broadcast_rollback,
                 _race_retries=_race_retries,
             )
         if built.kind == "micro_app":
@@ -313,6 +316,7 @@ class SurfaceService:
         _dedup_retry: bool,
         refuse_fallback_overwrite: bool = False,
         pre_broadcast: Callable[[], None] | None = None,
+        pre_broadcast_rollback: Callable[[], None] | None = None,
         agent_id: str,
         now: datetime,
         expires_at: datetime | None,
@@ -328,6 +332,7 @@ class SurfaceService:
                 _dedup_retry=_dedup_retry,
                 refuse_fallback_overwrite=refuse_fallback_overwrite,
                 pre_broadcast=pre_broadcast,
+                pre_broadcast_rollback=pre_broadcast_rollback,
                 agent_id=agent_id,
                 now=now,
                 expires_at=expires_at,
@@ -350,6 +355,7 @@ class SurfaceService:
                 notify=notify,
                 refuse_fallback_overwrite=refuse_fallback_overwrite,
                 pre_broadcast=pre_broadcast,
+                pre_broadcast_rollback=pre_broadcast_rollback,
                 _dedup_retry=_dedup_retry,
                 _race_retries=_race_retries + 1,
             )
@@ -364,6 +370,7 @@ class SurfaceService:
         _dedup_retry: bool,
         refuse_fallback_overwrite: bool = False,
         pre_broadcast: Callable[[], None] | None = None,
+        pre_broadcast_rollback: Callable[[], None] | None = None,
         agent_id: str,
         now: datetime,
         expires_at: datetime | None,
@@ -535,9 +542,31 @@ class SurfaceService:
                 # a live card with dead buttons (P2-1). On success, commit and
                 # broadcast follow immediately so clients never see the surface
                 # before its fingerprints are registered in the finding store.
+                #
+                # The hook mutates an IN-MEMORY store, which the DB transaction
+                # cannot roll back: a commit that fails after the hook ran (
+                # disconnect, serialization failure, deferred constraint) would
+                # otherwise orphan the registration and expose it via
+                # GET /heartbeat/findings for a surface that was never
+                # published (codex round 3). Running the hook AFTER commit is
+                # not a fix either — it just moves the window to "committed and
+                # broadcast with dead buttons". So: hook before commit, and
+                # compensate explicitly if the commit fails.
+                ran_pre_broadcast = False
                 if pre_broadcast is not None:
                     pre_broadcast()
-                await session.commit()
+                    ran_pre_broadcast = True
+                try:
+                    await session.commit()
+                except BaseException:
+                    if ran_pre_broadcast and pre_broadcast_rollback is not None:
+                        try:
+                            pre_broadcast_rollback()
+                        except Exception:  # pragma: no cover - defensive
+                            logger.exception(
+                                "pre_broadcast_rollback failed after commit error"
+                            )
+                    raise
             except IntegrityError:
                 # Lost the dedup race: another producer inserted the same
                 # live (agent_id, dedup_key) first. Retry once — the lookup
@@ -559,6 +588,7 @@ class SurfaceService:
                     # app that just got published.
                     refuse_fallback_overwrite=refuse_fallback_overwrite,
                     pre_broadcast=pre_broadcast,
+                    pre_broadcast_rollback=pre_broadcast_rollback,
                     _dedup_retry=True,
                 )
 

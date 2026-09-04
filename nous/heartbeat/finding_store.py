@@ -9,7 +9,9 @@ accumulation escalation for noisy checks.
 
 from __future__ import annotations
 
+import copy
 import logging
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 
 from nous.heartbeat.schemas import (
@@ -216,6 +218,33 @@ class FindingStore:
     def get_tracked(self, fingerprint: str) -> TrackedFinding | None:
         """Get a tracked finding by fingerprint."""
         return self._findings.get(fingerprint)
+
+    # ------------------------------------------------------------------
+    # Transactional compensation
+    # ------------------------------------------------------------------
+
+    def snapshot(self, fingerprints: Iterable[str]) -> dict[str, TrackedFinding | None]:
+        """Deep-copy the tracked state of ``fingerprints`` for later restore.
+
+        The store is in-memory and therefore cannot participate in the DB
+        transaction that publishes a surface. A caller that ingests findings
+        as part of a fallible push (see ``a2ui.tools.push_surface``) takes a
+        snapshot first and calls :meth:`restore` if the push fails, so a
+        rolled-back surface never leaves an orphaned finding exposed through
+        ``GET /heartbeat/findings``. ``None`` records "was not tracked".
+        """
+        return {
+            fp: copy.deepcopy(self._findings[fp]) if fp in self._findings else None
+            for fp in fingerprints
+        }
+
+    def restore(self, snapshot: Mapping[str, TrackedFinding | None]) -> None:
+        """Undo ingests by restoring a :meth:`snapshot` taken before them."""
+        for fp, tracked in snapshot.items():
+            if tracked is None:
+                self._findings.pop(fp, None)
+            else:
+                self._findings[fp] = tracked
 
     # ------------------------------------------------------------------
     # Maintenance

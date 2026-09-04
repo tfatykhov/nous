@@ -422,6 +422,18 @@ def register_a2ui_tools(
                 row = dict(item)
                 fp = str(row.get("fingerprint") or "")
                 if fp and fp in known:
+                    # Caller supplied a REAL fingerprint: adopt it unchanged.
+                    # But the stored finding may be RESOLVED, and rendering a
+                    # live Acknowledge/Resolve/Dismiss card over a resolved
+                    # record leaves the store and the surface disagreeing and
+                    # skips the RESOLVED->NEW transition, reopen_count and the
+                    # flapping bookkeeping that rides on it (codex round 3).
+                    # Re-ingest the STORED Finding — same deferred path as a
+                    # derived one, so nothing mutates before the censor gate.
+                    tracked = store.get_tracked(fp)
+                    if tracked is not None and fp not in within_push_fps:
+                        within_push_fps.add(fp)
+                        _pending_ingest.append(tracked.finding)
                     normalized.append(row)
                     continue
                 message = str(row.get("message") or "").strip()
@@ -545,11 +557,34 @@ def register_a2ui_tools(
             return _tool_error(f"Surface failed validation: {exc.errors[:2]}")
         except (KeyError, ValueError, TypeError) as exc:
             return _tool_error(f"Bad params for {template}: {exc}")
+        # The finding store is in-memory and cannot join the DB transaction,
+        # so the ingest is made explicitly compensatable: snapshot the affected
+        # fingerprints, ingest, and restore that snapshot if the surrounding
+        # push fails after the hook ran. Without this, a commit failure leaves
+        # an orphaned finding visible at GET /heartbeat/findings for a surface
+        # that was never published (codex round 3).
+        _ingest_snapshot: dict = {}
+
         def _do_ingest() -> None:
+            store_ = _pending_store
+            if store_ is None:  # pragma: no cover - hook not wired without a store
+                return
+            _ingest_snapshot.clear()
+            _ingest_snapshot.update(
+                store_.snapshot({_f.fingerprint() for _f in _pending_ingest})
+            )
             for _f in _pending_ingest:
-                _pending_store.ingest(_f)  # type: ignore[union-attr]
+                store_.ingest(_f)
+
+        def _undo_ingest() -> None:
+            store_ = _pending_store
+            if store_ is None or not _ingest_snapshot:
+                return
+            store_.restore(_ingest_snapshot)
+            _ingest_snapshot.clear()
 
         pre_broadcast_hook = _do_ingest if _pending_store is not None else None
+        pre_broadcast_rollback = _undo_ingest if _pending_store is not None else None
 
         try:
             surface_id = await surface_service.push_built(
@@ -558,10 +593,13 @@ def register_a2ui_tools(
                 session_id=kwargs.get("_session_id"),
                 notify=kwargs.get("notify"),
                 pre_broadcast=pre_broadcast_hook,
+                pre_broadcast_rollback=pre_broadcast_rollback,
             )
         except PermissionError as exc:
+            _undo_ingest()
             return _tool_error(f"Surface blocked: {exc}")
         except Exception as exc:
+            _undo_ingest()
             logger.exception("push_surface failed")
             return _tool_error(f"Failed to push surface: {exc}")
         return {
