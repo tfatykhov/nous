@@ -180,6 +180,20 @@ describe('isFigureValue', () => {
     expect(isFigureValue('9/4-2026')).toBe(false); // mixed separators
   });
 
+  it('dates with a month word and formatted NaN are figures', () => {
+    expect(isFigureValue('Sep 4, 2026')).toBe(true); // en-US medium
+    expect(isFigureValue('4 Sept 2026')).toBe(true); // en-GB
+    expect(isFigureValue('4. Sept. 2026')).toBe(true); // de
+    expect(isFigureValue('4 sept. 2026')).toBe(true); // fr
+    expect(isFigureValue('September 4, 2026, 3:40 PM')).toBe(true);
+    expect(isFigureValue('Sep 4 2026 and more')).toBe(false);
+    expect(isFigureValue('NaN')).toBe(true);
+    expect(isFigureValue('$NaN')).toBe(true);
+    expect(isFigureValue('NaN%')).toBe(true);
+    // 'NaNs' is NaN with unit 's' by the unit rule; prose is a sentence.
+    expect(isFigureValue('not a number')).toBe(false);
+  });
+
   it('isTightUnit shares the percent family with the classifier', () => {
     for (const u of ['%', '％', '٪', '‰', '°C', '′']) expect(isTightUnit(u)).toBe(true);
     for (const u of ['kg', 'bpm', '€', '']) expect(isTightUnit(u)).toBe(false);

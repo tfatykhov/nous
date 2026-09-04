@@ -5,7 +5,8 @@
 // A value is a FIGURE when its entire content matches one of:
 //   placeholder  : —, –, N/A, TBD, -
 //   ISO date/datetime : 2026-09-02, 2026-09-02T15:40:43Z, 2026-09-02T15:40:43+00:00
-//   localized date : 9/4/2026, 04/09/2026, 04.09.2026, 2026/09/04 15:40
+//   localized date : 9/4/2026, 04/09/2026, 04.09.2026, 2026/09/04 15:40,
+//               Sep 4, 2026, 4 Sept 2026, 4. Sept. 2026
 //   time of day  : 14:30, 2:30 PM
 //   ratio        : 12/30
 //   compound duration: 1h 30m, 2d 3h, 45s
@@ -33,8 +34,20 @@ const TIME_OF_DAY = /^\d{1,2}:\d{2}(:\d{2})?(\s?[APap][Mm])?$/;
 // A localized numeric date: three digit fields joined by one separator kind
 // (en-US 9/4/2026, en-GB 04/09/2026, de 04.09.2026, ISO-ish 2026/09/04), with
 // an optional time of day after a space or comma.
-const NUMERIC_DATE =
-  /^\p{Nd}{1,4}([./-])\p{Nd}{1,2}\1\p{Nd}{1,4}(?:[ ,]+\p{Nd}{1,2}:\p{Nd}{2}(?::\p{Nd}{2})?(?:\s?[APap][Mm])?)?$/u;
+const TIME_SUFFIX = String.raw`(?:[ ,]+\p{Nd}{1,2}:\p{Nd}{2}(?::\p{Nd}{2})?(?:\s?[APap][Mm])?)?`;
+const NUMERIC_DATE = new RegExp(
+  String.raw`^\p{Nd}{1,4}([./-])\p{Nd}{1,2}\1\p{Nd}{1,4}${TIME_SUFFIX}$`,
+  'u',
+);
+
+// A localized date with a month WORD (any script, optionally abbreviated with
+// a period): en-US "Sep 4, 2026", en-GB "4 Sept 2026", de "4. Sept. 2026",
+// fr "4 sept. 2026", plus the same optional time of day.
+const MONTH = String.raw`\p{L}{3,9}\.?`;
+const WORDY_DATE = new RegExp(
+  String.raw`^(?:${MONTH} \p{Nd}{1,2},? \p{Nd}{4}|\p{Nd}{1,2}\.? ${MONTH} \p{Nd}{4})${TIME_SUFFIX}$`,
+  'u',
+);
 
 const RATIO = /^\d+\/\d+$/;
 
@@ -94,9 +107,10 @@ const UNIT = String.raw`(\s?(?:${PERCENT}|[°′″])[A-Za-z]{0,2}|\s?(?![eE](?:
 // 1.2e-6, 1E+09) follows the mantissa.
 const DIGITS = String.raw`\p{Nd}(?:[\p{Nd}.,'’\s\u066b\u066c]*\p{Nd})?(?:[eE][+\-−]?\p{Nd}+)?`;
 
-// What sits where the number goes: digits, or the infinity a formatter emits
-// for a non-finite metric ("∞", "-∞", "$∞", "∞%") — same affixes apply.
-const MANTISSA = String.raw`(?:${DIGITS}|∞)`;
+// What sits where the number goes: digits, or what a formatter emits for a
+// non-finite metric — "∞" / "-∞" / "$∞" / "∞%", and "NaN" / "$NaN" / "NaN%"
+// for an indeterminate one — with the same affixes as digits.
+const MANTISSA = String.raw`(?:${DIGITS}|∞|NaN)`;
 
 // Accounting style wraps a negative in parentheses — "($1,234.56)",
 // "(1 234,56 $US)" — so every numeric core is also accepted inside one
@@ -126,6 +140,7 @@ const PATTERNS = [
   PLACEHOLDER,
   ISO_DATE,
   NUMERIC_DATE,
+  WORDY_DATE,
   TIME_OF_DAY,
   RATIO,
   DURATION,
