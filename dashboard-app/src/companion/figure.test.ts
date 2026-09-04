@@ -99,6 +99,16 @@ describe('isFigureValue', () => {
     expect(isFigureValue('١٢ نفر')).toBe(false); // digits followed by prose
   });
 
+  it('threshold and approximation markers before a number are figures', () => {
+    expect(isFigureValue('<5%')).toBe(true);
+    expect(isFigureValue('≥95 bpm')).toBe(true);
+    expect(isFigureValue('≤1.2 ms')).toBe(true);
+    expect(isFigureValue('> $1,000')).toBe(true);
+    expect(isFigureValue('~42')).toBe(true);
+    expect(isFigureValue('±0.3 kg')).toBe(true);
+    expect(isFigureValue('< five')).toBe(false);
+  });
+
   it('"—" is a figure (em-dash placeholder)', () => {
     expect(isFigureValue('—')).toBe(true);
   });

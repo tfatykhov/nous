@@ -8,7 +8,8 @@
 //   time of day  : 14:30, 2:30 PM
 //   ratio        : 12/30
 //   compound duration: 1h 30m, 2d 3h, 45s
-//   number with optional sign, currency symbol or 3-letter code, thousands
+//   number with optional comparison marker (<, ≥, ~, ±), sign, currency
+//               symbol or 3-letter code, thousands
 //               separators, decimal, and a short trailing unit (kg, km, %, °…),
 //               a compound unit (km/h) or a /rate suffix (0.8 /day, 3/wk)
 //   directional delta: ↓0.03, ↑6 %, ↑0.8 /day, ▲3 — a leading arrow (↑↓▲▼)
@@ -58,18 +59,22 @@ const DIGITS = String.raw`\p{Nd}(?:[\p{Nd}.,'’\s\u066b\u066c]*\p{Nd})?`;
 const SIGN = String.raw`[+\-−]`;
 const SYMBOL = String.raw`[€$£¥₹฿₩]`;
 
+// A threshold / approximation marker may lead a figure: "<5%", "≥95 bpm",
+// "≤1.2 ms", "~42", "±0.3 kg". Optional whitespace after it ("< 5").
+const COMPARE = String.raw`(?:[<>≤≥~≈±]\s?)?`;
+
 // Optional PREFIX currency symbol (space optional: "€ 42") with a sign on
 // either side, digits, optional unit (which may be a SUFFIX symbol: "42 €").
 // Covers: 42, -12.5%, $1,234.56, -$1,234.56, $-5, 42 €, 65.0 bpm, 0.8 /day.
 const NUMBER = new RegExp(
-  String.raw`^(?:${SIGN}?(?:${SYMBOL}\s?)?|${SYMBOL}\s?${SIGN}?)${DIGITS}${UNIT}$`,
+  String.raw`^${COMPARE}(?:${SIGN}?(?:${SYMBOL}\s?)?|${SYMBOL}\s?${SIGN}?)${DIGITS}${UNIT}$`,
   'u',
 );
 
 // 3-letter ISO currency code (space optional) with a sign on either side.
 // Covers: EUR 1,234,567.89, USD100, -EUR 5, EUR -5, EUR 5 /mo.
 const CURRENCY_CODE = new RegExp(
-  String.raw`^(?:${SIGN}?[A-Z]{3}\s?|[A-Z]{3}\s?${SIGN}?)${DIGITS}${UNIT}$`,
+  String.raw`^${COMPARE}(?:${SIGN}?[A-Z]{3}\s?|[A-Z]{3}\s?${SIGN}?)${DIGITS}${UNIT}$`,
   'u',
 );
 
