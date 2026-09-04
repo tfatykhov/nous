@@ -37,8 +37,11 @@ const ISO_DATE = new RegExp(String.raw`^${ranged(ISO_DATE_CORE)}$`);
 // followed by a day period — Latin "AM"/"p.m." or a locale's own one-to-two
 // letter marker (ar "م" / "ص"). One definition, used standalone and as the
 // optional tail of a date.
-const DAY_PERIOD = String.raw`(?:\s?(?:[APap]\.?[Mm]\.?|\p{L}\p{M}*(?:\p{L}\p{M}*)?\.?))?`;
-const CLOCK = String.raw`\p{Nd}{1,2}:\p{Nd}{2}(?::\p{Nd}{2})?${DAY_PERIOD}`;
+const PERIOD_WORD = String.raw`(?:[APap]\.?[Mm]\.?|\p{L}\p{M}*(?:\p{L}\p{M}*)?\.?)`;
+const DAY_PERIOD = String.raw`(?:\s?${PERIOD_WORD})?`;
+// ko-KR puts the period BEFORE the clock ("PM 2:30"), zh-CN glues it on
+// ("下午2:30"), so it is admitted on either side.
+const CLOCK = String.raw`(?:${PERIOD_WORD}\s?)?\p{Nd}{1,2}:\p{Nd}{2}(?::\p{Nd}{2})?${DAY_PERIOD}`;
 const TIME_OF_DAY = new RegExp(String.raw`^${ranged(CLOCK)}$`, 'u');
 
 // A localized numeric date: three digit fields joined by one separator kind
@@ -51,8 +54,12 @@ const NUMERIC_DATE = new RegExp(String.raw`^${ranged(NUMERIC_DATE_CORE)}$`, 'u')
 // A localized date with a month WORD (any script, optionally abbreviated with
 // a period): en-US "Sep 4, 2026", en-GB "4 Sept 2026", de "4. Sept. 2026",
 // fr "4 sept. 2026", plus the same optional time of day.
-const MONTH = String.raw`\p{L}[\p{L}\p{M}]{2,11}\.?`;
-const WORDY_DATE_CORE = String.raw`(?:${MONTH} \p{Nd}{1,2},? \p{Nd}{4}|\p{Nd}{1,2}\.? ${MONTH} \p{Nd}{4})${TIME_SUFFIX}`;
+// A month token may carry internal abbreviation periods (th "ก.ย.") and a
+// terminal abbreviation mark — a period or Devanagari's U+0970 (hi "सित॰").
+const MONTH = String.raw`\p{L}(?:[\p{L}\p{M}]|\.(?=[\p{L}\p{M}]))(?:[\p{L}\p{M}]|\.(?=[\p{L}\p{M}]))*[.॰]?`;
+// Either order; a comma may follow the day (en "Sep 4, 2026") or the month
+// (bn "৪ সেপ, ২০২৬").
+const WORDY_DATE_CORE = String.raw`(?:${MONTH} \p{Nd}{1,2},? \p{Nd}{4}|\p{Nd}{1,2}\.? ${MONTH},? \p{Nd}{4})${TIME_SUFFIX}`;
 const WORDY_DATE = new RegExp(String.raw`^${ranged(WORDY_DATE_CORE)}$`, 'u');
 
 // formatRange COLLAPSES the fields two dates share: en-GB "4 – 6 Sept 2026",

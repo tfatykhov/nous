@@ -278,6 +278,15 @@ describe('isFigureValue', () => {
     expect(isFigureValue('12°Celsius')).toBe(false);
   });
 
+  it('day-period prefixes and punctuated month tokens are figures', () => {
+    expect(isFigureValue('PM 2:30')).toBe(true); // ko-KR
+    expect(isFigureValue('下午2:30')).toBe(true); // zh-CN
+    expect(isFigureValue('৪ সেপ, ২০২৬')).toBe(true); // bn-BD: comma after the month
+    expect(isFigureValue('4 ก.ย. 2569')).toBe(true); // th-TH: internal periods
+    expect(isFigureValue('4 सित॰ 2026')).toBe(true); // hi-IN: U+0970
+    expect(isFigureValue('PM 2:30 sharp')).toBe(false);
+  });
+
   it('isTightUnit shares the percent family with the classifier', () => {
     for (const u of ['%', '％', '٪', '‰', '°C', '′']) expect(isTightUnit(u)).toBe(true);
     for (const u of ['kg', 'bpm', '€', '']) expect(isTightUnit(u)).toBe(false);
