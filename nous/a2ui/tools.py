@@ -346,6 +346,17 @@ def _intent_slug(intent: str) -> str:
     return f"{slug[:40] or 'app'}-{digest}"
 
 
+class FindingsChangedDuringPush(RuntimeError):
+    """Raised inside the pre-broadcast hook when a finding the probe left NEW is
+    no longer NEW at publication time (acknowledged/resolved meanwhile). The
+    surface was built from the probe's verdict, so publishing it would show
+    an open card over a record the store already considers handled."""
+
+    def __init__(self, fingerprints: list[str]) -> None:
+        super().__init__(", ".join(fingerprints))
+        self.fingerprints = fingerprints
+
+
 _FINDING_URGENCIES = ("high", "normal", "low")
 _URGENCY_ALIASES = {"medium": "normal", "moderate": "normal", "critical": "high",
                     "urgent": "high", "info": "low", "informational": "low"}
@@ -425,36 +436,40 @@ def register_a2ui_tools(
             from nous.heartbeat.schemas import FindingState as _FindingState
 
             candidates: list[tuple[dict, Any]] = []
+
+            def _adopt(fp: str, stored: Any) -> None:
+                # The card renders the STORED finding, never the caller's
+                # row, whenever the fingerprint is already tracked - whether
+                # the caller supplied it or it was derived from the message.
+                # The buttons act on the stored record and ingest() never
+                # replaces `existing.finding`, so a caller row with different
+                # message/urgency/check would have the user triage one thing
+                # while the lifecycle (and escalation) of another is mutated
+                # (codex rounds 5 and 6). The stored finding is routed through
+                # the lifecycle like any other item: RESOLVED reopens, an
+                # acknowledged or startup-suppressed one is not re-surfaced.
+                candidates.append(
+                    (
+                        {
+                            "fingerprint": fp,
+                            "message": stored.summary,
+                            "urgency": stored.urgency,
+                            "check": stored.check_name,
+                        },
+                        stored,
+                    )
+                )
+
             for item in findings:
                 row = dict(item)
                 fp = str(row.get("fingerprint") or "")
                 tracked = store.get_tracked(fp) if fp else None
                 if tracked is not None:
-                    # Caller supplied a REAL fingerprint: adopt it unchanged,
-                    # and route the STORED finding through the lifecycle like
-                    # any other item - a RESOLVED record reopens (reopen_count,
-                    # flapping), an acknowledged or startup-suppressed one is
-                    # not re-surfaced (codex rounds 3 and 4).
+                    # Caller supplied a REAL fingerprint: adopt it unchanged.
                     if fp in within_push_fps:
                         continue
                     within_push_fps.add(fp)
-                    stored = tracked.finding
-                    # Render the STORED finding, never the caller's row: the
-                    # buttons act on the stored record, so caller-supplied
-                    # message/urgency/check would let a stale or fabricated
-                    # row have the user triage one issue while the lifecycle
-                    # of another is mutated (codex round 5).
-                    candidates.append(
-                        (
-                            {
-                                "fingerprint": fp,
-                                "message": stored.summary,
-                                "urgency": stored.urgency,
-                                "check": stored.check_name,
-                            },
-                            stored,
-                        )
-                    )
+                    _adopt(fp, tracked.finding)
                     continue
                 message = str(row.get("message") or "").strip()
                 if not message:
@@ -488,6 +503,13 @@ def register_a2ui_tools(
                     # Same item twice in one push: render it once.
                     continue
                 within_push_fps.add(fp)
+                tracked = store.get_tracked(fp)
+                if tracked is not None:
+                    # The message derives to a fingerprint that is already
+                    # tracked (a re-push): the store is authoritative for
+                    # its metadata, so render that, not the caller's row.
+                    _adopt(fp, tracked.finding)
+                    continue
                 row["fingerprint"] = fp
                 row["urgency"] = urgency
                 candidates.append((row, finding))
@@ -654,6 +676,8 @@ def register_a2ui_tools(
             store_ = _pending_store
             if store_ is None:  # pragma: no cover - hook not wired without a store
                 return
+            from nous.heartbeat.schemas import FindingState as _State
+
             fps = {_f.fingerprint() for _f in _pending_ingest}
             _ingest_before.clear()
             _ingest_before.update(store_.snapshot(fps))
@@ -661,6 +685,21 @@ def register_a2ui_tools(
                 store_.ingest(_f)
             _ingest_after.clear()
             _ingest_after.update(store_.snapshot(fps))
+            # The surface was built from the PROBE's verdict; the censor gate
+            # and the DB writes it then awaited are windows in which a REST
+            # or companion action can acknowledge/resolve one of these
+            # fingerprints. Re-read the verdict now, inside the transaction:
+            # if any item is no longer NEW, publishing the card would show it
+            # open over a record the store considers handled, so the push
+            # fails instead (rollback, conditional restore, the agent re-pushes
+            # and the next probe drops it) (codex round 6).
+            changed = sorted(
+                fp
+                for fp in fps
+                if (t := store_.get_tracked(fp)) is None or t.state != _State.NEW
+            )
+            if changed:
+                raise FindingsChangedDuringPush(changed)
 
         def _undo_ingest() -> None:
             store_ = _pending_store
@@ -692,6 +731,13 @@ def register_a2ui_tools(
         except PermissionError as exc:
             _undo_ingest()
             return _tool_error(f"Surface blocked: {exc}")
+        except FindingsChangedDuringPush as exc:
+            _undo_ingest()
+            return _tool_error(
+                "Nothing published: while the surface was being published, "
+                f"these findings were acknowledged or resolved by someone else: {exc}. "
+                "Push again for a current card."
+            )
         except Exception as exc:
             _undo_ingest()
             logger.exception("push_surface failed")

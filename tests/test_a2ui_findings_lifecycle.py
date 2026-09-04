@@ -21,6 +21,10 @@ Round 4  the lifecycle's SUPPRESS verdict is honoured on the card: the store
        writer (a concurrent push, a user action, the runner) did meanwhile.
 Round 5  an adopted real fingerprint renders the STORED finding, never the
        caller's row - the buttons act on the stored record.
+Round 6  the same holds when a caller's message DERIVES to a tracked
+       fingerprint; and the hook re-reads the verdict inside the transaction,
+       failing the push if an item the probe left NEW was acknowledged or
+       resolved before publication.
 """
 
 from __future__ import annotations
@@ -516,3 +520,53 @@ async def test_round5_adopted_fingerprint_renders_the_stored_finding() -> None:
     assert "something else entirely" not in rendered
     assert "fake" not in rendered
     assert "disk-check" in rendered
+
+
+async def test_round6_derived_existing_fingerprint_renders_the_stored_finding() -> None:
+    """Re-pushing a message that derives to an already-tracked fingerprint,
+    with a different urgency, must render the STORED urgency: ingest() never
+    replaces `existing.finding`, so escalation keeps using the stored one."""
+    store = _store()
+    dispatcher, service = _make_dispatcher(store)
+
+    _, is_error = await _push_rows(dispatcher, [{"message": "PR #568 open", "urgency": "low", "check": "prs"}])
+    assert not is_error
+    (fp,) = _rendered(service)
+
+    content, is_error = await _push_rows(dispatcher, [{"message": "PR #568 open", "urgency": "high", "check": "prs"}])
+
+    assert not is_error, content
+    assert _rendered(service) == {fp}, "same message, same record - no fork"
+    rendered = json.dumps(service.pushed[-1].components)
+    assert "low" in rendered and "high" not in rendered
+    assert store.get_tracked(fp).finding.urgency == "low"
+
+
+async def test_round6_action_between_probe_and_hook_fails_the_push() -> None:
+    """A REST/companion acknowledge landing after the probe but before the
+    hook (during the censor gate / DB writes) must not let the already-built
+    card publish the item as open: the hook re-reads the verdict and fails."""
+    store = _store()
+    fp = _seed(store)
+
+    class _AckThenHook:
+        def __init__(self) -> None:
+            self.pushed: list[Any] = []
+
+        async def push_built(self, built: Any, *, pre_broadcast: Any = None, **kwargs: Any) -> str:
+            assert store.acknowledge(fp), "simulates a user action during the gate"
+            if pre_broadcast is not None:
+                pre_broadcast()  # raises; the real service rolls back and re-raises
+            self.pushed.append(built)
+            return "surface-123"
+
+    dispatcher, service = _make_dispatcher(store, _AckThenHook())
+
+    content, is_error = await _push_rows(dispatcher, [{"fingerprint": fp, "message": "disk 91% full"}])
+
+    assert is_error
+    assert "acknowledged or resolved" in content
+    assert not service.pushed, "nothing may publish over a record the store considers handled"
+    after = store.to_list()[0]
+    assert after["state"] == "acknowledged", "the user's action survives"
+    assert after["seen_count"] == 1, "the hook's own ingest bump is undone"
