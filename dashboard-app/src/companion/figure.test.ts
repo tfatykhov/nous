@@ -123,8 +123,11 @@ describe('isFigureValue', () => {
     expect(isFigureValue('1.2e-6')).toBe(true);
     expect(isFigureValue('1E+09')).toBe(true);
     expect(isFigureValue('3e8 m/s')).toBe(true);
-    // '1e' reads as 1 with unit 'e' (a legal alpha unit), so the negatives
-    // are shapes no rule admits: no mantissa, or a dangling exponent sign.
+    // A dangling exponent marker is not a unit: the alpha-unit branch
+    // refuses a bare e/E, so malformed notation stays prose.
+    expect(isFigureValue('1e')).toBe(false);
+    expect(isFigureValue('1e6e')).toBe(false);
+    expect(isFigureValue('1 E')).toBe(false);
     expect(isFigureValue('e6')).toBe(false);
     expect(isFigureValue('1e+')).toBe(false);
   });

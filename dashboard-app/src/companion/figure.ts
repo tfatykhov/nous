@@ -54,8 +54,10 @@ const COMPARE = String.raw`(?:[<>≤≥~≈±]\s?)?`;
 //   (°C, °F), a short alpha unit optionally compounded with a slash (kg,
 //   bpm, km/h, EUR), a bare /rate (/day, /wk), or a SUFFIX currency symbol
 //   as locale formatters emit it ("42 €", de-DE "1.234,56 €" — `\s` also
-//   matches the no-break space Intl puts there).
-const UNIT = String.raw`(\s?[%°‰′″][A-Za-z]{0,2}|\s?[A-Za-z]{1,5}(\/[A-Za-z]{1,10})?|\s?\/[A-Za-z]{1,10}|\s?${SYMBOL})?`;
+//   matches the no-break space Intl puts there). A bare `e`/`E` is NOT a
+//   unit: it is a dangling exponent marker ("1e", "1e6e"), and letting the
+//   alpha branch swallow it would classify malformed notation as a figure.
+const UNIT = String.raw`(\s?[%°‰′″][A-Za-z]{0,2}|\s?(?![eE](?:$|\/))[A-Za-z]{1,5}(\/[A-Za-z]{1,10})?|\s?\/[A-Za-z]{1,10}|\s?${SYMBOL})?`;
 
 // Digits with optional grouping and decimal separators, ending on a digit.
 // A digit is any Unicode decimal digit (\p{Nd}, `u` flag) — ar-EG and fa-IR
