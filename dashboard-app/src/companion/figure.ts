@@ -34,6 +34,20 @@ const RATIO = /^\d+\/\d+$/;
 // One or more <digits><unit-char> groups, e.g. "1h 30m", "2d", "45s".
 const DURATION = /^(\d+\s?[dhms]\s?)+$/;
 
+// A sign (ASCII or Unicode minus) may sit on EITHER side of a currency
+// prefix — Intl.NumberFormat emits "-$1,234.56", hand-written data "$-5" —
+// but not on both: `-$-5` is not a figure.
+const SIGN = String.raw`[+\-−]`;
+
+// A currency symbol, optionally COMPOUND as locale formatters emit it:
+// R$ (BRL), CA$ / US$ / A$ / HK$ (disambiguated dollars) — up to three
+// capitals glued to the symbol.
+const SYMBOL = String.raw`(?:[A-Z]{1,3})?[€$£¥₹฿₩]`;
+
+// A threshold / approximation marker may lead a figure: "<5%", "≥95 bpm",
+// "≤1.2 ms", "~42", "±0.3 kg". Optional whitespace after it ("< 5").
+const COMPARE = String.raw`(?:[<>≤≥~≈±]\s?)?`;
+
 // One optional unit suffix, shared by every numeric pattern so a unit
 // accepted after "↑0.8" is also accepted after "0.8" (codex on #632):
 //   a special symbol (%, °, ‰, ′, ″) with an optional short scale letter
@@ -41,7 +55,7 @@ const DURATION = /^(\d+\s?[dhms]\s?)+$/;
 //   bpm, km/h, EUR), a bare /rate (/day, /wk), or a SUFFIX currency symbol
 //   as locale formatters emit it ("42 €", de-DE "1.234,56 €" — `\s` also
 //   matches the no-break space Intl puts there).
-const UNIT = String.raw`(\s?[%°‰′″][A-Za-z]{0,2}|\s?[A-Za-z]{1,5}(\/[A-Za-z]{1,10})?|\s?\/[A-Za-z]{1,10}|\s?[€$£¥₹฿₩])?`;
+const UNIT = String.raw`(\s?[%°‰′″][A-Za-z]{0,2}|\s?[A-Za-z]{1,5}(\/[A-Za-z]{1,10})?|\s?\/[A-Za-z]{1,10}|\s?${SYMBOL})?`;
 
 // Digits with optional grouping and decimal separators, ending on a digit.
 // A digit is any Unicode decimal digit (\p{Nd}, `u` flag) — ar-EG and fa-IR
@@ -52,16 +66,6 @@ const UNIT = String.raw`(\s?[%°‰′″][A-Za-z]{0,2}|\s?[A-Za-z]{1,5}(\/[A-Za
 // which `\s` matches. Ending on a digit is what lets UNIT's own optional
 // whitespace claim the gap before a suffix.
 const DIGITS = String.raw`\p{Nd}(?:[\p{Nd}.,'’\s\u066b\u066c]*\p{Nd})?`;
-
-// A sign (ASCII or Unicode minus) may sit on EITHER side of a currency
-// prefix — Intl.NumberFormat emits "-$1,234.56", hand-written data "$-5" —
-// but not on both: `-$-5` is not a figure.
-const SIGN = String.raw`[+\-−]`;
-const SYMBOL = String.raw`[€$£¥₹฿₩]`;
-
-// A threshold / approximation marker may lead a figure: "<5%", "≥95 bpm",
-// "≤1.2 ms", "~42", "±0.3 kg". Optional whitespace after it ("< 5").
-const COMPARE = String.raw`(?:[<>≤≥~≈±]\s?)?`;
 
 // Optional PREFIX currency symbol (space optional: "€ 42") with a sign on
 // either side, digits, optional unit (which may be a SUFFIX symbol: "42 €").

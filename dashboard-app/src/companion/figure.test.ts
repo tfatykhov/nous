@@ -109,6 +109,15 @@ describe('isFigureValue', () => {
     expect(isFigureValue('< five')).toBe(false);
   });
 
+  it('compound currency affixes from locale formatters are figures', () => {
+    expect(isFigureValue('R$1,234.56')).toBe(true); // en-US BRL
+    expect(isFigureValue('CA$1,234.56')).toBe(true); // en-US CAD
+    expect(isFigureValue('US$ 1.234,56')).toBe(true); // pt-BR USD
+    expect(isFigureValue('-R$5')).toBe(true);
+    expect(isFigureValue('42 US$')).toBe(true);
+    expect(isFigureValue('ABCD$5')).toBe(false);
+  });
+
   it('"—" is a figure (em-dash placeholder)', () => {
     expect(isFigureValue('—')).toBe(true);
   });
