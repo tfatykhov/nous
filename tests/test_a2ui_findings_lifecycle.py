@@ -279,7 +279,14 @@ async def test_round3_commit_failure_after_hook_leaves_no_orphan_finding() -> No
     store._startup_suppression_seconds = 0
 
     class _CommitFailsService:
-        async def push_built(self, built: Any, *, pre_broadcast: Any = None, pre_broadcast_rollback: Any = None, **kwargs: Any) -> str:
+        async def push_built(
+            self,
+            built: Any,
+            *,
+            pre_broadcast: Any = None,
+            pre_broadcast_rollback: Any = None,
+            **kwargs: Any,
+        ) -> str:
             if pre_broadcast is not None:
                 pre_broadcast()
             # commit blows up (disconnect / serialization failure): the real
@@ -342,7 +349,14 @@ async def test_round3_compensation_restores_prior_state_not_just_deletes() -> No
     before = store.to_list()[0]
 
     class _CommitFailsService:
-        async def push_built(self, built: Any, *, pre_broadcast: Any = None, pre_broadcast_rollback: Any = None, **kwargs: Any) -> str:
+        async def push_built(
+            self,
+            built: Any,
+            *,
+            pre_broadcast: Any = None,
+            pre_broadcast_rollback: Any = None,
+            **kwargs: Any,
+        ) -> str:
             if pre_broadcast is not None:
                 pre_broadcast()
             if pre_broadcast_rollback is not None:
