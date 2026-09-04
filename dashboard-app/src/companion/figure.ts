@@ -103,7 +103,7 @@ export function isTightUnit(unit: string): boolean {
 // One optional unit suffix, shared by every numeric pattern so a unit
 // accepted after "↑0.8" is also accepted after "0.8" (codex on #632):
 //   a percent-family glyph or a special symbol (°, ′, ″) with an optional
-//   short scale letter (°C, °F); a unit WORD in any script — abbreviated
+//   short scale letter in any script (°C, °F, ar "°م"); a unit WORD in any script — abbreviated
 //   (kg, bpm, ru "км", de "Mio.", ja "万") or spelled out as
 //   `unitDisplay: "long"` emits it ("kilometers", "kilometers per hour": up
 //   to three words) — optionally compounded with a slash (km/h) or ending in
@@ -119,10 +119,10 @@ export function isTightUnit(unit: string): boolean {
 // Devanagari, Bengali, Thai and friends the vowel signs are marks, not
 // letters, so hi-IN "मेगाबाइट" would otherwise fail on its second character.
 const WORD = String.raw`\p{L}[\p{L}\p{M}]{0,19}`;
-const UNIT = String.raw`(\s?(?:${PERCENT}|[°′″])[A-Za-z]{0,2}|\s?(?![eE](?:$|\/))${WORD}\.?(?:\/${WORD}\.?|(?:\s${WORD}){1,2})?|\s?\/${WORD}\.?|\s?${SYMBOL})?`;
+const UNIT = String.raw`(\s?(?:${PERCENT}|[°′″])(?:\p{L}\p{M}*){0,2}|\s?(?![eE](?:$|\/))${WORD}\.?(?:\/${WORD}\.?|(?:\s${WORD}){1,2})?|\s?\/${WORD}\.?|\s?${SYMBOL})?`;
 // With a prefix word present the suffix may carry at most two words, so a
 // value never exceeds three words around its number.
-const UNIT_AFTER_PREFIX = String.raw`(\s?(?:${PERCENT}|[°′″])[A-Za-z]{0,2}|\s?(?![eE](?:$|\/))${WORD}\.?(?:\/${WORD}\.?|\s${WORD})?|\s?\/${WORD}\.?|\s?${SYMBOL})?`;
+const UNIT_AFTER_PREFIX = String.raw`(\s?(?:${PERCENT}|[°′″])(?:\p{L}\p{M}*){0,2}|\s?(?![eE](?:$|\/))${WORD}\.?(?:\/${WORD}\.?|\s${WORD})?|\s?\/${WORD}\.?|\s?${SYMBOL})?`;
 
 // Digits with optional grouping and decimal separators, ending on a digit.
 // A digit is any Unicode decimal digit (\p{Nd}, `u` flag) — ar-EG and fa-IR

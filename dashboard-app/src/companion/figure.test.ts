@@ -270,6 +270,12 @@ describe('isFigureValue', () => {
     expect(isFigureValue('4 – 6 Sept 2026 and much later still')).toBe(false);
   });
 
+  it('degree scale letters in any script are figures', () => {
+    expect(isFigureValue('١٢٫٣°م')).toBe(true); // ar-EG celsius, unitDisplay: short
+    expect(isFigureValue('12.3 °C')).toBe(true);
+    expect(isFigureValue('12°Celsius')).toBe(false);
+  });
+
   it('isTightUnit shares the percent family with the classifier', () => {
     for (const u of ['%', '％', '٪', '‰', '°C', '′']) expect(isTightUnit(u)).toBe(true);
     for (const u of ['kg', 'bpm', '€', '']) expect(isTightUnit(u)).toBe(false);
