@@ -479,3 +479,13 @@ if __name__ == "__main__":  # pragma: no cover — fixture export for vitest
 
     sys.stdout.reconfigure(encoding="utf-8")
     print(report_app_fixture_json())
+
+
+def test_scorecard_composer_guidance_names_the_format_override() -> None:
+    """The composer can only use the row-mode override if its guidance says the
+    prop exists and which two values the validator accepts (codex on #632)."""
+    from nous.a2ui.compose import _COMPONENT_USAGE
+
+    text = _COMPONENT_USAGE["ScoreCard"]
+    assert "format" in text
+    assert '"figure"' in text and '"prose"' in text
