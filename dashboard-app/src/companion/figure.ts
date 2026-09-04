@@ -35,9 +35,10 @@ const DURATION = /^(\d+\s?[dhms]\s?)+$/;
 
 // One optional unit suffix, shared by every numeric pattern so a unit
 // accepted after "↑0.8" is also accepted after "0.8" (codex on #632):
-//   a special symbol (%, °, ‰, ′, ″), a short alpha unit optionally compounded
-//   with a slash (kg, bpm, km/h), or a bare /rate (/day, /wk).
-const UNIT = String.raw`(\s?[%°‰′″]|\s?[A-Za-z]{1,5}(\/[A-Za-z]{1,10})?|\s?\/[A-Za-z]{1,10})?`;
+//   a special symbol (%, °, ‰, ′, ″) with an optional short scale letter
+//   (°C, °F), a short alpha unit optionally compounded with a slash (kg,
+//   bpm, km/h), or a bare /rate (/day, /wk).
+const UNIT = String.raw`(\s?[%°‰′″][A-Za-z]{0,2}|\s?[A-Za-z]{1,5}(\/[A-Za-z]{1,10})?|\s?\/[A-Za-z]{1,10})?`;
 
 // Digits with optional thousands separators and decimal.
 const DIGITS = String.raw`\d[\d,.]*`;

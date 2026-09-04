@@ -58,6 +58,13 @@ describe('isFigureValue', () => {
     expect(isFigureValue('0.8 / day of rest')).toBe(false);
   });
 
+  it('degree units with a scale letter are figures', () => {
+    expect(isFigureValue('16 °C')).toBe(true);
+    expect(isFigureValue('98.6°F')).toBe(true);
+    expect(isFigureValue('−2 °C')).toBe(true);
+    expect(isFigureValue('16 °Celsius')).toBe(false);
+  });
+
   it('"—" is a figure (em-dash placeholder)', () => {
     expect(isFigureValue('—')).toBe(true);
   });
