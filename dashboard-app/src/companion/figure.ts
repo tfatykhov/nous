@@ -43,11 +43,14 @@ const DURATION = /^(\d+\s?[dhms]\s?)+$/;
 const UNIT = String.raw`(\s?[%°‰′″][A-Za-z]{0,2}|\s?[A-Za-z]{1,5}(\/[A-Za-z]{1,10})?|\s?\/[A-Za-z]{1,10}|\s?[€$£¥₹฿₩])?`;
 
 // Digits with optional grouping and decimal separators, ending on a digit.
-// Grouping is whatever a locale formatter emits: comma, period, apostrophe
-// (de-CH 1'234.56), or a space — fr-FR uses U+202F, ru-RU U+00A0, hand-typed
-// data a plain space — all of which `\s` matches. Ending on a digit is what
-// lets UNIT's own optional whitespace claim the gap before a suffix.
-const DIGITS = String.raw`\d(?:[\d.,'’\s]*\d)?`;
+// A digit is any Unicode decimal digit (\p{Nd}, `u` flag) — ar-EG and fa-IR
+// formatters emit ١٢٣ / ۱۲۳, and JS `\d` is ASCII-only. Grouping/decimal is
+// whatever a locale formatter emits: comma, period, apostrophe (de-CH
+// 1'234.56), the Arabic separators U+066C / U+066B (١٬٢٣٤٫٥٦), or a space —
+// fr-FR uses U+202F, ru-RU U+00A0, hand-typed data a plain space — all of
+// which `\s` matches. Ending on a digit is what lets UNIT's own optional
+// whitespace claim the gap before a suffix.
+const DIGITS = String.raw`\p{Nd}(?:[\p{Nd}.,'’\s\u066b\u066c]*\p{Nd})?`;
 
 // A sign (ASCII or Unicode minus) may sit on EITHER side of a currency
 // prefix — Intl.NumberFormat emits "-$1,234.56", hand-written data "$-5" —
@@ -60,19 +63,21 @@ const SYMBOL = String.raw`[€$£¥₹฿₩]`;
 // Covers: 42, -12.5%, $1,234.56, -$1,234.56, $-5, 42 €, 65.0 bpm, 0.8 /day.
 const NUMBER = new RegExp(
   String.raw`^(?:${SIGN}?(?:${SYMBOL}\s?)?|${SYMBOL}\s?${SIGN}?)${DIGITS}${UNIT}$`,
+  'u',
 );
 
 // 3-letter ISO currency code (space optional) with a sign on either side.
 // Covers: EUR 1,234,567.89, USD100, -EUR 5, EUR -5, EUR 5 /mo.
 const CURRENCY_CODE = new RegExp(
   String.raw`^(?:${SIGN}?[A-Z]{3}\s?|[A-Z]{3}\s?${SIGN}?)${DIGITS}${UNIT}$`,
+  'u',
 );
 
 // Directional delta marker (↑ ↓ ▲ ▼ or Unicode minus −) followed by a number
 // and an optional unit. Covers: ↓0.03, ↑6 %, ↑0.8 /day, ▲3. ASCII +/- are
 // already handled by NUMBER; this pattern covers the arrow chars and Unicode
 // minus that NUMBER's [+-] class cannot match.
-const DIRECTIONAL = new RegExp(String.raw`^[↑↓▲▼−]\s?${DIGITS}${UNIT}$`);
+const DIRECTIONAL = new RegExp(String.raw`^[↑↓▲▼−]\s?${DIGITS}${UNIT}$`, 'u');
 
 const PATTERNS = [
   PLACEHOLDER,

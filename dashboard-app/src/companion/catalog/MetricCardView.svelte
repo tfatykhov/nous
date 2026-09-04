@@ -124,6 +124,8 @@
   }
   .pill {
     flex: 0 0 auto;
+    /* Right-aligned even when wrapped onto its own line (see ScoreCardView). */
+    margin-left: auto;
     font-size: 0.68rem;
     line-height: 1.4;
     padding: 0.1rem 0.5rem;

@@ -92,6 +92,13 @@ describe('isFigureValue', () => {
     expect(isFigureValue('1 234 people')).toBe(false);
   });
 
+  it('non-Latin decimal digits and their locale separators are figures', () => {
+    expect(isFigureValue('١٬٢٣٤٫٥٦')).toBe(true); // ar-EG Intl output
+    expect(isFigureValue('۱۲۳')).toBe(true); // fa-IR digits
+    expect(isFigureValue('↑١٢ km')).toBe(true);
+    expect(isFigureValue('١٢ نفر')).toBe(false); // digits followed by prose
+  });
+
   it('"—" is a figure (em-dash placeholder)', () => {
     expect(isFigureValue('—')).toBe(true);
   });

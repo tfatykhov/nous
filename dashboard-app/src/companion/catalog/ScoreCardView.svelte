@@ -144,6 +144,10 @@
   }
   .status {
     flex: 0 0 auto;
+    /* Alone on a wrapped flex line, space-between would park the pill on
+       the LEFT; an auto margin keeps it right-aligned whether it shares the
+       line with the title or not. */
+    margin-left: auto;
     font-size: 0.66rem;
     font-weight: 700;
     letter-spacing: 0.09em;
