@@ -38,6 +38,14 @@ describe('isFigureValue', () => {
     expect(isFigureValue('2026-09-02T15:40:43Z')).toBe(true);
   });
 
+  it('ISO datetime with a zone OFFSET is a figure (aware-datetime serializers emit +00:00, not Z)', () => {
+    expect(isFigureValue('2026-09-02T15:40:43+00:00')).toBe(true);
+    expect(isFigureValue('2026-09-02T15:40:43-04:00')).toBe(true);
+    expect(isFigureValue('2026-09-02T15:40:43.250+0200')).toBe(true);
+    // A bare trailing sign is not an offset.
+    expect(isFigureValue('2026-09-02T15:40:43+')).toBe(false);
+  });
+
   it('"—" is a figure (em-dash placeholder)', () => {
     expect(isFigureValue('—')).toBe(true);
   });

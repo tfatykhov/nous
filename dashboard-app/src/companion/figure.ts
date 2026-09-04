@@ -4,7 +4,7 @@
 //
 // A value is a FIGURE when its entire content matches one of:
 //   placeholder  : —, –, N/A, TBD, -
-//   ISO date/datetime : 2026-09-02, 2026-09-02T15:40:43Z
+//   ISO date/datetime : 2026-09-02, 2026-09-02T15:40:43Z, 2026-09-02T15:40:43+00:00
 //   time of day  : 14:30, 2:30 PM
 //   ratio        : 12/30
 //   compound duration: 1h 30m, 2d 3h, 45s
@@ -20,7 +20,10 @@
 
 const PLACEHOLDER = /^([—–−-]{1,3}|[Nn]\/[Aa]|TBD)$/;
 
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?([.,]\d+)?Z?)?$/;
+// Zone suffix: `Z` or an offset (`+00:00`, `-04:00`, `+0200`) — aware-datetime
+// serializers emit the offset form, not `Z`.
+const ISO_DATE =
+  /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?([.,]\d+)?(Z|[+-]\d{2}:?\d{2})?)?$/;
 
 const TIME_OF_DAY = /^\d{1,2}:\d{2}(:\d{2})?(\s?[APap][Mm])?$/;
 
