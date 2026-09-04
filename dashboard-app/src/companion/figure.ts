@@ -42,8 +42,12 @@ const DURATION = /^(\d+\s?[dhms]\s?)+$/;
 //   matches the no-break space Intl puts there).
 const UNIT = String.raw`(\s?[%°‰′″][A-Za-z]{0,2}|\s?[A-Za-z]{1,5}(\/[A-Za-z]{1,10})?|\s?\/[A-Za-z]{1,10}|\s?[€$£¥₹฿₩])?`;
 
-// Digits with optional thousands separators and decimal.
-const DIGITS = String.raw`\d[\d,.]*`;
+// Digits with optional grouping and decimal separators, ending on a digit.
+// Grouping is whatever a locale formatter emits: comma, period, apostrophe
+// (de-CH 1'234.56), or a space — fr-FR uses U+202F, ru-RU U+00A0, hand-typed
+// data a plain space — all of which `\s` matches. Ending on a digit is what
+// lets UNIT's own optional whitespace claim the gap before a suffix.
+const DIGITS = String.raw`\d(?:[\d.,'’\s]*\d)?`;
 
 // A sign (ASCII or Unicode minus) may sit on EITHER side of a currency
 // prefix — Intl.NumberFormat emits "-$1,234.56", hand-written data "$-5" —

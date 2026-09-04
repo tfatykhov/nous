@@ -84,6 +84,14 @@ describe('isFigureValue', () => {
     expect(isFigureValue('42 € extra')).toBe(false);
   });
 
+  it('localized grouping separators inside the number are figures', () => {
+    expect(isFigureValue('1 234,56 €')).toBe(true); // fr-FR narrow no-break space
+    expect(isFigureValue('1 234,56 €')).toBe(true); // ru-RU no-break space
+    expect(isFigureValue("1'234.56")).toBe(true); // de-CH apostrophe
+    expect(isFigureValue('1 234')).toBe(true);
+    expect(isFigureValue('1 234 people')).toBe(false);
+  });
+
   it('"—" is a figure (em-dash placeholder)', () => {
     expect(isFigureValue('—')).toBe(true);
   });
