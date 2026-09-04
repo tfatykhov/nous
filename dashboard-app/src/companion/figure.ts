@@ -5,6 +5,7 @@
 // A value is a FIGURE when its entire content matches one of:
 //   placeholder  : —, –, N/A, TBD, -
 //   ISO date/datetime : 2026-09-02, 2026-09-02T15:40:43Z, 2026-09-02T15:40:43+00:00
+//   localized date : 9/4/2026, 04/09/2026, 04.09.2026, 2026/09/04 15:40
 //   time of day  : 14:30, 2:30 PM
 //   ratio        : 12/30
 //   compound duration: 1h 30m, 2d 3h, 45s
@@ -28,6 +29,12 @@ const ISO_DATE =
   /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?([.,]\d+)?(Z|[+-]\d{2}:?\d{2})?)?$/;
 
 const TIME_OF_DAY = /^\d{1,2}:\d{2}(:\d{2})?(\s?[APap][Mm])?$/;
+
+// A localized numeric date: three digit fields joined by one separator kind
+// (en-US 9/4/2026, en-GB 04/09/2026, de 04.09.2026, ISO-ish 2026/09/04), with
+// an optional time of day after a space or comma.
+const NUMERIC_DATE =
+  /^\p{Nd}{1,4}([./-])\p{Nd}{1,2}\1\p{Nd}{1,4}(?:[ ,]+\p{Nd}{1,2}:\p{Nd}{2}(?::\p{Nd}{2})?(?:\s?[APap][Mm])?)?$/u;
 
 const RATIO = /^\d+\/\d+$/;
 
@@ -54,6 +61,14 @@ const COMPARE = String.raw`(?:[<>≤≥~≈±]\s?)?`;
 // U+060A). tr-TR puts the percent sign BEFORE the number ("%12"), so the
 // glyph is admitted as a prefix too.
 const PERCENT = String.raw`[%％٪‰؉‱؊]`;
+
+/** True when a unit string should be set tight against its number: the
+ *  percent family (any locale's glyph), degree, prime and double prime.
+ *  One definition for the classifier AND the card views, so a locale
+ *  percent that classifies as a figure also renders without the gap. */
+export function isTightUnit(unit: string): boolean {
+  return new RegExp(String.raw`^(?:${PERCENT}|[°′″])`).test(unit);
+}
 
 // One optional unit suffix, shared by every numeric pattern so a unit
 // accepted after "↑0.8" is also accepted after "0.8" (codex on #632):
@@ -110,6 +125,7 @@ const DIRECTIONAL = new RegExp(String.raw`^[↑↓▲▼−]\s?${MANTISSA}${UNIT
 const PATTERNS = [
   PLACEHOLDER,
   ISO_DATE,
+  NUMERIC_DATE,
   TIME_OF_DAY,
   RATIO,
   DURATION,

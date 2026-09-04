@@ -8,7 +8,7 @@
   import { store } from '../store.svelte';
   import { flexGrow, omittedNote, resolveDynamic, splitTruncation, toDisplayString } from '../functions';
   import { normalizeTone, toneInkVar } from '../chart';
-  import { isFigureValue } from '../figure';
+  import { isFigureValue, isTightUnit } from '../figure';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
 
@@ -37,8 +37,9 @@
   const status = $derived(toDisplayString(resolveDynamic(comp.status, ctx)));
   const value = $derived(toDisplayString(resolveDynamic(comp.value, ctx)));
   const unit = $derived(toDisplayString(resolveDynamic(comp.unit, ctx)));
-  // %, ° and friends are set tight against the number; kg/bpm/ms keep the gap.
-  const unitTight = $derived(/^[%°‰′″]/.test(unit));
+  // %, ° and friends (any locale's percent glyph) are set tight against the
+  // number; kg/bpm/ms keep the gap. Same definition as the figure classifier.
+  const unitTight = $derived(isTightUnit(unit));
   const caption = $derived(toDisplayString(resolveDynamic(comp.caption, ctx)));
   const note = $derived(toDisplayString(resolveDynamic(comp.note, ctx)));
   // Literal or {path} binding (per-record tone under a repeat template);

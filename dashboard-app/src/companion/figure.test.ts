@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isFigureValue } from './figure';
+import { isFigureValue, isTightUnit } from './figure';
 
 // Required cases from the Codex P2 finding on PR #632, plus coverage for
 // patterns that a 16-char cutoff could not distinguish.
@@ -168,6 +168,21 @@ describe('isFigureValue', () => {
     expect(isFigureValue('∞%')).toBe(true);
     expect(isFigureValue('↑∞')).toBe(true);
     expect(isFigureValue('infinity')).toBe(false);
+  });
+
+  it('localized numeric dates are figures', () => {
+    expect(isFigureValue('9/4/2026')).toBe(true); // en-US
+    expect(isFigureValue('04/09/2026')).toBe(true); // en-GB
+    expect(isFigureValue('04.09.2026')).toBe(true); // de
+    expect(isFigureValue('2026/09/04 15:40')).toBe(true);
+    expect(isFigureValue('9/4/2026, 3:40 PM')).toBe(true);
+    expect(isFigureValue('9/4/2026/1')).toBe(false);
+    expect(isFigureValue('9/4-2026')).toBe(false); // mixed separators
+  });
+
+  it('isTightUnit shares the percent family with the classifier', () => {
+    for (const u of ['%', '％', '٪', '‰', '°C', '′']) expect(isTightUnit(u)).toBe(true);
+    for (const u of ['kg', 'bpm', '€', '']) expect(isTightUnit(u)).toBe(false);
   });
 
   it('"—" is a figure (em-dash placeholder)', () => {

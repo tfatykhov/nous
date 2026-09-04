@@ -17,6 +17,7 @@
     toneInkVar,
   } from '../chart';
   import SparkSvg from './SparkSvg.svelte';
+  import { isTightUnit } from '../figure';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
 
@@ -36,8 +37,9 @@
   const label = $derived(toDisplayString(resolveDynamic(comp.label, ctx)));
   const value = $derived(toDisplayString(resolveDynamic(comp.value, ctx)));
   const unit = $derived(toDisplayString(resolveDynamic(comp.unit, ctx)));
-  // %, ° and friends are set tight against the number; kg/bpm/ms keep the gap.
-  const unitTight = $derived(/^[%°‰′″]/.test(unit));
+  // %, ° and friends (any locale's percent glyph) are set tight against the
+  // number; kg/bpm/ms keep the gap. Same definition as the figure classifier.
+  const unitTight = $derived(isTightUnit(unit));
   const delta = $derived(toDisplayString(resolveDynamic(comp.delta, ctx)));
   const caption = $derived(toDisplayString(resolveDynamic(comp.caption, ctx)));
   const footnote = $derived(toDisplayString(resolveDynamic(comp.footnote, ctx)));
