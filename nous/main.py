@@ -1059,7 +1059,12 @@ async def create_components(settings: Settings) -> dict:
             composer=composer,
         )
         register_a2ui_tools(
-            dispatcher, surface_service, brain=brain, dag_store=dag_store, composer=composer
+            dispatcher,
+            surface_service,
+            brain=brain,
+            dag_store=dag_store,
+            composer=composer,
+            heartbeat_runner=heartbeat_runner,
         )
 
         async def _a2ui_sweep_loop():

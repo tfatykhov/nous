@@ -9,7 +9,9 @@ accumulation escalation for noisy checks.
 
 from __future__ import annotations
 
+import copy
 import logging
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 
 from nous.heartbeat.schemas import (
@@ -216,6 +218,57 @@ class FindingStore:
     def get_tracked(self, fingerprint: str) -> TrackedFinding | None:
         """Get a tracked finding by fingerprint."""
         return self._findings.get(fingerprint)
+
+    # ------------------------------------------------------------------
+    # Transactional compensation
+    # ------------------------------------------------------------------
+
+    def snapshot(self, fingerprints: Iterable[str]) -> dict[str, TrackedFinding | None]:
+        """Deep-copy the tracked state of ``fingerprints`` for later restore.
+
+        The store is in-memory and therefore cannot participate in the DB
+        transaction that publishes a surface. A caller that ingests findings
+        as part of a fallible push (see ``a2ui.tools.push_surface``) takes a
+        snapshot first and calls :meth:`restore` if the push fails, so a
+        rolled-back surface never leaves an orphaned finding exposed through
+        ``GET /heartbeat/findings``. ``None`` records "was not tracked".
+        """
+        return {
+            fp: copy.deepcopy(self._findings[fp]) if fp in self._findings else None
+            for fp in fingerprints
+        }
+
+    def restore(
+        self,
+        snapshot: Mapping[str, TrackedFinding | None],
+        *,
+        expected: Mapping[str, TrackedFinding | None] | None = None,
+    ) -> list[str]:
+        """Undo ingests by restoring a :meth:`snapshot` taken before them.
+
+        ``expected`` is the image of the same fingerprints taken right AFTER
+        the ingests being undone. When given, a fingerprint is restored only
+        while its current record still equals that image - i.e. nothing else
+        has touched it since: not a user acknowledge/resolve/dismiss through
+        REST or the companion, not the heartbeat runner's own ingest or
+        sweep, not another push. Every mutation path changes some field
+        (state, last_seen, seen_count, outcome, absent_ticks ...), so
+        dataclass equality is the version check and no caller has to take a
+        lock. A record that moved on is left alone: the later mutation is
+        real work, and erasing it to tidy up a failed push would be worse
+        than the orphaned registration it would tidy. Returns the
+        fingerprints left alone for that reason.
+        """
+        skipped: list[str] = []
+        for fp, tracked in snapshot.items():
+            if expected is not None and self._findings.get(fp) != expected.get(fp):
+                skipped.append(fp)
+                continue
+            if tracked is None:
+                self._findings.pop(fp, None)
+            else:
+                self._findings[fp] = tracked
+        return skipped
 
     # ------------------------------------------------------------------
     # Maintenance

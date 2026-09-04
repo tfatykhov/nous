@@ -9,6 +9,7 @@ ratchet untouched. The only nous/api/tools.py edit for F092 is the
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -46,8 +47,21 @@ _PUSH_SURFACE_SCHEMA = {
                 "action_review: post-hoc review of an action already taken "
                 "(params: title, did, why, cost, compensation={revertible,"
                 "handler,note}, trace_id). "
-                "heartbeat_findings: triage list (params: findings=[{"
-                "fingerprint,message,urgency,check}], title). "
+                "heartbeat_findings: triage list whose buttons are FIXED "
+                "to Acknowledge/Resolve/Dismiss (params: findings=[{message,"
+                "urgency,check,fingerprint?}], title). Use it for items you "
+                "want to TRIAGE, never to ask a question — 'Acknowledge' is "
+                "not an answer to 'A or B'. Offer a CHOICE between "
+                "alternatives with approval_gate options=[{id,label}] "
+                "instead. Pass a 16-hex fingerprint from GET /heartbeat/"
+                "findings to triage an existing heartbeat finding; omit it "
+                "and the item is registered as a new tracked finding under "
+                "its own message text so its buttons work too. Never invent "
+                "a fingerprint: they are derived, not chosen, and a made-up "
+                "one is ignored. Items the finding lifecycle suppresses "
+                "(5-min startup window after a restart, already acknowledged, "
+                "flapping) are left off the card and listed under 'suppressed' "
+                "in the result. "
                 "decision_sweep: unreviewed-decision review cards, ALWAYS "
                 "self-sourced from the brain — decision rows in params are "
                 "ignored (optional: max_age_days, max_decisions, title). "
@@ -332,12 +346,29 @@ def _intent_slug(intent: str) -> str:
     return f"{slug[:40] or 'app'}-{digest}"
 
 
+class FindingsChangedDuringPush(RuntimeError):
+    """Raised inside the pre-broadcast hook when a finding the probe left NEW is
+    no longer NEW at publication time (acknowledged/resolved meanwhile). The
+    surface was built from the probe's verdict, so publishing it would show
+    an open card over a record the store already considers handled."""
+
+    def __init__(self, fingerprints: list[str]) -> None:
+        super().__init__(", ".join(fingerprints))
+        self.fingerprints = fingerprints
+
+
+_FINDING_URGENCIES = ("high", "normal", "low")
+_URGENCY_ALIASES = {"medium": "normal", "moderate": "normal", "critical": "high",
+                    "urgent": "high", "info": "low", "informational": "low"}
+
+
 def register_a2ui_tools(
     dispatcher: ToolDispatcher,
     surface_service: Any,
     brain: Any = None,
     dag_store: Any = None,
     composer: Any = None,
+    heartbeat_runner: Any = None,
 ) -> None:
     """Register the push_surface tool against a live SurfaceService.
 
@@ -362,6 +393,194 @@ def register_a2ui_tools(
             # exactly the spam dedup exists to prevent. Derive the stable
             # default rather than bouncing the model.
             dedup_key = "heartbeat:findings"
+
+        # Findings enter the live store ONLY inside the push transaction, via
+        # the pre_broadcast hook below (round-1 P1: a censor- or validation-
+        # blocked push must never leave rejected prose at GET /heartbeat/
+        # findings). The lifecycle verdict is still needed BEFORE the surface
+        # is built, because a SUPPRESSed item must not render (codex round 4),
+        # so ingest first runs as a synchronous PROBE - snapshot, ingest, read
+        # the resulting state, restore - that leaves the store byte-identical.
+        # Only items the probe leaves NEW are rendered, and only those reach
+        # the hook, so the card and the store agree by construction.
+        _pending_ingest: list = []
+        _pending_store = None
+        suppressed: list[dict] = []
+        within_push_fps: set[str] = set()
+
+        # Every rendered button MUST resolve against the live finding store
+        # (F092 P1). This template is thin presentation over the F034.1
+        # lifecycle: its ONLY verbs are acknowledge/resolve/dismiss against a
+        # fingerprint the store already tracks, and Finding.fingerprint() is
+        # DERIVED (sha256 of check:source:summary) - a caller cannot choose
+        # one. A hand-written slug therefore renders a perfectly normal card
+        # whose every button dead-ends at "not found" on the USER's click.
+        # Rejecting the push fixed the dead button but excluded the item from
+        # the card entirely. So: adopt a real fingerprint when the caller
+        # supplies one, otherwise REGISTER the item as a tracked finding and
+        # render its derived fingerprint. All items get working buttons.
+        if template == "heartbeat_findings":
+            findings = params.get("findings") or []
+            if not findings:
+                return _tool_error(
+                    "heartbeat_findings needs a non-empty findings list."
+                )
+            store = getattr(heartbeat_runner, "finding_store", None) if heartbeat_runner else None
+            if store is None:
+                return _tool_error(
+                    "heartbeat_findings is unavailable: no live finding store, so "
+                    "every button on the card would fail. Use a different template."
+                )
+
+            from nous.heartbeat.schemas import Finding as _Finding
+            from nous.heartbeat.schemas import FindingState as _FindingState
+
+            candidates: list[tuple[dict, Any]] = []
+
+            def _adopt(fp: str, stored: Any) -> None:
+                # The card renders the STORED finding, never the caller's
+                # row, whenever the fingerprint is already tracked - whether
+                # the caller supplied it or it was derived from the message.
+                # The buttons act on the stored record and ingest() never
+                # replaces `existing.finding`, so a caller row with different
+                # message/urgency/check would have the user triage one thing
+                # while the lifecycle (and escalation) of another is mutated
+                # (codex rounds 5 and 6). The stored finding is routed through
+                # the lifecycle like any other item: RESOLVED reopens, an
+                # acknowledged or startup-suppressed one is not re-surfaced.
+                candidates.append(
+                    (
+                        {
+                            "fingerprint": fp,
+                            "message": stored.summary,
+                            "urgency": stored.urgency,
+                            "check": stored.check_name,
+                        },
+                        stored,
+                    )
+                )
+
+            for item in findings:
+                row = dict(item)
+                fp = str(row.get("fingerprint") or "")
+                tracked = store.get_tracked(fp) if fp else None
+                if tracked is not None:
+                    # Caller supplied a REAL fingerprint: adopt it unchanged.
+                    if fp in within_push_fps:
+                        continue
+                    within_push_fps.add(fp)
+                    _adopt(fp, tracked.finding)
+                    continue
+                message = str(row.get("message") or "").strip()
+                if not message:
+                    return _tool_error(
+                        "Every finding needs a non-empty 'message': an item with no "
+                        "known fingerprint is registered under its own text, so blank "
+                        "text leaves nothing to track."
+                    )
+                # Finding.urgency is a 3-value Literal; the model reaches for
+                # "medium"/"critical" often enough to be worth mapping rather
+                # than bouncing.
+                urgency = str(row.get("urgency") or "normal").strip().lower()
+                if urgency not in _FINDING_URGENCIES:
+                    urgency = _URGENCY_ALIASES.get(urgency, "normal")
+                # Namespaced check_name keeps agent-authored items out of the
+                # real checks' escalation and tuner-reputation buckets, which
+                # are keyed by check_name. A per-message digest in the name
+                # ensures two items differing only in digits (e.g. "PR #568
+                # open" vs "PR #569 open") derive distinct fingerprints even
+                # after Finding.fingerprint()'s digit normalisation pass.
+                raw_check = str(row.get("check") or "").strip()
+                msg_digest = hashlib.sha256(message.encode()).hexdigest()[:8]
+                finding = _Finding(
+                    source=raw_check or "agent",
+                    summary=message,
+                    urgency=urgency,
+                    check_name=f"agent:{raw_check or 'adhoc'}:{msg_digest}",
+                )
+                fp = finding.fingerprint()
+                if fp in within_push_fps:
+                    # Same item twice in one push: render it once.
+                    continue
+                within_push_fps.add(fp)
+                tracked = store.get_tracked(fp)
+                if tracked is not None:
+                    # The message derives to a fingerprint that is already
+                    # tracked (a re-push): the store is authoritative for
+                    # its metadata, so render that, not the caller's row.
+                    _adopt(fp, tracked.finding)
+                    continue
+                row["fingerprint"] = fp
+                row["urgency"] = urgency
+                candidates.append((row, finding))
+
+            # Probe: the store's own state machine decides what is open for
+            # triage - startup suppression, an already-acknowledged duplicate
+            # and the third resolved->reopened flap all leave a state other
+            # than NEW, exactly the cases the heartbeat runner skips. A pure
+            # "would suppress" predicate here would re-derive ingest()'s
+            # control flow and drift from it. Restore runs synchronously in
+            # `finally`, so no other coroutine can observe the probe and
+            # nothing persists from it: a startup-window item is NOT left as
+            # a SUPPRESSED record (which never transitions to NEW), so a retry
+            # after the window registers it normally.
+            snapshot = store.snapshot(within_push_fps)
+            verdicts: dict[str, Any] = {}
+            try:
+                for _row, finding in candidates:
+                    store.ingest(finding)
+                    fp_ = finding.fingerprint()
+                    tracked_ = store.get_tracked(fp_)
+                    verdicts[fp_] = tracked_.state if tracked_ is not None else None
+            finally:
+                store.restore(snapshot)
+
+            normalized: list[dict] = []
+            for row, finding in candidates:
+                fp_ = finding.fingerprint()
+                state = verdicts.get(fp_)
+                if state == _FindingState.NEW:
+                    normalized.append(row)
+                    _pending_ingest.append(finding)
+                else:
+                    suppressed.append(
+                        {
+                            "fingerprint": fp_,
+                            "message": str(row.get("message") or ""),
+                            "state": getattr(state, "value", state),
+                        }
+                    )
+            if not normalized:
+                # Not an error: the lifecycle did its job. Nothing was
+                # registered (the probe restored the store), so the agent can
+                # retry after the startup window instead of finding these
+                # items wedged in SUPPRESSED.
+                return {
+                    "is_error": False,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {
+                                    "surface_id": None,
+                                    "pushed": False,
+                                    "suppressed": suppressed,
+                                    "note": (
+                                        "No surface pushed: every finding is "
+                                        "suppressed by the finding lifecycle "
+                                        "(5-minute startup window after a restart, "
+                                        "already acknowledged, or flapping). Nothing "
+                                        "was registered; retry after the startup "
+                                        "window, or triage the acknowledged ones via "
+                                        "GET /heartbeat/findings."
+                                    ),
+                                }
+                            ),
+                        }
+                    ],
+                }
+            params["findings"] = normalized
+            _pending_store = store
 
         # Self-sourcing templates — ALWAYS, not as a fallback (codex P1 x2):
         # the DB is the only source of truth for actionable rows. A caller-
@@ -438,33 +657,101 @@ def register_a2ui_tools(
             return _tool_error(f"Surface failed validation: {exc.errors[:2]}")
         except (KeyError, ValueError, TypeError) as exc:
             return _tool_error(f"Bad params for {template}: {exc}")
+        # The finding store is in-memory and cannot join the DB transaction,
+        # so the ingest is made explicitly compensatable: snapshot the affected
+        # fingerprints, ingest, and restore that snapshot if the surrounding
+        # push fails after the hook ran. Without this, a commit failure leaves
+        # an orphaned finding visible at GET /heartbeat/findings for a surface
+        # that was never published (codex round 3). The restore is CONDITIONAL
+        # on the image taken right after the ingest: the commit is an await,
+        # and in that window a user can acknowledge/resolve/dismiss through
+        # REST or the companion, the heartbeat runner can re-ingest or sweep,
+        # and another push can ingest the same fingerprint - none of which
+        # take a lock here, and none of which a failed push may erase (codex
+        # rounds 4 and 5). A record that moved on is left as it is.
+        _ingest_before: dict = {}
+        _ingest_after: dict = {}
+
+        def _do_ingest() -> None:
+            store_ = _pending_store
+            if store_ is None:  # pragma: no cover - hook not wired without a store
+                return
+            from nous.heartbeat.schemas import FindingState as _State
+
+            fps = {_f.fingerprint() for _f in _pending_ingest}
+            _ingest_before.clear()
+            _ingest_before.update(store_.snapshot(fps))
+            for _f in _pending_ingest:
+                store_.ingest(_f)
+            _ingest_after.clear()
+            _ingest_after.update(store_.snapshot(fps))
+            # The surface was built from the PROBE's verdict; the censor gate
+            # and the DB writes it then awaited are windows in which a REST
+            # or companion action can acknowledge/resolve one of these
+            # fingerprints. Re-read the verdict now, inside the transaction:
+            # if any item is no longer NEW, publishing the card would show it
+            # open over a record the store considers handled, so the push
+            # fails instead (rollback, conditional restore, the agent re-pushes
+            # and the next probe drops it) (codex round 6).
+            changed = sorted(
+                fp
+                for fp in fps
+                if (t := store_.get_tracked(fp)) is None or t.state != _State.NEW
+            )
+            if changed:
+                raise FindingsChangedDuringPush(changed)
+
+        def _undo_ingest() -> None:
+            store_ = _pending_store
+            if store_ is None or not _ingest_before:
+                return
+            left = store_.restore(_ingest_before, expected=_ingest_after)
+            if left:
+                logger.warning(
+                    "heartbeat_findings push failed after ingest; %d finding(s) were "
+                    "changed by another writer meanwhile and were left as-is: %s",
+                    len(left),
+                    left,
+                )
+            _ingest_before.clear()
+            _ingest_after.clear()
+
+        pre_broadcast_hook = _do_ingest if _pending_store is not None else None
+        pre_broadcast_rollback = _undo_ingest if _pending_store is not None else None
+
         try:
             surface_id = await surface_service.push_built(
                 built,
                 dedup_key=dedup_key,
                 session_id=kwargs.get("_session_id"),
                 notify=kwargs.get("notify"),
+                pre_broadcast=pre_broadcast_hook,
+                pre_broadcast_rollback=pre_broadcast_rollback,
             )
         except PermissionError as exc:
+            _undo_ingest()
             return _tool_error(f"Surface blocked: {exc}")
+        except FindingsChangedDuringPush as exc:
+            _undo_ingest()
+            return _tool_error(
+                "Nothing published: while the surface was being published, "
+                f"these findings were acknowledged or resolved by someone else: {exc}. "
+                "Push again for a current card."
+            )
         except Exception as exc:
+            _undo_ingest()
             logger.exception("push_surface failed")
             return _tool_error(f"Failed to push surface: {exc}")
-        return {
-            "is_error": False,
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {
-                            "surface_id": surface_id,
-                            "url": f"/companion#/s/{surface_id}",
-                            "priority": built.priority,
-                        }
-                    ),
-                }
-            ],
+        payload: dict[str, Any] = {
+            "surface_id": surface_id,
+            "url": f"/companion#/s/{surface_id}",
+            "priority": built.priority,
         }
+        if suppressed:
+            # Items the lifecycle routed away from triage are reported, never
+            # silently dropped: the agent asked for N and got a card of N-k.
+            payload["suppressed"] = suppressed
+        return {"is_error": False, "content": [{"type": "text", "text": json.dumps(payload)}]}
 
     dispatcher.register("push_surface", push_surface, _PUSH_SURFACE_SCHEMA)
 
