@@ -260,6 +260,16 @@ describe('isFigureValue', () => {
     expect(isFigureValue('12 Std./Tag')).toBe(true);
   });
 
+  it('collapsed formatRange dates are figures', () => {
+    expect(isFigureValue('4 – 6 Sept 2026')).toBe(true); // en-GB
+    expect(isFigureValue('Sep 4 – 6, 2026')).toBe(true); // en-US
+    expect(isFigureValue('04.–06.09.2026')).toBe(true); // de-DE
+    expect(isFigureValue('9/4 – 9/6/2026')).toBe(true);
+    // '4 – Sept 2026' is a numeric range whose right side is 'Sept 2026'
+    // (word + number) - a figure by the word budget; prose is a sentence.
+    expect(isFigureValue('4 – 6 Sept 2026 and much later still')).toBe(false);
+  });
+
   it('isTightUnit shares the percent family with the classifier', () => {
     for (const u of ['%', '％', '٪', '‰', '°C', '′']) expect(isTightUnit(u)).toBe(true);
     for (const u of ['kg', 'bpm', '€', '']) expect(isTightUnit(u)).toBe(false);

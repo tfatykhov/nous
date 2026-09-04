@@ -55,6 +55,16 @@ const MONTH = String.raw`\p{L}[\p{L}\p{M}]{2,11}\.?`;
 const WORDY_DATE_CORE = String.raw`(?:${MONTH} \p{Nd}{1,2},? \p{Nd}{4}|\p{Nd}{1,2}\.? ${MONTH} \p{Nd}{4})${TIME_SUFFIX}`;
 const WORDY_DATE = new RegExp(String.raw`^${ranged(WORDY_DATE_CORE)}$`, 'u');
 
+// formatRange COLLAPSES the fields two dates share: en-GB "4 – 6 Sept 2026",
+// en-US "Sep 4 – 6, 2026", de "04.–06.09.2026", "9/4 – 9/6/2026". The left
+// side is a partial date (one or two fields, an optional trailing separator),
+// the right side a complete one.
+const DASH = String.raw`\s?[–—-]\s?`;
+const COLLAPSED_DATE_RANGE = new RegExp(
+  String.raw`^(?:\p{Nd}{1,2}(?:[./-]\p{Nd}{1,2})?[./-]?${DASH}${NUMERIC_DATE_CORE}|\p{Nd}{1,2}\.?${DASH}\p{Nd}{1,2}\.? ${MONTH} \p{Nd}{4}|${MONTH} \p{Nd}{1,2}${DASH}\p{Nd}{1,2},? \p{Nd}{4})${TIME_SUFFIX}$`,
+  'u',
+);
+
 const RATIO = /^\p{Nd}+\/\p{Nd}+$/u;
 
 // One or more <digits><unit-char> groups, e.g. "1h 30m", "2d", "45s".
@@ -168,6 +178,7 @@ const PATTERNS = [
   ISO_DATE,
   NUMERIC_DATE,
   WORDY_DATE,
+  COLLAPSED_DATE_RANGE,
   TIME_OF_DAY,
   RATIO,
   DURATION,
