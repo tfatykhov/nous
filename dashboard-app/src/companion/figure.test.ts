@@ -75,6 +75,15 @@ describe('isFigureValue', () => {
     expect(isFigureValue('-$-5')).toBe(false);
   });
 
+  it('suffix currency symbols as locale formatters emit them are figures', () => {
+    expect(isFigureValue('42 €')).toBe(true);
+    expect(isFigureValue('1.234,56 €')).toBe(true);
+    expect(isFigureValue('1.234,56 €')).toBe(true); // de-DE Intl uses a no-break space
+    expect(isFigureValue('-42 €')).toBe(true);
+    expect(isFigureValue('€ 42')).toBe(true);
+    expect(isFigureValue('42 € extra')).toBe(false);
+  });
+
   it('"—" is a figure (em-dash placeholder)', () => {
     expect(isFigureValue('—')).toBe(true);
   });

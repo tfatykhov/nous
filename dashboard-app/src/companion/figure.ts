@@ -37,8 +37,10 @@ const DURATION = /^(\d+\s?[dhms]\s?)+$/;
 // accepted after "↑0.8" is also accepted after "0.8" (codex on #632):
 //   a special symbol (%, °, ‰, ′, ″) with an optional short scale letter
 //   (°C, °F), a short alpha unit optionally compounded with a slash (kg,
-//   bpm, km/h), or a bare /rate (/day, /wk).
-const UNIT = String.raw`(\s?[%°‰′″][A-Za-z]{0,2}|\s?[A-Za-z]{1,5}(\/[A-Za-z]{1,10})?|\s?\/[A-Za-z]{1,10})?`;
+//   bpm, km/h, EUR), a bare /rate (/day, /wk), or a SUFFIX currency symbol
+//   as locale formatters emit it ("42 €", de-DE "1.234,56 €" — `\s` also
+//   matches the no-break space Intl puts there).
+const UNIT = String.raw`(\s?[%°‰′″][A-Za-z]{0,2}|\s?[A-Za-z]{1,5}(\/[A-Za-z]{1,10})?|\s?\/[A-Za-z]{1,10}|\s?[€$£¥₹฿₩])?`;
 
 // Digits with optional thousands separators and decimal.
 const DIGITS = String.raw`\d[\d,.]*`;
@@ -49,10 +51,11 @@ const DIGITS = String.raw`\d[\d,.]*`;
 const SIGN = String.raw`[+\-−]`;
 const SYMBOL = String.raw`[€$£¥₹฿₩]`;
 
-// Optional currency symbol with a sign on either side, digits, optional unit.
-// Covers: 42, -12.5%, $1,234.56, -$1,234.56, $-5, 65.0 bpm, 0.8 /day, 12 km/h.
+// Optional PREFIX currency symbol (space optional: "€ 42") with a sign on
+// either side, digits, optional unit (which may be a SUFFIX symbol: "42 €").
+// Covers: 42, -12.5%, $1,234.56, -$1,234.56, $-5, 42 €, 65.0 bpm, 0.8 /day.
 const NUMBER = new RegExp(
-  String.raw`^(?:${SIGN}?${SYMBOL}?|${SYMBOL}${SIGN}?)${DIGITS}${UNIT}$`,
+  String.raw`^(?:${SIGN}?(?:${SYMBOL}\s?)?|${SYMBOL}\s?${SIGN}?)${DIGITS}${UNIT}$`,
 );
 
 // 3-letter ISO currency code (space optional) with a sign on either side.
