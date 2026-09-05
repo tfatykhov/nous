@@ -2,11 +2,29 @@
 
 All notable changes to Nous. Release notes for each version also live on the [GitHub releases page](https://github.com/tfatykhov/nous/releases).
 
-# v1.0.0 — The Working Agent
+# v1.0.0 — Stable Version
 
 **704 commits, 384 pull requests, 1,234 files changed since v0.2.0** (March 19 → September 5, 2026)
 
-v0.1.0 was "The Thinking Agent" — decisions, deliberation, cognitive framing. v0.2.0 was "The Remembering Agent" — what to remember, how to recall it, how to forget. v1.0.0 is **The Working Agent**: Nous now runs unattended — a heartbeat that watches and acts, durable multi-step DAGs that survive restarts, background subtasks and schedules — and shows its work in a companion app whose interfaces it composes itself. Underneath, memory stopped being assumed and started being **measured**: a retrieval evaluation harness, per-retrieval telemetry that attributes every dropped candidate to the gate that dropped it, and an audit trail for every sleep cycle.
+v0.1.0 was "The Thinking Agent" — decisions, deliberation, cognitive framing. v0.2.0 was "The Remembering Agent" — what to remember, how to recall it, how to forget. v1.0.0 is the **stable version**: the architecture is complete and running in production. Nous runs unattended — a heartbeat that watches and acts, durable multi-step DAGs that survive restarts, background subtasks and schedules — and shows its work in a companion app whose interfaces it composes itself. Underneath, memory stopped being assumed and started being **measured**: a retrieval evaluation harness, per-retrieval telemetry that attributes every dropped candidate to the gate that dropped it, and an audit trail for every sleep cycle.
+
+---
+
+## ✨ Key Features
+
+- **Persistent memory** — episodic, semantic, procedural and working memory in one Postgres + pgvector database; verbatim episode chunks next to summaries; admission control before a fact is kept (F023); supersession and principled forgetting (F027); document and multimodal ingestion — PDFs, images, text files (F024, F069).
+- **Decision intelligence** — every decision recorded with confidence and reasoning, reviewed for outcome, calibrated (Brier score, temperature scaling — F058), and guarded by CEL guardrails; `resolve_decision` closes the loop from inside a conversation.
+- **The cognitive loop** — frame selection, intent-driven retrieval, token-budgeted context assembly, post-turn self-monitoring, end-of-session reflection and a nightly sleep cycle that consolidates, links and prunes — with an audit trail per cycle (F035.6).
+- **Hybrid retrieval** — full-text + vector search fused by Reciprocal Rank Fusion (F025), graph-augmented recall with spreading activation (F022), MMR diversity (F030), optional cross-encoder reranking (F042) and query expansion (F050), all measured on a retrieval evaluation harness (F051).
+- **Knowledge graph** — facts, decisions, episodes, procedures and chunks linked across types, densified during sleep (F040), with contradictions surfaced at recall time.
+- **Proactive heartbeat** — scheduled checks (health, email, Drive, prompt-defined dynamic checks), a finding lifecycle with escalation and digests, self-tuning parameters, Telegram delivery (F034).
+- **Orchestration** — background subtasks, cron and one-shot schedules, and multi-node DAGs with durable at-least-once result delivery, a wall-clock reaper and token accounting (F038, F087).
+- **Skills and procedures** — `learn_skill` from URLs, files or inline markdown; K-line procedure learning from repeated successful decisions (F012); full skill bodies delivered at recall (F079, F081).
+- **Execution integrity** — an execution ledger, action gating, claim verification (F026) and censor middleware that can run read-only checks before an action proceeds (F031, F078).
+- **Companion app** — the agent renders structured, interactive UI instead of prose: approval gates, findings cards, and self-composed micro-apps with charts, metric cards, scorecards and tables that refresh live (F092–F096).
+- **Interfaces** — REST API (~100 routes), MCP server, and a streaming Telegram bot with attachments and file delivery; multi-tier web search (Tavily → Exa → Brave, F033).
+- **Observability** — a Svelte 5 dashboard: memory graph, decisions and calibration, retrieval telemetry with drop attribution (F091), consolidation audit, prompt-cache efficiency, execution ledger, heartbeat, DAGs, identity and user-profile editing.
+- **Operations** — one `docker compose up`; 72 migrations applied automatically on startup; every behavior-changing capability behind a documented flag, shipped land-dark and flipped deliberately; prompt-cache optimization at ~88% hit rate in production (F036); 6,344 tests.
 
 ---
 
