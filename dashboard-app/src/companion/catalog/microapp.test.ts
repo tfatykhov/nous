@@ -852,6 +852,27 @@ describe('activity indicator', () => {
     expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
   });
 
+  it('an unrelated later event never completes a refresh whose own envelope is still missing', () => {
+    seedSurface({ meta: { composedAt: new Date(Date.now() - 60_000).toISOString() } });
+    const token = store.beginActivity(SURFACE, 'refresh', 'refresh');
+    expect(store.holdForModel(SURFACE, token, 12)).toBe(true);
+
+    // Delivery is not ordered across processes: an envelope from another
+    // process reaches the local hub before older ones are polled. Seq 13
+    // for the same surface says nothing about seq 12.
+    store.apply(13, {
+      version: 'v1.0',
+      updateDataModel: { surfaceId: SURFACE, path: '/meta/actionError', value: 'unrelated' },
+    } as never);
+    expect(store.activity[SURFACE]?.holdFor).toBe('model');
+    expect(store.doneAt[SURFACE]).toBeUndefined();
+
+    // The refresh's own last envelope, polled late, is the arrival.
+    restamp(12);
+    expect(store.activity[SURFACE]).toBeUndefined();
+    expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
+  });
+
   it('a response naming no seq holds and never claims success — no envelope can be its arrival', () => {
     seedSurface({ meta: { composedAt: new Date(Date.now() - 60_000).toISOString() } });
     const token = store.beginActivity(SURFACE, 'refresh', 'refresh');

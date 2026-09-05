@@ -47,13 +47,22 @@ export interface Activity {
   /** The completion revision an ok refresh / refine response reported: the
    *  outbox seq of the call's LAST envelope (app.refresh: the /meta
    *  restamp; app.refine: the whole-model update). Set by holdForModel.
-   *  The update has arrived once the store has seen that seq for the
-   *  surface — delivered on the stream (SSE id = seq) or covered by a
-   *  hydration snapshot's X-A2UI-Upto-Seq watermark. Never a timestamp:
-   *  composedAt is second-precision, so two refreshes in one second share
-   *  it, and a reconnect snapshot carries the refreshed data under the
-   *  same stamp while suppressing the envelope. */
+   *  The update has arrived once that EXACT seq is in `applied`, or a
+   *  hydration snapshot's X-A2UI-Upto-Seq watermark covers it. Never a
+   *  timestamp: composedAt is second-precision, so two refreshes in one
+   *  second share it, and a reconnect snapshot carries the refreshed data
+   *  under the same stamp while suppressing the envelope. */
   seq?: number;
+  /** Outbox seqs of the envelopes applied to the surface since the record
+   *  began (the stream can beat the response, so they are collected before
+   *  `seq` is known). Arrival is exact membership — never "a higher seq
+   *  has been seen": delivery is not ordered across processes (an envelope
+   *  from another process reaches the local hub before older ones are
+   *  polled), so a later unrelated event says nothing about an earlier
+   *  one. A snapshot watermark IS a prefix guarantee (state and watermark
+   *  are read in one statement) and covers everything at/below it. Dies
+   *  with the record. */
+  applied?: number[];
 }
 
 /** The completion revision carried by an app.refresh / app.refine ok

@@ -115,21 +115,8 @@ export class SurfaceStore {
    * replays the in-between range and suppression handles the overlap. */
   setSurfaceUpto(surfaceId: string, uptoSeq: number): void {
     this.surfaceUpto[surfaceId] = Math.max(this.surfaceUpto[surfaceId] ?? 0, uptoSeq);
-    this.noteSeen(surfaceId, uptoSeq);
-  }
-
-  /** Highest outbox seq known to be REFLECTED in each surface's local state:
-   * every streamed envelope for it (applied, or suppressed because the
-   * snapshot that hydrated the surface already covered it) and every
-   * hydration watermark. Seqs are server-issued and delivered in order, so
-   * this is the completion revision holdForModel compares a response's
-   * `seq` against. Survives resync: nothing here can go backwards, and the
-   * next hydration re-establishes it from the watermark anyway. */
-  private surfaceSeen: Record<string, number> = {};
-
-  private noteSeen(surfaceId: string, seq: number): void {
-    if (seq <= (this.surfaceSeen[surfaceId] ?? 0)) return;
-    this.surfaceSeen[surfaceId] = seq;
+    // The watermark covers every seq at/below it — including a held
+    // refresh's completion seq whose envelope this snapshot suppresses.
     this.settleModelHold(surfaceId);
   }
 
@@ -146,12 +133,9 @@ export class SurfaceStore {
   /** Apply one envelope; seq=null bypasses dedupe (snapshot hydration). */
   apply(seq: number | null, envelope: Envelope): void {
     if (seq !== null) {
-      const target = this.targetOf(envelope);
-      // Reflected in its surface from here on — by this apply, or by the
-      // snapshot that suppresses it below (whose watermark covers it).
-      if (target !== null) this.noteSeen(target, seq);
       if (!this.markSeen(seq)) return;
       this.lastSeq = Math.max(this.lastSeq, seq);
+      const target = this.targetOf(envelope);
       if (target !== null && seq <= (this.surfaceUpto[target] ?? 0)) {
         // Already reflected in this surface's snapshot — applying it again
         // would clobber local edits made since hydration (codex P2).
@@ -173,7 +157,7 @@ export class SurfaceStore {
         theme: String(ext['com_nous_theme'] ?? ''),
         title: String(ext['com_nous_title'] ?? ''),
       };
-      this.observe(cs.surfaceId);
+      this.observe(cs.surfaceId, seq);
     } else if (envelope.updateComponents) {
       const uc = envelope.updateComponents;
       const surface = this.surfaces[uc.surfaceId];
@@ -188,7 +172,7 @@ export class SurfaceStore {
       } else {
         setPointer(surface.dataModel, ud.path, ud.value);
       }
-      this.observe(ud.surfaceId);
+      this.observe(ud.surfaceId, seq);
     } else if (envelope.deleteSurface) {
       delete this.surfaces[envelope.deleteSurface.surfaceId];
       // A removed surface has nothing in flight any more: the record ends
@@ -203,7 +187,9 @@ export class SurfaceStore {
 
   /** Runs after every envelope that can change a surface's data model —
    * the one place the model's transitions are read, whether or not any
-   * component is mounted.
+   * component is mounted. `seq` is the applied envelope's outbox seq (null
+   * for a hydration snapshot), recorded on the surface's activity record so
+   * a refresh / refine hold can require its EXACT completion seq.
    * - A stamp present: remember it (stampSeen: its identity, tappedAt:
    *   the tap the action started from), and a NEWLY seen stamp ends a
    *   record held for it.
@@ -213,13 +199,15 @@ export class SurfaceStore {
    *   actionError without moving composedAt); doneAt carries the ARRIVAL
    *   time, so a header mounted long after cannot flash for it.
    * - A record held for its model update: the surface now exists and its
-   *   completion revision has been seen (settleModelHold) — the last patch
-   *   has landed, the record ends as a success. */
-  private observe(surfaceId: string): void {
+   *   completion seq was applied, or a watermark covers it
+   *   (settleModelHold) — the last patch has landed, the record ends as a
+   *   success. */
+  private observe(surfaceId: string, seq: number | null = null): void {
     const meta = (this.surfaces[surfaceId]?.dataModel as Record<string, unknown> | undefined)?.meta as
       | Record<string, unknown>
       | undefined;
     const record = this.activity[surfaceId];
+    if (seq !== null) record?.applied?.push(seq);
     const p = pendingActionOf(meta);
     if (p) {
       if (this.stampSeen[surfaceId] !== p.key) {
@@ -255,7 +243,6 @@ export class SurfaceStore {
         delete this.surfaces[id];
         delete this.surfaceUpto[id];
         delete this.activity[id];
-        delete this.surfaceSeen[id];
       }
     }
   }
@@ -286,6 +273,7 @@ export class SurfaceStore {
       startedAt: Date.now(),
       token,
       stampSeenBefore: this.stampSeen[surfaceId],
+      applied: [],
     };
     // A new call supersedes the previous call's "updated just now" flash.
     delete this.doneAt[surfaceId];
@@ -317,8 +305,8 @@ export class SurfaceStore {
   }
 
   /** A refresh / refine call succeeded over HTTP, naming `seq` — the outbox
-   *  seq of its last envelope (responseSeq). If the surface has already
-   *  seen that seq (the stream can beat the response) the update is on
+   *  seq of its last envelope (responseSeq). If that envelope has already
+   *  been applied (the stream can beat the response) the update is on
    *  screen and the record ends as a success now, otherwise it is held for
    *  it. Same contract as holdForStamp. Without a seq the record can only
    *  time out: bounded busy, never a claimed success. */
@@ -336,18 +324,20 @@ export class SurfaceStore {
   }
 
   /** Has the update `a`'s response promised landed? Exactly when the
-   *  surface exists locally and has seen the response's completion
-   *  revision: delivered on the stream, or covered by the watermark of the
-   *  snapshot that hydrated it (a reconnect after the server committed the
-   *  refresh — the snapshot carries the data under the same second-precision
-   *  composedAt and suppresses the envelope, so no value comparison could
-   *  ever say so). Mid-resync the surface is gone until its snapshot
-   *  hydrates; nothing can have arrived on a model the client does not
-   *  hold, so the record stays held and is re-checked as the snapshot and
-   *  its watermark land. */
+   *  surface exists locally and the response's completion seq was APPLIED
+   *  to it since the record began, or the watermark of the snapshot that
+   *  hydrated it covers that seq (a reconnect after the server committed
+   *  the refresh — the snapshot carries the data under the same
+   *  second-precision composedAt and suppresses the envelope, so no value
+   *  comparison could ever say so). Not "a higher seq has been seen":
+   *  delivery is unordered across processes, so an unrelated later event
+   *  must not complete a refresh whose own envelope is still missing.
+   *  Mid-resync the surface is gone until its snapshot hydrates; nothing
+   *  can have arrived on a model the client does not hold, so the record
+   *  stays held and is re-checked as the snapshot and its watermark land. */
   private modelArrived(surfaceId: string, a: Activity): boolean {
-    if (this.surfaces[surfaceId] === undefined) return false;
-    return a.seq !== undefined && (this.surfaceSeen[surfaceId] ?? 0) >= a.seq;
+    if (this.surfaces[surfaceId] === undefined || a.seq === undefined) return false;
+    return a.seq <= (this.surfaceUpto[surfaceId] ?? 0) || (a.applied?.includes(a.seq) ?? false);
   }
 
   endActivity(surfaceId: string, ok: boolean): void {
@@ -367,7 +357,6 @@ export class SurfaceStore {
     this.doneAt = {};
     this.tappedAt = {};
     this.stampSeen = {};
-    this.surfaceSeen = {};
   }
 
   /** A server-forced resync (control: resync) or reconnect: the surfaces
