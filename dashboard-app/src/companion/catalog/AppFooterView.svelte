@@ -24,7 +24,7 @@
   import { store } from '../store.svelte';
   import { transport } from '../transport';
   import { resolveDynamic } from '../functions';
-  import { ACT_STAMP_WAIT_MS, pendingActionOf, pendingIsFresh } from '../activity';
+  import { HOLD_WAIT_MS, pendingActionOf, pendingIsFresh } from '../activity';
   import type { ActivityKind } from '../activity';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
@@ -95,24 +95,22 @@
   const actWorking = (id: string) =>
     (pendingFresh && pendingAction?.id === id) || (activity?.kind === 'act' && activity.id === id);
 
-  // A successful app.act POST only means the turn STARTED; from there the
-  // server's pendingAction stamp carries the activity. The stamp arrives
-  // over SSE, independently of the HTTP response, and can land AFTER it —
-  // releasing on the response would drop the rail and re-enable every
-  // control for that gap, and a second tap would be refused as already
-  // running. So the record is held (holdSince) until the stamp is
-  // observed, for at most ACT_STAMP_WAIT_MS from the hand-off; past that
-  // the controls release and the server's own guard covers a duplicate.
-  // Store-driven, so whichever footer is mounted runs it. Never a flash:
-  // completion is the header's call, and only a recompose counts.
+  // A successful HTTP response is not the end of a call. What it promises
+  // arrives over SSE, independently, and can land AFTER it: the server's
+  // pendingAction stamp for an agent action (a 200 only means the turn
+  // STARTED), the model patches for refresh / refine (ending on
+  // /meta/composedAt). Ending the record on the response would drop the
+  // rail, un-dim sections that still show the old model, flash "updated
+  // just now" over it, and re-enable the controls for that gap — where a
+  // second action tap is refused as already running. So the record is
+  // HELD (holdForStamp / holdForModel) and the STORE ends it when it
+  // observes the arrival; this effect is only the bound: past HOLD_WAIT_MS
+  // the controls release without claiming an update. Store-driven, so
+  // whichever footer is mounted runs it.
   $effect(() => {
     if (!activity || activity.holdSince === undefined) return;
     const token = activity.token;
-    if (pendingFresh) {
-      store.endActivityIf(surfaceId, token, false);
-      return;
-    }
-    const remaining = activity.holdSince + ACT_STAMP_WAIT_MS - Date.now();
+    const remaining = activity.holdSince + HOLD_WAIT_MS - Date.now();
     const t = setTimeout(() => store.endActivityIf(surfaceId, token, false), Math.max(0, remaining));
     return () => clearTimeout(t);
   });
@@ -127,24 +125,14 @@
   async function act(actionId: string) {
     if (locked) return;
     error = '';
-    // Whether a stamp has been observed since THIS tap decides what a
-    // success response means: none yet → hold for it; one already seen →
-    // it came, and may already have gone (the failure watcher can clear it
-    // and write actionError before a slow response lands) → nothing to
-    // wait for. Compared by the stamp's identity (subtask_id), so neither
-    // clock skew nor two stamps in the same server second can mislead.
-    const seenBefore = store.stampSeen[surfaceId];
     const token = store.beginActivity(surfaceId, 'act', actionId);
-    let handedOff = false;
+    let held = false;
     try {
       const res = await transport.postAction(surfaceId, 'app.act', comp.id, { actionId });
-      if (res.ok) {
-        if (store.stampSeen[surfaceId] === seenBefore) handedOff = store.holdForStamp(surfaceId, token);
-      } else {
-        error = res.message;
-      }
+      if (res.ok) held = store.holdForStamp(surfaceId, token);
+      else error = res.message;
     } finally {
-      if (!handedOff) store.endActivityIf(surfaceId, token, false);
+      if (!held) store.endActivityIf(surfaceId, token, false);
     }
   }
 
@@ -152,13 +140,13 @@
     if (locked) return;
     error = '';
     const token = store.beginActivity(surfaceId, kind, id);
-    let ok = false;
+    let held = false;
     try {
       const res = await transport.callAgentFunction(surfaceId, name, args);
-      ok = res.ok;
-      if (!res.ok) error = res.message;
+      if (res.ok) held = store.holdForModel(surfaceId, token);
+      else error = res.message;
     } finally {
-      store.endActivityIf(surfaceId, token, ok);
+      if (!held) store.endActivityIf(surfaceId, token, false);
     }
   }
 

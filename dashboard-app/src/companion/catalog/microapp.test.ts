@@ -9,7 +9,7 @@ import TimelineView from './TimelineView.svelte';
 import ModalView from './ModalView.svelte';
 import { store } from '../store.svelte';
 import { transport } from '../transport';
-import { ACT_STAMP_WAIT_MS } from '../activity';
+import { HOLD_WAIT_MS } from '../activity';
 
 // F092.1 micro-app adapter tests. Same harness discipline as phase2.test.ts:
 // module-singleton store reset per test, transport spied, settle() after
@@ -36,6 +36,14 @@ function seedSurface(
       dataModel,
       metadata: { extensions: { com_nous_nonce: 'test-nonce' } },
     },
+  } as never);
+}
+
+/** The last envelope a refresh / refine emits: the /meta/composedAt restamp. */
+function restamp(): void {
+  store.apply(null, {
+    version: 'v1.0',
+    updateDataModel: { surfaceId: SURFACE, path: '/meta', value: { composedAt: new Date().toISOString() } },
   } as never);
 }
 
@@ -211,6 +219,11 @@ describe('AppFooterView', () => {
 
     await fireEvent.click(getByText('refresh'));
     await settle();
+    // The refresh's patches land over SSE (its last one restamps composedAt);
+    // until then the app is still busy and close stays disabled.
+    expect((getByText('close') as HTMLButtonElement).disabled).toBe(true);
+    restamp();
+    await tick();
     // Two-tap confirmation on the destructive close: the first tap ARMS.
     await fireEvent.click(getByText('close'));
     await settle();
@@ -698,10 +711,106 @@ describe('activity indicator', () => {
 
     finish({ ok: true, message: '', value: {} });
     await settle();
+    // The response alone is not the end: the patches are still in flight.
+    expect(store.activity[SURFACE]?.holdFor).toBe('model');
+    expect(getByText('Refreshing').querySelector('.spin')).not.toBeNull();
+    restamp();
+    await tick();
     expect(store.activity[SURFACE]).toBeUndefined();
     expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
     expect(container.querySelector('.spin')).toBeNull();
     expect((getByText('refresh') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('a refresh whose patches landed before its response ends on the response, as a success', async () => {
+    let finish!: (v: { ok: boolean; message: string; value?: unknown }) => void;
+    vi.spyOn(transport, 'callAgentFunction').mockImplementation(
+      () => new Promise((resolve) => (finish = resolve)),
+    );
+    seedSurface({ meta: { composedAt: new Date(Date.now() - 60_000).toISOString() } });
+    const { getByText } = render(AppFooterView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'footer', component: 'AppFooter', refineOptions: [], showRefresh: true },
+      },
+    });
+    await fireEvent.click(getByText('refresh'));
+    await tick();
+    // SSE first (the usual order): a source patch, then the restamp.
+    store.apply(null, { version: 'v1.0', updateDataModel: { surfaceId: SURFACE, path: '/summary', value: { n: 1 } } } as never);
+    expect(store.activity[SURFACE]?.kind).toBe('refresh');
+    restamp();
+    // Still held — nothing has said ok yet.
+    expect(store.activity[SURFACE]?.kind).toBe('refresh');
+
+    finish({ ok: true, message: '', value: {} });
+    await settle();
+    expect(store.activity[SURFACE]).toBeUndefined();
+    expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
+  });
+
+  it('a refresh held for its patches is bounded, and a timeout claims no update', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(transport, 'callAgentFunction').mockResolvedValue({ ok: true, message: '', value: {} } as never);
+      seedSurface({ meta: { composedAt: new Date().toISOString() } });
+      const { getByText } = render(AppFooterView, {
+        props: { surfaceId: SURFACE, comp: { id: 'footer', component: 'AppFooter', refineOptions: [], showRefresh: true } },
+      });
+      await fireEvent.click(getByText('refresh'));
+      await vi.advanceTimersByTimeAsync(0);
+      await tick();
+      expect(store.activity[SURFACE]?.holdFor).toBe('model');
+
+      await vi.advanceTimersByTimeAsync(HOLD_WAIT_MS + 1);
+      await tick();
+      expect(store.activity[SURFACE]).toBeUndefined();
+      expect(store.doneAt[SURFACE]).toBeUndefined();
+      expect((getByText('refresh') as HTMLButtonElement).disabled).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a forced resync keeps what is in flight: the rehydrated surface mounts locked and the response still completes it', async () => {
+    let finish!: (v: { ok: boolean; message: string; value?: unknown }) => void;
+    vi.spyOn(transport, 'callAgentFunction').mockImplementation(
+      () => new Promise((resolve) => (finish = resolve)),
+    );
+    seedSurface({ meta: { composedAt: new Date(Date.now() - 60_000).toISOString() } });
+    const footer = { id: 'footer', component: 'AppFooter', refineOptions: [], showRefresh: true };
+    const first = render(AppFooterView, { props: { surfaceId: SURFACE, comp: footer } });
+    await fireEvent.click(first.getByText('refresh'));
+    await tick();
+    const token = store.activity[SURFACE]?.token;
+
+    // control: resync — the transport starts the surfaces over from the
+    // index and its snapshots; the unchanged surface comes back.
+    cleanup();
+    store.resync();
+    expect(store.surfaces[SURFACE]).toBeUndefined();
+    store.apply(null, {
+      version: 'v1.0',
+      createSurface: {
+        surfaceId: SURFACE,
+        catalogId: 'nous-core',
+        components: [],
+        dataModel: { meta: { composedAt: new Date(Date.now() - 60_000).toISOString() } },
+        metadata: { extensions: { com_nous_nonce: 'test-nonce' } },
+      },
+    } as never);
+    store.pruneAbsent(new Set([SURFACE]));
+    expect(store.activity[SURFACE]?.token).toBe(token);
+
+    const second = render(AppFooterView, { props: { surfaceId: SURFACE, comp: footer } });
+    expect((second.getByText('Refreshing') as HTMLButtonElement).disabled).toBe(true);
+
+    finish({ ok: true, message: '', value: {} });
+    await settle();
+    restamp();
+    await tick();
+    expect(store.activity[SURFACE]).toBeUndefined();
+    expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
   });
 
   it('a successful action holds its activity until the server stamp arrives, then hands over', async () => {
@@ -746,7 +855,7 @@ describe('activity indicator', () => {
     expect(getByText('Rebalance').querySelector('.spin')).not.toBeNull();
   });
 
-  it('the hold is bounded: with no stamp in ACT_STAMP_WAIT_MS the controls release', async () => {
+  it('the hold is bounded: with no stamp in HOLD_WAIT_MS the controls release', async () => {
     vi.useFakeTimers();
     try {
       vi.spyOn(transport, 'postAction').mockResolvedValue({ ok: true, message: '' } as never);
@@ -768,7 +877,7 @@ describe('activity indicator', () => {
       await tick();
       expect(store.activity[SURFACE]?.kind).toBe('act');
 
-      await vi.advanceTimersByTimeAsync(ACT_STAMP_WAIT_MS + 1);
+      await vi.advanceTimersByTimeAsync(HOLD_WAIT_MS + 1);
       await tick();
       expect(store.activity[SURFACE]).toBeUndefined();
       expect(store.doneAt[SURFACE]).toBeUndefined();
@@ -893,6 +1002,8 @@ describe('activity indicator', () => {
 
     finish({ ok: true, message: '', value: {} });
     await settle();
+    restamp();
+    await tick();
     expect(store.activity[SURFACE]).toBeUndefined();
     expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
     expect((second.getByText('refresh') as HTMLButtonElement).disabled).toBe(false);
@@ -1025,6 +1136,8 @@ describe('activity indicator', () => {
 
     finishRefresh({ ok: true, message: '', value: {} });
     await settle();
+    restamp();
+    await tick();
     expect(store.activity[SURFACE]).toBeUndefined();
     expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
   });

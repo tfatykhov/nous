@@ -22,7 +22,7 @@
   // moves past the stamp's `at`) — the failure watcher also clears the
   // stamp, so "stamp gone" alone would flash "updated just now" over an
   // action that explicitly failed (codex P1); that detection lives in the
-  // STORE at envelope arrival (noteStamp), because the recompose replaces
+  // STORE at envelope arrival (observe), because the recompose replaces
   // the surface (this header is destroyed and remounted) and may land
   // while the user is on another surface — this header only reads doneAt.
   // And the screen-reader announcement is a persistent polite live region

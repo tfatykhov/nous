@@ -165,7 +165,10 @@ export class Transport {
   }
 
   private async reconnect(): Promise<void> {
-    store.reset();
+    // resync, not reset: a call still in flight keeps its activity record
+    // across the rehydration (F092.4) — pruneAbsent in cycle() drops the
+    // records of surfaces the index no longer lists.
+    store.resync();
     await this.cycle();
   }
 

@@ -30,11 +30,21 @@ export interface Activity {
    *  replacement footer has since begun. Stamp-derived activity is 0:
    *  nobody owns it. */
   token: number;
-  /** Set when an app.act POST succeeded before the server's pendingAction
-   *  stamp was observed: the record is being HELD for the stamp, from this
-   *  epoch ms, for at most ACT_STAMP_WAIT_MS. On the record (not in a
-   *  component) so whichever footer is mounted runs the hold. */
+  /** The call's HTTP response said ok, but what it promised still has to
+   *  arrive over SSE: the server's pendingAction stamp for an agent action
+   *  ('stamp'), or the model patches for refresh / refine ('model' — both
+   *  emit /meta/composedAt as their LAST envelope). The record is HELD
+   *  from this epoch ms for at most HOLD_WAIT_MS; the store ends it when
+   *  it observes the arrival, a mounted footer ends it on timeout. On the
+   *  record, not in a component, so it survives remounts. */
   holdSince?: number;
+  holdFor?: 'stamp' | 'model';
+  /** What the store had observed for this surface when the record began:
+   *  the last stamp's identity and the model's composedAt. A later value
+   *  means the thing the call promised has been seen since — possibly
+   *  before the HTTP response even landed. */
+  stampSeenBefore?: string;
+  composedAtBefore?: string;
 }
 
 /** Present-tense verb the header shows next to the elapsed time. */
@@ -47,12 +57,13 @@ export const ACTIVITY_VERBS: Record<ActivityKind, string> = {
 /** How long the "updated just now" flash stays after a successful call. */
 export const DONE_FLASH_MS = 3000;
 
-/** After a successful app.act POST the server's /meta/pendingAction stamp
- *  arrives on a DIFFERENT channel (SSE) and can land after the HTTP
- *  response. The footer holds its local activity until the stamp is seen,
- *  for at most this long — past it the controls release; the server's own
- *  double-tap guard still refuses a duplicate. */
-export const ACT_STAMP_WAIT_MS = 10_000;
+/** What a successful HTTP response promises — the pendingAction stamp for
+ *  an agent action, the model patches for refresh / refine — arrives on a
+ *  DIFFERENT channel (SSE) and can land after the response. The record is
+ *  held until the store observes it, for at most this long; past it the
+ *  controls release without claiming an update (the server's own guard
+ *  still refuses a duplicate action). */
+export const HOLD_WAIT_MS = 10_000;
 
 /** F092.2 fallback only: the pending stamp carries the server's own
  *  timeout_s; this is used when a stamp predates that field. */

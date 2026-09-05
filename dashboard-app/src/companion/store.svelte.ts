@@ -63,7 +63,7 @@ export class SurfaceStore {
   doneAt = $state<Record<string, number>>({});
   /** The `at` (epoch ms) of the /meta/pendingAction stamp last observed
    * on each surface — the tap an agent action started from. Recorded and
-   * resolved in noteStamp() at envelope arrival, so completion is detected
+   * resolved in observe() at envelope arrival, so completion is detected
    * whether or not the app is on screen: a successful action is delivered
    * as deleteSurface + createSurface for the same id (the header is
    * destroyed and remounted), and the user may have focused another
@@ -154,7 +154,7 @@ export class SurfaceStore {
         theme: String(ext['com_nous_theme'] ?? ''),
         title: String(ext['com_nous_title'] ?? ''),
       };
-      this.noteStamp(cs.surfaceId);
+      this.observe(cs.surfaceId);
     } else if (envelope.updateComponents) {
       const uc = envelope.updateComponents;
       const surface = this.surfaces[uc.surfaceId];
@@ -169,7 +169,7 @@ export class SurfaceStore {
       } else {
         setPointer(surface.dataModel, ud.path, ud.value);
       }
-      this.noteStamp(ud.surfaceId);
+      this.observe(ud.surfaceId);
     } else if (envelope.deleteSurface) {
       delete this.surfaces[envelope.deleteSurface.surfaceId];
       // A removed surface has nothing in flight any more: the record ends
@@ -177,36 +177,50 @@ export class SurfaceStore {
       // the user is on another surface and no footer is mounted, and a
       // record left behind would lock the replacement until a POST that
       // may never settle. tappedAt/doneAt stay: a replacement's
-      // createSurface follows this and resolves them (noteStamp).
+      // createSurface follows this and resolves them (observe).
       delete this.activity[envelope.deleteSurface.surfaceId];
     }
   }
 
-  /** Runs after every envelope that can change a surface's data model.
-   * A stamp present: remember it (stampSeen for the footer, tappedAt as
-   * the tap the action started from). No stamp but a remembered tap: the
-   * action is over one way or the other — it COMPLETED only if the app
-   * was recomposed after the tap (recomposedAfter: the failure watcher
-   * clears the stamp and writes actionError without moving composedAt),
-   * and doneAt is stamped with the ARRIVAL time, so a header mounted long
-   * after cannot flash "updated just now" for it. */
-  private noteStamp(surfaceId: string): void {
+  /** Runs after every envelope that can change a surface's data model —
+   * the one place the model's transitions are read, whether or not any
+   * component is mounted.
+   * - A stamp present: remember it (stampSeen: its identity, tappedAt:
+   *   the tap the action started from), and a NEWLY seen stamp ends a
+   *   record held for it.
+   * - No stamp but a remembered tap: the action is over one way or the
+   *   other. It COMPLETED only if the app was recomposed after the tap
+   *   (recomposedAfter: the failure watcher clears the stamp and writes
+   *   actionError without moving composedAt); doneAt carries the ARRIVAL
+   *   time, so a header mounted long after cannot flash for it.
+   * - A record held for its model update: composedAt moving past the
+   *   value captured at begin means the last patch has landed — the
+   *   record ends as a success. */
+  private observe(surfaceId: string): void {
     const meta = (this.surfaces[surfaceId]?.dataModel as Record<string, unknown> | undefined)?.meta as
       | Record<string, unknown>
       | undefined;
+    const record = this.activity[surfaceId];
     const p = pendingActionOf(meta);
     if (p) {
-      this.stampSeen[surfaceId] = p.key;
+      if (this.stampSeen[surfaceId] !== p.key) {
+        this.stampSeen[surfaceId] = p.key;
+        if (record?.holdFor === 'stamp') this.endActivity(surfaceId, false);
+      }
       const at = Date.parse(p.at);
       if (Number.isFinite(at)) this.tappedAt[surfaceId] = at;
-      return;
+    } else {
+      const tapped = this.tappedAt[surfaceId];
+      if (tapped !== undefined) {
+        delete this.tappedAt[surfaceId];
+        const composedAt = meta?.composedAt;
+        if (typeof composedAt === 'string' && recomposedAfter(composedAt, tapped)) {
+          this.doneAt[surfaceId] = Date.now();
+        }
+      }
     }
-    const tapped = this.tappedAt[surfaceId];
-    if (tapped === undefined) return;
-    delete this.tappedAt[surfaceId];
-    const composedAt = meta?.composedAt;
-    if (typeof composedAt === 'string' && recomposedAfter(composedAt, tapped)) {
-      this.doneAt[surfaceId] = Date.now();
+    if (record?.holdFor === 'model' && this.composedAtOf(surfaceId) !== record.composedAtBefore) {
+      this.endActivity(surfaceId, true);
     }
   }
 
@@ -241,7 +255,14 @@ export class SurfaceStore {
    *  this record. */
   beginActivity(surfaceId: string, kind: ActivityKind, id: string): number {
     const token = ++this.activitySeq;
-    this.activity[surfaceId] = { kind, id, startedAt: Date.now(), token };
+    this.activity[surfaceId] = {
+      kind,
+      id,
+      startedAt: Date.now(),
+      token,
+      stampSeenBefore: this.stampSeen[surfaceId],
+      composedAtBefore: this.composedAtOf(surfaceId),
+    };
     // A new call supersedes the previous call's "updated just now" flash.
     delete this.doneAt[surfaceId];
     return token;
@@ -253,14 +274,47 @@ export class SurfaceStore {
     if (this.activity[surfaceId]?.token === token) this.endActivity(surfaceId, ok);
   }
 
-  /** The app.act POST succeeded before any stamp was observed: hold the
-   *  record for the stamp (the footer's hold effect ends it). Returns
-   *  false when the record is no longer `token` — nothing to hold. */
+  /** The app.act POST succeeded. If a stamp has been observed since the
+   *  record began, it already came — and may already have gone (the
+   *  failure watcher can clear it before a slow response lands) — so the
+   *  record ends now; otherwise it is held for the stamp (observe() ends
+   *  it on arrival, a mounted footer on timeout). Returns whether it is
+   *  held; false also when the record is no longer `token`. */
   holdForStamp(surfaceId: string, token: number): boolean {
     const a = this.activity[surfaceId];
     if (a?.token !== token) return false;
+    if (this.stampSeen[surfaceId] !== a.stampSeenBefore) {
+      this.endActivity(surfaceId, false);
+      return false;
+    }
     a.holdSince = Date.now();
+    a.holdFor = 'stamp';
     return true;
+  }
+
+  /** A refresh / refine call succeeded over HTTP. Its patches travel over
+   *  SSE and end with /meta/composedAt; if that has already moved since
+   *  the record began the update is on screen and the record ends as a
+   *  success now, otherwise it is held for it. Same contract as
+   *  holdForStamp. */
+  holdForModel(surfaceId: string, token: number): boolean {
+    const a = this.activity[surfaceId];
+    if (a?.token !== token) return false;
+    if (this.composedAtOf(surfaceId) !== a.composedAtBefore) {
+      this.endActivity(surfaceId, true);
+      return false;
+    }
+    a.holdSince = Date.now();
+    a.holdFor = 'model';
+    return true;
+  }
+
+  private composedAtOf(surfaceId: string): string | undefined {
+    const meta = (this.surfaces[surfaceId]?.dataModel as Record<string, unknown> | undefined)?.meta as
+      | Record<string, unknown>
+      | undefined;
+    const composedAt = meta?.composedAt;
+    return typeof composedAt === 'string' ? composedAt : undefined;
   }
 
   endActivity(surfaceId: string, ok: boolean): void {
@@ -273,12 +327,24 @@ export class SurfaceStore {
     this.doneAt[surfaceId] = Date.now();
   }
 
+  /** Everything, including transient activity — a fresh start (tests). */
   reset(): void {
-    this.surfaces = {};
+    this.resync();
     this.activity = {};
     this.doneAt = {};
     this.tappedAt = {};
     this.stampSeen = {};
+  }
+
+  /** A server-forced resync (control: resync) or reconnect: the surfaces
+   * and the stream bookkeeping start over from the index + snapshots, but
+   * what is IN FLIGHT does not — a refresh, refine or agent-action POST
+   * still running keeps its record, so the rehydrated copy of the same
+   * surface mounts locked and the response can still finish the record it
+   * began (by token). pruneAbsent drops records for surfaces the index no
+   * longer lists. */
+  resync(): void {
+    this.surfaces = {};
     this.lastSeq = 0;
     this.seenFloor = 0;
     this.seen = new Set();
