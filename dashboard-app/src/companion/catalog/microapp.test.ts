@@ -496,6 +496,12 @@ describe('activity indicator', () => {
 
   it('an in-flight refresh turns the stamp into a live status and shows the rail', async () => {
     const { container } = renderHeader();
+    // The live region exists BEFORE anything happens (a region inserted
+    // together with its first message is not reliably announced) and
+    // starts silent.
+    const live = container.querySelector('[role="status"]')!;
+    expect(live.getAttribute('aria-live')).toBe('polite');
+    expect(live.textContent).toBe('');
     expect(container.querySelector('.rail')).toBeNull();
 
     store.beginActivity(SURFACE, 'refresh', 'refresh');
@@ -503,9 +509,15 @@ describe('activity indicator', () => {
 
     const stamp = container.querySelector('.stamp.working')!;
     expect(stamp.textContent).toContain('refreshing');
-    expect(stamp.textContent).toMatch(/\d+s/);
-    expect(stamp.getAttribute('role')).toBe('status');
+    expect(stamp.textContent).toMatch(/[0-9]+s/);
     expect(container.querySelector('.rail')).not.toBeNull();
+    // The transition is announced once, by the same persistent region; the
+    // ticking elapsed value is outside it, and the visible stamp is hidden
+    // from assistive tech so the words are not read twice.
+    expect(container.querySelector('[role="status"]')).toBe(live);
+    expect(live.textContent).toBe('refreshing');
+    expect(live.querySelector('.elapsed')).toBeNull();
+    expect(stamp.getAttribute('aria-hidden')).toBe('true');
   });
 
   it('a refine names what is happening, and success flashes then returns the stamp', async () => {
@@ -518,12 +530,14 @@ describe('activity indicator', () => {
     await tick();
     expect(container.querySelector('.rail')).toBeNull();
     expect(container.querySelector('.stamp.done')?.textContent).toContain('updated just now');
+    expect(container.querySelector('[role="status"]')?.textContent).toBe('updated just now');
 
     // A failed call must not claim an update.
     store.beginActivity(SURFACE, 'refresh', 'refresh');
     store.endActivity(SURFACE, false);
     await tick();
     expect(container.querySelector('.stamp.done')).toBeNull();
+    expect(container.querySelector('[role="status"]')?.textContent).toBe('');
   });
 
   it('a fresh agent-action stamp is "agent working" with elapsed time only, and goes amber when stale', async () => {
@@ -540,20 +554,54 @@ describe('activity indicator', () => {
     const stale = renderHeader({ pendingAction: { id: 'rebalance', label: 'Rebalance', at: staleAt } });
     expect(stale.container.querySelector('.rail')).toBeNull();
     expect(stale.container.querySelector('.stamp.stale')?.textContent).toContain('no update after 5m');
+    expect(stale.container.querySelector('[role="status"]')?.textContent).toContain('no update after 5m');
   });
 
-  it('an agent action completes when its stamp is cleared, not when it goes stale', async () => {
-    const at = new Date().toISOString();
+  it('an agent action completes when the app is recomposed after the tap', async () => {
+    const at = new Date(Date.now() - 5_000).toISOString();
     const { container } = renderHeader({ pendingAction: { id: 'rebalance', label: 'Rebalance', at, timeout_s: 300 } });
     expect(container.querySelector('.stamp.working')).not.toBeNull();
 
-    // The recompose replaces the model wholesale; the stamp is simply gone.
+    // The recompose replaces /meta wholesale: the stamp is gone AND
+    // composedAt has moved past the tap.
     store.apply(null, {
       version: 'v1.0',
       updateDataModel: { surfaceId: SURFACE, path: '/meta', value: { composedAt: new Date().toISOString() } },
     } as never);
     await tick();
     expect(container.querySelector('.stamp.done')?.textContent).toContain('updated just now');
+    expect(container.querySelector('[role="status"]')?.textContent).toBe('updated just now');
+  });
+
+  it('a failed agent action never reads as updated: the watcher clears the stamp without recomposing', async () => {
+    const composedAt = new Date(Date.now() - 60_000).toISOString();
+    const at = new Date(Date.now() - 5_000).toISOString();
+    const { container } = renderHeader({
+      composedAt,
+      pendingAction: { id: 'rebalance', label: 'Rebalance', at, timeout_s: 300 },
+    });
+    expect(container.querySelector('.stamp.working')).not.toBeNull();
+
+    // actions.py clears the stamp FIRST and writes actionError in a second
+    // envelope. Neither state is a success: composedAt never moved.
+    store.apply(null, {
+      version: 'v1.0',
+      updateDataModel: { surfaceId: SURFACE, path: '/meta/pendingAction', value: null },
+    } as never);
+    await tick();
+    expect(container.querySelector('.stamp.working')).toBeNull();
+    expect(container.querySelector('.rail')).toBeNull();
+    expect(container.querySelector('.stamp.done')).toBeNull();
+
+    store.apply(null, {
+      version: 'v1.0',
+      updateDataModel: { surfaceId: SURFACE, path: '/meta/actionError', value: 'Rebalance: the action failed' },
+    } as never);
+    await tick();
+    expect(container.querySelector('.stamp.done')).toBeNull();
+    expect(container.querySelector('[role="status"]')?.textContent).toBe('');
+    // The ordinary freshness stamp is back — a minute-old compose, not "just now".
+    expect(container.querySelector('.stamp')?.textContent).not.toContain('just now');
   });
 
   it('the pressed refresh control carries a spinner and a present-tense label while its call runs', async () => {

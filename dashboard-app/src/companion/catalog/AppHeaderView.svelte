@@ -16,6 +16,15 @@
   // then the normal freshness stamp returns. A pending action that goes
   // stale reads "no update after …" in amber, the same degradation the
   // footer's note already performs.
+  //
+  // Two review findings shaped the details. An agent action counts as
+  // done only when the app was RECOMPOSED after the tap (/meta/composedAt
+  // moves past the stamp's `at`) — the failure watcher also clears the
+  // stamp, so "stamp gone" alone would flash "updated just now" over an
+  // action that explicitly failed (codex P1). And the screen-reader
+  // announcement is a persistent polite live region that carries only the
+  // transitions; the ticking elapsed value lives outside it, or a refresh
+  // would re-announce every second for its whole duration (codex P2).
   import { store } from '../store.svelte';
   import { resolveDynamic, toDisplayString } from '../functions';
   import { formatFreshness } from '../freshness';
@@ -77,17 +86,40 @@
     return () => clearInterval(id);
   });
 
-  // An agent action completes when the recompose replaces the data model
-  // and the pending stamp is simply gone. That transition — fresh, then
-  // absent — is the success signal; fresh-then-stale is not.
-  let hadFreshPending = $state(false);
+  // What assistive tech hears: ONE persistent polite region whose text
+  // changes only on a transition. The visible stamps below are aria-hidden
+  // so the same words are not read twice, and the elapsed counter is never
+  // inside a live region.
+  const announcement = $derived(
+    activity
+      ? ACTIVITY_VERBS[activity.kind]
+      : flashing
+        ? 'updated just now'
+        : pendingStale
+          ? `no update after ${formatElapsed(pending?.staleMs ?? 0)}`
+          : '',
+  );
+
+  // An agent action succeeded when the app was recomposed AFTER the tap:
+  // the recompose replaces /meta wholesale, so the stamp is gone and
+  // composedAt has moved past the stamp's `at`. The stamp disappearing is
+  // not the signal — actions.py clears it on failure / timeout /
+  // completed-without-recompose too (then writes /meta/actionError), and
+  // composedAt does not move on any of those. Both timestamps are
+  // second-precision server times; strict > is deliberate — a same-second
+  // recompose is not a real LLM turn, and a missed flash is the benign
+  // failure. A stale stamp (fresh → stale) is not a completion either.
+  let tappedAt: number | null = null;
   $effect(() => {
     if (pendingFresh) {
-      hadFreshPending = true;
-    } else if (hadFreshPending) {
-      hadFreshPending = false;
-      if (pending === null) store.markDone(surfaceId);
+      tappedAt = Date.parse(pending!.at);
+      return;
     }
+    if (tappedAt === null) return;
+    const at = tappedAt;
+    tappedAt = null;
+    const composed = Date.parse(composedAt);
+    if (pending === null && Number.isFinite(composed) && composed > at) store.markDone(surfaceId);
   });
 </script>
 
@@ -102,17 +134,18 @@
     {/if}
   </div>
   <span class="meta">
+    <span class="sr-only" role="status" aria-live="polite">{announcement}</span>
     {#if activity}
-      <span class="stamp working" role="status" aria-live="polite">
+      <span class="stamp working" aria-hidden="true">
         <i class="dot"></i>{ACTIVITY_VERBS[activity.kind]} · <span class="elapsed">{elapsed}</span>
       </span>
     {:else if flashing}
-      <span class="stamp done" role="status" aria-live="polite">
+      <span class="stamp done" aria-hidden="true">
         <svg class="check" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
         updated just now
       </span>
     {:else if pendingStale}
-      <span class="stamp stale"><i class="dot warn"></i>no update after {formatElapsed(pending?.staleMs ?? 0)}</span>
+      <span class="stamp stale" aria-hidden="true"><i class="dot warn"></i>no update after {formatElapsed(pending?.staleMs ?? 0)}</span>
     {:else}
       <span class="stamp" class:stale={freshness.stale}>{freshness.label}</span>
     {/if}
@@ -143,6 +176,17 @@
     flex-direction: column;
     align-items: flex-end;
     text-align: right;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
   .stamp {
     color: var(--muted);
