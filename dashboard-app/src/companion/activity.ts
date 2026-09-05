@@ -40,10 +40,16 @@ export interface Activity {
   holdSince?: number;
   holdFor?: 'stamp' | 'model';
   /** What the store had observed for this surface when the record began:
-   *  the last stamp's identity and the model's composedAt. A later value
-   *  means the thing the call promised has been seen since — possibly
-   *  before the HTTP response even landed. */
+   *  the last stamp's identity, the model generation (how many
+   *  model-ending envelopes the store had applied — a /meta restamp or a
+   *  whole-model update) and the model's composedAt. Anything moving past
+   *  these means the thing the call promised has been seen since —
+   *  possibly before the HTTP response even landed. Generation AND value:
+   *  composedAt is stamped at second precision, so two refreshes landing
+   *  in one second share it and only the envelope count tells them apart;
+   *  a hydration snapshot is not an envelope and only its value tells. */
   stampSeenBefore?: string;
+  modelGenBefore?: number;
   composedAtBefore?: string;
 }
 

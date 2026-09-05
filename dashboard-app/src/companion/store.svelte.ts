@@ -166,8 +166,10 @@ export class SurfaceStore {
       if (!surface) return;
       if (ud.path === undefined || ud.path === '' || ud.path === '/') {
         surface.dataModel = (ud.value ?? {}) as Record<string, unknown>;
+        this.modelGen[ud.surfaceId] = this.modelGenOf(ud.surfaceId) + 1;
       } else {
         setPointer(surface.dataModel, ud.path, ud.value);
+        if (ud.path === '/meta') this.modelGen[ud.surfaceId] = this.modelGenOf(ud.surfaceId) + 1;
       }
       this.observe(ud.surfaceId);
     } else if (envelope.deleteSurface) {
@@ -193,9 +195,10 @@ export class SurfaceStore {
    *   (recomposedAfter: the failure watcher clears the stamp and writes
    *   actionError without moving composedAt); doneAt carries the ARRIVAL
    *   time, so a header mounted long after cannot flash for it.
-   * - A record held for its model update: composedAt moving past the
-   *   value captured at begin means the last patch has landed — the
-   *   record ends as a success. */
+   * - A record held for its model update: a model-ending envelope applied
+   *   since begin, or composedAt moved past the value captured then
+   *   (modelArrived), means the last patch has landed — the record ends
+   *   as a success. */
   private observe(surfaceId: string): void {
     const meta = (this.surfaces[surfaceId]?.dataModel as Record<string, unknown> | undefined)?.meta as
       | Record<string, unknown>
@@ -219,7 +222,7 @@ export class SurfaceStore {
         }
       }
     }
-    if (record?.holdFor === 'model' && this.composedAtOf(surfaceId) !== record.composedAtBefore) {
+    if (record?.holdFor === 'model' && this.modelArrived(surfaceId, record)) {
       this.endActivity(surfaceId, true);
     }
   }
@@ -231,6 +234,7 @@ export class SurfaceStore {
         delete this.surfaces[id];
         delete this.surfaceUpto[id];
         delete this.activity[id];
+        delete this.modelGen[id];
       }
     }
   }
@@ -251,6 +255,14 @@ export class SurfaceStore {
 
   private activitySeq = 0;
 
+  /** Per-surface count of model-ENDING envelopes applied: an
+   *  updateDataModel at exactly /meta (a refresh emits meta after every
+   *  sourced key) or a whole-model one (a refine's last). Identity, not
+   *  value — see Activity.modelGenBefore. Sub-paths (/meta/pendingAction,
+   *  /meta/actionError) do not count: an agent action has its own arrival,
+   *  the stamp. Not reactive: only the store reads it. */
+  private modelGen: Record<string, number> = {};
+
   /** Returns the record's token; pass it to endActivityIf to release only
    *  this record. */
   beginActivity(surfaceId: string, kind: ActivityKind, id: string): number {
@@ -261,6 +273,7 @@ export class SurfaceStore {
       startedAt: Date.now(),
       token,
       stampSeenBefore: this.stampSeen[surfaceId],
+      modelGenBefore: this.modelGenOf(surfaceId),
       composedAtBefore: this.composedAtOf(surfaceId),
     };
     // A new call supersedes the previous call's "updated just now" flash.
@@ -293,20 +306,45 @@ export class SurfaceStore {
   }
 
   /** A refresh / refine call succeeded over HTTP. Its patches travel over
-   *  SSE and end with /meta/composedAt; if that has already moved since
-   *  the record began the update is on screen and the record ends as a
-   *  success now, otherwise it is held for it. Same contract as
-   *  holdForStamp. */
+   *  SSE and end with /meta/composedAt; if that has already arrived since
+   *  the record began (modelArrived) the update is on screen and the
+   *  record ends as a success now, otherwise it is held for it. Same
+   *  contract as holdForStamp. */
   holdForModel(surfaceId: string, token: number): boolean {
     const a = this.activity[surfaceId];
     if (a?.token !== token) return false;
-    if (this.composedAtOf(surfaceId) !== a.composedAtBefore) {
+    if (this.modelArrived(surfaceId, a)) {
       this.endActivity(surfaceId, true);
       return false;
     }
     a.holdSince = Date.now();
     a.holdFor = 'model';
     return true;
+  }
+
+  private modelGenOf(surfaceId: string): number {
+    return this.modelGen[surfaceId] ?? 0;
+  }
+
+  /** Has what a refresh / refine promised landed since `a` began? Either a
+   *  model-ending envelope was applied (the SSE delivery — COUNTED, so two
+   *  refreshes completing in the same second are told apart even though
+   *  the server's second-precision composedAt strings are equal) or
+   *  composedAt moved (a hydration snapshot taken after the server applied
+   *  the patches carries the new value but replays no envelope: the
+   *  snapshot's upto suppresses it). Never while the model is absent. */
+  private modelArrived(surfaceId: string, a: Activity): boolean {
+    // Mid-resync the surface is gone until its snapshot hydrates. Nothing
+    // can have arrived on a model the client does not hold, and reading
+    // the absent composedAt as "changed" would end the record as a success
+    // — unlocking a snapshot taken before the refresh committed and
+    // flashing "updated just now" over old data. A missing model keeps
+    // the record held; observe() re-checks when the snapshot lands.
+    if (this.surfaces[surfaceId] === undefined) return false;
+    return (
+      this.modelGenOf(surfaceId) !== a.modelGenBefore ||
+      this.composedAtOf(surfaceId) !== a.composedAtBefore
+    );
   }
 
   private composedAtOf(surfaceId: string): string | undefined {
@@ -334,6 +372,7 @@ export class SurfaceStore {
     this.doneAt = {};
     this.tappedAt = {};
     this.stampSeen = {};
+    this.modelGen = {};
   }
 
   /** A server-forced resync (control: resync) or reconnect: the surfaces

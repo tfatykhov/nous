@@ -40,11 +40,25 @@ function seedSurface(
 }
 
 /** The last envelope a refresh / refine emits: the /meta/composedAt restamp. */
-function restamp(): void {
+function restamp(composedAt: string = new Date().toISOString()): void {
   store.apply(null, {
     version: 'v1.0',
-    updateDataModel: { surfaceId: SURFACE, path: '/meta', value: { composedAt: new Date().toISOString() } },
+    updateDataModel: { surfaceId: SURFACE, path: '/meta', value: { composedAt } },
   } as never);
+}
+
+/** A hydration snapshot of the surface (reconnect): not an envelope. */
+function snapshot(composedAt: string) {
+  return {
+    version: 'v1.0',
+    createSurface: {
+      surfaceId: SURFACE,
+      catalogId: 'nous-core',
+      components: [],
+      dataModel: { meta: { composedAt } },
+      metadata: { extensions: { com_nous_nonce: 'test-nonce' } },
+    },
+  } as never;
 }
 
 beforeEach(() => store.reset());
@@ -770,6 +784,85 @@ describe('activity indicator', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('a second refresh completing in the same second as the first still completes on its restamp', async () => {
+    vi.spyOn(transport, 'callAgentFunction').mockResolvedValue({ ok: true, message: '', value: {} });
+    seedSurface({ meta: { composedAt: new Date(Date.now() - 60_000).toISOString() } });
+    const footer = { id: 'footer', component: 'AppFooter', refineOptions: [], showRefresh: true };
+    const { getByText } = render(AppFooterView, { props: { surfaceId: SURFACE, comp: footer } });
+    // The server stamps composedAt at SECOND precision: both refreshes
+    // land in this one, so their restamps carry the identical string.
+    const second = new Date().toISOString().replace(/\.\d{3}Z$/, '+00:00');
+
+    await fireEvent.click(getByText('refresh'));
+    await settle();
+    restamp(second);
+    await tick();
+    expect(store.activity[SURFACE]).toBeUndefined();
+    const firstDone = store.doneAt[SURFACE];
+    expect(firstDone).toBeGreaterThan(0);
+
+    await fireEvent.click(getByText('refresh'));
+    await settle();
+    // The response is back, its restamp is not: held.
+    expect(store.activity[SURFACE]?.holdFor).toBe('model');
+    restamp(second);
+    await tick();
+    // The envelope itself is the arrival — its value being unchanged
+    // must not hold the record for HOLD_WAIT_MS and release it flashless.
+    expect(store.activity[SURFACE]).toBeUndefined();
+    expect(store.doneAt[SURFACE]).toBeGreaterThanOrEqual(firstDone);
+  });
+
+  it('a hydration snapshot completes a held refresh only when it carries the new stamp', () => {
+    const before = new Date(Date.now() - 60_000).toISOString();
+    seedSurface({ meta: { composedAt: before } });
+    const token = store.beginActivity(SURFACE, 'refresh', 'refresh');
+    expect(store.holdForModel(SURFACE, token)).toBe(true);
+
+    // Reconnect mid-refresh: the snapshot still carries the old stamp and
+    // replays no envelope — nothing has arrived, the record stays held.
+    store.resync();
+    store.apply(null, snapshot(before));
+    store.pruneAbsent(new Set([SURFACE]));
+    expect(store.activity[SURFACE]?.holdFor).toBe('model');
+
+    // Reconnect after the server applied the patches: the snapshot carries
+    // the new stamp and its upto suppresses the /meta envelope, so the
+    // value is the only evidence — and it is enough.
+    store.resync();
+    store.apply(null, snapshot(new Date().toISOString()));
+    store.pruneAbsent(new Set([SURFACE]));
+    expect(store.activity[SURFACE]).toBeUndefined();
+    expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
+  });
+
+  it('a response landing mid-resync keeps the record held until the model is back', () => {
+    const before = new Date(Date.now() - 60_000).toISOString();
+    seedSurface({ meta: { composedAt: before } });
+    const token = store.beginActivity(SURFACE, 'refresh', 'refresh');
+
+    // control: resync clears the surfaces; the snapshot has not hydrated
+    // yet when the HTTP response comes back. Nothing has ARRIVED — an
+    // absent model must not read as "composedAt changed".
+    store.resync();
+    expect(store.surfaces[SURFACE]).toBeUndefined();
+    expect(store.holdForModel(SURFACE, token)).toBe(true);
+    expect(store.activity[SURFACE]?.holdFor).toBe('model');
+    expect(store.doneAt[SURFACE]).toBeUndefined();
+
+    // The snapshot was taken before the refresh committed: old data, still
+    // held and locked …
+    store.apply(null, snapshot(before));
+    store.pruneAbsent(new Set([SURFACE]));
+    expect(store.activity[SURFACE]?.holdFor).toBe('model');
+    expect(store.doneAt[SURFACE]).toBeUndefined();
+
+    // … until the replayed /meta envelope lands.
+    restamp();
+    expect(store.activity[SURFACE]).toBeUndefined();
+    expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
   });
 
   it('a forced resync keeps what is in flight: the rehydrated surface mounts locked and the response still completes it', async () => {
