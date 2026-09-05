@@ -312,7 +312,7 @@ For the full set — heartbeat tuning, DAG timeouts, sleep cycle, eval harness �
 
 ## Status
 
-🚀 **v0.1.0 — shipped and deployed.**
+🚀 **v1.0.0 — released 2026-09-05** (see [CHANGELOG.md](CHANGELOG.md)).
 
 All core architecture is implemented and running. Recent work focuses on retrieval quality, background reliability, and orchestration.
 

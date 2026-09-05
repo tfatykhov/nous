@@ -4,7 +4,7 @@
 
 Nous (Greek: mind/intellect) is a cognitive agent framework built on Minsky's Society of Mind principles. It gives AI agents persistent memory, decision intelligence, and the ability to learn from experience.
 
-**Status: v0.1.0 shipped and deployed.** All core architecture is live.
+**Status: v1.0.0 released 2026-09-05** ([release notes](CHANGELOG.md)). All core architecture is live and deployed.
 
 ## Architecture
 
