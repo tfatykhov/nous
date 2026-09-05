@@ -147,7 +147,7 @@ Dashboard v1 (vanilla JS, six views) shipped in March and was retired in June fo
 - **Python:** 171 modules, ~90,700 lines in `nous/` (+ ~15,000 in `nous_eval/`)
 - **Tests:** 325 files, ~138,000 lines, 6,344 test functions
 - **Dashboard + companion:** 135 Svelte/TS files, ~23,600 lines (+ ~6,300 test lines)
-- **Surface:** ~100 REST routes, 45 agent tools, 37 ORM tables, migrations through 072
+- **Surface:** ~100 REST routes, 34 agent tools, 37 ORM tables, migrations through 072
 - **Since v0.2.0:** 704 commits, 384 PRs, 1,234 files changed (+423,892 / −4,143)
 
 ---
