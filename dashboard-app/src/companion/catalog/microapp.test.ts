@@ -9,6 +9,7 @@ import TimelineView from './TimelineView.svelte';
 import ModalView from './ModalView.svelte';
 import { store } from '../store.svelte';
 import { transport } from '../transport';
+import { ACT_STAMP_WAIT_MS } from '../activity';
 
 // F092.1 micro-app adapter tests. Same harness discipline as phase2.test.ts:
 // module-singleton store reset per test, transport spied, settle() after
@@ -522,7 +523,7 @@ describe('activity indicator', () => {
 
   it('a refine names what is happening, and success flashes then returns the stamp', async () => {
     const { container } = renderHeader();
-    store.beginActivity(SURFACE, 'refine', 'Just the blockers');
+    store.beginActivity(SURFACE, 'refine', 'blockers');
     await tick();
     expect(container.querySelector('.stamp.working')?.textContent).toContain('rethinking layout');
 
@@ -571,6 +572,50 @@ describe('activity indicator', () => {
     await tick();
     expect(container.querySelector('.stamp.done')?.textContent).toContain('updated just now');
     expect(container.querySelector('[role="status"]')?.textContent).toBe('updated just now');
+  });
+
+  it('a late recompose after the stamp went stale still counts as the update', async () => {
+    const at = new Date(Date.now() - 10 * 60_000).toISOString();
+    const { container } = renderHeader({ pendingAction: { id: 'rebalance', label: 'Rebalance', at, timeout_s: 300 } });
+    expect(container.querySelector('.stamp.stale')).not.toBeNull();
+
+    store.apply(null, {
+      version: 'v1.0',
+      updateDataModel: { surfaceId: SURFACE, path: '/meta', value: { composedAt: new Date().toISOString() } },
+    } as never);
+    await tick();
+    expect(container.querySelector('.stamp.done')?.textContent).toContain('updated just now');
+  });
+
+  it('completion survives the dedup replacement that destroys and remounts the header', async () => {
+    const at = new Date(Date.now() - 5_000).toISOString();
+    const header0 = renderHeader({ pendingAction: { id: 'rebalance', label: 'Rebalance', at, timeout_s: 300 } });
+    expect(header0.container.querySelector('.stamp.working')).not.toBeNull();
+    expect(store.tappedAt[SURFACE]).toBe(Date.parse(at));
+
+    // service.py delivers a successful recompose as deleteSurface +
+    // createSurface for the same id. The feed is keyed by id, so the
+    // header is destroyed in between. Let its effect observe the absent
+    // surface before it dies: nothing may be forgotten there.
+    store.apply(null, { version: 'v1.0', deleteSurface: { surfaceId: SURFACE } } as never);
+    await tick();
+    expect(store.tappedAt[SURFACE]).toBe(Date.parse(at));
+    cleanup();
+
+    store.apply(null, {
+      version: 'v1.0',
+      createSurface: {
+        surfaceId: SURFACE,
+        catalogId: 'nous-core',
+        components: [],
+        dataModel: { meta: { composedAt: new Date().toISOString() } },
+        metadata: { extensions: { com_nous_nonce: 'rotated-nonce' } },
+      },
+    } as never);
+    const header1 = render(AppHeaderView, { props: { surfaceId: SURFACE, comp: header } });
+    await tick();
+    expect(header1.container.querySelector('.stamp.done')?.textContent).toContain('updated just now');
+    expect(store.tappedAt[SURFACE]).toBeUndefined();
   });
 
   it('a failed agent action never reads as updated: the watcher clears the stamp without recomposing', async () => {
@@ -630,6 +675,161 @@ describe('activity indicator', () => {
     expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
     expect(container.querySelector('.spin')).toBeNull();
     expect((getByText('refresh') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('a successful action holds its activity until the server stamp arrives, then hands over', async () => {
+    vi.spyOn(transport, 'postAction').mockResolvedValue({ ok: true, message: '' } as never);
+    seedSurface({});
+    const { getByText } = render(AppFooterView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: {
+          id: 'footer',
+          component: 'AppFooter',
+          refineOptions: [],
+          showRefresh: true,
+          agentActions: [{ id: 'rebalance', label: 'Rebalance' }],
+        },
+      },
+    });
+
+    await fireEvent.click(getByText('Rebalance'));
+    await settle();
+    // The POST succeeded but no stamp has been delivered yet: the local
+    // activity stays, the pressed control keeps its spinner, and every
+    // control stays disabled — no gap for a second tap.
+    expect(store.activity[SURFACE]).toMatchObject({ kind: 'act', id: 'rebalance' });
+    const pressed = getByText('Rebalance') as HTMLButtonElement;
+    expect(pressed.disabled).toBe(true);
+    expect(pressed.querySelector('.spin')).not.toBeNull();
+    expect((getByText('refresh') as HTMLButtonElement).disabled).toBe(true);
+
+    // The SSE envelope lands: the stamp takes over and the local record ends.
+    store.apply(null, {
+      version: 'v1.0',
+      updateDataModel: {
+        surfaceId: SURFACE,
+        path: '/meta/pendingAction',
+        value: { id: 'rebalance', label: 'Rebalance', at: new Date().toISOString(), timeout_s: 300 },
+      },
+    } as never);
+    await settle();
+    expect(store.activity[SURFACE]).toBeUndefined();
+    expect((getByText('Rebalance') as HTMLButtonElement).disabled).toBe(true);
+    expect(getByText('Rebalance').querySelector('.spin')).not.toBeNull();
+  });
+
+  it('the hold is bounded: with no stamp in ACT_STAMP_WAIT_MS the controls release', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(transport, 'postAction').mockResolvedValue({ ok: true, message: '' } as never);
+      seedSurface({});
+      const { getByText } = render(AppFooterView, {
+        props: {
+          surfaceId: SURFACE,
+          comp: {
+            id: 'footer',
+            component: 'AppFooter',
+            refineOptions: [],
+            showRefresh: false,
+            agentActions: [{ id: 'rebalance', label: 'Rebalance' }],
+          },
+        },
+      });
+      await fireEvent.click(getByText('Rebalance'));
+      await vi.advanceTimersByTimeAsync(0);
+      await tick();
+      expect(store.activity[SURFACE]?.kind).toBe('act');
+
+      await vi.advanceTimersByTimeAsync(ACT_STAMP_WAIT_MS + 1);
+      await tick();
+      expect(store.activity[SURFACE]).toBeUndefined();
+      expect(store.doneAt[SURFACE]).toBeUndefined();
+      expect((getByText('Rebalance') as HTMLButtonElement).disabled).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a footer destroyed mid-hold releases its record so the header cannot spin forever', async () => {
+    vi.spyOn(transport, 'postAction').mockResolvedValue({ ok: true, message: '' } as never);
+    seedSurface({});
+    const { getByText } = render(AppFooterView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'footer', component: 'AppFooter', refineOptions: [], agentActions: [{ id: 'a', label: 'Go' }] },
+      },
+    });
+    await fireEvent.click(getByText('Go'));
+    await settle();
+    expect(store.activity[SURFACE]?.kind).toBe('act');
+    cleanup();
+    expect(store.activity[SURFACE]).toBeUndefined();
+  });
+
+  it('the pressed control is identified by id, so two same-label controls never both spin', async () => {
+    vi.spyOn(transport, 'postAction').mockResolvedValue({ ok: true, message: '' } as never);
+    let finish!: (v: { ok: boolean; message: string; value?: unknown }) => void;
+    vi.spyOn(transport, 'callAgentFunction').mockImplementation(
+      () => new Promise((resolve) => (finish = resolve)),
+    );
+    seedSurface({});
+    const { getAllByText } = render(AppFooterView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: {
+          id: 'footer',
+          component: 'AppFooter',
+          showRefresh: false,
+          refineOptions: [
+            { id: 'week', label: 'Focus' },
+            { id: 'month', label: 'Focus' },
+          ],
+          agentActions: [
+            { id: 'sync-a', label: 'Sync' },
+            { id: 'sync-b', label: 'Sync' },
+          ],
+        },
+      },
+    });
+
+    const [syncA, syncB] = getAllByText('Sync') as HTMLButtonElement[];
+    await fireEvent.click(syncB);
+    await settle();
+    expect(store.activity[SURFACE]).toMatchObject({ kind: 'act', id: 'sync-b' });
+    expect(syncB.classList.contains('pressed')).toBe(true);
+    expect(syncB.querySelector('.spin')).not.toBeNull();
+    expect(syncA.classList.contains('pressed')).toBe(false);
+    expect(syncA.querySelector('.spin')).toBeNull();
+
+    // Release the hold, then a refine with a shared label.
+    store.endActivity(SURFACE, false);
+    await tick();
+    cleanup();
+    seedSurface({});
+    const again = render(AppFooterView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: {
+          id: 'footer',
+          component: 'AppFooter',
+          showRefresh: false,
+          refineOptions: [
+            { id: 'week', label: 'Focus' },
+            { id: 'month', label: 'Focus' },
+          ],
+        },
+      },
+    });
+    const [week, month] = again.getAllByText('Focus') as HTMLButtonElement[];
+    await fireEvent.click(month);
+    await tick();
+    expect(store.activity[SURFACE]).toMatchObject({ kind: 'refine', id: 'month' });
+    expect(month.classList.contains('pressed')).toBe(true);
+    expect(week.classList.contains('pressed')).toBe(false);
+    expect(week.querySelector('.spin')).toBeNull();
+    finish({ ok: true, message: '', value: {} });
+    await settle();
   });
 
   it('sections dim while the app is working and recover afterwards', async () => {

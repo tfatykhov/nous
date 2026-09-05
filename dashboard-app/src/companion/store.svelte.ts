@@ -60,6 +60,13 @@ export class SurfaceStore {
   /** When a surface's last call finished successfully — the header shows
    * "updated just now" for DONE_FLASH_MS after it. */
   doneAt = $state<Record<string, number>>({});
+  /** The `at` (epoch ms) of the fresh /meta/pendingAction stamp the header
+   * last observed, per surface. Lives HERE, not in the header: a successful
+   * agent action is delivered as deleteSurface + createSurface for the same
+   * id (the service rotates the nonce), which destroys and remounts the
+   * header — a component-local copy would die with it and the remounted
+   * header could never recognise the recompose. */
+  tappedAt = $state<Record<string, number>>({});
   /** Highest seq seen — the resume point, NOT the dedupe test. */
   lastSeq = 0;
   /** Membership dedupe: seqs can legitimately arrive OUT OF ORDER (two
@@ -180,8 +187,8 @@ export class SurfaceStore {
     this.seen = new Set([...this.seen].filter((s) => s > seq));
   }
 
-  beginActivity(surfaceId: string, kind: ActivityKind, label: string): void {
-    this.activity[surfaceId] = { kind, label, startedAt: Date.now() };
+  beginActivity(surfaceId: string, kind: ActivityKind, id: string): void {
+    this.activity[surfaceId] = { kind, id, startedAt: Date.now() };
     // A new call supersedes the previous call's "updated just now" flash.
     delete this.doneAt[surfaceId];
   }
@@ -200,6 +207,7 @@ export class SurfaceStore {
     this.surfaces = {};
     this.activity = {};
     this.doneAt = {};
+    this.tappedAt = {};
     this.lastSeq = 0;
     this.seenFloor = 0;
     this.seen = new Set();

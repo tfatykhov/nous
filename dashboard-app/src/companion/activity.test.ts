@@ -4,6 +4,7 @@ import {
   pendingActionOf,
   pendingActivity,
   pendingIsFresh,
+  recomposedAfter,
   PENDING_STALE_FALLBACK_MS,
 } from './activity';
 
@@ -55,7 +56,25 @@ describe('pendingIsFresh / pendingActivity', () => {
   });
 
   it('a fresh stamp is an act activity that started at the stamp', () => {
-    expect(pendingActivity(meta, at + 5_000)).toEqual({ kind: 'act', label: 'Rebalance', startedAt: at });
+    expect(pendingActivity(meta, at + 5_000)).toEqual({ kind: 'act', id: 'rebalance', startedAt: at });
     expect(pendingActivity(meta, at + 600_000)).toBeNull();
+  });
+});
+
+describe('recomposedAfter', () => {
+  const tap = Date.parse('2026-09-04T10:00:00Z');
+
+  it('is true only for a composedAt strictly after the tap', () => {
+    expect(recomposedAfter('2026-09-04T10:00:41Z', tap)).toBe(true);
+    // Same second: server stamps are second-precision, so this is "not
+    // after" — a missed flash beats claiming an update that did not happen.
+    expect(recomposedAfter('2026-09-04T10:00:00Z', tap)).toBe(false);
+    // The pre-tap compose the failure watcher leaves untouched.
+    expect(recomposedAfter('2026-09-04T09:00:00Z', tap)).toBe(false);
+  });
+
+  it('never fires on an unparsable stamp', () => {
+    expect(recomposedAfter('', tap)).toBe(false);
+    expect(recomposedAfter('soon', tap)).toBe(false);
   });
 });

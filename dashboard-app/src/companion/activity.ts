@@ -17,8 +17,11 @@ export type ActivityKind = 'refresh' | 'refine' | 'act';
 
 export interface Activity {
   kind: ActivityKind;
-  /** What was pressed — the refine option's label, the action's label. */
-  label: string;
+  /** Which control was pressed: the refine option's id, the agent action's
+   *  id, or 'refresh'. Ids, not labels — two agent actions may share a
+   *  label (`_normalize_agent_actions` makes only ids unique), and a
+   *  label-keyed record would light both spinners. */
+  id: string;
   /** Epoch ms; elapsed time is measured from here. */
   startedAt: number;
 }
@@ -32,6 +35,13 @@ export const ACTIVITY_VERBS: Record<ActivityKind, string> = {
 
 /** How long the "updated just now" flash stays after a successful call. */
 export const DONE_FLASH_MS = 3000;
+
+/** After a successful app.act POST the server's /meta/pendingAction stamp
+ *  arrives on a DIFFERENT channel (SSE) and can land after the HTTP
+ *  response. The footer holds its local activity until the stamp is seen,
+ *  for at most this long — past it the controls release; the server's own
+ *  double-tap guard still refuses a duplicate. */
+export const ACT_STAMP_WAIT_MS = 10_000;
 
 /** F092.2 fallback only: the pending stamp carries the server's own
  *  timeout_s; this is used when a stamp predates that field. */
@@ -74,7 +84,18 @@ export function pendingIsFresh(pending: PendingAction | null, nowMs: number): bo
 export function pendingActivity(meta: unknown, nowMs: number): Activity | null {
   const pending = pendingActionOf(meta);
   if (!pendingIsFresh(pending, nowMs)) return null;
-  return { kind: 'act', label: pending!.label, startedAt: Date.parse(pending!.at) };
+  return { kind: 'act', id: pending!.id, startedAt: Date.parse(pending!.at) };
+}
+
+/** Did a recompose land AFTER the tap at `tappedAtMs`? The recompose is the
+ *  only path that advances /meta/composedAt: the failure watcher clears the
+ *  pending stamp and writes /meta/actionError without touching it. Both
+ *  values are second-precision server times, so strict > is deliberate —
+ *  a same-second recompose is not a real LLM turn, and a missed flash is
+ *  the benign failure. */
+export function recomposedAfter(composedAt: string, tappedAtMs: number): boolean {
+  const composed = Date.parse(composedAt);
+  return Number.isFinite(composed) && composed > tappedAtMs;
 }
 
 /** "4s", "1m 12s", "1h 03m" — coarse on purpose; this is a wait, not a lap time. */

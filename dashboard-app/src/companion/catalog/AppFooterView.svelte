@@ -17,7 +17,7 @@
   import { store } from '../store.svelte';
   import { transport } from '../transport';
   import { resolveDynamic } from '../functions';
-  import { pendingActionOf, pendingIsFresh } from '../activity';
+  import { ACT_STAMP_WAIT_MS, pendingActionOf, pendingIsFresh } from '../activity';
   import type { ActivityKind } from '../activity';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
@@ -79,34 +79,66 @@
   const actionError = $derived(typeof meta?.actionError === 'string' ? meta.actionError : '');
 
   // What THIS footer has in flight right now (refresh / refine / the act
-  // POST itself); the header reads the same record.
+  // POST itself); the header reads the same record. Controls are matched
+  // by ID — two agent actions may share a label.
   const activity = $derived(store.activity[surfaceId] ?? null);
-  const actWorking = (id: string, label: string) =>
-    (pendingFresh && pendingAction?.id === id) ||
-    (activity?.kind === 'act' && activity.label === label);
+  const actWorking = (id: string) =>
+    (pendingFresh && pendingAction?.id === id) || (activity?.kind === 'act' && activity.id === id);
 
-  async function act(actionId: string, label: string) {
+  // A successful app.act POST only means the turn STARTED; from there the
+  // server's pendingAction stamp carries the activity. But the stamp
+  // arrives over SSE, independently of the HTTP response, and can land
+  // AFTER it — releasing here would drop the rail and re-enable every
+  // control for that gap, and a second tap would be refused as already
+  // running. So the local activity (and busy) is held until the stamp is
+  // observed, bounded by ACT_STAMP_WAIT_MS. Never a flash: completion is
+  // the header's call, and only a recompose counts.
+  let awaitingStamp = $state(false);
+  function releaseAct() {
+    awaitingStamp = false;
+    busy = false;
+    store.endActivity(surfaceId, false);
+  }
+  $effect(() => {
+    if (!awaitingStamp) return;
+    if (pendingFresh) {
+      releaseAct();
+      return;
+    }
+    const t = setTimeout(releaseAct, ACT_STAMP_WAIT_MS);
+    return () => clearTimeout(t);
+  });
+  // If this footer is destroyed mid-hold (the surface was replaced or
+  // closed) the store record must not outlive it, or the header would show
+  // "agent working" forever.
+  $effect(() => () => {
+    if (awaitingStamp) store.endActivity(surfaceId, false);
+  });
+
+  async function act(actionId: string) {
     if (busy || pendingFresh) return;
     busy = true;
     error = '';
-    store.beginActivity(surfaceId, 'act', label);
+    store.beginActivity(surfaceId, 'act', actionId);
+    let handedOff = false;
     try {
       const res = await transport.postAction(surfaceId, 'app.act', comp.id, { actionId });
-      if (!res.ok) error = res.message;
+      if (res.ok) {
+        handedOff = true;
+        awaitingStamp = true;
+      } else {
+        error = res.message;
+      }
     } finally {
-      busy = false;
-      // Never a flash here: a successful POST only means the turn STARTED.
-      // The server's pending stamp carries the activity from this point, and
-      // the header flashes when the recompose clears it.
-      store.endActivity(surfaceId, false);
+      if (!handedOff) releaseAct();
     }
   }
 
-  async function call(name: string, args: Record<string, unknown>, kind: ActivityKind, label: string) {
+  async function call(name: string, args: Record<string, unknown>, kind: ActivityKind, id: string) {
     if (busy) return;
     busy = true;
     error = '';
-    store.beginActivity(surfaceId, kind, label);
+    store.beginActivity(surfaceId, kind, id);
     let ok = false;
     try {
       const res = await transport.callAgentFunction(surfaceId, name, args);
@@ -167,11 +199,11 @@
     {#each agentActions as action (action.id)}
       <button
         class="ctl act"
-        class:pressed={actWorking(action.id, action.label)}
+        class:pressed={actWorking(action.id)}
         disabled={busy || pendingFresh}
-        onclick={() => void act(action.id, action.label)}
+        onclick={() => void act(action.id)}
       >
-        {#if actWorking(action.id, action.label)}{@render spinner()}{/if}
+        {#if actWorking(action.id)}{@render spinner()}{/if}
         {action.label}
       </button>
     {/each}
@@ -181,11 +213,11 @@
     {#each refineOptions as option (option.id)}
       <button
         class="ctl"
-        class:pressed={activity?.kind === 'refine' && activity.label === option.label}
+        class:pressed={activity?.kind === 'refine' && activity.id === option.id}
         disabled={busy || pendingFresh}
-        onclick={() => void call('app.refine', { id: option.id }, 'refine', option.label)}
+        onclick={() => void call('app.refine', { id: option.id }, 'refine', option.id)}
       >
-        {#if activity?.kind === 'refine' && activity.label === option.label}{@render spinner()}{/if}
+        {#if activity?.kind === 'refine' && activity.id === option.id}{@render spinner()}{/if}
         {option.label}
       </button>
     {/each}

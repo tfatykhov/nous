@@ -28,6 +28,7 @@
   import { store } from '../store.svelte';
   import { resolveDynamic, toDisplayString } from '../functions';
   import { formatFreshness } from '../freshness';
+  import { untrack } from 'svelte';
   import {
     ACTIVITY_VERBS,
     DONE_FLASH_MS,
@@ -35,6 +36,7 @@
     pendingActionOf,
     pendingActivity,
     pendingIsFresh,
+    recomposedAfter,
   } from '../activity';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
@@ -100,26 +102,32 @@
           : '',
   );
 
-  // An agent action succeeded when the app was recomposed AFTER the tap:
-  // the recompose replaces /meta wholesale, so the stamp is gone and
-  // composedAt has moved past the stamp's `at`. The stamp disappearing is
-  // not the signal — actions.py clears it on failure / timeout /
-  // completed-without-recompose too (then writes /meta/actionError), and
-  // composedAt does not move on any of those. Both timestamps are
-  // second-precision server times; strict > is deliberate — a same-second
-  // recompose is not a real LLM turn, and a missed flash is the benign
-  // failure. A stale stamp (fresh → stale) is not a completion either.
-  let tappedAt: number | null = null;
+  // An agent action succeeded when its stamp is CLEARED and the app was
+  // recomposed AFTER the tap (recomposedAfter in activity.ts). The stamp
+  // disappearing alone is not the signal — actions.py clears it on failure
+  // / timeout / completed-without-recompose too, then writes
+  // /meta/actionError, and composedAt does not move on any of those.
+  // Freshness plays no part: a stamp that went stale is still pending, and
+  // if the worker's late recompose then lands (the watcher's "still
+  // finishing" path) that IS an update and flashes.
+  //
+  // The tap time is remembered in the STORE, not here: the recompose is
+  // delivered as deleteSurface + createSurface for the same id, which
+  // destroys this header and mounts a fresh one that has never seen the
+  // stamp. That fresh header's first run of this effect is what finds the
+  // remembered tap and flashes. While the surface is absent (between the
+  // two envelopes) nothing is decided and nothing is forgotten.
   $effect(() => {
-    if (pendingFresh) {
-      tappedAt = Date.parse(pending!.at);
+    if (!store.surfaces[surfaceId]) return;
+    if (pending !== null) {
+      const at = Date.parse(pending.at);
+      if (Number.isFinite(at)) store.tappedAt[surfaceId] = at;
       return;
     }
-    if (tappedAt === null) return;
-    const at = tappedAt;
-    tappedAt = null;
-    const composed = Date.parse(composedAt);
-    if (pending === null && Number.isFinite(composed) && composed > at) store.markDone(surfaceId);
+    const at = untrack(() => store.tappedAt[surfaceId]);
+    if (at === undefined) return;
+    delete store.tappedAt[surfaceId];
+    if (recomposedAfter(composedAt, at)) store.markDone(surfaceId);
   });
 </script>
 
