@@ -56,7 +56,7 @@ describe('pendingIsFresh / pendingActivity', () => {
   });
 
   it('a fresh stamp is an act activity that started at the stamp', () => {
-    expect(pendingActivity(meta, at + 5_000)).toEqual({ kind: 'act', id: 'rebalance', startedAt: at });
+    expect(pendingActivity(meta, at + 5_000)).toEqual({ kind: 'act', id: 'rebalance', startedAt: at, token: 0 });
     expect(pendingActivity(meta, at + 600_000)).toBeNull();
   });
 });

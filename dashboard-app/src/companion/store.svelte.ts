@@ -187,10 +187,22 @@ export class SurfaceStore {
     this.seen = new Set([...this.seen].filter((s) => s > seq));
   }
 
-  beginActivity(surfaceId: string, kind: ActivityKind, id: string): void {
-    this.activity[surfaceId] = { kind, id, startedAt: Date.now() };
+  private activitySeq = 0;
+
+  /** Returns the record's token; pass it to endActivityIf to release only
+   *  this record. */
+  beginActivity(surfaceId: string, kind: ActivityKind, id: string): number {
+    const token = ++this.activitySeq;
+    this.activity[surfaceId] = { kind, id, startedAt: Date.now(), token };
     // A new call supersedes the previous call's "updated just now" flash.
     delete this.doneAt[surfaceId];
+    return token;
+  }
+
+  /** End the surface's activity only if it is still the record `token`
+   *  identifies. */
+  endActivityIf(surfaceId: string, token: number, ok: boolean): void {
+    if (this.activity[surfaceId]?.token === token) this.endActivity(surfaceId, ok);
   }
 
   endActivity(surfaceId: string, ok: boolean): void {

@@ -767,6 +767,51 @@ describe('activity indicator', () => {
     expect(store.activity[SURFACE]).toBeUndefined();
   });
 
+  it('a footer destroyed while its POST is in flight releases its record; the late response resurrects nothing and clobbers no successor', async () => {
+    let finish!: (v: { ok: boolean; message: string }) => void;
+    vi.spyOn(transport, 'postAction').mockImplementation(
+      () => new Promise((resolve) => (finish = resolve)),
+    );
+    seedSurface({});
+    const first = render(AppFooterView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'footer', component: 'AppFooter', refineOptions: [], agentActions: [{ id: 'a', label: 'Go' }] },
+      },
+    });
+    await fireEvent.click(first.getByText('Go'));
+    await tick();
+    expect(store.activity[SURFACE]?.kind).toBe('act');
+
+    // The whole action finished before the response arrived: the surface
+    // was replaced and this footer destroyed.
+    cleanup();
+    expect(store.activity[SURFACE]).toBeUndefined();
+
+    // The replacement footer begins its own record …
+    let finishRefresh!: (v: { ok: boolean; message: string; value?: unknown }) => void;
+    vi.spyOn(transport, 'callAgentFunction').mockImplementation(
+      () => new Promise((resolve) => (finishRefresh = resolve)),
+    );
+    const second = render(AppFooterView, {
+      props: { surfaceId: SURFACE, comp: { id: 'footer', component: 'AppFooter', refineOptions: [], showRefresh: true } },
+    });
+    await fireEvent.click(second.getByText('refresh'));
+    await tick();
+    expect(store.activity[SURFACE]?.kind).toBe('refresh');
+
+    // … and the dead footer's response, when it finally lands, touches nothing.
+    finish({ ok: true, message: '' });
+    await settle();
+    expect(store.activity[SURFACE]?.kind).toBe('refresh');
+    expect(store.doneAt[SURFACE]).toBeUndefined();
+
+    finishRefresh({ ok: true, message: '', value: {} });
+    await settle();
+    expect(store.activity[SURFACE]).toBeUndefined();
+    expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
+  });
+
   it('the pressed control is identified by id, so two same-label controls never both spin', async () => {
     vi.spyOn(transport, 'postAction').mockResolvedValue({ ok: true, message: '' } as never);
     let finish!: (v: { ok: boolean; message: string; value?: unknown }) => void;

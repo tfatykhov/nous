@@ -85,52 +85,64 @@
   const actWorking = (id: string) =>
     (pendingFresh && pendingAction?.id === id) || (activity?.kind === 'act' && activity.id === id);
 
+  // Every record this footer begins is remembered by its token (`mine`),
+  // and releaseMine() is the ONLY way it ends — so this footer releases
+  // its own record and never one the replacement footer has since begun.
+  // Three exits: the call resolved; the hold below saw the stamp or timed
+  // out; this footer was destroyed. The last one also covers a POST still
+  // in flight: the whole action can finish — stamp, recompose,
+  // deleteSurface + createSurface — before the HTTP response reaches the
+  // browser (the subtask row commits before app_act returns), and a record
+  // left behind by a dead footer would show "agent working" on the
+  // replacement forever.
+  let mine: number | null = null;
+  let awaitingStamp = $state(false);
+  function releaseMine(ok = false) {
+    if (mine !== null) store.endActivityIf(surfaceId, mine, ok);
+    mine = null;
+    awaitingStamp = false;
+    busy = false;
+  }
+  $effect(() => () => releaseMine());
+
   // A successful app.act POST only means the turn STARTED; from there the
   // server's pendingAction stamp carries the activity. But the stamp
   // arrives over SSE, independently of the HTTP response, and can land
-  // AFTER it — releasing here would drop the rail and re-enable every
-  // control for that gap, and a second tap would be refused as already
-  // running. So the local activity (and busy) is held until the stamp is
+  // AFTER it — releasing on the response would drop the rail and re-enable
+  // every control for that gap, and a second tap would be refused as
+  // already running. So the record (and busy) is held until the stamp is
   // observed, bounded by ACT_STAMP_WAIT_MS. Never a flash: completion is
   // the header's call, and only a recompose counts.
-  let awaitingStamp = $state(false);
-  function releaseAct() {
-    awaitingStamp = false;
-    busy = false;
-    store.endActivity(surfaceId, false);
-  }
   $effect(() => {
     if (!awaitingStamp) return;
     if (pendingFresh) {
-      releaseAct();
+      releaseMine();
       return;
     }
-    const t = setTimeout(releaseAct, ACT_STAMP_WAIT_MS);
+    const t = setTimeout(() => releaseMine(), ACT_STAMP_WAIT_MS);
     return () => clearTimeout(t);
-  });
-  // If this footer is destroyed mid-hold (the surface was replaced or
-  // closed) the store record must not outlive it, or the header would show
-  // "agent working" forever.
-  $effect(() => () => {
-    if (awaitingStamp) store.endActivity(surfaceId, false);
   });
 
   async function act(actionId: string) {
     if (busy || pendingFresh) return;
     busy = true;
     error = '';
-    store.beginActivity(surfaceId, 'act', actionId);
+    mine = store.beginActivity(surfaceId, 'act', actionId);
     let handedOff = false;
     try {
       const res = await transport.postAction(surfaceId, 'app.act', comp.id, { actionId });
       if (res.ok) {
-        handedOff = true;
-        awaitingStamp = true;
+        // Torn down while in flight? The record is already released and
+        // there is nothing left to hold.
+        if (mine !== null) {
+          handedOff = true;
+          awaitingStamp = true;
+        }
       } else {
         error = res.message;
       }
     } finally {
-      if (!handedOff) releaseAct();
+      if (!handedOff) releaseMine();
     }
   }
 
@@ -138,15 +150,14 @@
     if (busy) return;
     busy = true;
     error = '';
-    store.beginActivity(surfaceId, kind, id);
+    mine = store.beginActivity(surfaceId, kind, id);
     let ok = false;
     try {
       const res = await transport.callAgentFunction(surfaceId, name, args);
       ok = res.ok;
       if (!res.ok) error = res.message;
     } finally {
-      busy = false;
-      store.endActivity(surfaceId, ok);
+      releaseMine(ok);
     }
   }
 

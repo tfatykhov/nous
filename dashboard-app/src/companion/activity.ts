@@ -24,6 +24,12 @@ export interface Activity {
   id: string;
   /** Epoch ms; elapsed time is measured from here. */
   startedAt: number;
+  /** Identity of the begin, handed back by `store.beginActivity` so the
+   *  footer that began a record can release THAT record and no other —
+   *  a late response from a destroyed footer must not end what the
+   *  replacement footer has since begun. Stamp-derived activity is 0:
+   *  nobody owns it. */
+  token: number;
 }
 
 /** Present-tense verb the header shows next to the elapsed time. */
@@ -84,7 +90,7 @@ export function pendingIsFresh(pending: PendingAction | null, nowMs: number): bo
 export function pendingActivity(meta: unknown, nowMs: number): Activity | null {
   const pending = pendingActionOf(meta);
   if (!pendingIsFresh(pending, nowMs)) return null;
-  return { kind: 'act', id: pending!.id, startedAt: Date.parse(pending!.at) };
+  return { kind: 'act', id: pending!.id, startedAt: Date.parse(pending!.at), token: 0 };
 }
 
 /** Did a recompose land AFTER the tap at `tappedAtMs`? The recompose is the
