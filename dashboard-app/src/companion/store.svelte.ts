@@ -8,6 +8,7 @@
 // EventSource auto-reconnect can redeliver. Envelopes without a seq (direct
 // snapshot application) pass `null` and always apply.
 
+import { pendingActionOf } from './activity';
 import type { Activity, ActivityKind } from './activity';
 import { setPointer } from './pointer';
 
@@ -67,6 +68,12 @@ export class SurfaceStore {
    * header — a component-local copy would die with it and the remounted
    * header could never recognise the recompose. */
   tappedAt = $state<Record<string, number>>({});
+  /** The `at` of the latest /meta/pendingAction stamp observed on each
+   * surface, recorded in apply() — so it does not depend on which
+   * components are mounted — and never cleared when the stamp is (only
+   * by reset). The footer compares it before and after its app.act POST:
+   * a stamp seen since the tap already came, and may already have gone. */
+  stampSeenAt = $state<Record<string, string>>({});
   /** Highest seq seen — the resume point, NOT the dedupe test. */
   lastSeq = 0;
   /** Membership dedupe: seqs can legitimately arrive OUT OF ORDER (two
@@ -144,6 +151,7 @@ export class SurfaceStore {
         theme: String(ext['com_nous_theme'] ?? ''),
         title: String(ext['com_nous_title'] ?? ''),
       };
+      this.noteStamp(cs.surfaceId);
     } else if (envelope.updateComponents) {
       const uc = envelope.updateComponents;
       const surface = this.surfaces[uc.surfaceId];
@@ -158,9 +166,16 @@ export class SurfaceStore {
       } else {
         setPointer(surface.dataModel, ud.path, ud.value);
       }
+      this.noteStamp(ud.surfaceId);
     } else if (envelope.deleteSurface) {
       delete this.surfaces[envelope.deleteSurface.surfaceId];
     }
+  }
+
+  private noteStamp(surfaceId: string): void {
+    const meta = (this.surfaces[surfaceId]?.dataModel as Record<string, unknown> | undefined)?.meta;
+    const p = pendingActionOf(meta);
+    if (p) this.stampSeenAt[surfaceId] = p.at;
   }
 
   /** Hydration-first reconnect: drop local surfaces the index no longer lists. */
@@ -205,6 +220,16 @@ export class SurfaceStore {
     if (this.activity[surfaceId]?.token === token) this.endActivity(surfaceId, ok);
   }
 
+  /** The app.act POST succeeded before any stamp was observed: hold the
+   *  record for the stamp (the footer's hold effect ends it). Returns
+   *  false when the record is no longer `token` — nothing to hold. */
+  holdForStamp(surfaceId: string, token: number): boolean {
+    const a = this.activity[surfaceId];
+    if (a?.token !== token) return false;
+    a.holdSince = Date.now();
+    return true;
+  }
+
   endActivity(surfaceId: string, ok: boolean): void {
     delete this.activity[surfaceId];
     if (ok) this.doneAt[surfaceId] = Date.now();
@@ -220,6 +245,7 @@ export class SurfaceStore {
     this.activity = {};
     this.doneAt = {};
     this.tappedAt = {};
+    this.stampSeenAt = {};
     this.lastSeq = 0;
     this.seenFloor = 0;
     this.seen = new Set();

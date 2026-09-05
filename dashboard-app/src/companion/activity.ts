@@ -30,6 +30,11 @@ export interface Activity {
    *  replacement footer has since begun. Stamp-derived activity is 0:
    *  nobody owns it. */
   token: number;
+  /** Set when an app.act POST succeeded before the server's pendingAction
+   *  stamp was observed: the record is being HELD for the stamp, from this
+   *  epoch ms, for at most ACT_STAMP_WAIT_MS. On the record (not in a
+   *  component) so whichever footer is mounted runs the hold. */
+  holdSince?: number;
 }
 
 /** Present-tense verb the header shows next to the elapsed time. */

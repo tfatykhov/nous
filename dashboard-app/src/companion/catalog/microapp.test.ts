@@ -751,7 +751,7 @@ describe('activity indicator', () => {
     }
   });
 
-  it('a footer destroyed mid-hold releases its record so the header cannot spin forever', async () => {
+  it('a footer destroyed mid-hold because its surface was removed releases the record', async () => {
     vi.spyOn(transport, 'postAction').mockResolvedValue({ ok: true, message: '' } as never);
     seedSurface({});
     const { getByText } = render(AppFooterView, {
@@ -762,9 +762,114 @@ describe('activity indicator', () => {
     });
     await fireEvent.click(getByText('Go'));
     await settle();
-    expect(store.activity[SURFACE]?.kind).toBe('act');
+    expect(store.activity[SURFACE]?.holdSince).toBeGreaterThan(0);
+    store.apply(null, { version: 'v1.0', deleteSurface: { surfaceId: SURFACE } } as never);
     cleanup();
     expect(store.activity[SURFACE]).toBeUndefined();
+  });
+
+  it('a route remount keeps the record: the new footer stays locked and the original response completes it', async () => {
+    let finish!: (v: { ok: boolean; message: string; value?: unknown }) => void;
+    vi.spyOn(transport, 'callAgentFunction').mockImplementation(
+      () => new Promise((resolve) => (finish = resolve)),
+    );
+    seedSurface({});
+    const footer = { id: 'footer', component: 'AppFooter', refineOptions: [], showRefresh: true };
+    const first = render(AppFooterView, { props: { surfaceId: SURFACE, comp: footer } });
+    await fireEvent.click(first.getByText('refresh'));
+    await tick();
+    const token = store.activity[SURFACE]?.token;
+    expect(store.activity[SURFACE]?.kind).toBe('refresh');
+
+    // Feed → focused view: the surface is unchanged, only the footer is
+    // destroyed and mounted again.
+    cleanup();
+    expect(store.activity[SURFACE]?.token).toBe(token);
+    const second = render(AppFooterView, { props: { surfaceId: SURFACE, comp: footer } });
+    const pressed = second.getByText('Refreshing') as HTMLButtonElement;
+    expect(pressed.disabled).toBe(true);
+    expect(pressed.querySelector('.spin')).not.toBeNull();
+    expect((second.getByText('close') as HTMLButtonElement).disabled).toBe(true);
+
+    finish({ ok: true, message: '', value: {} });
+    await settle();
+    expect(store.activity[SURFACE]).toBeUndefined();
+    expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
+    expect((second.getByText('refresh') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('an action handed off after a route remount is held by the new footer until the stamp', async () => {
+    let finish!: (v: { ok: boolean; message: string }) => void;
+    vi.spyOn(transport, 'postAction').mockImplementation(
+      () => new Promise((resolve) => (finish = resolve)),
+    );
+    seedSurface({});
+    const footer = {
+      id: 'footer',
+      component: 'AppFooter',
+      refineOptions: [],
+      showRefresh: false,
+      agentActions: [{ id: 'a', label: 'Go' }],
+    };
+    const first = render(AppFooterView, { props: { surfaceId: SURFACE, comp: footer } });
+    await fireEvent.click(first.getByText('Go'));
+    await tick();
+    cleanup();
+    const second = render(AppFooterView, { props: { surfaceId: SURFACE, comp: footer } });
+    finish({ ok: true, message: '' });
+    await settle();
+    expect(store.activity[SURFACE]?.holdSince).toBeGreaterThan(0);
+    expect((second.getByText('Go') as HTMLButtonElement).disabled).toBe(true);
+
+    store.apply(null, {
+      version: 'v1.0',
+      updateDataModel: {
+        surfaceId: SURFACE,
+        path: '/meta/pendingAction',
+        value: { id: 'a', label: 'Go', at: new Date().toISOString(), timeout_s: 300 },
+      },
+    } as never);
+    await settle();
+    expect(store.activity[SURFACE]).toBeUndefined();
+    // Still locked — by the fresh stamp now, not the record.
+    expect((second.getByText('Go') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('a success response that lands after the stamp already came and went releases at once', async () => {
+    let finish!: (v: { ok: boolean; message: string }) => void;
+    vi.spyOn(transport, 'postAction').mockImplementation(
+      () => new Promise((resolve) => (finish = resolve)),
+    );
+    seedSurface({});
+    const { getByText, container } = render(AppFooterView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: {
+          id: 'footer',
+          component: 'AppFooter',
+          refineOptions: [],
+          showRefresh: true,
+          agentActions: [{ id: 'a', label: 'Go' }],
+        },
+      },
+    });
+    await fireEvent.click(getByText('Go'));
+    await tick();
+    // Meanwhile over SSE: the stamp, then the watcher's failure — stamp
+    // cleared, actionError written.
+    const stamp = { id: 'a', label: 'Go', at: new Date().toISOString(), timeout_s: 300 };
+    store.apply(null, { version: 'v1.0', updateDataModel: { surfaceId: SURFACE, path: '/meta/pendingAction', value: stamp } } as never);
+    store.apply(null, { version: 'v1.0', updateDataModel: { surfaceId: SURFACE, path: '/meta/pendingAction', value: null } } as never);
+    store.apply(null, { version: 'v1.0', updateDataModel: { surfaceId: SURFACE, path: '/meta/actionError', value: 'Go: the action failed' } } as never);
+    await tick();
+
+    finish({ ok: true, message: '' });
+    await settle();
+    expect(store.activity[SURFACE]).toBeUndefined();
+    expect(store.doneAt[SURFACE]).toBeUndefined();
+    expect((getByText('Go') as HTMLButtonElement).disabled).toBe(false);
+    expect((getByText('refresh') as HTMLButtonElement).disabled).toBe(false);
+    expect(container.textContent).toContain('Go: the action failed');
   });
 
   it('a footer destroyed while its POST is in flight releases its record; the late response resurrects nothing and clobbers no successor', async () => {
@@ -784,9 +889,21 @@ describe('activity indicator', () => {
     expect(store.activity[SURFACE]?.kind).toBe('act');
 
     // The whole action finished before the response arrived: the surface
-    // was replaced and this footer destroyed.
+    // was replaced (deleteSurface destroys this footer; createSurface
+    // brings the successor).
+    store.apply(null, { version: 'v1.0', deleteSurface: { surfaceId: SURFACE } } as never);
     cleanup();
     expect(store.activity[SURFACE]).toBeUndefined();
+    store.apply(null, {
+      version: 'v1.0',
+      createSurface: {
+        surfaceId: SURFACE,
+        catalogId: 'nous-core',
+        components: [],
+        dataModel: { meta: { composedAt: new Date().toISOString() } },
+        metadata: { extensions: { com_nous_nonce: 'rotated-nonce' } },
+      },
+    } as never);
 
     // The replacement footer begins its own record …
     let finishRefresh!: (v: { ok: boolean; message: string; value?: unknown }) => void;

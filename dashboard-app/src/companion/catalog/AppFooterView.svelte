@@ -6,14 +6,21 @@
   // silently no-ops, and an event action for app.refine fails the build-time
   // allowlist check (micro-apps allow only app.close).
   //
-  // The busy guard is load-bearing: the server rate limit is SHARED between
+  // The lock is load-bearing: the server rate limit is SHARED between
   // actions and function calls, so rapid refine clicks would 429.
   //
   // F092.4 activity indicator: every call is bracketed in the store
-  // (beginActivity / endActivity) so the header and the sections can show
+  // (beginActivity / endActivityIf) so the header and the sections show
   // the same in-flight state; the pressed control itself carries a spinner
   // and a present-tense label. An agent action's activity outlives the POST
   // — the server's /meta/pendingAction stamp carries it from there.
+  //
+  // The STORE record is the lock, not a component flag: Companion.svelte's
+  // feed and focused views are exclusive branches, so following a permalink
+  // or switching views destroys this footer and mounts another for the
+  // same unchanged surface. Locking on the record keeps the controls
+  // disabled and the pressed control spinning across that remount, and the
+  // original response still finishes the record it began (by token).
   import { store } from '../store.svelte';
   import { transport } from '../transport';
   import { resolveDynamic } from '../functions';
@@ -38,7 +45,7 @@
     ancestors?: readonly string[];
   } = $props();
 
-  let busy = $state(false);
+  let closing = $state(false);
   let error = $state('');
 
   const dataModel = $derived(store.surfaces[surfaceId]?.dataModel ?? {});
@@ -78,86 +85,83 @@
   const pendingFresh = $derived(pendingIsFresh(pendingAction, nowTick));
   const actionError = $derived(typeof meta?.actionError === 'string' ? meta.actionError : '');
 
-  // What THIS footer has in flight right now (refresh / refine / the act
-  // POST itself); the header reads the same record. Controls are matched
-  // by ID — two agent actions may share a label.
+  // What this SURFACE has in flight right now — refresh / refine / an
+  // agent action's POST (and, after it succeeds, the hold for the server
+  // stamp). Controls are matched by ID — two agent actions may share a
+  // label.
   const activity = $derived(store.activity[surfaceId] ?? null);
+  const inFlight = $derived(activity !== null);
+  const locked = $derived(inFlight || closing || pendingFresh);
   const actWorking = (id: string) =>
     (pendingFresh && pendingAction?.id === id) || (activity?.kind === 'act' && activity.id === id);
 
-  // Every record this footer begins is remembered by its token (`mine`),
-  // and releaseMine() is the ONLY way it ends — so this footer releases
-  // its own record and never one the replacement footer has since begun.
-  // Three exits: the call resolved; the hold below saw the stamp or timed
-  // out; this footer was destroyed. The last one also covers a POST still
-  // in flight: the whole action can finish — stamp, recompose,
-  // deleteSurface + createSurface — before the HTTP response reaches the
-  // browser (the subtask row commits before app_act returns), and a record
-  // left behind by a dead footer would show "agent working" on the
-  // replacement forever.
-  let mine: number | null = null;
-  let awaitingStamp = $state(false);
-  function releaseMine(ok = false) {
-    if (mine !== null) store.endActivityIf(surfaceId, mine, ok);
-    mine = null;
-    awaitingStamp = false;
-    busy = false;
-  }
-  $effect(() => () => releaseMine());
-
   // A successful app.act POST only means the turn STARTED; from there the
-  // server's pendingAction stamp carries the activity. But the stamp
-  // arrives over SSE, independently of the HTTP response, and can land
-  // AFTER it — releasing on the response would drop the rail and re-enable
-  // every control for that gap, and a second tap would be refused as
-  // already running. So the record (and busy) is held until the stamp is
-  // observed, bounded by ACT_STAMP_WAIT_MS. Never a flash: completion is
-  // the header's call, and only a recompose counts.
+  // server's pendingAction stamp carries the activity. The stamp arrives
+  // over SSE, independently of the HTTP response, and can land AFTER it —
+  // releasing on the response would drop the rail and re-enable every
+  // control for that gap, and a second tap would be refused as already
+  // running. So the record is held (holdSince) until the stamp is
+  // observed, for at most ACT_STAMP_WAIT_MS from the hand-off; past that
+  // the controls release and the server's own guard covers a duplicate.
+  // Store-driven, so whichever footer is mounted runs it. Never a flash:
+  // completion is the header's call, and only a recompose counts.
   $effect(() => {
-    if (!awaitingStamp) return;
+    if (!activity || activity.holdSince === undefined) return;
+    const token = activity.token;
     if (pendingFresh) {
-      releaseMine();
+      store.endActivityIf(surfaceId, token, false);
       return;
     }
-    const t = setTimeout(() => releaseMine(), ACT_STAMP_WAIT_MS);
+    const remaining = activity.holdSince + ACT_STAMP_WAIT_MS - Date.now();
+    const t = setTimeout(() => store.endActivityIf(surfaceId, token, false), Math.max(0, remaining));
     return () => clearTimeout(t);
   });
 
+  // Teardown releases the surface's record ONLY when the surface itself is
+  // gone — closed, pruned on reconnect, or mid-replacement (deleteSurface
+  // precedes the createSurface, and a fast action can finish that way
+  // before its POST response lands; a record left behind would show
+  // "agent working" on the replacement forever). A route remount keeps
+  // the surface, so it keeps the record.
+  $effect(() => () => {
+    if (!store.surfaces[surfaceId]) store.endActivity(surfaceId, false);
+  });
+
   async function act(actionId: string) {
-    if (busy || pendingFresh) return;
-    busy = true;
+    if (locked) return;
     error = '';
-    mine = store.beginActivity(surfaceId, 'act', actionId);
+    // Whether a stamp has been observed since THIS tap decides what a
+    // success response means: none yet → hold for it; one already seen →
+    // it came, and may already have gone (the failure watcher can clear it
+    // and write actionError before a slow response lands) → nothing to
+    // wait for. Compared as server-stamped values, so client/server clock
+    // skew cannot mislead.
+    const seenBefore = store.stampSeenAt[surfaceId];
+    const token = store.beginActivity(surfaceId, 'act', actionId);
     let handedOff = false;
     try {
       const res = await transport.postAction(surfaceId, 'app.act', comp.id, { actionId });
       if (res.ok) {
-        // Torn down while in flight? The record is already released and
-        // there is nothing left to hold.
-        if (mine !== null) {
-          handedOff = true;
-          awaitingStamp = true;
-        }
+        if (store.stampSeenAt[surfaceId] === seenBefore) handedOff = store.holdForStamp(surfaceId, token);
       } else {
         error = res.message;
       }
     } finally {
-      if (!handedOff) releaseMine();
+      if (!handedOff) store.endActivityIf(surfaceId, token, false);
     }
   }
 
   async function call(name: string, args: Record<string, unknown>, kind: ActivityKind, id: string) {
-    if (busy) return;
-    busy = true;
+    if (locked) return;
     error = '';
-    mine = store.beginActivity(surfaceId, kind, id);
+    const token = store.beginActivity(surfaceId, kind, id);
     let ok = false;
     try {
       const res = await transport.callAgentFunction(surfaceId, name, args);
       ok = res.ok;
       if (!res.ok) error = res.message;
     } finally {
-      releaseMine(ok);
+      store.endActivityIf(surfaceId, token, ok);
     }
   }
 
@@ -171,7 +175,7 @@
   let disarmTimer: ReturnType<typeof setTimeout> | undefined;
 
   function requestClose() {
-    if (busy) return;
+    if (inFlight || closing) return;
     if (!armed) {
       armed = true;
       clearTimeout(disarmTimer);
@@ -184,8 +188,8 @@
   }
 
   async function close() {
-    if (busy) return;
-    busy = true;
+    if (inFlight || closing) return;
+    closing = true;
     error = '';
     try {
       const res = await transport.postAction(surfaceId, 'app.close', comp.id, {});
@@ -193,7 +197,7 @@
       // On success the server resolves the surface and the deleteSurface
       // envelope removes it from the feed — nothing to paint here.
     } finally {
-      busy = false;
+      closing = false;
     }
   }
 </script>
@@ -211,7 +215,7 @@
       <button
         class="ctl act"
         class:pressed={actWorking(action.id)}
-        disabled={busy || pendingFresh}
+        disabled={locked}
         onclick={() => void act(action.id)}
       >
         {#if actWorking(action.id)}{@render spinner()}{/if}
@@ -225,7 +229,7 @@
       <button
         class="ctl"
         class:pressed={activity?.kind === 'refine' && activity.id === option.id}
-        disabled={busy || pendingFresh}
+        disabled={locked}
         onclick={() => void call('app.refine', { id: option.id }, 'refine', option.id)}
       >
         {#if activity?.kind === 'refine' && activity.id === option.id}{@render spinner()}{/if}
@@ -236,7 +240,7 @@
       <button
         class="ctl"
         class:pressed={activity?.kind === 'refresh'}
-        disabled={busy || pendingFresh}
+        disabled={locked}
         onclick={() => void call('app.refresh', {}, 'refresh', 'refresh')}
       >
         {#if activity?.kind === 'refresh'}{@render spinner()}Refreshing{:else}refresh{/if}
@@ -245,7 +249,7 @@
     <button
       class="ctl quiet"
       class:armed
-      disabled={busy}
+      disabled={inFlight || closing}
       aria-label={armed ? 'confirm close' : 'close app'}
       onclick={requestClose}
     >
