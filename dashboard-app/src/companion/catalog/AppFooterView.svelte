@@ -6,11 +6,26 @@
   // silently no-ops, and an event action for app.refine fails the build-time
   // allowlist check (micro-apps allow only app.close).
   //
-  // The busy guard is load-bearing: the server rate limit is SHARED between
+  // The lock is load-bearing: the server rate limit is SHARED between
   // actions and function calls, so rapid refine clicks would 429.
+  //
+  // F092.4 activity indicator: every call is bracketed in the store
+  // (beginActivity / endActivityIf) so the header and the sections show
+  // the same in-flight state; the pressed control itself carries a spinner
+  // and a present-tense label. An agent action's activity outlives the POST
+  // — the server's /meta/pendingAction stamp carries it from there.
+  //
+  // The STORE record is the lock, not a component flag: Companion.svelte's
+  // feed and focused views are exclusive branches, so following a permalink
+  // or switching views destroys this footer and mounts another for the
+  // same unchanged surface. Locking on the record keeps the controls
+  // disabled and the pressed control spinning across that remount, and the
+  // original response still finishes the record it began (by token).
   import { store } from '../store.svelte';
   import { transport } from '../transport';
   import { resolveDynamic } from '../functions';
+  import { HOLD_WAIT_MS, pendingActionOf, pendingIsFresh, responseSeq } from '../activity';
+  import type { ActivityKind } from '../activity';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
 
@@ -18,15 +33,6 @@
     id: string;
     label: string;
   }
-
-  // F092.2 fallback only: the pending stamp carries the server's own
-  // timeout_s (a hardcoded client window drifts from any non-default
-  // NOUS_A2UI_AGENT_ACTION_TIMEOUT_SECONDS — announcing retry while the
-  // server still rejects, or spinning long after it considers the stamp
-  // stale). Past the window the client re-enables the buttons and renders
-  // the stamp as stale — the honest degradation for the watcher's restart
-  // hole.
-  const PENDING_STALE_FALLBACK_MS = 5 * 60 * 1000;
 
   let {
     surfaceId,
@@ -39,10 +45,11 @@
     ancestors?: readonly string[];
   } = $props();
 
-  let busy = $state(false);
+  let closing = $state(false);
   let error = $state('');
 
-  const ctx = $derived({ dataModel: store.surfaces[surfaceId]?.dataModel ?? {}, scope: null });
+  const dataModel = $derived(store.surfaces[surfaceId]?.dataModel ?? {});
+  const ctx = $derived({ dataModel, scope: null });
   const refineOptions = $derived.by(() => {
     const raw = resolveDynamic(comp.refineOptions, ctx);
     if (!Array.isArray(raw)) return [];
@@ -56,7 +63,8 @@
   // a server-owned /meta stamp with a timestamp — a successful recompose
   // replaces the whole model and clears it; the timestamp is what makes a
   // dead watcher degrade to an honest "no update arrived" instead of an
-  // infinite spinner.
+  // infinite spinner. The parsing and the freshness rule live in
+  // activity.ts, shared with the header (codex on F092.2: one definition).
   const agentActions = $derived.by(() => {
     const raw = comp.agentActions;
     if (!Array.isArray(raw)) return [];
@@ -65,57 +73,80 @@
     );
   });
   const meta = $derived(
-    ((store.surfaces[surfaceId]?.dataModel ?? {}) as Record<string, unknown>).meta as
-      | Record<string, unknown>
-      | undefined,
+    (dataModel as Record<string, unknown>).meta as Record<string, unknown> | undefined,
   );
-  const pendingAction = $derived.by(() => {
-    const raw = meta?.pendingAction;
-    if (!raw || typeof raw !== 'object') return null;
-    const p = raw as { id?: unknown; label?: unknown; at?: unknown; timeout_s?: unknown };
-    if (typeof p.id !== 'string' || typeof p.at !== 'string') return null;
-    const timeoutS = typeof p.timeout_s === 'number' && p.timeout_s > 0 ? p.timeout_s : null;
-    return {
-      id: p.id,
-      label: typeof p.label === 'string' ? p.label : p.id,
-      at: p.at,
-      staleMs: timeoutS !== null ? timeoutS * 1000 : PENDING_STALE_FALLBACK_MS,
-    };
-  });
+  const pendingAction = $derived(pendingActionOf(meta));
   let nowTick = $state(Date.now());
   $effect(() => {
     if (!pendingAction) return;
     const t = setInterval(() => (nowTick = Date.now()), 10_000);
     return () => clearInterval(t);
   });
-  const pendingFresh = $derived.by(() => {
-    if (!pendingAction) return false;
-    const at = Date.parse(pendingAction.at);
-    return Number.isFinite(at) && nowTick - at < pendingAction.staleMs;
-  });
+  const pendingFresh = $derived(pendingIsFresh(pendingAction, nowTick));
   const actionError = $derived(typeof meta?.actionError === 'string' ? meta.actionError : '');
 
+  // What this SURFACE has in flight right now — refresh / refine / an
+  // agent action's POST (and, after it succeeds, the hold for the server
+  // stamp). Controls are matched by ID — two agent actions may share a
+  // label.
+  const activity = $derived(store.activity[surfaceId] ?? null);
+  const inFlight = $derived(activity !== null);
+  const locked = $derived(inFlight || closing || pendingFresh);
+  const actWorking = (id: string) =>
+    (pendingFresh && pendingAction?.id === id) || (activity?.kind === 'act' && activity.id === id);
+
+  // A successful HTTP response is not the end of a call. What it promises
+  // arrives over SSE, independently, and can land AFTER it: the server's
+  // pendingAction stamp for an agent action (a 200 only means the turn
+  // STARTED), the model patches for refresh / refine (ending on
+  // /meta/composedAt). Ending the record on the response would drop the
+  // rail, un-dim sections that still show the old model, flash "updated
+  // just now" over it, and re-enable the controls for that gap — where a
+  // second action tap is refused as already running. So the record is
+  // HELD (holdForStamp / holdForModel) and the STORE ends it when it
+  // observes the arrival; this effect is only the bound: past HOLD_WAIT_MS
+  // the controls release without claiming an update. Store-driven, so
+  // whichever footer is mounted runs it.
+  $effect(() => {
+    if (!activity || activity.holdSince === undefined) return;
+    const token = activity.token;
+    const remaining = activity.holdSince + HOLD_WAIT_MS - Date.now();
+    const t = setTimeout(() => store.endActivityIf(surfaceId, token, false), Math.max(0, remaining));
+    return () => clearTimeout(t);
+  });
+
+  // No teardown release here: a route remount keeps the surface and must
+  // keep the record, and when the surface itself goes (closed, pruned on
+  // reconnect, or the deleteSurface half of a replacement) the STORE ends
+  // the record as it applies the removal — that can happen while the user
+  // is on another surface and no footer is mounted at all. A late response
+  // to a call this footer began finds no record and does nothing (token).
+
   async function act(actionId: string) {
-    if (busy || pendingFresh) return;
-    busy = true;
+    if (locked) return;
     error = '';
+    const token = store.beginActivity(surfaceId, 'act', actionId);
+    let held = false;
     try {
       const res = await transport.postAction(surfaceId, 'app.act', comp.id, { actionId });
-      if (!res.ok) error = res.message;
+      if (res.ok) held = store.holdForStamp(surfaceId, token);
+      else error = res.message;
     } finally {
-      busy = false;
+      if (!held) store.endActivityIf(surfaceId, token, false);
     }
   }
 
-  async function call(name: string, args: Record<string, unknown>) {
-    if (busy) return;
-    busy = true;
+  async function call(name: string, args: Record<string, unknown>, kind: ActivityKind, id: string) {
+    if (locked) return;
     error = '';
+    const token = store.beginActivity(surfaceId, kind, id);
+    let held = false;
     try {
       const res = await transport.callAgentFunction(surfaceId, name, args);
-      if (!res.ok) error = res.message;
+      if (res.ok) held = store.holdForModel(surfaceId, token, responseSeq(res.value));
+      else error = res.message;
     } finally {
-      busy = false;
+      if (!held) store.endActivityIf(surfaceId, token, false);
     }
   }
 
@@ -129,7 +160,7 @@
   let disarmTimer: ReturnType<typeof setTimeout> | undefined;
 
   function requestClose() {
-    if (busy) return;
+    if (inFlight || closing) return;
     if (!armed) {
       armed = true;
       clearTimeout(disarmTimer);
@@ -142,8 +173,8 @@
   }
 
   async function close() {
-    if (busy) return;
-    busy = true;
+    if (inFlight || closing) return;
+    closing = true;
     error = '';
     try {
       const res = await transport.postAction(surfaceId, 'app.close', comp.id, {});
@@ -151,20 +182,29 @@
       // On success the server resolves the surface and the deleteSurface
       // envelope removes it from the feed — nothing to paint here.
     } finally {
-      busy = false;
+      closing = false;
     }
   }
 </script>
+
+{#snippet spinner()}
+  <svg class="spin" viewBox="0 0 16 16" aria-hidden="true">
+    <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-opacity="0.25" stroke-width="2" />
+    <path d="M14 8a6 6 0 0 0-6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+  </svg>
+{/snippet}
 
 <footer class="app-footer">
   <div class="controls">
     {#each agentActions as action (action.id)}
       <button
         class="ctl act"
-        disabled={busy || pendingFresh}
+        class:pressed={actWorking(action.id)}
+        disabled={locked}
         onclick={() => void act(action.id)}
       >
-        {pendingFresh && pendingAction?.id === action.id ? `${action.label}…` : action.label}
+        {#if actWorking(action.id)}{@render spinner()}{/if}
+        {action.label}
       </button>
     {/each}
     <!-- refine/refresh disabled while an action runs: the server refuses
@@ -173,25 +213,28 @@
     {#each refineOptions as option (option.id)}
       <button
         class="ctl"
-        disabled={busy || pendingFresh}
-        onclick={() => void call('app.refine', { id: option.id })}
+        class:pressed={activity?.kind === 'refine' && activity.id === option.id}
+        disabled={locked}
+        onclick={() => void call('app.refine', { id: option.id }, 'refine', option.id)}
       >
+        {#if activity?.kind === 'refine' && activity.id === option.id}{@render spinner()}{/if}
         {option.label}
       </button>
     {/each}
     {#if showRefresh}
       <button
         class="ctl"
-        disabled={busy || pendingFresh}
-        onclick={() => void call('app.refresh', {})}
+        class:pressed={activity?.kind === 'refresh'}
+        disabled={locked}
+        onclick={() => void call('app.refresh', {}, 'refresh', 'refresh')}
       >
-        {busy ? 'working…' : 'refresh'}
+        {#if activity?.kind === 'refresh'}{@render spinner()}Refreshing{:else}refresh{/if}
       </button>
     {/if}
     <button
       class="ctl quiet"
       class:armed
-      disabled={busy}
+      disabled={inFlight || closing}
       aria-label={armed ? 'confirm close' : 'close app'}
       onclick={requestClose}
     >
@@ -235,6 +278,9 @@
     padding: 0.3rem 0.7rem;
     cursor: pointer;
     transition: var(--transition);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
   }
   .ctl:hover:not(:disabled) {
     border-color: var(--accent);
@@ -242,6 +288,12 @@
   .ctl:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+  /* The pressed control stays at full strength while its call runs — it is
+     the one thing on the card that should NOT look inert. */
+  .ctl.pressed:disabled {
+    opacity: 1;
+    border-color: var(--accent);
   }
   /* .quiet's rule appears later at equal specificity and was overriding both
      declarations, so the armed state showed only a text change (codex P2).
@@ -260,6 +312,22 @@
     background: none;
     border-color: transparent;
     color: var(--muted);
+  }
+  .spin {
+    width: 12px;
+    height: 12px;
+    flex: 0 0 auto;
+    animation: rot 0.9s linear infinite;
+  }
+  @keyframes rot {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .spin {
+      animation: none;
+    }
   }
   .stale {
     color: var(--warn, var(--muted));

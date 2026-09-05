@@ -1389,11 +1389,18 @@ def _register_micro_app_functions(router: ActionRouter) -> None:
         # these two micro-app functions are the exception (they write
         # surface presentation state), so they take the per-surface lock
         # THEMSELVES to serialize with app.close and LRU eviction.
+        # F092.4: `seq` is the outbox seq of the LAST envelope (meta is added
+        # last by refresh_data) — the call's completion revision. The client
+        # holds its activity indicator until the stream delivers that seq or
+        # a hydration snapshot's watermark covers it.
+        seq = 0
         async with router._service.surface_lock(ctx.surface.surface_id):
             await _assert_same_epoch(ctx.surface.surface_id, ctx.surface)
             for key, value in patches.items():
-                await router._service.update_data(ctx.surface.surface_id, f"/{key}", value)
-        return {"refreshed": sorted(patches)}
+                seq = await router._service.update_data(
+                    ctx.surface.surface_id, f"/{key}", value
+                )
+        return {"refreshed": sorted(patches), "seq": seq}
 
     async def app_refine(ctx: ActionContext) -> Any:
         if router._composer is None:
@@ -1464,13 +1471,17 @@ def _register_micro_app_functions(router: ActionRouter) -> None:
                 composed.built.components,
                 app_spec=composed.app_spec,
             )
-            await router._service.update_data(
+            # F092.4: the whole-model update is the last envelope — its seq
+            # is the completion revision the client holds for (see
+            # app_refresh).
+            seq = await router._service.update_data(
                 ctx.surface.surface_id, None, composed.built.data_model
             )
         return {
             "refined": option_id,
             "fallback": composed.fallback,
             "title": composed.built.title,
+            "seq": seq,
         }
 
     router.register_function("app.refresh", app_refresh, mutating=True)

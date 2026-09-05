@@ -693,8 +693,17 @@ class SurfaceService:
             )
         ).scalar_one_or_none()
 
-    async def update_data(self, surface_id: str, path: str | None, value: Any) -> None:
-        """Patch the data model (authoritative row + outbox + broadcast)."""
+    async def update_data(self, surface_id: str, path: str | None, value: Any) -> int:
+        """Patch the data model (authoritative row + outbox + broadcast).
+
+        Returns the envelope's outbox seq. F092.4: a caller that answers an
+        HTTP call (app.refresh / app.refine) reports the seq of its LAST
+        envelope as the call's completion revision — the client holds its
+        activity indicator until the stream delivers that seq or a snapshot's
+        ``X-A2UI-Upto-Seq`` watermark covers it. Nothing weaker identifies the
+        arrival: ``composedAt`` is second-precision, and a reconnect snapshot
+        carries the refreshed data while suppressing the envelope.
+        """
         async with self._db.session() as session:
             surface = await self._get_own(session, surface_id)
             if surface is None or surface.status != "live":
@@ -724,6 +733,7 @@ class SurfaceService:
             await session.commit()
             seq = row.seq
         self._broadcast(seq, envelope)
+        return seq
 
     async def update_components(
         self, surface_id: str, components: list[dict], *, app_spec: dict | None = None
