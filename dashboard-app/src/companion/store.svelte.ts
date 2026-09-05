@@ -8,7 +8,7 @@
 // EventSource auto-reconnect can redeliver. Envelopes without a seq (direct
 // snapshot application) pass `null` and always apply.
 
-import { pendingActionOf } from './activity';
+import { pendingActionOf, recomposedAfter } from './activity';
 import type { Activity, ActivityKind } from './activity';
 import { setPointer } from './pointer';
 
@@ -61,12 +61,13 @@ export class SurfaceStore {
   /** When a surface's last call finished successfully — the header shows
    * "updated just now" for DONE_FLASH_MS after it. */
   doneAt = $state<Record<string, number>>({});
-  /** The `at` (epoch ms) of the fresh /meta/pendingAction stamp the header
-   * last observed, per surface. Lives HERE, not in the header: a successful
-   * agent action is delivered as deleteSurface + createSurface for the same
-   * id (the service rotates the nonce), which destroys and remounts the
-   * header — a component-local copy would die with it and the remounted
-   * header could never recognise the recompose. */
+  /** The `at` (epoch ms) of the /meta/pendingAction stamp last observed
+   * on each surface — the tap an agent action started from. Recorded and
+   * resolved in noteStamp() at envelope arrival, so completion is detected
+   * whether or not the app is on screen: a successful action is delivered
+   * as deleteSurface + createSurface for the same id (the header is
+   * destroyed and remounted), and the user may have focused another
+   * surface entirely. A header mounted later only READS doneAt. */
   tappedAt = $state<Record<string, number>>({});
   /** The `at` of the latest /meta/pendingAction stamp observed on each
    * surface, recorded in apply() — so it does not depend on which
@@ -172,10 +173,32 @@ export class SurfaceStore {
     }
   }
 
+  /** Runs after every envelope that can change a surface's data model.
+   * A stamp present: remember it (stampSeenAt for the footer, tappedAt as
+   * the tap the action started from). No stamp but a remembered tap: the
+   * action is over one way or the other — it COMPLETED only if the app
+   * was recomposed after the tap (recomposedAfter: the failure watcher
+   * clears the stamp and writes actionError without moving composedAt),
+   * and doneAt is stamped with the ARRIVAL time, so a header mounted long
+   * after cannot flash "updated just now" for it. */
   private noteStamp(surfaceId: string): void {
-    const meta = (this.surfaces[surfaceId]?.dataModel as Record<string, unknown> | undefined)?.meta;
+    const meta = (this.surfaces[surfaceId]?.dataModel as Record<string, unknown> | undefined)?.meta as
+      | Record<string, unknown>
+      | undefined;
     const p = pendingActionOf(meta);
-    if (p) this.stampSeenAt[surfaceId] = p.at;
+    if (p) {
+      this.stampSeenAt[surfaceId] = p.at;
+      const at = Date.parse(p.at);
+      if (Number.isFinite(at)) this.tappedAt[surfaceId] = at;
+      return;
+    }
+    const tapped = this.tappedAt[surfaceId];
+    if (tapped === undefined) return;
+    delete this.tappedAt[surfaceId];
+    const composedAt = meta?.composedAt;
+    if (typeof composedAt === 'string' && recomposedAfter(composedAt, tapped)) {
+      this.doneAt[surfaceId] = Date.now();
+    }
   }
 
   /** Hydration-first reconnect: drop local surfaces the index no longer lists. */

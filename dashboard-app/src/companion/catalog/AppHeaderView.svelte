@@ -21,14 +21,17 @@
   // done only when the app was RECOMPOSED after the tap (/meta/composedAt
   // moves past the stamp's `at`) — the failure watcher also clears the
   // stamp, so "stamp gone" alone would flash "updated just now" over an
-  // action that explicitly failed (codex P1). And the screen-reader
-  // announcement is a persistent polite live region that carries only the
-  // transitions; the ticking elapsed value lives outside it, or a refresh
-  // would re-announce every second for its whole duration (codex P2).
+  // action that explicitly failed (codex P1); that detection lives in the
+  // STORE at envelope arrival (noteStamp), because the recompose replaces
+  // the surface (this header is destroyed and remounted) and may land
+  // while the user is on another surface — this header only reads doneAt.
+  // And the screen-reader announcement is a persistent polite live region
+  // that carries only the transitions; the ticking elapsed value lives
+  // outside it, or a refresh would re-announce every second for its whole
+  // duration (codex P2).
   import { store } from '../store.svelte';
   import { resolveDynamic, toDisplayString } from '../functions';
   import { formatFreshness } from '../freshness';
-  import { untrack } from 'svelte';
   import {
     ACTIVITY_VERBS,
     DONE_FLASH_MS,
@@ -36,7 +39,6 @@
     pendingActionOf,
     pendingActivity,
     pendingIsFresh,
-    recomposedAfter,
   } from '../activity';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
@@ -101,34 +103,6 @@
           ? `no update after ${formatElapsed(pending?.staleMs ?? 0)}`
           : '',
   );
-
-  // An agent action succeeded when its stamp is CLEARED and the app was
-  // recomposed AFTER the tap (recomposedAfter in activity.ts). The stamp
-  // disappearing alone is not the signal — actions.py clears it on failure
-  // / timeout / completed-without-recompose too, then writes
-  // /meta/actionError, and composedAt does not move on any of those.
-  // Freshness plays no part: a stamp that went stale is still pending, and
-  // if the worker's late recompose then lands (the watcher's "still
-  // finishing" path) that IS an update and flashes.
-  //
-  // The tap time is remembered in the STORE, not here: the recompose is
-  // delivered as deleteSurface + createSurface for the same id, which
-  // destroys this header and mounts a fresh one that has never seen the
-  // stamp. That fresh header's first run of this effect is what finds the
-  // remembered tap and flashes. While the surface is absent (between the
-  // two envelopes) nothing is decided and nothing is forgotten.
-  $effect(() => {
-    if (!store.surfaces[surfaceId]) return;
-    if (pending !== null) {
-      const at = Date.parse(pending.at);
-      if (Number.isFinite(at)) store.tappedAt[surfaceId] = at;
-      return;
-    }
-    const at = untrack(() => store.tappedAt[surfaceId]);
-    if (at === undefined) return;
-    delete store.tappedAt[surfaceId];
-    if (recomposedAfter(composedAt, at)) store.markDone(surfaceId);
-  });
 </script>
 
 {#if activity}

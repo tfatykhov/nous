@@ -618,6 +618,33 @@ describe('activity indicator', () => {
     expect(store.tappedAt[SURFACE]).toBeUndefined();
   });
 
+  it('a recompose that lands while the app is off screen is timestamped on arrival, not on the next mount', async () => {
+    const at = new Date(Date.now() - 5_000).toISOString();
+    renderHeader({ pendingAction: { id: 'rebalance', label: 'Rebalance', at, timeout_s: 300 } });
+    // The user focuses another surface: this header is unmounted.
+    cleanup();
+
+    store.apply(null, { version: 'v1.0', deleteSurface: { surfaceId: SURFACE } } as never);
+    store.apply(null, {
+      version: 'v1.0',
+      createSurface: {
+        surfaceId: SURFACE,
+        catalogId: 'nous-core',
+        components: [],
+        dataModel: { meta: { composedAt: new Date().toISOString() } },
+        metadata: { extensions: { com_nous_nonce: 'rotated-nonce' } },
+      },
+    } as never);
+    // Completion was recorded when the envelope arrived …
+    expect(store.doneAt[SURFACE]).toBeGreaterThan(Date.now() - 1_000);
+    expect(store.tappedAt[SURFACE]).toBeUndefined();
+
+    // … so coming back later finds an ordinary stamp, not "updated just now".
+    store.doneAt[SURFACE] -= 60_000;
+    const { container } = render(AppHeaderView, { props: { surfaceId: SURFACE, comp: header } });
+    expect(container.querySelector('.stamp.done')).toBeNull();
+  });
+
   it('a failed agent action never reads as updated: the watcher clears the stamp without recomposing', async () => {
     const composedAt = new Date(Date.now() - 60_000).toISOString();
     const at = new Date(Date.now() - 5_000).toISOString();
