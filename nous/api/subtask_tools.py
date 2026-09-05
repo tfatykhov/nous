@@ -31,7 +31,7 @@ SUBMIT_FINAL_REPORT_SCHEMA: dict[str, Any] = {
     ),
     "input_schema": {
         "type": "object",
-        "required": ["summary", "confidence"],
+        "required": ["summary"],
         "properties": {
             "summary": {
                 "type": "string",
@@ -60,8 +60,13 @@ SUBMIT_FINAL_REPORT_SCHEMA: dict[str, Any] = {
                 "maximum": 1.0,
                 "description": (
                     "Your confidence (0.0-1.0) that the summary is correct "
-                    "and addresses the task."
+                    "and addresses the task. Strongly preferred — please "
+                    "always supply a real estimate. Optional only so that "
+                    "omitting it cannot discard an otherwise complete "
+                    "report; when omitted it defaults to 0.5 and the report "
+                    "is flagged as having no self-reported confidence."
                 ),
+                "default": 0.5,
             },
             "evidence_refs": {
                 "type": "array",
