@@ -7,6 +7,7 @@
   import Renderer from '../Renderer.svelte';
   import { store } from '../store.svelte';
   import { resolveDynamic, toDisplayString } from '../functions';
+  import { pendingActionOf, pendingActivity } from '../activity';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
 
@@ -38,6 +39,17 @@
   // F096 §4.1 — a DynamicString qualifier in the head: source attribution,
   // the comparison window, a count. Bound or literal; absent ⇒ nothing.
   const ctx = $derived({ dataModel: store.surfaces[surfaceId]?.dataModel ?? {}, scope });
+  // F092.4: while the app is working (footer call in flight, or a fresh
+  // agent-action stamp) the data dims to 72% — visible, never hidden, and
+  // clearly about to change. Same definition of "working" as the header.
+  const meta = $derived((store.surfaces[surfaceId]?.dataModel as Record<string, unknown> | undefined)?.meta);
+  let nowTick = $state(Date.now());
+  $effect(() => {
+    if (!pendingActionOf(meta)) return;
+    const t = setInterval(() => (nowTick = Date.now()), 10_000);
+    return () => clearInterval(t);
+  });
+  const dimmed = $derived(store.activity[surfaceId] !== undefined || pendingActivity(meta, nowTick) !== null);
   const caption = $derived(toDisplayString(resolveDynamic(comp.caption, ctx)));
   // Accordion open state is renderer-local, exactly like Tabs selection: the
   // catalog gives Section no `open` property, so whether a section is
@@ -48,7 +60,7 @@
   const collapsible = $derived(layout === 'accordion');
 </script>
 
-<section class="app-section {layout}" class:model={modelSupplied} class:open>
+<section class="app-section {layout}" class:model={modelSupplied} class:open class:dim={dimmed}>
   {#if collapsible}
     <!-- APG disclosure: the BUTTON goes inside the H3, not the reverse — an
          h3 inside a button is invalid button content, and screen readers
@@ -87,6 +99,10 @@
   .app-section {
     border-top: 1px solid var(--border);
     padding: 0.6rem 0 0.2rem;
+  }
+  .app-section.dim {
+    opacity: 0.72;
+    transition: opacity var(--transition);
   }
   .app-section.model {
     border-left: 3px solid var(--warn);

@@ -8,6 +8,7 @@
 // EventSource auto-reconnect can redeliver. Envelopes without a seq (direct
 // snapshot application) pass `null` and always apply.
 
+import type { Activity, ActivityKind } from './activity';
 import { setPointer } from './pointer';
 
 export interface A2uiComponent {
@@ -50,6 +51,15 @@ interface Envelope {
 export class SurfaceStore {
   surfaces = $state<Record<string, SurfaceState>>({});
   connection = $state<Connection>('connecting');
+  /** F092.4: what a micro-app's footer has in flight, keyed by surface.
+   * refresh / refine are synchronous transport calls the footer brackets
+   * with beginActivity/endActivity; an agent action's activity is instead
+   * derived from the server's /meta/pendingAction stamp (activity.ts), so
+   * it survives a reload — this record only covers the POST itself. */
+  activity = $state<Record<string, Activity>>({});
+  /** When a surface's last call finished successfully — the header shows
+   * "updated just now" for DONE_FLASH_MS after it. */
+  doneAt = $state<Record<string, number>>({});
   /** Highest seq seen — the resume point, NOT the dedupe test. */
   lastSeq = 0;
   /** Membership dedupe: seqs can legitimately arrive OUT OF ORDER (two
@@ -170,8 +180,26 @@ export class SurfaceStore {
     this.seen = new Set([...this.seen].filter((s) => s > seq));
   }
 
+  beginActivity(surfaceId: string, kind: ActivityKind, label: string): void {
+    this.activity[surfaceId] = { kind, label, startedAt: Date.now() };
+    // A new call supersedes the previous call's "updated just now" flash.
+    delete this.doneAt[surfaceId];
+  }
+
+  endActivity(surfaceId: string, ok: boolean): void {
+    delete this.activity[surfaceId];
+    if (ok) this.doneAt[surfaceId] = Date.now();
+  }
+
+  /** Success reached by another route (an agent action's recompose). */
+  markDone(surfaceId: string): void {
+    this.doneAt[surfaceId] = Date.now();
+  }
+
   reset(): void {
     this.surfaces = {};
+    this.activity = {};
+    this.doneAt = {};
     this.lastSeq = 0;
     this.seenFloor = 0;
     this.seen = new Set();

@@ -139,9 +139,11 @@ describe('AppFooterView', () => {
       pendingAction: { id: 'rebalance', label: 'Rebalance', at: new Date().toISOString() },
     });
 
-    const busy = getByText('Rebalance…') as HTMLButtonElement;
+    const busy = getByText('Rebalance') as HTMLButtonElement;
     const other = getByText('Escalate') as HTMLButtonElement;
     expect(busy.disabled).toBe(true);
+    expect(busy.querySelector('.spin')).not.toBeNull();
+    expect(other.querySelector('.spin')).toBeNull();
     expect(other.disabled).toBe(true);
     await fireEvent.click(other);
     await settle();
@@ -174,7 +176,7 @@ describe('AppFooterView', () => {
     const long = renderActionFooter({
       pendingAction: { id: 'rebalance', label: 'Rebalance', at: twoMinAgo, timeout_s: 600 },
     });
-    expect((long.getByText('Rebalance…') as HTMLButtonElement).disabled).toBe(true);
+    expect((long.getByText('Rebalance') as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('renders the server-written actionError', () => {
@@ -470,5 +472,135 @@ describe('TimelineView', () => {
     });
 
     expect(container.querySelectorAll('li').length).toBe(0);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// F092.4 activity indicator — header stamp, rail, pressed control, dimming
+// ---------------------------------------------------------------------------
+
+describe('activity indicator', () => {
+  const header = {
+    id: 'header',
+    component: 'AppHeader',
+    title: 'T',
+    composedAt: { path: '/meta/composedAt' },
+    staleAfterS: 3600,
+  };
+
+  function renderHeader(meta: Record<string, unknown> = {}) {
+    seedSurface({ meta: { composedAt: new Date().toISOString(), ...meta } });
+    return render(AppHeaderView, { props: { surfaceId: SURFACE, comp: header } });
+  }
+
+  it('an in-flight refresh turns the stamp into a live status and shows the rail', async () => {
+    const { container } = renderHeader();
+    expect(container.querySelector('.rail')).toBeNull();
+
+    store.beginActivity(SURFACE, 'refresh', 'refresh');
+    await tick();
+
+    const stamp = container.querySelector('.stamp.working')!;
+    expect(stamp.textContent).toContain('refreshing');
+    expect(stamp.textContent).toMatch(/\d+s/);
+    expect(stamp.getAttribute('role')).toBe('status');
+    expect(container.querySelector('.rail')).not.toBeNull();
+  });
+
+  it('a refine names what is happening, and success flashes then returns the stamp', async () => {
+    const { container } = renderHeader();
+    store.beginActivity(SURFACE, 'refine', 'Just the blockers');
+    await tick();
+    expect(container.querySelector('.stamp.working')?.textContent).toContain('rethinking layout');
+
+    store.endActivity(SURFACE, true);
+    await tick();
+    expect(container.querySelector('.rail')).toBeNull();
+    expect(container.querySelector('.stamp.done')?.textContent).toContain('updated just now');
+
+    // A failed call must not claim an update.
+    store.beginActivity(SURFACE, 'refresh', 'refresh');
+    store.endActivity(SURFACE, false);
+    await tick();
+    expect(container.querySelector('.stamp.done')).toBeNull();
+  });
+
+  it('a fresh agent-action stamp is "agent working" with elapsed time only, and goes amber when stale', async () => {
+    const at = new Date(Date.now() - 125_000).toISOString();
+    const { container } = renderHeader({ pendingAction: { id: 'rebalance', label: 'Rebalance', at, timeout_s: 300 } });
+    const stamp = container.querySelector('.stamp.working')!;
+    expect(stamp.textContent).toContain('agent working');
+    expect(stamp.textContent).toContain('2m 0');
+    expect(stamp.textContent).not.toContain('of');
+    expect(container.querySelector('.rail')).not.toBeNull();
+
+    cleanup();
+    const staleAt = new Date(Date.now() - 10 * 60_000).toISOString();
+    const stale = renderHeader({ pendingAction: { id: 'rebalance', label: 'Rebalance', at: staleAt } });
+    expect(stale.container.querySelector('.rail')).toBeNull();
+    expect(stale.container.querySelector('.stamp.stale')?.textContent).toContain('no update after 5m');
+  });
+
+  it('an agent action completes when its stamp is cleared, not when it goes stale', async () => {
+    const at = new Date().toISOString();
+    const { container } = renderHeader({ pendingAction: { id: 'rebalance', label: 'Rebalance', at, timeout_s: 300 } });
+    expect(container.querySelector('.stamp.working')).not.toBeNull();
+
+    // The recompose replaces the model wholesale; the stamp is simply gone.
+    store.apply(null, {
+      version: 'v1.0',
+      updateDataModel: { surfaceId: SURFACE, path: '/meta', value: { composedAt: new Date().toISOString() } },
+    } as never);
+    await tick();
+    expect(container.querySelector('.stamp.done')?.textContent).toContain('updated just now');
+  });
+
+  it('the pressed refresh control carries a spinner and a present-tense label while its call runs', async () => {
+    let finish!: (v: { ok: boolean; message: string; value?: unknown }) => void;
+    vi.spyOn(transport, 'callAgentFunction').mockImplementation(
+      () => new Promise((resolve) => (finish = resolve)),
+    );
+    seedSurface({});
+    const { getByText, container } = render(AppFooterView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'footer', component: 'AppFooter', refineOptions: [], showRefresh: true },
+      },
+    });
+
+    await fireEvent.click(getByText('refresh'));
+    await tick();
+    expect(store.activity[SURFACE]?.kind).toBe('refresh');
+    const pressed = getByText('Refreshing') as HTMLButtonElement;
+    expect(pressed.querySelector('.spin')).not.toBeNull();
+    expect(pressed.classList.contains('pressed')).toBe(true);
+
+    finish({ ok: true, message: '', value: {} });
+    await settle();
+    expect(store.activity[SURFACE]).toBeUndefined();
+    expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
+    expect(container.querySelector('.spin')).toBeNull();
+    expect((getByText('refresh') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('sections dim while the app is working and recover afterwards', async () => {
+    seedSurface({}, [
+      { id: 'sec', component: 'Section', title: 'S', child: 'txt' },
+      { id: 'txt', component: 'Text', text: 'hello' },
+    ]);
+    const { container } = render(SectionView, {
+      props: { surfaceId: SURFACE, comp: { id: 'sec', component: 'Section', title: 'S', child: 'txt' } },
+    });
+    const section = container.querySelector('.app-section')!;
+    expect(section.classList.contains('dim')).toBe(false);
+
+    store.beginActivity(SURFACE, 'refresh', 'refresh');
+    await tick();
+    expect(section.classList.contains('dim')).toBe(true);
+
+    store.endActivity(SURFACE, true);
+    await tick();
+    expect(section.classList.contains('dim')).toBe(false);
   });
 });
