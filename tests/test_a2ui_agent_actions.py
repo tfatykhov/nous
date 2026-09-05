@@ -325,8 +325,9 @@ class _FakeService:
             model["meta"]["pendingAction"] = self.pending
         return {"createSurface": {"dataModel": model}}, 1
 
-    async def update_data(self, surface_id: str, path: str, value: Any) -> None:
+    async def update_data(self, surface_id: str, path: str, value: Any) -> int:
         self.patches.append((path, value))
+        return len(self.patches)
 
 
 class _FakeSubtasks:

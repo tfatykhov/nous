@@ -24,7 +24,7 @@
   import { store } from '../store.svelte';
   import { transport } from '../transport';
   import { resolveDynamic } from '../functions';
-  import { HOLD_WAIT_MS, pendingActionOf, pendingIsFresh } from '../activity';
+  import { HOLD_WAIT_MS, pendingActionOf, pendingIsFresh, responseSeq } from '../activity';
   import type { ActivityKind } from '../activity';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
@@ -143,7 +143,7 @@
     let held = false;
     try {
       const res = await transport.callAgentFunction(surfaceId, name, args);
-      if (res.ok) held = store.holdForModel(surfaceId, token);
+      if (res.ok) held = store.holdForModel(surfaceId, token, responseSeq(res.value));
       else error = res.message;
     } finally {
       if (!held) store.endActivityIf(surfaceId, token, false);

@@ -836,6 +836,10 @@ async def test_app_refresh_reruns_sources_and_patches(
 
     assert status == 200
     assert payload["agentFunctionResponse"]["value"]["refreshed"] == ["meta", "trip"]
+    # F092.4: the completion revision — the outbox seq of the last envelope
+    # (the /meta restamp), which the companion holds its indicator for.
+    seq = payload["agentFunctionResponse"]["value"]["seq"]
+    assert isinstance(seq, int) and seq > 0
     row = await _surface_row(db, surface_id)
     assert row.data_model["trip"] == {"flights": ["fresh"]}
     assert row.data_model["meta"]["composedAt"] == "2026-08-29T15:00:00+00:00"
@@ -872,6 +876,7 @@ async def test_app_refine_recomposes_the_same_surface(
     assert status == 200
     value = payload["agentFunctionResponse"]["value"]
     assert value["refined"] == "blockers"
+    assert isinstance(value["seq"], int) and value["seq"] > 0
     assert "Just the blockers" in fake_composer.compose_calls[0]
     row = await _surface_row(db, surface_id)
     assert row.status == "live", "refine recomposes in place, never tears down"

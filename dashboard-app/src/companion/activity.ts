@@ -32,25 +32,37 @@ export interface Activity {
   token: number;
   /** The call's HTTP response said ok, but what it promised still has to
    *  arrive over SSE: the server's pendingAction stamp for an agent action
-   *  ('stamp'), or the model patches for refresh / refine ('model' — both
-   *  emit /meta/composedAt as their LAST envelope). The record is HELD
-   *  from this epoch ms for at most HOLD_WAIT_MS; the store ends it when
-   *  it observes the arrival, a mounted footer ends it on timeout. On the
-   *  record, not in a component, so it survives remounts. */
+   *  ('stamp'), or the model patches for refresh / refine ('model' — the
+   *  response names the outbox seq of its last envelope, see `seq`). The
+   *  record is HELD from this epoch ms for at most HOLD_WAIT_MS; the store
+   *  ends it when it observes the arrival, a mounted footer ends it on
+   *  timeout. On the record, not in a component, so it survives remounts. */
   holdSince?: number;
   holdFor?: 'stamp' | 'model';
-  /** What the store had observed for this surface when the record began:
-   *  the last stamp's identity, the model generation (how many
-   *  model-ending envelopes the store had applied — a /meta restamp or a
-   *  whole-model update) and the model's composedAt. Anything moving past
-   *  these means the thing the call promised has been seen since —
-   *  possibly before the HTTP response even landed. Generation AND value:
-   *  composedAt is stamped at second precision, so two refreshes landing
-   *  in one second share it and only the envelope count tells them apart;
-   *  a hydration snapshot is not an envelope and only its value tells. */
+  /** The last stamp identity the store had observed for this surface when
+   *  the record began. A different one since means the stamp the app.act
+   *  response promised has been seen — possibly before the response even
+   *  landed. */
   stampSeenBefore?: string;
-  modelGenBefore?: number;
-  composedAtBefore?: string;
+  /** The completion revision an ok refresh / refine response reported: the
+   *  outbox seq of the call's LAST envelope (app.refresh: the /meta
+   *  restamp; app.refine: the whole-model update). Set by holdForModel.
+   *  The update has arrived once the store has seen that seq for the
+   *  surface — delivered on the stream (SSE id = seq) or covered by a
+   *  hydration snapshot's X-A2UI-Upto-Seq watermark. Never a timestamp:
+   *  composedAt is second-precision, so two refreshes in one second share
+   *  it, and a reconnect snapshot carries the refreshed data under the
+   *  same stamp while suppressing the envelope. */
+  seq?: number;
+}
+
+/** The completion revision carried by an app.refresh / app.refine ok
+ *  response (`value.seq`), or undefined when the response names none — a
+ *  record held without one can only time out: bounded busy, no claimed
+ *  success, because nothing observable identifies its arrival. */
+export function responseSeq(value: unknown): number | undefined {
+  const seq = (value as { seq?: unknown } | null | undefined)?.seq;
+  return typeof seq === 'number' && Number.isInteger(seq) && seq > 0 ? seq : undefined;
 }
 
 /** Present-tense verb the header shows next to the elapsed time. */

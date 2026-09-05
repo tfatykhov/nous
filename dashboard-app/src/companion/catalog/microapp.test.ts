@@ -39,9 +39,16 @@ function seedSurface(
   } as never);
 }
 
-/** The last envelope a refresh / refine emits: the /meta/composedAt restamp. */
-function restamp(composedAt: string = new Date().toISOString()): void {
-  store.apply(null, {
+/** Outbox seqs are server-issued and monotone: one counter per test. */
+let seq = 0;
+/** What an ok app.refresh / app.refine response carries: the seq of its
+ *  last envelope — the completion revision the footer hands to the store. */
+const okSeq = (n: number) => ({ ok: true, message: '', value: { seq: n } });
+
+/** The last envelope a refresh / refine emits — the /meta/composedAt
+ *  restamp — arriving on the stream at outbox seq `n`. */
+function restamp(n: number, composedAt: string = new Date().toISOString()): void {
+  store.apply(n, {
     version: 'v1.0',
     updateDataModel: { surfaceId: SURFACE, path: '/meta', value: { composedAt } },
   } as never);
@@ -61,7 +68,10 @@ function snapshot(composedAt: string) {
   } as never;
 }
 
-beforeEach(() => store.reset());
+beforeEach(() => {
+  store.reset();
+  seq = 0;
+});
 afterEach(() => {
   // globals:false disables testing-library's automatic cleanup, and the
   // render-result queries bind to document.body — without this, test 1's
@@ -211,9 +221,7 @@ describe('AppFooterView', () => {
   });
 
   it('refine button calls app.refine with the option id over the RPC channel', async () => {
-    const spy = vi
-      .spyOn(transport, 'callAgentFunction')
-      .mockResolvedValue({ ok: true, message: '', value: {} });
+    const spy = vi.spyOn(transport, 'callAgentFunction').mockResolvedValue(okSeq(1));
     const { getByText } = renderFooter();
 
     await fireEvent.click(getByText('Just the blockers'));
@@ -223,9 +231,7 @@ describe('AppFooterView', () => {
   });
 
   it('refresh calls app.refresh and close posts the app.close action', async () => {
-    const rpc = vi
-      .spyOn(transport, 'callAgentFunction')
-      .mockResolvedValue({ ok: true, message: '', value: {} });
+    const rpc = vi.spyOn(transport, 'callAgentFunction').mockResolvedValue(okSeq(1));
     const act = vi
       .spyOn(transport, 'postAction')
       .mockResolvedValue({ ok: true, message: '', resolved: true });
@@ -236,7 +242,7 @@ describe('AppFooterView', () => {
     // The refresh's patches land over SSE (its last one restamps composedAt);
     // until then the app is still busy and close stays disabled.
     expect((getByText('close') as HTMLButtonElement).disabled).toBe(true);
-    restamp();
+    restamp(1);
     await tick();
     // Two-tap confirmation on the destructive close: the first tap ARMS.
     await fireEvent.click(getByText('close'));
@@ -723,12 +729,12 @@ describe('activity indicator', () => {
     expect(pressed.querySelector('.spin')).not.toBeNull();
     expect(pressed.classList.contains('pressed')).toBe(true);
 
-    finish({ ok: true, message: '', value: {} });
+    finish(okSeq(1));
     await settle();
     // The response alone is not the end: the patches are still in flight.
     expect(store.activity[SURFACE]?.holdFor).toBe('model');
     expect(getByText('Refreshing').querySelector('.spin')).not.toBeNull();
-    restamp();
+    restamp(1);
     await tick();
     expect(store.activity[SURFACE]).toBeUndefined();
     expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
@@ -753,11 +759,11 @@ describe('activity indicator', () => {
     // SSE first (the usual order): a source patch, then the restamp.
     store.apply(null, { version: 'v1.0', updateDataModel: { surfaceId: SURFACE, path: '/summary', value: { n: 1 } } } as never);
     expect(store.activity[SURFACE]?.kind).toBe('refresh');
-    restamp();
+    restamp(1);
     // Still held — nothing has said ok yet.
     expect(store.activity[SURFACE]?.kind).toBe('refresh');
 
-    finish({ ok: true, message: '', value: {} });
+    finish(okSeq(1));
     await settle();
     expect(store.activity[SURFACE]).toBeUndefined();
     expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
@@ -766,7 +772,7 @@ describe('activity indicator', () => {
   it('a refresh held for its patches is bounded, and a timeout claims no update', async () => {
     vi.useFakeTimers();
     try {
-      vi.spyOn(transport, 'callAgentFunction').mockResolvedValue({ ok: true, message: '', value: {} } as never);
+      vi.spyOn(transport, 'callAgentFunction').mockResolvedValue(okSeq(1));
       seedSurface({ meta: { composedAt: new Date().toISOString() } });
       const { getByText } = render(AppFooterView, {
         props: { surfaceId: SURFACE, comp: { id: 'footer', component: 'AppFooter', refineOptions: [], showRefresh: true } },
@@ -787,7 +793,9 @@ describe('activity indicator', () => {
   });
 
   it('a second refresh completing in the same second as the first still completes on its restamp', async () => {
-    vi.spyOn(transport, 'callAgentFunction').mockResolvedValue({ ok: true, message: '', value: {} });
+    vi.spyOn(transport, 'callAgentFunction')
+      .mockResolvedValueOnce(okSeq(1))
+      .mockResolvedValueOnce(okSeq(2));
     seedSurface({ meta: { composedAt: new Date(Date.now() - 60_000).toISOString() } });
     const footer = { id: 'footer', component: 'AppFooter', refineOptions: [], showRefresh: true };
     const { getByText } = render(AppFooterView, { props: { surfaceId: SURFACE, comp: footer } });
@@ -797,7 +805,7 @@ describe('activity indicator', () => {
 
     await fireEvent.click(getByText('refresh'));
     await settle();
-    restamp(second);
+    restamp(1, second);
     await tick();
     expect(store.activity[SURFACE]).toBeUndefined();
     const firstDone = store.doneAt[SURFACE];
@@ -807,35 +815,53 @@ describe('activity indicator', () => {
     await settle();
     // The response is back, its restamp is not: held.
     expect(store.activity[SURFACE]?.holdFor).toBe('model');
-    restamp(second);
+    restamp(2, second);
     await tick();
-    // The envelope itself is the arrival — its value being unchanged
-    // must not hold the record for HOLD_WAIT_MS and release it flashless.
+    // The envelope's seq is the arrival — its value being unchanged must
+    // not hold the record for HOLD_WAIT_MS and release it flashless.
     expect(store.activity[SURFACE]).toBeUndefined();
     expect(store.doneAt[SURFACE]).toBeGreaterThanOrEqual(firstDone);
   });
 
-  it('a hydration snapshot completes a held refresh only when it carries the new stamp', () => {
-    const before = new Date(Date.now() - 60_000).toISOString();
-    seedSurface({ meta: { composedAt: before } });
+  it('a reconnect snapshot completes a held refresh once its watermark covers the response seq — same second-precision stamp or not', () => {
+    const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, '+00:00');
+    seedSurface({ meta: { composedAt: stamp } });
     const token = store.beginActivity(SURFACE, 'refresh', 'refresh');
-    expect(store.holdForModel(SURFACE, token)).toBe(true);
+    // The response names the seq of its last envelope; the connection
+    // drops before that envelope arrives.
+    expect(store.holdForModel(SURFACE, token, 7)).toBe(true);
 
-    // Reconnect mid-refresh: the snapshot still carries the old stamp and
-    // replays no envelope — nothing has arrived, the record stays held.
+    // Reconnect mid-refresh: the snapshot predates the commit (watermark
+    // 6) — nothing has arrived, the record stays held and locked.
     store.resync();
-    store.apply(null, snapshot(before));
+    store.apply(null, snapshot(stamp));
+    store.setSurfaceUpto(SURFACE, 6);
     store.pruneAbsent(new Set([SURFACE]));
     expect(store.activity[SURFACE]?.holdFor).toBe('model');
+    expect(store.doneAt[SURFACE]).toBeUndefined();
 
-    // Reconnect after the server applied the patches: the snapshot carries
-    // the new stamp and its upto suppresses the /meta envelope, so the
-    // value is the only evidence — and it is enough.
+    // Reconnect after the commit: the snapshot carries the refreshed data
+    // under the SAME second-precision composedAt, and its watermark (7)
+    // suppresses the /meta envelope, so no envelope will ever say so — the
+    // watermark is the evidence, and it is exact.
     store.resync();
-    store.apply(null, snapshot(new Date().toISOString()));
+    store.apply(null, snapshot(stamp));
+    store.setSurfaceUpto(SURFACE, 7);
     store.pruneAbsent(new Set([SURFACE]));
     expect(store.activity[SURFACE]).toBeUndefined();
     expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
+  });
+
+  it('a response naming no seq holds and never claims success — no envelope can be its arrival', () => {
+    seedSurface({ meta: { composedAt: new Date(Date.now() - 60_000).toISOString() } });
+    const token = store.beginActivity(SURFACE, 'refresh', 'refresh');
+    expect(store.holdForModel(SURFACE, token, undefined)).toBe(true);
+    restamp(1);
+    restamp(2);
+    // Still held: only a mounted footer's HOLD_WAIT_MS timeout ends it,
+    // and that ends it as a failure — bounded busy, no flash.
+    expect(store.activity[SURFACE]?.holdFor).toBe('model');
+    expect(store.doneAt[SURFACE]).toBeUndefined();
   });
 
   it('a response landing mid-resync keeps the record held until the model is back', () => {
@@ -845,22 +871,23 @@ describe('activity indicator', () => {
 
     // control: resync clears the surfaces; the snapshot has not hydrated
     // yet when the HTTP response comes back. Nothing has ARRIVED — an
-    // absent model must not read as "composedAt changed".
+    // absent model is not an arrived one.
     store.resync();
     expect(store.surfaces[SURFACE]).toBeUndefined();
-    expect(store.holdForModel(SURFACE, token)).toBe(true);
+    expect(store.holdForModel(SURFACE, token, 3)).toBe(true);
     expect(store.activity[SURFACE]?.holdFor).toBe('model');
     expect(store.doneAt[SURFACE]).toBeUndefined();
 
-    // The snapshot was taken before the refresh committed: old data, still
-    // held and locked …
+    // The snapshot was taken before the refresh committed (watermark 2):
+    // old data, still held and locked …
     store.apply(null, snapshot(before));
+    store.setSurfaceUpto(SURFACE, 2);
     store.pruneAbsent(new Set([SURFACE]));
     expect(store.activity[SURFACE]?.holdFor).toBe('model');
     expect(store.doneAt[SURFACE]).toBeUndefined();
 
-    // … until the replayed /meta envelope lands.
-    restamp();
+    // … until the replayed /meta envelope (seq 3) lands.
+    restamp(3);
     expect(store.activity[SURFACE]).toBeUndefined();
     expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
   });
@@ -898,9 +925,9 @@ describe('activity indicator', () => {
     const second = render(AppFooterView, { props: { surfaceId: SURFACE, comp: footer } });
     expect((second.getByText('Refreshing') as HTMLButtonElement).disabled).toBe(true);
 
-    finish({ ok: true, message: '', value: {} });
+    finish(okSeq(1));
     await settle();
-    restamp();
+    restamp(1);
     await tick();
     expect(store.activity[SURFACE]).toBeUndefined();
     expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
@@ -1093,9 +1120,9 @@ describe('activity indicator', () => {
     expect(pressed.querySelector('.spin')).not.toBeNull();
     expect((second.getByText('close') as HTMLButtonElement).disabled).toBe(true);
 
-    finish({ ok: true, message: '', value: {} });
+    finish(okSeq(1));
     await settle();
-    restamp();
+    restamp(1);
     await tick();
     expect(store.activity[SURFACE]).toBeUndefined();
     expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
@@ -1227,9 +1254,9 @@ describe('activity indicator', () => {
     expect(store.activity[SURFACE]?.kind).toBe('refresh');
     expect(store.doneAt[SURFACE]).toBeUndefined();
 
-    finishRefresh({ ok: true, message: '', value: {} });
+    finishRefresh(okSeq(1));
     await settle();
-    restamp();
+    restamp(1);
     await tick();
     expect(store.activity[SURFACE]).toBeUndefined();
     expect(store.doneAt[SURFACE]).toBeGreaterThan(0);
@@ -1296,7 +1323,7 @@ describe('activity indicator', () => {
     expect(month.classList.contains('pressed')).toBe(true);
     expect(week.classList.contains('pressed')).toBe(false);
     expect(week.querySelector('.spin')).toBeNull();
-    finish({ ok: true, message: '', value: {} });
+    finish(okSeq(1));
     await settle();
   });
 

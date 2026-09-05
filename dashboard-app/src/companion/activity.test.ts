@@ -5,6 +5,7 @@ import {
   pendingActivity,
   pendingIsFresh,
   recomposedAfter,
+  responseSeq,
   PENDING_STALE_FALLBACK_MS,
 } from './activity';
 
@@ -85,5 +86,23 @@ describe('recomposedAfter', () => {
   it('never fires on an unparsable stamp', () => {
     expect(recomposedAfter('', tap)).toBe(false);
     expect(recomposedAfter('soon', tap)).toBe(false);
+  });
+});
+
+describe('responseSeq', () => {
+  it('reads the completion revision an ok refresh / refine response names', () => {
+    expect(responseSeq({ refreshed: ['meta'], seq: 42 })).toBe(42);
+    expect(responseSeq({ refined: 'blockers', seq: 7 })).toBe(7);
+  });
+
+  it('is undefined when the response names none — a hold without one can only time out', () => {
+    expect(responseSeq({ refreshed: ['meta'] })).toBeUndefined();
+    expect(responseSeq({ seq: '42' })).toBeUndefined();
+    expect(responseSeq({ seq: 0 })).toBeUndefined();
+    expect(responseSeq({ seq: 4.5 })).toBeUndefined();
+    expect(responseSeq({ seq: NaN })).toBeUndefined();
+    expect(responseSeq(undefined)).toBeUndefined();
+    expect(responseSeq(null)).toBeUndefined();
+    expect(responseSeq('seq')).toBeUndefined();
   });
 });
