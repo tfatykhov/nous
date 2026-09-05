@@ -778,6 +778,78 @@ describe('activity indicator', () => {
     }
   });
 
+  it('a surface removed while no footer is mounted ends its record in the store, and the late response resurrects nothing', async () => {
+    let finish!: (v: { ok: boolean; message: string }) => void;
+    vi.spyOn(transport, 'postAction').mockImplementation(
+      () => new Promise((resolve) => (finish = resolve)),
+    );
+    seedSurface({});
+    const footer = { id: 'footer', component: 'AppFooter', refineOptions: [], showRefresh: true, agentActions: [{ id: 'a', label: 'Go' }] };
+    const first = render(AppFooterView, { props: { surfaceId: SURFACE, comp: footer } });
+    await fireEvent.click(first.getByText('Go'));
+    await tick();
+    // The user focuses another surface: no footer for this one is mounted …
+    cleanup();
+    expect(store.activity[SURFACE]?.kind).toBe('act');
+
+    // … and the worker's replacement arrives before the slow POST response.
+    store.apply(null, { version: 'v1.0', deleteSurface: { surfaceId: SURFACE } } as never);
+    expect(store.activity[SURFACE]).toBeUndefined();
+    store.apply(null, {
+      version: 'v1.0',
+      createSurface: {
+        surfaceId: SURFACE,
+        catalogId: 'nous-core',
+        components: [],
+        dataModel: { meta: { composedAt: new Date().toISOString() } },
+        metadata: { extensions: { com_nous_nonce: 'rotated-nonce' } },
+      },
+    } as never);
+
+    finish({ ok: true, message: '' });
+    await settle();
+    expect(store.activity[SURFACE]).toBeUndefined();
+
+    // Coming back finds the app unlocked.
+    const back = render(AppFooterView, { props: { surfaceId: SURFACE, comp: footer } });
+    expect((back.getByText('Go') as HTMLButtonElement).disabled).toBe(false);
+    expect((back.getByText('refresh') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('a reconnect that prunes the surface ends its record too', () => {
+    seedSurface({});
+    store.beginActivity(SURFACE, 'refresh', 'refresh');
+    store.pruneAbsent(new Set());
+    expect(store.surfaces[SURFACE]).toBeUndefined();
+    expect(store.activity[SURFACE]).toBeUndefined();
+  });
+
+  it('two stamps in the same server second are told apart by subtask_id, so a came-and-went retap releases at once', async () => {
+    const at = new Date().toISOString();
+    let finish!: (v: { ok: boolean; message: string }) => void;
+    vi.spyOn(transport, 'postAction').mockImplementation(
+      () => new Promise((resolve) => (finish = resolve)),
+    );
+    // A previous action's stamp was seen and cleared (it finished).
+    seedSurface({ meta: { pendingAction: { id: 'a', label: 'Go', at, timeout_s: 300, subtask_id: 'sub-1' } } });
+    store.apply(null, { version: 'v1.0', updateDataModel: { surfaceId: SURFACE, path: '/meta/pendingAction', value: null } } as never);
+    const { getByText } = render(AppFooterView, {
+      props: { surfaceId: SURFACE, comp: { id: 'footer', component: 'AppFooter', refineOptions: [], showRefresh: false, agentActions: [{ id: 'a', label: 'Go' }] } },
+    });
+
+    // Retap within the same second: the new stamp shares `at` but not identity.
+    await fireEvent.click(getByText('Go'));
+    await tick();
+    store.apply(null, { version: 'v1.0', updateDataModel: { surfaceId: SURFACE, path: '/meta/pendingAction', value: { id: 'a', label: 'Go', at, timeout_s: 300, subtask_id: 'sub-2' } } } as never);
+    store.apply(null, { version: 'v1.0', updateDataModel: { surfaceId: SURFACE, path: '/meta/pendingAction', value: null } } as never);
+    await tick();
+
+    finish({ ok: true, message: '' });
+    await settle();
+    expect(store.activity[SURFACE]).toBeUndefined();
+    expect((getByText('Go') as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('a footer destroyed mid-hold because its surface was removed releases the record', async () => {
     vi.spyOn(transport, 'postAction').mockResolvedValue({ ok: true, message: '' } as never);
     seedSurface({});
@@ -791,6 +863,7 @@ describe('activity indicator', () => {
     await settle();
     expect(store.activity[SURFACE]?.holdSince).toBeGreaterThan(0);
     store.apply(null, { version: 'v1.0', deleteSurface: { surfaceId: SURFACE } } as never);
+    expect(store.activity[SURFACE]).toBeUndefined();
     cleanup();
     expect(store.activity[SURFACE]).toBeUndefined();
   });

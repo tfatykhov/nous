@@ -22,7 +22,16 @@ describe('formatElapsed', () => {
 describe('pendingActionOf', () => {
   it('parses a server stamp and derives the stale window from timeout_s', () => {
     const p = pendingActionOf({ pendingAction: { id: 'a', label: 'Act', at: '2026-09-04T10:00:00Z', timeout_s: 60 } });
-    expect(p).toEqual({ id: 'a', label: 'Act', at: '2026-09-04T10:00:00Z', staleMs: 60_000 });
+    expect(p).toEqual({ id: 'a', label: 'Act', at: '2026-09-04T10:00:00Z', staleMs: 60_000, key: 'a@2026-09-04T10:00:00Z' });
+  });
+
+  it('identifies a stamp by its subtask_id — two stamps can share a second-precision at', () => {
+    const at = '2026-09-04T10:00:00Z';
+    const a = pendingActionOf({ pendingAction: { id: 'x', at, subtask_id: 'sub-1' } });
+    const b = pendingActionOf({ pendingAction: { id: 'x', at, subtask_id: 'sub-2' } });
+    expect(a?.key).toBe('sub-1');
+    expect(b?.key).toBe('sub-2');
+    expect(a?.key).not.toBe(b?.key);
   });
 
   it('falls back to the client window when the stamp predates timeout_s, and to id when label is missing', () => {

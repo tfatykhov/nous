@@ -69,12 +69,14 @@ export class SurfaceStore {
    * destroyed and remounted), and the user may have focused another
    * surface entirely. A header mounted later only READS doneAt. */
   tappedAt = $state<Record<string, number>>({});
-  /** The `at` of the latest /meta/pendingAction stamp observed on each
-   * surface, recorded in apply() — so it does not depend on which
-   * components are mounted — and never cleared when the stamp is (only
-   * by reset). The footer compares it before and after its app.act POST:
-   * a stamp seen since the tap already came, and may already have gone. */
-  stampSeenAt = $state<Record<string, string>>({});
+  /** Identity (subtask_id) of the latest /meta/pendingAction stamp
+   * observed on each surface, recorded in apply() — so it does not depend
+   * on which components are mounted — and never cleared when the stamp is
+   * (only by reset). The footer compares it before and after its app.act
+   * POST: a stamp seen since the tap already came, and may already have
+   * gone. Identity, not `at`: stamps are second-precision, and an action
+   * finishing plus a retap can land in the same server second. */
+  stampSeen = $state<Record<string, string>>({});
   /** Highest seq seen — the resume point, NOT the dedupe test. */
   lastSeq = 0;
   /** Membership dedupe: seqs can legitimately arrive OUT OF ORDER (two
@@ -170,11 +172,18 @@ export class SurfaceStore {
       this.noteStamp(ud.surfaceId);
     } else if (envelope.deleteSurface) {
       delete this.surfaces[envelope.deleteSurface.surfaceId];
+      // A removed surface has nothing in flight any more: the record ends
+      // HERE, not in a footer's teardown — the deletion can arrive while
+      // the user is on another surface and no footer is mounted, and a
+      // record left behind would lock the replacement until a POST that
+      // may never settle. tappedAt/doneAt stay: a replacement's
+      // createSurface follows this and resolves them (noteStamp).
+      delete this.activity[envelope.deleteSurface.surfaceId];
     }
   }
 
   /** Runs after every envelope that can change a surface's data model.
-   * A stamp present: remember it (stampSeenAt for the footer, tappedAt as
+   * A stamp present: remember it (stampSeen for the footer, tappedAt as
    * the tap the action started from). No stamp but a remembered tap: the
    * action is over one way or the other — it COMPLETED only if the app
    * was recomposed after the tap (recomposedAfter: the failure watcher
@@ -187,7 +196,7 @@ export class SurfaceStore {
       | undefined;
     const p = pendingActionOf(meta);
     if (p) {
-      this.stampSeenAt[surfaceId] = p.at;
+      this.stampSeen[surfaceId] = p.key;
       const at = Date.parse(p.at);
       if (Number.isFinite(at)) this.tappedAt[surfaceId] = at;
       return;
@@ -207,6 +216,7 @@ export class SurfaceStore {
       if (!liveIds.has(id)) {
         delete this.surfaces[id];
         delete this.surfaceUpto[id];
+        delete this.activity[id];
       }
     }
   }
@@ -268,7 +278,7 @@ export class SurfaceStore {
     this.activity = {};
     this.doneAt = {};
     this.tappedAt = {};
-    this.stampSeenAt = {};
+    this.stampSeen = {};
     this.lastSeq = 0;
     this.seenFloor = 0;
     this.seen = new Set();

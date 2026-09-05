@@ -117,15 +117,12 @@
     return () => clearTimeout(t);
   });
 
-  // Teardown releases the surface's record ONLY when the surface itself is
-  // gone — closed, pruned on reconnect, or mid-replacement (deleteSurface
-  // precedes the createSurface, and a fast action can finish that way
-  // before its POST response lands; a record left behind would show
-  // "agent working" on the replacement forever). A route remount keeps
-  // the surface, so it keeps the record.
-  $effect(() => () => {
-    if (!store.surfaces[surfaceId]) store.endActivity(surfaceId, false);
-  });
+  // No teardown release here: a route remount keeps the surface and must
+  // keep the record, and when the surface itself goes (closed, pruned on
+  // reconnect, or the deleteSurface half of a replacement) the STORE ends
+  // the record as it applies the removal — that can happen while the user
+  // is on another surface and no footer is mounted at all. A late response
+  // to a call this footer began finds no record and does nothing (token).
 
   async function act(actionId: string) {
     if (locked) return;
@@ -134,15 +131,15 @@
     // success response means: none yet → hold for it; one already seen →
     // it came, and may already have gone (the failure watcher can clear it
     // and write actionError before a slow response lands) → nothing to
-    // wait for. Compared as server-stamped values, so client/server clock
-    // skew cannot mislead.
-    const seenBefore = store.stampSeenAt[surfaceId];
+    // wait for. Compared by the stamp's identity (subtask_id), so neither
+    // clock skew nor two stamps in the same server second can mislead.
+    const seenBefore = store.stampSeen[surfaceId];
     const token = store.beginActivity(surfaceId, 'act', actionId);
     let handedOff = false;
     try {
       const res = await transport.postAction(surfaceId, 'app.act', comp.id, { actionId });
       if (res.ok) {
-        if (store.stampSeenAt[surfaceId] === seenBefore) handedOff = store.holdForStamp(surfaceId, token);
+        if (store.stampSeen[surfaceId] === seenBefore) handedOff = store.holdForStamp(surfaceId, token);
       } else {
         error = res.message;
       }

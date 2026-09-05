@@ -63,6 +63,9 @@ export interface PendingAction {
   label: string;
   at: string;
   staleMs: number;
+  /** Identity of THIS stamp: the server's subtask_id, else id@at. `at` alone
+   *  is second-precision, so two stamps can share it. */
+  key: string;
 }
 
 /** Parse /meta/pendingAction. Anything malformed is "no pending action". */
@@ -70,7 +73,7 @@ export function pendingActionOf(meta: unknown): PendingAction | null {
   if (!meta || typeof meta !== 'object') return null;
   const raw = (meta as { pendingAction?: unknown }).pendingAction;
   if (!raw || typeof raw !== 'object') return null;
-  const p = raw as { id?: unknown; label?: unknown; at?: unknown; timeout_s?: unknown };
+  const p = raw as { id?: unknown; label?: unknown; at?: unknown; timeout_s?: unknown; subtask_id?: unknown };
   if (typeof p.id !== 'string' || typeof p.at !== 'string') return null;
   const timeoutS = typeof p.timeout_s === 'number' && p.timeout_s > 0 ? p.timeout_s : null;
   return {
@@ -78,6 +81,7 @@ export function pendingActionOf(meta: unknown): PendingAction | null {
     label: typeof p.label === 'string' ? p.label : p.id,
     at: p.at,
     staleMs: timeoutS !== null ? timeoutS * 1000 : PENDING_STALE_FALLBACK_MS,
+    key: typeof p.subtask_id === 'string' && p.subtask_id ? p.subtask_id : `${p.id}@${p.at}`,
   };
 }
 
