@@ -31,7 +31,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    model_serializer,
+    model_validator,
+)
 
 
 #: Neutral fallback used when a report omits ``confidence``. 0.5 is
@@ -86,8 +92,34 @@ class SubtaskReport(BaseModel):
 
         Non-dict input (e.g. revalidating a model instance) is passed through
         untouched — there is no raw payload to inspect in that case.
+
+        Round trips are kept honest by ``_omit_unreported_confidence`` below,
+        which drops the defaulted ``confidence`` from the dump so it is absent
+        here on the way back in.
         """
         if isinstance(data, dict):
             data = dict(data)
             data["confidence_reported"] = data.get("confidence") is not None
+        return data
+
+    @model_serializer(mode="wrap")
+    def _omit_unreported_confidence(self, handler: Any) -> Any:
+        """Drop ``confidence`` from the dump when it was never reported.
+
+        ``_derive_confidence_reported`` stamps provenance from the *presence*
+        of ``confidence``, which makes the flag unspoofable on the way in but
+        made ``model_dump()`` lossy on the way out: the dump always carried the
+        defaulted ``confidence: 0.5``, so re-validating a dump flipped
+        ``confidence_reported`` from False to True. A persisted-and-reloaded
+        report could then masquerade as a genuine self-report and pollute the
+        very calibration this flag exists to protect.
+
+        Omitting the key makes the dump a faithful inverse of the input the
+        validator would have accepted, so provenance survives any number of
+        round trips without giving callers a spoofable field to set. The
+        default is restored on reload by the field default.
+        """
+        data = handler(self)
+        if isinstance(data, dict) and not self.confidence_reported:
+            data.pop("confidence", None)
         return data

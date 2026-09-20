@@ -179,3 +179,65 @@ class TestConfidenceReportedFlag:
         """Fail-open on absence must not weaken the range check on presence."""
         with pytest.raises(ValidationError):
             SubtaskReport.model_validate({"summary": "x", "confidence": 1.5})
+
+
+class TestConfidenceProvenanceSurvivesRoundTrips:
+    """`confidence_reported` is stamped from the PRESENCE of `confidence`, but
+    the dump used to always carry the defaulted 0.5 — so re-validating a dump
+    flipped the flag False -> True and a persisted/reloaded report could
+    masquerade as a genuine self-report, polluting the calibration the flag
+    exists to protect.
+    """
+
+    def test_dump_omits_confidence_when_it_was_never_reported(self):
+        d = SubtaskReport(summary="x").model_dump()
+        assert "confidence" not in d
+        assert d["confidence_reported"] is False
+
+    def test_dump_keeps_confidence_when_it_was_reported(self):
+        d = SubtaskReport(summary="x", confidence=0.7).model_dump()
+        assert d["confidence"] == 0.7
+        assert d["confidence_reported"] is True
+
+    def test_unreported_flag_survives_revalidation(self):
+        original = SubtaskReport(summary="x")
+        reloaded = SubtaskReport.model_validate(original.model_dump())
+        assert reloaded.confidence_reported is False
+        assert reloaded.confidence == DEFAULT_CONFIDENCE
+
+    def test_reported_flag_survives_revalidation(self):
+        original = SubtaskReport(summary="x", confidence=0.9)
+        reloaded = SubtaskReport.model_validate(original.model_dump())
+        assert reloaded.confidence_reported is True
+        assert reloaded.confidence == 0.9
+
+    def test_provenance_is_stable_across_repeated_round_trips(self):
+        r = SubtaskReport(summary="x")
+        for _ in range(5):
+            r = SubtaskReport.model_validate(r.model_dump())
+        assert r.confidence_reported is False
+
+    def test_reported_value_at_the_default_still_counts_as_reported(self):
+        """Explicitly saying 0.5 is a real self-report, not an absence."""
+        r = SubtaskReport(summary="x", confidence=DEFAULT_CONFIDENCE)
+        assert r.confidence_reported is True
+        d = r.model_dump()
+        assert d["confidence"] == DEFAULT_CONFIDENCE
+        assert SubtaskReport.model_validate(d).confidence_reported is True
+
+    def test_json_round_trip_also_preserves_provenance(self):
+        import json
+
+        original = SubtaskReport(summary="x")
+        reloaded = SubtaskReport.model_validate(
+            json.loads(original.model_dump_json())
+        )
+        assert reloaded.confidence_reported is False
+
+    def test_spoofing_is_still_rejected_after_the_round_trip_fix(self):
+        """The dump no longer carries an unreported confidence, and a caller
+        hand-setting the flag without a value is still corrected."""
+        r = SubtaskReport.model_validate(
+            {"summary": "x", "confidence_reported": True}
+        )
+        assert r.confidence_reported is False
