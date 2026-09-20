@@ -15,7 +15,9 @@ class Anomaly:
     current: float
     mean: float
     stddev: float
-    z_score: float
+    #: None when the baseline had zero variance, i.e. the deviation is
+    #: unbounded in sigma. Consumers must render it as such, not as 0.
+    z_score: float | None
     direction: str   # "up" or "down"
     severity: str    # "warning" or "alert"
     # Set when this metric was residualized (see DriftDetector.RESIDUALIZE).
@@ -79,12 +81,37 @@ class DriftDetector:
                 stddev = statistics.stdev(values)
             except statistics.StatisticsError:
                 continue
-            if stddev == 0:
-                continue
             current_val = _value_of(current_metrics)
             deviation = current_val - mean
-            if abs(deviation) < config.get("min_abs_deviation", 0.0):
+            floor = config.get("min_abs_deviation", 0.0)
+            if abs(deviation) < floor:
                 continue
+
+            if stddev == 0:
+                # A residualized series is frequently constant -- usually all
+                # zeros, because every change WAS explained. Skipping on zero
+                # variance would then let residualization silence the very
+                # metric it exists to sharpen: with a flat baseline, an
+                # unexplained drop of -100 would never fire.
+                #
+                # The z-score is undefined here, not small. Fall back to the
+                # materiality floor, which is an absolute magnitude and needs
+                # no variance, and report z_score=None so consumers do not
+                # print a fabricated sigma. Metrics without a floor have no
+                # scale-free way to judge a departure from a constant series,
+                # so they still skip.
+                if floor <= 0:
+                    continue
+                anomalies.append(Anomaly(
+                    metric=metric, current=current_val, mean=round(mean, 2),
+                    stddev=0.0, z_score=None,
+                    direction="up" if deviation > 0 else "down",
+                    severity="alert",
+                    residualized_by=explainer,
+                    raw_current=float(current_metrics.get(metric, 0)) if explainer else None,
+                ))
+                continue
+
             z_score = deviation / stddev
             if abs(z_score) > config["k"]:
                 severity = "alert" if abs(z_score) >= 3.0 else "warning"

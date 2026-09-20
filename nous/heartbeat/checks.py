@@ -966,6 +966,15 @@ class DriveCheck(BaseCheck):
 # ------------------------------------------------------------------
 
 
+#: Schema version stamped into every stored behavior-snapshot metrics blob.
+#: Bump whenever a metric's DEFINITION changes (scope, units, or which inputs
+#: feed it) so _load_baseline can refuse to compare across the change.
+#:   1 -> original: global corpus counts, facts_pruned never populated.
+#:   2 -> agent-scoped corpus counts, facts_pruned populated from the inactive
+#:        count delta (so fact_count_delta residualization is meaningful).
+SNAPSHOT_METRICS_VERSION = 2
+
+
 class BehaviorDriftCheck(BaseCheck):
     """Periodic behavioral drift detection (F035.3).
 
@@ -994,6 +1003,11 @@ class BehaviorDriftCheck(BaseCheck):
         findings: list[Finding] = []
         try:
             snapshot = await self._capture_snapshot()
+            if snapshot is None:
+                # Counts were unavailable with no previous snapshot to carry
+                # forward. Skip the tick entirely: do not detect against a
+                # fabricated snapshot and do not persist one into the baseline.
+                return CheckResult(has_updates=False, findings=[])
             baseline = await self._load_baseline(hours=168)
             self._last_anomalies = []
             if baseline:
@@ -1011,13 +1025,18 @@ class BehaviorDriftCheck(BaseCheck):
                     for a in anomalies
                 ]
                 for a in anomalies:
+                    # z_score is None when the baseline had zero variance, so
+                    # "+/- 0.0" would read as a suspiciously precise sigma
+                    # rather than "this series had never moved before".
+                    spread = (f"+/- {a.stddev}" if a.z_score is not None
+                              else "previously constant")
                     if a.residualized_by:
                         summary = (
                             f"{a.metric}: {a.raw_current} raw -> {a.current} unexplained "
-                            f"after {a.residualized_by} ({a.direction} from {a.mean} +/- {a.stddev})"
+                            f"after {a.residualized_by} ({a.direction} from {a.mean} {spread})"
                         )
                     else:
-                        summary = f"{a.metric}: {a.current} ({a.direction} from {a.mean} +/- {a.stddev})"
+                        summary = f"{a.metric}: {a.current} ({a.direction} from {a.mean} {spread})"
                     findings.append(Finding(
                         source="drift",
                         summary=summary,
@@ -1075,15 +1094,21 @@ class BehaviorDriftCheck(BaseCheck):
             except Exception:
                 logger.debug("Snapshot: DB query failed", exc_info=True)
 
-        if not counts_ok and prev is not None:
-            # The count query failed (or returned nothing) and the exception was
-            # swallowed above. Falling through with zeros would be actively
-            # harmful, not merely lossy: every delta becomes -prev.count, the
-            # residual adds two large negatives instead of cancelling, the
-            # zeroed snapshot is persisted into the baseline, and recovery on
-            # the next tick produces the mirror-image anomaly. Carry the
-            # previous counts forward so a transient DB failure reports no
-            # movement rather than a fabricated collapse.
+        if not counts_ok:
+            # The count query failed (or returned nothing) and the exception
+            # was swallowed above. Publishing zeros would be actively harmful,
+            # not merely lossy: every delta becomes -prev.count, the residual
+            # adds two large negatives instead of cancelling, the zeroed
+            # snapshot enters the baseline, and recovery produces the
+            # mirror-image anomaly on the next tick.
+            if prev is None:
+                # Nothing to carry forward -- this is the first tick after a
+                # restart. Abort rather than seeding an all-zero snapshot:
+                # _last_snapshot would become that zero, and the next
+                # successful tick would report the ENTIRE corpus as a fresh
+                # delta (and the whole inactive corpus as newly pruned).
+                logger.debug("Snapshot: counts unavailable at startup, skipping tick")
+                return None
             logger.debug("Snapshot: counts unavailable, carrying previous forward")
             fact_count = prev.fact_count
             inactive_fact_count = prev.inactive_fact_count
@@ -1146,7 +1171,10 @@ class BehaviorDriftCheck(BaseCheck):
                     "INSERT INTO nous_system.behavior_snapshots (agent_id, timestamp, metrics, anomalies) "
                     "VALUES (:aid, :ts, :metrics, :anomalies)"
                 ), {"aid": self._settings.agent_id, "ts": snapshot.timestamp,
-                    "metrics": json.dumps(snapshot.to_metrics_dict()),
+                    "metrics": json.dumps({
+                        **snapshot.to_metrics_dict(),
+                        "metrics_version": SNAPSHOT_METRICS_VERSION,
+                    }),
                     "anomalies": json.dumps(self._last_anomalies)})
                 await session.commit()
         except Exception:
@@ -1170,12 +1198,28 @@ class BehaviorDriftCheck(BaseCheck):
             snapshots = []
             for row in rows:
                 metrics = row.metrics if isinstance(row.metrics, dict) else _json.loads(row.metrics)
+                # Skip snapshots written under an older metric definition.
+                #
+                # Version 1 snapshots are not comparable with version 2 ones:
+                # facts_pruned was never populated (so their residual is just
+                # the raw delta) and the corpus counts were global rather than
+                # agent-scoped. Mixing the two lets stale prune gaps and other
+                # agents' spikes set the mean and stddev for today's residual,
+                # which both masks real unexplained drops and invents
+                # transition-only alerts.
+                #
+                # The baseline simply starts smaller after rollout; min_samples
+                # holds detection off until enough v2 samples exist, which is
+                # the conservative direction (quiet, not wrong).
+                if metrics.get("metrics_version", 1) < SNAPSHOT_METRICS_VERSION:
+                    continue
                 # Build snapshot from stored metrics, defaulting missing keys to 0
                 kwargs: dict[str, Any] = {"timestamp": row.timestamp}
                 for k in BehaviorSnapshot.__dataclass_fields__:
                     if k == "timestamp" or k == "interval_changes":
                         continue
                     kwargs[k] = metrics.get(k, 0)
+                kwargs.pop("metrics_version", None)
                 snapshots.append(BehaviorSnapshot(**kwargs))
             return snapshots
         except Exception:
