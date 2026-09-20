@@ -75,6 +75,11 @@ from pathlib import Path
 
 import asyncpg
 
+# Recompute through the SAME function the write path uses, so the
+# integrity check cannot drift from the implementation it validates
+# (clipping, and anything the curve grows later).
+from nous.brain.calibration_scaling import calibrate_confidence
+
 
 # What the write path should be applying RIGHT NOW. Keep in sync with
 # Settings.confidence_calibration_factor. Retired to 1.0 on 2026-09-20.
@@ -88,8 +93,13 @@ _DEFAULT_FACTOR = 1.0
 # scaling neither helps nor hurts, so the step-2 gate would pass vacuously.
 _HISTORICAL_F058_FACTOR = 0.7627
 
-# Ratio match tolerance for deciding whether a row was scaled as expected.
-_RATIO_TOLERANCE = 0.001
+# Tolerance for comparing two factors (a configuration value).
+_FACTOR_TOLERANCE = 0.001
+
+# Tolerance for comparing a stored confidence against the recomputed one.
+# Both are double precision and produced by the same function, so this only
+# absorbs the float round trip through Postgres.
+_VALUE_TOLERANCE = 1e-9
 
 # When the retirement reached prod. Rows created at or after this instant must
 # have been written by the retired-factor build, so they -- and only they --
@@ -200,8 +210,7 @@ async def run(
     )
     post_f058_rows = await conn.fetch(
         """
-        SELECT (confidence / NULLIF(confidence_raw, 0))::float8 AS r,
-               calibration_factor,
+        SELECT confidence_raw, confidence, calibration_factor,
                (calibration_applied_at >= $2) AS is_current_era
         FROM brain.decisions
         WHERE agent_id = $1 AND confidence_raw IS NOT NULL
@@ -234,11 +243,24 @@ async def run(
     # (re)calibrated, so it dates the factor application itself. Rows predating
     # migration 073 have NULL and are skipped -- the same fallback migration
     # 039 used for confidence_raw.
+    # Integrity compares the stored value against the value the production
+    # calibrator actually produces, NOT against the confidence/confidence_raw
+    # ratio. The ratio is not a faithful signal:
+    #   * calibrate_confidence clips to [0, 1], so a correct write with a
+    #     factor above 1.0 (raw 0.95 at factor 1.2 -> stored 1.0) has a ratio
+    #     of ~1.053 and would be reported as corruption;
+    #   * raw 0.0 is a valid confidence but makes the ratio a division by
+    #     zero, so those rows would silently bypass the check entirely.
+    # Recomputing through the real function also keeps this check honest if
+    # the calibration curve ever stops being a plain multiply.
     scoped = [r for r in post_f058_rows if r["calibration_factor"] is not None]
     bad_integrity = [
         r for r in scoped
-        if r["r"] is not None
-        and abs(r["r"] - float(r["calibration_factor"])) > _RATIO_TOLERANCE
+        if abs(
+            float(r["confidence"])
+            - calibrate_confidence(float(r["confidence_raw"]),
+                                   float(r["calibration_factor"]))
+        ) > _VALUE_TOLERANCE
     ]
     # (b) deliberately does NOT age out: a persistent stale override must keep
     # failing until someone fixes the deployment, where a rolling window would
@@ -246,7 +268,7 @@ async def run(
     current_era = [r for r in scoped if r["is_current_era"]]
     bad_ratios = [
         r for r in current_era
-        if abs(float(r["calibration_factor"]) - factor) > _RATIO_TOLERANCE
+        if abs(float(r["calibration_factor"]) - factor) > _FACTOR_TOLERANCE
     ]
     sanity_ok = not bad_ratios and not bad_integrity
 

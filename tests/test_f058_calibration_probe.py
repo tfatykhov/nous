@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from nous.brain.calibration_scaling import calibrate_confidence
 from nous_eval.probes.f058_calibration import (
     _FACTOR_RETIRED_AT,
     _HISTORICAL_F058_FACTOR,
@@ -168,31 +169,45 @@ _AFTER = _CUTOFF + timedelta(days=1)
 class _FakeConn:
     """Serves the probe's two SELECTs off canned rows.
 
-    ``decisions`` are (ratio, calibration_factor, calibration_applied_at)
-    triples; the era flag is evaluated the way the real query does it so the
-    tests exercise the predicate rather than restating it.
+    ``decisions`` are (confidence_raw, calibration_factor,
+    calibration_applied_at) triples and the stored confidence is computed the
+    way the write path computes it, so a row is correct by construction unless
+    a test overrides it. Pass a 4th element to force a specific stored value
+    and simulate a corrupt write. The era flag is evaluated the way the real
+    query does it, so the tests exercise the predicate rather than restate it.
     """
 
     def __init__(self, decisions, reviewed_rows=()):
-        self._decisions = list(decisions)
+        self._decisions = [tuple(d) for d in decisions]
         self._reviewed = list(reviewed_rows)
         self.retired_at_arg = None
 
     async def fetch(self, query, *args):
-        if "NULLIF" in query:
-            assert "calibration_factor" in query, (
-                "the applied factor must be read, not inferred"
+        if "calibration_factor" in query and "brain.decisions" in query:
+            assert "NULLIF" not in query, (
+                "integrity must not be judged from the ratio: it breaks on "
+                "clipping and on raw 0.0"
             )
             assert "created_at >=" not in query, (
                 "created_at cannot date a calibration -- _update rescales "
                 "historical rows without changing it"
             )
             self.retired_at_arg = args[1]
-            return [
-                {"r": r, "calibration_factor": cf,
-                 "is_current_era": None if at is None else at >= args[1]}
-                for r, cf, at in self._decisions
-            ]
+            rows = []
+            for d in self._decisions:
+                raw, cf, at = d[0], d[1], d[2]
+                if len(d) > 3:
+                    stored = d[3]
+                elif cf is None:
+                    stored = raw
+                else:
+                    stored = calibrate_confidence(raw, cf)
+                rows.append({
+                    "confidence_raw": raw, "confidence": stored,
+                    "calibration_factor": cf,
+                    "is_current_era": None if at is None else at >= args[1],
+                })
+            return rows
         return self._reviewed
 
 
@@ -212,7 +227,7 @@ class TestHistoryCannotPinStrictToFailure:
     @pytest.mark.asyncio
     async def test_old_factor_rows_do_not_fail_the_new_factor(self):
         conn = _FakeConn(
-            [(0.7627, 0.7627, _BEFORE)] * 5 + [(1.0, 1.0, _AFTER)] * 3
+            [(1.0, 0.7627, _BEFORE)] * 5 + [(1.0, 1.0, _AFTER)] * 3
         )
         result = await run(conn, "a", 1.0)
         s = result["sanity"]
@@ -222,7 +237,7 @@ class TestHistoryCannotPinStrictToFailure:
     @pytest.mark.asyncio
     async def test_strict_verdict_no_longer_pinned_to_failure(self):
         conn = _FakeConn(
-            [(0.7627, 0.7627, _BEFORE)] * 4 + [(1.0, 1.0, _AFTER)] * 2,
+            [(1.0, 0.7627, _BEFORE)] * 4 + [(1.0, 1.0, _AFTER)] * 2,
             _reviewed([(0.9, "failure"), (0.9, "success"), (0.8, "failure")]),
         )
         assert verdict_exit_code(await run(conn, "a", 1.0)) == 0
@@ -230,7 +245,7 @@ class TestHistoryCannotPinStrictToFailure:
     @pytest.mark.asyncio
     async def test_rows_predating_the_provenance_column_are_skipped(self):
         """calibration_factor IS NULL -> unknowable, so not a failure."""
-        conn = _FakeConn([(0.7627, None, None)] * 9 + [(1.0, 1.0, _AFTER)])
+        conn = _FakeConn([(1.0, None, None)] * 9 + [(1.0, 1.0, _AFTER)])
         result = await run(conn, "a", 1.0)
         assert result["sanity"]["ok"] is True
         assert result["sanity"]["n_post_f058"] == 10
@@ -244,7 +259,7 @@ class TestStaleOverrideIsCaughtHoweverItIsWritten:
 
     @pytest.mark.asyncio
     async def test_new_rows_with_the_stale_factor_fail(self):
-        conn = _FakeConn([(0.7627, 0.7627, _AFTER)] * 4)
+        conn = _FakeConn([(1.0, 0.7627, _AFTER)] * 4)
         result = await run(conn, "a", 1.0)
         assert result["sanity"]["ok"] is False
         assert result["sanity"]["n_bad"] == 4
@@ -258,8 +273,8 @@ class TestStaleOverrideIsCaughtHoweverItIsWritten:
 
         calibration_applied_at is post-cutoff even though the row is old.
         """
-        conn = _FakeConn([(0.7627, 0.7627, _AFTER)] * 3
-                         + [(0.7627, 0.7627, _BEFORE)] * 6)
+        conn = _FakeConn([(1.0, 0.7627, _AFTER)] * 3
+                         + [(1.0, 0.7627, _BEFORE)] * 6)
         result = await run(conn, "a", 1.0)
         assert result["sanity"]["n_current_era"] == 3
         assert result["sanity"]["ok"] is False
@@ -267,13 +282,13 @@ class TestStaleOverrideIsCaughtHoweverItIsWritten:
 
     @pytest.mark.asyncio
     async def test_a_stale_override_does_not_age_out(self):
-        conn = _FakeConn([(0.7627, 0.7627, _CUTOFF + timedelta(days=400))] * 3)
+        conn = _FakeConn([(1.0, 0.7627, _CUTOFF + timedelta(days=400))] * 3)
         result = await run(conn, "a", 1.0)
         assert result["sanity"]["ok"] is False
 
     @pytest.mark.asyncio
     async def test_idle_database_passes(self):
-        conn = _FakeConn([(0.7627, 0.7627, _BEFORE)] * 5)
+        conn = _FakeConn([(1.0, 0.7627, _BEFORE)] * 5)
         result = await run(conn, "a", 1.0)
         assert result["sanity"]["n_current_era"] == 0
         assert result["sanity"]["ok"] is True
@@ -286,15 +301,15 @@ class TestWritePathIntegrityIsCheckedInBothEras:
 
     @pytest.mark.asyncio
     async def test_ratio_disagreeing_with_recorded_factor_fails(self):
-        # Claims 0.7627 but stored an unscaled value -> write path is broken.
-        conn = _FakeConn([(1.0, 0.7627, _BEFORE)])
+        # Claims 0.7627 but stored the unscaled value -> write path is broken.
+        conn = _FakeConn([(1.0, 0.7627, _BEFORE, 1.0)])
         result = await run(conn, "a", 1.0)
         assert result["sanity"]["n_bad_integrity"] == 1
         assert result["sanity"]["ok"] is False
 
     @pytest.mark.asyncio
     async def test_historical_rows_that_agree_with_their_factor_pass(self):
-        conn = _FakeConn([(0.7627, 0.7627, _BEFORE)] * 4)
+        conn = _FakeConn([(1.0, 0.7627, _BEFORE)] * 4)
         result = await run(conn, "a", 1.0)
         assert result["sanity"]["n_bad_integrity"] == 0
         assert result["sanity"]["ok"] is True
@@ -309,11 +324,11 @@ class TestEraIsNotInferredFromRowOrder:
     @pytest.mark.asyncio
     async def test_edited_historical_row_does_not_poison_the_cohort(self):
         decisions = [
-            (0.7627, 0.7627, _BEFORE - timedelta(days=5)),
+            (1.0, 0.7627, _BEFORE - timedelta(days=5)),
             # edited post-retirement -> rescaled to 1.0 and re-stamped
             (1.0, 1.0, _AFTER),
-            (0.7627, 0.7627, _BEFORE - timedelta(days=3)),
-            (0.7627, 0.7627, _BEFORE - timedelta(days=2)),
+            (1.0, 0.7627, _BEFORE - timedelta(days=3)),
+            (1.0, 0.7627, _BEFORE - timedelta(days=2)),
         ]
         result = await run(_FakeConn(decisions), "a", 1.0)
         assert result["sanity"]["ok"] is True
@@ -355,3 +370,52 @@ class TestCounterfactualUsesTheHistoricalFactor:
         assert cf["calibrated"]["mean_conf"] == pytest.approx(
             cf["raw"]["mean_conf"] * 0.5
         )
+
+
+class TestIntegrityUsesTheCalibratorNotTheRatio:
+    """confidence/confidence_raw is not a faithful signal of correctness."""
+
+    @pytest.mark.asyncio
+    async def test_clipped_write_above_factor_one_is_not_corruption(self):
+        """calibrate_confidence clips to [0, 1], so raw 0.95 at factor 1.2
+        stores 1.0 -- a ratio of ~1.053 that the ratio check called broken."""
+        assert calibrate_confidence(0.95, 1.2) == 1.0
+        conn = _FakeConn([(0.95, 1.2, _AFTER)])
+        result = await run(conn, "a", 1.2)
+        assert result["sanity"]["n_bad_integrity"] == 0
+        assert result["sanity"]["ok"] is True
+
+    @pytest.mark.asyncio
+    async def test_raw_zero_is_still_checked(self):
+        """NULLIF(confidence_raw, 0) made the ratio NULL, so these rows
+        bypassed integrity validation entirely."""
+        # Correct: 0.0 * anything is 0.0.
+        ok = _FakeConn([(0.0, 0.7627, _BEFORE)])
+        assert (await run(ok, "a", 1.0))["sanity"]["n_bad_integrity"] == 0
+
+        # Corrupt: stored a non-zero value for a raw 0.0 claim.
+        bad = _FakeConn([(0.0, 0.7627, _BEFORE, 0.4)])
+        result = await run(bad, "a", 1.0)
+        assert result["sanity"]["n_bad_integrity"] == 1
+        assert result["sanity"]["ok"] is False
+
+    @pytest.mark.asyncio
+    async def test_clipping_at_zero_is_also_accepted(self):
+        conn = _FakeConn([(0.0, 0.0, _AFTER)])
+        assert (await run(conn, "a", 0.0))["sanity"]["n_bad_integrity"] == 0
+
+    @pytest.mark.asyncio
+    async def test_a_genuinely_miscomputed_write_still_fails(self):
+        """The check must not become permissive: an off-by-a-bit stored value
+        is still corruption."""
+        conn = _FakeConn([(0.8, 0.7627, _AFTER, 0.8 * 0.5)])
+        result = await run(conn, "a", 0.7627)
+        assert result["sanity"]["n_bad_integrity"] == 1
+        assert verdict_exit_code(result) == 1
+
+    @pytest.mark.asyncio
+    async def test_passthrough_factor_one_round_trips_exactly(self):
+        conn = _FakeConn([(raw, 1.0, _AFTER) for raw in (0.0, 0.33, 0.5, 1.0)])
+        result = await run(conn, "a", 1.0)
+        assert result["sanity"]["n_bad_integrity"] == 0
+        assert result["sanity"]["ok"] is True
