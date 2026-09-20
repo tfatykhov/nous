@@ -58,7 +58,10 @@ import asyncpg
 
 
 # Default factor — keep in sync with Settings.confidence_calibration_factor.
-_DEFAULT_FACTOR = 0.7627
+# Retired to 1.0 on 2026-09-20 (F058 factor no longer applied at write time).
+# NOTE: decisions written before that date were scaled at 0.7627, so a single
+# constant cannot unscale both eras — prefer brain.decisions.confidence_raw.
+_DEFAULT_FACTOR = 1.0
 _DEFAULT_AGENT_ID = "nous-default"
 
 _STRICT_OUTCOME = {"success": 1.0, "partial": 0.0, "failure": 0.0}

@@ -218,7 +218,7 @@ Nous agents track their confidence and learn from it:
 - **Brier scores** measure calibration accuracy over time
 - Agents that say "80% confident" should be right ~80% of the time
 
-A separate write-time **calibration scale** (F058) shrinks agent-recorded confidence toward observed accuracy — the default factor (`0.7627`) is derived empirically from a 401-decision audit and can be tuned per deployment via `NOUS_CONFIDENCE_CALIBRATION_FACTOR`. The pre-calibration value is preserved in `brain.decisions.confidence_raw`.
+A separate write-time **calibration scale** (F058) shrinks agent-recorded confidence toward observed accuracy — the original factor (`0.7627`) was derived empirically from a 401-decision audit, but was retired to `1.0` (pass-through) on 2026-09-20 after a refit on 802 resolved decisions showed the overconfidence it corrected had ended; it remains tunable per deployment via `NOUS_CONFIDENCE_CALIBRATION_FACTOR`. The pre-calibration value is preserved in `brain.decisions.confidence_raw`.
 
 **Fredkin's Paradox:** When two options seem equally good, the choice matters least. Stop agonizing at 0.50 confidence — pick one and move. Save deliberation energy for decisions where options are actually different.
 
@@ -303,7 +303,7 @@ Key environment variables. See the [Quickstart Guide](docs/quickstart.md) and [C
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NOUS_CONFIDENCE_CALIBRATION_FACTOR` | `0.7627` | Write-time scale on agent-recorded decision confidence (F058). Set to `1.0` to disable. |
+| `NOUS_CONFIDENCE_CALIBRATION_FACTOR` | `1.0` | Write-time scale on agent-recorded decision confidence (F058). Retired to pass-through on 2026-09-20 after a refit on 802 resolved decisions; set below 1.0 to re-enable scaling if your deployment measures as overconfident. |
 | `NOUS_ACTION_GATING_ENABLED` | `true` | Tiered action gating before write/external/irreversible tools (F026) |
 | `NOUS_CLAIM_VERIFICATION_ENABLED` | `true` | Post-turn claim verification against execution ledger (F026) |
 | `NOUS_RUBRIC_ENABLED` | `true` | Self-modifying decision-quality rubric (F024-3b) |
