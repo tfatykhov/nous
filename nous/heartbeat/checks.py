@@ -1039,6 +1039,7 @@ class BehaviorDriftCheck(BaseCheck):
         prev = self._last_snapshot
         fact_count = episode_count = censor_count = procedure_count = 0
         inactive_fact_count = 0
+        counts_ok = False
         if self._db:
             try:
                 async with self._db.session() as session:
@@ -1046,20 +1047,49 @@ class BehaviorDriftCheck(BaseCheck):
                     # Both fact counts are read in ONE statement so they share a
                     # single MVCC snapshot. That is what makes facts_pruned and
                     # fact_count_delta below consistent with each other.
+                    #
+                    # Every count is scoped to this agent, because the snapshot
+                    # these feed is stored and read back under agent_id (see
+                    # _store_snapshot / _load_baseline). On a shared database an
+                    # unscoped count would let another agent's writes move this
+                    # agent's deltas -- and for the residualized pair, let agent
+                    # A's prune explain away agent B's unexplained fact drop.
                     result = await session.execute(text(
                         "SELECT "
-                        "(SELECT COUNT(*) FROM heart.facts WHERE active = true) AS facts, "
-                        "(SELECT COUNT(*) FROM heart.episodes) AS episodes, "
-                        "(SELECT COUNT(*) FROM heart.censors WHERE active = true) AS censors, "
-                        "(SELECT COUNT(*) FROM heart.procedures WHERE active = true) AS procedures, "
-                        "(SELECT COUNT(*) FROM heart.facts WHERE active = false) AS inactive_facts"
-                    ))
+                        "(SELECT COUNT(*) FROM heart.facts "
+                        " WHERE agent_id = :aid AND active = true) AS facts, "
+                        "(SELECT COUNT(*) FROM heart.episodes "
+                        " WHERE agent_id = :aid) AS episodes, "
+                        "(SELECT COUNT(*) FROM heart.censors "
+                        " WHERE agent_id = :aid AND active = true) AS censors, "
+                        "(SELECT COUNT(*) FROM heart.procedures "
+                        " WHERE agent_id = :aid AND active = true) AS procedures, "
+                        "(SELECT COUNT(*) FROM heart.facts "
+                        " WHERE agent_id = :aid AND active = false) AS inactive_facts"
+                    ), {"aid": self._settings.agent_id})
                     row = result.fetchone()
                     if row:
                         fact_count, episode_count, censor_count, procedure_count = row.facts, row.episodes, row.censors, row.procedures
                         inactive_fact_count = row.inactive_facts
+                        counts_ok = True
             except Exception:
                 logger.debug("Snapshot: DB query failed", exc_info=True)
+
+        if not counts_ok and prev is not None:
+            # The count query failed (or returned nothing) and the exception was
+            # swallowed above. Falling through with zeros would be actively
+            # harmful, not merely lossy: every delta becomes -prev.count, the
+            # residual adds two large negatives instead of cancelling, the
+            # zeroed snapshot is persisted into the baseline, and recovery on
+            # the next tick produces the mirror-image anomaly. Carry the
+            # previous counts forward so a transient DB failure reports no
+            # movement rather than a fabricated collapse.
+            logger.debug("Snapshot: counts unavailable, carrying previous forward")
+            fact_count = prev.fact_count
+            inactive_fact_count = prev.inactive_fact_count
+            episode_count = prev.episode_count
+            censor_count = prev.active_censor_count
+            procedure_count = prev.procedure_count
 
         # Deactivations since the previous tick, by DIFFERENCING the inactive
         # count -- deliberately not by an `updated_at` window.

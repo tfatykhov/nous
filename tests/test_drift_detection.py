@@ -321,9 +321,10 @@ class _FakeRow:
 class _FakeSession:
     """Records every statement executed and replays a canned row."""
 
-    def __init__(self, row, sink):
+    def __init__(self, row, sink, boom=False):
         self._row = row
         self._sink = sink
+        self._boom = boom
 
     async def __aenter__(self):
         return self
@@ -333,21 +334,24 @@ class _FakeSession:
 
     async def execute(self, stmt, params=None):
         self._sink.append((str(stmt), params))
+        if self._boom:
+            raise RuntimeError("connection reset")
         result = MagicMock()
         result.fetchone.return_value = self._row
         return result
 
 
 class _FakeDB:
-    def __init__(self, row, sink):
+    def __init__(self, row, sink, boom=False):
         self._row = row
         self._sink = sink
+        self._boom = boom
 
     def session(self):
-        return _FakeSession(self._row, self._sink)
+        return _FakeSession(self._row, self._sink, self._boom)
 
 
-def _drift_check(db):
+def _drift_check(db, agent_id="agent-b"):
     from nous.heartbeat.checks import BehaviorDriftCheck
 
     check = BehaviorDriftCheck.__new__(BehaviorDriftCheck)
@@ -355,6 +359,7 @@ def _drift_check(db):
     check._bus_stats = None
     check._last_snapshot = None
     check._last_anomalies = []
+    check._settings = MagicMock(agent_id=agent_id)
     return check
 
 
@@ -396,7 +401,9 @@ class TestPruneAccounting:
         await check._capture_snapshot()
         sql, params = sink[0]
         assert "updated_at" not in sql, "prune window must not be time-based"
-        assert not params, "no clock cutoff may be passed into the count query"
+        # No clock cutoff may reach the count query -- agent scoping only.
+        assert set(params) == {"aid"}
+        assert not any(isinstance(v, datetime) for v in params.values())
         # ...and both fact counts come from one statement => one MVCC snapshot.
         assert sql.count("heart.facts") == 2
         assert len(sink) == 1
@@ -476,3 +483,99 @@ class TestAnomalyPersistenceCarriesResidualMetadata:
         stored = check._last_anomalies[0]
         assert stored["residualized_by"] is None
         assert stored["raw_current"] is None
+
+
+class TestCountsAreAgentScoped:
+    """The snapshot these counts feed is written and read back under agent_id
+    (_store_snapshot / _load_baseline), so an unscoped count lets another
+    agent on a shared database move this agent's deltas -- and, for the
+    residualized pair, lets agent A's prune explain away agent B's fact drop.
+    """
+
+    _ROW = dict(facts=900, episodes=10, censors=2, procedures=5,
+                inactive_facts=100)
+
+    @pytest.mark.asyncio
+    async def test_every_count_filters_on_the_current_agent(self):
+        sink = []
+        check = _drift_check(_FakeDB(_FakeRow(**self._ROW), sink), agent_id="agent-b")
+        await check._capture_snapshot()
+        sql, params = sink[0]
+        assert params == {"aid": "agent-b"}
+        # Both halves of the residualized pair must be scoped, or they stop
+        # describing the same population.
+        assert sql.count("agent_id = :aid") == 5
+        for table in ("heart.facts", "heart.episodes", "heart.censors",
+                      "heart.procedures"):
+            assert table in sql
+
+    @pytest.mark.asyncio
+    async def test_no_unscoped_count_remains(self):
+        sink = []
+        check = _drift_check(_FakeDB(_FakeRow(**self._ROW), sink))
+        await check._capture_snapshot()
+        sql, _ = sink[0]
+        # Each SELECT COUNT(*) subquery must carry the agent predicate.
+        assert sql.count("SELECT COUNT(*)") == sql.count("agent_id = :aid")
+
+
+class TestCountQueryFailureDoesNotFabricateDrift:
+    """On a swallowed DB error the counts stayed at their 0 defaults, so every
+    delta became -prev.count, the residual added two large negatives instead of
+    cancelling, the zeroed snapshot entered the baseline, and recovery produced
+    the mirror-image anomaly on the next tick.
+    """
+
+    _PREV = dict(fact_count=1000, inactive_fact_count=100, episode_count=50,
+                 active_censor_count=6, procedure_count=9)
+
+    def _prev_snapshot(self):
+        return BehaviorSnapshot(timestamp=datetime.now(UTC), **self._PREV)
+
+    @pytest.mark.asyncio
+    async def test_query_exception_carries_previous_counts_forward(self):
+        sink = []
+        check = _drift_check(_FakeDB(None, sink, boom=True))
+        check._last_snapshot = self._prev_snapshot()
+        snap = await check._capture_snapshot()
+        assert snap.fact_count == 1000
+        assert snap.inactive_fact_count == 100
+        assert snap.fact_count_delta == 0
+        assert snap.facts_pruned == 0
+        assert snap.episode_count_delta == 0
+        assert snap.active_censor_delta == 0
+        assert snap.procedure_count == 9
+
+    @pytest.mark.asyncio
+    async def test_empty_result_row_is_treated_as_failure(self):
+        sink = []
+        check = _drift_check(_FakeDB(None, sink))
+        check._last_snapshot = self._prev_snapshot()
+        snap = await check._capture_snapshot()
+        assert snap.fact_count_delta == 0
+        assert snap.facts_pruned == 0
+
+    @pytest.mark.asyncio
+    async def test_failure_on_the_first_tick_still_reports_zeroes(self):
+        """No previous snapshot to carry forward; deltas are 0 either way."""
+        sink = []
+        check = _drift_check(_FakeDB(None, sink, boom=True))
+        snap = await check._capture_snapshot()
+        assert snap.fact_count == 0
+        assert snap.fact_count_delta == 0
+        assert snap.facts_pruned == 0
+
+    @pytest.mark.asyncio
+    async def test_recovery_after_failure_does_not_mirror_an_anomaly(self):
+        """Tick 1 fails, tick 2 recovers with unchanged real counts -> the
+        recovery tick must report no movement, not a rebound spike."""
+        check = _drift_check(_FakeDB(None, [], boom=True))
+        check._last_snapshot = self._prev_snapshot()
+        failed = await check._capture_snapshot()
+        check._last_snapshot = failed
+
+        check._db = _FakeDB(_FakeRow(facts=1000, episodes=50, censors=6,
+                                     procedures=9, inactive_facts=100), [])
+        recovered = await check._capture_snapshot()
+        assert recovered.fact_count_delta == 0
+        assert recovered.facts_pruned == 0
