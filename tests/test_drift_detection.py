@@ -231,3 +231,77 @@ class TestBehaviorDriftCheck:
             settings=mock_settings,
         )
         assert check.interval == 3600
+
+
+# ------------------------------------------------------------------
+# Residualization + materiality floor (fact_count_delta false positive)
+# ------------------------------------------------------------------
+
+
+class TestResidualization:
+    """A fact drop that facts_pruned explains must not alert; an unexplained
+    drop of the same magnitude must still alert at full strength.
+
+    Regression for the `fact_count_delta` false positive that was triaged by
+    hand 7+ times: the explanation was already in the same snapshot, unused.
+    """
+
+    @staticmethod
+    def _history():
+        # Quiet baseline: small churn, nothing deactivated.
+        return [_make_snapshot(fact_count_delta=d, facts_pruned=0) for d in
+                (2, -1, 3, 0, 1, -2, 4, 1, 0, 2)]
+
+    def _delta_anomalies(self, current):
+        return [a for a in DriftDetector().detect(current, self._history())
+                if a.metric == "fact_count_delta"]
+
+    def test_explained_drop_is_silent(self):
+        # 661 facts vanish, 669 deactivations recorded -> fully accounted for.
+        current = _make_snapshot(fact_count_delta=-661, facts_pruned=669)
+        assert self._delta_anomalies(current) == []
+
+    def test_unexplained_drop_still_fires(self):
+        # Same magnitude, but nothing was deactivated -> genuinely anomalous.
+        current = _make_snapshot(fact_count_delta=-661, facts_pruned=0)
+        anomalies = self._delta_anomalies(current)
+        assert len(anomalies) == 1
+        assert anomalies[0].direction == "down"
+        assert anomalies[0].severity == "alert"
+
+    def test_partially_explained_drop_fires_on_the_remainder(self):
+        # Real case, 2026-09-16: -366 delta but only 11 deactivations.
+        current = _make_snapshot(fact_count_delta=-366, facts_pruned=11)
+        anomalies = self._delta_anomalies(current)
+        assert len(anomalies) == 1
+        # Reported in residual space, and labelled as such so the finding text
+        # cannot pass the residual off as the raw metric.
+        assert anomalies[0].residualized_by == "facts_pruned"
+        assert anomalies[0].raw_current == -366
+        assert anomalies[0].current == -355
+
+    def test_small_deviation_below_floor_is_silent(self):
+        # Many sigma against a near-constant series, but only ~20 facts --
+        # statistically real, operationally meaningless.
+        current = _make_snapshot(fact_count_delta=-20, facts_pruned=0)
+        assert self._delta_anomalies(current) == []
+
+    def test_deviation_just_above_floor_fires(self):
+        # Guards the boundary so the floor cannot be raised silently.
+        current = _make_snapshot(fact_count_delta=-60, facts_pruned=0)
+        assert len(self._delta_anomalies(current)) == 1
+
+    def test_floor_does_not_apply_to_rate_metrics(self):
+        """admission_rate lives in [0, 1]; a 50.0 floor would mute it forever."""
+        assert DriftDetector.THRESHOLDS["admission_rate"].get("min_abs_deviation", 0.0) == 0.0
+
+    def test_non_residualized_metrics_report_raw(self):
+        history = [_make_snapshot(events_dropped=n) for n in
+                   (0, 1, 0, 0, 1, 0, 2, 0, 1, 0)]
+        current = _make_snapshot(events_dropped=50)
+        anomalies = [a for a in DriftDetector().detect(current, history)
+                     if a.metric == "events_dropped"]
+        assert len(anomalies) == 1
+        assert anomalies[0].residualized_by is None
+        assert anomalies[0].raw_current is None
+        assert anomalies[0].current == 50

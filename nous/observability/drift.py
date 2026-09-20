@@ -18,13 +18,35 @@ class Anomaly:
     z_score: float
     direction: str   # "up" or "down"
     severity: str    # "warning" or "alert"
+    # Set when this metric was residualized (see DriftDetector.RESIDUALIZE).
+    # current/mean/stddev are then in RESIDUAL space, not raw space, so
+    # consumers must say so rather than printing the number as the raw metric.
+    residualized_by: str | None = None
+    raw_current: float | None = None
 
 
 class DriftDetector:
     """Z-score based behavioral drift detection."""
 
+    # Metrics whose movement is mechanically explained by another metric in
+    # the SAME snapshot. The explanation is added back before testing for
+    # anomaly, so an accounted-for change residualizes to ~0 and stays quiet
+    # while an UNACCOUNTED change of the same size still fires at full
+    # strength. facts_pruned is a positive count and fact_count_delta is
+    # negative for the same event, hence addition.
+    RESIDUALIZE: dict[str, str] = {
+        "fact_count_delta": "facts_pruned",
+    }
+
+    # Per-metric absolute floor on |current - mean|. A z-score computed over a
+    # near-constant series has a tiny denominator, so a trivially small change
+    # can score many sigma. The floor suppresses those statistically-real but
+    # operationally-meaningless alerts. Unset = 0.0 = no floor, which is
+    # required for rate metrics in [0, 1] such as admission_rate.
     THRESHOLDS: dict[str, dict[str, Any]] = {
-        "fact_count_delta":        {"k": 2.0, "min_samples": 10},
+        # 50 facts is the materiality threshold for an unexplained swing;
+        # see the tuning table in the PR that introduced residualization.
+        "fact_count_delta":        {"k": 2.0, "min_samples": 10, "min_abs_deviation": 50.0},
         "admission_rate":          {"k": 2.0, "min_samples": 10},
         "active_censor_count":     {"k": 2.5, "min_samples": 10},
         "active_censor_delta":     {"k": 2.5, "min_samples": 10},
@@ -41,7 +63,15 @@ class DriftDetector:
         anomalies: list[Anomaly] = []
         current_metrics = current.to_metrics_dict()
         for metric, config in self.THRESHOLDS.items():
-            values = [float(s.to_metrics_dict().get(metric, 0)) for s in history]
+            explainer = self.RESIDUALIZE.get(metric)
+
+            def _value_of(metrics: dict[str, Any], _m: str = metric, _e: str | None = explainer) -> float:
+                value = float(metrics.get(_m, 0))
+                if _e:
+                    value += float(metrics.get(_e, 0))
+                return value
+
+            values = [_value_of(s.to_metrics_dict()) for s in history]
             if len(values) < config["min_samples"]:
                 continue
             mean = statistics.mean(values)
@@ -51,13 +81,18 @@ class DriftDetector:
                 continue
             if stddev == 0:
                 continue
-            current_val = float(current_metrics.get(metric, 0))
-            z_score = (current_val - mean) / stddev
+            current_val = _value_of(current_metrics)
+            deviation = current_val - mean
+            if abs(deviation) < config.get("min_abs_deviation", 0.0):
+                continue
+            z_score = deviation / stddev
             if abs(z_score) > config["k"]:
                 severity = "alert" if abs(z_score) >= 3.0 else "warning"
                 anomalies.append(Anomaly(
                     metric=metric, current=current_val, mean=round(mean, 2),
                     stddev=round(stddev, 2), z_score=round(z_score, 2),
                     direction="up" if z_score > 0 else "down", severity=severity,
+                    residualized_by=explainer,
+                    raw_current=float(current_metrics.get(metric, 0)) if explainer else None,
                 ))
         return anomalies

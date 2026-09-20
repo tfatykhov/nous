@@ -1005,12 +1005,21 @@ class BehaviorDriftCheck(BaseCheck):
                     for a in anomalies
                 ]
                 for a in anomalies:
+                    if a.residualized_by:
+                        summary = (
+                            f"{a.metric}: {a.raw_current} raw -> {a.current} unexplained "
+                            f"after {a.residualized_by} ({a.direction} from {a.mean} +/- {a.stddev})"
+                        )
+                    else:
+                        summary = f"{a.metric}: {a.current} ({a.direction} from {a.mean} +/- {a.stddev})"
                     findings.append(Finding(
                         source="drift",
-                        summary=f"{a.metric}: {a.current} ({a.direction} from {a.mean} +/- {a.stddev})",
+                        summary=summary,
                         urgency="high" if a.severity == "alert" else "normal",
                         needs_action=a.severity == "alert",
-                        raw_data={"metric": a.metric, "current": a.current, "mean": a.mean, "stddev": a.stddev, "z_score": a.z_score},
+                        raw_data={"metric": a.metric, "current": a.current, "mean": a.mean,
+                                  "stddev": a.stddev, "z_score": a.z_score,
+                                  "residualized_by": a.residualized_by, "raw_current": a.raw_current},
                     ))
             await self._store_snapshot(snapshot)
             self._last_snapshot = snapshot
@@ -1021,7 +1030,13 @@ class BehaviorDriftCheck(BaseCheck):
     async def _capture_snapshot(self):
         from nous.observability.snapshots import BehaviorSnapshot
         now = datetime.now(UTC)
+        prev = self._last_snapshot
         fact_count = episode_count = censor_count = procedure_count = 0
+        facts_pruned = 0
+        # Window for the deactivation count. With no previous snapshot (first
+        # tick after a restart) this collapses to an empty range -> 0, which
+        # matches fact_count_delta also being 0 on that tick.
+        since = prev.timestamp if prev else now
         if self._db:
             try:
                 async with self._db.session() as session:
@@ -1031,11 +1046,14 @@ class BehaviorDriftCheck(BaseCheck):
                         "(SELECT COUNT(*) FROM heart.facts WHERE active = true) AS facts, "
                         "(SELECT COUNT(*) FROM heart.episodes) AS episodes, "
                         "(SELECT COUNT(*) FROM heart.censors WHERE active = true) AS censors, "
-                        "(SELECT COUNT(*) FROM heart.procedures WHERE active = true) AS procedures"
-                    ))
+                        "(SELECT COUNT(*) FROM heart.procedures WHERE active = true) AS procedures, "
+                        "(SELECT COUNT(*) FROM heart.facts WHERE active = false "
+                        " AND updated_at > :since AND updated_at <= :now) AS pruned"
+                    ), {"since": since, "now": now})
                     row = result.fetchone()
                     if row:
                         fact_count, episode_count, censor_count, procedure_count = row.facts, row.episodes, row.censors, row.procedures
+                        facts_pruned = row.pruned
             except Exception:
                 logger.debug("Snapshot: DB query failed", exc_info=True)
 
@@ -1045,10 +1063,10 @@ class BehaviorDriftCheck(BaseCheck):
         total_invocations = sum(h.get("invocations", 0) for h in handlers.values())
         error_rate = total_errors / total_invocations if total_invocations else 0.0
 
-        prev = self._last_snapshot
         return BehaviorSnapshot(
             timestamp=now,
             fact_count=fact_count, fact_count_delta=fact_count - (prev.fact_count if prev else fact_count),
+            facts_pruned=facts_pruned,
             episode_count=episode_count, episode_count_delta=episode_count - (prev.episode_count if prev else episode_count),
             active_censor_count=censor_count, active_censor_delta=censor_count - (prev.active_censor_count if prev else censor_count),
             procedure_count=procedure_count, decision_count=0,
