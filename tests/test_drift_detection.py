@@ -359,6 +359,7 @@ def _drift_check(db, agent_id="agent-b"):
     check._bus_stats = None
     check._last_snapshot = None
     check._last_anomalies = []
+    check._last_counts_ok = False  # real _capture_snapshot overwrites this each tick
     check._settings = MagicMock(agent_id=agent_id)
     return check
 
@@ -684,6 +685,62 @@ class TestStartupCountFailureAbortsTheTick:
         check._store_snapshot.assert_not_awaited()
         check._detector.detect.assert_not_called()
         assert check._last_snapshot is None, "must not seed a zero baseline"
+
+
+class TestCountsUnavailableSupprestsStore:
+    """P2 regression guard: when the count query fails but a previous snapshot
+    exists, run() must carry the previous values forward for in-memory anomaly
+    detection but must NOT write the carried-forward snapshot to the DB.
+
+    Persisting zero deltas would corrupt the baseline: every subsequent tick
+    sees a mirror-image anomaly (the whole corpus appearing as a fresh delta)
+    and variance collapses toward zero, making the z-score detector hypersensitive.
+    """
+
+    @pytest.mark.asyncio
+    async def test_counts_failure_with_prev_suppresses_store(self):
+        """Carried-forward snapshot must NOT be written to the DB."""
+        from nous.heartbeat.checks import BehaviorDriftCheck
+        from nous.observability.snapshots import BehaviorSnapshot
+
+        check = BehaviorDriftCheck.__new__(BehaviorDriftCheck)
+        check._detector = MagicMock()
+        check._last_snapshot = None
+        check._last_anomalies = []
+        # Simulate: _capture_snapshot ran with counts_ok=False (carry-forward case)
+        # and set _last_counts_ok=False before returning a non-None snapshot.
+        check._last_counts_ok = False
+        check._capture_snapshot = AsyncMock(
+            return_value=BehaviorSnapshot(timestamp=datetime.now(UTC))
+        )
+        check._load_baseline = AsyncMock(return_value=[])
+        check._store_snapshot = AsyncMock()
+
+        await check.run()
+
+        check._store_snapshot.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_counts_ok_persists_snapshot(self):
+        """When counts are available, the snapshot is written to the DB normally."""
+        from nous.heartbeat.checks import BehaviorDriftCheck
+        from nous.observability.snapshots import BehaviorSnapshot
+
+        check = BehaviorDriftCheck.__new__(BehaviorDriftCheck)
+        check._detector = MagicMock()
+        check._detector.detect.return_value = []
+        check._last_snapshot = None
+        check._last_anomalies = []
+        check._last_counts_ok = True  # counts were available this tick
+        check._capture_snapshot = AsyncMock(
+            return_value=BehaviorSnapshot(timestamp=datetime.now(UTC))
+        )
+        check._load_baseline = AsyncMock(return_value=[])
+        check._store_snapshot = AsyncMock()
+
+        await check.run()
+
+        check._store_snapshot.assert_awaited_once()
 
 
 class TestBaselineExcludesLegacySnapshots:

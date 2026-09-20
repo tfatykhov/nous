@@ -988,6 +988,7 @@ class BehaviorDriftCheck(BaseCheck):
         self._detector = DriftDetector()
         self._last_snapshot: Any = None  # BehaviorSnapshot
         self._last_anomalies: list[dict] = []  # Serialized anomalies for DB persistence
+        self._last_counts_ok: bool = False  # True only when the count query succeeded
         self.interval = getattr(settings, 'drift_detection_interval', 3600)
 
     async def run(self) -> CheckResult:
@@ -1038,7 +1039,8 @@ class BehaviorDriftCheck(BaseCheck):
                                   "stddev": a.stddev, "z_score": a.z_score,
                                   "residualized_by": a.residualized_by, "raw_current": a.raw_current},
                     ))
-            await self._store_snapshot(snapshot)
+            if self._last_counts_ok:
+                await self._store_snapshot(snapshot)
             self._last_snapshot = snapshot
         except Exception:
             logger.exception("BehaviorDriftCheck failed")
@@ -1139,6 +1141,7 @@ class BehaviorDriftCheck(BaseCheck):
         total_invocations = sum(h.get("invocations", 0) for h in handlers.values())
         error_rate = total_errors / total_invocations if total_invocations else 0.0
 
+        self._last_counts_ok = counts_ok
         return BehaviorSnapshot(
             timestamp=now,
             fact_count=fact_count, fact_count_delta=fact_count - (prev.fact_count if prev else fact_count),
