@@ -998,10 +998,16 @@ class BehaviorDriftCheck(BaseCheck):
             self._last_anomalies = []
             if baseline:
                 anomalies = self._detector.detect(snapshot, baseline)
+                # NOTE: residualized_by/raw_current MUST be carried here too,
+                # not only on the live Finding. This list is what gets persisted
+                # (see _store_snapshot) and replayed by GET /behavior/anomalies
+                # and /behavior/drift-report, so dropping them there would make
+                # those endpoints print the residual as if it were the raw metric.
                 self._last_anomalies = [
                     {"metric": a.metric, "current": a.current, "mean": a.mean,
                      "stddev": a.stddev, "z_score": a.z_score, "direction": a.direction,
-                     "severity": a.severity}
+                     "severity": a.severity, "residualized_by": a.residualized_by,
+                     "raw_current": a.raw_current}
                     for a in anomalies
                 ]
                 for a in anomalies:
@@ -1032,30 +1038,53 @@ class BehaviorDriftCheck(BaseCheck):
         now = datetime.now(UTC)
         prev = self._last_snapshot
         fact_count = episode_count = censor_count = procedure_count = 0
-        facts_pruned = 0
-        # Window for the deactivation count. With no previous snapshot (first
-        # tick after a restart) this collapses to an empty range -> 0, which
-        # matches fact_count_delta also being 0 on that tick.
-        since = prev.timestamp if prev else now
+        inactive_fact_count = 0
         if self._db:
             try:
                 async with self._db.session() as session:
                     from sqlalchemy import text
+                    # Both fact counts are read in ONE statement so they share a
+                    # single MVCC snapshot. That is what makes facts_pruned and
+                    # fact_count_delta below consistent with each other.
                     result = await session.execute(text(
                         "SELECT "
                         "(SELECT COUNT(*) FROM heart.facts WHERE active = true) AS facts, "
                         "(SELECT COUNT(*) FROM heart.episodes) AS episodes, "
                         "(SELECT COUNT(*) FROM heart.censors WHERE active = true) AS censors, "
                         "(SELECT COUNT(*) FROM heart.procedures WHERE active = true) AS procedures, "
-                        "(SELECT COUNT(*) FROM heart.facts WHERE active = false "
-                        " AND updated_at > :since AND updated_at <= :now) AS pruned"
-                    ), {"since": since, "now": now})
+                        "(SELECT COUNT(*) FROM heart.facts WHERE active = false) AS inactive_facts"
+                    ))
                     row = result.fetchone()
                     if row:
                         fact_count, episode_count, censor_count, procedure_count = row.facts, row.episodes, row.censors, row.procedures
-                        facts_pruned = row.pruned
+                        inactive_fact_count = row.inactive_facts
             except Exception:
                 logger.debug("Snapshot: DB query failed", exc_info=True)
+
+        # Deactivations since the previous tick, by DIFFERENCING the inactive
+        # count -- deliberately not by an `updated_at` window.
+        #
+        # A window needs a cutoff, and no cutoff can be made to agree with the
+        # counts. Taking it from the application clock loses any fact
+        # deactivated while we waited for a pooled connection, and adds
+        # app/database clock skew on top. Taking it from the database in the
+        # same statement (statement_timestamp()) removes the skew but still
+        # leaks, because heart.facts.updated_at is stamped by a BEFORE UPDATE
+        # trigger with clock_timestamp() -- write time, not commit time. A
+        # batch prune that writes rows early and commits after our snapshot is
+        # invisible to these counts yet already carries updated_at < cutoff, so
+        # the next tick's window (> cutoff) would skip it permanently.
+        #
+        # Differencing has no cutoff to get wrong: the deactivation is observed
+        # on whichever tick first sees it committed, which is exactly the tick
+        # whose fact_count_delta it explains. The two numbers cannot disagree
+        # because they are read from the same snapshot.
+        #
+        # On the first tick after a restart prev is None, so this is 0 -- and
+        # fact_count_delta is 0 on that tick too, so the pair still agrees.
+        facts_pruned = (
+            inactive_fact_count - prev.inactive_fact_count if prev else 0
+        )
 
         bus_data = self._bus_stats.to_dict() if self._bus_stats else {}
         handlers = bus_data.get("handlers", {})
@@ -1066,7 +1095,7 @@ class BehaviorDriftCheck(BaseCheck):
         return BehaviorSnapshot(
             timestamp=now,
             fact_count=fact_count, fact_count_delta=fact_count - (prev.fact_count if prev else fact_count),
-            facts_pruned=facts_pruned,
+            inactive_fact_count=inactive_fact_count, facts_pruned=facts_pruned,
             episode_count=episode_count, episode_count_delta=episode_count - (prev.episode_count if prev else episode_count),
             active_censor_count=censor_count, active_censor_delta=censor_count - (prev.active_censor_count if prev else censor_count),
             procedure_count=procedure_count, decision_count=0,

@@ -2903,7 +2903,20 @@ def create_app(
         else:
             lines = [f"Drift detected at {row.timestamp.isoformat()}:"]
             for a in anomalies:
-                lines.append(f"  - {a.get('metric', '?')}: {a.get('current', '?')} ({a.get('direction', '?')} from baseline)")
+                # A residualized metric's "current" is the UNEXPLAINED remainder,
+                # not the raw metric value, so it must never be printed bare as
+                # though it were the raw number. Snapshots written before
+                # residualization shipped carry no residualized_by and render
+                # with the original one-line form.
+                explained_by = a.get("residualized_by")
+                if explained_by:
+                    lines.append(
+                        f"  - {a.get('metric', '?')}: {a.get('raw_current', '?')} raw "
+                        f"-> {a.get('current', '?')} unexplained after {explained_by} "
+                        f"({a.get('direction', '?')} from baseline)"
+                    )
+                else:
+                    lines.append(f"  - {a.get('metric', '?')}: {a.get('current', '?')} ({a.get('direction', '?')} from baseline)")
             report = "\n".join(lines)
         return JSONResponse({"report": report, "anomalies": anomalies, "snapshot_time": row.timestamp.isoformat()})
 

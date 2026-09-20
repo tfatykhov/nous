@@ -15,6 +15,11 @@ class BehaviorSnapshot:
     # Memory metrics
     fact_count: int = 0
     fact_count_delta: int = 0
+    # Count of soft-deactivated facts (active = false). Read in the SAME
+    # query/snapshot as fact_count so facts_pruned can be derived by
+    # differencing it instead of by a wall-clock window (see
+    # BehaviorDriftCheck._capture_snapshot).
+    inactive_fact_count: int = 0
     episode_count: int = 0
     episode_count_delta: int = 0
     active_censor_count: int = 0
@@ -55,6 +60,7 @@ class BehaviorSnapshot:
     def to_metrics_dict(self) -> dict[str, Any]:
         return {
             "fact_count": self.fact_count, "fact_count_delta": self.fact_count_delta,
+            "inactive_fact_count": self.inactive_fact_count,
             "episode_count": self.episode_count, "episode_count_delta": self.episode_count_delta,
             "active_censor_count": self.active_censor_count, "active_censor_delta": self.active_censor_delta,
             "procedure_count": self.procedure_count, "decision_count": self.decision_count,
