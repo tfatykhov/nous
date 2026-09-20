@@ -12,12 +12,15 @@ checks instead of waiting:
   1. SANITY — two checks off ``brain.decisions.calibration_factor``
      (migration 073), which records the factor actually applied:
        (a) integrity: every row must satisfy ``confidence ==
-           confidence_raw * calibration_factor``, in either era;
-       (b) currency: every calibration performed at or after
-           ``--retired-at`` must have used the configured factor, else the
-           deployment is still scaling with a stale override.
+           calibrate_confidence(confidence_raw, calibration_factor)``,
+           in either era;
+       (b) currency: every calibration this build performed must have
+           used the configured factor, else the deployment is still
+           scaling with a stale override.
      Rows predating migration 073 have a NULL factor and are skipped, so
-     history cannot pin --strict to a permanent failure.
+     history cannot pin --strict to a permanent failure — and because
+     only this build writes those columns, no date cutoff is needed to
+     tell the eras apart.
 
   2. COUNTERFACTUAL — apply the HISTORICAL F058 factor (0.7627, not the
      now-retired live factor) retroactively to all reviewed pre-F058
@@ -58,10 +61,10 @@ while ``--counterfactual-factor`` is the scaling hypothesis step 2
 evaluates (0.7627). Passing the live 1.0 into step 2 makes it multiply
 by one, so the Brier/ECE gate would pass without testing anything.
 
-``--retired-at`` dates the deploy and is compared against
-``calibration_applied_at``, which is stamped only when confidence is
-actually (re)calibrated — unlike ``updated_at``, which also moves for
-description-only edits.
+``--retired-at`` is optional and only needed after a LATER factor change;
+it is matched against ``calibration_applied_at``, which is stamped only
+when confidence is actually (re)calibrated — unlike ``updated_at``, which
+also moves for description-only edits.
 """
 from __future__ import annotations
 
@@ -101,15 +104,18 @@ _FACTOR_TOLERANCE = 0.001
 # absorbs the float round trip through Postgres.
 _VALUE_TOLERANCE = 1e-9
 
-# When the retirement reached prod. Rows created at or after this instant must
-# have been written by the retired-factor build, so they -- and only they --
-# are the cohort step 1 validates.
+# No cutoff by default, and deliberately so.
 #
-# This MUST be at or after the actual deploy. Set it earlier and rows written
-# by the old build fall inside the cohort and fail forever; that permanent
-# --strict exit 1 is the exact bug this cohort logic was introduced to fix.
-# Override with --retired-at when the factor changes again.
-_FACTOR_RETIRED_AT = datetime(2026, 9, 21, tzinfo=UTC)
+# The provenance columns arrive with migration 073, so ONLY the current build
+# writes them: a non-null calibration_factor already means "this row was
+# calibrated by the build under test". A date constant would be strictly
+# worse -- set it before the rollout and old-build rows fail forever, set it
+# after and the first post-rollout writes go unchecked, which is exactly how
+# a stale override survived the previous two attempts at this cohort.
+#
+# --retired-at exists for the NEXT factor change, when rows written under
+# this retirement will themselves be history and need excluding by date.
+_FACTOR_RETIRED_AT = None
 
 _DEFAULT_AGENT_ID = "nous-default"
 
@@ -181,7 +187,7 @@ def _print_summary(s: dict) -> None:
 async def run(
     conn: asyncpg.Connection, agent_id: str, factor: float,
     counterfactual_factor: float = _HISTORICAL_F058_FACTOR,
-    retired_at: datetime = _FACTOR_RETIRED_AT,
+    retired_at: datetime | None = _FACTOR_RETIRED_AT,
 ) -> dict:
     """Execute all three checks against ``conn``. Returns a dict.
 
@@ -211,11 +217,11 @@ async def run(
     post_f058_rows = await conn.fetch(
         """
         SELECT confidence_raw, confidence, calibration_factor,
-               (calibration_applied_at >= $2) AS is_current_era
+               calibration_applied_at
         FROM brain.decisions
         WHERE agent_id = $1 AND confidence_raw IS NOT NULL
         """,
-        agent_id, retired_at,
+        agent_id,
     )
 
     # Step 1: scaling-applied sanity.
@@ -262,10 +268,25 @@ async def run(
                                    float(r["calibration_factor"]))
         ) > _VALUE_TOLERANCE
     ]
-    # (b) deliberately does NOT age out: a persistent stale override must keep
-    # failing until someone fixes the deployment, where a rolling window would
-    # let it go quiet after a month.
-    current_era = [r for r in scoped if r["is_current_era"]]
+    # (b) By default every row carrying provenance is current: those columns
+    # only exist from migration 073, so writing them IS the signal that the
+    # current build produced the row. That leaves no unchecked window at
+    # rollout -- the very first post-deploy calibration is validated, so a
+    # host still running a stale 0.7627 override is caught on its next write
+    # rather than hidden behind a cutoff date that had not arrived yet.
+    #
+    # A cutoff is only meaningful for a LATER factor change, and is opt-in via
+    # --retired-at. Either way this does not age out: a persistent stale
+    # override keeps failing until someone fixes the deployment, where a
+    # rolling window would let it go quiet after a month.
+    if retired_at is None:
+        current_era = scoped
+    else:
+        current_era = [
+            r for r in scoped
+            if r["calibration_applied_at"] is not None
+            and r["calibration_applied_at"] >= retired_at
+        ]
     bad_ratios = [
         r for r in current_era
         if abs(float(r["calibration_factor"]) - factor) > _FACTOR_TOLERANCE
@@ -276,7 +297,13 @@ async def run(
     pre_f058 = [r for r in rows if not r["is_post_f058"]]
     raw_pairs = [(float(r["raw"]), _STRICT_OUTCOME[r["outcome"]])
                  for r in pre_f058]
-    cal_pairs = [(float(r["raw"]) * counterfactual_factor,
+    # Through the production calibrator, not a bare multiply: with a
+    # counterfactual factor above 1.0 (supported, for correcting
+    # underconfidence) raw values near 1.0 would otherwise produce
+    # confidences above 1.0 that the write path clips and could never store,
+    # so the Brier/ECE deltas and the --strict verdict would be judging
+    # values that cannot exist.
+    cal_pairs = [(calibrate_confidence(float(r["raw"]), counterfactual_factor),
                   _STRICT_OUTCOME[r["outcome"]])
                  for r in pre_f058]
 
@@ -290,7 +317,7 @@ async def run(
     return {
         "factor": factor,
         "counterfactual_factor": counterfactual_factor,
-        "retired_at": retired_at.isoformat(),
+        "retired_at": retired_at.isoformat() if retired_at else None,
         "agent_id": agent_id,
         "sanity": {
             "ok": sanity_ok,
@@ -363,9 +390,13 @@ async def _async_main(argv: list[str] | None = None) -> int:
                    help="Scaling the prod write path should apply now.")
     p.add_argument("--retired-at", type=datetime.fromisoformat,
                    default=_FACTOR_RETIRED_AT,
-                   help="Deploy instant separating the two factor eras. The "
-                        "currency check covers calibrations performed at or "
-                        "after it (by calibration_applied_at, not created_at).")
+                   help="Optional cutoff for the currency check, matched "
+                        "against calibration_applied_at. Unset means every "
+                        "row that recorded a factor is checked — correct for "
+                        "this retirement, since only the current build "
+                        "populates those columns. Supply it after a LATER "
+                        "factor change, when rows from this era become "
+                        "history.")
     p.add_argument("--counterfactual-factor", type=float,
                    default=_HISTORICAL_F058_FACTOR,
                    help="Scaling hypothesis tested against pre-F058 data. "
@@ -396,7 +427,7 @@ async def _async_main(argv: list[str] | None = None) -> int:
         # prod even if they bypass the existing two SELECTs.
         await conn.execute("SET default_transaction_read_only = on")
         retired_at = args.retired_at
-        if retired_at.tzinfo is None:
+        if retired_at is not None and retired_at.tzinfo is None:
             retired_at = retired_at.replace(tzinfo=UTC)
         result = await run(conn, args.agent_id, args.factor,
                            args.counterfactual_factor, retired_at)
@@ -412,22 +443,24 @@ async def _async_main(argv: list[str] | None = None) -> int:
     print()
     print("## Step 1 — Sanity (factor applied in prod write path)")
     s = result["sanity"]
+    _since = (f"calibrated since {result['retired_at']}"
+              if result["retired_at"] else "written by the current build")
     print(f"   post-F058 rows: {s['n_post_f058']} "
           f"({s['n_with_factor']} recorded their factor; of those "
-          f"{s['n_current_era']} calibrated since {result['retired_at']})")
+          f"{s['n_current_era']} {_since})")
     if s["n_bad_integrity"]:
         print(f"   [FAIL] {s['n_bad_integrity']} rows do not match the factor "
               f"they recorded — the write path is miscomputing confidence")
     elif s["n_current_era"] == 0:
-        print("   [PASS] no confidence calibrated since the retirement deploy "
+        print("   [PASS] no confidence calibrated by this build yet "
               "— nothing for the current factor to have got wrong")
     elif s["ok"]:
-        print(f"   [PASS] all {s['n_current_era']} post-retirement "
-              f"calibrations used factor {args.factor:.4f}")
+        print(f"   [PASS] all {s['n_current_era']} in-scope calibrations "
+              f"used factor {args.factor:.4f}")
     else:
-        print(f"   [FAIL] {s['n_bad']} post-retirement calibrations used a "
-              f"factor other than {args.factor:.4f} — the deployment is "
-              f"still scaling with a stale override")
+        print(f"   [FAIL] {s['n_bad']} calibrations used a factor other than "
+              f"{args.factor:.4f} — the deployment is still scaling with a "
+              f"stale override")
     print()
     print(f"## Step 2 — Counterfactual (apply "
           f"{args.counterfactual_factor:.4f} to pre-F058 reviewed)")
@@ -481,16 +514,15 @@ def _build_md(result: dict, factor: float,
                        f"the factor they recorded — the write path is "
                        f"miscomputing `confidence`")
     elif s["n_current_era"] == 0:
-        sanity_line = ("- **PASS** no confidence calibrated since the "
-                       "retirement deploy — nothing for the current factor to "
-                       "have got wrong")
+        sanity_line = ("- **PASS** no confidence calibrated by this build yet "
+                       "— nothing for the current factor to have got wrong")
     elif s["ok"]:
-        sanity_line = (f"- **PASS** all {s['n_current_era']} post-retirement "
+        sanity_line = (f"- **PASS** all {s['n_current_era']} in-scope "
                        f"calibrations used factor `{factor:.4f}`")
     else:
-        sanity_line = (f"- **FAIL** {s['n_bad']} post-retirement calibrations "
-                       f"used a factor other than `{factor:.4f}` — the "
-                       f"deployment is still scaling with a stale override")
+        sanity_line = (f"- **FAIL** {s['n_bad']} calibrations used a factor "
+                       f"other than `{factor:.4f}` — the deployment is still "
+                       f"scaling with a stale override")
     md = [
         "# F058 calibration validation",
         f"- agent_id: `{result['agent_id']}`",
@@ -498,10 +530,10 @@ def _build_md(result: dict, factor: float,
         f"- counterfactual factor: **{counterfactual_factor}**",
         "",
         "## Step 1 — Sanity (factor applied in prod)",
-        f"- retired at: `{result['retired_at']}`",
+        f"- retired at: `{result['retired_at'] or 'n/a (all provenanced rows)'}`",
         f"- post-F058 rows: {s['n_post_f058']} "
         f"({s['n_with_factor']} recorded their factor; of those "
-        f"{s['n_current_era']} calibrated since retirement)",
+        f"{s['n_current_era']} in scope for the currency check)",
         sanity_line,
         "",
         "## Step 2 — Counterfactual on pre-F058 reviewed",

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -161,7 +162,10 @@ def test_verdict_passes_on_tiny_ece_drift():
 # Factor provenance (Codex P2/P1 rounds 2-3, PR #640)
 # ---------------------------------------------------------------------------
 
-_CUTOFF = _FACTOR_RETIRED_AT
+# No default cutoff any more: writing provenance at all marks the current
+# build, so there is no unchecked window at rollout.
+assert _FACTOR_RETIRED_AT is None
+_CUTOFF = datetime(2026, 9, 21, tzinfo=UTC)
 _BEFORE = _CUTOFF - timedelta(days=30)
 _AFTER = _CUTOFF + timedelta(days=1)
 
@@ -192,7 +196,7 @@ class _FakeConn:
                 "created_at cannot date a calibration -- _update rescales "
                 "historical rows without changing it"
             )
-            self.retired_at_arg = args[1]
+            self.retired_at_arg = args[1] if len(args) > 1 else None
             rows = []
             for d in self._decisions:
                 raw, cf, at = d[0], d[1], d[2]
@@ -204,8 +208,7 @@ class _FakeConn:
                     stored = calibrate_confidence(raw, cf)
                 rows.append({
                     "confidence_raw": raw, "confidence": stored,
-                    "calibration_factor": cf,
-                    "is_current_era": None if at is None else at >= args[1],
+                    "calibration_factor": cf, "calibration_applied_at": at,
                 })
             return rows
         return self._reviewed
@@ -225,19 +228,19 @@ class TestHistoryCannotPinStrictToFailure:
     """
 
     @pytest.mark.asyncio
-    async def test_old_factor_rows_do_not_fail_the_new_factor(self):
-        conn = _FakeConn(
-            [(1.0, 0.7627, _BEFORE)] * 5 + [(1.0, 1.0, _AFTER)] * 3
-        )
+    async def test_rows_without_provenance_do_not_fail_the_new_factor(self):
+        """Pre-migration-073 rows have a NULL factor: unknowable, so skipped.
+        That is what keeps history from pinning --strict to a failure."""
+        conn = _FakeConn([(1.0, None, None)] * 5 + [(1.0, 1.0, _AFTER)] * 3)
         result = await run(conn, "a", 1.0)
         s = result["sanity"]
         assert s["ok"] is True
-        assert (s["n_current_era"], s["n_prior_era"], s["n_bad"]) == (3, 5, 0)
+        assert (s["n_post_f058"], s["n_with_factor"], s["n_bad"]) == (8, 3, 0)
 
     @pytest.mark.asyncio
     async def test_strict_verdict_no_longer_pinned_to_failure(self):
         conn = _FakeConn(
-            [(1.0, 0.7627, _BEFORE)] * 4 + [(1.0, 1.0, _AFTER)] * 2,
+            [(1.0, None, None)] * 4 + [(1.0, 1.0, _AFTER)] * 2,
             _reviewed([(0.9, "failure"), (0.9, "success"), (0.8, "failure")]),
         )
         assert verdict_exit_code(await run(conn, "a", 1.0)) == 0
@@ -271,14 +274,15 @@ class TestStaleOverrideIsCaughtHoweverItIsWritten:
         as prior-era, so n_current_era stayed 0 and --strict reported PASS
         while the database filled with incorrectly scaled values.
 
-        calibration_applied_at is post-cutoff even though the row is old.
+        They carry provenance, so the current build wrote them -- whatever
+        their creation date -- and every one is checked.
         """
         conn = _FakeConn([(1.0, 0.7627, _AFTER)] * 3
                          + [(1.0, 0.7627, _BEFORE)] * 6)
         result = await run(conn, "a", 1.0)
-        assert result["sanity"]["n_current_era"] == 3
+        assert result["sanity"]["n_current_era"] == 9
         assert result["sanity"]["ok"] is False
-        assert result["sanity"]["n_bad"] == 3
+        assert result["sanity"]["n_bad"] == 9
 
     @pytest.mark.asyncio
     async def test_a_stale_override_does_not_age_out(self):
@@ -288,7 +292,10 @@ class TestStaleOverrideIsCaughtHoweverItIsWritten:
 
     @pytest.mark.asyncio
     async def test_idle_database_passes(self):
-        conn = _FakeConn([(1.0, 0.7627, _BEFORE)] * 5)
+        """Nothing calibrated by this build yet -> nothing it could have got
+        wrong. Distinguishable from the stale-override case above, which does
+        write provenance and therefore does get checked."""
+        conn = _FakeConn([(1.0, None, None)] * 5)
         result = await run(conn, "a", 1.0)
         assert result["sanity"]["n_current_era"] == 0
         assert result["sanity"]["ok"] is True
@@ -308,9 +315,20 @@ class TestWritePathIntegrityIsCheckedInBothEras:
         assert result["sanity"]["ok"] is False
 
     @pytest.mark.asyncio
-    async def test_historical_rows_that_agree_with_their_factor_pass(self):
+    async def test_rows_agreeing_with_their_own_factor_pass_integrity(self):
+        """Integrity is judged against the factor the row RECORDED, so a
+        0.7627 row is internally consistent even while the currency check
+        separately flags it as a stale override."""
         conn = _FakeConn([(1.0, 0.7627, _BEFORE)] * 4)
         result = await run(conn, "a", 1.0)
+        assert result["sanity"]["n_bad_integrity"] == 0
+        # ...and the same rows still fail currency against the live 1.0.
+        assert result["sanity"]["n_bad"] == 4
+
+    @pytest.mark.asyncio
+    async def test_integrity_and_currency_both_pass_when_aligned(self):
+        conn = _FakeConn([(1.0, 0.7627, _BEFORE)] * 4)
+        result = await run(conn, "a", 0.7627)
         assert result["sanity"]["n_bad_integrity"] == 0
         assert result["sanity"]["ok"] is True
 
@@ -324,11 +342,13 @@ class TestEraIsNotInferredFromRowOrder:
     @pytest.mark.asyncio
     async def test_edited_historical_row_does_not_poison_the_cohort(self):
         decisions = [
-            (1.0, 0.7627, _BEFORE - timedelta(days=5)),
-            # edited post-retirement -> rescaled to 1.0 and re-stamped
+            # untouched history: written before migration 073, no provenance
+            (1.0, None, None),
+            # edited post-retirement -> rescaled to 1.0 and stamped, even
+            # though the row itself is old
             (1.0, 1.0, _AFTER),
-            (1.0, 0.7627, _BEFORE - timedelta(days=3)),
-            (1.0, 0.7627, _BEFORE - timedelta(days=2)),
+            (1.0, None, None),
+            (1.0, None, None),
         ]
         result = await run(_FakeConn(decisions), "a", 1.0)
         assert result["sanity"]["ok"] is True
@@ -419,3 +439,69 @@ class TestIntegrityUsesTheCalibratorNotTheRatio:
         result = await run(conn, "a", 1.0)
         assert result["sanity"]["n_bad_integrity"] == 0
         assert result["sanity"]["ok"] is True
+
+
+class TestNoUncheckedWindowAtRollout:
+    """Codex round-5 P2: a hard-coded cutoff one day after the documented
+    retirement meant every calibration performed on rollout day fell outside
+    current_era, so the probe could report n_current_era == 0 and pass
+    --strict while the host's stale 0.7627 override was still active.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stale_override_on_rollout_day_is_caught(self):
+        rollout_day = datetime(2026, 9, 20, 14, 0, tzinfo=UTC)
+        conn = _FakeConn([(1.0, 0.7627, rollout_day)] * 3)
+        result = await run(conn, "a", 1.0)
+        assert result["sanity"]["n_current_era"] == 3
+        assert result["sanity"]["ok"] is False
+        assert verdict_exit_code(result) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_very_first_post_deploy_write_is_checked(self):
+        conn = _FakeConn([(1.0, 0.7627, datetime(2026, 9, 20, tzinfo=UTC))])
+        assert (await run(conn, "a", 1.0))["sanity"]["n_bad"] == 1
+
+    @pytest.mark.asyncio
+    async def test_provenance_alone_defines_the_cohort(self):
+        """No date anywhere: an ancient timestamp with provenance is still the
+        current build's work, because only the current build writes it."""
+        ancient = datetime(2020, 1, 1, tzinfo=UTC)
+        conn = _FakeConn([(1.0, 1.0, ancient)])
+        result = await run(conn, "a", 1.0)
+        assert result["sanity"]["n_current_era"] == 1
+        assert result["sanity"]["ok"] is True
+
+
+class TestCounterfactualRespectsProductionClipping:
+    """Codex round-5 P2: --counterfactual-factor above 1.0 is supported for
+    correcting underconfidence, but a bare multiply produced confidences above
+    1.0 that the write path clips and could never store, so the Brier/ECE
+    deltas and the --strict verdict judged impossible values.
+    """
+
+    _PRE = [(0.99, "success"), (0.95, "success"), (0.9, "failure"),
+            (0.85, "success"), (0.8, "success")]
+
+    @pytest.mark.asyncio
+    async def test_counterfactual_confidences_never_exceed_one(self):
+        conn = _FakeConn([(1.0, 1.0, _AFTER)], _reviewed(self._PRE))
+        cf = (await run(conn, "a", 1.0, 1.2))["counterfactual"]
+        assert cf["calibrated"]["mean_conf"] <= 1.0
+        expected = statistics.mean(
+            [calibrate_confidence(c, 1.2) for c, _ in self._PRE]
+        )
+        assert cf["calibrated"]["mean_conf"] == pytest.approx(expected, abs=5e-3)
+
+    @pytest.mark.asyncio
+    async def test_bare_multiply_would_have_exceeded_one(self):
+        """Guard that the fixture actually exercises clipping."""
+        assert max(c * 1.2 for c, _ in self._PRE) > 1.0
+        assert calibrate_confidence(0.99, 1.2) == 1.0
+
+    @pytest.mark.asyncio
+    async def test_factors_below_one_are_unaffected(self):
+        conn = _FakeConn([(1.0, 1.0, _AFTER)], _reviewed(self._PRE))
+        cf = (await run(conn, "a", 1.0, 0.7627))["counterfactual"]
+        expected = statistics.mean([c * 0.7627 for c, _ in self._PRE])
+        assert cf["calibrated"]["mean_conf"] == pytest.approx(expected, abs=5e-3)
