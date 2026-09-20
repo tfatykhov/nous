@@ -642,13 +642,16 @@ class TestZeroVarianceResidualBaseline:
         assert found == []
 
     def test_metric_without_a_floor_still_skips_on_zero_variance(self):
-        """facts_pruned has no min_abs_deviation, so a constant baseline gives
-        the fallback no scale to judge against and it must stay silent."""
-        history = self._history([(0, 3)] * 12)
+        """A metric with no min_abs_deviation gives the fallback no scale to
+        judge against, so a constant baseline must stay silent."""
+        history = [
+            BehaviorSnapshot(timestamp=datetime.now(UTC), episodes_compacted=0)
+            for _ in range(12)
+        ]
         current = BehaviorSnapshot(timestamp=datetime.now(UTC),
-                                   fact_count_delta=0, facts_pruned=99)
+                                   episodes_compacted=99)
         found = [a for a in DriftDetector().detect(current, history)
-                 if a.metric == "facts_pruned"]
+                 if a.metric == "episodes_compacted"]
         assert found == []
 
 
@@ -756,3 +759,90 @@ class TestBaselineExcludesLegacySnapshots:
         assert _j.loads(captured["metrics"])["metrics_version"] == (
             SNAPSHOT_METRICS_VERSION
         )
+
+
+class TestMassPruneIsNeverSilentOnBothMetrics:
+    """Residualization cancels a mass prune out of fact_count_delta by design,
+    which makes facts_pruned the only metric left that can report it. On a
+    baseline of quiet zero-prune snapshots that series has no variance, so
+    without a materiality floor the zero-variance branch dropped it too and
+    the prune vanished from both metrics at once.
+    """
+
+    def _quiet_history(self, n=12):
+        return [
+            BehaviorSnapshot(timestamp=datetime.now(UTC),
+                             fact_count_delta=0, facts_pruned=0)
+            for _ in range(n)
+        ]
+
+    def test_mass_prune_reported_by_facts_pruned(self):
+        current = BehaviorSnapshot(timestamp=datetime.now(UTC),
+                                   fact_count_delta=-400, facts_pruned=400)
+        anomalies = DriftDetector().detect(current, self._quiet_history())
+        by_metric = {a.metric: a for a in anomalies}
+        # fact_count_delta is correctly explained away...
+        assert "fact_count_delta" not in by_metric
+        # ...so facts_pruned must carry the signal.
+        assert "facts_pruned" in by_metric
+        assert by_metric["facts_pruned"].current == 400
+        assert by_metric["facts_pruned"].z_score is None
+
+    def test_small_prune_against_a_quiet_baseline_stays_silent(self):
+        current = BehaviorSnapshot(timestamp=datetime.now(UTC),
+                                   fact_count_delta=-3, facts_pruned=3)
+        anomalies = DriftDetector().detect(current, self._quiet_history())
+        assert [a for a in anomalies if a.metric == "facts_pruned"] == []
+
+
+class TestBaselineRejectsIncompatibleVersionsBothWays:
+    """A snapshot from a NEWER writer is as incomparable as an older one:
+    during a rolling upgrade or rollback this process can share the database
+    with a v3 writer.
+    """
+
+    async def _baseline_for(self, versions):
+        from nous.heartbeat.checks import BehaviorDriftCheck
+
+        rows = []
+        for i, v in enumerate(versions):
+            m = {"fact_count_delta": -i, "facts_pruned": i}
+            if v is not None:
+                m["metrics_version"] = v
+            rows.append(_FakeRow(timestamp=datetime.now(UTC), metrics=m))
+
+        class _Sess:
+            async def __aenter__(self_inner): return self_inner
+            async def __aexit__(self_inner, *a): return False
+            async def execute(self_inner, *a, **k):
+                r = MagicMock()
+                r.fetchall.return_value = rows
+                return r
+
+        db = MagicMock()
+        db.session = lambda: _Sess()
+        check = BehaviorDriftCheck.__new__(BehaviorDriftCheck)
+        check._db = db
+        check._settings = MagicMock(agent_id="a")
+        return await check._load_baseline()
+
+    @pytest.mark.asyncio
+    async def test_newer_version_snapshots_are_rejected(self):
+        from nous.heartbeat.checks import SNAPSHOT_METRICS_VERSION
+
+        baseline = await self._baseline_for(
+            [SNAPSHOT_METRICS_VERSION + 1, SNAPSHOT_METRICS_VERSION + 1]
+        )
+        assert baseline == []
+
+    @pytest.mark.asyncio
+    async def test_only_the_matching_version_survives(self):
+        from nous.heartbeat.checks import SNAPSHOT_METRICS_VERSION
+
+        baseline = await self._baseline_for([
+            None,                            # v1, implicit
+            SNAPSHOT_METRICS_VERSION,
+            SNAPSHOT_METRICS_VERSION + 1,
+        ])
+        assert len(baseline) == 1
+        assert baseline[0].fact_count_delta == -1

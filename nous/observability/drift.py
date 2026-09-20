@@ -55,7 +55,14 @@ class DriftDetector:
         "handler_error_rate":      {"k": 1.5, "min_samples": 5},
         "handler_error_count":     {"k": 1.5, "min_samples": 5},
         "events_dropped":          {"k": 1.5, "min_samples": 5},
-        "facts_pruned":            {"k": 2.0, "min_samples": 10},
+        # Same 50-fact materiality bar as fact_count_delta, and for a reason
+        # that only exists because of residualization: a mass prune cancels
+        # out of fact_count_delta by design, so facts_pruned is the ONLY
+        # metric left that can report it. Without a floor, a baseline of ten
+        # quiet (zero-prune) snapshots has no variance, the zero-variance
+        # branch has no scale to judge against, and the prune is silent on
+        # both metrics at once.
+        "facts_pruned":            {"k": 2.0, "min_samples": 10, "min_abs_deviation": 50.0},
         "findings_created":        {"k": 2.0, "min_samples": 10},
         "episodes_compacted":      {"k": 2.0, "min_samples": 10},
         "contradictions_resolved": {"k": 2.0, "min_samples": 10},

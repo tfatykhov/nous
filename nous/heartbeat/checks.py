@@ -1211,7 +1211,13 @@ class BehaviorDriftCheck(BaseCheck):
                 # The baseline simply starts smaller after rollout; min_samples
                 # holds detection off until enough v2 samples exist, which is
                 # the conservative direction (quiet, not wrong).
-                if metrics.get("metrics_version", 1) < SNAPSHOT_METRICS_VERSION:
+                # Equality, not `<`: a snapshot from a NEWER writer is just as
+                # incomparable as an older one. During a rolling upgrade or a
+                # rollback this process can share the database with a v3
+                # writer, and accepting those rows would reintroduce exactly
+                # the mixed-definition contamination this guard exists to
+                # prevent.
+                if metrics.get("metrics_version", 1) != SNAPSHOT_METRICS_VERSION:
                     continue
                 # Build snapshot from stored metrics, defaulting missing keys to 0
                 kwargs: dict[str, Any] = {"timestamp": row.timestamp}
