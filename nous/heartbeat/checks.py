@@ -23,6 +23,7 @@ from nous.config import Settings
 from nous.heart import Heart
 from nous.heartbeat.registry import BaseCheck
 from nous.heartbeat.schemas import CheckResult, Finding, TunableParam
+from nous.observability.snapshots import SNAPSHOT_METRICS_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -964,15 +965,6 @@ class DriveCheck(BaseCheck):
 # ------------------------------------------------------------------
 # BehaviorDriftCheck (F035.3)
 # ------------------------------------------------------------------
-
-
-#: Schema version stamped into every stored behavior-snapshot metrics blob.
-#: Bump whenever a metric's DEFINITION changes (scope, units, or which inputs
-#: feed it) so _load_baseline can refuse to compare across the change.
-#:   1 -> original: global corpus counts, facts_pruned never populated.
-#:   2 -> agent-scoped corpus counts, facts_pruned populated from the inactive
-#:        count delta (so fact_count_delta residualization is meaningful).
-SNAPSHOT_METRICS_VERSION = 2
 
 
 class BehaviorDriftCheck(BaseCheck):

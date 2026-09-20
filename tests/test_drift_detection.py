@@ -846,3 +846,79 @@ class TestBaselineRejectsIncompatibleVersionsBothWays:
         ])
         assert len(baseline) == 1
         assert baseline[0].fact_count_delta == -1
+
+
+class TestTrendConsumersFilterByVersion:
+    """_load_baseline is not the only reader of behavior_snapshots.
+    /behavior/trends returns a mean and stddev over the window, and the
+    observability dashboard charts fact_count_delta over 7 days — both
+    aggregated across rows without checking the version, so for as long as v1
+    rows remain in the window they blended global (v1) and agent-scoped (v2)
+    fact metrics into the same statistics and the same line.
+    """
+
+    def _rest_source(self):
+        from pathlib import Path
+
+        return (Path(__file__).resolve().parents[1]
+                / "nous/api/rest.py").read_text()
+
+    def test_predicate_matches_the_stamp_written_by_store_snapshot(self):
+        from nous.observability.snapshots import (
+            CURRENT_METRICS_VERSION_SQL,
+            SNAPSHOT_METRICS_VERSION,
+        )
+
+        assert CURRENT_METRICS_VERSION_SQL.endswith(
+            f"= {SNAPSHOT_METRICS_VERSION}"
+        )
+        # Unstamped rows must fall back to v1, not to the current version --
+        # COALESCE'ing to the current value would defeat the whole guard.
+        assert "COALESCE" in CURRENT_METRICS_VERSION_SQL
+        assert ", 1)" in CURRENT_METRICS_VERSION_SQL
+
+    def _metric_aggregating_reads(self):
+        """Every query that reads `metrics` across MORE THAN ONE row.
+
+        A LIMIT 1 read shows the newest snapshot as written and cannot blend
+        definitions, and the anomalies-only reads carry no metric statistics,
+        so neither needs the filter. Only cross-row metric aggregation does.
+        """
+        src = self._rest_source()
+        reads = []
+        marker = "FROM nous_system.behavior_snapshots "
+        i = src.find(marker)
+        while i != -1:
+            stmt = src[i:i + 420]
+            end = stmt.find("), {")
+            stmt = stmt[:end] if end != -1 else stmt
+            if "metrics" in src[max(0, i - 120):i] and "LIMIT 1" not in stmt:
+                reads.append(stmt)
+            i = src.find(marker, i + 1)
+        return reads
+
+    def test_every_cross_row_metric_reader_applies_the_filter(self):
+        """Guard against a new aggregating consumer being added without it."""
+        reads = self._metric_aggregating_reads()
+        # /behavior/trends and the observability dashboard's drift_trends.
+        assert len(reads) == 2, f"unexpected reader set: {reads}"
+        for stmt in reads:
+            assert "CURRENT_METRICS_VERSION_SQL" in stmt, (
+                f"unfiltered cross-row metric read: {stmt}"
+            )
+
+    def test_single_row_readers_are_deliberately_unfiltered(self):
+        """Pinning the reasoning: a LIMIT 1 read must NOT be filtered, or the
+        dashboard would show nothing at all until this build writes its first
+        snapshot after a rollback."""
+        src = self._rest_source()
+        latest = src[src.find("async def behavior_snapshot_latest"):][:700]
+        assert "LIMIT 1" in latest
+        assert "CURRENT_METRICS_VERSION_SQL" not in latest
+
+    def test_trends_endpoint_reports_the_version(self):
+        src = self._rest_source()
+        assert '"metrics_version": SNAPSHOT_METRICS_VERSION' in src, (
+            "callers need to distinguish a quiet week from a window "
+            "truncated by the version change"
+        )

@@ -7,6 +7,26 @@ from datetime import datetime
 from typing import Any
 
 
+#: Schema version stamped into every stored behavior-snapshot metrics blob.
+#: Bump whenever a metric's DEFINITION changes (scope, units, or which inputs
+#: feed it) so consumers can refuse to compare across the change.
+#:   1 -> original: global corpus counts, facts_pruned never populated.
+#:   2 -> agent-scoped corpus counts, facts_pruned populated from the inactive
+#:        count delta (so fact_count_delta residualization is meaningful).
+SNAPSHOT_METRICS_VERSION = 2
+
+#: SQL predicate selecting only snapshots written under the CURRENT metric
+#: definition. Every reader of nous_system.behavior_snapshots that aggregates
+#: across rows must apply it, or it will average incompatible definitions --
+#: v1 fact counts are global while v2 are agent-scoped, so a mixed window
+#: silently blends another agent's corpus into this one's mean and stddev.
+#: Rows predating the stamp have no key and default to version 1.
+CURRENT_METRICS_VERSION_SQL = (
+    "COALESCE((metrics->>'metrics_version')::int, 1) = "
+    f"{SNAPSHOT_METRICS_VERSION}"
+)
+
+
 @dataclass
 class BehaviorSnapshot:
     """Point-in-time snapshot of key system metrics."""
