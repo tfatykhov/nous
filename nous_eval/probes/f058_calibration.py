@@ -9,12 +9,16 @@ Validation is hard short-term because reviewed post-rollout decisions
 accumulate slowly (~4 in the first 3 days). This probe runs three
 checks instead of waiting:
 
-  1. SANITY — every post-F058 row in prod must show
+  1. SANITY — every row written under the CURRENT factor must show
      ``confidence == confidence_raw * factor`` exactly. If not, the
-     scaling is silently broken in the write path.
+     scaling is silently broken in the write path. Rows predating the
+     2026-09-20 retirement keep their 0.7627 ratio permanently, so the
+     cohort is cut at the era boundary (detected from the observed
+     ratio) rather than spanning both eras.
 
-  2. COUNTERFACTUAL — apply the factor retroactively to all reviewed
-     pre-F058 decisions and recompute Brier / ECE. The aggregate gap
+  2. COUNTERFACTUAL — apply the HISTORICAL F058 factor (0.7627, not the
+     now-retired live factor) retroactively to all reviewed pre-F058
+     decisions and recompute Brier / ECE. The aggregate gap
      collapses to ~0 by construction (the factor was derived from
      this same data), but **Brier and ECE deltas are NOT determined
      by the factor** — they tell us whether the scaling captures real
@@ -44,6 +48,12 @@ Exit code (with --strict):
     0 — sanity passes AND counterfactual shows Brier improvement
     1 — sanity fails OR scaling DEGRADES Brier (factor mis-set)
     2 — env / connection error
+
+Two distinct factors are in play since the retirement and must not be
+conflated: ``--factor`` is what the write path should apply NOW (1.0),
+while ``--counterfactual-factor`` is the scaling hypothesis step 2
+evaluates (0.7627). Passing the live 1.0 into step 2 makes it multiply
+by one, so the Brier/ECE gate would pass without testing anything.
 """
 from __future__ import annotations
 
@@ -57,11 +67,21 @@ from pathlib import Path
 import asyncpg
 
 
-# Default factor — keep in sync with Settings.confidence_calibration_factor.
-# Retired to 1.0 on 2026-09-20 (F058 factor no longer applied at write time).
-# NOTE: decisions written before that date were scaled at 0.7627, so a single
-# constant cannot unscale both eras — prefer brain.decisions.confidence_raw.
+# What the write path should be applying RIGHT NOW. Keep in sync with
+# Settings.confidence_calibration_factor. Retired to 1.0 on 2026-09-20.
 _DEFAULT_FACTOR = 1.0
+
+# What the write path applied during the F058 era (2026-04-30 .. 2026-09-20).
+# This is the scaling HYPOTHESIS step 2 evaluates, and it is deliberately a
+# separate constant from _DEFAULT_FACTOR: until the retirement the two were
+# the same number, which hid the fact that `factor` was doing two unrelated
+# jobs. At 1.0 the counterfactual would multiply by one and "prove" that
+# scaling neither helps nor hurts, so the step-2 gate would pass vacuously.
+_HISTORICAL_F058_FACTOR = 0.7627
+
+# Ratio match tolerance for deciding which era a row was written in.
+_RATIO_TOLERANCE = 0.001
+
 _DEFAULT_AGENT_ID = "nous-default"
 
 _STRICT_OUTCOME = {"success": 1.0, "partial": 0.0, "failure": 0.0}
@@ -131,8 +151,14 @@ def _print_summary(s: dict) -> None:
 
 async def run(
     conn: asyncpg.Connection, agent_id: str, factor: float,
+    counterfactual_factor: float = _HISTORICAL_F058_FACTOR,
 ) -> dict:
     """Execute all three checks against ``conn``. Returns a dict.
+
+    ``factor`` is the scaling the write path is expected to apply now;
+    ``counterfactual_factor`` is the historical scaling step 2 tests as a
+    hypothesis against pre-F058 data. They are the same number only before
+    the 2026-09-20 retirement.
 
     Caller owns connection lifetime.
     """
@@ -157,14 +183,38 @@ async def run(
                (confidence / NULLIF(confidence_raw, 0))::float8 AS r
         FROM brain.decisions
         WHERE agent_id = $1 AND confidence_raw IS NOT NULL
+        ORDER BY created_at
         """,
         agent_id,
     )
 
-    # Step 1: scaling-applied sanity
+    # Step 1: scaling-applied sanity, restricted to the CURRENT factor's era.
+    #
+    # Every row ever written under F058 carries confidence_raw, so this cohort
+    # spans both eras. Rows written while 0.7627 was live keep that ratio
+    # forever; checking them against the retired-to-1.0 factor would make
+    # sanity_ok permanently false and --strict permanently exit 1, no matter
+    # how correct the live write path is.
+    #
+    # The era boundary is read from the data, not from a hardcoded retirement
+    # date: the stored ratio IS the factor that was applied to that row, so the
+    # current era begins at the first row whose ratio matches `factor`. A date
+    # constant would have to match the deploy instant exactly, and any drift
+    # between the two reintroduces the permanent failure this fixes.
+    #
+    # This still fails loudly in both real regression cases: a row reverting to
+    # the old scaling AFTER the boundary sits inside the cohort and is flagged,
+    # and a write path that stops scaling DURING the old era moves the boundary
+    # early so every correctly-scaled row after it is flagged.
+    era_start = next(
+        (i for i, r in enumerate(post_f058_rows)
+         if r["r"] is not None and abs(r["r"] - factor) <= _RATIO_TOLERANCE),
+        None,
+    )
+    current_era = post_f058_rows[era_start:] if era_start is not None else []
     bad_ratios = [
-        r for r in post_f058_rows
-        if r["r"] is not None and abs(r["r"] - factor) > 0.001
+        r for r in current_era
+        if r["r"] is not None and abs(r["r"] - factor) > _RATIO_TOLERANCE
     ]
     sanity_ok = len(bad_ratios) == 0
 
@@ -172,7 +222,8 @@ async def run(
     pre_f058 = [r for r in rows if not r["is_post_f058"]]
     raw_pairs = [(float(r["raw"]), _STRICT_OUTCOME[r["outcome"]])
                  for r in pre_f058]
-    cal_pairs = [(float(r["raw"]) * factor, _STRICT_OUTCOME[r["outcome"]])
+    cal_pairs = [(float(r["raw"]) * counterfactual_factor,
+                  _STRICT_OUTCOME[r["outcome"]])
                  for r in pre_f058]
 
     # Step 3: direction check on post-F058 reviewed
@@ -184,10 +235,13 @@ async def run(
 
     return {
         "factor": factor,
+        "counterfactual_factor": counterfactual_factor,
         "agent_id": agent_id,
         "sanity": {
             "ok": sanity_ok,
             "n_post_f058": len(post_f058_rows),
+            "n_current_era": len(current_era),
+            "n_prior_era": len(post_f058_rows) - len(current_era),
             "n_bad": len(bad_ratios),
         },
         "counterfactual": {
@@ -248,7 +302,14 @@ async def _async_main(argv: list[str] | None = None) -> int:
                    default=os.environ.get("DB_PASSWORD"))
     p.add_argument("--prod-db", default=os.environ.get("DB_NAME", "nous"))
     p.add_argument("--agent-id", default=_DEFAULT_AGENT_ID)
-    p.add_argument("--factor", type=float, default=_DEFAULT_FACTOR)
+    p.add_argument("--factor", type=float, default=_DEFAULT_FACTOR,
+                   help="Scaling the prod write path should apply now.")
+    p.add_argument("--counterfactual-factor", type=float,
+                   default=_HISTORICAL_F058_FACTOR,
+                   help="Scaling hypothesis tested against pre-F058 data. "
+                        "Defaults to the historical F058 factor, NOT --factor: "
+                        "after the retirement --factor is 1.0 and would make "
+                        "step 2 a no-op that always passes.")
     p.add_argument("--strict", action="store_true",
                    help="Exit 1 on sanity fail or counterfactual Brier regression.")
     p.add_argument("--out", type=Path,
@@ -272,26 +333,33 @@ async def _async_main(argv: list[str] | None = None) -> int:
         # contributor adding a third query cannot accidentally write to
         # prod even if they bypass the existing two SELECTs.
         await conn.execute("SET default_transaction_read_only = on")
-        result = await run(conn, args.agent_id, args.factor)
+        result = await run(conn, args.agent_id, args.factor,
+                           args.counterfactual_factor)
     finally:
         await conn.close()
 
     print()
     print("=" * 84)
     print(f"F058 CALIBRATION VALIDATION — agent={args.agent_id}, "
-          f"factor={args.factor}")
+          f"factor={args.factor}, "
+          f"counterfactual={args.counterfactual_factor}")
     print("=" * 84)
     print()
     print("## Step 1 — Sanity (factor applied in prod write path)")
     s = result["sanity"]
-    print(f"   post-F058 rows: {s['n_post_f058']}")
-    if s["ok"]:
-        print(f"   [PASS] all rows show confidence == confidence_raw * "
-              f"{args.factor:.4f}")
+    print(f"   post-F058 rows: {s['n_post_f058']} "
+          f"({s['n_current_era']} in the current factor's era, "
+          f"{s['n_prior_era']} written under an earlier factor)")
+    if s["n_current_era"] == 0:
+        print(f"   [PASS] no rows written under factor {args.factor:.4f} yet")
+    elif s["ok"]:
+        print(f"   [PASS] all current-era rows show confidence == "
+              f"confidence_raw * {args.factor:.4f}")
     else:
-        print(f"   [FAIL] {s['n_bad']} rows have wrong ratio")
+        print(f"   [FAIL] {s['n_bad']} current-era rows have wrong ratio")
     print()
-    print("## Step 2 — Counterfactual (apply F058 to pre-F058 reviewed)")
+    print(f"## Step 2 — Counterfactual (apply "
+          f"{args.counterfactual_factor:.4f} to pre-F058 reviewed)")
     cf = result["counterfactual"]
     _print_summary(cf["raw"])
     _print_summary(cf["calibrated"])
@@ -320,7 +388,8 @@ async def _async_main(argv: list[str] | None = None) -> int:
     args.out_json.write_text(
         json.dumps(result, indent=2, default=str), encoding="utf-8"
     )
-    args.out.write_text("\n".join(_build_md(result, args.factor)),
+    args.out.write_text("\n".join(_build_md(result, args.factor,
+                                            args.counterfactual_factor)),
                         encoding="utf-8")
     print(f"\nWrote: {args.out}")
     print(f"Wrote: {args.out_json}")
@@ -330,20 +399,31 @@ async def _async_main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _build_md(result: dict, factor: float) -> list[str]:
+def _build_md(result: dict, factor: float,
+              counterfactual_factor: float = _HISTORICAL_F058_FACTOR,
+              ) -> list[str]:
     s = result["sanity"]
     cf = result["counterfactual"]
     pd = result["post_f058_direction"]
+    if s["n_current_era"] == 0:
+        sanity_line = (f"- **PASS** no rows written under factor "
+                       f"`{factor:.4f}` yet")
+    elif s["ok"]:
+        sanity_line = (f"- **PASS** all {s['n_current_era']} current-era rows "
+                       f"show `confidence = confidence_raw * {factor:.4f}`")
+    else:
+        sanity_line = (f"- **FAIL** {s['n_bad']} current-era rows have "
+                       f"wrong ratio")
     md = [
         "# F058 calibration validation",
         f"- agent_id: `{result['agent_id']}`",
         f"- factor: **{factor}**",
+        f"- counterfactual factor: **{counterfactual_factor}**",
         "",
         "## Step 1 — Sanity (factor applied in prod)",
-        f"- post-F058 rows: {s['n_post_f058']}",
-        (f"- **PASS** all rows show "
-         f"`confidence = confidence_raw * {factor:.4f}`"
-         if s["ok"] else f"- **FAIL** {s['n_bad']} rows have wrong ratio"),
+        f"- post-F058 rows: {s['n_post_f058']} "
+        f"({s['n_current_era']} current-era, {s['n_prior_era']} earlier era)",
+        sanity_line,
         "",
         "## Step 2 — Counterfactual on pre-F058 reviewed",
         "",
@@ -365,7 +445,8 @@ def _build_md(result: dict, factor: float) -> list[str]:
             "",
             f"- **\u0394 Brier**: {d_brier:+.4f}",
             f"- **\u0394 ECE**: {d_ece:+.4f}",
-            "- Aggregate gap collapses to ~0 by construction "
+            f"- Hypothesis tested: `confidence * {counterfactual_factor:.4f}`. "
+            "Aggregate gap collapses to ~0 by construction "
             "(factor derived from this same data); Brier/ECE deltas "
             "are NOT determined by the factor.",
         ]

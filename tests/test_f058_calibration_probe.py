@@ -6,9 +6,11 @@ import math
 import pytest
 
 from nous_eval.probes.f058_calibration import (
+    _HISTORICAL_F058_FACTOR,
     brier,
     ece,
     gap,
+    run,
     summarize,
     verdict_exit_code,
 )
@@ -150,3 +152,133 @@ def test_verdict_passes_on_tiny_ece_drift():
         },
     }
     assert verdict_exit_code(result) == 0
+
+
+# ---------------------------------------------------------------------------
+# Two-factor era handling (Codex P2, PR #640)
+# ---------------------------------------------------------------------------
+
+
+class _FakeConn:
+    """Serves the probe's two SELECTs off canned rows.
+
+    ``ratio_rows`` are (ratio, ) entries for the sanity cohort, IN created_at
+    order — the probe relies on that ordering to find the era boundary.
+    """
+
+    def __init__(self, ratio_rows, reviewed_rows=()):
+        self._ratios = list(ratio_rows)
+        self._reviewed = list(reviewed_rows)
+
+    async def fetch(self, query, *args):
+        if "NULLIF" in query:
+            assert "ORDER BY created_at" in query, (
+                "era detection depends on chronological order"
+            )
+            return [
+                {"confidence_raw": 0.8, "confidence": 0.8 * r, "r": r}
+                for r in self._ratios
+            ]
+        return self._reviewed
+
+
+def _reviewed(conf_outcomes, post=False):
+    return [
+        {"raw": c, "stored": c, "is_post_f058": post, "outcome": o}
+        for c, o in conf_outcomes
+    ]
+
+
+class TestSanityCohortIsEraScoped:
+    """Every row ever written under F058 carries confidence_raw, so the sanity
+    cohort spans both the 0.7627 era and the retired-to-1.0 era. Comparing the
+    old rows against the new factor made sanity_ok permanently false and
+    --strict permanently exit 1 no matter how correct the write path was.
+    """
+
+    @pytest.mark.asyncio
+    async def test_rows_from_the_retired_era_do_not_fail_the_new_factor(self):
+        conn = _FakeConn([0.7627] * 5 + [1.0] * 3)
+        result = await run(conn, "a", 1.0)
+        s = result["sanity"]
+        assert s["ok"] is True
+        assert s["n_post_f058"] == 8
+        assert s["n_prior_era"] == 5
+        assert s["n_current_era"] == 3
+        assert s["n_bad"] == 0
+
+    @pytest.mark.asyncio
+    async def test_no_rows_under_the_new_factor_yet_is_not_a_failure(self):
+        """Retirement deployed, nothing written since — vacuously fine."""
+        conn = _FakeConn([0.7627] * 5)
+        result = await run(conn, "a", 1.0)
+        assert result["sanity"]["ok"] is True
+        assert result["sanity"]["n_current_era"] == 0
+
+    @pytest.mark.asyncio
+    async def test_scaling_reverting_after_the_boundary_still_fails(self):
+        """The check must not be defanged: an old-factor row appearing AFTER
+        the era boundary is a live write-path regression."""
+        conn = _FakeConn([0.7627, 0.7627, 1.0, 1.0, 0.7627])
+        result = await run(conn, "a", 1.0)
+        assert result["sanity"]["ok"] is False
+        assert result["sanity"]["n_bad"] == 1
+
+    @pytest.mark.asyncio
+    async def test_write_path_dropping_scaling_mid_era_still_fails(self):
+        """Pre-retirement config (factor 0.7627): an unscaled row is the exact
+        bug step 1 exists to catch, and is still caught."""
+        conn = _FakeConn([0.7627, 0.7627, 1.0, 0.7627])
+        result = await run(conn, "a", 0.7627)
+        assert result["sanity"]["ok"] is False
+        assert result["sanity"]["n_bad"] == 1
+
+    @pytest.mark.asyncio
+    async def test_strict_verdict_no_longer_pinned_to_failure(self):
+        """End-to-end: the reported symptom was --strict exiting 1 forever."""
+        conn = _FakeConn(
+            [0.7627] * 4 + [1.0] * 2,
+            _reviewed([(0.9, "failure"), (0.9, "success"), (0.8, "failure")]),
+        )
+        result = await run(conn, "a", 1.0)
+        assert verdict_exit_code(result) == 0
+
+
+class TestCounterfactualUsesTheHistoricalFactor:
+    """Sibling defect Codex did not flag: `factor` was doing two jobs — "what
+    the write path applies now" and "the scaling hypothesis under test". They
+    were the same number until the retirement split them. Feeding the live 1.0
+    into step 2 multiplies by one, so the Brier/ECE gate passes vacuously.
+    """
+
+    _PRE = [(0.9, "failure"), (0.9, "success"), (0.8, "failure"),
+            (0.7, "success"), (0.95, "failure")]
+
+    @pytest.mark.asyncio
+    async def test_counterfactual_is_not_the_identity_after_retirement(self):
+        conn = _FakeConn([1.0], _reviewed(self._PRE))
+        result = await run(conn, "a", 1.0)
+        cf = result["counterfactual"]
+        assert result["counterfactual_factor"] == _HISTORICAL_F058_FACTOR
+        assert cf["calibrated"]["mean_conf"] == pytest.approx(
+            cf["raw"]["mean_conf"] * _HISTORICAL_F058_FACTOR
+        )
+        assert cf["calibrated"]["brier"] != cf["raw"]["brier"]
+
+    @pytest.mark.asyncio
+    async def test_live_factor_does_not_leak_into_the_hypothesis(self):
+        """--factor is independent of what step 2 tests."""
+        conn = _FakeConn([1.0], _reviewed(self._PRE))
+        a = await run(conn, "a", 1.0)
+        b = await run(conn, "a", 0.5)
+        assert (a["counterfactual"]["calibrated"]["brier"]
+                == b["counterfactual"]["calibrated"]["brier"])
+
+    @pytest.mark.asyncio
+    async def test_explicit_counterfactual_factor_is_honored(self):
+        conn = _FakeConn([1.0], _reviewed(self._PRE))
+        result = await run(conn, "a", 1.0, 0.5)
+        cf = result["counterfactual"]
+        assert cf["calibrated"]["mean_conf"] == pytest.approx(
+            cf["raw"]["mean_conf"] * 0.5
+        )
