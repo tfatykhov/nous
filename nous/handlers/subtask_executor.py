@@ -491,7 +491,12 @@ async def execute_hardened(
             )
     if notify_telegram:
         try:
-            await notify_telegram(subtask, last_result, last_payload)
+            # Normalized here too: the notification is an emission of the
+            # report, and must not show a forged confidence_reported either.
+            await notify_telegram(
+                subtask, last_result,
+                _normalized_report_payload(last_result, last_payload),
+            )
         except Exception:  # pragma: no cover — defensive
             logger.exception(
                 "Subtask %s notify_telegram failed", subtask.id.hex[:8],
@@ -555,6 +560,33 @@ def _build_retry_message(
     return msg if len(msg) <= 2000 else msg[:1997] + "..."
 
 
+def _normalized_report_payload(
+    last_result: ValidationResult, last_payload: dict | None
+) -> dict | None:
+    """Return the report JSON to persist and emit, with provenance intact.
+
+    The collector's raw payload is exactly what the model emitted, so it
+    carries neither the derived ``confidence_reported`` flag nor any
+    correction to a forged one. Persisting it verbatim meant a normal
+    omitted-confidence report never recorded ``confidence_reported: false``,
+    and a model that emitted ``confidence_reported: true`` had that forged
+    value stored and emitted even though SubtaskReport had already overruled
+    it in the validated copy — poisoning the very calibration signal the flag
+    exists to protect.
+
+    When validation produced a report, that model IS the normalized form, so
+    dump it (``extra="forbid"`` means a successful validation saw no keys
+    outside the model, making the dump lossless). Otherwise the payload was
+    rejected, so keep it verbatim for debugging but strip the derived field
+    so a rejected payload cannot smuggle it either.
+    """
+    if last_result.report is not None:
+        return last_result.report.model_dump(mode="json")
+    if last_payload is None:
+        return None
+    return {k: v for k, v in last_payload.items() if k != "confidence_reported"}
+
+
 async def _persist_outcome(
     heart,
     subtask,
@@ -573,7 +605,7 @@ async def _persist_outcome(
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         tool_calls_made=tool_calls_made,
-        report_jsonb=last_payload,
+        report_jsonb=_normalized_report_payload(last_result, last_payload),
         payload_schema_valid=payload_schema_valid,
     )
     if last_result.ok and last_result.report is not None:
