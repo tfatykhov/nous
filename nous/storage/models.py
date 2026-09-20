@@ -196,6 +196,14 @@ class Decision(Base):
     # `confidence` (above) holds the calibrated value used by all gates;
     # `confidence_raw` preserves the original for calibration eval.
     confidence_raw: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # F058 retirement: the factor actually applied to produce `confidence`,
+    # and when. Without these the calibration probe has to infer the factor
+    # from the confidence/confidence_raw ratio, which no timestamp column can
+    # disambiguate once _update starts rescaling historical rows.
+    calibration_factor: Mapped[float | None] = mapped_column(Float, nullable=True)
+    calibration_applied_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     category: Mapped[str] = mapped_column(String(50), nullable=False)
     stakes: Mapped[str] = mapped_column(String(20), nullable=False)
     quality_score: Mapped[float | None] = mapped_column(Float)
