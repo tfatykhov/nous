@@ -9,6 +9,7 @@ from nous.api.subtask_tools import (
     SubtaskReportCollector,
     make_submit_final_report_executor,
 )
+from nous.heart.subtask_report import DEFAULT_CONFIDENCE
 
 
 class TestSchema:
@@ -23,7 +24,9 @@ class TestSchema:
         sch = SUBMIT_FINAL_REPORT_SCHEMA["input_schema"]
         assert sch["type"] == "object"
         assert sch["additionalProperties"] is False
-        assert set(sch["required"]) == {"summary", "confidence"}
+        # confidence is intentionally NOT required — an omitted soft metadata
+        # field must not discard a complete report.
+        assert set(sch["required"]) == {"summary"}
 
     def test_summary_min_length_50(self):
         sch = SUBMIT_FINAL_REPORT_SCHEMA["input_schema"]
@@ -33,6 +36,11 @@ class TestSchema:
         c = SUBMIT_FINAL_REPORT_SCHEMA["input_schema"]["properties"]["confidence"]
         assert c["minimum"] == 0.0
         assert c["maximum"] == 1.0
+
+    def test_confidence_has_default(self):
+        """Tool schema must mirror SubtaskReport's fail-open default."""
+        c = SUBMIT_FINAL_REPORT_SCHEMA["input_schema"]["properties"]["confidence"]
+        assert c["default"] == DEFAULT_CONFIDENCE
 
     def test_optional_fields_have_defaults(self):
         props = SUBMIT_FINAL_REPORT_SCHEMA["input_schema"]["properties"]
