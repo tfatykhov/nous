@@ -15,6 +15,11 @@ from pydantic import BaseModel, Field, model_validator
 CategoryType = Literal["architecture", "process", "tooling", "security", "integration"]
 StakesType = Literal["low", "medium", "high", "critical"]
 OutcomeType = Literal["pending", "success", "partial", "failure", "noise", "superseded"]
+# The outcomes that grade a prediction: exactly the Brier/ECE denominator in
+# calibration.py. Every other resolved outcome is a non-prediction (a sweep
+# artifact or a replaced decision) and is excluded from calibration.
+GRADED_OUTCOMES: tuple[str, ...] = ("success", "partial", "failure")
+NON_PREDICTION_OUTCOMES: tuple[str, ...] = ("noise", "superseded")
 RelationType = Literal[
     "supports", "contradicts", "supersedes", "related_to", "caused_by",
     "informed_by", "evidence_for", "discussed_in", "extracted_from",
