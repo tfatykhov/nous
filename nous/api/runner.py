@@ -34,6 +34,7 @@ from nous.api.attachments import (
 from nous.api.cache_optimizer import CacheBreakDetector
 from nous.api.cache_optimizer import _hash as cache_hash
 from nous.api.compaction import ConversationCompactor
+from nous.api.execution_context import ExecutionContext, resolve_context
 from nous.api.models import (  # noqa: F401 — re-exported for backward compat
     ApiResponse,
     Attachment,
@@ -232,6 +233,41 @@ class AgentRunner:
             # Persistence is best-effort — never let it break a turn.
             logger.debug("F026 persistence failed (suppressed)", exc_info=True)
 
+    def _authorize_tool_call(
+        self, ctx: ExecutionContext, tool_name: str,
+        offered_names: frozenset[str], session_id: str | None,
+    ) -> str | None:
+        """Return a refusal for a call the harness must not execute, else None.
+
+        Harness Phase 1a: the single choke point both loops call before gating
+        and dispatch. Today it only knows the OFFERED set; Phase 2a adds the
+        capability policy here, so one place decides whether a call may run.
+        """
+        mode = self._settings.tool_offered_set_enforcement_mode
+        if mode == "off" or tool_name in offered_names:
+            return None
+        logger.warning(
+            "Harness: %s unoffered tool call %r (context=%s, session=%s)",
+            "refused" if mode == "enforce" else "allowed (warn mode)",
+            tool_name, ctx.kind, session_id,
+        )
+        self._log_f026_decision(
+            "harness_unoffered_tool_call",
+            {
+                "tool_name": tool_name,
+                "context_kind": ctx.kind,
+                "mode": mode,
+                "offered_count": len(offered_names),
+            },
+            session_id=session_id,
+        )
+        if mode != "enforce":
+            return None
+        return (
+            f"Tool error: '{tool_name}' is not available in this turn. "
+            "Use only the tools offered to you."
+        )
+
     def _log_compaction_guard(
         self, event_type: str, data: dict, session_id: str
     ) -> None:
@@ -358,6 +394,9 @@ class AgentRunner:
         # `dag_nodes.last_activity_at`. None on chat / non-DAG paths — ping
         # site short-circuits.
         dag_node_id: UUID | None = None,
+        # Harness Phase 1a: which harness path runs this turn. Callers that
+        # start a background turn name it; chat/MCP pass interactive/mcp.
+        context: ExecutionContext | None = None,
     ) -> tuple[str, TurnContext, dict[str, int]]:
         """Execute a single conversational turn.
 
@@ -374,6 +413,8 @@ class AgentRunner:
         10. Return (response_text, turn_context)
         """
         _agent_id = agent_id or self._settings.agent_id
+        _ctx = resolve_context(context, is_background=is_background, session_id=session_id)
+        is_background = _ctx.is_background
 
         # Refresh session activity synchronously BEFORE any long-running
         # work. The event-bus path (turn_completed) only fires after the
@@ -608,6 +649,7 @@ class AgentRunner:
                             force_tool_on_penultimate=force_tool_on_penultimate,
                             dag_node_id=dag_node_id,
                             refuse_active=getattr(turn_context, "refuse_active", False),  # F078 R6
+                            context=_ctx,  # harness Phase 1a
                         )
                     finally:
                         CURRENT_TURN_EXCLUDE_IDS.reset(_f071_token)
@@ -1038,6 +1080,8 @@ class AgentRunner:
             raise RuntimeError("No tool dispatcher set -- call set_dispatcher() first")
 
         _agent_id = agent_id or self._settings.agent_id
+        # stream_chat serves REST /chat/stream only — a person is in the loop.
+        _ctx = ExecutionContext(kind="interactive", session_id=session_id)
 
         # Sync activity refresh before any long-running work. See run_turn
         # for rationale — the bus is queued, so message_received emission
@@ -1173,6 +1217,8 @@ class AgentRunner:
                 _before = len(tools)
                 tools = [t for t in tools if t["name"] not in _refuse_denylist]
                 logger.info("F078 refuse: stripped %d state-modifying tool(s) (streaming)", _before - len(tools))
+            # Harness Phase 1a: exactly what the model is offered this turn.
+            offered_names = frozenset(t["name"] for t in tools)
             messages = self._format_messages(conversation)
 
             # F036: Compactor needs flat string for token estimation
@@ -1466,6 +1512,27 @@ class AgentRunner:
                             yield StreamEvent(type="tool_end", tool_name=tc["name"])
                             continue
 
+                        # Harness Phase 1a: was this tool offered this turn?
+                        refusal = self._authorize_tool_call(_ctx, tc["name"], offered_names, session_id)
+                        if refusal is not None:
+                            tool_results_for_message.append({
+                                "type": "tool_result",
+                                "tool_use_id": tc["id"],
+                                "content": refusal,
+                                "is_error": True,
+                            })
+                            all_tool_results.append(ToolResult(
+                                tool_name=tc["name"],
+                                arguments=tc.get("input", {}),
+                                result=None,
+                                error=refusal,
+                                duration_ms=0,
+                            ))
+                            if ledger:
+                                ledger.record(tc["name"], tc.get("input", {}), refusal, "blocked")
+                            yield StreamEvent(type="tool_end", tool_name=tc["name"])
+                            continue
+
                         # F022: Auto-inject source_episode_id into learn_fact.
                         # Use a local variable (not tc["input"]) to avoid mutating the
                         # shared block dict that content_blocks already references.
@@ -1510,6 +1577,7 @@ class AgentRunner:
                             async for item in self._dispatch_with_keepalive(
                                 tc["name"], dispatch_input, session_id=session_id,
                                 turn_number=_stream_turn_number,  # F091
+                                context=_ctx,  # harness Phase 1a
                             ):
                                 if isinstance(item, StreamEvent):
                                     yield item
@@ -1677,6 +1745,7 @@ class AgentRunner:
         # other session's turn — a row whose session_id and turn_number point
         # at different turns, which is worse than a NULL.
         turn_number: int | None = None,
+        context: ExecutionContext | None = None,  # harness Phase 1a
     ) -> tuple[str, list[ToolResult], dict[str, int], list[str]]:
         """Run the tool use loop until completion or max_turns.
 
@@ -1691,6 +1760,9 @@ class AgentRunner:
         """
         if not self._dispatcher:
             raise RuntimeError("No tool dispatcher set -- call set_dispatcher() first")
+
+        ctx = resolve_context(context, is_background=is_background, session_id=session_id)
+        is_background = ctx.is_background
 
         # Get base tools for current frame (D5)
         base_tools = self._dispatcher.available_tools(frame_id)
@@ -1771,6 +1843,8 @@ class AgentRunner:
             if extra_tools:
                 for _name, (_schema, _exec) in extra_tools.items():
                     tools.append(_schema)
+            # Harness Phase 1a: exactly what the model was offered this iteration.
+            offered_names = frozenset(t["name"] for t in tools)
 
             # F061: force the terminal tool on the LAST TWO allowed turns
             # (penultimate + ultimate) when force_tool_on_penultimate is set
@@ -1917,6 +1991,26 @@ class AgentRunner:
                         ))
                         continue
 
+                    # Harness Phase 1a: was this tool offered this iteration?
+                    refusal = self._authorize_tool_call(ctx, tool_name, offered_names, session_id)
+                    if refusal is not None:
+                        tool_results_for_message.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": refusal,
+                            "is_error": True,
+                        })
+                        all_tool_results.append(ToolResult(
+                            tool_name=tool_name,
+                            arguments=tool_input,
+                            result=None,
+                            error=refusal,
+                            duration_ms=0,
+                        ))
+                        if ledger:
+                            ledger.record(tool_name, tool_input, refusal, "blocked")
+                        continue
+
                     # F022: Auto-inject source_episode_id into learn_fact.
                     tool_input = self._maybe_inject_episode_id(tool_name, tool_input, session_id)
 
@@ -1990,6 +2084,7 @@ class AgentRunner:
                                     tool_name, tool_input, session_id=session_id,
                                     is_background=is_background,
                                     turn_number=turn_number,  # F091 (caller-captured)
+                                    context=ctx,  # harness Phase 1a
                                 )
                             finally:
                                 await self._stop_activity_heartbeat(_hb)
@@ -2711,6 +2806,7 @@ Rules:
     async def _dispatch_with_keepalive(
         self, name: str, args: dict[str, Any], session_id: str | None = None,
         turn_number: int | None = None,  # F091: caller-captured, see _tool_loop
+        context: ExecutionContext | None = None,  # harness Phase 1a
     ) -> AsyncGenerator[StreamEvent | tuple[str, bool], None]:
         """Execute a tool, yielding keepalive events during long execution.
 
@@ -2726,6 +2822,7 @@ Rules:
                 self._dispatcher.dispatch(
                     name, args, session_id=session_id,
                     turn_number=turn_number,  # F091 (caller-captured)
+                    context=context,  # harness Phase 1a
                 ),
                 timeout=timeout,
             )

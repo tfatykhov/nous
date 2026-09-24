@@ -14,6 +14,7 @@ from uuid import uuid4
 from croniter import croniter
 from sqlalchemy import select, update
 
+from nous.api.execution_context import ExecutionContext
 from nous.heartbeat.registry import BaseCheck
 from nous.heartbeat.schemas import CheckResult, Finding
 
@@ -138,6 +139,7 @@ class DynamicCheck(BaseCheck):
                 tool_filter=self._tools if self._tools else None,
                 model_override=self._model_override,
                 is_background=True,
+                context=ExecutionContext(kind="heartbeat_check", session_id=session_id),
             )
 
             findings = self._parse_findings(response_text or "")

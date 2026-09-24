@@ -1,4 +1,4 @@
-# Harness Autonomy — Phase 0 + Phase 1 Implementation Plan (v2)
+# Harness Autonomy — Phase 0 + Phase 1 Implementation Plan (v2.1)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -51,6 +51,20 @@
 | 24 | Phase 0 before 1a: SMTP timeout, `send_email` → external (devil) | New PR 0. **Not adopted:** DAG node `max_attempts: 1` (removes one of two retry layers — the DAG fix stage re-sends too — at a reliability cost; Phase 2b's key covers every layer). **Deferred to 2a:** stripping spawn tools from `dag_summary` turns — prod shows those turns spawning email sends, so it is a behavior change the policy table must decide explicitly |
 | 25 | Owner's late close vs sweep-set `unknown` (db P3) | Close accepts `pending` or `unknown` |
 | 26 | Build row outside `try` (db P3) | Inside |
+
+### Re-review v2 → v2.1
+
+| # | Finding | Fix |
+|---|---|---|
+| R1 | `_log_f026_decision` fires `asyncio.create_task`, so `emit_event` is *called* but not yet *awaited* when `_run_loop` returns — `assert_awaited` fails and `assert_not_awaited` passes vacuously | Tests use `assert_called()` / `call_args.args[:2]` / `assert_not_called()` |
+| R2 | `fork(self, api_client)` takes an argument | `r.fork(MagicMock())` |
+| R3 | A non-dict `tool_input` does not raise in `durable_key_args` (`in` on a str is a substring test) | `_insert` rejects non-dict input first thing inside its `try` |
+| R4 | `tests/test_streaming.py:770,802` assert exact `dispatch` kwargs | Task 2 adds `context=ANY` there |
+| R5 | The `-p` pattern mangles `find -path`, `cp -pr` and redacts the wrong token of `openssl -passin` | `-p<secret>` redaction scoped to the mysql family and `sshpass`; `Authorization` consumes an optional scheme word; `--api-key`/`--token`, JSON `"password":` added; benign-command test added |
+| R6 | `last_prune=0.0` vs monotonic `loop.time()` skips the startup prune on young hosts; two contradictory startup-sweep versions; unguarded inline sweep | One version: inline awaited, guarded, bounded startup sweep; the loop prunes when `last_prune is None` |
+| R7 | `_DURABLE_ARGS` names that do not exist (`learn_skill`, `create_censor`, `schedule_task`, `write_file.file_path`) | Real names: `learn_skill`→`source`/`content`; `create_censor`→`domain`,`action`/`reason`,`trigger_pattern`; `schedule_task`→`every`,`when`; `write_file`→`path` |
+| R8 | `stream_chat` snippet drops `result_text, is_error = "", False` and `start_time` | Kept |
+| R9 | `_ledger_open` after `_start_activity_heartbeat` leaks `_hb` on a cancel during the insert | `_ledger_open` runs before `_hb` starts |
 
 ---
 
@@ -654,7 +668,10 @@ and `context=ctx,` in its `self._dispatcher.dispatch(...)` call.
 and `context=_ctx,` in the `self._dispatch_with_keepalive(...)` call; `_dispatch_with_keepalive` gains `context: ExecutionContext | None = None` and forwards `context=context` to `dispatch`.
 
 The three hand-written doubles become
-`async def dispatch(self, name, inp, session_id=None, is_background=False, turn_number=None, context=None):`.
+`async def dispatch(self, name, inp, session_id=None, is_background=False, turn_number=None, context=None):`,
+and the two exact-kwargs assertions in `tests/test_streaming.py` (~lines 770 and 802,
+`dispatch.assert_called_once_with("web_search", {...}, session_id="s1", turn_number=1)`) gain
+`context=ANY`.
 
 - [ ] **Step 4:** `uv run pytest tests/test_runner_authorization.py tests/test_runner.py tests/test_runner_background.py tests/test_streaming.py tests/test_streaming_keepalive.py -q` → green.
 - [ ] **Step 5:** commit `feat(runner): thread ExecutionContext run_turn -> _tool_loop -> dispatch (harness Phase 1a)`.
@@ -676,8 +693,10 @@ async def test_warn_mode_runs_the_call_and_records_it():
     r._call_api = _one_tool_call_then_done("bash")
     await _run_loop(r, is_background=True, tool_filter=["recall_deep"])
     assert [c[0] for c in d.calls] == ["bash"]
-    r._brain.emit_event.assert_awaited()
-    event_type, data = r._brain.emit_event.await_args.args[:2]
+    # _log_f026_decision schedules the write with asyncio.create_task: the
+    # coroutine was CALLED (created) but has not run yet when the loop returns.
+    r._brain.emit_event.assert_called()
+    event_type, data = r._brain.emit_event.call_args.args[:2]
     assert event_type == "harness_unoffered_tool_call"
     assert data["tool_name"] == "bash" and data["mode"] == "warn" and data["context_kind"] == "background"
 
@@ -710,7 +729,7 @@ async def test_offered_tool_runs_in_every_mode():
         r._call_api = _one_tool_call_then_done("recall_deep")
         await _run_loop(r)
         assert [c[0] for c in d.calls] == ["recall_deep"]
-        r._brain.emit_event.assert_not_awaited()
+        r._brain.emit_event.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -735,7 +754,7 @@ async def test_off_mode_is_silent():
     r._call_api = _one_tool_call_then_done("bash")
     await _run_loop(r, is_background=True, tool_filter=["recall_deep"])
     assert [c[0] for c in d.calls] == ["bash"]
-    r._brain.emit_event.assert_not_awaited()
+    r._brain.emit_event.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1173,13 +1192,33 @@ def test_redaction_runs_before_truncation():
 @pytest.mark.parametrize("secret", [
     "curl -u admin:hunter2 https://x",
     "mysql -phunter2 -u root",
+    "sshpass -p hunter2 ssh host",
     "tool --password=hunter2",
+    "tool --api-key hunter2",
     "curl -H 'X-Api-Key: hunter2' https://x",
+    "curl -H 'Authorization: Basic hunter2' https://x",
+    "curl -H 'Authorization: token hunter2' https://x",
     "https://x/api?api_key=hunter2",
     "token=hunter2",
+    '{"password": "hunter2"}',
+    "postgresql://u:pa@hunter2@db:5432/x",
 ])
 def test_redact_text_covers_common_secret_shapes(secret):
     assert "hunter2" not in redact_text(secret)
+
+
+@pytest.mark.parametrize("benign", [
+    "ls -la /tmp",
+    "find . -path ./x -prune -o -print",
+    "cp -pr a b",
+    "mkdir -p /tmp/x/y",
+    "ssh -p 2222 host",
+    "python -m pytest -p no:cacheprovider",
+    "git commit -m 'x'",
+    "pip install -r requirements.txt",
+])
+def test_redact_text_leaves_ordinary_commands_alone(benign):
+    assert redact_text(benign) == benign
 
 
 # ---- LedgerStore (DB) ----
@@ -1191,13 +1230,13 @@ async def test_open_writes_a_pending_row_with_context(store, db):
                            dag_id=dag_id, dag_node_id=node_id)
     entry_id = await store.open_entry(
         context=ctx, tool_name="write_file",
-        tool_input={"file_path": "/tmp/nous-workspace/x.txt", "content": "hi"}, turn=2,
+        tool_input={"path": "/tmp/nous-workspace/x.txt", "content": "hi"}, turn=2,
     )
     row = await _row(db, entry_id)
     assert (row.status, row.context_kind, row.dag_id, row.dag_node_id, row.turn, row.parent_session_id) == (
         "pending", "dag_node", dag_id, node_id, 2, "dag-summary-1")
     assert row.side_effect_type == "write"
-    assert row.key_args["file_path"] == "/tmp/nous-workspace/x.txt"
+    assert row.key_args["path"] == "/tmp/nous-workspace/x.txt"
     assert "content" not in row.key_args and row.completed_at is None
 
 
@@ -1325,12 +1364,17 @@ async def test_prune_is_agent_scoped(store, db, agent):
 _REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"[A-Z_]{2,}=\S+"), "[REDACTED_ENV]"),
     (re.compile(r"Bearer\s+\S+", re.IGNORECASE), "Bearer [REDACTED]"),
-    (re.compile(r"://[^/\s:@]+:[^@\s]+@"), "://[REDACTED]@"),
+    # user:password@host - the password may itself contain '@', so match to the LAST '@'
+    (re.compile(r"://[^/\s:@]+:\S+@"), "://[REDACTED]@"),
     (re.compile(r"(-u\s+)[^\s:]+:\S+"), r"\1[REDACTED]"),
-    (re.compile(r"(\s-p)\S+"), r"\1[REDACTED]"),
-    (re.compile(r"(--password[=\s])\S+", re.IGNORECASE), r"\1[REDACTED]"),
-    (re.compile(r"((?:x-api-key|api-key|authorization)\s*:\s*)[^'\"\s]+", re.IGNORECASE), r"\1[REDACTED]"),
-    (re.compile(r"((?:api_key|apikey|access_token|token|secret|password)=)[^&\s'\"]+", re.IGNORECASE), r"\1[REDACTED]"),
+    # -p<password> only for tools that take it that way (not find -path, cp -pr, ssh -p 22)
+    (re.compile(r"(\b(?:mysql|mysqldump|mysqladmin|mariadb)\b[^|;&]*?\s-p)(?!\s)\S+"), r"\1[REDACTED]"),
+    (re.compile(r"(\bsshpass\s+-p\s*)\S+"), r"\1[REDACTED]"),
+    (re.compile(r"(--(?:password|passwd|api-key|api_key|token|secret)[=\s])\S+", re.IGNORECASE), r"\1[REDACTED]"),
+    # header value, including an optional scheme word (Basic / token / Bearer)
+    (re.compile(r"((?:x-api-key|api-key|authorization)\s*:\s*)(?:[A-Za-z]+\s+)?[^'\"\s]+", re.IGNORECASE), r"\1[REDACTED]"),
+    (re.compile(r"((?:api_key|apikey|access_token|token|secret|password|passwd)=)[^&\s'\"]+", re.IGNORECASE), r"\1[REDACTED]"),
+    (re.compile(r'("(?:password|passwd|secret|token|api_key|apikey)"\s*:\s*")[^"]*"', re.IGNORECASE), r'\1[REDACTED]"'),
 ]
 
 
@@ -1382,19 +1426,19 @@ _TERMINAL = frozenset(s for s in LEDGER_STATUSES if s != "pending")
 # Per-tool durable argument policy: (values kept after redaction, values stored as sha256+len).
 # A tool not listed here stores its argument NAMES only.
 _DURABLE_ARGS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "bash": (("command", "cmd"), ()),
-    "write_file": (("path", "file_path"), ("content",)),
+    "bash": (("command",), ()),
+    "write_file": (("path",), ("content",)),
     "run_python": ((), ("code",)),
     "send_email": (("to", "cc", "subject"), ("body", "html_body")),
     "send_file": (("file_path", "chat_id"), ("caption",)),
-    "learn_fact": (("subject", "category"), ("content", "fact")),
-    "learn_skill": (("name", "url", "path"), ("content",)),
-    "record_decision": (("category", "stakes"), ("description", "decision")),
-    "create_censor": (("name", "action"), ("expression", "trigger_pattern")),
+    "learn_fact": (("subject", "category"), ("content",)),
+    "learn_skill": (("source",), ("content",)),
+    "record_decision": (("category", "stakes"), ("description",)),
+    "create_censor": (("domain", "action"), ("reason", "trigger_pattern")),
     "spawn_task": (("frame_type",), ("task",)),
     "spawn_sync": (("frame_type",), ("task",)),
-    "schedule_task": (("schedule", "frame_type"), ("task",)),
-    "cancel_task": (("task_id", "id"), ()),
+    "schedule_task": (("every", "when", "frame_type"), ("task",)),
+    "cancel_task": (("task_id",), ()),
     "heartbeat_check_create": (("name",), ("prompt",)),
     "heartbeat_check_manage": (("action", "name"), ()),
     "dag_create": (("name",), ("nodes",)),
@@ -1512,6 +1556,8 @@ class LedgerStore:
                       turn: int | None, status: str, result_summary: str | None) -> UUID | None:
         entry_id = uuid4()
         try:
+            if not isinstance(tool_input, dict):
+                raise TypeError(f"tool_input must be a dict, got {type(tool_input).__name__}")
             side_effect = classify_side_effect(tool_name, tool_input)
             if side_effect == "none":
                 return None
@@ -1550,8 +1596,8 @@ def _summary(text: str | None) -> str | None:
     return redact_text(text)[:RESULT_SUMMARY_CHARS]
 ```
 
-> `classify_side_effect("learn_fact", "not-a-dict")` does not raise, but `durable_key_args`
-> iterates `args` → `TypeError` inside the `try` → `LedgerWriteError` (the test asserts this).
+> A non-dict `tool_input` is rejected explicitly (neither `classify_side_effect` nor
+> `durable_key_args` would raise on a str) → `LedgerWriteError`, which the test asserts.
 > If `completed_at=func.now()` on an ORM insert does not compile on SQLite through
 > `sqlite_compat`, use `datetime.now(UTC)` for the insert path only and keep `func.now()` in the
 > UPDATEs.
@@ -1718,9 +1764,11 @@ async def test_extra_tools_are_not_persisted():
 
 
 def test_fork_shares_the_ledger_store():
+    from unittest.mock import MagicMock
+
     store = _FakeStore()
     r, _ = _runner(store)
-    assert r.fork()._ledger_store is store
+    assert r.fork(MagicMock())._ledger_store is store
 ```
 
 Streaming (using `tests/test_streaming.py`'s fake generator): a `stream_chat` tool call whose
@@ -1797,7 +1845,9 @@ class DispatchOutcome(NamedTuple):
   `await self._ledger_blocked(ctx, tool_name, tool_input, ledger.current_turn if ledger else None, refusal)`;
 - ActionGate `enforce` branch: after its `ledger.record(..., "blocked")`,
   `await self._ledger_blocked(ctx, tool_name, tool_input, ledger.current_turn, result_text)`;
-- dispatcher branch (fold the existing `_hb` try/finally — exactly one `_stop_activity_heartbeat`):
+- dispatcher branch (fold the existing `_hb` try/finally — exactly one `_stop_activity_heartbeat`).
+  `_ledger_open` runs **before** `_hb = self._start_activity_heartbeat(...)`, so a cancellation
+  during the insert cannot leave the activity heartbeat running:
 
 ```python
                             entry_id = await self._ledger_open(
@@ -1832,6 +1882,8 @@ annotation `AsyncGenerator[StreamEvent | DispatchOutcome, None]`.
 the dispatch site:
 
 ```python
+                            start_time = time.monotonic()
+                            result_text, is_error = "", False
                             entry_id = await self._ledger_open(
                                 _ctx, tc["name"], dispatch_input, ledger.current_turn if ledger else None,
                             )
@@ -1937,45 +1989,47 @@ def effective_orphan_threshold(settings: Any) -> float:
         )
         runner.set_ledger_store(ledger_store)
 
+        # Startup sweep: inline, awaited, bounded, guarded. Every row still
+        # pending belongs to the previous process (one process per agent_id),
+        # so its outcome is unknown. Runs before the subtask pool and heartbeat
+        # start (both are created later in create_components), so no live
+        # dispatch can be caught by it; a row it races anyway is healed by the
+        # owner's close, which accepts 'unknown'.
+        try:
+            n = await asyncio.wait_for(
+                ledger_store.mark_orphans_unknown(older_than_seconds=None), timeout=30,
+            )
+            if n:
+                logger.warning("Harness: %d execution-ledger rows orphaned by the previous process -> unknown", n)
+        except Exception:
+            logger.warning("Harness: startup execution-ledger sweep failed", exc_info=True)
+
         async def _execution_ledger_maintenance_loop():
-            # Startup FIRST (a process restarted daily must still prune — the
-            # F091 lesson), then every sweep interval; prune at most daily.
-            first = True
-            last_prune = 0.0
+            # Prune at startup (a process restarted daily must still prune -
+            # the F091 lesson) and then at most daily; sweep stale pending rows
+            # every interval.
+            last_prune: float | None = None
             loop = asyncio.get_running_loop()
             while True:
                 try:
-                    if first:
-                        # Every row still pending belongs to the previous process
-                        # (one process per agent_id): its outcome is unknown.
-                        n = await ledger_store.mark_orphans_unknown(older_than_seconds=None)
-                        if n:
-                            logger.warning("Harness: %d execution-ledger rows orphaned by the previous process -> unknown", n)
-                        first = False
-                    else:
-                        await asyncio.sleep(settings.execution_ledger_sweep_interval_seconds)
-                        await ledger_store.mark_orphans_unknown(
-                            older_than_seconds=effective_orphan_threshold(settings)
-                        )
-                    if settings.execution_ledger_retention_days > 0 and loop.time() - last_prune >= 86400:
+                    if settings.execution_ledger_retention_days > 0 and (
+                        last_prune is None or loop.time() - last_prune >= 86400
+                    ):
                         n = await ledger_store.prune(retention_days=settings.execution_ledger_retention_days)
                         last_prune = loop.time()
                         logger.info("Harness: execution ledger retention pruned %d rows", n)
+                    await asyncio.sleep(settings.execution_ledger_sweep_interval_seconds)
+                    await ledger_store.mark_orphans_unknown(
+                        older_than_seconds=effective_orphan_threshold(settings)
+                    )
                 except asyncio.CancelledError:
                     break
                 except Exception:
                     logger.warning("Harness: execution ledger maintenance failed", exc_info=True)
+                    await asyncio.sleep(60)
 
         execution_ledger_task = asyncio.create_task(_execution_ledger_maintenance_loop())
 ```
-
-**Ordering note:** the loop's first iteration must run before any worker can open a new row.
-`create_components` builds the runner at ~527 and starts the subtask pool (~774+) and heartbeat
-(~879+) later; `create_task` does not run until the next await, so call
-`await asyncio.sleep(0)` right after `create_task` to let the startup sweep's first statement
-start, OR run the startup `mark_orphans_unknown(older_than_seconds=None)` inline (awaited) before
-`create_task` and start the loop with `first=False`. **Prefer the inline awaited startup sweep** —
-it is deterministic.
 
 Return dict (~1100): add `"ledger_store": ledger_store, "execution_ledger_task": execution_ledger_task,`.
 `shutdown_components` (~1178), beside the retrieval-log task block:

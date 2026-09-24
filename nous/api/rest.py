@@ -52,6 +52,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
 
+from nous.api.execution_context import ExecutionContext
 from nous.api.models import Attachment
 from nous.api.runner import AgentRunner
 from nous.brain import Brain
@@ -138,6 +139,7 @@ def create_app(
                 session_id, message, platform=platform,
                 user_id=user_id, user_display_name=user_display_name,
                 attachments=attachments or None,
+                context=ExecutionContext(kind="interactive", session_id=session_id),
             )
             result: dict[str, Any] = {
                 "response": response_text,

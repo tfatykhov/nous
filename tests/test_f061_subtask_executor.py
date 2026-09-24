@@ -134,6 +134,27 @@ async def test_happy_path_one_attempt_completes():
     assert kwargs["tokens_out"] == 50
     assert kwargs["tool_calls_made"] == 1
     assert kwargs["report_jsonb"]["confidence"] == 0.9
+    # Harness Phase 1a: the hardened executor derives the context from the row.
+    ctx = runner.run_turn.await_args.kwargs["context"]
+    assert (ctx.kind, ctx.subtask_id, ctx.session_id) == ("subtask", subtask.id, "sess-1")
+
+
+@pytest.mark.asyncio
+async def test_dag_node_subtask_runs_as_a_dag_node_context():
+    """A row stamped by the DAG orchestrator runs under a dag_node context."""
+    runner = _scripted_runner(scripted_payloads=[{
+        "summary": "Fetched the premarket data and wrote it to the workspace for the next node.",
+        "confidence": 0.9,
+    }])
+    dag_id, node_id = uuid.uuid4(), uuid.uuid4()
+    subtask = _make_subtask(
+        metadata_={"dag_id": str(dag_id), "node_name": "fetch"}, dag_node_id=node_id,
+    )
+    await execute_hardened(
+        subtask, "sess-dag", runner=runner, heart=_make_heart_mock(), settings=_make_settings(),
+    )
+    ctx = runner.run_turn.await_args.kwargs["context"]
+    assert (ctx.kind, ctx.dag_id, ctx.dag_node_id, ctx.dag_node_name) == ("dag_node", dag_id, node_id, "fetch")
 
 
 @pytest.mark.asyncio

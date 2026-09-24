@@ -1,0 +1,355 @@
+"""Harness Phase 1a: context threading + offered-set measurement/enforcement."""
+
+from __future__ import annotations
+
+import pytest
+
+from nous.api.execution_context import ExecutionContext
+from nous.api.models import ApiResponse
+from nous.api.runner import AgentRunner, Conversation, Message
+from nous.config import Settings
+from tests.test_runner_background import _MockBrain, _MockCognitive, _MockHeart
+
+
+def _settings(**overrides) -> Settings:
+    return Settings(_env_file=None, ANTHROPIC_API_KEY="test-key", agent_id="test-agent", **overrides)
+
+
+class _RecordingDispatcher:
+    """Offers ``offered``; records every dispatch (name, context, is_background)."""
+
+    def __init__(self, offered, store=None):
+        self.offered = list(offered)
+        self.store = store
+        self.calls: list[tuple[str, ExecutionContext | None, bool]] = []
+
+    def available_tools(self, frame_id):
+        return [{"name": n, "description": n, "input_schema": {"type": "object"}} for n in self.offered]
+
+    async def dispatch(self, name, inp, session_id=None, is_background=False,
+                       turn_number=None, context=None):
+        if self.store is not None:
+            self.store.events.append(("dispatch", name))
+        self.calls.append((name, context, is_background))
+        return f"{name} ran", False
+
+
+def _one_tool_call_then_done(tool_name: str):
+    calls = {"n": 0}
+
+    async def fake_call_api(system_prompt, messages, tools=None, skip_thinking=False,
+                            model_override=None, is_background=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ApiResponse(
+                content=[{"type": "tool_use", "id": "t1", "name": tool_name, "input": {}}],
+                stop_reason="tool_use",
+            )
+        return ApiResponse(content=[{"type": "text", "text": "done"}], stop_reason="end_turn")
+
+    return fake_call_api
+
+
+async def _run_loop(runner: AgentRunner, **kwargs):
+    conv = Conversation(session_id="s1")
+    conv.messages.append(Message(role="user", content="go"))
+    try:
+        return await runner._tool_loop(
+            system_prompt="sys", conversation=conv, frame_id="conversation",
+            session_id="s1", **kwargs,
+        )
+    finally:
+        runner._api_shared = True
+        await runner.close()
+
+
+def _runner(offered, **settings_overrides):
+    r = AgentRunner(_MockCognitive(), _MockBrain(), _MockHeart(), _settings(**settings_overrides))
+    d = _RecordingDispatcher(offered)
+    r.set_dispatcher(d)
+    return r, d
+
+
+# ---------------------------------------------------------------------------
+# Task 2: context threading
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_passes_the_explicit_context_to_dispatch():
+    r, d = _runner(["recall_deep"])
+    r._call_api = _one_tool_call_then_done("recall_deep")
+    ctx = ExecutionContext(kind="heartbeat_triage", session_id="s1")
+    await _run_loop(r, is_background=True, context=ctx)
+    assert d.calls == [("recall_deep", ctx, True)]
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_without_context_resolves_a_generic_one():
+    r, d = _runner(["recall_deep"])
+    r._call_api = _one_tool_call_then_done("recall_deep")
+    await _run_loop(r, is_background=True)
+    ((_name, ctx, is_bg),) = d.calls
+    assert ctx.kind == "background" and ctx.session_id == "s1" and is_bg is True
+
+
+@pytest.mark.asyncio
+async def test_background_context_makes_the_loop_background():
+    r, d = _runner(["recall_deep"])
+    r._call_api = _one_tool_call_then_done("recall_deep")
+    await _run_loop(r, context=ExecutionContext(kind="dag_summary", session_id="s1"))
+    assert d.calls[0][2] is True
+
+
+@pytest.mark.asyncio
+async def test_run_turn_forwards_its_context_to_the_tool_loop():
+    """Guards the run_turn -> _tool_loop hop that the loop-level tests skip."""
+    r, _ = _runner(["recall_deep"])
+    captured = {}
+
+    async def fake_tool_loop(**kwargs):
+        captured.update(kwargs)
+        return "done", [], {"input_tokens": 0, "output_tokens": 0}, []
+
+    r._tool_loop = fake_tool_loop  # type: ignore[method-assign]
+    ctx = ExecutionContext(kind="scheduled", session_id="sched-1")
+    try:
+        await r.run_turn("sched-1", "go", is_background=True, skip_episode=True, context=ctx)
+    finally:
+        r._api_shared = True
+        await r.close()
+    assert captured["context"] is ctx and captured["is_background"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_turn_background_context_makes_the_turn_background():
+    """A caller passing a background context without is_background=True still
+    runs a background turn (F048 streaming + dispatch agree)."""
+    r, _ = _runner(["recall_deep"])
+    captured = {}
+
+    async def fake_tool_loop(**kwargs):
+        captured.update(kwargs)
+        return "done", [], {"input_tokens": 0, "output_tokens": 0}, []
+
+    r._tool_loop = fake_tool_loop  # type: ignore[method-assign]
+    try:
+        await r.run_turn(
+            "h-1", "go", skip_episode=True,
+            context=ExecutionContext(kind="heartbeat_check", session_id="h-1"),
+        )
+    finally:
+        r._api_shared = True
+        await r.close()
+    assert captured["is_background"] is True
+
+
+@pytest.fixture
+def probe_dispatcher():
+    """A real ToolDispatcher with one tool that reads the injected flag."""
+    from nous.api.tools import ToolDispatcher
+
+    seen: list[bool] = []
+    dispatcher = ToolDispatcher()
+
+    async def probe(_is_background: bool = False):
+        seen.append(_is_background)
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    dispatcher.register("probe", probe, {"type": "object", "description": "p"})
+    dispatcher._BACKGROUND_AWARE_TOOLS = dispatcher._BACKGROUND_AWARE_TOOLS | {"probe"}
+    return dispatcher, seen
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_derives_is_background_from_context(probe_dispatcher):
+    dispatcher, seen = probe_dispatcher
+    await dispatcher.dispatch("probe", {}, context=ExecutionContext(kind="scheduled", session_id="x"))
+    await dispatcher.dispatch("probe", {}, context=ExecutionContext(kind="interactive"))
+    await dispatcher.dispatch("probe", {}, context=ExecutionContext(kind="mcp"))
+    assert seen == [True, False, False]
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_legacy_flag_still_works(probe_dispatcher):
+    dispatcher, seen = probe_dispatcher
+    await dispatcher.dispatch("probe", {}, is_background=True)
+    await dispatcher.dispatch("probe", {})
+    assert seen == [True, False]
+
+
+# ---------------------------------------------------------------------------
+# Task 3: offered-set measurement (warn) / enforcement (enforce)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_warn_mode_runs_the_call_and_records_it():
+    """Default mode: nothing changes for the model; the event makes it measurable."""
+    from unittest.mock import AsyncMock
+
+    r, d = _runner(["recall_deep", "bash"])
+    assert r._settings.tool_offered_set_enforcement_mode == "warn"
+    r._brain.emit_event = AsyncMock()
+    r._call_api = _one_tool_call_then_done("bash")
+    await _run_loop(r, is_background=True, tool_filter=["recall_deep"])
+    assert [c[0] for c in d.calls] == ["bash"]
+    # _log_f026_decision schedules the write with asyncio.create_task: the
+    # coroutine was CALLED (created) but may not have run when the loop returns.
+    r._brain.emit_event.assert_called()
+    event_type, data = r._brain.emit_event.call_args.args[:2]
+    assert event_type == "harness_unoffered_tool_call"
+    assert data["tool_name"] == "bash" and data["mode"] == "warn"
+    assert data["context_kind"] == "background"
+
+
+@pytest.mark.asyncio
+async def test_enforce_mode_refuses_and_never_dispatches():
+    from unittest.mock import AsyncMock
+
+    r, d = _runner(["recall_deep", "bash"], tool_offered_set_enforcement_mode="enforce")
+    r._brain.emit_event = AsyncMock()
+    r._call_api = _one_tool_call_then_done("bash")
+    _text, results, _usage, _thinking = await _run_loop(
+        r, is_background=True, tool_filter=["recall_deep"],
+    )
+    assert d.calls == []
+    (res,) = results
+    assert res.tool_name == "bash" and "not available in this turn" in res.error
+
+
+@pytest.mark.asyncio
+async def test_enforce_mode_enforces_subtask_exclusions():
+    from unittest.mock import AsyncMock
+
+    r, d = _runner(["spawn_task", "recall_deep"], tool_offered_set_enforcement_mode="enforce")
+    r._brain.emit_event = AsyncMock()
+    r._call_api = _one_tool_call_then_done("spawn_task")
+    await _run_loop(r, is_background=True, is_subtask=True)
+    assert d.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["off", "warn", "enforce"])
+async def test_offered_tool_runs_in_every_mode(mode):
+    from unittest.mock import AsyncMock
+
+    r, d = _runner(["recall_deep"], tool_offered_set_enforcement_mode=mode)
+    r._brain.emit_event = AsyncMock()
+    r._call_api = _one_tool_call_then_done("recall_deep")
+    await _run_loop(r)
+    assert [c[0] for c in d.calls] == ["recall_deep"]
+    r._brain.emit_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_extra_tools_count_as_offered():
+    r, _d = _runner(["recall_deep"], tool_offered_set_enforcement_mode="enforce")
+    r._call_api = _one_tool_call_then_done("submit_final_report")
+    ran = []
+
+    async def _submit(**_):
+        ran.append(True)
+        return "report accepted", False
+
+    schema = {"name": "submit_final_report", "description": "s", "input_schema": {"type": "object"}}
+    await _run_loop(r, is_background=True, extra_tools={"submit_final_report": (schema, _submit)})
+    assert ran == [True]
+
+
+@pytest.mark.asyncio
+async def test_off_mode_is_silent():
+    from unittest.mock import AsyncMock
+
+    r, d = _runner(["recall_deep", "bash"], tool_offered_set_enforcement_mode="off")
+    r._brain.emit_event = AsyncMock()
+    r._call_api = _one_tool_call_then_done("bash")
+    await _run_loop(r, is_background=True, tool_filter=["recall_deep"])
+    assert [c[0] for c in d.calls] == ["bash"]
+    r._brain.emit_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_enforced_refusal_is_recorded_blocked_in_the_session_ledger():
+    from unittest.mock import AsyncMock
+
+    from nous.cognitive.execution_ledger import ExecutionLedger
+
+    r, _d = _runner(["recall_deep", "bash"], tool_offered_set_enforcement_mode="enforce")
+    r._brain.emit_event = AsyncMock()
+    r._call_api = _one_tool_call_then_done("bash")
+    ledger = ExecutionLedger(session_id="s1")
+    await _run_loop(r, is_background=True, tool_filter=["recall_deep"], ledger=ledger)
+    assert [(a.tool_name, a.status) for a in ledger.actions] == [("bash", "blocked")]
+
+
+def test_mode_setting_rejects_unknown_values():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        _settings(tool_offered_set_enforcement_mode="block")
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_enforce_refuses_an_unoffered_tool():
+    """/chat/stream offers web_search only; the model emits bash."""
+    from unittest.mock import MagicMock
+
+    from nous.api.anthropic_client import StreamEvent
+    from tests.test_streaming import _make_mock_cognitive, _make_mock_settings, _make_runner
+
+    cognitive, _ = _make_mock_cognitive()
+    settings = _make_mock_settings()
+    settings.tool_offered_set_enforcement_mode = "enforce"
+    runner = _make_runner(cognitive, settings)
+    calls = {"n": 0}
+
+    async def fake_stream(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield StreamEvent(type="tool_start", tool_name="bash", tool_id="t1", block_index=1)
+            yield StreamEvent(type="tool_input_delta", text='{"command": "id"}', block_index=1)
+            yield StreamEvent(type="block_stop", block_index=1)
+            yield StreamEvent(type="done", stop_reason="tool_use")
+        else:
+            yield StreamEvent(type="text_delta", text="ok")
+            yield StreamEvent(type="done", stop_reason="end_turn")
+
+    runner._call_api_stream = MagicMock(side_effect=fake_stream)
+    events = [e async for e in runner.stream_chat("s1", "run it")]
+
+    assert not runner._dispatcher.dispatch.called
+    assert any(e.type == "tool_end" and e.tool_name == "bash" for e in events)
+    second_call_messages = runner._call_api_stream.call_args_list[1][0][1]
+    results = [
+        b for m in second_call_messages if isinstance(m.get("content"), list)
+        for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_result"
+    ]
+    assert len(results) == 1 and results[0]["is_error"] is True
+    assert "not available in this turn" in results[0]["content"]
+
+
+# ---------------------------------------------------------------------------
+# Task 4: every caller names its context
+# ---------------------------------------------------------------------------
+
+
+def test_every_production_run_turn_call_passes_a_context():
+    """No exemptions: interactive entry points pass an explicit interactive/mcp
+    context too, so a background call added to rest.py/mcp.py later cannot
+    slip through as the generic kind."""
+    import ast
+    from pathlib import Path
+
+    offenders = []
+    for path in Path("nous").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "run_turn"
+                and not any(k.arg == "context" for k in node.keywords)
+            ):
+                offenders.append(f"{path.as_posix()}:{node.lineno}")
+    assert offenders == [], offenders

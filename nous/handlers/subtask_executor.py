@@ -27,6 +27,7 @@ from typing import Any, Awaitable, Callable
 
 import jsonschema
 
+from nous.api.execution_context import ExecutionContext
 from nous.api.subtask_tools import (
     SubtaskReportCollector,
     build_submit_final_report_schema,
@@ -268,6 +269,7 @@ async def execute_hardened(
                     # @codex P1 on 2399032: only the legacy _execute_legacy
                     # path was carrying dag_node_id previously.
                     dag_node_id=getattr(subtask, "dag_node_id", None),
+                    context=ExecutionContext.for_subtask(subtask, session_id),  # harness Phase 1a
                 )
             except asyncio.CancelledError:
                 # F061 PR-3 Codex review P1: do NOT classify CancelledError

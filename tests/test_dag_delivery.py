@@ -219,6 +219,9 @@ class TestAgentSummaryLeg:
         assert http.post.await_args.kwargs["json"]["text"] == (
             "Everything shipped cleanly."
         )
+        # Harness Phase 1a: the summary turn names its context and its DAG.
+        ctx = runner.run_turn.await_args.kwargs["context"]
+        assert ctx.kind == "dag_summary" and ctx.dag_id == dag.id
 
     @pytest.mark.asyncio
     async def test_agent_summary_timeout_falls_back_to_template(self, store):

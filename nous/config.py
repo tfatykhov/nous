@@ -974,6 +974,17 @@ class Settings(BaseSettings):
     stable_tool_set_enabled: bool = Field(
         default=True, validation_alias="NOUS_STABLE_TOOL_SET_ENABLED"
     )
+    # Harness Phase 1a: what happens when the model calls a tool it was NOT
+    # offered this iteration. Every per-context restriction (subtask
+    # exclusions, tool_filter, F078 refuse) edits only the schema list; the
+    # dispatcher resolves any registered name, so such a call runs today.
+    #   off     - no check
+    #   warn    - run it, log WARNING, persist a harness_unoffered_tool_call event
+    #   enforce - refuse it with a tool error (never dispatched)
+    # Ships `warn`: prod dynamic-check callbacks with on_complete_tools=['bash']
+    # are prompted to "notify via Telegram" and only succeed because the hole
+    # exists; flip to `enforce` once the events show what would break.
+    tool_offered_set_enforcement_mode: Literal["off", "warn", "enforce"] = "warn"
     # Salvage tool args the model leaked as XML <parameter> tags inside a
     # string arg (dispatch-level repair; see ToolDispatcher.dispatch).
     tool_arg_salvage_enabled: bool = Field(

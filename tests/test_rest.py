@@ -48,6 +48,7 @@ class MockAgentRunner:
 
     async def run_turn(self, session_id, user_message, agent_id=None, **kwargs):
         self.run_turn_calls.append((session_id, user_message, agent_id))
+        self.run_turn_contexts = getattr(self, "run_turn_contexts", []) + [kwargs.get("context")]
         return self.preset_response, self.preset_context, {"input_tokens": 100, "output_tokens": 50}
 
     async def end_conversation(self, session_id, agent_id=None):
@@ -185,6 +186,9 @@ async def test_chat_with_session(client, mock_runner):
     data = resp.json()
     assert data["session_id"] == session_id
     assert mock_runner.run_turn_calls[0][0] == session_id
+    # Harness Phase 1a: /chat runs as an interactive context on that session.
+    ctx = mock_runner.run_turn_contexts[0]
+    assert ctx.kind == "interactive" and ctx.session_id == session_id
 
 
 async def test_end_chat(client, mock_runner):
