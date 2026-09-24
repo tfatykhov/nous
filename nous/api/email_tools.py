@@ -612,7 +612,10 @@ def _send_email_sync(
     msg: Any,  # MIMEText or MIMEMultipart (with attachments)
 ) -> None:
     """Blocking SMTP send. Runs in a worker thread via asyncio.to_thread."""
-    server = smtplib.SMTP(settings.email_smtp_host, settings.email_smtp_port)
+    server = smtplib.SMTP(
+        settings.email_smtp_host, settings.email_smtp_port,
+        timeout=settings.email_smtp_timeout_seconds,
+    )
     try:
         server.starttls()
         server.login(settings.email_user, settings.email_password)

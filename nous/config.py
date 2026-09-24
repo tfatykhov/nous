@@ -1536,6 +1536,10 @@ class Settings(BaseSettings):
     email_content_gate: str = "strict"  # strict | warn | off — content-completeness gate
     email_smtp_host: str = "smtp.gmail.com"  # SMTP host for the send_email tool
     email_smtp_port: int = 587  # SMTP STARTTLS port
+    # Harness Phase 0: bound every SMTP socket operation. Without it a hung
+    # server held the to_thread worker forever, and a caller-side timeout only
+    # cancelled the await - the thread could still deliver afterwards.
+    email_smtp_timeout_seconds: float = Field(default=30.0, gt=0)
     email_max_attachment_mb: int = 25  # F078.1.2: total attachment size cap for send_email (Gmail ~25MB)
     tim_chat_id: str = ""  # Tim's Telegram chat ID
     emerson_hook_url: str = ""  # Emerson presence hook URL

@@ -531,6 +531,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_HEARTBEAT_EMAIL_ENABLED` | `false` | Enable email check (needs IMAP credentials) |
 | `NOUS_HEARTBEAT_EMAIL_INTERVAL` | `180` | Seconds between email checks |
 | `NOUS_HEARTBEAT_EMAIL_IMAP_HOST` | `imap.gmail.com` | IMAP server host |
+| `NOUS_EMAIL_SMTP_TIMEOUT_SECONDS` | `30` | Harness Phase 0: timeout (seconds) on every SMTP socket operation of the guarded `send_email` tool. Before it `smtplib.SMTP` had none and nothing set a default socket timeout, so a hung SMTP server held the `to_thread` worker forever — and a caller-side timeout only cancelled the await, while the thread could still deliver afterwards. |
 | `NOUS_HEARTBEAT_HEALTH_INTERVAL` | `3600` | Seconds between health checks |
 | `NOUS_HEARTBEAT_SELF_INITIATED_INTERVAL` | `1800` | Seconds between self-initiated checks |
 | `NOUS_HEARTBEAT_ESCALATION_LOW_TO_NORMAL_HOURS` | `72` | Hours before low→normal finding escalation |
