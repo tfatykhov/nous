@@ -528,6 +528,64 @@ async def create_components(settings: Settings) -> dict:
     runner.set_api_client(api_client)
     await runner.start()
 
+    # Harness Phase 1b: durable execution ledger (nous_system.execution_ledger,
+    # migration 074) for side-effecting tool calls. Wired here, before the
+    # subtask pool and heartbeat exist, so the startup sweep cannot race a live
+    # dispatch; runner.fork() shares the store with the heartbeat runner.
+    ledger_store = None
+    execution_ledger_task = None
+    if settings.execution_ledger_persist_enabled:
+        from nous.cognitive.ledger_store import LedgerStore, effective_orphan_threshold
+
+        ledger_store = LedgerStore(
+            database, settings.agent_id,
+            write_timeout_seconds=settings.execution_ledger_write_timeout_seconds,
+        )
+        runner.set_ledger_store(ledger_store)
+
+        # Startup sweep: inline, awaited, bounded, guarded. Every row still
+        # pending belongs to the previous process (one process per agent_id),
+        # so its outcome is unknown. A row it races anyway is healed by the
+        # owner's close, which accepts 'unknown'.
+        try:
+            n = await asyncio.wait_for(
+                ledger_store.mark_orphans_unknown(older_than_seconds=None), timeout=30,
+            )
+            if n:
+                logger.warning(
+                    "Harness: %d execution-ledger rows orphaned by the previous process -> unknown", n,
+                )
+        except Exception:
+            logger.warning("Harness: startup execution-ledger sweep failed", exc_info=True)
+
+        async def _execution_ledger_maintenance_loop():
+            # Prune at startup (a process restarted daily must still prune -
+            # the F091 lesson) and then at most daily; sweep stale pending rows
+            # every interval.
+            last_prune: float | None = None
+            loop = asyncio.get_running_loop()
+            while True:
+                try:
+                    if settings.execution_ledger_retention_days > 0 and (
+                        last_prune is None or loop.time() - last_prune >= 86400
+                    ):
+                        pruned = await ledger_store.prune(
+                            retention_days=settings.execution_ledger_retention_days,
+                        )
+                        last_prune = loop.time()
+                        logger.info("Harness: execution ledger retention pruned %d rows", pruned)
+                    await asyncio.sleep(settings.execution_ledger_sweep_interval_seconds)
+                    await ledger_store.mark_orphans_unknown(
+                        older_than_seconds=effective_orphan_threshold(settings),
+                    )
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    logger.warning("Harness: execution ledger maintenance failed", exc_info=True)
+                    await asyncio.sleep(60)
+
+        execution_ledger_task = asyncio.create_task(_execution_ledger_maintenance_loop())
+
     # Late-bind runner into SessionTimeoutMonitor so idle-timeout closures
     # take the canonical runner.end_conversation path (full cleanup + reflection)
     # rather than only cognitive.end_session. Mirrors the procedure_learner
@@ -1123,6 +1181,8 @@ async def create_components(settings: Settings) -> dict:
         "context_log_retention_task": context_log_retention_task,
         "retrieval_log_retention_task": retrieval_log_retention_task,
         "retrieval_logger": retrieval_logger,
+        "ledger_store": ledger_store,
+        "execution_ledger_task": execution_ledger_task,
         "surface_service": surface_service,
         "action_router": action_router,
         "a2ui_sweep_task": a2ui_sweep_task,
@@ -1172,6 +1232,23 @@ async def shutdown_components(components: dict) -> None:
             await retention_task
         except (asyncio.CancelledError, Exception):
             pass
+
+    # Harness Phase 1b: stop the ledger maintenance loop, then give in-flight
+    # shielded ledger closes a bounded chance to land before the pool closes
+    # (anything still pending is swept to 'unknown' at the next startup).
+    execution_ledger_task = components.get("execution_ledger_task")
+    if execution_ledger_task:
+        execution_ledger_task.cancel()
+        try:
+            await execution_ledger_task
+        except (asyncio.CancelledError, Exception):
+            pass
+    _runner = components.get("runner")
+    _ledger_tasks = [
+        t for t in getattr(_runner, "_ledger_pending_tasks", ()) if not t.done()
+    ]
+    if _ledger_tasks:
+        await asyncio.wait(_ledger_tasks, timeout=5)
 
     # F091: stop the retrieval-log retention sweep and unregister the sink so a
     # restarted process never writes through a logger bound to a closed pool.

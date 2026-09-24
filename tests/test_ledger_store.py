@@ -251,3 +251,32 @@ def test_effective_orphan_threshold_never_undercuts_a_legitimate_call():
 
     s = Settings(_env_file=None, dag_node_max_timeout=10000)
     assert effective_orphan_threshold(s) >= 10000 + 600
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_the_maintenance_loop_and_lets_pending_closes_land():
+    """main.shutdown_components: the ledger loop is cancelled and in-flight
+    shielded closes get a bounded chance to finish before the pool closes."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from nous.main import shutdown_components
+
+    loop_task = asyncio.create_task(asyncio.sleep(3600))
+    landed = []
+
+    async def close():
+        await asyncio.sleep(0.05)
+        landed.append(True)
+
+    pending = asyncio.ensure_future(close())
+
+    async def _runner_close():
+        return None
+
+    await shutdown_components({
+        "execution_ledger_task": loop_task,
+        "runner": SimpleNamespace(_ledger_pending_tasks={pending}, close=_runner_close),
+    })
+    assert loop_task.cancelled()
+    assert landed == [True]
