@@ -1029,8 +1029,12 @@ class TestClassifyWholeBashCommand:
         # nested finds that only print: any verdict, but it must be quick
         pytest.param("find " + "-exec find " * 20, {"none", "write"}, id="find-exec-x20"),
         pytest.param("bash -c " * 400 + "ls", {"write"}, id="bash-c-x400"),
-        # a huge but plain read stays a read: the budget is not a size cap
-        pytest.param("cat " + "a " * 50000, {"none"}, id="cat-100kb"),
+        # a large but plain read stays a read...
+        pytest.param("cat " + "a " * 30000, {"none"}, id="cat-60kb"),
+        # ...but lexing is O(n) and runs on the event loop, so past the size
+        # cap a command is a write without being lexed (second review of #645)
+        pytest.param("cat " + "a " * 3_000_000, {"write"}, id="cat-6mb"),
+        pytest.param("a;" * 3_000_000, {"write"}, id="segments-6mb"),
     ])
     def test_nesting_is_bounded(self, cmd, allowed):
         """Classification runs on the event loop: every recursion path shares
@@ -1039,7 +1043,7 @@ class TestClassifyWholeBashCommand:
 
         start = time.perf_counter()
         assert _classify_bash_command(cmd) in allowed
-        assert time.perf_counter() - start < 2.0
+        assert time.perf_counter() - start < 0.5
 
     @pytest.mark.parametrize("cmd, expected", [
         ("sudo env " * 1500 + "ssh h", "external"),

@@ -21,7 +21,8 @@ commands, ``git branch -D`` ...) are checked for it.
 
 Classification runs on the event loop, so every recursion path -- ``eval``,
 ``bash -c``, ``find -exec``, ``flock -c``, ``watch`` -- shares one work budget,
-and exhausting it is a ``write``.
+exhausting it is a ``write``, and a command longer than ``_MAX_COMMAND_CHARS``
+is a ``write`` without being lexed at all.
 """
 
 from __future__ import annotations
@@ -106,6 +107,10 @@ _NETWORK_REDIRECT = ("/dev/tcp/", "/dev/udp/")
 
 # Work units (words and lexed characters) one top-level classification may spend.
 _WORK_LIMIT = 200_000
+# Lexing is O(n) and runs on the event loop before the budget can meter it: a
+# longer command is a write without being lexed (a false write is the safe
+# direction, and a command this large is almost always writing something).
+_MAX_COMMAND_CHARS = 64_000
 _work: ContextVar[list[int] | None] = ContextVar("bash_classifier_work", default=None)
 
 
@@ -129,6 +134,8 @@ def classify_bash_command(command: str) -> str:
     would leave no record at all. Nested calls (``eval``, ``bash -c``) share
     the outermost call's work budget.
     """
+    if len(command) > _MAX_COMMAND_CHARS:
+        return "write"
     outer = _work.get()
     token = _work.set([_WORK_LIMIT]) if outer is None else None
     try:
