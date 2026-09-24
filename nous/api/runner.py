@@ -14,7 +14,7 @@ import time
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, Callable
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import UUID
 
 from nous.api import attachment_store
@@ -52,6 +52,7 @@ from nous.cognitive.execution_ledger import (
     ExecutionLedger,
 )
 from nous.cognitive.layer import CognitiveLayer
+from nous.cognitive.ledger_store import LedgerStore, LedgerWriteError
 from nous.cognitive.schemas import ToolResult, TurnContext, TurnResult
 from nous.config import Settings
 from nous.heart.heart import Heart
@@ -123,6 +124,14 @@ FRAME_TOOLS: dict[str, list[str]] = {
 }
 
 
+class DispatchOutcome(NamedTuple):
+    """Final item yielded by AgentRunner._dispatch_with_keepalive."""
+
+    result_text: str
+    is_error: bool
+    timed_out: bool
+
+
 class AgentRunner:
     """Runs conversational turns with cognitive layer hooks.
 
@@ -191,6 +200,11 @@ class AgentRunner:
 
         # F026: Execution Integrity
         self._ledgers: dict[str, ExecutionLedger] = {}
+        # Harness Phase 1b: durable ledger for side-effecting calls, and a
+        # strong-ref set for shielded closes (asyncio holds only weak refs
+        # to tasks - the F091 _pending_tasks lesson).
+        self._ledger_store: LedgerStore | None = None
+        self._ledger_pending_tasks: set[asyncio.Task] = set()
         self._pending_corrections: dict[str, list[str]] = {}
         self._claim_verifier: ClaimVerifier | None = (
             ClaimVerifier() if settings.claim_verification_enabled else None
@@ -267,6 +281,67 @@ class AgentRunner:
             f"Tool error: '{tool_name}' is not available in this turn. "
             "Use only the tools offered to you."
         )
+
+    def set_ledger_store(self, store: LedgerStore | None) -> None:
+        """Harness Phase 1b: durable ledger for side-effecting tool calls."""
+        self._ledger_store = store
+
+    async def _ledger_open(
+        self, ctx: ExecutionContext, tool_name: str, tool_input: dict, turn: int | None,
+    ) -> Any:
+        """Open a durable row before dispatch. Phase 1b policy: FAIL OPEN.
+
+        Returns the row id — or, when the write failed or timed out, the
+        client-generated id of a write that may still have committed (a later
+        close on a missing row is a harmless no-op). None when the call is not
+        side-effecting or no store is wired.
+        """
+        if self._ledger_store is None:
+            return None
+        try:
+            return await self._ledger_store.open_entry(
+                context=ctx, tool_name=tool_name, tool_input=tool_input, turn=turn,
+            )
+        except LedgerWriteError as exc:
+            logger.warning(
+                "Harness: execution ledger open failed for %s (%s) — call proceeds: %s",
+                tool_name, ctx.kind, exc,
+            )
+            return exc.entry_id
+
+    async def _ledger_close(self, entry_id: Any, status: str, result_summary: str | None) -> None:
+        """Close a durable row, shielded: a cancellation arriving now must not
+        leave the row 'pending'. The task is strongly referenced until done."""
+        if self._ledger_store is None or entry_id is None:
+            return
+        task = asyncio.ensure_future(self._ledger_close_now(entry_id, status, result_summary))
+        self._ledger_pending_tasks.add(task)
+        task.add_done_callback(self._ledger_pending_tasks.discard)
+        await asyncio.shield(task)
+
+    async def _ledger_close_now(self, entry_id: Any, status: str, result_summary: str | None) -> None:
+        try:
+            await self._ledger_store.close_entry(
+                entry_id, status=status, result_summary=result_summary,
+            )
+        except LedgerWriteError as exc:
+            logger.warning(
+                "Harness: execution ledger close failed (row stays pending until the sweep): %s", exc,
+            )
+
+    async def _ledger_blocked(
+        self, ctx: ExecutionContext, tool_name: str, tool_input: dict,
+        turn: int | None, reason: str,
+    ) -> None:
+        """A side-effecting call the harness refused (offered-set / ActionGate)."""
+        if self._ledger_store is None:
+            return
+        try:
+            await self._ledger_store.record_blocked(
+                context=ctx, tool_name=tool_name, tool_input=tool_input, turn=turn, reason=reason,
+            )
+        except LedgerWriteError as exc:
+            logger.warning("Harness: execution ledger blocked-row write failed: %s", exc)
 
     def _log_compaction_guard(
         self, event_type: str, data: dict, session_id: str
@@ -355,6 +430,8 @@ class AgentRunner:
             forked._dispatcher = self._dispatcher
         # Share execution ledgers so heartbeat/subtask sessions appear in dashboard
         forked._ledgers = self._ledgers
+        forked._ledger_store = self._ledger_store  # harness Phase 1b
+        forked._ledger_pending_tasks = self._ledger_pending_tasks
         # F035.4: Context logger NOT propagated to forks — heartbeat triage
         # uses a dedicated API client on a separate connection pool, and the
         # context logger's async DB writer can contend with triage DB sessions.
@@ -1530,6 +1607,10 @@ class AgentRunner:
                             ))
                             if ledger:
                                 ledger.record(tc["name"], tc.get("input", {}), refusal, "blocked")
+                            await self._ledger_blocked(
+                                _ctx, tc["name"], tc.get("input", {}),
+                                ledger.current_turn if ledger else None, refusal,
+                            )
                             yield StreamEvent(type="tool_end", tool_name=tc["name"])
                             continue
 
@@ -1565,6 +1646,9 @@ class AgentRunner:
                                     is_error = True
                                     gated = True
                                     ledger.record(tc["name"], dispatch_input, result_text, "blocked")
+                                    await self._ledger_blocked(
+                                        _ctx, tc["name"], dispatch_input, ledger.current_turn, result_text,
+                                    )
                                     logger.info("F026 gate: %s BLOCKED (%s)", tc["name"], gate_result.reason)
                                 elif self._settings.action_gating_mode == "warn":
                                     logger.warning("F026 gate: %s would block (%s)", tc["name"], gate_result.reason)
@@ -1574,15 +1658,34 @@ class AgentRunner:
                         if not gated:
                             start_time = time.monotonic()
                             result_text, is_error = "", False
-                            async for item in self._dispatch_with_keepalive(
-                                tc["name"], dispatch_input, session_id=session_id,
-                                turn_number=_stream_turn_number,  # F091
-                                context=_ctx,  # harness Phase 1a
-                            ):
-                                if isinstance(item, StreamEvent):
-                                    yield item
-                                else:
-                                    result_text, is_error = item
+                            # Harness Phase 1b: durable row before the side effect.
+                            entry_id = await self._ledger_open(
+                                _ctx, tc["name"], dispatch_input,
+                                ledger.current_turn if ledger else None,
+                            )
+                            timed_out = False
+                            try:
+                                async for item in self._dispatch_with_keepalive(
+                                    tc["name"], dispatch_input, session_id=session_id,
+                                    turn_number=_stream_turn_number,  # F091
+                                    context=_ctx,  # harness Phase 1a
+                                ):
+                                    if isinstance(item, StreamEvent):
+                                        yield item
+                                    else:
+                                        result_text, is_error, timed_out = item
+                            except (asyncio.CancelledError, GeneratorExit):
+                                # Client disconnect / stream closed mid-call: the
+                                # side effect may or may not have happened.
+                                await self._ledger_close(
+                                    entry_id, "unknown", "stream closed mid-call — outcome unknown",
+                                )
+                                raise
+                            await self._ledger_close(
+                                entry_id,
+                                "unknown" if timed_out else ("error" if is_error else "success"),
+                                result_text,
+                            )
                             duration_ms = int((time.monotonic() - start_time) * 1000)
 
                             # F026: Record in execution ledger (post-dispatch)
@@ -2009,6 +2112,10 @@ class AgentRunner:
                         ))
                         if ledger:
                             ledger.record(tool_name, tool_input, refusal, "blocked")
+                        await self._ledger_blocked(
+                            ctx, tool_name, tool_input,
+                            ledger.current_turn if ledger else None, refusal,
+                        )
                         continue
 
                     # F022: Auto-inject source_episode_id into learn_fact.
@@ -2041,6 +2148,9 @@ class AgentRunner:
                                 is_error = True
                                 gated = True
                                 ledger.record(tool_name, tool_input, result_text, "blocked")
+                                await self._ledger_blocked(
+                                    ctx, tool_name, tool_input, ledger.current_turn, result_text,
+                                )
                                 logger.info("F026 gate: %s BLOCKED (%s)", tool_name, gate_result.reason)
                             elif self._settings.action_gating_mode == "warn":
                                 logger.warning("F026 gate: %s would block (%s)", tool_name, gate_result.reason)
@@ -2072,6 +2182,14 @@ class AgentRunner:
                             # trip the stall scan mid-execution.
                             if dag_node_id is not None:
                                 self._ping_dag_node_activity(dag_node_id)
+                            # Harness Phase 1b: the durable row exists BEFORE
+                            # the side effect. Opened before the activity
+                            # heartbeat starts, so a cancellation during the
+                            # insert cannot leave the heartbeat running.
+                            entry_id = await self._ledger_open(
+                                ctx, tool_name, tool_input,
+                                ledger.current_turn if ledger else None,
+                            )
                             # @codex P1 on e8841b2: in-flight heartbeat
                             # for tool calls that may exceed stall_timeout.
                             # Cancels in the finally regardless of success.
@@ -2086,8 +2204,23 @@ class AgentRunner:
                                     turn_number=turn_number,  # F091 (caller-captured)
                                     context=ctx,  # harness Phase 1a
                                 )
+                            except asyncio.CancelledError:
+                                # Subtask timeout / shutdown: the side effect may
+                                # or may not have happened (an orphaned SMTP
+                                # thread can still deliver) — record exactly
+                                # that, then re-raise.
+                                await self._ledger_close(
+                                    entry_id, "unknown", "cancelled mid-call — outcome unknown",
+                                )
+                                raise
+                            except Exception as exc:
+                                await self._ledger_close(entry_id, "error", f"{type(exc).__name__}: {exc}")
+                                raise
                             finally:
                                 await self._stop_activity_heartbeat(_hb)
+                            await self._ledger_close(
+                                entry_id, "error" if is_error else "success", result_text,
+                            )
                         duration_ms = int((time.monotonic() - start_time) * 1000)
 
                         # F026: Record in execution ledger (post-dispatch)
@@ -2807,7 +2940,7 @@ Rules:
         self, name: str, args: dict[str, Any], session_id: str | None = None,
         turn_number: int | None = None,  # F091: caller-captured, see _tool_loop
         context: ExecutionContext | None = None,  # harness Phase 1a
-    ) -> AsyncGenerator[StreamEvent | tuple[str, bool], None]:
+    ) -> AsyncGenerator[StreamEvent | DispatchOutcome, None]:
         """Execute a tool, yielding keepalive events during long execution.
 
         Yields StreamEvent(type="keepalive") every `keepalive_interval` seconds
@@ -2842,6 +2975,7 @@ Rules:
                     # Task raised — will be handled below via task.result()
                     break
 
+            timed_out = False
             try:
                 result_text, is_error = task.result()
             except TimeoutError:
@@ -2850,11 +2984,14 @@ Rules:
                 )
                 result_text = f"Tool '{name}' timed out after {timeout}s"
                 is_error = True
+                # Harness Phase 1b: the call's outcome is unknown, not a failure
+                # — the cancelled task's worker thread may still complete it.
+                timed_out = True
             except Exception as e:
                 result_text = str(e)
                 is_error = True
 
-            yield (result_text, is_error)
+            yield DispatchOutcome(result_text, is_error, timed_out)
         finally:
             if not task.done():
                 task.cancel()
