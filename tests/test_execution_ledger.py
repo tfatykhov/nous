@@ -885,6 +885,9 @@ class TestClassifyWholeBashCommand:
         "git archive --remote=ssh://example.com/r.git HEAD",
         "git send-email 0001.patch",
         "git lfs pull",
+        # codex r4: a config option before the subcommand must not hide it
+        "git -c protocol.version=2 fetch origin",
+        "git -c http.extraHeader=x --config-env=a=B pull",
     ])
     def test_external_anywhere_wins(self, cmd):
         assert _classify_bash_command(cmd) == "external", cmd
@@ -924,6 +927,16 @@ class TestClassifyWholeBashCommand:
     ])
     def test_reads(self, cmd):
         assert _classify_bash_command(cmd) == "none", cmd
+
+    def test_the_classifier_is_total(self, monkeypatch):
+        """No input may make the ledger skip a row: an internal failure is a write."""
+        from nous.cognitive import bash_side_effect
+
+        def boom(words):
+            raise RuntimeError("unexpected shape")
+
+        monkeypatch.setattr(bash_side_effect, "_classify_simple", boom)
+        assert _classify_bash_command("ls") == "write"
 
     def test_classify_side_effect_uses_the_whole_command(self):
         assert classify_side_effect("bash", {"command": "echo data > file"}) == "write"

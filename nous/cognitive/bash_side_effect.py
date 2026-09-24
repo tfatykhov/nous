@@ -52,7 +52,19 @@ _NETWORK_REDIRECT = ("/dev/tcp/", "/dev/udp/")
 
 
 def classify_bash_command(command: str) -> str:
-    """Classify a bash command as ``'none'`` | ``'write'`` | ``'external'``."""
+    """Classify a bash command as ``'none'`` | ``'write'`` | ``'external'``.
+
+    Total: an input this analysis did not anticipate is a ``write``, never an
+    exception -- a raise here would fail the durable row open and the call
+    would leave no record at all.
+    """
+    try:
+        return _classify(command)
+    except Exception:
+        return "write"
+
+
+def _classify(command: str) -> str:
     if not command or not command.strip():
         return "write"
     lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
@@ -366,15 +378,25 @@ _GIT_TAG_LISTS = ("ln", (
 
 
 def _classify_git(args: list[str]) -> str:
+    # Configuration can make any git command run a program, so it sets a
+    # floor -- but the subcommand is still classified: `git -c x fetch` is a
+    # fetch.
+    floor = "none"
     i = 0
     while i < len(args) and args[i].startswith("-"):
         a = args[i]
-        if a.startswith(("-c", "--config-env", "--exec-path=")):
-            return "write"  # config can make any git command run arbitrary programs
-        i += 2 if a in ("-C", "--git-dir", "--work-tree", "--namespace") else 1
+        if a in ("-c", "--config-env"):
+            floor, i = "write", i + 2
+        elif a.startswith(("-c", "--config-env=", "--exec-path=")):
+            floor, i = "write", i + 1
+        else:
+            i += 2 if a in ("-C", "--git-dir", "--work-tree", "--namespace") else 1
     if i >= len(args):
-        return "none"
-    sub, rest = args[i], args[i + 1:]
+        return floor
+    return _worst(floor, _classify_git_subcommand(args[i], args[i + 1:]))
+
+
+def _classify_git_subcommand(sub: str, rest: list[str]) -> str:
     if sub in _GIT_REMOTE_SUBCOMMANDS:
         return "external"
     if sub == "archive":
