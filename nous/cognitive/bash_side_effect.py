@@ -35,7 +35,20 @@ READ_COMMANDS: frozenset[str] = frozenset(
     }
 )
 
-_EXTERNAL_COMMANDS = frozenset({"curl", "wget", "http", "httpie"})
+# Commands whose purpose is another host: transfer, remote shell, mail, cloud.
+_EXTERNAL_COMMANDS = frozenset({
+    "curl", "wget", "http", "httpie",
+    "ssh", "scp", "sftp", "rsync", "nc", "ncat", "netcat", "socat", "telnet", "ftp", "lftp",
+    "mail", "mailx", "sendmail", "mutt",
+    "gh", "aws", "gcloud", "gsutil", "az", "kubectl", "helm",
+})
+# Run another command. Classified by what they run, never below write.
+_WRAPPERS = frozenset({
+    "sudo", "doas", "timeout", "nohup", "time", "nice", "ionice", "command", "exec",
+    "xargs", "stdbuf", "setsid", "flock", "watch", "chronic", "parallel",
+})
+# Take a command STRING (`-c '...'`) and run it.
+_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "su"})
 _SEVERITY = {"none": 0, "write": 1, "external": 2}
 
 # Substitution the lexer returns as opaque word text: $(...), `...`, <(...), >(...).
@@ -112,8 +125,13 @@ def _worst(a: str, b: str) -> str:
     return a if _SEVERITY[a] >= _SEVERITY[b] else b
 
 
-def _classify_simple(words: list[str]) -> str:
-    """Classify one simple command (no operators, redirections removed)."""
+def _classify_simple(words: list[str], in_wrapper: bool = False) -> str:
+    """Classify one simple command (no operators, redirections removed).
+
+    ``in_wrapper``: reached from a wrapper's scan, which already covers every
+    later word -- so a nested wrapper is not scanned again (that re-entry is
+    what makes `sudo env sudo env ...` exponential).
+    """
     i = 0
     while i < len(words) and _ASSIGNMENT.match(words[i]):
         i += 1
@@ -121,15 +139,65 @@ def _classify_simple(words: list[str]) -> str:
         return "none"  # an empty segment, or shell variable assignments only
     cmd, args = words[i], words[i + 1:]
     if cmd == "env":
-        return _classify_env(args)
+        return _classify_env(args, in_wrapper)
     if cmd == "git":
         return _classify_git(args)
+    if cmd in _WRAPPERS:
+        return "write" if in_wrapper else _classify_wrapped(args)
+    if cmd in _SHELLS:
+        return _classify_shell(cmd, args)
+    if cmd == "eval":
+        return _worst("write", classify_bash_command(" ".join(args)))
+    if cmd == "docker":
+        remote = any(a in ("-H", "--host", "--context") or a.startswith(("--host=", "--context="))
+                     for a in args)
+        positional = [a for a in args if not a.startswith("-")]
+        return "external" if remote or positional[:1] in (["push"], ["pull"], ["login"]) else "write"
     if cmd in _EXTERNAL_COMMANDS:
         return "external"
     if cmd not in READ_COMMANDS:
         return "write"
     rule = _READ_COMMAND_RULES.get(cmd)
     return rule(args) if rule else "none"
+
+
+# Words that can start a network-capable command inside a wrapper.
+_WRAPPED_CANDIDATES = _EXTERNAL_COMMANDS | _SHELLS | {"git", "docker", "env", "eval"}
+
+
+_MAX_WRAPPED_CANDIDATES = 16
+
+
+def _classify_wrapped(args: list[str]) -> str:
+    """sudo / timeout / xargs ...: option syntax differs per wrapper, so each
+    word that could start a network-capable command is classified from there.
+    Bounded: nested wrappers are not re-entered (their words are in this scan)
+    and at most _MAX_WRAPPED_CANDIDATES starts are tried."""
+    if any(word in _EXTERNAL_COMMANDS for word in args):
+        return "external"  # linear, and not subject to the cap below
+    verdict = "write"
+    candidates = (j for j, word in enumerate(args) if word in _WRAPPED_CANDIDATES)
+    for _, j in zip(range(_MAX_WRAPPED_CANDIDATES), candidates):
+        verdict = _worst(verdict, _classify_simple(args[j:], in_wrapper=True))
+        if verdict == "external":
+            break
+    return verdict
+
+
+def _classify_shell(cmd: str, args: list[str]) -> str:
+    """`bash -c '...'` / `su -c '...'`: the string is a command and is classified
+    as one; a script file cannot be vetted. Never below write. A shell's options
+    precede its script, so the scan stops at the first operand; su also takes
+    `-c` after the user, within its first few words."""
+    window = args[:8] if cmd == "su" else args
+    for j, a in enumerate(window):
+        if a == "-c" or "c" in _short_flags(a):
+            if j + 1 >= len(args):
+                return "write"
+            return _worst("write", classify_bash_command(args[j + 1]))
+        if cmd != "su" and not a.startswith("-"):
+            break
+    return "write"
 
 
 def _short_flags(word: str) -> str:
@@ -156,13 +224,13 @@ def _flag_rule(short: str, long: tuple[str, ...]):
     return rule
 
 
-def _classify_env(args: list[str]) -> str:
+def _classify_env(args: list[str], in_wrapper: bool = False) -> str:
     """``env`` prints the environment, or runs its argument."""
     i = 0
     while i < len(args):
         a = args[i]
-        if a in ("-i", "-", "--ignore-environment", "-0", "--null"):
-            i += 1
+        if a in ("-i", "-", "--ignore-environment", "-0", "--null", "env"):
+            i += 1  # a nested `env` is more env: consumed here, not recursed into
         elif a in ("-u", "--unset", "-C", "--chdir"):
             i += 2
         elif a.startswith(("-u", "--unset=", "-C", "--chdir=")):
@@ -172,7 +240,7 @@ def _classify_env(args: list[str]) -> str:
         elif _ASSIGNMENT.match(a):
             i += 1
         else:
-            return _classify_simple(args[i:])
+            return _classify_simple(args[i:], in_wrapper)
     return "none"
 
 

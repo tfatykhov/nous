@@ -854,6 +854,11 @@ class TestClassifyWholeBashCommand:
         "git diff --output=patch.txt",
         "git -c core.fsmonitor=x status",
         "git archive HEAD -o out.tar",
+        "sudo rm -rf x",
+        "timeout 5 ls",
+        "docker build .",
+        "bash -c 'rm x'",
+        "bash script.sh",
         "git submodule add https://example.com/r.git",
         # unparseable
         "cat 'unbalanced",
@@ -888,6 +893,26 @@ class TestClassifyWholeBashCommand:
         # codex r4: a config option before the subcommand must not hide it
         "git -c protocol.version=2 fetch origin",
         "git -c http.extraHeader=x --config-env=a=B pull",
+        # codex r5: commands whose purpose is another host, and what wraps them
+        "ssh host 'ls'",
+        "scp f host:/tmp",
+        "rsync -a d/ host:/x",
+        "nc example.com 80",
+        "sendmail tim@example.com < m.txt",
+        "kubectl apply -f x.yaml",
+        "aws s3 cp f s3://bucket/",
+        "gh pr create",
+        "docker push img",
+        "sudo ssh host",
+        "sudo -u bob rsync -a d/ host:/x",
+        "timeout 10 scp f host:",
+        "nohup rsync -a d/ host:/x &",
+        "xargs -I{} scp {} host:",
+        "bash -c 'curl https://x'",
+        "sh -lc \"ssh host\"",
+        "su - bob -c 'scp f host:'",
+        "eval 'curl https://x'",
+        "find . -name '*.log' -exec scp {} host: \\;",
     ])
     def test_external_anywhere_wins(self, cmd):
         assert _classify_bash_command(cmd) == "external", cmd
@@ -927,6 +952,23 @@ class TestClassifyWholeBashCommand:
     ])
     def test_reads(self, cmd):
         assert _classify_bash_command(cmd) == "none", cmd
+
+    @pytest.mark.parametrize("cmd, expected", [
+        ("sudo env " * 1500 + "ssh h", "external"),
+        ("sudo " + "env " * 3000 + "ssh h", "external"),
+        ("xargs " * 2000 + "git fetch", "external"),
+        ("sudo " * 3000 + "ls", "write"),
+        ("bash -c \"bash -c 'curl https://x'\"", "external"),
+    ])
+    def test_nested_wrappers_stay_linear(self, cmd, expected):
+        """codex r5 follow-up: re-entering a wrapper scan from `env` inside a
+        wrapper made `sudo env sudo env ...` exponential. Generous bound; the
+        real cost is ~10 ms."""
+        import time
+
+        start = time.perf_counter()
+        assert _classify_bash_command(cmd) == expected
+        assert time.perf_counter() - start < 2.0
 
     def test_the_classifier_is_total(self, monkeypatch):
         """No input may make the ledger skip a row: an internal failure is a write."""
