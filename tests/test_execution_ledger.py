@@ -859,6 +859,11 @@ class TestClassifyWholeBashCommand:
         "docker build .",
         "bash -c 'rm x'",
         "bash script.sh",
+        # ...but a path may name any program: it escalates, never reads
+        "/bin/cat f",
+        "./git status",
+        "/usr/bin/env",
+        "./sort f",
         "git submodule add https://example.com/r.git",
         # unparseable
         "cat 'unbalanced",
@@ -913,6 +918,13 @@ class TestClassifyWholeBashCommand:
         "su - bob -c 'scp f host:'",
         "eval 'curl https://x'",
         "find . -name '*.log' -exec scp {} host: \\;",
+        # codex r6: a path-qualified executable is still that executable
+        "/usr/bin/curl https://example.com",
+        "/usr/bin/ssh host",
+        "find . -exec /usr/bin/curl {} \\;",
+        "sudo /usr/bin/scp f host:",
+        "/usr/bin/git fetch origin",
+        "curl.exe https://example.com",
     ])
     def test_external_anywhere_wins(self, cmd):
         assert _classify_bash_command(cmd) == "external", cmd

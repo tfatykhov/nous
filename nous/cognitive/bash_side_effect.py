@@ -138,6 +138,20 @@ def _classify_simple(words: list[str], in_wrapper: bool = False) -> str:
     if i == len(words):
         return "none"  # an empty segment, or shell variable assignments only
     cmd, args = words[i], words[i + 1:]
+    prog = _program(cmd)
+    verdict = _classify_program(prog, args, in_wrapper)
+    # A path may name any program: `/usr/bin/curl` is curl and escalates, but
+    # `./cat` is not cat, so a path-qualified name never reads below write.
+    return verdict if prog == cmd else _worst("write", verdict)
+
+
+def _program(word: str) -> str:
+    """The program a command word names: `/usr/bin/curl`, `curl.exe` -> `curl`."""
+    name = word.replace("\\", "/").rsplit("/", 1)[-1]
+    return name[:-4] if name.lower().endswith(".exe") else name
+
+
+def _classify_program(cmd: str, args: list[str], in_wrapper: bool) -> str:
     if cmd == "env":
         return _classify_env(args, in_wrapper)
     if cmd == "git":
@@ -173,10 +187,11 @@ def _classify_wrapped(args: list[str]) -> str:
     word that could start a network-capable command is classified from there.
     Bounded: nested wrappers are not re-entered (their words are in this scan)
     and at most _MAX_WRAPPED_CANDIDATES starts are tried."""
-    if any(word in _EXTERNAL_COMMANDS for word in args):
+    programs = [_program(word) for word in args]
+    if any(p in _EXTERNAL_COMMANDS for p in programs):
         return "external"  # linear, and not subject to the cap below
     verdict = "write"
-    candidates = (j for j, word in enumerate(args) if word in _WRAPPED_CANDIDATES)
+    candidates = (j for j, p in enumerate(programs) if p in _WRAPPED_CANDIDATES)
     for _, j in zip(range(_MAX_WRAPPED_CANDIDATES), candidates):
         verdict = _worst(verdict, _classify_simple(args[j:], in_wrapper=True))
         if verdict == "external":
