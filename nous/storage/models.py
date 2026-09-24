@@ -1348,8 +1348,10 @@ class A2uiOutbox(Base):
 class A2uiAction(Base):
     """F092: durable audit record of a companion user action.
 
-    This table IS the audit trail (the F032 ledger is in-memory and
-    session-scoped); `ledger_entry_id` is reserved. See migration 071.
+    This table IS the audit trail of companion actions. `ledger_entry_id`
+    is reserved: it can reference `nous_system.execution_ledger.id`
+    (harness Phase 1b, migration 074) but nothing populates it yet.
+    See migration 071.
     """
 
     __tablename__ = "a2ui_actions"

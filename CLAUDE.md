@@ -239,6 +239,7 @@ nous/
 ### Database
 
 - Three schemas: `brain`, `heart`, `nous_system` (28 tables total)
+- `nous_system.execution_ledger` (migration 074, harness Phase 1b) is the durable record of side-effecting tool calls; it assumes one Nous process per (database, agent_id)
 - All tables are agent-scoped (`agent_id` column) for multi-agent readiness
 - Use `vector(1536)` for embeddings (text-embedding-3-small)
 - Full-text search via `tsvector` + GIN indexes
@@ -474,6 +475,11 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_SPREADING_ACTIVATION_FLOOR` | `0.1` | Minimum activation for a spreading result to survive. Was a hardcoded `0.1` literal at **two** sites — the filter and its F091 telemetry mirror — which had to move together or the trace stops agreeing with the filter. Hoisted so a relative-floor experiment is a config arm rather than a code change; the default reproduces the literal exactly. Measured on prod: this gate drops 428 of ~1,891 activated candidates per sampled window, the single largest discard. |
 | `NOUS_EXECUTION_LEDGER_ENABLED` | `true` | Enable execution ledger (F026) |
 | `NOUS_EXECUTION_LEDGER_MAX_TOKENS` | `500` | Token budget for ledger in system prompt |
+| `NOUS_EXECUTION_LEDGER_PERSIST_ENABLED` | `true` | Harness Phase 1b: persist every SIDE-EFFECTING tool call (`classify_side_effect != none`) to `nous_system.execution_ledger` (migration 074) — the in-memory F026 ledger is dropped at session end, eviction and restart and has no ids. The row is written `pending` BEFORE dispatch and closed `success`/`error` after; a call cancelled mid-flight (subtask timeout, client disconnect, stream tool timeout) closes `unknown`, because its side effect may or may not have happened; a call the harness refused (offered-set `enforce`, ActionGate `enforce`) is one `blocked` row. Rows carry the `ExecutionContext` (`context_kind`, `session_id`, `parent_session_id`, `subtask_id`, `dag_id`, `dag_node_id`). `key_args` never holds bodies, code or secrets: per-tool allowlist, bodies/code stored as sha256+length, unknown tools store argument NAMES only, every kept value and `result_summary` redacted before truncation. Writes fail OPEN in Phase 1b (the call proceeds, WARNING logged); `idempotency_key`/`external_ref` are reserved for Phase 2b. Assumes ONE Nous process per (database, agent_id): the startup sweep marks every leftover `pending` row `unknown`. Kill switch only. |
+| `NOUS_EXECUTION_LEDGER_WRITE_TIMEOUT_SECONDS` | `2.0` | Harness Phase 1b: bound on each ledger insert/close. A timed-out insert still returns its client-generated id, so a later close hits the row if the COMMIT landed. |
+| `NOUS_EXECUTION_LEDGER_RETENTION_DAYS` | `90` | Harness Phase 1b: agent-scoped prune of ledger rows, at startup then at most daily. `0` disables pruning. |
+| `NOUS_EXECUTION_LEDGER_PENDING_UNKNOWN_AFTER_SECONDS` | `7800` | Harness Phase 1b: a `pending` row older than this is swept to `unknown`. The effective threshold is never below the longest legitimate call — `max(this, dag_node_max_timeout, subtask_max_timeout, tool_timeout) + 600` — so raising a timeout cannot make the sweep mislabel a live call. The owner's late close still replaces a sweep-set `unknown`. |
+| `NOUS_EXECUTION_LEDGER_SWEEP_INTERVAL_SECONDS` | `1800` | Harness Phase 1b: interval of the stale-`pending` sweep (the startup sweep is separate and immediate). |
 | `NOUS_CLAIM_VERIFICATION_ENABLED` | `true` | Enable claim verification (F026) |
 | `NOUS_CLAIM_VERIFICATION_MODE` | `enforce` | Claim verification mode (shadow/warn/enforce) |
 | `NOUS_ACTION_GATING_ENABLED` | `true` | Enable action gating (F026) |
