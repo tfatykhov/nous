@@ -18,11 +18,16 @@ before them merges, because they build on its interfaces.
 1. **Nothing enforces the offered tool set at dispatch.** Every per-context restriction
    (`FRAME_TOOLS`, stable tool set, `_SUBTASK_EXCLUDED_TOOLS` `runner.py:1705`, `tool_filter`
    `runner.py:1709`, F078 refuse `runner.py:1718`/`:1172`) edits the *schema list* sent to the model.
-   `ToolDispatcher.dispatch` (`tools.py:383`) resolves any registered name, and `_tool_loop`
+   `ToolDispatcher.dispatch` (defined at `tools.py:370`) resolves any registered name, and `_tool_loop`
    (`runner.py:1989`) dispatches whatever name the model emits. A tool name outside the offered set
    **still executes**. So the proposal's principle is not true today for any restricted turn.
+   (Prod evidence so far: zero nested spawns from any background session since March — the hole
+   has not been exploited, but prod dynamic-check callbacks with `on_complete_tools=['bash']` are
+   prompted to "notify via Telegram" and can only succeed *through* it, so enforcement must be
+   measured before it is switched on.)
 2. **Execution context does not reach dispatch.** The only signal is `is_background: bool`, only on
-   the `_tool_loop` path (`stream_chat` drops it, `runner.py:2726`), and only three tools read it
+   the `_tool_loop` path (`stream_chat` serves interactive `/chat/stream` only, so it correctly
+   passes none), and only three tools read it
    (`tools.py:438`). Heartbeat triage, dynamic checks, callbacks, schedules, DAG nodes, `app.act`
    and `spawn_task` all collapse to `is_subtask=True, is_background=True`. No context enum exists.
 3. **The execution ledger is in-memory only** (`cognitive/execution_ledger.py:1-6`). It is dropped at
@@ -33,7 +38,9 @@ before them merges, because they build on its interfaces.
    (`heartbeat/runner.py:562`), i.e. `bash`, `send_email`, `dag_create`, and skips censors entirely
    (`cognitive/layer.py:910`). DynamicCheck/callbacks get the same whenever their tool list is empty.
    The DAG summary turn (`dag/delivery.py:277`) runs with `is_subtask=False`, so it even keeps
-   `spawn_task`/`schedule_task`.
+   `spawn_task`/`schedule_task` — and prod shows it using them: three subtasks with
+   `parent_session_id LIKE 'dag-summary-%'` (2026-09-14..16) were email-send deliveries, one of
+   which timed out with an unknown send outcome.
 
 Findings 1–3 are shared dependencies of most of the proposal, so they come first.
 
@@ -72,7 +79,7 @@ Findings 1–3 are shared dependencies of most of the proposal, so they come fir
       │ 2a P0.1 tags +   │   │ 2b P0.2 idempotent   │    │ 2c P2.7 claim → tool │
       │ context policy   │   │ sends + message ids  │    │ set + arg evidence   │
       └────────┬─────────┘   └──────────────────────┘    └──────────────────────┘
-               │                     (independent of 1b)
+               │                                            (2c: independent of 1a/1b)
       ┌────────▼──────────────────────────────────────┐
       │ 3  P0.3 park-and-resume (spec first)           │
       └────────┬──────────────────────────────────────┘
@@ -82,8 +89,9 @@ Findings 1–3 are shared dependencies of most of the proposal, so they come fir
 
 | Phase | PR | Invariant (one sentence) | Depends on | Ships |
 |---|---|---|---|---|
-| 1 | **1a** ExecutionContext + offered-set enforcement | A tool call executes only if its name was offered to the model in that iteration, and every dispatch knows which execution context it runs in. | — | enforcement ON (kill switch) |
-| 1 | **1b** Persisted execution ledger | Every side-effecting tool call leaves a durable row that exists *before* the side effect and ends `success`/`error`/`blocked`/`unknown` — never silently `pending`. | 1a | ON (additive telemetry) |
+| 0 | **0** Send-path fixes | Every SMTP operation is bounded in time, and the ledger classes `send_email` as external (so F078 refuse strips it) and pure reads as reads. | — | ON |
+| 1 | **1a** ExecutionContext + offered-set enforcement | Every dispatch knows which execution context it runs in, and a call to a tool not offered that iteration is measured (`warn`) or refused (`enforce`). | 0 | `warn` (measure), `enforce` after the events are read |
+| 1 | **1b** Persisted execution ledger | Every side-effecting tool call leaves a durable row — no bodies, code or secrets — that exists *before* the side effect and ends `success`/`error`/`blocked`/`unknown` within one sweep interval. | 1a | ON (additive telemetry) |
 | 2 | **2a** P0.1 capability tags + policy table | A tool's risk class is declared once at registration, and whether a context may use it is decided by one table, not by call-site name sets. | 1a (+1b for audit) | `warn` first, then `enforce` after a week of data |
 | 2 | **2b** P0.2 idempotent sends | The same logical send (same key) reaches the recipient at most once, and "did it send?" is answered by the ledger plus a provider id. | 1a, 1b | ON for keyed calls |
 | 2 | **2c** P2.7 evidence-aware claim verification | A completion claim is grounded when *any* tool that can produce that effect succeeded with matching arguments. | — | ON (behavior of an existing check) |
@@ -91,6 +99,11 @@ Findings 1–3 are shared dependencies of most of the proposal, so they come fir
 | later | P1.4, P1.6, P2.8, P2.9 | see §5 | 1b, 3 | — |
 
 Per the proposal's "Deliberately NOT now": no peer-to-peer agent teams.
+
+**Considered and not adopted:** capping DAG node subtasks at `max_attempts: 1` (the `app.act`
+precedent). It removes only one of two retry layers — the DAG fix stage (`retry_as_is`, LLM
+fix-dispatch ON in prod) re-sends too — at a reliability cost for every non-sending node. Phase
+2b's idempotency key covers every retry layer.
 
 ### Design forks resolved for Phase 2 (recorded now so Phase 1 does not paint over them)
 
@@ -119,7 +132,6 @@ Per the proposal's "Deliberately NOT now": no peer-to-peer agent teams.
 | Spawn censor gate misses `schedule_task` (create and fire) and DAG node launch | `censor_actions.py:158-216`; `tools.py:3205`, `task_scheduler.py:184`, `orchestrator.py:2460` | 2a (policy) |
 | F078 refuse denylist built from stale static sets → a refuse-tier censor does not strip `send_email`, `push_surface`, `dag_*`, `spawn_sync`, `resolve_*`, `ingest_document` | `runner.py:1172,1718` | 2a (derive from tags) |
 | DAG send nodes have no `max_attempts` cap; F061 retries re-run the whole objective | `orchestrator.py:2465`, `subtask_executor.py:241-416` | 2b |
-| `smtplib.SMTP` has no timeout | `email_tools.py:615` | 2b |
 | `nous_system.events` and `a2ui_actions` have no retention | — | P2.9 |
 | `irreversible` flag on ActionRouter never read | `a2ui/actions.py:55-58` | 2a |
 | `_validate_path` confines `write_file` only; `bash`/`run_python` unconfined | `builtin_tools.py:31-44` | P1.4 |
@@ -127,8 +139,11 @@ Per the proposal's "Deliberately NOT now": no peer-to-peer agent teams.
 | `spawn_sync` off in prod; not given `_session_id` | `config.py:1059`, `tools.py:443` | P1.5 |
 | `SubtaskManager.create` does not clamp to `subtask_max_timeout` (prod: node 6000 s > subtask max 5000 s) | `heart/subtasks.py:77-91` | P1.6 |
 | Heartbeat triage turns skip censors entirely | `cognitive/layer.py:910` | 2a |
+| `dag_summary` turns keep spawn/schedule tools and use them for email sends in prod | `dag/delivery.py:277`; prod subtasks `parent_session_id LIKE 'dag-summary-%'` | 2a — the policy table must decide explicitly (stripping them silently would break a flow prod uses) |
+| CI's migration loop has no `ON_ERROR_STOP`, so a broken migration surfaces only as later test failures | `.github/workflows/*.yml` | separate CI hygiene PR |
 | Callback "may NOT re-enable" rule exists only in prompt text | `heartbeat/runner.py:625`, `dynamic.py:547` | 2a |
 | Migration `073` is already used on unmerged branch `fix/retire-stale-calibration-factor` | `f3b6516` | Phase 1b uses **074** |
+| `smtplib.SMTP` has no timeout; `send_email` missing from `EXTERNAL_TOOLS`; `recall_hubs`/`list_decisions` default to `write` | `email_tools.py:615`; `execution_ledger.py:53` | **PR 0** |
 
 ---
 
