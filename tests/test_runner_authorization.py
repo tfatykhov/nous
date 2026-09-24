@@ -176,3 +176,154 @@ async def test_dispatcher_legacy_flag_still_works(probe_dispatcher):
     await dispatcher.dispatch("probe", {}, is_background=True)
     await dispatcher.dispatch("probe", {})
     assert seen == [True, False]
+
+
+# ---------------------------------------------------------------------------
+# Task 3: offered-set measurement (warn) / enforcement (enforce)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_warn_mode_runs_the_call_and_records_it():
+    """Default mode: nothing changes for the model; the event makes it measurable."""
+    from unittest.mock import AsyncMock
+
+    r, d = _runner(["recall_deep", "bash"])
+    assert r._settings.tool_offered_set_enforcement_mode == "warn"
+    r._brain.emit_event = AsyncMock()
+    r._call_api = _one_tool_call_then_done("bash")
+    await _run_loop(r, is_background=True, tool_filter=["recall_deep"])
+    assert [c[0] for c in d.calls] == ["bash"]
+    # _log_f026_decision schedules the write with asyncio.create_task: the
+    # coroutine was CALLED (created) but may not have run when the loop returns.
+    r._brain.emit_event.assert_called()
+    event_type, data = r._brain.emit_event.call_args.args[:2]
+    assert event_type == "harness_unoffered_tool_call"
+    assert data["tool_name"] == "bash" and data["mode"] == "warn"
+    assert data["context_kind"] == "background"
+
+
+@pytest.mark.asyncio
+async def test_enforce_mode_refuses_and_never_dispatches():
+    from unittest.mock import AsyncMock
+
+    r, d = _runner(["recall_deep", "bash"], tool_offered_set_enforcement_mode="enforce")
+    r._brain.emit_event = AsyncMock()
+    r._call_api = _one_tool_call_then_done("bash")
+    _text, results, _usage, _thinking = await _run_loop(
+        r, is_background=True, tool_filter=["recall_deep"],
+    )
+    assert d.calls == []
+    (res,) = results
+    assert res.tool_name == "bash" and "not available in this turn" in res.error
+
+
+@pytest.mark.asyncio
+async def test_enforce_mode_enforces_subtask_exclusions():
+    from unittest.mock import AsyncMock
+
+    r, d = _runner(["spawn_task", "recall_deep"], tool_offered_set_enforcement_mode="enforce")
+    r._brain.emit_event = AsyncMock()
+    r._call_api = _one_tool_call_then_done("spawn_task")
+    await _run_loop(r, is_background=True, is_subtask=True)
+    assert d.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["off", "warn", "enforce"])
+async def test_offered_tool_runs_in_every_mode(mode):
+    from unittest.mock import AsyncMock
+
+    r, d = _runner(["recall_deep"], tool_offered_set_enforcement_mode=mode)
+    r._brain.emit_event = AsyncMock()
+    r._call_api = _one_tool_call_then_done("recall_deep")
+    await _run_loop(r)
+    assert [c[0] for c in d.calls] == ["recall_deep"]
+    r._brain.emit_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_extra_tools_count_as_offered():
+    r, _d = _runner(["recall_deep"], tool_offered_set_enforcement_mode="enforce")
+    r._call_api = _one_tool_call_then_done("submit_final_report")
+    ran = []
+
+    async def _submit(**_):
+        ran.append(True)
+        return "report accepted", False
+
+    schema = {"name": "submit_final_report", "description": "s", "input_schema": {"type": "object"}}
+    await _run_loop(r, is_background=True, extra_tools={"submit_final_report": (schema, _submit)})
+    assert ran == [True]
+
+
+@pytest.mark.asyncio
+async def test_off_mode_is_silent():
+    from unittest.mock import AsyncMock
+
+    r, d = _runner(["recall_deep", "bash"], tool_offered_set_enforcement_mode="off")
+    r._brain.emit_event = AsyncMock()
+    r._call_api = _one_tool_call_then_done("bash")
+    await _run_loop(r, is_background=True, tool_filter=["recall_deep"])
+    assert [c[0] for c in d.calls] == ["bash"]
+    r._brain.emit_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_enforced_refusal_is_recorded_blocked_in_the_session_ledger():
+    from unittest.mock import AsyncMock
+
+    from nous.cognitive.execution_ledger import ExecutionLedger
+
+    r, _d = _runner(["recall_deep", "bash"], tool_offered_set_enforcement_mode="enforce")
+    r._brain.emit_event = AsyncMock()
+    r._call_api = _one_tool_call_then_done("bash")
+    ledger = ExecutionLedger(session_id="s1")
+    await _run_loop(r, is_background=True, tool_filter=["recall_deep"], ledger=ledger)
+    assert [(a.tool_name, a.status) for a in ledger.actions] == [("bash", "blocked")]
+
+
+def test_mode_setting_rejects_unknown_values():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        _settings(tool_offered_set_enforcement_mode="block")
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_enforce_refuses_an_unoffered_tool():
+    """/chat/stream offers web_search only; the model emits bash."""
+    from unittest.mock import MagicMock
+
+    from nous.api.anthropic_client import StreamEvent
+    from tests.test_streaming import _make_mock_cognitive, _make_mock_settings, _make_runner
+
+    cognitive, _ = _make_mock_cognitive()
+    settings = _make_mock_settings()
+    settings.tool_offered_set_enforcement_mode = "enforce"
+    runner = _make_runner(cognitive, settings)
+    calls = {"n": 0}
+
+    async def fake_stream(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield StreamEvent(type="tool_start", tool_name="bash", tool_id="t1", block_index=1)
+            yield StreamEvent(type="tool_input_delta", text='{"command": "id"}', block_index=1)
+            yield StreamEvent(type="block_stop", block_index=1)
+            yield StreamEvent(type="done", stop_reason="tool_use")
+        else:
+            yield StreamEvent(type="text_delta", text="ok")
+            yield StreamEvent(type="done", stop_reason="end_turn")
+
+    runner._call_api_stream = MagicMock(side_effect=fake_stream)
+    events = [e async for e in runner.stream_chat("s1", "run it")]
+
+    assert not runner._dispatcher.dispatch.called
+    assert any(e.type == "tool_end" and e.tool_name == "bash" for e in events)
+    second_call_messages = runner._call_api_stream.call_args_list[1][0][1]
+    results = [
+        b for m in second_call_messages if isinstance(m.get("content"), list)
+        for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_result"
+    ]
+    assert len(results) == 1 and results[0]["is_error"] is True
+    assert "not available in this turn" in results[0]["content"]

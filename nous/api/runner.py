@@ -233,6 +233,41 @@ class AgentRunner:
             # Persistence is best-effort — never let it break a turn.
             logger.debug("F026 persistence failed (suppressed)", exc_info=True)
 
+    def _authorize_tool_call(
+        self, ctx: ExecutionContext, tool_name: str,
+        offered_names: frozenset[str], session_id: str | None,
+    ) -> str | None:
+        """Return a refusal for a call the harness must not execute, else None.
+
+        Harness Phase 1a: the single choke point both loops call before gating
+        and dispatch. Today it only knows the OFFERED set; Phase 2a adds the
+        capability policy here, so one place decides whether a call may run.
+        """
+        mode = self._settings.tool_offered_set_enforcement_mode
+        if mode == "off" or tool_name in offered_names:
+            return None
+        logger.warning(
+            "Harness: %s unoffered tool call %r (context=%s, session=%s)",
+            "refused" if mode == "enforce" else "allowed (warn mode)",
+            tool_name, ctx.kind, session_id,
+        )
+        self._log_f026_decision(
+            "harness_unoffered_tool_call",
+            {
+                "tool_name": tool_name,
+                "context_kind": ctx.kind,
+                "mode": mode,
+                "offered_count": len(offered_names),
+            },
+            session_id=session_id,
+        )
+        if mode != "enforce":
+            return None
+        return (
+            f"Tool error: '{tool_name}' is not available in this turn. "
+            "Use only the tools offered to you."
+        )
+
     def _log_compaction_guard(
         self, event_type: str, data: dict, session_id: str
     ) -> None:
@@ -1182,6 +1217,8 @@ class AgentRunner:
                 _before = len(tools)
                 tools = [t for t in tools if t["name"] not in _refuse_denylist]
                 logger.info("F078 refuse: stripped %d state-modifying tool(s) (streaming)", _before - len(tools))
+            # Harness Phase 1a: exactly what the model is offered this turn.
+            offered_names = frozenset(t["name"] for t in tools)
             messages = self._format_messages(conversation)
 
             # F036: Compactor needs flat string for token estimation
@@ -1472,6 +1509,27 @@ class AgentRunner:
                                 error=tc["input_error"],
                                 duration_ms=0,
                             ))
+                            yield StreamEvent(type="tool_end", tool_name=tc["name"])
+                            continue
+
+                        # Harness Phase 1a: was this tool offered this turn?
+                        refusal = self._authorize_tool_call(_ctx, tc["name"], offered_names, session_id)
+                        if refusal is not None:
+                            tool_results_for_message.append({
+                                "type": "tool_result",
+                                "tool_use_id": tc["id"],
+                                "content": refusal,
+                                "is_error": True,
+                            })
+                            all_tool_results.append(ToolResult(
+                                tool_name=tc["name"],
+                                arguments=tc.get("input", {}),
+                                result=None,
+                                error=refusal,
+                                duration_ms=0,
+                            ))
+                            if ledger:
+                                ledger.record(tc["name"], tc.get("input", {}), refusal, "blocked")
                             yield StreamEvent(type="tool_end", tool_name=tc["name"])
                             continue
 
@@ -1785,6 +1843,8 @@ class AgentRunner:
             if extra_tools:
                 for _name, (_schema, _exec) in extra_tools.items():
                     tools.append(_schema)
+            # Harness Phase 1a: exactly what the model was offered this iteration.
+            offered_names = frozenset(t["name"] for t in tools)
 
             # F061: force the terminal tool on the LAST TWO allowed turns
             # (penultimate + ultimate) when force_tool_on_penultimate is set
@@ -1929,6 +1989,26 @@ class AgentRunner:
                             error=input_error,
                             duration_ms=0,
                         ))
+                        continue
+
+                    # Harness Phase 1a: was this tool offered this iteration?
+                    refusal = self._authorize_tool_call(ctx, tool_name, offered_names, session_id)
+                    if refusal is not None:
+                        tool_results_for_message.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": refusal,
+                            "is_error": True,
+                        })
+                        all_tool_results.append(ToolResult(
+                            tool_name=tool_name,
+                            arguments=tool_input,
+                            result=None,
+                            error=refusal,
+                            duration_ms=0,
+                        ))
+                        if ledger:
+                            ledger.record(tool_name, tool_input, refusal, "blocked")
                         continue
 
                     # F022: Auto-inject source_episode_id into learn_fact.
