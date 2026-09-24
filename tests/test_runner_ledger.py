@@ -36,8 +36,8 @@ class _FakeStore:
             raise LedgerWriteError(self.failed_id, RuntimeError("db down"))
         return f"id-{tool_name}"
 
-    async def record_blocked(self, *, context, tool_name, tool_input, turn, reason):
-        self.events.append(("blocked", tool_name, reason))
+    async def record_blocked(self, *, context, tool_name, tool_input, turn, refused_by):
+        self.events.append(("blocked", tool_name, refused_by))
 
     async def close_entry(self, entry_id, *, status, result_summary, output_of=None):
         self.events.append(("close", entry_id, status))
@@ -172,8 +172,29 @@ async def test_enforced_refusal_is_recorded_blocked():
     r._call_api = _one_tool_call_then_done("write_file")
     await _run_loop(r, is_background=True, tool_filter=["recall_deep"])
     assert d.calls == []
-    (event,) = store.events
-    assert event[:2] == ("blocked", "write_file") and event[2].startswith("Tool error:")
+    assert store.events == [("blocked", "write_file", "offered_set")]
+
+
+@pytest.mark.asyncio
+async def test_action_gate_block_records_a_code_never_the_gate_model_prose():
+    """codex r4 on #645: the gate prompt carries the call's arguments, so the
+    gate model's reason can echo a subject, a body or a bare key."""
+    from nous.cognitive.action_gate import GateResult
+    from nous.cognitive.execution_ledger import ExecutionLedger
+
+    store = _FakeStore()
+    r, d = _runner(store, action_gating_mode="enforce")
+
+    class _Gate:
+        async def check(self, *a, **k):
+            return GateResult(approved=False, reason="echoes sk-ABCDEFGHIJKLMNOP",
+                              suggestion="try sk-ABCDEFGHIJKLMNOP")
+
+    r._action_gate = _Gate()
+    r._call_api = _one_tool_call_then_done("write_file")
+    await _run_loop(r, ledger=ExecutionLedger(session_id="s1"))
+    assert d.calls == []
+    assert store.events == [("blocked", "write_file", "action_gate")]
 
 
 @pytest.mark.asyncio

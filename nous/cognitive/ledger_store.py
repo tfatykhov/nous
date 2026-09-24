@@ -38,6 +38,10 @@ logger = logging.getLogger(__name__)
 KEY_ARG_CHARS = 200
 RESULT_SUMMARY_CHARS = 500
 _CLOSABLE = ("pending", "unknown")
+# Why the harness refused a call. A code, never prose: the ActionGate model's
+# reason is written from a prompt that carries the call's arguments, so it can
+# echo a subject, a body or a bare key.
+REFUSAL_CODES = frozenset({"offered_set", "action_gate"})
 _TERMINAL = frozenset(s for s in LEDGER_STATUSES if s != "pending")
 
 # Per-tool durable argument policy. Pattern redaction cannot be trusted with
@@ -137,7 +141,10 @@ def durable_key_args(tool_name: str, args: dict[str, Any]) -> dict[str, str]:
         value = args.get(name)
         if value is None:
             continue
-        kept = _shaped(kind, value) if kind != _HASH else None
+        try:
+            kept = _shaped(kind, value) if kind != _HASH else None
+        except Exception:  # unparseable (`http://[`) is not a shape: hash it
+            kept = None
         if kept is not None:
             out[name] = kept
         # A source keeps its full hash beside the host, so a later match on
@@ -215,10 +222,18 @@ class LedgerStore:
 
     async def record_blocked(
         self, *, context: ExecutionContext, tool_name: str,
-        tool_input: dict[str, Any], turn: int | None, reason: str,
+        tool_input: dict[str, Any], turn: int | None, refused_by: str,
     ) -> None:
-        """A side-effecting call the harness refused: one terminal row."""
-        await self._insert(context, tool_name, tool_input, turn, "blocked", reason)
+        """A side-effecting call the harness refused: one terminal row.
+
+        ``refused_by`` is a code from REFUSAL_CODES -- the refusal's prose
+        stays in the session, never in the durable row.
+        """
+        if refused_by not in REFUSAL_CODES:
+            raise ValueError(f"unknown refusal code {refused_by!r}")
+        await self._insert(
+            context, tool_name, tool_input, turn, "blocked", f"refused by {refused_by}",
+        )
 
     async def close_entry(
         self, entry_id: UUID, *, status: str, result_summary: str | None,

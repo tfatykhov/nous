@@ -338,14 +338,16 @@ class AgentRunner:
 
     async def _ledger_blocked(
         self, ctx: ExecutionContext, tool_name: str, tool_input: dict,
-        turn: int | None, reason: str,
+        turn: int | None, refused_by: str,
     ) -> None:
-        """A side-effecting call the harness refused (offered-set / ActionGate)."""
+        """A side-effecting call the harness refused. ``refused_by`` is a code
+        (``offered_set`` / ``action_gate``), never the refusal's prose."""
         if self._ledger_store is None:
             return
         try:
             await self._ledger_store.record_blocked(
-                context=ctx, tool_name=tool_name, tool_input=tool_input, turn=turn, reason=reason,
+                context=ctx, tool_name=tool_name, tool_input=tool_input, turn=turn,
+                refused_by=refused_by,
             )
         except LedgerWriteError as exc:
             logger.warning("Harness: execution ledger blocked-row write failed: %s", exc)
@@ -1616,7 +1618,7 @@ class AgentRunner:
                                 ledger.record(tc["name"], tc.get("input", {}), refusal, "blocked")
                             await self._ledger_blocked(
                                 _ctx, tc["name"], tc.get("input", {}),
-                                ledger.current_turn if ledger else None, refusal,
+                                ledger.current_turn if ledger else None, "offered_set",
                             )
                             yield StreamEvent(type="tool_end", tool_name=tc["name"])
                             continue
@@ -1654,7 +1656,7 @@ class AgentRunner:
                                     gated = True
                                     ledger.record(tc["name"], dispatch_input, result_text, "blocked")
                                     await self._ledger_blocked(
-                                        _ctx, tc["name"], dispatch_input, ledger.current_turn, result_text,
+                                        _ctx, tc["name"], dispatch_input, ledger.current_turn, "action_gate",
                                     )
                                     logger.info("F026 gate: %s BLOCKED (%s)", tc["name"], gate_result.reason)
                                 elif self._settings.action_gating_mode == "warn":
@@ -2122,7 +2124,7 @@ class AgentRunner:
                             ledger.record(tool_name, tool_input, refusal, "blocked")
                         await self._ledger_blocked(
                             ctx, tool_name, tool_input,
-                            ledger.current_turn if ledger else None, refusal,
+                            ledger.current_turn if ledger else None, "offered_set",
                         )
                         continue
 
@@ -2157,7 +2159,7 @@ class AgentRunner:
                                 gated = True
                                 ledger.record(tool_name, tool_input, result_text, "blocked")
                                 await self._ledger_blocked(
-                                    ctx, tool_name, tool_input, ledger.current_turn, result_text,
+                                    ctx, tool_name, tool_input, ledger.current_turn, "action_gate",
                                 )
                                 logger.info("F026 gate: %s BLOCKED (%s)", tool_name, gate_result.reason)
                             elif self._settings.action_gating_mode == "warn":

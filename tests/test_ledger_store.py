@@ -259,15 +259,35 @@ async def test_close_rejects_non_terminal_status(store):
 @pytest.mark.asyncio
 async def test_record_blocked_writes_a_terminal_row(store, db, agent):
     await store.record_blocked(context=ExecutionContext(kind="heartbeat_triage"), tool_name="send_file",
-                               tool_input={"file_path": "/x"}, turn=1, reason="not offered")
+                               tool_input={"file_path": "/x"}, turn=1, refused_by="offered_set")
     async with db.session() as s:
         rows = (await s.execute(
             select(ExecutionLedgerEntry)
             .where(ExecutionLedgerEntry.agent_id == agent)
             .order_by(ExecutionLedgerEntry.created_at)
         )).scalars().all()
-    assert [(r.tool_name, r.status, r.result_summary) for r in rows] == [("send_file", "blocked", "not offered")]
+    assert [(r.tool_name, r.status, r.result_summary) for r in rows] == [
+        ("send_file", "blocked", "refused by offered_set")]
     assert rows[0].completed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_record_blocked_accepts_only_a_known_refusal_code(store):
+    with pytest.raises(ValueError):
+        await store.record_blocked(context=ExecutionContext(kind="interactive"), tool_name="send_file",
+                                   tool_input={}, turn=1, refused_by="the gate said sk-ABCDEFGHIJKLMNOP")
+
+
+@pytest.mark.parametrize("tool, args", [
+    ("ingest_document", {"source_ref": "http://[", "content": "c"}),
+    ("learn_skill", {"source": "https://[::1"}),
+    ("send_email", {"to": {"nested": "dict"}}),
+])
+def test_a_value_that_fails_to_parse_is_hashed_not_raised(tool, args):
+    """codex r4 on #645: urlsplit raises on `http://[`; that escaped, the
+    insert failed open, and the call left no durable row."""
+    out = durable_key_args(tool, args)
+    assert any(k.endswith("_sha256") for k in out)
 
 
 @pytest.mark.asyncio
