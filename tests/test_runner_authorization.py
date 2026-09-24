@@ -327,3 +327,29 @@ async def test_stream_chat_enforce_refuses_an_unoffered_tool():
     ]
     assert len(results) == 1 and results[0]["is_error"] is True
     assert "not available in this turn" in results[0]["content"]
+
+
+# ---------------------------------------------------------------------------
+# Task 4: every caller names its context
+# ---------------------------------------------------------------------------
+
+
+def test_every_production_run_turn_call_passes_a_context():
+    """No exemptions: interactive entry points pass an explicit interactive/mcp
+    context too, so a background call added to rest.py/mcp.py later cannot
+    slip through as the generic kind."""
+    import ast
+    from pathlib import Path
+
+    offenders = []
+    for path in Path("nous").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "run_turn"
+                and not any(k.arg == "context" for k in node.keywords)
+            ):
+                offenders.append(f"{path.as_posix()}:{node.lineno}")
+    assert offenders == [], offenders

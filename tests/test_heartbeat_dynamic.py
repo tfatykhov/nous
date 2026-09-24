@@ -1842,6 +1842,9 @@ class TestF048DynamicCheckBackgroundStreaming:
         runner.run_turn.assert_awaited_once()
         call_kwargs = runner.run_turn.call_args.kwargs
         assert call_kwargs.get("is_background") is True
+        # Harness Phase 1a: a dynamic check names its execution context.
+        assert call_kwargs["context"].kind == "heartbeat_check"
+        assert call_kwargs["context"].session_id.startswith("dynamic-check-bg_check-")
 
     @pytest.mark.asyncio
     async def test_execute_callback_uses_background_streaming(self):
@@ -1886,3 +1889,6 @@ class TestF048DynamicCheckBackgroundStreaming:
             "on_complete callback must forward is_background=True "
             "(regression check for the 5th F048 call site)"
         )
+        # Harness Phase 1a: the callback names its execution context.
+        assert call_kwargs["context"].kind == "heartbeat_callback"
+        assert call_kwargs["context"].session_id.startswith("dynamic-callback-cb_bg-")

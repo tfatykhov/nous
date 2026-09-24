@@ -78,6 +78,11 @@ async def test_execute_subtask_success_ends_conversation():
     assert call.args[0] == _expected_session_id(subtask)
     assert call.kwargs.get("agent_id") == settings.agent_id
     heart.subtasks.complete.assert_awaited_once()
+    # Harness Phase 1a: the worker derives the context from the subtask row.
+    ctx = runner.run_turn.await_args.kwargs["context"]
+    assert ctx.kind == "subtask"
+    assert ctx.subtask_id == subtask.id
+    assert ctx.session_id == _expected_session_id(subtask)
 
 
 async def test_execute_subtask_failure_ends_conversation(caplog):

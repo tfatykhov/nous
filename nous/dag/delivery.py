@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from nous.api.execution_context import ExecutionContext
 from nous.config import Settings
 from nous.events import Event
 from nous.storage.models import ExecutionDAG
@@ -278,6 +279,11 @@ class DAGResultDelivery:
                     session_id=f"dag-summary-{dag.id.hex[:8]}",
                     user_message=prompt,
                     is_background=True,
+                    context=ExecutionContext(  # harness Phase 1a
+                        kind="dag_summary",
+                        session_id=f"dag-summary-{dag.id.hex[:8]}",
+                        dag_id=dag.id,
+                    ),
                 ),
                 timeout=self._settings.dag_delivery_agent_summary_timeout_seconds,
             )

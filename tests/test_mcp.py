@@ -40,8 +40,9 @@ class MockAgentRunner:
             context_token_estimate=100,
         )
 
-    async def run_turn(self, session_id, user_message, agent_id=None):
+    async def run_turn(self, session_id, user_message, agent_id=None, context=None):
         self.run_turn_calls.append((session_id, user_message, agent_id))
+        self.run_turn_contexts = getattr(self, "run_turn_contexts", []) + [context]
         return self.preset_response, self.preset_context, {"input_tokens": 100, "output_tokens": 50}
 
 
@@ -144,6 +145,8 @@ async def test_nous_chat(mcp_tools, mock_runner):
     assert len(mock_runner.run_turn_calls) == 1
     _, msg, _ = mock_runner.run_turn_calls[0]
     assert msg == "Hello from MCP!"
+    # Harness Phase 1a: MCP callers are agents waiting on the answer.
+    assert mock_runner.run_turn_contexts[0].kind == "mcp"
     assert result is not None
 
 
@@ -219,6 +222,8 @@ async def test_nous_decide(mcp_tools, mock_runner):
 
     assert len(mock_runner.run_turn_calls) == 1
     _, msg, _ = mock_runner.run_turn_calls[0]
+    assert mock_runner.run_turn_contexts[0].kind == "mcp"
+    assert mock_runner.run_turn_contexts[0].session_id == "mcp-decision"
     # The message should contain the question, possibly prefixed with stakes
     assert "Redis" in msg or "caching" in msg
     assert result is not None

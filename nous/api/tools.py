@@ -3163,6 +3163,9 @@ def create_subtask_tools(
                         max_tool_calls=settings.subtask_tool_call_limit,
                         model_override=effective_model,
                         is_background=True,
+                        context=ExecutionContext.for_subtask(  # harness Phase 1a
+                            subtask, subtask_session_id,
+                        ),
                     ),
                     timeout=effective_timeout,
                 )

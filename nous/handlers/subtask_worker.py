@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 
 import httpx
 
+from nous.api.execution_context import ExecutionContext
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart.heart import Heart
@@ -335,6 +336,7 @@ class SubtaskWorkerPool:
                 model_override=subtask.model or self._settings.background_model,
                 is_background=True,
                 dag_node_id=_dag_node_id,
+                context=ExecutionContext.for_subtask(subtask, session_id),  # harness Phase 1a
             )
             # F061 PR-1: record outcome on legacy path so dashboard rows
             # are never NULL between PR-1 ship and PR-2 hardened-executor ship.

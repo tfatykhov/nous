@@ -1100,6 +1100,10 @@ class TestF048HeartbeatBackgroundStreaming:
         shared_runner.run_turn.assert_awaited_once()
         call_kwargs = shared_runner.run_turn.call_args.kwargs
         assert call_kwargs.get("is_background") is True
+        # Harness Phase 1a: triage names its execution context.
+        ctx = call_kwargs["context"]
+        assert ctx.kind == "heartbeat_triage"
+        assert ctx.session_id.startswith("heartbeat-")
 
 
 class TestScheduledTuning:

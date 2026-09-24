@@ -18,6 +18,7 @@ from uuid import uuid4
 import httpx
 
 from nous.api.anthropic_client import AnthropicClient
+from nous.api.execution_context import ExecutionContext
 from nous.api.runner import AgentRunner
 from nous.brain import Brain
 from nous.config import Settings
@@ -566,6 +567,7 @@ class HeartbeatRunner:
                 is_subtask=True,
                 model_override=heartbeat_model,
                 is_background=True,
+                context=ExecutionContext(kind="heartbeat_triage", session_id=session_id),
             )
             result.response = response_text or ""
             result.tokens_used = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)
@@ -648,6 +650,7 @@ class HeartbeatRunner:
                     tool_filter=tool_filter,
                     model_override=heartbeat_model,
                     is_background=True,
+                    context=ExecutionContext(kind="heartbeat_callback", session_id=session_id),
                 )
                 tokens = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)
                 self._tokens_used_today += tokens
