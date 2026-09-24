@@ -1333,19 +1333,14 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # F023/F038: Handle rejected facts — user_direct gets +0.15 bonus (F038-2.4)
             # but very low-quality or short content can still be rejected
             if isinstance(result, FactRejected):
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                f"Fact not stored (admission score {result.composite_score:.2f} "
-                                f"< {result.threshold} threshold).\n"
-                                f"Scores: {', '.join(f'{k}={v:.2f}' for k, v in result.scores.items())}\n"
-                                f"Override with explicit instruction if this should be stored."
-                            ),
-                        }
-                    ]
-                }
+                # Nothing was written: flagged, or the durable ledger records
+                # a stored fact that does not exist (codex r2 on #645).
+                return _tool_error(
+                    f"Fact not stored (admission score {result.composite_score:.2f} "
+                    f"< {result.threshold} threshold).\n"
+                    f"Scores: {', '.join(f'{k}={v:.2f}' for k, v in result.scores.items())}\n"
+                    f"Override with explicit instruction if this should be stored."
+                )
 
             warning_msg = ""
             if result.contradiction_warning:
@@ -3191,26 +3186,15 @@ def create_subtask_tools(
                     subtask.id, f"Timeout after {effective_timeout}s",
                     final_outcome="timed_out", attempts=1,
                 )
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": f"[Subtask {subtask.id.hex[:8]} timed out after {effective_timeout}s]",
-                        }
-                    ]
-                }
+                # Flagged like the hardened inline path above.
+                return _tool_error(
+                    f"[Subtask {subtask.id.hex[:8]} timed out after {effective_timeout}s]"
+                )
             except Exception as e:
                 await heart.subtasks.fail(
                     subtask.id, str(e), final_outcome="errored", attempts=1,
                 )
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": f"[Subtask {subtask.id.hex[:8]} failed: {e}]",
-                        }
-                    ]
-                }
+                return _tool_error(f"[Subtask {subtask.id.hex[:8]} failed: {e}]")
 
         except ValueError as e:
             return _tool_error(f"Cannot spawn subtask: {e}")
@@ -3376,11 +3360,8 @@ def create_subtask_tools(
                     ]
                 }
 
-            return {
-                "content": [
-                    {"type": "text", "text": f"No pending subtask or active schedule found for {task_id}."}
-                ]
-            }
+            # A cancel that cancelled nothing did not happen.
+            return _tool_error(f"No pending subtask or active schedule found for {task_id}.")
         except ValueError:
             return _tool_error(f"Invalid task ID: {task_id}")
         except Exception as e:
@@ -3454,11 +3435,7 @@ def create_subtask_tools(
                 elapsed_seconds=0.0,
                 validator_reason="spawn_sync: no subtask row created (censor or runner unavailable)",
             )
-            return {
-                "content": [
-                    {"type": "text", "text": _json.dumps(result.to_dict(), indent=2)}
-                ]
-            }
+            return _tool_error(_json.dumps(result.to_dict(), indent=2))
 
         report = match.report_jsonb or {}
         # Codex round-9 P2: inline subtasks (await_result=True) bypass the
@@ -3542,6 +3519,10 @@ def create_subtask_tools(
             elapsed_seconds=elapsed,
             validator_reason=validator_reason,
         )
+        # Same typed JSON either way; the flag follows the outcome so a failed
+        # subtask is never reported (or durably recorded) as a success.
+        if status != "completed":
+            return _tool_error(_json.dumps(result.to_dict(), indent=2))
         return {
             "content": [
                 {"type": "text", "text": _json.dumps(result.to_dict(), indent=2)}

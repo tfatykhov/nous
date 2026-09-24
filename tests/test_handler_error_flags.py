@@ -291,3 +291,107 @@ def test_except_branches_never_return_the_success_helper(path):
         and node.value.func.id in {"_mcp_response", "_ok"}
     ]
     assert not offenders, "failures returned as successes:\n  " + "\n  ".join(offenders)
+
+
+# ---- tools.py: writes that did not happen (codex r2 on #645) ----
+
+
+def _settings(**overrides):
+    from nous.config import Settings
+
+    return Settings(_env_file=None, **overrides)
+
+
+@pytest.mark.asyncio
+async def test_learn_fact_admission_rejection_is_an_error():
+    from nous.api.tools import create_nous_tools
+    from nous.heart.schemas import FactRejected
+
+    heart = MagicMock()
+    heart.learn = AsyncMock(return_value=FactRejected(
+        content="x" * 40, composite_score=0.2, threshold=0.5,
+        scores={"novelty": 0.2}, explanation="low",
+    ))
+    result = await create_nous_tools(MagicMock(), heart, _settings())["learn_fact"](content="x" * 40)
+    assert result.get("is_error") is True
+    assert "Fact not stored" in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_that_found_nothing_is_an_error():
+    import uuid
+
+    from nous.api.tools import create_subtask_tools
+
+    heart = MagicMock()
+    heart.subtasks = AsyncMock()
+    heart.subtasks.cancel = AsyncMock(return_value=False)
+    heart.schedules = AsyncMock()
+    heart.schedules.get = AsyncMock(return_value=None)
+    result = await create_subtask_tools(heart, _settings())["cancel_task"](task_id=str(uuid.uuid4()))
+    assert result.get("is_error") is True
+
+
+def _inline_heart():
+    import uuid
+
+    heart = MagicMock()
+    heart.subtasks = AsyncMock()
+    subtask = MagicMock()
+    subtask.id = uuid.uuid4()
+    heart.subtasks.create = AsyncMock(return_value=subtask)
+    return heart
+
+
+@pytest.mark.asyncio
+async def test_legacy_inline_subtask_failure_is_an_error():
+    from nous.api.tools import create_subtask_tools
+
+    runner = AsyncMock()
+    runner.run_turn = AsyncMock(side_effect=RuntimeError("LLM down"))
+    tools = create_subtask_tools(_inline_heart(), _settings(subtask_hardening_enabled=False), runner=runner)
+    result = await tools["spawn_task"](task="t", await_result=True, _session_id="s")
+    assert result.get("is_error") is True and "failed" in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_inline_subtask_timeout_is_an_error():
+    from nous.api.tools import create_subtask_tools
+
+    async def hang(**_):
+        await asyncio.sleep(30)
+
+    runner = AsyncMock()
+    runner.run_turn = hang
+    tools = create_subtask_tools(_inline_heart(), _settings(subtask_hardening_enabled=False), runner=runner)
+    result = await tools["spawn_task"](task="t", await_result=True, timeout=1, _session_id="s")
+    assert result.get("is_error") is True and "timed out" in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_spawn_sync_with_no_subtask_row_is_an_error():
+    import json
+
+    from nous.api.tools import create_subtask_tools
+
+    heart = _inline_heart()
+    heart.subtasks.get_by_spawn_sync_token = AsyncMock(return_value=None)
+    result = await create_subtask_tools(heart, _settings())["spawn_sync"](task="t", _session_id="s")
+    assert result.get("is_error") is True
+    assert json.loads(result["content"][0]["text"])["status"] == "errored"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome, flagged", [("failed", True), ("timed_out", True), ("completed", False)])
+async def test_spawn_sync_flag_follows_the_outcome(outcome, flagged):
+    import uuid
+
+    from nous.api.tools import create_subtask_tools
+
+    heart = _inline_heart()
+    heart.subtasks.get_by_spawn_sync_token = AsyncMock(return_value=SimpleNamespace(
+        id=uuid.uuid4(), report_jsonb={}, completed_at=None, started_at=None, created_at=None,
+        result="r", final_outcome=outcome, error=None if outcome == "completed" else "boom",
+    ))
+    result = await create_subtask_tools(heart, _settings())["spawn_sync"](task="t", _session_id="s")
+    assert bool(result.get("is_error")) is flagged
