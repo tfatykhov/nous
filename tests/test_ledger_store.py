@@ -88,6 +88,18 @@ def test_unknown_tools_store_argument_names_only():
     assert args == {"arg_names": "target,token"}
 
 
+@pytest.mark.parametrize("args", [
+    {"sk-ABCDEFGHIJKLMNOP": ""},
+    {"ok": 1, "x" * 200: 2},
+    {f"name_{chr(97 + i)}{chr(97 + j)}": 0 for i in range(5) for j in range(5)},
+])
+def test_unshaped_or_unbounded_argument_names_are_hashed(args):
+    """codex r5 on #645: the JSON keys are model-controlled too."""
+    out = durable_key_args("brand_new_tool", args)
+    assert set(out) == {"arg_count", "arg_names_sha256"}
+    assert out["arg_count"] == str(len(args)) and "sk-" not in str(out)
+
+
 def test_an_over_long_target_path_is_hashed_not_truncated():
     path = "/tmp/nous-workspace/" + "d" * (KEY_ARG_CHARS + 50) + "/x.txt"
     out = durable_key_args("write_file", {"path": path, "content": "c"})

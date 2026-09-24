@@ -85,6 +85,7 @@ _DURABLE_ARGS: dict[str, dict[str, str]] = {
 }
 
 _WORD_SHAPE = re.compile(r"[a-z][a-z_]{0,31}")
+_MAX_ARG_NAMES = 16
 _EMAIL_SHAPE = re.compile(r"[^@\s,;<>\"']+@[^@\s,;<>\"']+\.[A-Za-z]{2,}")
 _CHAT_SHAPE = re.compile(r"-?\d{1,20}")
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
@@ -135,7 +136,13 @@ def durable_key_args(tool_name: str, args: dict[str, Any]) -> dict[str, str]:
     """What the durable ledger may keep about a call's arguments (see _DURABLE_ARGS)."""
     policy = _DURABLE_ARGS.get(tool_name)
     if policy is None:
-        return {"arg_names": ",".join(sorted(str(k) for k in args))}
+        # The keys are model-controlled too: kept only while every one is a
+        # lowercase word and there are few of them.
+        names = sorted(str(k) for k in args)
+        if len(names) <= _MAX_ARG_NAMES and all(_WORD_SHAPE.fullmatch(n) for n in names):
+            return {"arg_names": ",".join(names)}
+        sha, _ = _digest(",".join(names))
+        return {"arg_count": str(len(names)), "arg_names_sha256": sha}
     out: dict[str, str] = {}
     for name, kind in policy.items():
         value = args.get(name)

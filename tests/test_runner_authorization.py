@@ -18,10 +18,14 @@ def _settings(**overrides) -> Settings:
 class _RecordingDispatcher:
     """Offers ``offered``; records every dispatch (name, context, is_background)."""
 
-    def __init__(self, offered, store=None):
+    def __init__(self, offered, store=None, registered=None):
         self.offered = list(offered)
         self.store = store
+        self.registered = registered  # None = every name is registered
         self.calls: list[tuple[str, ExecutionContext | None, bool]] = []
+
+    def is_registered(self, name):
+        return self.registered is None or name in self.registered
 
     def available_tools(self, frame_id):
         return [{"name": n, "description": n, "input_schema": {"type": "object"}} for n in self.offered]

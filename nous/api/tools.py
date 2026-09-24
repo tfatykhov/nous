@@ -368,6 +368,10 @@ class ToolDispatcher:
         # <parameter> tag inside another string arg (see _salvage_leaked_args).
         self._arg_salvage_enabled = arg_salvage_enabled
 
+    def is_registered(self, name: str) -> bool:
+        """True when ``name`` has a handler -- the only way a call can run."""
+        return name in self._handlers
+
     def register(self, name: str, handler: Callable[..., Any], schema: dict[str, Any]) -> None:
         """Register a tool handler with its JSON schema."""
         self._handlers[name] = handler

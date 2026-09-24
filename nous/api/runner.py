@@ -298,6 +298,10 @@ class AgentRunner:
         """
         if self._ledger_store is None:
             return None
+        if not self._dispatcher.is_registered(tool_name):
+            # A name nothing registered cannot have run, and it is model-chosen
+            # text: no durable row, so it never reaches the tool_name column.
+            return None
         try:
             return await self._ledger_store.open_entry(
                 context=ctx, tool_name=tool_name, tool_input=tool_input, turn=turn,
@@ -342,8 +346,8 @@ class AgentRunner:
     ) -> None:
         """A side-effecting call the harness refused. ``refused_by`` is a code
         (``offered_set`` / ``action_gate``), never the refusal's prose."""
-        if self._ledger_store is None:
-            return
+        if self._ledger_store is None or not self._dispatcher.is_registered(tool_name):
+            return  # an unregistered name could not have run (see _ledger_open)
         try:
             await self._ledger_store.record_blocked(
                 context=ctx, tool_name=tool_name, tool_input=tool_input, turn=turn,

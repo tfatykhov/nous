@@ -221,6 +221,31 @@ async def test_extra_tools_are_not_persisted():
     assert store.events == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["warn", "enforce"])
+async def test_an_unregistered_tool_name_leaves_no_row(mode):
+    """A name nothing registered cannot have run, and it is model-chosen text:
+    no durable row in either mode (codex r5 on #645)."""
+    store = _FakeStore()
+    r, d = _runner(store, offered=("write_file",), tool_offered_set_enforcement_mode=mode)
+    d.registered = {"write_file"}
+    r._call_api = _one_tool_call_then_done("sk_hallucinated_tool")
+    await _run_loop(r, is_background=True)
+    assert [e for e in store.events if e[0] in ("open", "blocked")] == []
+
+
+def test_dispatcher_reports_registration():
+    from nous.api.tools import ToolDispatcher
+
+    d = ToolDispatcher()
+
+    async def h():
+        return {"content": []}
+
+    d.register("real_tool", h, {"name": "real_tool", "input_schema": {"type": "object"}})
+    assert d.is_registered("real_tool") and not d.is_registered("sk_hallucinated_tool")
+
+
 def test_fork_shares_the_ledger_store():
     store = _FakeStore()
     r, _ = _runner(store)
