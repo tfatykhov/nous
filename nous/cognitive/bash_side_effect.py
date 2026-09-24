@@ -341,6 +341,11 @@ _READ_COMMAND_RULES = {
 # ---- git ----
 
 _GIT_READ_SUBCOMMANDS = frozenset({"log", "status", "diff", "show", "ls-files"})
+# Talk to another repository -- over the network, conservatively, whatever
+# the transport turns out to be.
+_GIT_REMOTE_SUBCOMMANDS = frozenset(
+    {"push", "push-upstream", "fetch", "pull", "clone", "ls-remote", "send-email", "lfs"}
+)
 
 _GIT_BRANCH_WRITES = ("dDmMcCuf", (
     "--delete", "--move", "--copy", "--force", "--set-upstream-to",
@@ -370,8 +375,13 @@ def _classify_git(args: list[str]) -> str:
     if i >= len(args):
         return "none"
     sub, rest = args[i], args[i + 1:]
-    if sub in ("push", "push-upstream"):
+    if sub in _GIT_REMOTE_SUBCOMMANDS:
         return "external"
+    if sub == "archive":
+        return "external" if any(_long_matches(a, ("--remote",)) for a in rest) else "write"
+    if sub == "submodule":
+        positional = [a for a in rest if not a.startswith("-")]
+        return "external" if positional[:1] == ["update"] else "write"
     if sub in _GIT_READ_SUBCOMMANDS:
         return "write" if any(_long_matches(a, ("--output",)) for a in rest) else "none"
     if sub == "branch":
@@ -386,6 +396,8 @@ def _classify_git(args: list[str]) -> str:
             # `remote show <name>` queries the remote unless told not to (-n);
             # a bare `remote show` only lists the configured names.
             return "none" if len(positional) == 1 or "-n" in rest else "external"
+        if positional[0] in ("update", "prune"):
+            return "external"
         return "write"
     return "write"
 

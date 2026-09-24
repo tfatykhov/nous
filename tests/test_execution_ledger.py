@@ -853,6 +853,8 @@ class TestClassifyWholeBashCommand:
         "git remote add origin https://x",
         "git diff --output=patch.txt",
         "git -c core.fsmonitor=x status",
+        "git archive HEAD -o out.tar",
+        "git submodule add https://example.com/r.git",
         # unparseable
         "cat 'unbalanced",
         "ls >",
@@ -871,6 +873,18 @@ class TestClassifyWholeBashCommand:
         "cat < /dev/tcp/example.com/80",
         "echo x > /dev/tcp/example.com/80",
         "exec 3<>/dev/udp/example.com/53",
+        # codex r3: git subcommands that talk to a remote
+        "git fetch origin",
+        "git pull",
+        "git clone https://example.com/r.git",
+        "git ls-remote origin",
+        "git -C repo fetch",
+        "git remote update",
+        "git remote prune origin",
+        "git submodule update --init",
+        "git archive --remote=ssh://example.com/r.git HEAD",
+        "git send-email 0001.patch",
+        "git lfs pull",
     ])
     def test_external_anywhere_wins(self, cmd):
         assert _classify_bash_command(cmd) == "external", cmd
