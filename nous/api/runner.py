@@ -44,12 +44,15 @@ from nous.api.models import (  # noqa: F401 — re-exported for backward compat
 from nous.api.smart_compress import smart_compress
 from nous.brain.brain import Brain
 from nous.cognitive.action_gate import ActionGate
-from nous.cognitive.claim_verifier import ClaimVerifier, IntentTracker
+from nous.cognitive.claim_verifier import ClaimVerifier, Evidence, IntentTracker
 from nous.cognitive.execution_ledger import (
     EXTERNAL_TOOLS,
     IRREVERSIBLE_TOOLS,
     WRITE_TOOLS,
     ExecutionLedger,
+    bash_exit_code,
+    classify_side_effect,
+    evidence_args,
 )
 from nous.cognitive.layer import CognitiveLayer
 from nous.cognitive.ledger_store import LedgerStore, LedgerWriteError
@@ -2795,15 +2798,35 @@ Rules:
         # this turn can ground an action claim. A blocked/errored bash or
         # web_fetch must not let "I pushed the code" verify — mirrors the
         # ledger-side status filter in ClaimVerifier.verify.
-        turn_tool_names = [tr.tool_name for tr in tool_results if tr.error is None]
+        turn_results = [tr for tr in tool_results if tr.error is None]
+        turn_tool_names = [tr.tool_name for tr in turn_results]
 
         # Claim verification
         if self._claim_verifier:
-            verification = self._claim_verifier.verify(response_text, turn_tool_names, ledger)
+            # Harness 2c: this turn's calls with their FULL arguments -- the
+            # ledger's copy is bounded, and a `git push` can sit past the bound.
+            turn_evidence = [
+                Evidence(
+                    tool_name=tr.tool_name,
+                    args=evidence_args(tr.tool_name, tr.arguments or {}, limit=None),
+                    exit_code=bash_exit_code(tr.result) if tr.tool_name == "bash" else None,
+                    side_effect=classify_side_effect(tr.tool_name, tr.arguments or {}),
+                )
+                for tr in turn_results
+            ]
+            verification = self._claim_verifier.verify(
+                response_text, turn_tool_names, ledger, turn_evidence=turn_evidence,
+            )
             self._log_f026_decision(
                 "f026_claim_verification",
                 {
                     "verified": verification.verified,
+                    "claim_count": len(verification.claims),
+                    "claims": [
+                        {"kind": c.kind, "evidence": c.evidence, "text": c.text[:120]}
+                        for c in verification.claims
+                    ],
+                    "turn": ledger.current_turn if ledger is not None else None,
                     "violation_count": len(verification.violations),
                     "violations": [
                         {

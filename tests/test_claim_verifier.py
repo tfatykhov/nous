@@ -248,3 +248,51 @@ def test_evidence_on_huge_arguments_is_linear():
     for claim in ("I pushed the fix.", "I sent the email.", "I saved the report file."):
         _verify(claim, _bash(command, side_effect="external"), Evidence("run_python", {"code": code}))
     assert time.perf_counter() - start < 1.0
+
+
+# --- runner wiring -------------------------------------------------------------
+
+
+def _runner_with_capture():
+    from types import SimpleNamespace
+
+    from nous.api.runner import AgentRunner
+
+    runner = AgentRunner.__new__(AgentRunner)
+    runner._claim_verifier = ClaimVerifier()
+    runner._intent_tracker = None
+    runner._settings = SimpleNamespace(claim_verification_mode="enforce")
+    runner._pending_corrections = {}
+    events = []
+    runner._log_f026_decision = lambda kind, data, session_id: events.append((kind, data))
+    return runner, events
+
+
+def test_runner_grounds_a_claim_in_this_turns_untruncated_arguments():
+    from nous.cognitive.schemas import ToolResult
+
+    runner, events = _runner_with_capture()
+    long_cmd = "git commit -m '" + "x" * 5000 + "' && git push origin main"
+    results = [ToolResult(tool_name="bash", arguments={"command": long_cmd}, result="Exit code: 0")]
+    runner._verify_claims("s1", "I pushed the fix.", results, ExecutionLedger(session_id="s1"))
+    (_, data), = events
+    assert data["verified"] and data["claim_count"] == 1
+    assert data["claims"] == [{"kind": "vcs_push", "evidence": "exact", "text": "I pushed"}]
+    assert data["turn"] == 0
+    assert runner._pending_corrections == {}
+
+
+def test_runner_rejects_a_failed_push():
+    from nous.cognitive.schemas import ToolResult
+
+    runner, events = _runner_with_capture()
+    results = [ToolResult(tool_name="bash", arguments={"command": "git push"}, result="rejected\nExit code: 1")]
+    runner._verify_claims("s1", "I pushed the fix.", results, ExecutionLedger(session_id="s1"))
+    assert not events[0][1]["verified"] and runner._pending_corrections["s1"]
+
+
+def test_runner_ignores_third_person_narration():
+    runner, events = _runner_with_capture()
+    runner._verify_claims("s1", "The send node completed and sent the email to Tim.", [],
+                          ExecutionLedger(session_id="s1"))
+    assert events[0][1]["verified"] and events[0][1]["claim_count"] == 0
