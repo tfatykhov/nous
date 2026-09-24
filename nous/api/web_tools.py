@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from nous.api.tools import ToolDispatcher
+from nous.api.tools import ToolDispatcher, _tool_error
 from nous.config import Settings
 
 if TYPE_CHECKING:
@@ -132,7 +132,7 @@ async def _web_search(
         # Check rate limit (applies regardless of provider)
         rate_error = _check_rate_limit(_settings)
         if rate_error:
-            return _mcp_response(f"Rate limit: {rate_error}")
+            return _tool_error(f"Rate limit: {rate_error}")
 
         count = min(count, 10)
 
@@ -143,7 +143,7 @@ async def _web_search(
                     query, count=count, http=_http, freshness=freshness,
                 )
             except RuntimeError as e:
-                return _mcp_response(f"Search error: {e}")
+                return _tool_error(f"Search error: {e}")
 
             lines = [f"Search results for: {query} [via {provider_name}]\n"]
             for i, r in enumerate(results, 1):
@@ -155,7 +155,7 @@ async def _web_search(
 
         # Fallback: direct Brave (no router configured)
         if not _settings.brave_search_api_key:
-            return _mcp_response(
+            return _tool_error(
                 "Error: No search provider configured. Set TAVILY_API_KEY, "
                 "EXA_API_KEY, or BRAVE_SEARCH_API_KEY."
             )
@@ -179,7 +179,7 @@ async def _web_search(
         )
 
         if response.status_code != 200:
-            return _mcp_response(
+            return _tool_error(
                 f"Search failed (HTTP {response.status_code}). "
                 "Check BRAVE_SEARCH_API_KEY if 401."
             )
@@ -205,12 +205,12 @@ async def _web_search(
         return _mcp_response("\n".join(lines))
 
     except httpx.TimeoutException:
-        return _mcp_response("Web search timed out. Try again.")
+        return _tool_error("Web search timed out. Try again.")
     except httpx.ConnectError as e:
-        return _mcp_response(f"Could not connect to search service: {e}")
+        return _tool_error(f"Could not connect to search service: {e}")
     except Exception as e:
         logger.exception("web_search error")
-        return _mcp_response(f"Search error: {e}")
+        return _tool_error(f"Search error: {e}")
 
 
 async def _web_fetch(
@@ -224,12 +224,12 @@ async def _web_fetch(
     try:
         # Validate URL scheme
         if not url.startswith(("http://", "https://")):
-            return _mcp_response("URL must start with http:// or https://")
+            return _tool_error("URL must start with http:// or https://")
 
         # SSRF protection
         is_safe, error = _is_url_safe(url)
         if not is_safe:
-            return _mcp_response(f"Blocked: {error}")
+            return _tool_error(f"Blocked: {error}")
 
         # F069 (2026-05-26): hard ceiling bumped from 50,000 -> 200,000.
         # Lets explicit doc-ingest callers (ingest_document path) pull a
@@ -259,20 +259,20 @@ async def _web_fetch(
             # SSRF check on redirect target
             redirect_safe, redirect_error = _is_url_safe(redirect_url)
             if not redirect_safe:
-                return _mcp_response(f"Blocked redirect to unsafe URL: {redirect_error}")
+                return _tool_error(f"Blocked redirect to unsafe URL: {redirect_error}")
             current_url = redirect_url
         else:
-            return _mcp_response(f"Too many redirects (max {max_redirects})")
+            return _tool_error(f"Too many redirects (max {max_redirects})")
 
         if response is None:
-            return _mcp_response("No response received")
+            return _tool_error("No response received")
 
         content_type = response.headers.get("content-type", "")
 
         # Reject binary content
         is_text = any(t in content_type for t in ["text/", "application/json", "application/xml", "application/xhtml"])
         if content_type and not is_text:
-            return _mcp_response(f"Cannot extract text from binary content (content-type: {content_type})")
+            return _tool_error(f"Cannot extract text from binary content (content-type: {content_type})")
 
         if "html" in content_type or "xhtml" in content_type:
             text = _extract_readable(response.text)
@@ -285,12 +285,12 @@ async def _web_fetch(
         return _mcp_response(f"Content from {url} ({len(text)} chars):\n\n{text}")
 
     except httpx.TimeoutException:
-        return _mcp_response(f"Fetch timed out for: {url}")
+        return _tool_error(f"Fetch timed out for: {url}")
     except httpx.ConnectError as e:
-        return _mcp_response(f"Could not connect to {url}: {e}")
+        return _tool_error(f"Could not connect to {url}: {e}")
     except Exception as e:
         logger.exception("web_fetch error")
-        return _mcp_response(f"Fetch error: {e}")
+        return _tool_error(f"Fetch error: {e}")
 
 
 # ---------------------------------------------------------------------------

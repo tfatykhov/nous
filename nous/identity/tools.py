@@ -16,7 +16,7 @@ from typing import Any
 
 from nous.identity.manager import IdentityManager, VALID_SECTIONS, SECTIONS
 from nous.identity.protocol import STORE_IDENTITY_SCHEMA, COMPLETE_INITIATION_SCHEMA
-from nous.api.tools import ToolDispatcher
+from nous.api.tools import ToolDispatcher, _tool_error
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ def register_identity_tools(dispatcher: ToolDispatcher, identity_manager: Identi
         """Store a piece of identity information."""
         # Review fix P2-3: validate section name
         if section not in SECTIONS:
-            return _mcp_response(
+            return _tool_error(
                 f"Invalid section '{section}'. Valid sections: {', '.join(SECTIONS)}"
             )
 
@@ -49,7 +49,7 @@ def register_identity_tools(dispatcher: ToolDispatcher, identity_manager: Identi
             return _mcp_response(f"✅ Stored {section} identity.")
         except Exception as e:
             logger.error("Failed to store identity section %s: %s", section, e)
-            return _mcp_response(f"Error storing {section}: {e}")
+            return _tool_error(f"Error storing {section}: {e}")
 
     async def complete_initiation() -> dict[str, Any]:
         """Mark initiation as complete."""
@@ -60,7 +60,7 @@ def register_identity_tools(dispatcher: ToolDispatcher, identity_manager: Identi
             required = {"character", "preferences"}
             missing = required - stored
             if missing:
-                return _mcp_response(
+                return _tool_error(
                     f"Cannot complete initiation — missing required sections: "
                     f"{', '.join(sorted(missing))}. "
                     f"Please store them first with store_identity."
@@ -74,7 +74,7 @@ def register_identity_tools(dispatcher: ToolDispatcher, identity_manager: Identi
             )
         except Exception as e:
             logger.error("Failed to complete initiation: %s", e)
-            return _mcp_response(f"Error completing initiation: {e}")
+            return _tool_error(f"Error completing initiation: {e}")
 
     # Register with flat schema format (type/properties/required/description)
     # matching existing tools — dispatcher.tool_definitions() wraps with name + input_schema

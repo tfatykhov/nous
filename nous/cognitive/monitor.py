@@ -31,6 +31,7 @@ _CORRECTION_PATTERNS = [
 # Patterns that indicate transient errors (shouldn't create censors)
 _TRANSIENT_PATTERNS = [
     "timeout",
+    "timed out",
     "rate limit",
     "rate_limit",
     "429",

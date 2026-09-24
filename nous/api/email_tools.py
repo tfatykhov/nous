@@ -28,6 +28,7 @@ from email.mime.text import MIMEText
 from html.parser import HTMLParser
 from typing import Any
 
+from nous.api.tools import _tool_error
 from nous.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -47,8 +48,8 @@ def _ok(text: str) -> dict[str, Any]:
 
 
 def _error(text: str) -> dict[str, Any]:
-    """MCP-compliant error response."""
-    return {"content": [{"type": "text", "text": f"Error: {text}"}]}
+    """MCP-compliant error response, flagged so dispatch reports a failure."""
+    return _tool_error(f"Error: {text}")
 
 
 def _normalize_recipients(value: Any) -> list[str]:
