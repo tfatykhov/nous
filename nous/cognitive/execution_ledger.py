@@ -30,6 +30,8 @@ READ_TOOLS: set[str] = {
     "web_fetch",
     "list_tasks",
     "cache_retrieve",
+    "recall_hubs",
+    "list_decisions",
 }
 
 # Local writes — reversible
@@ -49,9 +51,10 @@ WRITE_TOOLS: set[str] = {
     "heartbeat_check_create",
 }
 
-# External side effects — extend when email/notification tools are registered
+# External side effects — leave the host (message delivery, remote pushes)
 EXTERNAL_TOOLS: set[str] = {
-    "send_file",  # Sends files to Telegram
+    "send_file",   # Sends files to Telegram
+    "send_email",  # Guarded SMTP send (email_tools.py), registered after F026
 }
 
 # Irreversible — extend when irreversible tools are registered
@@ -89,6 +92,8 @@ _KEY_ARGS: dict[str, list[str]] = {
     "heartbeat_check_manage": ["action", "name"],
     "heartbeat_check_create": ["name", "prompt"],
     "send_file": ["file_path"],
+    # Recipient + subject identify a send; the 5-arg fallback captured body[:80].
+    "send_email": ["to", "cc", "subject"],
 }
 
 

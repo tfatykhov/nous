@@ -160,8 +160,21 @@ window and pass the 0.1 floor before being discarded. Push the same
 outcome predicate into the CTE's final `SELECT` (or fold it into `exclude_ids`)
 so the window is spent on nodes that can actually be rendered.
 
-Output-identical by construction: the rows being excluded are ones the Python
-resolver already drops. Verify with a byte-identical `recall_deep` snapshot.
+**CORRECTION (measured 2026-08-24, after A6 shipped in #602).** I wrote here that
+this is "output-identical by construction, verify with a byte-identical
+`recall_deep` snapshot". **That is wrong**, and the shipped code comment does not
+repeat it. The excluded rows are indeed ones the Python resolver already drops —
+but they were consuming slots in the CTE's `LIMIT 40`, so removing them lets the
+window refill with other rows. Measured on the prod clone, 8 trials: the new
+version admits rows the old one never returned in 7 of 8 (0–13 per call, median 4).
+
+The change is **monotonically non-worse rather than neutral**: A6 only *removes*
+candidates from the pool, so everything else shifts up in rank and the new result
+set is a superset of `old − demoted`. Nothing useful is pushed out; more is pulled
+in. Note the newly-admitted rows arrive at the tail with low activation, so the
+count clearing the floor can *fall* (e.g. 30 → 27) even as the usable count rises
+— the rows lost from that count are exactly the demoted decisions that would have
+been discarded at resolution anyway.
 
 ### A8 — make the CTE report real hop depth
 
