@@ -826,7 +826,7 @@ class TestClassifyWholeBashCommand:
         # find actions
         "find . -delete",
         "find . -name '*.pyc' -delete",
-        "find . -exec rm {} \;",
+        "find . -exec rm {} \\;",
         "find . -fprint out.txt",
         # sed in-place, write and execute
         "sed -i 's/a/b/' f",
