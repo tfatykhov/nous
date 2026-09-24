@@ -121,6 +121,16 @@ async def test_reads_are_not_persisted(store):
 
 
 @pytest.mark.asyncio
+async def test_a_bash_write_behind_a_read_command_is_persisted(store, db):
+    """codex r1 on #645: `echo x > f` starts with a read command, and the
+    first-token classifier skipped it -- a write with no durable row."""
+    entry_id = await store.open_entry(context=ExecutionContext(kind="interactive"), tool_name="bash",
+                                      tool_input={"command": "echo x > f"}, turn=1)
+    row = await _row(db, entry_id)
+    assert (row.status, row.side_effect_type) == ("pending", "write")
+
+
+@pytest.mark.asyncio
 async def test_close_moves_pending_to_terminal_once(store, db):
     entry_id = await store.open_entry(context=ExecutionContext(kind="interactive"),
                                       tool_name="learn_fact", tool_input={"content": "c"}, turn=1)

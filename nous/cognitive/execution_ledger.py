@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from nous.cognitive.bash_side_effect import classify_bash_command as _classify_bash_command
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -59,16 +61,6 @@ EXTERNAL_TOOLS: set[str] = {
 
 # Irreversible — extend when irreversible tools are registered
 IRREVERSIBLE_TOOLS: set[str] = set()
-
-# Bash commands whose first token indicates a read-only operation
-_READ_COMMANDS: frozenset[str] = frozenset(
-    {
-        "cat", "ls", "ll", "find", "grep", "rg", "awk", "sed", "head", "tail",
-        "wc", "diff", "stat", "file", "echo", "printf", "which", "type",
-        "pwd", "env", "printenv", "less", "more", "sort", "uniq", "cut",
-        "tr", "basename", "dirname", "realpath", "readlink",
-    }
-)
 
 # Key argument names per tool — used by _summarize_args
 _KEY_ARGS: dict[str, list[str]] = {
@@ -380,40 +372,6 @@ def redact_key_args(tool_name: str, key_args: dict[str, str]) -> dict[str, str]:
     for k, v in key_args.items():
         result[k] = redact_text(v)
     return result
-
-
-def _classify_bash_command(command: str) -> str:
-    """Classify a bash command as 'none' | 'write' | 'external'.
-
-    Only the first command token is inspected; pipes and chains are
-    approximate — the conservative default is 'write'.
-    """
-    if not command:
-        return "write"
-
-    # Strip leading environment assignments (FOO=bar cmd ...)
-    tokens = command.strip().split()
-    first = ""
-    for tok in tokens:
-        if "=" not in tok:
-            first = tok.lstrip("(").lower()
-            break
-
-    if first in _READ_COMMANDS:
-        return "none"
-
-    if first == "git":
-        sub = tokens[tokens.index("git") + 1] if "git" in tokens else ""
-        if sub in ("log", "status", "diff", "show", "branch", "tag", "remote", "ls-files"):
-            return "none"
-        if sub in ("push", "push-upstream"):
-            return "external"
-        return "write"
-
-    if first in ("curl", "wget", "http", "httpie"):
-        return "external"
-
-    return "write"
 
 
 def _estimate_tokens(text: str) -> int:

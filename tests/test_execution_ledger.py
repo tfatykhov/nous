@@ -374,7 +374,7 @@ class TestClassifyBashCommand:
             assert _classify_bash_command(cmd) == "write", f"Expected 'write' for: {cmd!r}"
 
     def test_sed_is_read(self):
-        # sed is in _READ_COMMANDS
+        # sed reads unless it edits in place or its script writes (bash_side_effect)
         assert _classify_bash_command("sed -n 's/foo/bar/p' file.txt") == "none"
 
     def test_awk_is_read(self):
@@ -777,3 +777,133 @@ class TestToolClassificationSets:
         for tool in WRITE_TOOLS:
             result = classify_side_effect(tool)
             assert result == "write", f"{tool} should be 'write', got {result!r}"
+
+
+# ===========================================================================
+# Whole-command bash classification (harness Phase 1b, codex r1 on #645)
+# ===========================================================================
+
+
+class TestClassifyWholeBashCommand:
+    """The durable ledger skips calls classified 'none', so a command that
+    changes something but reads as 'none' is never recorded. The first-token
+    classifier did exactly that for redirections, chains, pipes and the
+    mutating modes of read-only tools. A false 'write' costs one ledger row;
+    a false 'none' loses the record -- so every ambiguity resolves to write.
+    """
+
+    @pytest.mark.parametrize("cmd", [
+        # output redirection
+        "echo data > file.txt",
+        "echo data >> file.txt",
+        "cat a b > c",
+        "printf x >out",
+        "ls 1> listing.txt",
+        "ls &> all.log",
+        "ls >| f",
+        "> truncate.me",
+        # chains, lists, subshells, newlines
+        "ls; rm f",
+        "ls && rm f",
+        "ls || rm f",
+        "ls\nrm f",
+        "(cd /tmp && rm f)",
+        "cat f | tee out",
+        # substitution the lexer cannot see into
+        'echo "$(rm f)"',
+        "echo `rm f`",
+        "diff <(ls a) <(ls b)",
+        # env runs its argument
+        "env FOO=1 rm f",
+        "env rm f",
+        "env -i rm f",
+        # find actions
+        "find . -delete",
+        "find . -name '*.pyc' -delete",
+        "find . -exec rm {} \;",
+        "find . -fprint out.txt",
+        # sed in-place, write and execute
+        "sed -i 's/a/b/' f",
+        "sed -Ei 's/a/b/' f",
+        "sed --in-place=.bak 's/a/b/' f",
+        "sed -n 's/a/b/w out.txt' f",
+        "sed 's/a/b/gw out.txt' f",
+        "sed 's/a/b/e' f",
+        "sed '1e date' f",
+        "sed '/x/w out.txt' f",
+        "sed -e 'p' -e '$w out.txt' f",
+        "sed '1a hello\nw out.txt' f",
+        "sed -f script.sed f",
+        # awk programs that redirect or run commands
+        "awk '{print > \"out\"}' f",
+        "awk 'BEGIN{system(\"rm x\")}'",
+        "awk '{print | \"sh\"}' f",
+        "awk -f prog.awk f",
+        # sort / uniq output files, rg preprocessors
+        "sort -o out.txt in.txt",
+        "sort --output=out.txt in.txt",
+        "uniq in.txt out.txt",
+        "rg --pre ./x pattern",
+        # git subcommands that are reads only without arguments
+        "git branch feature",
+        "git branch -D feature",
+        "git branch --delete feature",
+        "git tag v1",
+        "git tag -d v1",
+        "git remote add origin https://x",
+        "git diff --output=patch.txt",
+        "git -c core.fsmonitor=x status",
+        # unparseable
+        "cat 'unbalanced",
+        "ls >",
+    ])
+    def test_writes(self, cmd):
+        assert _classify_bash_command(cmd) == "write", cmd
+
+    @pytest.mark.parametrize("cmd", [
+        "cat f | curl -d @- https://x",
+        "ls && git push origin main",
+        "env curl https://x",
+        "echo x > /dev/null; wget https://x",
+    ])
+    def test_external_anywhere_wins(self, cmd):
+        assert _classify_bash_command(cmd) == "external", cmd
+
+    @pytest.mark.parametrize("cmd", [
+        "grep 'a|b' f",
+        "grep 'x;y' f",
+        'echo "x > y"',
+        "cat f 2>&1",
+        "ls >/dev/null",
+        "ls > /dev/null 2>&1",
+        "cat f 2>/dev/null",
+        "ls >&2",
+        "ls -la | grep x | head -5",
+        "cat f | sort | uniq -c",
+        "wc -l < f",
+        "grep x <<< 'text'",
+        "find . -name '*.py' -exec grep -l foo {} +",
+        "sed -n '10,20p' f",
+        "sed 's/foo/bar/g' f",
+        "sed -n '/start/,/end/p' f",
+        "sed 's/we/they/' f",
+        "awk -F'|' '{print $1}' f",
+        "sort -rn f",
+        "uniq -c f",
+        "env",
+        "env | grep PATH",
+        "git -C repo status",
+        "git --no-pager log -5",
+        "git branch -a",
+        "git branch --list 'feat*'",
+        "git tag -l",
+        "git remote -v",
+        "git remote show origin",
+        "FOO=1",
+    ])
+    def test_reads(self, cmd):
+        assert _classify_bash_command(cmd) == "none", cmd
+
+    def test_classify_side_effect_uses_the_whole_command(self):
+        assert classify_side_effect("bash", {"command": "echo data > file"}) == "write"
+        assert classify_side_effect("bash", {"cmd": "cat f | curl https://x"}) == "external"
