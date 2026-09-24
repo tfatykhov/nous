@@ -151,6 +151,73 @@ def classify_bash_command(command: str) -> str:
             _work.reset(token)
 
 
+def command_invocations(command: str) -> list[tuple[str, list[str]]]:
+    """``(program, arguments)`` of every simple command ``command`` runs.
+
+    Read with the classifier's lexer and unwrapping: quoting is respected,
+    redirect targets are not arguments, and assignments, ``env`` and wrappers
+    (``sudo``, ``timeout`` ...) are peeled off, so `cd r && sudo git push` runs
+    git while `echo "git push"` and `git log --grep push` do not push. The
+    split mirrors ``_classify``. Command strings (``bash -c``, ``eval``) are
+    not entered. Used as evidence for completion claims (harness 2c), where a
+    miss is safe to report -- so this is total and linear: an input it cannot
+    read, or one over the classifier's size cap, yields ``[]``.
+    """
+    if len(command) > _MAX_COMMAND_CHARS:
+        return []
+    try:
+        tokens = _lex(command)
+        if tokens is None:
+            return []
+        simple: list[list[str]] = []
+        words: list[str] = []
+        expect_target = False
+        for tok, is_operator in tokens:
+            if not is_operator:
+                if expect_target:
+                    expect_target = False
+                else:
+                    words.append(tok)
+                continue
+            for op in _OPERATOR.findall(tok):
+                if op in _OUTPUT_REDIRECTS or op in _INPUT_REDIRECTS or op == ">&":
+                    expect_target = True
+                else:  # a command separator
+                    simple.append(words)
+                    words = []
+        simple.append(words)
+        found = []
+        for words in simple:
+            start = _command_start(words)
+            if start is not None:
+                found.append((_program(words[start]), words[start + 1:]))
+        return found
+    except Exception:
+        return []
+
+
+def _command_start(words: list[str]) -> int | None:
+    """Index of the word naming the program a simple command actually runs,
+    past assignments, ``env`` and wrappers; None when it runs a command
+    string or nothing."""
+    i = 0
+    while True:
+        while i < len(words) and _ASSIGNMENT.match(words[i]):
+            i += 1
+        if i >= len(words):
+            return None
+        prog = _program(words[i])
+        if prog == "env":
+            start = _env_command_start(words, i + 1)
+        elif prog in _WRAPPERS:
+            start = _wrapped_command_start(prog, words, i + 1)
+        else:
+            return i
+        if not isinstance(start, int):
+            return None
+        i = start
+
+
 def _lex(command: str) -> list[tuple[str, bool]] | None:
     """``(text, is_operator)`` tokens with bash quoting; None if unbalanced."""
     tokens: list[tuple[str, bool]] = []
@@ -608,10 +675,12 @@ _GIT_LISTING_VALUE_OPTIONS = frozenset({
 })
 
 
-def _classify_git(args: list[str]) -> str:
-    # Configuration can make any git command run a program, so it sets a
-    # floor -- but the subcommand is still classified: `git -c x fetch` is a
-    # fetch.
+def _git_global_options(args: list[str]) -> tuple[str, int]:
+    """Skip git's global options: ``(floor, index of the subcommand)``.
+
+    Configuration can make any git command run a program, so it sets a
+    floor -- but the subcommand is still what runs: `git -c x fetch` is a fetch.
+    """
     floor = "none"
     i = 0
     while i < len(args) and args[i].startswith("-"):
@@ -622,9 +691,20 @@ def _classify_git(args: list[str]) -> str:
             floor, i = "write", i + 1
         else:
             i += 2 if a in ("-C", "--git-dir", "--work-tree", "--namespace") else 1
+    return floor, i
+
+
+def _classify_git(args: list[str]) -> str:
+    floor, i = _git_global_options(args)
     if i >= len(args):
         return floor
     return _worst(floor, _classify_git_subcommand(args[i], args[i + 1:]))
+
+
+def git_subcommand(args: list[str]) -> tuple[str, list[str]] | None:
+    """``(subcommand, its arguments)`` for git's argument list, or None."""
+    _, i = _git_global_options(args)
+    return (args[i], args[i + 1:]) if i < len(args) else None
 
 
 def _classify_git_subcommand(sub: str, rest: list[str]) -> str:

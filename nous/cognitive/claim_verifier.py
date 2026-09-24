@@ -6,8 +6,12 @@ IntentTracker: detects ghost planning (describing work without doing it).
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import TYPE_CHECKING
+
+from nous.cognitive.bash_side_effect import command_invocations, git_subcommand
 
 if TYPE_CHECKING:
     from nous.cognitive.execution_ledger import ExecutionLedger
@@ -21,6 +25,26 @@ class ClaimViolation:
     expected_tool: str
     found_in_turn: bool
     found_in_ledger: bool
+    capable_tools: tuple[str, ...] = ()  # every tool that could have grounded it
+
+
+@dataclass(frozen=True)
+class Evidence:
+    """One successful tool call a claim may be grounded in."""
+
+    tool_name: str
+    args: Mapping[str, str] = field(default_factory=dict)
+    exit_code: int | None = None   # bash: a non-zero exit is not evidence
+    side_effect: str = "write"
+
+
+@dataclass(frozen=True)
+class ClaimCheck:
+    """One extracted claim and the best evidence found for it."""
+
+    kind: str
+    text: str
+    evidence: str  # "exact" | "plausible" | "none"
 
 
 @dataclass
@@ -30,6 +54,7 @@ class VerificationResult:
     verified: bool
     violations: list[ClaimViolation] = field(default_factory=list)
     correction: str | None = None
+    claims: list[ClaimCheck] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -94,6 +119,127 @@ _FIRST_RE = re.compile(_FIRST, re.IGNORECASE)
 _FIRST_CLAIM_RE = re.compile(_FIRST + _CLAIM_VERBS, re.IGNORECASE)
 _SENTENCE_END = re.compile(r"[.!?](?=\s|$)|\n")
 
+# The signal an argument must carry for a capable tool to count as evidence.
+# Every pattern is linear: this turn's evidence is untruncated and is scanned
+# on the event loop, so no unbounded class may be followed by a search.
+_MAIL_PROGRAMS = frozenset({"mail", "mailx", "sendmail", "mutt", "msmtp", "ssmtp", "swaks"})
+_PY_WRITES = re.compile(
+    r"open\([^)]{0,300}['\"][wax]b?\+?['\"]|\.write_(?:text|bytes)\(|\.to_(?:csv|json|excel|parquet)\("
+    r"|savefig\(|json\.dump\(|shutil\.(?:copy\w*|move)\(")
+_PY_SENDS = re.compile(r"\bsmtplib\b|\bsendmail\b|api\.telegram\.org")
+_PY_GIT = {
+    "vcs_push": re.compile(
+        r"\bgit\b[^|;&\n]{0,200}?\bpush\b(?![^|;&\n]{0,200}?(?:--dry-run|[\s'\"]-n\b))"),
+    "vcs_commit": re.compile(r"\bgit\b[^|;&\n]{0,200}?\bcommit\b(?![^|;&\n]{0,200}?--dry-run)"),
+}
+_DEPLOY_WORDS = re.compile(
+    r"\b(?:deploy\w*|docker|kubectl|helm|systemctl|terraform|ansible|rsync|scp|ssh|gcloud|aws|az)\b",
+    re.I)
+
+
+def _names(target: str, text: str) -> bool:
+    """True if ``text`` names the claimed target (full path or basename)."""
+    return bool(target and text) and (target in text or target.rsplit("/", 1)[-1] in text)
+
+
+@lru_cache(maxsize=32)
+def _invocations(command: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Cached: each claim is checked against every evidence item."""
+    return tuple((prog, tuple(args)) for prog, args in command_invocations(command))
+
+
+def _dry_run(sub: str, args: tuple[str, ...]) -> bool:
+    """`git push -n` / `--dry-run` change nothing; for commit `-n` is --no-verify."""
+    for a in args:
+        if a == "--":
+            break
+        name = a.split("=", 1)[0]
+        if len(name) >= 5 and "--dry-run".startswith(name):  # getopt abbreviation
+            return True
+        if sub == "push" and a.startswith("-") and not a.startswith("--") and "n" in a[1:]:
+            return True
+    return False
+
+
+def _runs_git(command: str, sub: str) -> bool:
+    """True if ``command`` runs ``git <sub>`` for real (not a dry run)."""
+    for prog, args in _invocations(command):
+        if prog == "git":
+            split = git_subcommand(list(args))
+            if split is not None and split[0] == sub and not _dry_run(sub, tuple(split[1])):
+                return True
+    return False
+
+
+def _sends_mail(command: str) -> bool:
+    """True if ``command`` runs a mail client, or curl against an SMTP server."""
+    for prog, args in _invocations(command):
+        if prog in _MAIL_PROGRAMS:
+            return True
+        if prog == "curl" and any(
+                a.lower().startswith(("smtp://", "smtps://", "--mail-rcpt")) for a in args):
+            return True
+    return False
+
+
+def evidence_level(claim: Claim, ev: Evidence) -> str:
+    """How well one successful call supports one claim: exact, plausible or none."""
+    kind = CLAIM_KINDS[claim.kind]
+    if ev.tool_name not in kind.capable_tools:
+        return "none"
+    if ev.tool_name == "bash" and ev.exit_code not in (None, 0):
+        return "none"
+    if not ev.args:  # names-only evidence from a legacy caller
+        return "plausible"
+    command = ev.args.get("command") or ev.args.get("cmd") or ""
+    code = ev.args.get("code", "")
+    if claim.kind == "file_write":
+        if ev.tool_name == "write_file":
+            path = ev.args.get("path") or ev.args.get("file_path") or ""
+            return "exact" if not claim.target or _names(claim.target, path) else "none"
+        if ev.tool_name == "bash":
+            if ev.side_effect not in ("write", "external"):
+                return "none"  # a read cannot have saved anything
+            if claim.target:
+                return "exact" if _names(claim.target, command) else "none"
+            return "plausible"
+        if not _PY_WRITES.search(code):
+            return "none"
+        if claim.target:
+            return "exact" if _names(claim.target, code) else "none"
+        return "plausible"
+    if claim.kind == "email":
+        if ev.tool_name == "send_email":
+            recipients = f"{ev.args.get('to', '')} {ev.args.get('cc', '')}".lower()
+            return "exact" if not claim.target or claim.target in recipients else "none"
+        if ev.tool_name == "send_file":
+            return "plausible"
+        if ev.tool_name == "bash":
+            # a mail command that actually leaves the host: `cat mail.log` is a read
+            if ev.side_effect != "external" or not _sends_mail(command):
+                return "none"
+            body = command
+        else:
+            if not _PY_SENDS.search(code):
+                return "none"
+            body = code
+        if claim.target and claim.target not in body.lower():
+            return "none"
+        return "plausible"
+    if claim.kind in ("vcs_push", "vcs_commit"):
+        if ev.tool_name == "run_python":
+            return "plausible" if _PY_GIT[claim.kind].search(code) else "none"
+        if not _runs_git(command, "push" if claim.kind == "vcs_push" else "commit"):
+            return "none"
+        needed = ("external",) if claim.kind == "vcs_push" else ("write", "external")
+        return "exact" if ev.side_effect in needed else "none"
+    # deploy: a deploy or transfer tool, not any network call (`curl` of an API is not a deploy)
+    if ev.tool_name == "bash" and ev.side_effect != "none" and _DEPLOY_WORDS.search(command):
+        return "plausible"
+    if ev.tool_name == "run_python" and _DEPLOY_WORDS.search(code):
+        return "plausible"
+    return "none"
+
 
 class ClaimVerifier:
     """Verifies that action claims in assistant responses are grounded in actual tool use."""
@@ -107,14 +253,22 @@ class ClaimVerifier:
         self,
         assistant_response: str,
         tool_calls_this_turn: list[str],
-        ledger: ExecutionLedger,
+        ledger: ExecutionLedger | None,
+        *,
+        turn_evidence: list[Evidence] | None = None,
     ) -> VerificationResult:
-        """Check every action claim against this turn's tool calls and the ledger.
+        """Check every action claim against this turn's calls and the ledger.
+
+        A claim is grounded when any successful call of a tool capable of the
+        claimed effect carries the effect's signal in its arguments (see
+        ``evidence_level``); a named path or recipient must match.
 
         Args:
             assistant_response: Full text of the assistant's reply.
-            tool_calls_this_turn: Tool names dispatched in the current turn.
+            tool_calls_this_turn: Tool names dispatched in the current turn
+                (names-only evidence when ``turn_evidence`` is not given).
             ledger: Session execution ledger for historical lookup.
+            turn_evidence: This turn's successful calls with their full arguments.
 
         Returns:
             VerificationResult with verified=True when no violations are found.
@@ -123,41 +277,43 @@ class ClaimVerifier:
         if not claims:
             return VerificationResult(verified=True)
 
-        # Build a set of tool names seen in the last 10 ledger entries.
-        # Audit CL-4 (2026-06-09): only count SUCCESSFUL actions. A blocked /
-        # errored / timed-out tool call must not satisfy an action claim — e.g.
-        # a censored or failed `bash` should not let "I pushed the code" verify.
-        # (Arg-level matching — distinguishing `git push` from `ls` — is a
-        # deeper follow-up; this closes the status hole the audit flagged.)
-        recent_ledger_tools: set[str] = {
-            action.tool_name
-            for action in ledger.actions[-10:]
-            if action.status == "success"
-        }
-        turn_tool_set = set(tool_calls_this_turn)
+        pool = list(turn_evidence) if turn_evidence is not None else [
+            Evidence(name) for name in tool_calls_this_turn]
+        if ledger is not None:
+            # Audit CL-4 (2026-06-09): only SUCCESSFUL actions count -- a blocked
+            # or failed call must not let "I pushed the code" verify.
+            recent = ledger.actions[-10:]
+            current = [a for a in ledger.actions if a.turn == ledger.current_turn]
+            for action in {id(a): a for a in [*current, *recent]}.values():
+                if action.status == "success":
+                    pool.append(Evidence(action.tool_name, action.evidence_args,
+                                         action.exit_code, action.side_effect_type))
+        turn_names = set(tool_calls_this_turn) | {ev.tool_name for ev in turn_evidence or ()}
 
+        checks: list[ClaimCheck] = []
         violations: list[ClaimViolation] = []
         for claim in claims:
-            expected_tool = CLAIM_KINDS[claim.kind].primary_tool
-            found_in_turn = expected_tool in turn_tool_set
-            found_in_ledger = expected_tool in recent_ledger_tools
-            if not found_in_turn and not found_in_ledger:
-                violations.append(
-                    ClaimViolation(
-                        claimed_text=claim.text,
-                        expected_tool=expected_tool,
-                        found_in_turn=found_in_turn,
-                        found_in_ledger=found_in_ledger,
-                    )
-                )
+            levels = {evidence_level(claim, ev) for ev in pool}
+            level = "exact" if "exact" in levels else "plausible" if "plausible" in levels else "none"
+            checks.append(ClaimCheck(claim.kind, claim.text, level))
+            if level == "none":
+                kind = CLAIM_KINDS[claim.kind]
+                violations.append(ClaimViolation(
+                    claimed_text=claim.text,
+                    expected_tool=kind.primary_tool,
+                    found_in_turn=kind.primary_tool in turn_names,
+                    found_in_ledger=False,
+                    capable_tools=tuple(sorted(kind.capable_tools)),
+                ))
 
         if not violations:
-            return VerificationResult(verified=True)
+            return VerificationResult(verified=True, claims=checks)
 
         return VerificationResult(
             verified=False,
             violations=violations,
             correction=self._build_correction(violations),
+            claims=checks,
         )
 
     def _extract_claims(self, text: str) -> list[Claim]:
@@ -193,10 +349,11 @@ class ClaimVerifier:
             "[Execution Integrity] The previous response contained ungrounded action claims:"
         ]
         for v in violations:
+            capable = f"; any of: {', '.join(v.capable_tools)}" if v.capable_tools else ""
             lines.append(
                 f'  - Claimed: "{v.claimed_text}" '
-                f"(expected tool: {v.expected_tool}) — "
-                "no matching tool call was recorded."
+                f"(expected tool: {v.expected_tool}{capable}) — "
+                "no successful call that could have done this was recorded."
             )
         lines.append(
             "Do not assert that an action was taken unless the corresponding tool "
