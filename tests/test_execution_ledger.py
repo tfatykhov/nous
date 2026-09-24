@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 import pytest
 
 from nous.cognitive.execution_ledger import (
+    EVIDENCE_ARG_CHARS,
     EXTERNAL_TOOLS,
     IRREVERSIBLE_TOOLS,
     READ_TOOLS,
@@ -34,10 +35,11 @@ from nous.cognitive.execution_ledger import (
     _format_key_args,
     _friendly_label,
     _group_summary,
+    bash_exit_code,
     classify_side_effect,
+    evidence_args,
     redact_key_args,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1075,3 +1077,46 @@ class TestClassifyWholeBashCommand:
     def test_classify_side_effect_uses_the_whole_command(self):
         assert classify_side_effect("bash", {"command": "echo data > file"}) == "write"
         assert classify_side_effect("bash", {"cmd": "cat f | curl https://x"}) == "external"
+
+
+class TestEvidenceFields:
+    """Harness Phase 2c: what a completion claim can be checked against."""
+
+    def test_bash_exit_code_is_parsed_from_the_trailer(self):
+        ledger = ExecutionLedger(session_id="s")
+        ok = ledger.record("bash", {"command": "git push"}, "Everything up-to-date\nExit code: 0", "success")
+        bad = ledger.record("bash", {"command": "git push"}, "rejected\nExit code: 1", "success")
+        assert ok.exit_code == 0 and bad.exit_code == 1
+
+    def test_a_timeout_has_no_exit_code(self):
+        ledger = ExecutionLedger(session_id="s")
+        assert ledger.record("bash", {"command": "sleep 99"}, "Command timed out after 30s.", "error").exit_code is None
+
+    def test_exit_code_only_for_bash(self):
+        ledger = ExecutionLedger(session_id="s")
+        assert ledger.record("write_file", {"path": "/tmp/x"}, "ok\nExit code: 1", "success").exit_code is None
+
+    def test_long_commands_keep_head_and_tail(self):
+        cmd = "git commit -m '" + "x" * 5000 + "' && git push origin main"
+        ledger = ExecutionLedger(session_id="s")
+        action = ledger.record("bash", {"command": cmd}, "Exit code: 0", "success")
+        kept = action.evidence_args["command"]
+        assert kept.startswith("git commit") and kept.endswith("git push origin main")
+        assert len(kept) <= EVIDENCE_ARG_CHARS + 5
+        assert action.key_args["command"] == cmd[:80]  # the prompt-facing summary is unchanged
+
+    def test_unbounded_evidence_for_this_turn(self):
+        cmd = "x" * 5000
+        assert evidence_args("bash", {"command": cmd}, limit=None)["command"] == cmd
+
+    def test_evidence_args_only_for_effect_tools(self):
+        assert evidence_args("recall_deep", {"query": "q"}) == {}
+        assert evidence_args("send_email", {"to": ["a@x.io"], "subject": "s", "body": "b"}) == {
+            "to": "['a@x.io']", "subject": "s"}
+        assert evidence_args("run_python", {"code": "open('r.md','w')"}) == {"code": "open('r.md','w')"}
+
+    def test_bash_exit_code_parser(self):
+        assert bash_exit_code("out\nExit code: 0\n") == 0
+        assert bash_exit_code("Exit code: -9") == -9
+        assert bash_exit_code("quoted 'Exit code: 0' then\nExit code: 2") == 2
+        assert bash_exit_code(None) is None and bash_exit_code("no trailer") is None

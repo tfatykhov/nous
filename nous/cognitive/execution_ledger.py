@@ -88,6 +88,46 @@ _KEY_ARGS: dict[str, list[str]] = {
     "send_email": ["to", "cc", "subject"],
 }
 
+# Argument values a completion claim can be checked against (harness Phase 2c).
+# In-memory only -- never persisted, never rendered into the prompt. Bounded
+# head AND tail, so a long commit message still shows the `git push` after it.
+EVIDENCE_ARG_CHARS = 2000
+_EVIDENCE_ARGS: dict[str, tuple[str, ...]] = {
+    "bash": ("command", "cmd"),
+    "run_python": ("code",),
+    "write_file": ("path", "file_path"),
+    "send_email": ("to", "cc", "subject"),
+    "send_file": ("file_path", "chat_id", "caption"),
+}
+# bash_tool always appends this trailer: the authoritative wrapper status.
+_BASH_EXIT_CODE = re.compile(r"(?:\A|\n)Exit code: (-?\d+)\s*\Z")
+
+
+def _bounded(value: str, limit: int | None) -> str:
+    if limit is None or len(value) <= limit:
+        return value
+    half = limit // 2
+    return f"{value[:half]}\n…\n{value[-half:]}"
+
+
+def evidence_args(
+    tool_name: str, tool_input: dict[str, Any], *, limit: int | None = EVIDENCE_ARG_CHARS,
+) -> dict[str, str]:
+    """The argument values a claim about this call can be checked against."""
+    return {
+        key: _bounded(str(tool_input[key]), limit)
+        for key in _EVIDENCE_ARGS.get(tool_name, ())
+        if tool_input.get(key) is not None
+    }
+
+
+def bash_exit_code(result: str | None) -> int | None:
+    """Exit code from bash_tool's trailer; None when absent (timeout, spawn error)."""
+    if not result:
+        return None
+    match = _BASH_EXIT_CODE.search(result)
+    return int(match.group(1)) if match else None
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -105,6 +145,8 @@ class ExecutedAction:
     timestamp: datetime
     result_summary: str  # First 100 chars of result
     side_effect_type: str  # "none" | "write" | "external" | "irreversible"
+    exit_code: int | None = None  # bash only: a non-zero exit is not evidence
+    evidence_args: dict[str, str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +187,8 @@ class ExecutionLedger:
             timestamp=datetime.now(UTC),
             result_summary=str(result)[:100],
             side_effect_type=side_effect,
+            exit_code=bash_exit_code(str(result)) if tool_name == "bash" else None,
+            evidence_args=evidence_args(tool_name, tool_input),
         )
         self.actions.append(action)
         if status == "blocked":
