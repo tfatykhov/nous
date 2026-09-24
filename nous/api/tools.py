@@ -29,7 +29,7 @@ from typing import Any
 from uuid import UUID
 
 from nous.brain.brain import Brain
-from nous.brain.schemas import ReasonInput, RecordInput
+from nous.brain.schemas import NON_PREDICTION_OUTCOMES, ReasonInput, RecordInput
 from nous.config import PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS, Settings
 from nous.heart.exemplars import parse_label
 from nous.heart.heart import Heart
@@ -377,8 +377,8 @@ class ToolDispatcher:
         P1-1 fix: Extracts text from MCP-format response.
 
         is_background: True for heartbeat/subtask turns. Decision-resolution
-        tools read it via the injected _is_background kwarg to hard-block
-        autopilot self-resolution.
+        tools read it via the injected _is_background kwarg to restrict
+        autopilot resolution to non-prediction outcomes.
         """
         handler = self._handlers.get(name)
         if not handler:
@@ -2063,15 +2063,31 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
     # Decision resolution (closes the calibration loop). resolve_decision /
     # resolve_decisions persist an outcome on an existing decision via the
     # pre-existing Brain.review(); list_decisions surfaces the pending set so
-    # a sweep can enumerate what to resolve. Background turns (heartbeat /
-    # subtask, dispatched with _is_background=True) are HARD-BLOCKED so an
-    # autopilot tick can't self-resolve its own noise without interactive
-    # reasoning. Cite: live Nous decision 06d62894 / FORGE a22f4ccc.
+    # a sweep can enumerate what to resolve.
+    #
+    # Background turns (heartbeat / subtask / schedule / DAG, dispatched with
+    # _is_background=True) may apply only the NON-PREDICTION outcomes
+    # (noise, superseded), and never over a decision that already carries a
+    # graded outcome (Brain preserve_graded). Both are excluded from the
+    # Brier denominator, so an autopilot sweep can drain its own tick
+    # artifacts and replaced decisions from the pending queue without being
+    # able to grade — or un-grade — a prediction. Grading success / partial /
+    # failure still needs an interactive turn. Narrows the original hard
+    # block (live Nous decision 06d62894 / FORGE a22f4ccc).
+    #
+    # Background resolutions are attributed reviewer='agent-background':
+    # decisions.session_id is the session that RECORDED the decision, so the
+    # reviewer is the only field that says an autopilot resolved it.
     # ------------------------------------------------------------------
-    _BG_BLOCK_MSG = (
-        "Error: decision resolution is blocked in background/heartbeat turns. "
-        "Resolving a decision requires an interactive reasoning session."
-    )
+    _BG_REVIEWER = "agent-background"
+
+    def _bg_outcome_error(outcome: Any) -> str:
+        return (
+            f"Error: outcome={outcome!r} is not available in background/heartbeat "
+            f"turns — they may only resolve a decision as {' or '.join(NON_PREDICTION_OUTCOMES)} "
+            "(non-prediction outcomes, excluded from calibration). Grading a "
+            "prediction as success/partial/failure requires an interactive turn."
+        )
 
     async def resolve_decision(
         decision_id: str,
@@ -2090,8 +2106,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             superseded_by: UUID of the replacing decision. Required when
                 outcome=superseded.
         """
-        if _is_background:
-            return _tool_error(_BG_BLOCK_MSG)
+        if _is_background and outcome not in NON_PREDICTION_OUTCOMES:
+            return _tool_error(_bg_outcome_error(outcome))
         # A supersession without a successor is a lineage dead end: retrieval
         # can label the row `[superseded]` but cannot point at what replaced
         # it. Validated here, not as a JSON-schema conditional — the dispatcher
@@ -2111,8 +2127,9 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 UUID(decision_id),
                 outcome=outcome,
                 result=resolution_note,
-                reviewer="agent",
+                reviewer=_BG_REVIEWER if _is_background else "agent",
                 superseded_by=UUID(superseded_by) if superseded_by else None,
+                preserve_graded=_is_background,
             )
             text = f"Decision {detail.id} resolved: outcome={detail.outcome}"
             if detail.superseded_by:
@@ -2129,10 +2146,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         """Resolve a batch of decisions in one transaction (sweep path).
 
         Each item: {decision_id, outcome, resolution_note?, superseded_by?}.
-        A per-item failure is reported and does not abort the batch.
+        A per-item failure is reported and does not abort the batch — in a
+        background turn that includes an outcome outside
+        NON_PREDICTION_OUTCOMES and a decision that is already graded.
         """
-        if _is_background:
-            return _tool_error(_BG_BLOCK_MSG)
         try:
             # codex #577 r3: NO batch-wide lineage precheck here. ReviewInput's
             # validator (shared by every entry point) rejects a missing-lineage
@@ -2149,7 +2166,28 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 }
                 for r in resolutions
             ]
-            results = await brain.review_many(items, reviewer="agent")
+            if _is_background:
+                # Refuse disallowed outcomes per item (same contract as a
+                # not-found id) and re-merge in input order, so the sweep
+                # keeps every item it was allowed to resolve.
+                allowed = [i for i, it in enumerate(items) if it["outcome"] in NON_PREDICTION_OUTCOMES]
+                reviewed = (
+                    await brain.review_many(
+                        [items[i] for i in allowed], reviewer=_BG_REVIEWER, preserve_graded=True,
+                    )
+                    if allowed else []
+                )
+                by_index = dict(zip(allowed, reviewed))
+                results = [
+                    by_index[i] if i in by_index else {
+                        "decision_id": str(it["decision_id"]),
+                        "ok": False,
+                        "error": _bg_outcome_error(it["outcome"]),
+                    }
+                    for i, it in enumerate(items)
+                ]
+            else:
+                results = await brain.review_many(items, reviewer="agent")
             ok = sum(1 for r in results if r["ok"])
             failed = [r for r in results if not r["ok"]]
             text = f"Resolved {ok}/{len(results)} decisions."
@@ -2278,7 +2316,10 @@ _RESOLVE_DECISION_SCHEMA: dict[str, Any] = {
         "later decision replaced this one (both excluded from calibration). "
         "'superseded' REQUIRES superseded_by — record the replacing decision "
         "first, then pass its UUID; without it the call is rejected. "
-        "Always include a resolution_note as the evidence trail."
+        "Always include a resolution_note as the evidence trail. In background "
+        "turns (heartbeat, subtask, schedule, DAG) only 'noise' and 'superseded' "
+        "are accepted, and never on a decision that already has a success/"
+        "partial/failure outcome — grading needs an interactive turn."
     ),
     "properties": {
         "decision_id": {"type": "string", "description": "UUID of the decision to resolve"},
@@ -2303,7 +2344,10 @@ _RESOLVE_DECISIONS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
         "Resolve a batch of decisions in one transaction (for sweeps). "
-        "A per-item failure is reported and does not abort the batch."
+        "A per-item failure is reported and does not abort the batch. In "
+        "background turns only 'noise' and 'superseded' items are applied, and "
+        "never over an existing success/partial/failure outcome; other items "
+        "are reported as failures."
     ),
     "properties": {
         "resolutions": {

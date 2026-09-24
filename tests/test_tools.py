@@ -165,17 +165,133 @@ class TestResolveDecision:
         assert detail.outcome == "noise"
 
     @pytest.mark.asyncio
-    async def test_resolve_decision_blocked_in_background(self, tools, brain):
-        """Background turns are hard-blocked from resolving decisions."""
+    async def test_resolve_decision_noise_allowed_in_background(self, tools, brain):
+        """A background turn may mark a pending decision as noise, attributed to it."""
         did = await self._make_decision(tools, brain)
+        result = await tools["resolve_decision"](
+            decision_id=did, outcome="noise", resolution_note="heartbeat tick artifact",
+            _is_background=True,
+        )
+        assert result.get("is_error") is not True
+        detail = await brain.get(uuid.UUID(did))
+        assert detail.outcome == "noise"
+        # decisions.session_id is the RECORDING session, so the reviewer is the
+        # only thing that says an autopilot made this resolution.
+        assert detail.reviewer == "agent-background"
+
+    @pytest.mark.asyncio
+    async def test_resolve_decision_foreground_reviewer_unchanged(self, tools, brain):
+        """Interactive resolutions keep reviewer='agent'."""
+        did = await self._make_decision(tools, brain)
+        await tools["resolve_decision"](decision_id=did, outcome="noise")
+        detail = await brain.get(uuid.UUID(did))
+        assert detail.reviewer == "agent"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["success", "partial", "failure"])
+    async def test_resolve_decision_graded_outcome_blocked_in_background(self, tools, brain, outcome):
+        """Background turns cannot grade a prediction; the error names what IS allowed."""
+        did = await self._make_decision(tools, brain)
+        result = await tools["resolve_decision"](
+            decision_id=did, outcome=outcome, _is_background=True,
+        )
+        assert result.get("is_error") is True
+        text = result["content"][0]["text"]
+        assert "background" in text.lower()
+        assert "noise" in text and "superseded" in text
+        detail = await brain.get(uuid.UUID(did))
+        assert detail.outcome == "pending"
+
+    @pytest.mark.asyncio
+    async def test_resolve_decision_superseded_in_background(self, tools, brain):
+        """Supersession is allowed in background, still only with its successor."""
+        old_id = await self._make_decision(tools, brain)
+        new_id = await self._make_decision(tools, brain)
+        refused = await tools["resolve_decision"](
+            decision_id=old_id, outcome="superseded", _is_background=True,
+        )
+        assert refused.get("is_error") is True
+        assert "superseded_by" in refused["content"][0]["text"]
+        assert (await brain.get(uuid.UUID(old_id))).outcome == "pending"
+
+        result = await tools["resolve_decision"](
+            decision_id=old_id, outcome="superseded", superseded_by=new_id,
+            _is_background=True,
+        )
+        assert result.get("is_error") is not True
+        detail = await brain.get(uuid.UUID(old_id))
+        assert detail.outcome == "superseded"
+        assert str(detail.superseded_by) == new_id
+
+    @pytest.mark.asyncio
+    async def test_background_cannot_overwrite_a_graded_outcome(self, tools, brain):
+        """noise/superseded are excluded from calibration, so relabelling a graded
+        decision in background would delete a data point from the Brier score."""
+        did = await self._make_decision(tools, brain)
+        await tools["resolve_decision"](decision_id=did, outcome="failure", resolution_note="broke prod")
         result = await tools["resolve_decision"](
             decision_id=did, outcome="noise", _is_background=True,
         )
         assert result.get("is_error") is True
-        assert "background" in result["content"][0]["text"].lower()
-        # Outcome unchanged
+        assert "failure" in result["content"][0]["text"]
         detail = await brain.get(uuid.UUID(did))
-        assert detail.outcome == "pending"
+        assert detail.outcome == "failure"
+        assert detail.reviewer == "agent"
+
+    @pytest.mark.asyncio
+    async def test_background_may_relabel_an_ungraded_resolution(self, tools, brain):
+        """noise -> superseded moves between non-prediction outcomes: allowed."""
+        old_id = await self._make_decision(tools, brain)
+        new_id = await self._make_decision(tools, brain)
+        await tools["resolve_decision"](decision_id=old_id, outcome="noise", _is_background=True)
+        result = await tools["resolve_decision"](
+            decision_id=old_id, outcome="superseded", superseded_by=new_id,
+            _is_background=True,
+        )
+        assert result.get("is_error") is not True
+        assert (await brain.get(uuid.UUID(old_id))).outcome == "superseded"
+
+    @pytest.mark.asyncio
+    async def test_resolve_decisions_background_batch_is_per_item(self, tools, brain):
+        """A background sweep keeps its allowed items; graded outcomes and graded
+        rows fail per item, in input order, without aborting the batch."""
+        noise_id = await self._make_decision(tools, brain)
+        graded_req_id = await self._make_decision(tools, brain)
+        graded_row_id = await self._make_decision(tools, brain)
+        await tools["resolve_decision"](decision_id=graded_row_id, outcome="success")
+
+        result = await tools["resolve_decisions"](
+            resolutions=[
+                {"decision_id": graded_req_id, "outcome": "success", "resolution_note": "looks fine"},
+                {"decision_id": noise_id, "outcome": "noise", "resolution_note": "tick artifact"},
+                {"decision_id": graded_row_id, "outcome": "noise"},
+            ],
+            _is_background=True,
+        )
+        assert result.get("is_error") is False
+        text = result["content"][0]["text"]
+        assert "Resolved 1/3" in text
+        failures = text.split("Failures:", 1)[1]
+        # Reported in input order: the disallowed outcome, then the graded row.
+        assert failures.index(graded_req_id) < failures.index(graded_row_id)
+        assert noise_id not in failures
+
+        assert (await brain.get(uuid.UUID(noise_id))).outcome == "noise"
+        assert (await brain.get(uuid.UUID(noise_id))).reviewer == "agent-background"
+        assert (await brain.get(uuid.UUID(graded_req_id))).outcome == "pending"
+        assert (await brain.get(uuid.UUID(graded_row_id))).outcome == "success"
+
+    @pytest.mark.asyncio
+    async def test_resolve_decisions_background_all_refused_is_error(self, tools, brain):
+        """A background batch where nothing is allowed reports an error."""
+        did = await self._make_decision(tools, brain)
+        result = await tools["resolve_decisions"](
+            resolutions=[{"decision_id": did, "outcome": "failure"}],
+            _is_background=True,
+        )
+        assert result.get("is_error") is True
+        assert "Resolved 0/1" in result["content"][0]["text"]
+        assert (await brain.get(uuid.UUID(did))).outcome == "pending"
 
     @pytest.mark.asyncio
     async def test_resolve_decisions_batch_reports_failures(self, tools, brain):

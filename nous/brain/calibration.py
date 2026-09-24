@@ -8,7 +8,7 @@ from __future__ import annotations
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nous.brain.schemas import CalibrationReport
+from nous.brain.schemas import GRADED_OUTCOMES, CalibrationReport
 from nous.storage.models import Decision, DecisionReason
 
 
@@ -56,7 +56,7 @@ class CalibrationEngine:
         # contribute (0.0 - 0.0)^2 = 0.0 to Brier score, artificially improving it
         reviewed_filter = (
             (Decision.agent_id == agent_id)
-            & (Decision.outcome.in_(("success", "partial", "failure")))
+            & (Decision.outcome.in_(GRADED_OUTCOMES))
             & ~((Decision.outcome == "failure") & (Decision.confidence == 0.0))
         )
 
@@ -67,7 +67,7 @@ class CalibrationEngine:
             select(
                 func.count().label("total"),
                 func.count().filter(
-                    (Decision.outcome.in_(("success", "partial", "failure")))
+                    (Decision.outcome.in_(GRADED_OUTCOMES))
                     & ~((Decision.outcome == "failure") & (Decision.confidence == 0.0))
                 ).label("reviewed"),
             ).where(Decision.agent_id == agent_id)

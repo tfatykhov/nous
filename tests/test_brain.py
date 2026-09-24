@@ -491,6 +491,55 @@ async def test_review_many_batch_survives_bad_item(brain, session):
     assert detail2.outcome == "noise"
 
 
+async def test_review_preserve_graded_refuses_to_overwrite(brain, session):
+    """preserve_graded never replaces success/partial/failure (calibration data)."""
+    graded = await brain.record(_record_input(description="graded"), session=session)
+    await brain.review(graded.id, "failure", result="broke", session=session)
+    with pytest.raises(ValueError, match="failure"):
+        await brain.review(graded.id, "noise", preserve_graded=True, session=session)
+    assert (await brain.get(graded.id, session=session)).outcome == "failure"
+
+    # pending -> noise -> superseded: no graded outcome is ever touched.
+    old = await brain.record(_record_input(description="old"), session=session)
+    new = await brain.record(_record_input(description="new"), session=session)
+    await brain.review(old.id, "noise", preserve_graded=True, session=session)
+    reviewed = await brain.review(
+        old.id, "superseded", superseded_by=new.id, preserve_graded=True, session=session
+    )
+    assert reviewed.outcome == "superseded"
+
+
+async def test_review_many_preserve_graded_is_per_item(brain, session):
+    """A graded row fails its own item; the rest of the batch still lands."""
+    graded = await brain.record(_record_input(description="g"), session=session)
+    pending = await brain.record(_record_input(description="p"), session=session)
+    await brain.review(graded.id, "success", session=session)
+
+    results = await brain.review_many(
+        [
+            {"decision_id": str(graded.id), "outcome": "noise"},
+            {"decision_id": str(pending.id), "outcome": "noise"},
+        ],
+        preserve_graded=True,
+        session=session,
+    )
+    assert [r["ok"] for r in results] == [False, True]
+    assert "success" in results[0]["error"]
+    assert (await brain.get(graded.id, session=session)).outcome == "success"
+    assert (await brain.get(pending.id, session=session)).outcome == "noise"
+
+
+def test_graded_and_non_prediction_outcomes_partition_review_outcomes():
+    """The two sets are disjoint and together are exactly what review() accepts."""
+    from typing import get_args
+
+    from nous.brain.schemas import GRADED_OUTCOMES, NON_PREDICTION_OUTCOMES, ReviewInput
+
+    accepted = set(get_args(ReviewInput.model_fields["outcome"].annotation))
+    assert set(GRADED_OUTCOMES).isdisjoint(NON_PREDICTION_OUTCOMES)
+    assert set(GRADED_OUTCOMES) | set(NON_PREDICTION_OUTCOMES) == accepted
+
+
 async def test_calibration_excludes_noise_and_superseded(brain, session):
     """noise/superseded resolutions must not enter the calibration denominator."""
     baseline = (await brain.get_calibration(session=session)).reviewed_decisions

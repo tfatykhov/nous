@@ -25,6 +25,7 @@ from nous.brain.embeddings import EmbeddingProvider
 from nous.brain.guardrails import GuardrailEngine
 from nous.brain.quality import QualityScorer
 from nous.brain.schemas import (
+    GRADED_OUTCOMES,
     BridgeInfo,
     CalibrationReport,
     DecisionDetail,
@@ -985,17 +986,26 @@ class Brain:
         reviewer: str | None = None,
         superseded_by: UUID | None = None,
         session: AsyncSession | None = None,
+        preserve_graded: bool = False,
     ) -> DecisionDetail:
-        """Record outcome for a decision."""
+        """Record outcome for a decision.
+
+        preserve_graded: refuse (ValueError) to replace an outcome in
+        GRADED_OUTCOMES. Relabelling a graded decision as noise/superseded
+        removes a data point from calibration, so a caller that must not
+        touch calibration (a background turn) sets this.
+        """
         if session is None:
             async with self.db.session() as session:
                 detail = await self._review(
-                    decision_id, outcome, result, reviewer, superseded_by, session
+                    decision_id, outcome, result, reviewer, superseded_by, session,
+                    preserve_graded,
                 )
                 await session.commit()
                 return detail
         return await self._review(
-            decision_id, outcome, result, reviewer, superseded_by, session
+            decision_id, outcome, result, reviewer, superseded_by, session,
+            preserve_graded,
         )
 
     async def review_many(
@@ -1003,25 +1013,27 @@ class Brain:
         items: list[dict],
         reviewer: str | None = None,
         session: AsyncSession | None = None,
+        preserve_graded: bool = False,
     ) -> list[dict]:
         """Resolve a batch of decisions in one transaction.
 
         Each item is a dict with keys ``decision_id`` (str|UUID, required),
         ``outcome`` (required), ``result`` (optional), ``superseded_by``
-        (optional). A per-item failure (not-found / invalid outcome) is
-        captured in the returned row and does not abort the batch — the
-        failing item is simply not mutated. Returns one
-        ``{decision_id, ok, error}`` dict per input item, in order.
+        (optional). A per-item failure (not-found / invalid outcome / a graded
+        row under ``preserve_graded``) is captured in the returned row and
+        does not abort the batch — the failing item is simply not mutated.
+        Returns one ``{decision_id, ok, error}`` dict per input item, in order.
         """
         if session is None:
             async with self.db.session() as session:
-                results = await self._review_many(items, reviewer, session)
+                results = await self._review_many(items, reviewer, session, preserve_graded)
                 await session.commit()
                 return results
-        return await self._review_many(items, reviewer, session)
+        return await self._review_many(items, reviewer, session, preserve_graded)
 
     async def _review_many(
         self, items: list[dict], reviewer: str | None, session: AsyncSession,
+        preserve_graded: bool = False,
     ) -> list[dict]:
         results: list[dict] = []
         for item in items:
@@ -1037,6 +1049,7 @@ class Brain:
                     item.get("reviewer", reviewer),
                     sup_uuid,
                     session,
+                    preserve_graded,
                 )
                 results.append({"decision_id": str(raw_id), "ok": True, "error": None})
             except Exception as e:  # noqa: BLE001 — surface per-item, keep batch alive
@@ -1051,6 +1064,7 @@ class Brain:
         reviewer: str | None,
         superseded_by: UUID | None,
         session: AsyncSession,
+        preserve_graded: bool = False,
     ) -> DecisionDetail:
         # Validate via Pydantic (P2-18)
         validated = ReviewInput(
@@ -1060,9 +1074,19 @@ class Brain:
             superseded_by=superseded_by,
         )
 
-        decision = await self._get_decision_orm(decision_id, session)
+        # Row-locked when preserving a grade, so a concurrent review cannot
+        # grade the decision between this check and the write below.
+        decision = await self._get_decision_orm(
+            decision_id, session, for_update=preserve_graded
+        )
         if decision is None:
             raise ValueError(f"Decision {decision_id} not found")
+        if preserve_graded and decision.outcome in GRADED_OUTCOMES:
+            raise ValueError(
+                f"Decision {decision_id} already has the graded outcome "
+                f"{decision.outcome!r}; a graded outcome cannot be replaced here "
+                "(it would drop out of calibration) — re-grade it in an interactive turn"
+            )
 
         decision.outcome = validated.outcome
         decision.outcome_result = validated.result
@@ -2035,12 +2059,16 @@ class Brain:
     # Private helpers
     # ------------------------------------------------------------------
 
-    async def _get_decision_orm(self, decision_id: UUID, session: AsyncSession) -> Decision | None:
+    async def _get_decision_orm(
+        self, decision_id: UUID, session: AsyncSession, for_update: bool = False,
+    ) -> Decision | None:
         """Fetch a Decision ORM object with all relationships eagerly loaded.
 
         Scoped by agent_id to enforce multi-agent data isolation.
+        for_update: lock the decisions row until the transaction ends (the
+        relationship selectinloads are separate statements and stay unlocked).
         """
-        result = await session.execute(
+        stmt = (
             select(Decision)
             .options(
                 selectinload(Decision.tags),
@@ -2051,6 +2079,9 @@ class Brain:
             .where(Decision.id == decision_id)
             .where(Decision.agent_id == self.agent_id)
         )
+        if for_update:
+            stmt = stmt.with_for_update(of=Decision)
+        result = await session.execute(stmt)
         return result.scalars().first()
 
     def _decision_to_detail(self, decision: Decision) -> DecisionDetail:
