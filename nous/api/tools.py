@@ -2146,9 +2146,9 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         """Resolve a batch of decisions in one transaction (sweep path).
 
         Each item: {decision_id, outcome, resolution_note?, superseded_by?}.
-        A per-item failure is reported and does not abort the batch — in a
-        background turn that includes an outcome outside
-        NON_PREDICTION_OUTCOMES and a decision that is already graded.
+        A per-item failure — a not-found id, a supersession without its
+        successor, and in a background turn either a disallowed outcome or an
+        already-graded decision — is reported and does not abort the batch.
         """
         try:
             # codex #577 r3: NO batch-wide lineage precheck here. ReviewInput's
