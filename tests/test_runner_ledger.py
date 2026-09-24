@@ -28,6 +28,7 @@ class _FakeStore:
         self.fail_open = fail_open
         self.fail_close = fail_close
         self.failed_id = uuid.uuid4()
+        self.output_of: list[str | None] = []
 
     async def open_entry(self, *, context, tool_name, tool_input, turn):
         self.events.append(("open", tool_name, context.kind))
@@ -38,8 +39,9 @@ class _FakeStore:
     async def record_blocked(self, *, context, tool_name, tool_input, turn, reason):
         self.events.append(("blocked", tool_name, reason))
 
-    async def close_entry(self, entry_id, *, status, result_summary):
+    async def close_entry(self, entry_id, *, status, result_summary, output_of=None):
         self.events.append(("close", entry_id, status))
+        self.output_of.append(output_of)
         if self.fail_close:
             raise LedgerWriteError(entry_id, RuntimeError("db down"))
 
@@ -63,6 +65,48 @@ async def test_row_opens_before_dispatch_and_closes_after():
         ("dispatch", "write_file"),
         ("close", "id-write_file", "success"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_tool_output_close_names_the_tool_but_a_cancelled_close_does_not():
+    """The store shapes a result by the tool that produced it (bash and
+    run_python output is never stored), so the runner must say which text
+    is tool output -- and a fixed 'outcome unknown' note is not."""
+    store = _FakeStore()
+    r, _ = _runner(store)
+    r._call_api = _one_tool_call_then_done("write_file")
+    await _run_loop(r)
+    assert store.output_of == ["write_file"]
+
+    store = _FakeStore()
+    r, d = _runner(store)
+    reached = asyncio.Event()
+
+    async def hanging(name, inp, **kw):
+        reached.set()
+        await asyncio.sleep(3600)
+
+    d.dispatch = hanging
+    r._call_api = _one_tool_call_then_done("write_file")
+    task = asyncio.create_task(_run_loop(r, is_background=True))
+    await asyncio.wait_for(reached.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert store.output_of == [None]
+
+
+@pytest.mark.asyncio
+async def test_stream_tool_output_close_names_the_tool():
+    store = _FakeStore()
+
+    async def quick(name, inp, **kw):
+        return "done", False
+
+    runner = _stream_runner(store, quick)
+    runner._call_api_stream = _one_streamed_call()
+    [e async for e in runner.stream_chat("s1", "go")]
+    assert store.output_of == ["write_file"]
 
 
 @pytest.mark.asyncio

@@ -56,9 +56,17 @@ def test_unknown_tools_store_argument_names_only():
 
 def test_redaction_runs_before_truncation():
     """A password cut by truncation must still be redacted."""
-    url = "postgresql://nous:" + "p" * (KEY_ARG_CHARS + 50) + "@db:5432/nous"
-    out = durable_key_args("bash", {"command": f"psql {url}"})
-    assert "ppppp" not in out["command"]
+    url = "https://nous:" + "p" * (KEY_ARG_CHARS + 50) + "@example.com/skill.md"
+    out = durable_key_args("learn_skill", {"source": url})
+    assert "ppppp" not in out["source"]
+
+
+def test_bash_command_is_stored_as_a_hash_never_verbatim():
+    """codex r2 on #645: a pattern redactor cannot see a bare `sk-...` key or
+    a heredoc payload, so the command is code and is hashed like run_python's."""
+    args = durable_key_args("bash", {"command": "echo sk-ABCDEFGHIJKLMNOP > file"})
+    assert set(args) == {"command_sha256", "command_len"}
+    assert "sk-" not in str(args)
 
 
 @pytest.mark.parametrize("secret", [
@@ -157,6 +165,35 @@ async def test_result_summary_is_redacted(store, db):
                                       tool_name="run_python", tool_input={"code": "x"}, turn=1)
     await store.close_entry(entry_id, status="success", result_summary="DB_PASSWORD=hunter2 printed")
     assert "hunter2" not in (await _row(db, entry_id)).result_summary
+
+
+@pytest.mark.asyncio
+async def test_bash_output_keeps_only_its_shape(store, db):
+    entry_id = await store.open_entry(context=ExecutionContext(kind="subtask"), tool_name="bash",
+                                      tool_input={"command": "echo x > f"}, turn=1)
+    await store.close_entry(entry_id, status="success", output_of="bash",
+                            result_summary="sk-ABCDEFGHIJKLMNOP\nExit code: 0")
+    summary = (await _row(db, entry_id)).result_summary
+    assert "sk-" not in summary and "exit code 0" in summary
+
+
+@pytest.mark.asyncio
+async def test_bash_timeout_keeps_the_reason_not_the_echoed_command(store, db):
+    entry_id = await store.open_entry(context=ExecutionContext(kind="subtask"), tool_name="bash",
+                                      tool_input={"command": "echo x > f"}, turn=1)
+    await store.close_entry(entry_id, status="error", output_of="bash",
+                            result_summary="Command timed out after 30s.\nCommand: echo sk-ABCDEFGHIJKLMNOP > f")
+    summary = (await _row(db, entry_id)).result_summary
+    assert summary.startswith("Command timed out after 30s.") and "sk-" not in summary
+
+
+@pytest.mark.asyncio
+async def test_run_python_output_is_never_stored(store, db):
+    entry_id = await store.open_entry(context=ExecutionContext(kind="subtask"), tool_name="run_python",
+                                      tool_input={"code": "print(key)"}, turn=1)
+    await store.close_entry(entry_id, status="success", output_of="run_python",
+                            result_summary="sk-ABCDEFGHIJKLMNOP")
+    assert "sk-" not in (await _row(db, entry_id)).result_summary
 
 
 @pytest.mark.asyncio

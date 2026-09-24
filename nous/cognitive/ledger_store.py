@@ -7,8 +7,9 @@ store is the durable record of side-effecting tool calls: a row is written
 The store RAISES on write failure (LedgerWriteError, carrying the
 client-generated id — the COMMIT may have landed even when the wait timed
 out). The RUNNER decides what a failure means: Phase 1b fails open; Phase 2b
-makes keyed sends fail closed. Rows never hold bodies, code, or the values
-of an unknown tool's arguments (durable_key_args).
+makes keyed sends fail closed. Rows never hold bodies, code, the output of
+agent-authored code, or the values of an unknown tool's arguments
+(durable_key_args, _summary).
 
 Deployment assumption: ONE Nous process per (database, agent_id). The startup
 sweep marks every 'pending' row 'unknown' because only a dead process can
@@ -20,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -41,7 +43,9 @@ _TERMINAL = frozenset(s for s in LEDGER_STATUSES if s != "pending")
 # stored only as sha256 + length). A tool not listed here stores its argument
 # NAMES only — an unknown tool's values may be anything, including secrets.
 _DURABLE_ARGS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "bash": (("command",), ()),
+    # A bash command is code: pattern redaction cannot see a bare API key or a
+    # heredoc payload, so it is hashed like run_python's, never kept.
+    "bash": ((), ("command",)),
     "write_file": (("path",), ("content",)),
     "run_python": ((), ("code",)),
     "send_email": (("to", "cc", "subject"), ("body", "html_body")),
@@ -112,9 +116,29 @@ class LedgerWriteError(Exception):
         self.entry_id = entry_id
 
 
-def _summary(text: str | None) -> str | None:
+# Tools whose result is the output of agent-authored code: arbitrary text no
+# pattern redactor can vet (`cat .env; touch x` is a write whose output is a
+# secrets file). Only the shape survives.
+_OPAQUE_OUTPUT_TOOLS = frozenset({"bash", "run_python"})
+# bash_tool always appends this trailer; it is the authoritative wrapper status.
+_BASH_EXIT_CODE = re.compile(r"(?:\A|\n)Exit code: (-?\d+)\s*\Z")
+_BASH_TIMEOUT = re.compile(r"\ACommand timed out after \d+s\.")
+
+
+def _summary(text: str | None, output_of: str | None = None) -> str | None:
+    """Durable form of a result. ``output_of`` names the tool when ``text`` is
+    that tool's raw output rather than a harness-authored note."""
     if not text:
         return None
+    if output_of in _OPAQUE_OUTPUT_TOOLS:
+        parts: list[str] = []
+        if output_of == "bash":
+            if timeout := _BASH_TIMEOUT.match(text):
+                parts.append(timeout.group(0))
+            if exit_code := _BASH_EXIT_CODE.search(text):
+                parts.append(f"exit code {exit_code.group(1)}")
+        parts.append(f"{len(text)} chars of output, not stored")
+        return "; ".join(parts)
     return redact_text(text)[:RESULT_SUMMARY_CHARS]
 
 
@@ -142,8 +166,13 @@ class LedgerStore:
 
     async def close_entry(
         self, entry_id: UUID, *, status: str, result_summary: str | None,
+        output_of: str | None = None,
     ) -> None:
-        """Move a row out of 'pending' (or a sweep-set 'unknown') to ``status``."""
+        """Move a row out of 'pending' (or a sweep-set 'unknown') to ``status``.
+
+        Pass ``output_of`` (the tool name) when ``result_summary`` is the
+        tool's raw output, so it is stored in the form that tool allows.
+        """
         if status not in _TERMINAL:
             raise ValueError(f"cannot close a ledger row as {status!r}")
 
@@ -156,7 +185,7 @@ class LedgerStore:
                     .where(ExecutionLedgerEntry.status.in_(_CLOSABLE))
                     .values(
                         status=status,
-                        result_summary=_summary(result_summary),
+                        result_summary=_summary(result_summary, output_of),
                         completed_at=func.now(),
                     )
                 )

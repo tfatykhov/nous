@@ -309,20 +309,27 @@ class AgentRunner:
             )
             return exc.entry_id
 
-    async def _ledger_close(self, entry_id: Any, status: str, result_summary: str | None) -> None:
+    async def _ledger_close(
+        self, entry_id: Any, status: str, result_summary: str | None, output_of: str | None = None,
+    ) -> None:
         """Close a durable row, shielded: a cancellation arriving now must not
-        leave the row 'pending'. The task is strongly referenced until done."""
+        leave the row 'pending'. The task is strongly referenced until done.
+        ``output_of`` names the tool when ``result_summary`` is its raw output."""
         if self._ledger_store is None or entry_id is None:
             return
-        task = asyncio.ensure_future(self._ledger_close_now(entry_id, status, result_summary))
+        task = asyncio.ensure_future(
+            self._ledger_close_now(entry_id, status, result_summary, output_of)
+        )
         self._ledger_pending_tasks.add(task)
         task.add_done_callback(self._ledger_pending_tasks.discard)
         await asyncio.shield(task)
 
-    async def _ledger_close_now(self, entry_id: Any, status: str, result_summary: str | None) -> None:
+    async def _ledger_close_now(
+        self, entry_id: Any, status: str, result_summary: str | None, output_of: str | None,
+    ) -> None:
         try:
             await self._ledger_store.close_entry(
-                entry_id, status=status, result_summary=result_summary,
+                entry_id, status=status, result_summary=result_summary, output_of=output_of,
             )
         except LedgerWriteError as exc:
             logger.warning(
@@ -1685,6 +1692,7 @@ class AgentRunner:
                                 entry_id,
                                 "unknown" if timed_out else ("error" if is_error else "success"),
                                 result_text,
+                                output_of=tc["name"],
                             )
                             duration_ms = int((time.monotonic() - start_time) * 1000)
 
@@ -2220,6 +2228,7 @@ class AgentRunner:
                                 await self._stop_activity_heartbeat(_hb)
                             await self._ledger_close(
                                 entry_id, "error" if is_error else "success", result_text,
+                                output_of=tool_name,
                             )
                         duration_ms = int((time.monotonic() - start_time) * 1000)
 
