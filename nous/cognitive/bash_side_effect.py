@@ -151,24 +151,30 @@ def classify_bash_command(command: str) -> str:
             _work.reset(token)
 
 
-def command_invocations(command: str) -> list[tuple[str, list[str]]]:
-    """``(program, arguments)`` of every simple command ``command`` runs.
+def command_invocations(command: str) -> list[tuple[str, list[str]]] | None:
+    """``(program, arguments)`` of every simple command ``command`` runs, or
+    None when it cannot be read.
 
     Read with the classifier's lexer and unwrapping: quoting is respected,
-    redirect targets are not arguments, and assignments, ``env`` and wrappers
-    (``sudo``, ``timeout`` ...) are peeled off, so `cd r && sudo git push` runs
-    git while `echo "git push"` and `git log --grep push` do not push. The
-    split mirrors ``_classify``. Command strings (``bash -c``, ``eval``) are
-    not entered. Used as evidence for completion claims (harness 2c), where a
-    miss is safe to report -- so this is total and linear: an input it cannot
-    read, or one over the classifier's size cap, yields ``[]``.
+    redirect targets are not arguments, and reserved words, assignments,
+    ``env`` and wrappers (``sudo``, ``timeout`` ...) are peeled off, so
+    `cd r && sudo git push` runs git while `echo "git push"` and `git log
+    --grep push` do not push. The split mirrors ``_classify``. A command
+    string is not entered: it is reported as the program that runs it
+    (``bash``, ``eval``, ``ssh``, ``env -S``, ``flock -c``, ``watch``).
+
+    Evidence for completion claims (harness 2c). None -- an unbalanced quote
+    (a heredoc body with an apostrophe), an input over the classifier's size
+    cap, or anything unexpected -- is NOT "nothing runs": the caller must not
+    read absence into it. ``[]`` means it was read and runs nothing.
+    Total and linear.
     """
     if len(command) > _MAX_COMMAND_CHARS:
-        return []
+        return None
     try:
         tokens = _lex(command)
         if tokens is None:
-            return []
+            return None
         simple: list[list[str]] = []
         words: list[str] = []
         expect_target = False
@@ -193,14 +199,27 @@ def command_invocations(command: str) -> list[tuple[str, list[str]]]:
                 found.append((_program(words[start]), words[start + 1:]))
         return found
     except Exception:
-        return []
+        return None
+
+
+# Shell syntax at the start of a simple command, not a program: what follows runs.
+_RESERVED = frozenset({"if", "then", "elif", "else", "fi", "do", "done", "while", "until",
+                       "case", "esac", "!", "{", "}"})
+
+
+def _skip_reserved(words: list[str]) -> int:
+    i = 0
+    while i < len(words) and words[i] in _RESERVED:
+        i += 1
+    return i
 
 
 def _command_start(words: list[str]) -> int | None:
     """Index of the word naming the program a simple command actually runs,
-    past assignments, ``env`` and wrappers; None when it runs a command
-    string or nothing."""
-    i = 0
+    past reserved words, assignments, ``env`` and wrappers. When what runs
+    is a command STRING (``env -S``, ``flock -c``, ``watch``) it is the index
+    of that runner; None when nothing runs."""
+    i = _skip_reserved(words)
     while True:
         while i < len(words) and _ASSIGNMENT.match(words[i]):
             i += 1
@@ -209,12 +228,16 @@ def _command_start(words: list[str]) -> int | None:
         prog = _program(words[i])
         if prog == "env":
             start = _env_command_start(words, i + 1)
+            if start is None:  # env -S: a command string
+                return i
         elif prog in _WRAPPERS:
             start = _wrapped_command_start(prog, words, i + 1)
+            if isinstance(start, str):  # flock -c, watch: a command string
+                return i
+            if start is None:
+                return None
         else:
             return i
-        if not isinstance(start, int):
-            return None
         i = start
 
 
@@ -302,7 +325,7 @@ def _classify_simple(words: list[str]) -> str:
     """
     _spend(len(words) + 1)
     floor = "none"
-    i = 0
+    i = _skip_reserved(words)
     while True:
         while i < len(words) and _ASSIGNMENT.match(words[i]):
             if not _HARMLESS_ASSIGNMENT.match(words[i]):

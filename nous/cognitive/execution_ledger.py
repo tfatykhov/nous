@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from nous.cognitive.bash_side_effect import classify_bash_command as _classify_bash_command
+from nous.cognitive.bash_side_effect import command_invocations as _command_invocations
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,30 @@ def evidence_args(
     }
 
 
+Invocation = tuple[str, tuple[str, ...]]
+# Bounds on what the in-memory ledger keeps of a bash command's invocations.
+_MAX_INVOCATIONS = 32
+_MAX_INVOCATION_ARGS = 24
+_MAX_INVOCATION_ARG_CHARS = 120
+
+
+def bash_invocations(command: str) -> tuple[Invocation, ...] | None:
+    """What a bash command runs, read from the WHOLE command and bounded for
+    the ledger; None when it cannot be read (see ``command_invocations``).
+
+    Read at record time because the ledger's bounded copy of the command can
+    drop a `git push` in its middle, or cut a quote in half and become
+    unreadable.
+    """
+    found = _command_invocations(command)
+    if found is None:
+        return None
+    return tuple(
+        (prog, tuple(a[:_MAX_INVOCATION_ARG_CHARS] for a in args[:_MAX_INVOCATION_ARGS]))
+        for prog, args in found[:_MAX_INVOCATIONS]
+    )
+
+
 def bash_exit_code(result: str | None) -> int | None:
     """Exit code from bash_tool's trailer; None when absent (timeout, spawn error)."""
     if not result:
@@ -147,6 +172,8 @@ class ExecutedAction:
     side_effect_type: str  # "none" | "write" | "external" | "irreversible"
     exit_code: int | None = None  # bash only: a non-zero exit is not evidence
     evidence_args: dict[str, str] = field(default_factory=dict)
+    # bash only: what the command runs, read at record time; None = unreadable
+    invocations: tuple[Invocation, ...] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +216,8 @@ class ExecutionLedger:
             side_effect_type=side_effect,
             exit_code=bash_exit_code(str(result)) if tool_name == "bash" else None,
             evidence_args=evidence_args(tool_name, tool_input),
+            invocations=(bash_invocations(_extract_bash_command(tool_input))
+                         if tool_name == "bash" else None),
         )
         self.actions.append(action)
         if status == "blocked":

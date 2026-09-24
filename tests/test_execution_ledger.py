@@ -1120,3 +1120,47 @@ class TestEvidenceFields:
         assert bash_exit_code("Exit code: -9") == -9
         assert bash_exit_code("quoted 'Exit code: 0' then\nExit code: 2") == 2
         assert bash_exit_code(None) is None and bash_exit_code("no trailer") is None
+
+
+class TestShellReservedWords:
+    """`if`/`then`/`{`/`!` are syntax, not programs: the command after one is
+    what runs. Before harness 2c they were read as unknown programs (`write`)."""
+
+    @pytest.mark.parametrize("cmd, expected", [
+        ("if git push origin main; then echo ok; fi", "external"),
+        ("if grep -q x f; then echo found; fi", "none"),
+        ("{ curl -s https://x; } > /dev/null", "external"),
+        ("! grep -q x f", "none"),
+        ("while read -r l; do rm \"$l\"; done < list", "write"),
+        ("until git fetch; do sleep 5; done", "external"),
+    ])
+    def test_reserved_words_are_skipped(self, cmd, expected):
+        assert _classify_bash_command(cmd) == expected
+
+    def test_invocations_after_reserved_words(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("if git push; then echo ok; fi") == [
+            ("git", ["push"]), ("echo", ["ok"])]
+
+
+class TestCommandInvocations:
+    def test_unreadable_is_none_not_empty(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("cat > x <<'EOF'\nIt's\nEOF") is None  # unbalanced quote
+        assert command_invocations("x " * 40_000) is None                  # over the size cap
+        assert command_invocations("FOO=1") == []                          # read: nothing runs
+
+    def test_a_command_string_is_reported_as_its_runner(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("flock /tmp/l -c 'git push'")[0][0] == "flock"
+        assert command_invocations("env -S 'git push'")[0][0] == "env"
+
+    def test_the_ledger_keeps_invocations_read_from_the_whole_command(self):
+        cmd = 'git commit -m "' + "x" * 3000 + '" && git push origin main'
+        action = ExecutionLedger(session_id="s").record("bash", {"command": cmd}, "Exit code: 0", "success")
+        assert [p for p, _ in action.invocations] == ["git", "git"]
+        assert action.invocations[1] == ("git", ("push", "origin", "main"))
+        assert all(len(a) <= 120 for _, args in action.invocations for a in args)  # bounded in memory

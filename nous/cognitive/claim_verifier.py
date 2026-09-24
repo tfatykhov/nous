@@ -6,15 +6,19 @@ IntentTracker: detects ghost planning (describing work without doing it).
 from __future__ import annotations
 
 import re
+from bisect import bisect_left, bisect_right
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from functools import lru_cache
-from typing import TYPE_CHECKING
+from functools import cached_property
+from typing import TYPE_CHECKING, Any
 
-from nous.cognitive.bash_side_effect import command_invocations, git_subcommand
+from nous.cognitive.bash_side_effect import git_subcommand
+from nous.cognitive.execution_ledger import Invocation, bash_invocations
 
 if TYPE_CHECKING:
     from nous.cognitive.execution_ledger import ExecutionLedger
+
+_UNREAD: Any = object()  # sentinel: read the invocations from ``args`` when first needed
 
 
 @dataclass
@@ -36,6 +40,16 @@ class Evidence:
     args: Mapping[str, str] = field(default_factory=dict)
     exit_code: int | None = None   # bash: a non-zero exit is not evidence
     side_effect: str = "write"
+    # bash: what the command runs when already read -- the ledger reads it at
+    # record time from the WHOLE command; None = unreadable
+    invocations: tuple[Invocation, ...] | None = field(default=_UNREAD, repr=False, compare=False)
+
+    @cached_property
+    def runs(self) -> tuple[Invocation, ...] | None:
+        """What a bash command runs, read once per evidence item; None = unreadable."""
+        if self.invocations is not _UNREAD:
+            return self.invocations
+        return bash_invocations(self.args.get("command") or self.args.get("cmd") or "")
 
 
 @dataclass(frozen=True)
@@ -79,62 +93,115 @@ class Claim:
     target: str | None = None  # a path or recipient the claim names
 
 
-# First person: "I", "I've", "I have", "I just", "I already". The "I" is
-# case-SENSITIVE inside patterns compiled IGNORECASE: a lowercase "i " is not a subject.
-_FIRST = r"\b(?-i:I)(?:['’]ve|\s+have|\s+just|\s+already)?\s+"
+# First person: "I", "I've", "I have", "I just", "I also" ... The "I" is
+# case-SENSITIVE inside patterns compiled IGNORECASE: a lowercase "i " is not a
+# subject. "if I pushed", "whether I committed" are conditions, not claims.
+_FIRST = (r"(?<!\bif )(?<!\bwhether )(?<!\bunless )\b(?-i:I)(?:['’]ve|\s+have)?"
+          r"(?:\s+(?:just|already|also|then|now|successfully|finally)){0,2}\s+")
 _CLAIM_VERBS = (r"(?:saved|wrote|written|created|generated|exported|stored|sent|emailed"
                 r"|forwarded|mailed|pushed|committed|deployed)\b")
 # The second clause of a FIRST-PERSON compound ("I saved X and sent Y"); only
 # accepted when a first-person CLAIM ("I" + claim verb) appears earlier in the
-# same sentence -- "I checked: the DAG ran and sent the email" is narration.
+# same CLAUSE -- "I checked: the DAG ran and sent the email" and "As I wrote
+# earlier, the DAG finished and sent it" are narration.
 _AND = r"\band\s+(?:also\s+)?"
 # One sentence: a dot ends it only when followed by whitespace or the end, so
 # `config.yaml` and `v1.2` stay inside; "e.g." / "i.e." / "etc." do not end it.
 # The abbreviation branches take ONLY a dot followed by whitespace, so they
 # never overlap `\.(?=\S)` -- overlapping branches backtrack exponentially on
-# a failed match ("etc.," x20 took 4.5 s; exclusive branches: 0.03 ms).
-_SPAN = (r"(?:[^.\n]|\.(?=\S)|(?<=\be\.g)\.(?=\s)|(?<=\bi\.e)\.(?=\s)"
+# a failed match ("etc.," x20 took 4.5 s; exclusive branches: 0.03 ms). A
+# semicolon ends the clause the claim can span.
+_SPAN = (r"(?:[^.\n;]|\.(?=\S)|(?<=\be\.g)\.(?=\s)|(?<=\bi\.e)\.(?=\s)"
          r"|(?<=\betc)\.(?=\s)){0,160}?")
-_PATH = r"(?P<target>(?:~|\.{0,2})/[\w./-]*\w|[\w-]+\.\w{1,6})"
+# The object of a targeted claim ("saved <the report> to <path>"): short and
+# inside one clause, so a path named later in the sentence is not its target.
+_OBJ = r"(?:[^.\n;,(—]|\.(?=\S)){0,40}?"
+# A path, or a bare file name whose extension starts with a letter (`v1.2`
+# and `3.30pm` are not files).
+_PATH = r"(?P<target>(?:~|\.{0,2})/[\w./-]*\w|[\w-]+\.[A-Za-z]\w{0,5})"
 _ADDRESS = r"(?P<target>[\w.+-]+@[\w-]+(?:\.[\w-]+)+)"
 _SUBJECT = rf"(?P<subj>{_FIRST}|{_AND})"
+# The effect landed somewhere no file / git / deploy tool reaches: memory, the
+# companion app, or the reply itself ("a short report below").
+_NOT_ELSEWHERE = (r"(?![^.\n;]{0,80}?\b(?:(?:to|in|into|on)\s+(?:your\s+|my\s+|the\s+)?"
+                  r"(?:memory|companion|dashboard|chat)\b|below\b|above\b))")
+# A version-control object near the verb, or a bare pronoun ending the clause:
+# "I pushed the fix", "I pushed it." -- not "I pushed an approval card".
+_VCS_OBJECT = (r"(?=[^.\n;:!?]{0,40}?\b(?:branch(?:es)?|commits?|fix(?:es)?|changes?|patch(?:es)?"
+               r"|PRs?|pull\s+request|tags?|code|repo(?:sitory)?|remote|origin|main|master|upstream"
+               r"|github|gitlab|refactor|feature)\b"
+               r"|\s+(?:it|them|that|this|those|these)(?:\s+(?:up|too|as\s+well))?\s*(?:[.;:!?,)]|$|and\b))")
+# Line- or sentence-initial: "Email sent to x", "Done. Saved to /tmp/x.md".
+_OPENING = r"(?:(?<![^\n])|(?<=[.!?:]\s)|(?<=[✓✅*-]\s))"
 
 # (pattern, kind). Patterns that open with the subject group are claims only
 # under the first-person rule in _extract_claims; the targeted file pattern
 # runs first so its target wins over the untargeted one on the same span.
 _CLAIM_PATTERNS: list[tuple[str, str]] = [
-    (rf"{_SUBJECT}(?:saved|wrote|written|exported|stored)\b{_SPAN}\s+(?:to|at|in)\s+{_PATH}",
-     "file_write"),
-    (rf"{_SUBJECT}(?:saved|wrote|written|created|generated)\b{_SPAN}\b(?:file|document|report)\b",
-     "file_write"),
-    (rf"\b(?:saved|written)\s+to[:\s]+{_PATH}", "file_write"),
+    (rf"{_SUBJECT}(?:saved|wrote|written|exported|stored)\b{_NOT_ELSEWHERE}{_OBJ}"
+     rf"\s+(?:to|at|in|into)\s+{_PATH}", "file_write"),
+    (rf"{_SUBJECT}(?:saved|wrote|written|created|generated)\b{_NOT_ELSEWHERE}{_SPAN}"
+     r"\b(?:file|document|report)\b", "file_write"),
+    # actor-less completion: past tense ("was saved to") or an opening ("Saved to")
+    (rf"\b(?:was|were|been|got)\s+(?:saved|written)\s+to[:\s]+{_PATH}", "file_write"),
+    (rf"{_OPENING}(?:saved|written)\s+to[:\s]+{_PATH}", "file_write"),
     (rf"{_SUBJECT}(?:sent|emailed|forwarded|mailed)\b{_SPAN}\b(?:e-?mail|message|report)\b",
      "email"),
-    (rf"\be-?mail(?:ed)?\s+sent\s+to\b(?:\s+{_ADDRESS})?", "email"),
-    (rf"{_SUBJECT}pushed\b", "vcs_push"),
-    (rf"{_SUBJECT}committed\b", "vcs_commit"),
-    (rf"{_SUBJECT}deployed\b", "deploy"),
+    (rf"{_OPENING}e-?mail(?:ed)?\s+sent\s+to\b(?:\s+{_ADDRESS})?", "email"),
+    (rf"\be-?mail\s+(?:was|has\s+been|got)\s+sent\s+to\b(?:\s+{_ADDRESS})?", "email"),
+    (rf"{_SUBJECT}pushed\b{_NOT_ELSEWHERE}{_VCS_OBJECT}", "vcs_push"),
+    (rf"{_SUBJECT}committed\b{_NOT_ELSEWHERE}{_VCS_OBJECT}", "vcs_commit"),
+    (rf"{_SUBJECT}deployed\b{_NOT_ELSEWHERE}", "deploy"),
 ]
 _FIRST_RE = re.compile(_FIRST, re.IGNORECASE)
 _FIRST_CLAIM_RE = re.compile(_FIRST + _CLAIM_VERBS, re.IGNORECASE)
 _SENTENCE_END = re.compile(r"[.!?](?=\s|$)|\n")
+# Where a clause ends for the `and` rule; a comma right before "and" joins.
+_CLAUSE_END = re.compile(r"[.!?](?=\s|$)|\n|[;:—]|,(?!\s*and\b)")
+# Text that is not the agent speaking: fenced code, block quotes, quotations.
+_QUOTED = re.compile(r"```.*?(?:```|\Z)|^[ \t]*>[^\n]*|\"[^\"\n]{0,300}\"|“[^”\n]{0,300}”",
+                     re.DOTALL | re.MULTILINE)
+
+
+def _blank(match: re.Match[str]) -> str:
+    """Same length, newlines kept: offsets and sentence ends stay put."""
+    return re.sub(r"[^\n]", " ", match.group(0))
 
 # The signal an argument must carry for a capable tool to count as evidence.
 # Every pattern is linear: this turn's evidence is untruncated and is scanned
 # on the event loop, so no unbounded class may be followed by a search.
-_MAIL_PROGRAMS = frozenset({"mail", "mailx", "sendmail", "mutt", "msmtp", "ssmtp", "swaks"})
 _PY_WRITES = re.compile(
-    r"open\([^)]{0,300}['\"][wax]b?\+?['\"]|\.write_(?:text|bytes)\(|\.to_(?:csv|json|excel|parquet)\("
-    r"|savefig\(|json\.dump\(|shutil\.(?:copy\w*|move)\(")
+    r"open\([^\n]{0,300}?['\"][wax]b?\+?['\"]|\.write_(?:text|bytes|html|image)\("
+    r"|\.to_(?:csv|json|excel|parquet|html|markdown)\(|savefig\(|json\.dump\(|pickle\.dump\("
+    r"|yaml\.(?:safe_)?dump\(|\.save\(|shutil\.(?:copy\w*|move)\(")
 _PY_SENDS = re.compile(r"\bsmtplib\b|\bsendmail\b|api\.telegram\.org")
 _PY_GIT = {
     "vcs_push": re.compile(
-        r"\bgit\b[^|;&\n]{0,200}?\bpush\b(?![^|;&\n]{0,200}?(?:--dry-run|[\s'\"]-n\b))"),
-    "vcs_commit": re.compile(r"\bgit\b[^|;&\n]{0,200}?\bcommit\b(?![^|;&\n]{0,200}?--dry-run)"),
+        r"\bgit\b[^|;&]{0,200}?\bpush\b(?![^|;&]{0,200}?(?:--dry-run|[\s'\"]-n\b))"),
+    "vcs_commit": re.compile(r"\bgit\b[^|;&]{0,200}?\bcommit\b(?![^|;&]{0,200}?--dry-run)"),
 }
-_DEPLOY_WORDS = re.compile(
+_PY_DEPLOY = re.compile(
     r"\b(?:deploy\w*|docker|kubectl|helm|systemctl|terraform|ansible|rsync|scp|ssh|gcloud|aws|az)\b",
     re.I)
+
+_MAIL_CLIENTS = frozenset({"mail", "mailx", "mutt"})  # also READ a mailbox: need a recipient
+_MAIL_SENDERS = frozenset({"sendmail", "msmtp", "ssmtp", "swaks"})
+_DEPLOY_PROGRAMS = frozenset({
+    "docker", "docker-compose", "podman", "kubectl", "helm", "kustomize", "skaffold", "systemctl",
+    "terraform", "pulumi", "ansible", "ansible-playbook", "rsync", "scp", "gcloud", "aws", "az",
+    "vercel", "netlify", "fly", "flyctl", "railway", "firebase", "wrangler", "serverless", "sls",
+    "heroku", "eb", "nomad",
+})
+# What runs something this reader cannot see into: a command string, another
+# host, an interpreter, a script, a task runner. Such a run cannot DISPROVE a
+# claim -- `make release` may well have pushed.
+_OPAQUE_PROGRAMS = frozenset({
+    "bash", "sh", "zsh", "dash", "ksh", "su", "eval", "ssh", "env", "flock", "watch",
+    "python", "python3", "node", "deno", "bun", "perl", "ruby", "php",
+    "make", "just", "npm", "npx", "pnpm", "yarn", "uv", "poetry", "pipenv", "tox", "nox",
+    "invoke", "fab", "rake", "gradle", "mvn",
+})
+_SCRIPT = re.compile(r"\.(?:sh|bash|zsh|py|js|mjs|ts|rb|pl|php)\Z")
 
 
 def _names(target: str, text: str) -> bool:
@@ -142,10 +209,8 @@ def _names(target: str, text: str) -> bool:
     return bool(target and text) and (target in text or target.rsplit("/", 1)[-1] in text)
 
 
-@lru_cache(maxsize=32)
-def _invocations(command: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
-    """Cached: each claim is checked against every evidence item."""
-    return tuple((prog, tuple(args)) for prog, args in command_invocations(command))
+def _opaque(prog: str, args: tuple[str, ...]) -> bool:
+    return prog in _OPAQUE_PROGRAMS or bool(_SCRIPT.search(prog)) or prog.startswith("python3.")
 
 
 def _dry_run(sub: str, args: tuple[str, ...]) -> bool:
@@ -161,25 +226,69 @@ def _dry_run(sub: str, args: tuple[str, ...]) -> bool:
     return False
 
 
-def _runs_git(command: str, sub: str) -> bool:
-    """True if ``command`` runs ``git <sub>`` for real (not a dry run)."""
-    for prog, args in _invocations(command):
-        if prog == "git":
-            split = git_subcommand(list(args))
-            if split is not None and split[0] == sub and not _dry_run(sub, tuple(split[1])):
-                return True
-    return False
+def _git_does(args: tuple[str, ...], sub: str) -> bool:
+    split = git_subcommand(list(args))
+    return split is not None and split[0] == sub and not _dry_run(sub, tuple(split[1]))
 
 
-def _sends_mail(command: str) -> bool:
-    """True if ``command`` runs a mail client, or curl against an SMTP server."""
-    for prog, args in _invocations(command):
-        if prog in _MAIL_PROGRAMS:
+def _docker_pushes(args: tuple[str, ...]) -> bool:
+    positional = [a for a in args if not a.startswith("-")]
+    return positional[:1] == ["push"] or positional[:2] == ["image", "push"]
+
+
+def _does(kind: str, prog: str, args: tuple[str, ...]) -> bool:
+    """True if one invocation produces the claimed effect."""
+    if kind == "vcs_push":
+        return (prog == "git" and _git_does(args, "push")) or (prog == "docker" and _docker_pushes(args))
+    if kind == "vcs_commit":
+        return prog == "git" and _git_does(args, "commit")
+    if kind == "email":
+        if prog in _MAIL_SENDERS:
             return True
-        if prog == "curl" and any(
-                a.lower().startswith(("smtp://", "smtps://", "--mail-rcpt")) for a in args):
-            return True
-    return False
+        if prog in _MAIL_CLIENTS:
+            return any("@" in a for a in args)
+        return prog == "curl" and any(
+            a.lower().startswith(("smtp://", "smtps://", "--mail-rcpt")) or "api.telegram.org" in a
+            for a in args)
+    # deploy: a deploy or transfer tool, not any network call (`curl` of an API is not a deploy)
+    return (prog in _DEPLOY_PROGRAMS or "deploy" in prog or any("deploy" in a for a in args)
+            or (prog == "git" and _git_does(args, "push")))
+
+
+def _bash_level(claim: Claim, ev: Evidence) -> str:
+    """Evidence from one successful bash call.
+
+    Only a command this reader READ can disprove a claim: an unreadable one
+    (``runs is None`` -- a heredoc body with an apostrophe, a quote cut in
+    half) or one that runs something opaque is ``plausible``. The classifier's
+    ``write`` for an unreadable command is its fail-safe, not information, so
+    it is not consulted there. A non-zero exit is the LAST command's status:
+    it disproves only an effect that command produced.
+    """
+    runs = ev.runs
+    if runs is None:
+        return "plausible"
+    command = ev.args.get("command") or ev.args.get("cmd") or ""
+    failed = ev.exit_code not in (None, 0)
+    opaque = any(_opaque(prog, args) for prog, args in runs)
+    if claim.kind == "file_write":
+        if ev.side_effect not in ("write", "external"):
+            return "none"  # a read cannot have saved anything
+        if failed and len(runs) <= 1:
+            return "none"
+        if claim.target and not _names(claim.target, command):
+            return "plausible" if opaque else "none"
+        return "exact" if claim.target and not failed else "plausible"
+    hits = [i for i, (prog, args) in enumerate(runs) if _does(claim.kind, prog, args)]
+    if not hits:
+        return "plausible" if opaque else "none"
+    if failed and hits[-1] == len(runs) - 1 and len(hits) == 1:
+        return "none"
+    if claim.kind == "email" and claim.target and claim.target not in command.lower():
+        return "plausible" if opaque else "none"
+    if claim.kind in ("vcs_push", "vcs_commit") and not failed:
+        return "exact"
+    return "plausible"
 
 
 def evidence_level(claim: Claim, ev: Evidence) -> str:
@@ -187,22 +296,15 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
     kind = CLAIM_KINDS[claim.kind]
     if ev.tool_name not in kind.capable_tools:
         return "none"
-    if ev.tool_name == "bash" and ev.exit_code not in (None, 0):
-        return "none"
     if not ev.args:  # names-only evidence from a legacy caller
         return "plausible"
-    command = ev.args.get("command") or ev.args.get("cmd") or ""
+    if ev.tool_name == "bash":
+        return _bash_level(claim, ev)
     code = ev.args.get("code", "")
     if claim.kind == "file_write":
         if ev.tool_name == "write_file":
             path = ev.args.get("path") or ev.args.get("file_path") or ""
             return "exact" if not claim.target or _names(claim.target, path) else "none"
-        if ev.tool_name == "bash":
-            if ev.side_effect not in ("write", "external"):
-                return "none"  # a read cannot have saved anything
-            if claim.target:
-                return "exact" if _names(claim.target, command) else "none"
-            return "plausible"
         if not _PY_WRITES.search(code):
             return "none"
         if claim.target:
@@ -214,31 +316,12 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
             return "exact" if not claim.target or claim.target in recipients else "none"
         if ev.tool_name == "send_file":
             return "plausible"
-        if ev.tool_name == "bash":
-            # a mail command that actually leaves the host: `cat mail.log` is a read
-            if ev.side_effect != "external" or not _sends_mail(command):
-                return "none"
-            body = command
-        else:
-            if not _PY_SENDS.search(code):
-                return "none"
-            body = code
-        if claim.target and claim.target not in body.lower():
+        if not _PY_SENDS.search(code) or (claim.target and claim.target not in code.lower()):
             return "none"
         return "plausible"
     if claim.kind in ("vcs_push", "vcs_commit"):
-        if ev.tool_name == "run_python":
-            return "plausible" if _PY_GIT[claim.kind].search(code) else "none"
-        if not _runs_git(command, "push" if claim.kind == "vcs_push" else "commit"):
-            return "none"
-        needed = ("external",) if claim.kind == "vcs_push" else ("write", "external")
-        return "exact" if ev.side_effect in needed else "none"
-    # deploy: a deploy or transfer tool, not any network call (`curl` of an API is not a deploy)
-    if ev.tool_name == "bash" and ev.side_effect != "none" and _DEPLOY_WORDS.search(command):
-        return "plausible"
-    if ev.tool_name == "run_python" and _DEPLOY_WORDS.search(code):
-        return "plausible"
-    return "none"
+        return "plausible" if _PY_GIT[claim.kind].search(code) else "none"
+    return "plausible" if _PY_DEPLOY.search(code) else "none"
 
 
 class ClaimVerifier:
@@ -286,8 +369,13 @@ class ClaimVerifier:
             current = [a for a in ledger.actions if a.turn == ledger.current_turn]
             for action in {id(a): a for a in [*current, *recent]}.values():
                 if action.status == "success":
-                    pool.append(Evidence(action.tool_name, action.evidence_args,
-                                         action.exit_code, action.side_effect_type))
+                    pool.append(Evidence(
+                        action.tool_name, action.evidence_args, action.exit_code,
+                        action.side_effect_type,
+                        # read from the whole command at record time, not re-read
+                        # from the ledger's bounded copy
+                        action.invocations if action.tool_name == "bash" else _UNREAD,
+                    ))
         turn_names = set(tool_calls_this_turn) | {ev.tool_name for ev in turn_evidence or ()}
 
         checks: list[ClaimCheck] = []
@@ -317,31 +405,46 @@ class ClaimVerifier:
         )
 
     def _extract_claims(self, text: str) -> list[Claim]:
-        """Every first-person completion claim in ``text``, in document order."""
-        found: list[tuple[int, int, Claim]] = []
+        """Every first-person completion claim in ``text``, in document order.
+
+        Quoted text, code blocks and questions are not claims. Linear: every
+        boundary is computed once and looked up by bisection.
+        """
+        text = _QUOTED.sub(_blank, text)
+        sentence_ends = [m.start() for m in _SENTENCE_END.finditer(text)]
+        clause_starts = [m.end() for m in _CLAUSE_END.finditer(text)]
+        first_claims = [m.start() for m in _FIRST_CLAIM_RE.finditer(text)]
+        spans: dict[str, list[tuple[int, int]]] = {}
+        found: list[tuple[int, Claim]] = []
         for pattern, kind in self._compiled:
             for match in pattern.finditer(text):
+                start, end = match.span()
+                k = bisect_left(sentence_ends, end)
+                if k < len(sentence_ends) and text[sentence_ends[k]] == "?":
+                    continue  # "Was the email sent to x?" asks; it does not claim
                 subj = match.groupdict().get("subj")
                 if subj is not None and not _FIRST_RE.match(subj):
                     # an "and <verb>" clause: a claim only after a first-person
-                    # CLAIM earlier in the same sentence
-                    start = max(
-                        (m.end() for m in _SENTENCE_END.finditer(text, 0, match.start())),
-                        default=0,
-                    )
-                    if not _FIRST_CLAIM_RE.search(text, start, match.start()):
+                    # CLAIM earlier in the same clause
+                    c = bisect_right(clause_starts, start) - 1
+                    clause = clause_starts[c] if c >= 0 else 0
+                    i = bisect_left(first_claims, clause)
+                    if not (i < len(first_claims) and first_claims[i] < start):
                         continue
+                # same claim already captured? (the targeted pattern runs first)
+                taken = spans.setdefault(kind, [])
+                j = bisect_left(taken, (start, end))
+                if (j > 0 and taken[j - 1][1] > start) or (j < len(taken) and taken[j][0] < end):
+                    continue
+                taken.insert(j, (start, end))
                 target = match.groupdict().get("target")
                 if target:
                     target = target.rstrip(".,;:)")
                     if "@" in target:
                         target = target.lower()
-                start, end = match.start(), match.end()
-                if any(c.kind == kind and s < end and start < e for s, e, c in found):
-                    continue  # same claim already captured; the targeted pattern runs first
-                found.append((start, end, Claim(kind=kind, text=match.group(0).strip(), target=target)))
+                found.append((start, Claim(kind=kind, text=match.group(0).strip(), target=target)))
         found.sort(key=lambda item: item[0])
-        return [claim for _, _, claim in found]
+        return [claim for _, claim in found]
 
     def _build_correction(self, violations: list[ClaimViolation]) -> str:
         """Build a correction message describing all ungrounded claims."""

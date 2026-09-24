@@ -296,3 +296,190 @@ def test_runner_ignores_third_person_narration():
     runner._verify_claims("s1", "The send node completed and sent the email to Tim.", [],
                           ExecutionLedger(session_id="s1"))
     assert events[0][1]["verified"] and events[0][1]["claim_count"] == 0
+
+
+# --- unreadable is not no-signal (review round 1) ------------------------------
+# Under `enforce` a false violation misleads the agent, so evidence the reader
+# cannot parse is plausible; only a command it READ, doing something else, is none.
+
+
+def _real_bash(command, exit_code=0):
+    from nous.cognitive.execution_ledger import classify_side_effect
+
+    return Evidence("bash", {"command": command}, exit_code=exit_code,
+                    side_effect=classify_side_effect("bash", {"command": command}))
+
+
+_HEREDOC_PUSH = ("cd /repo && git add -A && git commit -F - <<'EOF'\n"
+                 "fix: don't drop the header\nEOF\ngit push origin main")
+
+
+@pytest.mark.parametrize("command", [
+    _HEREDOC_PUSH,                                    # an apostrophe in a heredoc body
+    "if git push origin main; then echo ok; fi",      # reserved words
+    "{ git push origin main; } 2>&1 | tee push.log",
+    "! git push origin main",
+    "bash -c 'cd /repo && git push origin main'",     # an inner command string
+    "ssh deploy@host 'cd /srv/app && git push'",
+])
+def test_a_push_the_reader_cannot_disprove_is_not_a_violation(command):
+    assert _verify("I pushed the fix.", _real_bash(command)).verified
+
+
+def test_a_push_past_the_ledgers_cut_still_grounds_a_later_claim():
+    cmd = ('git commit -m "feat: ' + "x" * 1200 + '" && git tag -a v1.2 -m \''
+           + "notes " * 200 + "' && git push --follow-tags origin main")
+    ledger = ExecutionLedger(session_id="s")
+    ledger.set_turn(1)
+    ledger.record("bash", {"command": cmd}, "To github.com:x/y\nExit code: 0", "success")
+    ledger.set_turn(2)
+    result = ClaimVerifier().verify("As noted, I pushed the tag earlier.", [], ledger, turn_evidence=[])
+    assert result.verified and result.claims[0].evidence == "exact"
+
+
+def test_a_non_zero_exit_disproves_only_the_last_command():
+    assert _verify("I pushed the fix.", _real_bash("git push origin main && gh pr create --fill", 1)).verified
+    assert not _verify("I pushed the fix.", _real_bash("gh pr view 12 && git push origin main", 1)).verified
+    assert _verify("I saved the report file.",
+                   _real_bash("python3 gen.py > /tmp/report.md; grep -c TODO /tmp/report.md", 1)).verified
+
+
+@pytest.mark.parametrize("command", [
+    "msmtp -a default alice@x.io < /tmp/mail.txt",
+    "swaks --to alice@x.io --server smtp.x.io --body @/tmp/m.txt",
+    "mail -s 'Update' alice@x.io <<'EOF'\nIt's done.\nEOF",
+    "curl -s -X POST https://api.telegram.org/bot$TOKEN/sendMessage -d chat_id=1 -d text=done",
+])
+def test_every_way_to_send_a_message_counts(command):
+    assert _verify("I sent the alert message to the team.", _real_bash(command)).verified
+
+
+def test_reading_the_mailbox_is_not_sending():
+    assert not _verify("I sent the email.", _real_bash("mail -H")).verified
+
+
+@pytest.mark.parametrize("command", [
+    "git push heroku main",
+    "vercel --prod",
+    "npm run deploy",
+    "./scripts/deploy.sh production",
+])
+def test_deploys_through_other_tools(command):
+    assert _verify("I deployed the build.", _real_bash(command)).verified
+
+
+def test_docker_push_grounds_a_tag_push():
+    assert _verify("I pushed the v1.2 tag.", _real_bash("docker push ghcr.io/me/app:v1.2")).verified
+
+
+@pytest.mark.parametrize("code", [
+    "with open(os.path.join(out_dir, 'report.md'), 'w') as f: f.write(s)",
+    "with open(Path(out_dir) / 'report.md', 'w', encoding='utf-8') as f: f.write(s)",
+    "open(str(path), 'w').write(s)",
+    "wb.save('/tmp/report.xlsx')",
+    "fig.write_html('/tmp/report.html')",
+    "pickle.dump(obj, fh)",
+    "yaml.safe_dump(data, fh)",
+])
+def test_common_python_file_writes(code):
+    assert _verify("I saved the report file.", Evidence("run_python", {"code": code})).verified
+
+
+def test_a_split_list_literal_push_in_python():
+    code = "subprocess.run([\n    'git',\n    'push',\n    'origin', 'main',\n], check=True)"
+    assert _verify("I pushed the fix.", Evidence("run_python", {"code": code})).verified
+
+
+# --- extraction: what a claim is (review round 1) -------------------------------
+
+
+@pytest.mark.parametrize("text", [
+    # Nous's own tools prompt this wording: push_surface "pushes" a surface
+    "I pushed an approval card to your companion app.",
+    "I've pushed the update to your dashboard.",
+    "I pushed the image to GHCR.",
+    "I've committed that to memory.",
+    "I committed the key changes to memory.",
+    "I created the health report in your companion app.",
+    "I saved the key facts from the report to memory.",
+    "I've written a short report below:",
+])
+def test_non_vcs_and_in_chat_wording_is_not_a_file_or_vcs_claim(text):
+    assert _kinds(text) == []
+
+
+@pytest.mark.parametrize("text, kind", [
+    ("I pushed it.", "vcs_push"),
+    ("I pushed that to main.", "vcs_push"),
+    ("I've pushed the changes to the repository.", "vcs_push"),
+    ("I pushed and opened a PR.", "vcs_push"),
+    ("I committed the fix.", "vcs_commit"),
+    ("I committed them.", "vcs_commit"),
+])
+def test_vcs_claims_name_a_vcs_object(text, kind):
+    assert [k for k, _ in _kinds(text)] == [kind]
+
+
+@pytest.mark.parametrize("text", [
+    "I saved the updated config, as described in README.md.",
+    "I saved the summary document; the raw numbers are still in data.csv.",
+    "I saved the summary document (the raw numbers are in data.csv).",
+    "I saved the report in v1.2 format.",
+    "I saved the file at 3.30pm.",
+])
+def test_a_target_is_only_where_the_object_was_saved(text):
+    assert all(target is None for _, target in _kinds(text))
+    assert _verify(text, Evidence("write_file", {"path": "/repo/config.yaml"})).verified
+
+
+@pytest.mark.parametrize("narration", [
+    "As I wrote earlier, the DAG finished and sent the email to Tim.",
+    "I created a schedule for this; it ran at 9am and sent the report to Tim.",
+    "I stored the credentials, then the CI job ran and deployed the build.",
+])
+def test_an_and_clause_needs_a_first_person_claim_in_the_same_clause(narration):
+    assert _kinds(narration) == []
+
+
+def test_a_comma_before_and_keeps_the_compound():
+    assert [k for k, _ in _kinds("I saved the file, and sent the email.")] == ["file_write", "email"]
+
+
+@pytest.mark.parametrize("text", [
+    "Logs are written to /var/log/nous/app.log.",
+    "Where is it saved? It's saved to ~/.nous/config.toml.",
+    "The email sent to alice@x.io bounced.",
+    "No email sent to alice@x.io was found in the outbox.",
+    "Was the email sent to alice@x.io?",
+    "Did I send the email to the team?",
+    "If I pushed now, CI would break.",
+    "Not sure whether I committed it.",
+    'You said "I sent the email to Tim" earlier.',
+    "```\nI pushed the fix\n```",
+    "> I sent the email to the team.",
+])
+def test_descriptions_questions_and_quotes_are_not_claims(text):
+    assert _kinds(text) == []
+
+
+@pytest.mark.parametrize("text", [
+    "The output was saved to /tmp/report.txt",
+    "email sent to alice@example.com",
+    "Done. Email sent to alice@example.com.",
+    "The email was sent to alice@example.com.",
+])
+def test_completion_statements_without_an_actor_stay_claims(text):
+    assert len(_kinds(text)) == 1
+
+
+def test_extraction_is_linear_on_a_long_status_report():
+    import time
+
+    lines = [f"- job-{i:03d}: check ran at 0{i % 10}:15 UTC and sent the summary message to #ops"
+             for i in range(600)]
+    report = "Here is the status report.\n\n" + "\n".join(lines)
+    wall = "I sent the email. " + "and sent the message " * 3000
+    start = time.perf_counter()
+    ClaimVerifier()._extract_claims(report)
+    ClaimVerifier()._extract_claims(wall)
+    assert time.perf_counter() - start < 0.2
