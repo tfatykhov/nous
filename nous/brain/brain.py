@@ -1042,15 +1042,21 @@ class Brain:
                 decision_id = raw_id if isinstance(raw_id, UUID) else UUID(str(raw_id))
                 sup = item.get("superseded_by")
                 sup_uuid = sup if (sup is None or isinstance(sup, UUID)) else UUID(str(sup))
-                await self._review(
-                    decision_id,
-                    item["outcome"],
-                    item.get("result"),
-                    item.get("reviewer", reviewer),
-                    sup_uuid,
-                    session,
-                    preserve_graded,
-                )
+                # One SAVEPOINT per item: a database error during this item's
+                # flush (Postgres aborts the whole transaction on the first
+                # one) rolls back THIS item only, instead of failing every
+                # later item and making the final commit discard the items
+                # that had succeeded (codex #642 r2).
+                async with session.begin_nested():
+                    await self._review(
+                        decision_id,
+                        item["outcome"],
+                        item.get("result"),
+                        item.get("reviewer", reviewer),
+                        sup_uuid,
+                        session,
+                        preserve_graded,
+                    )
                 results.append({"decision_id": str(raw_id), "ok": True, "error": None})
             except Exception as e:  # noqa: BLE001 — surface per-item, keep batch alive
                 results.append({"decision_id": str(raw_id), "ok": False, "error": str(e)})
@@ -1081,6 +1087,22 @@ class Brain:
         )
         if decision is None:
             raise ValueError(f"Decision {decision_id} not found")
+        if validated.outcome == "superseded":
+            # Checked here rather than left to the FK: a hallucinated UUID gets
+            # a message the caller can act on, and a successor owned by
+            # another agent (which the FK would accept) is refused.
+            if validated.superseded_by == decision_id:
+                raise ValueError("superseded_by cannot be the decision itself")
+            successor = await session.execute(
+                select(Decision.id)
+                .where(Decision.id == validated.superseded_by)
+                .where(Decision.agent_id == self.agent_id)
+            )
+            if successor.scalar_one_or_none() is None:
+                raise ValueError(
+                    f"superseded_by {validated.superseded_by} is not a decision of "
+                    "this agent — record the replacing decision first and pass its UUID"
+                )
         if preserve_graded and decision.outcome in GRADED_OUTCOMES:
             raise ValueError(
                 f"Decision {decision_id} already has the graded outcome "

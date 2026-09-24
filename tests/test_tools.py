@@ -301,6 +301,27 @@ class TestResolveDecision:
         assert (await brain.get(uuid.UUID(graded_row_id))).outcome == "success"
 
     @pytest.mark.asyncio
+    async def test_resolve_decisions_background_unknown_successor_is_per_item(self, tools, brain):
+        """A hallucinated superseded_by fails only its own item in a background sweep."""
+        first = await self._make_decision(tools, brain)
+        bad = await self._make_decision(tools, brain)
+        last = await self._make_decision(tools, brain)
+        result = await tools["resolve_decisions"](
+            resolutions=[
+                {"decision_id": first, "outcome": "noise"},
+                {"decision_id": bad, "outcome": "superseded", "superseded_by": str(uuid.uuid4())},
+                {"decision_id": last, "outcome": "noise"},
+            ],
+            _is_background=True,
+        )
+        text = result["content"][0]["text"]
+        assert "Resolved 2/3" in text
+        assert bad in text.split("Failures:", 1)[1]
+        assert (await brain.get(uuid.UUID(first))).outcome == "noise"
+        assert (await brain.get(uuid.UUID(bad))).outcome == "pending"
+        assert (await brain.get(uuid.UUID(last))).outcome == "noise"
+
+    @pytest.mark.asyncio
     async def test_resolve_decisions_background_all_refused_is_error(self, tools, brain):
         """A background batch where nothing is allowed reports an error."""
         did = await self._make_decision(tools, brain)
