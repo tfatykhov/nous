@@ -7,9 +7,9 @@ store is the durable record of side-effecting tool calls: a row is written
 The store RAISES on write failure (LedgerWriteError, carrying the
 client-generated id — the COMMIT may have landed even when the wait timed
 out). The RUNNER decides what a failure means: Phase 1b fails open; Phase 2b
-makes keyed sends fail closed. Rows never hold bodies, code, the output of
-agent-authored code, or the values of an unknown tool's arguments
-(durable_key_args, _summary).
+makes keyed sends fail closed. Rows never hold free text: an argument value
+is kept only when its shape proves it is not free text (or it is the call's
+target path), and tool output is never stored (durable_key_args, _summary).
 
 Deployment assumption: ONE Nous process per (database, agent_id). The startup
 sweep marks every 'pending' row 'unknown' because only a dead process can
@@ -24,6 +24,7 @@ import logging
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, func, update
@@ -39,36 +40,50 @@ RESULT_SUMMARY_CHARS = 500
 _CLOSABLE = ("pending", "unknown")
 _TERMINAL = frozenset(s for s in LEDGER_STATUSES if s != "pending")
 
-# Per-tool durable argument policy: (values kept after redaction, values
-# stored only as sha256 + length). A tool not listed here stores its argument
-# NAMES only — an unknown tool's values may be anything, including secrets.
-_DURABLE_ARGS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    # A bash command is code: pattern redaction cannot see a bare API key or a
-    # heredoc payload, so it is hashed like run_python's, never kept.
-    "bash": ((), ("command",)),
-    "write_file": (("path",), ("content",)),
-    "run_python": ((), ("code",)),
-    "send_email": (("to", "cc", "subject"), ("body", "html_body")),
-    "send_file": (("file_path", "chat_id"), ("caption",)),
-    "learn_fact": (("subject", "category"), ("content",)),
-    "learn_skill": (("source",), ("content",)),
-    "record_decision": (("category", "stakes"), ("description",)),
-    "create_censor": (("domain", "action"), ("reason", "trigger_pattern")),
-    "spawn_task": (("frame_type",), ("task",)),
-    "spawn_sync": (("frame_type",), ("task",)),
-    "schedule_task": (("every", "when", "frame_type"), ("task",)),
-    "cancel_task": (("task_id",), ()),
-    "heartbeat_check_create": (("name",), ("prompt",)),
-    "heartbeat_check_manage": (("action", "name"), ()),
-    "dag_create": (("name",), ("nodes",)),
-    "dag_manage": (("action", "dag_id", "node_name"), ()),
-    "push_surface": (("template", "dedup_key"), ("params",)),
-    "compose_surface": (("dedup_key", "archetype"), ("intent", "data_sources")),
-    "resolve_decision": (("decision_id", "outcome", "superseded_by"), ("resolution_note",)),
-    "resolve_decisions": ((), ("resolutions",)),
-    "ingest_document": (("source_ref", "episode_id"), ("content",)),
-    "store_identity": (("section",), ("content",)),
+# Per-tool durable argument policy. Pattern redaction cannot be trusted with
+# free text -- a bare `sk-...` key matches no pattern -- so nothing is kept
+# because it "looks safe". A value is kept only when its SHAPE proves it holds
+# no free text (a UUID, a lowercase enum word, validated recipients, a URL cut
+# to scheme://host), or when it is the call's target path, which is what the
+# row records. Every other value -- and any value that fails its shape -- is
+# stored as sha256 + length. A tool not listed here stores its argument NAMES
+# only.
+_WORD, _UUID, _EMAILS, _CHAT, _PATH, _SOURCE, _HASH = (
+    "word", "uuid", "emails", "chat", "path", "source", "hash",
+)
+_DURABLE_ARGS: dict[str, dict[str, str]] = {
+    # A bash command is code: hashed like run_python's, never kept.
+    "bash": {"command": _HASH},
+    "write_file": {"path": _PATH, "content": _HASH},
+    "run_python": {"code": _HASH},
+    "send_email": {"to": _EMAILS, "cc": _EMAILS, "subject": _HASH, "body": _HASH, "html_body": _HASH},
+    "send_file": {"file_path": _PATH, "chat_id": _CHAT, "caption": _HASH},
+    "learn_fact": {"category": _WORD, "subject": _HASH, "content": _HASH},
+    "learn_skill": {"source": _SOURCE, "content": _HASH},
+    "record_decision": {"category": _WORD, "stakes": _WORD, "description": _HASH},
+    "create_censor": {"domain": _WORD, "action": _WORD, "reason": _HASH, "trigger_pattern": _HASH},
+    "spawn_task": {"frame_type": _WORD, "task": _HASH},
+    "spawn_sync": {"frame_type": _WORD, "task": _HASH},
+    "schedule_task": {"frame_type": _WORD, "every": _HASH, "when": _HASH, "task": _HASH},
+    "cancel_task": {"task_id": _UUID},
+    "heartbeat_check_create": {"name": _HASH, "prompt": _HASH},
+    "heartbeat_check_manage": {"action": _WORD, "name": _HASH},
+    "dag_create": {"name": _HASH, "nodes": _HASH},
+    "dag_manage": {"action": _WORD, "dag_id": _UUID, "node_name": _HASH},
+    "push_surface": {"template": _WORD, "dedup_key": _HASH, "params": _HASH},
+    "compose_surface": {"archetype": _WORD, "dedup_key": _HASH, "intent": _HASH, "data_sources": _HASH},
+    "resolve_decision": {
+        "decision_id": _UUID, "outcome": _WORD, "superseded_by": _UUID, "resolution_note": _HASH,
+    },
+    "resolve_decisions": {"resolutions": _HASH},
+    "ingest_document": {"source_ref": _SOURCE, "episode_id": _UUID, "content": _HASH},
+    "store_identity": {"section": _WORD, "content": _HASH},
 }
+
+_WORD_SHAPE = re.compile(r"[a-z][a-z_]{0,31}")
+_EMAIL_SHAPE = re.compile(r"[^@\s,;<>\"']+@[^@\s,;<>\"']+\.[A-Za-z]{2,}")
+_CHAT_SHAPE = re.compile(r"-?\d{1,20}")
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def _digest(value: Any) -> tuple[str, int]:
@@ -76,23 +91,59 @@ def _digest(value: Any) -> tuple[str, int]:
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16], len(text)
 
 
-def durable_key_args(tool_name: str, args: dict[str, Any]) -> dict[str, str]:
-    """What the durable ledger may keep about a call's arguments.
+def _shaped(kind: str, value: Any) -> str | None:
+    """``value`` in durable form if its shape proves it is not free text, else None."""
+    if kind == _EMAILS:
+        items = value if isinstance(value, list) else re.split(r"[,;]", str(value))
+        parts = [str(v).strip() for v in items if str(v).strip()]
+        if parts and all(_EMAIL_SHAPE.fullmatch(v) for v in parts):
+            return ",".join(parts)[:KEY_ARG_CHARS]
+        return None
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    text = str(value)
+    if kind == _WORD:
+        return text if _WORD_SHAPE.fullmatch(text) else None
+    if kind == _UUID:
+        try:
+            return str(UUID(text))
+        except ValueError:
+            return None
+    if kind == _CHAT:
+        return text if _CHAT_SHAPE.fullmatch(text) else None
+    if kind == _PATH:
+        # Kept, not hashed: the target path is what the row records. Too long
+        # or carrying control characters and it is not a path worth trusting.
+        if len(text) > KEY_ARG_CHARS or _CONTROL_CHARS.search(text) or "://" in text:
+            return None
+        return redact_text(text)
+    if kind == _SOURCE:
+        if text == "inline":
+            return text
+        parts = urlsplit(text)
+        if parts.scheme in ("http", "https") and parts.hostname:
+            return f"{parts.scheme}://{parts.hostname}"
+        return None
+    return None
 
-    Redact the FULL value, then truncate — truncating first can cut a secret
-    in half and defeat the pattern that would have matched it.
-    """
+
+def durable_key_args(tool_name: str, args: dict[str, Any]) -> dict[str, str]:
+    """What the durable ledger may keep about a call's arguments (see _DURABLE_ARGS)."""
     policy = _DURABLE_ARGS.get(tool_name)
     if policy is None:
         return {"arg_names": ",".join(sorted(str(k) for k in args))}
-    keep, hashed = policy
     out: dict[str, str] = {}
-    for name in keep:
-        if name in args and args[name] is not None:
-            out[name] = redact_text(str(args[name]))[:KEY_ARG_CHARS]
-    for name in hashed:
-        if name in args and args[name] is not None:
-            sha, length = _digest(args[name])
+    for name, kind in policy.items():
+        value = args.get(name)
+        if value is None:
+            continue
+        kept = _shaped(kind, value) if kind != _HASH else None
+        if kept is not None:
+            out[name] = kept
+        # A source keeps its full hash beside the host, so a later match on
+        # the exact value is still possible.
+        if kept is None or (kind == _SOURCE and kept != "inline"):
+            sha, length = _digest(value)
             out[f"{name}_sha256"] = sha
             out[f"{name}_len"] = str(length)
     return out
@@ -116,21 +167,26 @@ class LedgerWriteError(Exception):
         self.entry_id = entry_id
 
 
-# Tools whose result is the output of agent-authored code: arbitrary text no
-# pattern redactor can vet (`cat .env; touch x` is a write whose output is a
-# secrets file). Only the shape survives.
-_OPAQUE_OUTPUT_TOOLS = frozenset({"bash", "run_python"})
 # bash_tool always appends this trailer; it is the authoritative wrapper status.
 _BASH_EXIT_CODE = re.compile(r"(?:\A|\n)Exit code: (-?\d+)\s*\Z")
 _BASH_TIMEOUT = re.compile(r"\ACommand timed out after \d+s\.")
 
 
 def _summary(text: str | None, output_of: str | None = None) -> str | None:
-    """Durable form of a result. ``output_of`` names the tool when ``text`` is
-    that tool's raw output rather than a harness-authored note."""
+    """Durable form of a result.
+
+    ``output_of`` names the tool when ``text`` is that tool's output, which is
+    never stored: handlers echo their arguments back (a fact's subject, a
+    subtask's answer, a quoted email body) and bash / run_python print
+    whatever the code prints (`cat .env; touch x` is a write whose output is a
+    secrets file). None of that is vettable by pattern redaction, and the
+    arguments are already hashed in key_args. Only the shape survives: its
+    length, plus bash's authoritative exit-code trailer and timeout line.
+    Harness-authored notes (outcome unknown, refusals) are kept, redacted.
+    """
     if not text:
         return None
-    if output_of in _OPAQUE_OUTPUT_TOOLS:
+    if output_of is not None:
         parts: list[str] = []
         if output_of == "bash":
             if timeout := _BASH_TIMEOUT.match(text):
@@ -216,12 +272,20 @@ class LedgerStore:
             return result.rowcount or 0
 
     async def prune(self, *, retention_days: int) -> int:
-        """Delete this agent's rows older than ``retention_days``."""
+        """Delete this agent's CLOSED rows older than ``retention_days``.
+
+        Never a 'pending' row: retention and the call timeouts are configured
+        independently, so a live long-running call can be older than the
+        window, and deleting its row would make the call vanish -- the owner's
+        close would then update nothing. The orphan sweep closes a genuinely
+        dead 'pending' row first; retention takes it after that.
+        """
         cutoff = datetime.now(UTC) - timedelta(days=retention_days)
         async with self._db.session() as s:
             result = await s.execute(
                 delete(ExecutionLedgerEntry)
                 .where(ExecutionLedgerEntry.agent_id == self._agent_id)
+                .where(ExecutionLedgerEntry.status != "pending")
                 .where(ExecutionLedgerEntry.created_at < cutoff)
             )
             await s.commit()

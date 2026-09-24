@@ -2222,7 +2222,10 @@ class AgentRunner:
                                 )
                                 raise
                             except Exception as exc:
-                                await self._ledger_close(entry_id, "error", f"{type(exc).__name__}: {exc}")
+                                # The type only: an exception message can echo arguments.
+                                await self._ledger_close(
+                                    entry_id, "error", f"{type(exc).__name__} raised during dispatch",
+                                )
                                 raise
                             finally:
                                 await self._stop_activity_heartbeat(_hb)

@@ -43,10 +43,44 @@ def test_run_python_stores_a_hash_never_the_code():
     assert "sk-live" not in str(args)
 
 
-def test_send_email_stores_recipients_and_subject_not_the_body():
-    args = durable_key_args("send_email", {"to": "a@b.c", "subject": "Premarket", "body": "secret numbers"})
-    assert args["to"] == "a@b.c" and args["subject"] == "Premarket"
+def test_send_email_stores_recipients_but_hashes_subject_and_body():
+    args = durable_key_args("send_email", {"to": "tim@example.com", "subject": "Premarket", "body": "numbers"})
+    assert args["to"] == "tim@example.com"
+    assert "subject" not in args and "subject_sha256" in args
     assert "body" not in args and "body_sha256" in args
+
+
+@pytest.mark.parametrize("tool, args", [
+    ("send_email", {"to": "tim@example.com", "subject": "sk-ABCDEFGHIJKLMNOP"}),
+    ("send_email", {"to": "sk-ABCDEFGHIJKLMNOP", "subject": "x"}),
+    ("learn_fact", {"subject": "sk-ABCDEFGHIJKLMNOP", "category": "technical", "content": "c"}),
+    ("learn_fact", {"subject": "s", "category": "sk-ABCDEFGHIJKLMNOP", "content": "c"}),
+    ("learn_skill", {"source": "https://u:sk-ABCDEFGHIJKLMNOP@example.com/s.md?token=sk-ABCDEFGHIJKLMNOP"}),
+    ("learn_skill", {"source": "sk-ABCDEFGHIJKLMNOP"}),
+    ("cancel_task", {"task_id": "sk-ABCDEFGHIJKLMNOP"}),
+    ("send_file", {"file_path": "/tmp/x.png", "chat_id": "sk-ABCDEFGHIJKLMNOP"}),
+    ("heartbeat_check_create", {"name": "sk-ABCDEFGHIJKLMNOP", "prompt": "p"}),
+    ("schedule_task", {"every": "sk-ABCDEFGHIJKLMNOP", "task": "t"}),
+    ("ingest_document", {"source_ref": "sk-ABCDEFGHIJKLMNOP", "content": "c"}),
+])
+def test_free_text_values_are_never_kept(tool, args):
+    """codex r3 on #645: a pattern redactor cannot see a bare `sk-...` key, so a
+    value is kept only when its SHAPE proves it holds no free text."""
+    assert "sk-" not in str(durable_key_args(tool, args))
+
+
+def test_shape_proven_values_are_kept():
+    import uuid
+
+    task_id = str(uuid.uuid4())
+    assert durable_key_args("cancel_task", {"task_id": task_id}) == {"task_id": task_id}
+    assert durable_key_args("learn_fact", {"category": "technical"})["category"] == "technical"
+    assert durable_key_args("send_file", {"chat_id": "-100123"})["chat_id"] == "-100123"
+    assert durable_key_args("send_email", {"to": ["a@example.com", "b@example.org"]})["to"] == (
+        "a@example.com,b@example.org")
+    source = durable_key_args("learn_skill", {"source": "https://u:pw@example.com/skills/x.md?t=1"})
+    assert source["source"] == "https://example.com" and "source_sha256" in source
+    assert durable_key_args("learn_skill", {"source": "inline"})["source"] == "inline"
 
 
 def test_unknown_tools_store_argument_names_only():
@@ -54,11 +88,10 @@ def test_unknown_tools_store_argument_names_only():
     assert args == {"arg_names": "target,token"}
 
 
-def test_redaction_runs_before_truncation():
-    """A password cut by truncation must still be redacted."""
-    url = "https://nous:" + "p" * (KEY_ARG_CHARS + 50) + "@example.com/skill.md"
-    out = durable_key_args("learn_skill", {"source": url})
-    assert "ppppp" not in out["source"]
+def test_an_over_long_target_path_is_hashed_not_truncated():
+    path = "/tmp/nous-workspace/" + "d" * (KEY_ARG_CHARS + 50) + "/x.txt"
+    out = durable_key_args("write_file", {"path": path, "content": "c"})
+    assert "path" not in out and out["path_len"] == str(len(path))
 
 
 def test_bash_command_is_stored_as_a_hash_never_verbatim():
@@ -160,6 +193,16 @@ async def test_owner_close_replaces_a_sweep_set_unknown(store, db):
 
 
 @pytest.mark.asyncio
+async def test_result_summary_redaction_runs_before_truncation(store, db):
+    """A password cut by truncation must still be redacted."""
+    entry_id = await store.open_entry(context=ExecutionContext(kind="subtask"), tool_name="learn_fact",
+                                      tool_input={"content": "c"}, turn=1)
+    await store.close_entry(entry_id, status="success",
+                            result_summary="x" * 480 + " password=" + "p" * 80)
+    assert "ppppp" not in (await _row(db, entry_id)).result_summary
+
+
+@pytest.mark.asyncio
 async def test_result_summary_is_redacted(store, db):
     entry_id = await store.open_entry(context=ExecutionContext(kind="subtask"),
                                       tool_name="run_python", tool_input={"code": "x"}, turn=1)
@@ -194,6 +237,17 @@ async def test_run_python_output_is_never_stored(store, db):
     await store.close_entry(entry_id, status="success", output_of="run_python",
                             result_summary="sk-ABCDEFGHIJKLMNOP")
     assert "sk-" not in (await _row(db, entry_id)).result_summary
+
+
+@pytest.mark.asyncio
+async def test_no_tool_output_is_stored_because_handlers_echo_their_arguments(store, db):
+    """learn_fact's success text quotes the subject that key_args hashes."""
+    entry_id = await store.open_entry(context=ExecutionContext(kind="subtask"), tool_name="learn_fact",
+                                      tool_input={"subject": "sk-ABCDEFGHIJKLMNOP", "content": "c"}, turn=1)
+    await store.close_entry(entry_id, status="success", output_of="learn_fact",
+                            result_summary="Fact learned successfully.\nSubject: sk-ABCDEFGHIJKLMNOP")
+    summary = (await _row(db, entry_id)).result_summary
+    assert "sk-" not in summary and "chars of output" in summary
 
 
 @pytest.mark.asyncio
@@ -258,12 +312,29 @@ async def test_orphan_sweep_threshold_and_agent_scope(store, db, agent):
 
 
 @pytest.mark.asyncio
+async def test_prune_never_deletes_a_pending_row(store, db):
+    """codex r3 on #645: retention and the call timeouts are configured
+    independently, so a long-running call's 'pending' row can be older than
+    the retention window. Deleting it would make the call vanish."""
+    live = await store.open_entry(context=ExecutionContext(kind="subtask"), tool_name="learn_fact",
+                                  tool_input={}, turn=1)
+    async with db.session() as s:
+        await s.execute(update(ExecutionLedgerEntry).where(ExecutionLedgerEntry.id == live)
+                        .values(created_at=datetime.now(UTC) - timedelta(days=200)))
+        await s.commit()
+    assert await store.prune(retention_days=90) == 0
+    assert (await _row(db, live)).status == "pending"
+
+
+@pytest.mark.asyncio
 async def test_prune_is_agent_scoped(store, db, agent):
     mine = await store.open_entry(context=ExecutionContext(kind="subtask"), tool_name="learn_fact",
                                   tool_input={}, turn=1)
     other = LedgerStore(db, f"{agent}-other")
     theirs = await other.open_entry(context=ExecutionContext(kind="subtask"), tool_name="learn_fact",
                                     tool_input={}, turn=1)
+    await store.close_entry(mine, status="success", result_summary=None)
+    await other.close_entry(theirs, status="success", result_summary=None)
     async with db.session() as s:
         await s.execute(update(ExecutionLedgerEntry)
                         .where(ExecutionLedgerEntry.id.in_([mine, theirs]))

@@ -1391,8 +1391,8 @@ class ExecutionLedgerEntry(Base):
     """Harness Phase 1b: durable record of one side-effecting tool call.
 
     See migration 074. Written by ``nous.cognitive.ledger_store.LedgerStore``:
-    'pending' before dispatch, closed after; never holds bodies, code or
-    secrets (``durable_key_args``).
+    'pending' before dispatch, closed after; never holds free text or tool
+    output (``durable_key_args``, ``_summary``).
     """
 
     __tablename__ = "execution_ledger"
