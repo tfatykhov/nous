@@ -32,37 +32,75 @@ class VerificationResult:
     correction: str | None = None
 
 
+@dataclass(frozen=True)
+class ClaimKind:
+    primary_tool: str          # kept as ClaimViolation.expected_tool (back-compat)
+    capable_tools: frozenset[str]
+
+
+CLAIM_KINDS: dict[str, ClaimKind] = {
+    "file_write": ClaimKind("write_file", frozenset({"write_file", "bash", "run_python"})),
+    "email": ClaimKind("send_email", frozenset({"send_email", "send_file", "bash", "run_python"})),
+    "vcs_push": ClaimKind("bash", frozenset({"bash", "run_python"})),
+    "vcs_commit": ClaimKind("bash", frozenset({"bash", "run_python"})),
+    "deploy": ClaimKind("bash", frozenset({"bash", "run_python"})),
+}
+
+
+@dataclass(frozen=True)
+class Claim:
+    kind: str
+    text: str
+    target: str | None = None  # a path or recipient the claim names
+
+
+# First person: "I", "I've", "I have", "I just", "I already". The "I" is
+# case-SENSITIVE inside patterns compiled IGNORECASE: a lowercase "i " is not a subject.
+_FIRST = r"\b(?-i:I)(?:['’]ve|\s+have|\s+just|\s+already)?\s+"
+_CLAIM_VERBS = (r"(?:saved|wrote|written|created|generated|exported|stored|sent|emailed"
+                r"|forwarded|mailed|pushed|committed|deployed)\b")
+# The second clause of a FIRST-PERSON compound ("I saved X and sent Y"); only
+# accepted when a first-person CLAIM ("I" + claim verb) appears earlier in the
+# same sentence -- "I checked: the DAG ran and sent the email" is narration.
+_AND = r"\band\s+(?:also\s+)?"
+# One sentence: a dot ends it only when followed by whitespace or the end, so
+# `config.yaml` and `v1.2` stay inside; "e.g." / "i.e." / "etc." do not end it.
+# The abbreviation branches take ONLY a dot followed by whitespace, so they
+# never overlap `\.(?=\S)` -- overlapping branches backtrack exponentially on
+# a failed match ("etc.," x20 took 4.5 s; exclusive branches: 0.03 ms).
+_SPAN = (r"(?:[^.\n]|\.(?=\S)|(?<=\be\.g)\.(?=\s)|(?<=\bi\.e)\.(?=\s)"
+         r"|(?<=\betc)\.(?=\s)){0,160}?")
+_PATH = r"(?P<target>(?:~|\.{0,2})/[\w./-]*\w|[\w-]+\.\w{1,6})"
+_ADDRESS = r"(?P<target>[\w.+-]+@[\w-]+(?:\.[\w-]+)+)"
+_SUBJECT = rf"(?P<subj>{_FIRST}|{_AND})"
+
+# (pattern, kind). Patterns that open with the subject group are claims only
+# under the first-person rule in _extract_claims; the targeted file pattern
+# runs first so its target wins over the untargeted one on the same span.
+_CLAIM_PATTERNS: list[tuple[str, str]] = [
+    (rf"{_SUBJECT}(?:saved|wrote|written|exported|stored)\b{_SPAN}\s+(?:to|at|in)\s+{_PATH}",
+     "file_write"),
+    (rf"{_SUBJECT}(?:saved|wrote|written|created|generated)\b{_SPAN}\b(?:file|document|report)\b",
+     "file_write"),
+    (rf"\b(?:saved|written)\s+to[:\s]+{_PATH}", "file_write"),
+    (rf"{_SUBJECT}(?:sent|emailed|forwarded|mailed)\b{_SPAN}\b(?:e-?mail|message|report)\b",
+     "email"),
+    (rf"\be-?mail(?:ed)?\s+sent\s+to\b(?:\s+{_ADDRESS})?", "email"),
+    (rf"{_SUBJECT}pushed\b", "vcs_push"),
+    (rf"{_SUBJECT}committed\b", "vcs_commit"),
+    (rf"{_SUBJECT}deployed\b", "deploy"),
+]
+_FIRST_RE = re.compile(_FIRST, re.IGNORECASE)
+_FIRST_CLAIM_RE = re.compile(_FIRST + _CLAIM_VERBS, re.IGNORECASE)
+_SENTENCE_END = re.compile(r"[.!?](?=\s|$)|\n")
+
+
 class ClaimVerifier:
     """Verifies that action claims in assistant responses are grounded in actual tool use."""
 
-    # (compiled_pattern, expected_tool_name)
-    ACTION_CLAIM_PATTERNS: list[tuple[str, str]] = [
-        (
-            r"(?:I |I've |I just )(?:saved|wrote|created|generated) .+(?:file|document|report)",
-            "write_file",
-        ),
-        (
-            r"(?:I |I've |I just )(?:sent|emailed|forwarded) .+(?:email|message|report)",
-            "send_email",
-        ),
-        (
-            r"(?:I |I've |I just )(?:pushed|committed|deployed)",
-            "bash",
-        ),
-        (
-            r"(?:saved|written) to[:\s]+[/\w.-]+",
-            "write_file",
-        ),
-        (
-            r"email sent to",
-            "send_email",
-        ),
-    ]
-
     def __init__(self) -> None:
         self._compiled: list[tuple[re.Pattern[str], str]] = [
-            (re.compile(pattern, re.IGNORECASE | re.DOTALL), tool)
-            for pattern, tool in self.ACTION_CLAIM_PATTERNS
+            (re.compile(pattern, re.IGNORECASE), kind) for pattern, kind in _CLAIM_PATTERNS
         ]
 
     def verify(
@@ -99,13 +137,14 @@ class ClaimVerifier:
         turn_tool_set = set(tool_calls_this_turn)
 
         violations: list[ClaimViolation] = []
-        for matched_text, expected_tool in claims:
+        for claim in claims:
+            expected_tool = CLAIM_KINDS[claim.kind].primary_tool
             found_in_turn = expected_tool in turn_tool_set
             found_in_ledger = expected_tool in recent_ledger_tools
             if not found_in_turn and not found_in_ledger:
                 violations.append(
                     ClaimViolation(
-                        claimed_text=matched_text,
+                        claimed_text=claim.text,
                         expected_tool=expected_tool,
                         found_in_turn=found_in_turn,
                         found_in_ledger=found_in_ledger,
@@ -121,13 +160,32 @@ class ClaimVerifier:
             correction=self._build_correction(violations),
         )
 
-    def _extract_claims(self, text: str) -> list[tuple[str, str]]:
-        """Return (matched_text, expected_tool) for every claim found in text."""
-        results: list[tuple[str, str]] = []
-        for pattern, tool in self._compiled:
+    def _extract_claims(self, text: str) -> list[Claim]:
+        """Every first-person completion claim in ``text``, in document order."""
+        found: list[tuple[int, int, Claim]] = []
+        for pattern, kind in self._compiled:
             for match in pattern.finditer(text):
-                results.append((match.group(0), tool))
-        return results
+                subj = match.groupdict().get("subj")
+                if subj is not None and not _FIRST_RE.match(subj):
+                    # an "and <verb>" clause: a claim only after a first-person
+                    # CLAIM earlier in the same sentence
+                    start = max(
+                        (m.end() for m in _SENTENCE_END.finditer(text, 0, match.start())),
+                        default=0,
+                    )
+                    if not _FIRST_CLAIM_RE.search(text, start, match.start()):
+                        continue
+                target = match.groupdict().get("target")
+                if target:
+                    target = target.rstrip(".,;:)")
+                    if "@" in target:
+                        target = target.lower()
+                start, end = match.start(), match.end()
+                if any(c.kind == kind and s < end and start < e for s, e, c in found):
+                    continue  # same claim already captured; the targeted pattern runs first
+                found.append((start, end, Claim(kind=kind, text=match.group(0).strip(), target=target)))
+        found.sort(key=lambda item: item[0])
+        return [claim for _, _, claim in found]
 
     def _build_correction(self, violations: list[ClaimViolation]) -> str:
         """Build a correction message describing all ungrounded claims."""
