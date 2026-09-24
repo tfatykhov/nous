@@ -179,7 +179,8 @@ def test_no_capable_tool_is_still_a_violation():
     result = _verify("I saved the report file.", Evidence("recall_deep", {}))
     assert not result.verified
     assert result.violations[0].expected_tool == "write_file"
-    assert set(result.violations[0].capable_tools) == {"write_file", "bash", "run_python"}
+    assert {"write_file", "bash", "run_python"} <= set(result.violations[0].capable_tools)
+    assert "recall_deep" not in result.violations[0].capable_tools
 
 
 def test_ledger_history_with_evidence_args_counts():
@@ -483,3 +484,134 @@ def test_extraction_is_linear_on_a_long_status_report():
     ClaimVerifier()._extract_claims(report)
     ClaimVerifier()._extract_claims(wall)
     assert time.perf_counter() - start < 0.2
+
+
+# --- review round 2 ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", [
+    # Nous's own tools: a schedule, a check, a subtask, a fact, a micro-app
+    "I've created a schedule that generates the report every Monday at 9am.",
+    "I created a heartbeat check that emails the report to you every morning.",
+    "I created a subtask to write the report in the background.",
+    "I saved your preference, so the daily report now uses metric units.",
+    "I saved the report as a fact so I can recall it later.",
+    "I saved the document to my knowledge base.",
+    "I created a report dashboard with the Q3 numbers.",
+    "I generated the report as a micro-app you can refresh.",
+    "I sent the weekly report to your companion app.",
+    "I've deployed a heartbeat check that watches disk usage.",
+    "I deployed a live dashboard for your health metrics.",
+    # idioms with a VCS noun nearby
+    "I pushed back on the code review feedback.",
+    "I pushed for a smaller PR.",
+    "I committed to a code freeze until Friday.",
+    "I pushed an approval request for the deploy branch.",
+    "I pushed a notification about the failed commit.",
+    "I pushed hard to get the feature finished before the demo.",
+    # another actor's work, and descriptions
+    "The report was saved to /srv/reports/q3.md by the scheduled task.",
+    "The email was sent to alice@x.io by the nightly digest job.",
+    "Check whether it was saved to /tmp/r.md.",
+    "Default: saved to ~/.config/app.toml.",
+    "Where does it go?\nSaved to ~/.cache/nous/ by default.",
+    "- saved to /var/lib/app/state.json on every shutdown",
+])
+def test_nous_wording_idioms_and_descriptions_are_not_claims(text):
+    assert _kinds(text) == []
+
+
+@pytest.mark.parametrize("text, kinds", [
+    ("I've pushed the fix to main — want me to deploy it too?", ["vcs_push"]),
+    ("I committed the fix; shall I push it?", ["vcs_commit"]),
+    ("I saved the report to /tmp/r.md, want me to email it?", ["file_write"]),
+    ("I've committed and pushed everything.", ["vcs_commit", "vcs_push"]),
+    ("I committed the changes listed below.", ["vcs_commit"]),
+    ("I pushed the fix described above to main.", ["vcs_push"]),
+    ("I've **pushed** the fix to main.", ["vcs_push"]),
+    ("I pushed the failing test fix.", ["vcs_push"]),
+    ("I pushed that to main.", ["vcs_push"]),
+    ("I deployed the fix to prod.", ["deploy"]),
+    ("I deployed to Heroku.", ["deploy"]),
+    ("I sent you the report.", ["email"]),
+    ("I saved the report file if you need it.", ["file_write"]),
+])
+def test_completed_actions_stay_claims(text, kinds):
+    assert [k for k, _ in _kinds(text)] == kinds
+
+
+def test_a_nous_producing_tool_grounds_an_untargeted_claim():
+    made = Evidence("compose_surface", {"intent": "q3 report"})
+    assert _verify("I created the report file.", made).claims[0].evidence == "plausible"
+    assert _verify("I sent you the report.", made).verified
+    assert not _verify("It was saved to /tmp/r.md.", made).verified
+
+
+@pytest.mark.parametrize("command", [
+    "python3 --version", "node -v", 'python3 -c "print(1+1)"', "uv sync",
+    "uv run pytest -q tests/test_x.py", "npm test", "make lint", "ssh prod uptime",
+    "bash -c 'ls -la'", "env -S 'ls -l'", "./scripts/check_health.sh",
+])
+def test_a_readable_or_unrelated_run_grounds_nothing(command):
+    for claim in ("I pushed the fix to main.", "I committed the fix.",
+                  "I sent the email to alice@x.io about it.", "Email sent to alice@x.io.",
+                  "I deployed the fix to prod."):
+        assert not _verify(claim, _real_bash(command)).verified, (claim, command)
+
+
+def _push_level(command):
+    return _verify("I pushed the fix.", _real_bash(command)).claims[0].evidence
+
+
+def test_a_command_string_is_read():
+    assert _push_level("bash -c 'cd /repo && git push origin main'") == "exact"
+    assert _push_level("ssh deploy@host 'cd /srv/app && git push'") == "exact"
+    assert _push_level("eval git push origin main") == "exact"
+    assert _push_level("sudo -u deploy bash -c 'git -C /srv push'") == "exact"
+    assert _push_level("bash -c 'git log --oneline | grep push'") == "none"
+
+
+def test_python_dash_c_is_read_as_code():
+    sends = "python3 -c 'import smtplib; smtplib.SMTP(\"h\").sendmail(a, b, m)'"
+    assert _verify("I sent the email.", _real_bash(sends)).verified
+    assert not _verify("I sent the email.", _real_bash("python3 -c 'print(1)'")).verified
+
+
+def test_an_interpreter_grounds_only_what_its_text_hints_at():
+    assert _verify("I exported the data to /tmp/export.csv.",
+                   _real_bash("uv run python scripts/export.py")).verified
+    assert _verify("I sent the digest email.", _real_bash("python3 scripts/send_digest.py")).verified
+    assert not _verify("I pushed the fix.", _real_bash("python3 scripts/send_digest.py")).verified
+    assert _verify("I deployed the build.", _real_bash("make release")).verified
+
+
+@pytest.mark.parametrize("command", [
+    "tail -n 50 /var/log/deploy.log", "ls deploy/", "grep -rn deploy docs/", "cat deploy.yaml",
+    "git log --oneline -5 -- deploy/", "docker ps", "docker logs nous --tail 20", "kubectl get pods",
+    "systemctl status nous", "aws s3 ls",
+])
+def test_looking_at_a_deployment_is_not_deploying(command):
+    assert not _verify("I deployed the fix to prod.", _real_bash(command)).verified
+
+
+@pytest.mark.parametrize("command", [
+    "docker compose up -d", "kubectl apply -f k8s/", "helm upgrade --install nous ./chart",
+    "systemctl restart nous", "terraform apply -auto-approve", "aws s3 sync build/ s3://site",
+    "fly deploy", "npm run deploy", "make deploy", "vercel --prod",
+])
+def test_changing_a_deployment_is_deploying(command):
+    assert _verify("I deployed the fix to prod.", _real_bash(command)).verified
+
+
+def test_a_recipient_in_a_variable_is_a_send():
+    assert _verify("I sent the email.", _real_bash('TO=alice@x.io; mail -s "Report" "$TO" < body.txt')).verified
+    assert _verify("Email sent to alice@x.io.", _real_bash('mail -s "Report" "$TO" < body.txt')).verified
+
+
+def test_this_turns_evidence_is_never_capped():
+    cmd = (" && ".join(f"mkdir -p out/d{i}" for i in range(40))
+           + " && git add -A && git commit -m s && git push origin main")
+    assert _verify("I pushed the fix to main.", _real_bash(cmd)).claims[0].evidence == "exact"
+    ledger = ExecutionLedger(session_id="s")
+    ledger.record("bash", {"command": cmd}, "Exit code: 0", "success")
+    assert ClaimVerifier().verify("I pushed the fix to main.", [], ledger).verified

@@ -160,8 +160,9 @@ def command_invocations(command: str) -> list[tuple[str, list[str]]] | None:
     ``env`` and wrappers (``sudo``, ``timeout`` ...) are peeled off, so
     `cd r && sudo git push` runs git while `echo "git push"` and `git log
     --grep push` do not push. The split mirrors ``_classify``. A command
-    string is not entered: it is reported as the program that runs it
-    (``bash``, ``eval``, ``ssh``, ``env -S``, ``flock -c``, ``watch``).
+    STRING (``bash -c``, ``su -c``, ``eval``, ``env -S``, ``flock -c``,
+    ``watch``, ``ssh host CMD``) is read the same way, to a bounded depth;
+    one that cannot be read stays as the program that runs it.
 
     Evidence for completion claims (harness 2c). None -- an unbalanced quote
     (a heredoc body with an apostrophe), an input over the classifier's size
@@ -172,34 +173,89 @@ def command_invocations(command: str) -> list[tuple[str, list[str]]] | None:
     if len(command) > _MAX_COMMAND_CHARS:
         return None
     try:
-        tokens = _lex(command)
-        if tokens is None:
-            return None
-        simple: list[list[str]] = []
-        words: list[str] = []
-        expect_target = False
-        for tok, is_operator in tokens:
-            if not is_operator:
-                if expect_target:
-                    expect_target = False
-                else:
-                    words.append(tok)
-                continue
-            for op in _OPERATOR.findall(tok):
-                if op in _OUTPUT_REDIRECTS or op in _INPUT_REDIRECTS or op == ">&":
-                    expect_target = True
-                else:  # a command separator
-                    simple.append(words)
-                    words = []
-        simple.append(words)
-        found = []
-        for words in simple:
-            start = _command_start(words)
-            if start is not None:
-                found.append((_program(words[start]), words[start + 1:]))
-        return found
+        return _invocations(command, 0)
     except Exception:
         return None
+
+
+_MAX_STRING_DEPTH = 3
+
+
+def _invocations(command: str, depth: int) -> list[tuple[str, list[str]]] | None:
+    tokens = _lex(command)
+    if tokens is None:
+        return None
+    simple: list[list[str]] = []
+    words: list[str] = []
+    expect_target = False
+    for tok, is_operator in tokens:
+        if not is_operator:
+            if expect_target:
+                expect_target = False
+            else:
+                words.append(tok)
+            continue
+        for op in _OPERATOR.findall(tok):
+            if op in _OUTPUT_REDIRECTS or op in _INPUT_REDIRECTS or op == ">&":
+                expect_target = True
+            else:  # a command separator
+                simple.append(words)
+                words = []
+    simple.append(words)
+    found: list[tuple[str, list[str]]] = []
+    for words in simple:
+        start = _command_start(words)
+        if start is None:
+            continue
+        prog, args = _program(words[start]), words[start + 1:]
+        inner = _command_string(prog, args)
+        if inner is not None and depth < _MAX_STRING_DEPTH:
+            sub = _invocations(inner, depth + 1)
+            if sub is not None:
+                found.extend(sub)
+                continue
+        found.append((prog, args))
+    return found
+
+
+_SSH_VALUE_OPTIONS = frozenset("bBcDEeFIiJLlmOopQRSWw")
+
+
+def _command_string(prog: str, args: list[str]) -> str | None:
+    """The command STRING an invocation runs, when it runs one that can be
+    found; None when it runs a file, a session, or nothing of the kind."""
+    if prog in _SHELLS:
+        window = args[:8] if prog == "su" else args
+        for j, a in enumerate(window):
+            if a == "-c" or "c" in _short_flags(a):
+                return args[j + 1] if j + 1 < len(args) else ""
+            if prog != "su" and not a.startswith("-"):
+                break
+        return None
+    if prog == "eval":
+        return " ".join(args)
+    if prog == "env":
+        for j, a in enumerate(args):
+            if a in ("-S", "--split-string"):
+                return args[j + 1] if j + 1 < len(args) else ""
+            if a.startswith("-S"):
+                return a[2:]
+            if a.startswith("--split-string="):
+                return a.split("=", 1)[1]
+            if not a.startswith("-"):
+                break
+        return None
+    if prog in ("flock", "watch"):
+        start = _wrapped_command_start(prog, [prog, *args], 1)
+        return start if isinstance(start, str) else None
+    if prog == "ssh":
+        i = 0
+        while i < len(args) and args[i].startswith("-"):
+            flags = _short_flags(args[i])
+            i += 2 if len(flags) == 1 and flags in _SSH_VALUE_OPTIONS else 1
+        rest = args[i + 1:]  # after the host
+        return " ".join(rest) if rest else None
+    return None
 
 
 # Shell syntax at the start of a simple command, not a program: what follows runs.

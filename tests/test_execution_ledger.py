@@ -1152,15 +1152,45 @@ class TestCommandInvocations:
         assert command_invocations("x " * 40_000) is None                  # over the size cap
         assert command_invocations("FOO=1") == []                          # read: nothing runs
 
-    def test_a_command_string_is_reported_as_its_runner(self):
-        from nous.cognitive.bash_side_effect import command_invocations
-
-        assert command_invocations("flock /tmp/l -c 'git push'")[0][0] == "flock"
-        assert command_invocations("env -S 'git push'")[0][0] == "env"
-
     def test_the_ledger_keeps_invocations_read_from_the_whole_command(self):
         cmd = 'git commit -m "' + "x" * 3000 + '" && git push origin main'
         action = ExecutionLedger(session_id="s").record("bash", {"command": cmd}, "Exit code: 0", "success")
         assert [p for p, _ in action.invocations] == ["git", "git"]
         assert action.invocations[1] == ("git", ("push", "origin", "main"))
         assert all(len(a) <= 120 for _, args in action.invocations for a in args)  # bounded in memory
+
+
+class TestCommandStrings:
+    """A command string is read, not treated as a wall: `bash -c`, `su -c`,
+    `eval`, `env -S`, `flock -c`, `watch`, `ssh host CMD`."""
+
+    @pytest.mark.parametrize("cmd, expected", [
+        ("bash -c 'cd /repo && git push'", [("cd", ["/repo"]), ("git", ["push"])]),
+        ("ssh deploy@host 'git push'", [("git", ["push"])]),
+        ("ssh -p 2222 -i k -o StrictHostKeyChecking=no deploy@host uptime", [("uptime", [])]),
+        ("eval git push", [("git", ["push"])]),
+        ("env -S 'ls -l'", [("ls", ["-l"])]),
+        ("flock /tmp/l -c 'git push'", [("git", ["push"])]),
+        ("watch -n 5 git status", [("git", ["status"])]),
+        ("sudo bash -c \"sh -c 'git push'\"", [("git", ["push"])]),
+    ])
+    def test_command_strings_are_read(self, cmd, expected):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations(cmd) == expected
+
+    @pytest.mark.parametrize("cmd, runner", [
+        ("bash -c \"echo it's\"", ("bash", ["-c", "echo it's"])),   # unreadable inside
+        ("bash script.sh", ("bash", ["script.sh"])),                 # a file
+        ("ssh host", ("ssh", ["host"])),                             # interactive
+    ])
+    def test_what_cannot_be_read_keeps_its_runner(self, cmd, runner):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations(cmd) == [runner]
+
+    def test_nesting_is_bounded(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        found = command_invocations("eval " * 6 + "git push")
+        assert found is not None and found[0][0] == "eval"  # stops at the depth bound, never raises

@@ -124,25 +124,31 @@ def evidence_args(
 
 Invocation = tuple[str, tuple[str, ...]]
 # Bounds on what the in-memory ledger keeps of a bash command's invocations.
-_MAX_INVOCATIONS = 32
+# Past them the command is kept as UNREADABLE (None), never as fewer commands:
+# a cut list could drop the `git push` at the end.
+_MAX_INVOCATIONS = 64
 _MAX_INVOCATION_ARGS = 24
 _MAX_INVOCATION_ARG_CHARS = 120
 
 
-def bash_invocations(command: str) -> tuple[Invocation, ...] | None:
-    """What a bash command runs, read from the WHOLE command and bounded for
-    the ledger; None when it cannot be read (see ``command_invocations``).
+def bash_invocations(command: str, *, bound: bool = True) -> tuple[Invocation, ...] | None:
+    """What a bash command runs, read from the WHOLE command; None when it
+    cannot be read (see ``command_invocations``).
 
-    Read at record time because the ledger's bounded copy of the command can
-    drop a `git push` in its middle, or cut a quote in half and become
-    unreadable.
+    ``bound`` (the ledger) caps what is kept in memory. Read at record time
+    because the ledger's bounded copy of the command can drop a `git push` in
+    its middle, or cut a quote in half and become unreadable.
     """
     found = _command_invocations(command)
     if found is None:
         return None
+    if not bound:
+        return tuple((prog, tuple(args)) for prog, args in found)
+    if len(found) > _MAX_INVOCATIONS:
+        return None
     return tuple(
         (prog, tuple(a[:_MAX_INVOCATION_ARG_CHARS] for a in args[:_MAX_INVOCATION_ARGS]))
-        for prog, args in found[:_MAX_INVOCATIONS]
+        for prog, args in found
     )
 
 
