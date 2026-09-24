@@ -12,7 +12,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from nous.api.tools import ToolDispatcher
+from nous.api.tools import ToolDispatcher, _tool_error
 from nous.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -87,7 +87,7 @@ async def bash_tool(
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            return _mcp_response(
+            return _tool_error(
                 f"Command timed out after {effective_timeout}s.\n"
                 f"Command: {command}"
             )
@@ -118,7 +118,7 @@ async def bash_tool(
 
     except Exception as e:
         logger.exception("bash_tool error")
-        return _mcp_response(f"Error executing command: {e}")
+        return _tool_error(f"Error executing command: {e}")
 
 
 async def read_file_tool(
@@ -143,15 +143,15 @@ async def read_file_tool(
         target = _validate_path(path, _workspace_dir)
 
         if not target.exists():
-            return _mcp_response(f"File not found: {path}")
+            return _tool_error(f"File not found: {path}")
 
         if not target.is_file():
-            return _mcp_response(f"Not a file: {path}")
+            return _tool_error(f"Not a file: {path}")
 
         # Check size
         file_size = target.stat().st_size
         if file_size > _MAX_FILE_SIZE:
-            return _mcp_response(
+            return _tool_error(
                 f"File too large: {file_size:,} bytes (limit: {_MAX_FILE_SIZE:,} bytes). "
                 f"Use offset/limit to read portions."
             )
@@ -171,10 +171,10 @@ async def read_file_tool(
         return _mcp_response(content if content else "(empty file)")
 
     except ValueError as e:
-        return _mcp_response(str(e))
+        return _tool_error(str(e))
     except Exception as e:
         logger.exception("read_file_tool error")
-        return _mcp_response(f"Error reading file: {e}")
+        return _tool_error(f"Error reading file: {e}")
 
 
 async def write_file_tool(
@@ -208,10 +208,10 @@ async def write_file_tool(
         )
 
     except ValueError as e:
-        return _mcp_response(str(e))
+        return _tool_error(str(e))
     except Exception as e:
         logger.exception("write_file_tool error")
-        return _mcp_response(f"Error writing file: {e}")
+        return _tool_error(f"Error writing file: {e}")
 
 
 # ---------------------------------------------------------------------------

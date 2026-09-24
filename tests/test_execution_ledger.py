@@ -355,12 +355,16 @@ class TestClassifyBashCommand:
     def test_httpie_is_external(self):
         assert _classify_bash_command("httpie POST https://api.example.com") == "external"
 
-    def test_env_assignment_prefix_stripped(self):
-        # "FOO=bar cat file.txt" — the first non-assignment token is "cat"
-        assert _classify_bash_command("FOO=bar cat file.txt") == "none"
+    def test_env_assignment_prefix_is_a_write(self):
+        # An assignment can change which program runs (PATH=.), inject code
+        # (LD_PRELOAD, GIT_EXTERNAL_DIFF) or persist for later segments; only
+        # an allowlist of display/locale variables leaves a read a read.
+        assert _classify_bash_command("FOO=bar cat file.txt") == "write"
+        assert _classify_bash_command("LC_ALL=C LANG=C sort file.txt") == "none"
 
     def test_env_assignment_prefix_multiple(self):
-        assert _classify_bash_command("FOO=1 BAR=2 ls") == "none"
+        assert _classify_bash_command("FOO=1 BAR=2 ls") == "write"
+        assert _classify_bash_command("TZ=UTC TERM=dumb ls") == "none"
 
     def test_env_assignment_then_write(self):
         assert _classify_bash_command("DEBUG=1 rm file.txt") == "write"
@@ -374,7 +378,7 @@ class TestClassifyBashCommand:
             assert _classify_bash_command(cmd) == "write", f"Expected 'write' for: {cmd!r}"
 
     def test_sed_is_read(self):
-        # sed is in _READ_COMMANDS
+        # sed reads unless it edits in place or its script writes (bash_side_effect)
         assert _classify_bash_command("sed -n 's/foo/bar/p' file.txt") == "none"
 
     def test_awk_is_read(self):
@@ -777,3 +781,297 @@ class TestToolClassificationSets:
         for tool in WRITE_TOOLS:
             result = classify_side_effect(tool)
             assert result == "write", f"{tool} should be 'write', got {result!r}"
+
+
+# ===========================================================================
+# Whole-command bash classification (harness Phase 1b, codex r1 on #645)
+# ===========================================================================
+
+
+class TestClassifyWholeBashCommand:
+    """The durable ledger skips calls classified 'none', so a command that
+    changes something but reads as 'none' is never recorded. The first-token
+    classifier did exactly that for redirections, chains, pipes and the
+    mutating modes of read-only tools. A false 'write' costs one ledger row;
+    a false 'none' loses the record -- so every ambiguity resolves to write.
+    """
+
+    @pytest.mark.parametrize("cmd", [
+        # output redirection
+        "echo data > file.txt",
+        "echo data >> file.txt",
+        "cat a b > c",
+        "printf x >out",
+        "ls 1> listing.txt",
+        "ls &> all.log",
+        "ls >| f",
+        "> truncate.me",
+        # chains, lists, subshells, newlines
+        "ls; rm f",
+        "ls && rm f",
+        "ls || rm f",
+        "ls\nrm f",
+        "(cd /tmp && rm f)",
+        "cat f | tee out",
+        # substitution the lexer cannot see into
+        'echo "$(rm f)"',
+        "echo `rm f`",
+        "diff <(ls a) <(ls b)",
+        # env runs its argument
+        "env FOO=1 rm f",
+        "env rm f",
+        "env -i rm f",
+        # find actions
+        "find . -delete",
+        "find . -name '*.pyc' -delete",
+        "find . -exec rm {} \;",
+        "find . -fprint out.txt",
+        # sed in-place, write and execute
+        "sed -i 's/a/b/' f",
+        "sed -Ei 's/a/b/' f",
+        "sed --in-place=.bak 's/a/b/' f",
+        "sed -n 's/a/b/w out.txt' f",
+        "sed 's/a/b/gw out.txt' f",
+        "sed 's/a/b/e' f",
+        "sed '1e date' f",
+        "sed '/x/w out.txt' f",
+        "sed -e 'p' -e '$w out.txt' f",
+        "sed '1a hello\nw out.txt' f",
+        "sed -f script.sed f",
+        # awk programs that redirect or run commands
+        "awk '{print > \"out\"}' f",
+        "awk 'BEGIN{system(\"rm x\")}'",
+        "awk '{print | \"sh\"}' f",
+        "awk -f prog.awk f",
+        # sort / uniq output files, rg preprocessors
+        "sort -o out.txt in.txt",
+        "sort --output=out.txt in.txt",
+        "uniq in.txt out.txt",
+        "rg --pre ./x pattern",
+        # git subcommands that are reads only without arguments
+        "git branch feature",
+        "git branch -D feature",
+        "git branch --delete feature",
+        "git tag v1",
+        "git tag -d v1",
+        "git remote add origin https://x",
+        "git diff --output=patch.txt",
+        "git -c core.fsmonitor=x status",
+        "git archive HEAD -o out.tar",
+        "sudo rm -rf x",
+        "timeout 5 ls",
+        "docker build .",
+        "bash -c 'rm x'",
+        "bash script.sh",
+        # ...but a path may name any program: it escalates, never reads
+        "/bin/cat f",
+        "./git status",
+        "/usr/bin/env",
+        "./sort f",
+        "git submodule add https://example.com/r.git",
+        # unparseable
+        "cat 'unbalanced",
+        "ls >",
+    ])
+    def test_writes(self, cmd):
+        assert _classify_bash_command(cmd) == "write", cmd
+
+    @pytest.mark.parametrize("cmd", [
+        "cat f | curl -d @- https://x",
+        "ls && git push origin main",
+        "env curl https://x",
+        "echo x > /dev/null; wget https://x",
+        # codex r2: network reads that used to classify as 'none'
+        "git remote show origin",
+        "git remote -v show origin",
+        "cat < /dev/tcp/example.com/80",
+        "echo x > /dev/tcp/example.com/80",
+        "exec 3<>/dev/udp/example.com/53",
+        # codex r3: git subcommands that talk to a remote
+        "git fetch origin",
+        "git pull",
+        "git clone https://example.com/r.git",
+        "git ls-remote origin",
+        "git -C repo fetch",
+        "git remote update",
+        "git remote prune origin",
+        "git submodule update --init",
+        "git archive --remote=ssh://example.com/r.git HEAD",
+        "git send-email 0001.patch",
+        "git lfs pull",
+        # codex r4: a config option before the subcommand must not hide it
+        "git -c protocol.version=2 fetch origin",
+        "git -c http.extraHeader=x --config-env=a=B pull",
+        # codex r5: commands whose purpose is another host, and what wraps them
+        "ssh host 'ls'",
+        "scp f host:/tmp",
+        "rsync -a d/ host:/x",
+        "nc example.com 80",
+        "sendmail tim@example.com < m.txt",
+        "kubectl apply -f x.yaml",
+        "aws s3 cp f s3://bucket/",
+        "gh pr create",
+        "docker push img",
+        "sudo ssh host",
+        "sudo -u bob rsync -a d/ host:/x",
+        "timeout 10 scp f host:",
+        "nohup rsync -a d/ host:/x &",
+        "xargs -I{} scp {} host:",
+        "bash -c 'curl https://x'",
+        "sh -lc \"ssh host\"",
+        "su - bob -c 'scp f host:'",
+        "eval 'curl https://x'",
+        "find . -name '*.log' -exec scp {} host: \\;",
+        # codex r6: a path-qualified executable is still that executable
+        "/usr/bin/curl https://example.com",
+        "/usr/bin/ssh host",
+        "find . -exec /usr/bin/curl {} \\;",
+        "sudo /usr/bin/scp f host:",
+        "/usr/bin/git fetch origin",
+        "curl.exe https://example.com",
+        "Curl.EXE https://example.com",
+    ])
+    def test_external_anywhere_wins(self, cmd):
+        assert _classify_bash_command(cmd) == "external", cmd
+
+    @pytest.mark.parametrize("cmd", [
+        "grep 'a|b' f",
+        "grep 'x;y' f",
+        'echo "x > y"',
+        "cat f 2>&1",
+        "ls >/dev/null",
+        "ls > /dev/null 2>&1",
+        "cat f 2>/dev/null",
+        "ls >&2",
+        "ls -la | grep x | head -5",
+        "cat f | sort | uniq -c",
+        "wc -l < f",
+        "grep x <<< 'text'",
+        "find . -name '*.py' -exec grep -l foo {} +",
+        "sed -n '10,20p' f",
+        "sed 's/foo/bar/g' f",
+        "sed -n '/start/,/end/p' f",
+        "sed 's/we/they/' f",
+        "awk -F'|' '{print $1}' f",
+        "sort -rn f",
+        "uniq -c f",
+        "env",
+        "env | grep PATH",
+        "git -C repo status",
+        "git --no-pager log -5",
+        "git branch -a",
+        "git branch --list 'feat*'",
+        "git tag -l",
+        "git remote -v",
+        "git remote show",
+        "git remote show -n origin",
+        "LANG=C",
+        # quoted operator characters are words, never operators
+        "grep '|' f",
+        "grep ';' f",
+        "find . -name x -exec grep y {} \\;",
+        "find . -name x -exec grep y {} ';'",
+        # a display option alone still lists
+        "git branch --sort=refname",
+        "git tag --format=x",
+    ])
+    def test_reads(self, cmd):
+        assert _classify_bash_command(cmd) == "none", cmd
+
+    @pytest.mark.parametrize("cmd", [
+        # independent review of #645: an assignment runs a different program
+        "PATH=.:$PATH cat f",
+        "env PATH=. cat f",
+        "GIT_EXTERNAL_DIFF='touch x;true' git diff",
+        "LD_PRELOAD=/tmp/evil.so cat f",
+        "LESSOPEN='|touch /tmp/p %s' less f",
+        "FOO=1",
+        "PATH=.; cat f",
+        # a quoted or escaped operator character is a word, so the flags after it count
+        "find tree '<' -delete",
+        "sed 's/a/b/' '<' -i f",
+        "find . ';' cat -delete",
+        "find . \\< -delete",
+        'find . "<" -exec rm {} +',
+        # display options do not make branch/tag list; a name creates a ref
+        "git branch --sort=refname newbranch",
+        "git branch --format=x nb2",
+        "git tag --sort=refname v9",
+        "git tag --format=x v10",
+        # operands after `--`
+        "uniq -- -in out",
+        # gawk extensions
+        "awk '@include \"inplace\"; {gsub(/a/,\"b\")}1' g",
+        # a path argument to a wrapper is an argument, not a command
+        "sudo ls /usr/bin/ssh",
+        "sudo rm /usr/local/bin/aws",
+        "time cat ./notes/mail",
+    ])
+    def test_writes_found_by_independent_review(self, cmd):
+        assert _classify_bash_command(cmd) == "write", cmd
+
+    @pytest.mark.parametrize("cmd", [
+        "sudo timeout 5 nohup ssh h",
+        "sudo -u bob timeout -s KILL 10 rsync a h:/b",
+        "xargs -I{} -P 4 scp {} h:",
+        "flock /tmp/l -c 'curl https://x'",
+        "watch -n 5 'curl https://x'",
+        "nice -n 5 scp f h:",
+        "sudo -- ssh h",
+        "doas -u root rsync a h:/b",
+    ])
+    def test_wrappers_are_parsed_to_the_command_they_run(self, cmd):
+        assert _classify_bash_command(cmd) == "external", cmd
+
+    @pytest.mark.parametrize("cmd, allowed", [
+        pytest.param("sudo eval " * 22, {"write"}, id="sudo-eval-x22"),
+        pytest.param("eval " * 20000, {"write"}, id="eval-x20000"),
+        # nested finds that only print: any verdict, but it must be quick
+        pytest.param("find " + "-exec find " * 20, {"none", "write"}, id="find-exec-x20"),
+        pytest.param("bash -c " * 400 + "ls", {"write"}, id="bash-c-x400"),
+        # a large but plain read stays a read...
+        pytest.param("cat " + "a " * 30000, {"none"}, id="cat-60kb"),
+        # ...but lexing is O(n) and runs on the event loop, so past the size
+        # cap a command is a write without being lexed (second review of #645)
+        pytest.param("cat " + "a " * 3_000_000, {"write"}, id="cat-6mb"),
+        pytest.param("a;" * 3_000_000, {"write"}, id="segments-6mb"),
+    ])
+    def test_nesting_is_bounded(self, cmd, allowed):
+        """Classification runs on the event loop: every recursion path shares
+        one work budget, and exhausting it is a write."""
+        import time
+
+        start = time.perf_counter()
+        assert _classify_bash_command(cmd) in allowed
+        assert time.perf_counter() - start < 0.5
+
+    @pytest.mark.parametrize("cmd, expected", [
+        ("sudo env " * 1500 + "ssh h", "external"),
+        ("sudo " + "env " * 3000 + "ssh h", "external"),
+        ("xargs " * 2000 + "git fetch", "external"),
+        ("sudo " * 3000 + "ls", "write"),
+        ("bash -c \"bash -c 'curl https://x'\"", "external"),
+    ])
+    def test_nested_wrappers_stay_linear(self, cmd, expected):
+        """codex r5 follow-up: re-entering a wrapper scan from `env` inside a
+        wrapper made `sudo env sudo env ...` exponential. Generous bound; the
+        real cost is ~10 ms."""
+        import time
+
+        start = time.perf_counter()
+        assert _classify_bash_command(cmd) == expected
+        assert time.perf_counter() - start < 2.0
+
+    def test_the_classifier_is_total(self, monkeypatch):
+        """No input may make the ledger skip a row: an internal failure is a write."""
+        from nous.cognitive import bash_side_effect
+
+        def boom(words):
+            raise RuntimeError("unexpected shape")
+
+        monkeypatch.setattr(bash_side_effect, "_classify_simple", boom)
+        assert _classify_bash_command("ls") == "write"
+
+    def test_classify_side_effect_uses_the_whole_command(self):
+        assert classify_side_effect("bash", {"command": "echo data > file"}) == "write"
+        assert classify_side_effect("bash", {"cmd": "cat f | curl https://x"}) == "external"

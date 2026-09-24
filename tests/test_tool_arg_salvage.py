@@ -885,7 +885,7 @@ class TestErrorReturnsAreMarked:
     # inverted, not widened: this one cannot miss a new failure path, because
     # it does not try to recognise one. Adding ANY unflagged MCP return fails
     # here until it is classified via _tool_error() or counted in deliberately.
-    _UNFLAGGED_BASELINE = 43
+    _UNFLAGGED_BASELINE = 38
 
     def test_unflagged_mcp_returns_do_not_grow(self):
         tree = ast.parse(Path("nous/api/tools.py").read_text(encoding="utf-8"))

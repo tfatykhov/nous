@@ -286,6 +286,9 @@ async def test_is_transient_error(monitor):
     assert monitor._is_transient_error("connection refused") is True
     assert monitor._is_transient_error("ECONNRESET") is True
     assert monitor._is_transient_error("ETIMEDOUT") is True
+    # The bash / web_fetch timeout messages, now flagged as errors (#645)
+    assert monitor._is_transient_error("Command timed out after 30s.") is True
+    assert monitor._is_transient_error("Fetch timed out for: https://x") is True
     # Non-transient
     assert monitor._is_transient_error("Permission denied") is False
     assert monitor._is_transient_error("File not found") is False

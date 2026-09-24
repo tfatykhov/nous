@@ -1471,6 +1471,16 @@ class Settings(BaseSettings):
 
     # F026: Execution Integrity
     execution_ledger_enabled: bool = True
+    # Harness Phase 1b: persist side-effecting tool calls to
+    # nous_system.execution_ledger (migration 074). Additive; kill switch only.
+    execution_ledger_persist_enabled: bool = True
+    execution_ledger_write_timeout_seconds: float = Field(default=2.0, gt=0)
+    execution_ledger_retention_days: int = Field(default=90, ge=0)  # 0 disables pruning
+    # 'pending' rows older than this are swept to 'unknown'. The effective
+    # threshold is never below the longest legitimate call (see
+    # ledger_store.effective_orphan_threshold).
+    execution_ledger_pending_unknown_after_seconds: int = Field(default=7800, ge=60)
+    execution_ledger_sweep_interval_seconds: int = Field(default=1800, ge=60)
     execution_ledger_max_tokens: int = 500
 
     claim_verification_enabled: bool = True

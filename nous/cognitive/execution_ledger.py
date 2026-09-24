@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from nous.cognitive.bash_side_effect import classify_bash_command as _classify_bash_command
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -59,16 +61,6 @@ EXTERNAL_TOOLS: set[str] = {
 
 # Irreversible — extend when irreversible tools are registered
 IRREVERSIBLE_TOOLS: set[str] = set()
-
-# Bash commands whose first token indicates a read-only operation
-_READ_COMMANDS: frozenset[str] = frozenset(
-    {
-        "cat", "ls", "ll", "find", "grep", "rg", "awk", "sed", "head", "tail",
-        "wc", "diff", "stat", "file", "echo", "printf", "which", "type",
-        "pwd", "env", "printenv", "less", "more", "sort", "uniq", "cut",
-        "tr", "basename", "dirname", "realpath", "readlink",
-    }
-)
 
 # Key argument names per tool — used by _summarize_args
 _KEY_ARGS: dict[str, list[str]] = {
@@ -297,24 +289,34 @@ class ExecutionLedger:
         args: dict[str, Any],
     ) -> dict[str, str]:
         """Extract key identifying args and truncate values to 80 chars."""
-        key_names = _KEY_ARGS.get(tool_name, [])
-        result: dict[str, str] = {}
-
-        if key_names:
-            for name in key_names:
-                if name in args:
-                    result[name] = str(args[name])[:80]
-        else:
-            # Fallback: capture up to 5 args for unknown tools
-            for k, v in list(args.items())[:5]:
-                result[k] = str(v)[:80]
-
-        return result
+        return summarize_args(tool_name, args)
 
 
 # ---------------------------------------------------------------------------
 # Module-level helpers (no class state needed)
 # ---------------------------------------------------------------------------
+
+
+def summarize_args(tool_name: str, args: dict[str, Any]) -> dict[str, str]:
+    """Extract key identifying args and truncate values to 80 chars.
+
+    The in-memory session ledger's summary (prompt aid, ActionGate duplicate
+    key). The durable ledger uses ``ledger_store.durable_key_args`` instead,
+    which never stores bodies or code.
+    """
+    key_names = _KEY_ARGS.get(tool_name, [])
+    result: dict[str, str] = {}
+
+    if key_names:
+        for name in key_names:
+            if name in args:
+                result[name] = str(args[name])[:80]
+    else:
+        # Fallback: capture up to 5 args for unknown tools
+        for k, v in list(args.items())[:5]:
+            result[k] = str(v)[:80]
+
+    return result
 
 
 def classify_side_effect(tool_name: str, tool_input: dict[str, Any] | None = None) -> str:
@@ -335,8 +337,31 @@ def classify_side_effect(tool_name: str, tool_input: dict[str, Any] | None = Non
 _REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"[A-Z_]{2,}=\S+"), "[REDACTED_ENV]"),
     (re.compile(r"Bearer\s+\S+", re.IGNORECASE), "Bearer [REDACTED]"),
-    (re.compile(r"://\w+:[^@\s]+@"), "://[REDACTED]@"),
+    # user:password@host - the password may itself contain '@', so match to the LAST '@'
+    (re.compile(r"://[^/\s:@]+:\S+@"), "://[REDACTED]@"),
+    (re.compile(r"(-u\s+)[^\s:]+:\S+"), r"\1[REDACTED]"),
+    # -p<password> only for tools that take it that way (not find -path, cp -pr, ssh -p 22)
+    (re.compile(r"(\b(?:mysql|mysqldump|mysqladmin|mariadb)\b[^|;&]*?\s-p)(?!\s)\S+"), r"\1[REDACTED]"),
+    (re.compile(r"(\bsshpass\s+-p\s*)\S+"), r"\1[REDACTED]"),
+    (re.compile(r"(--(?:password|passwd|api-key|api_key|token|secret)[=\s])\S+", re.IGNORECASE),
+     r"\1[REDACTED]"),
+    # header value, including an optional scheme word (Basic / token); Bearer
+    # is left to the Bearer pattern above so its output keeps the scheme.
+    (re.compile(r"((?:x-api-key|api-key|authorization)\s*:\s*)(?!Bearer\s)(?:[A-Za-z]+\s+)?[^'\"\s]+",
+                re.IGNORECASE),
+     r"\1[REDACTED]"),
+    (re.compile(r"((?:api_key|apikey|access_token|token|secret|password|passwd)=)[^&\s'\"]+", re.IGNORECASE),
+     r"\1[REDACTED]"),
+    (re.compile(r'("(?:password|passwd|secret|token|api_key|apikey)"\s*:\s*")[^"]*"', re.IGNORECASE),
+     r'\1[REDACTED]"'),
 ]
+
+
+def redact_text(text: str) -> str:
+    """Apply every redaction pattern. Safe for any tool's argument or output."""
+    for pattern, replacement in _REDACT_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 def redact_key_args(tool_name: str, key_args: dict[str, str]) -> dict[str, str]:
@@ -345,45 +370,8 @@ def redact_key_args(tool_name: str, key_args: dict[str, str]) -> dict[str, str]:
         return key_args
     result = {}
     for k, v in key_args.items():
-        redacted = v
-        for pattern, replacement in _REDACT_PATTERNS:
-            redacted = pattern.sub(replacement, redacted)
-        result[k] = redacted
+        result[k] = redact_text(v)
     return result
-
-
-def _classify_bash_command(command: str) -> str:
-    """Classify a bash command as 'none' | 'write' | 'external'.
-
-    Only the first command token is inspected; pipes and chains are
-    approximate — the conservative default is 'write'.
-    """
-    if not command:
-        return "write"
-
-    # Strip leading environment assignments (FOO=bar cmd ...)
-    tokens = command.strip().split()
-    first = ""
-    for tok in tokens:
-        if "=" not in tok:
-            first = tok.lstrip("(").lower()
-            break
-
-    if first in _READ_COMMANDS:
-        return "none"
-
-    if first == "git":
-        sub = tokens[tokens.index("git") + 1] if "git" in tokens else ""
-        if sub in ("log", "status", "diff", "show", "branch", "tag", "remote", "ls-files"):
-            return "none"
-        if sub in ("push", "push-upstream"):
-            return "external"
-        return "write"
-
-    if first in ("curl", "wget", "http", "httpie"):
-        return "external"
-
-    return "write"
 
 
 def _estimate_tokens(text: str) -> int:

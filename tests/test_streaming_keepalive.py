@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nous.api.runner import AgentRunner, StreamEvent
+from nous.api.runner import AgentRunner, DispatchOutcome, StreamEvent
 from nous.config import Settings
 
 
@@ -50,9 +50,9 @@ class TestDispatchWithKeepalive:
         async for item in runner._dispatch_with_keepalive("test_tool", {}):
             events.append(item)
 
-        # Only the final result tuple, no keepalives
+        # Only the final DispatchOutcome, no keepalives
         assert len(events) == 1
-        assert events[0] == ("result", False)
+        assert events[0] == DispatchOutcome("result", False, False)
 
     @pytest.mark.asyncio
     async def test_slow_tool_emits_keepalives(self, runner):
@@ -74,7 +74,7 @@ class TestDispatchWithKeepalive:
         assert len(keepalives) >= 2
         assert all(k.type == "keepalive" for k in keepalives)
         assert len(results) == 1
-        assert results[0] == ("done", False)
+        assert results[0] == DispatchOutcome("done", False, False)
 
     @pytest.mark.asyncio
     async def test_tool_timeout_returns_error(self, runner):
@@ -92,10 +92,13 @@ class TestDispatchWithKeepalive:
 
         results = [e for e in events if isinstance(e, tuple)]
         assert len(results) == 1
-        result_text, is_error = results[0]
+        result_text, is_error, timed_out = results[0]
         assert is_error is True
         assert "timed out" in result_text
         assert "hang_tool" in result_text
+        # Harness Phase 1b: a timeout is an UNKNOWN outcome, not just an error
+        # (the cancelled call's worker thread may still complete it).
+        assert timed_out is True
 
     @pytest.mark.asyncio
     async def test_tool_exception_returns_error(self, runner):
@@ -112,9 +115,10 @@ class TestDispatchWithKeepalive:
 
         results = [e for e in events if isinstance(e, tuple)]
         assert len(results) == 1
-        result_text, is_error = results[0]
+        result_text, is_error, timed_out = results[0]
         assert is_error is True
         assert "tool broke" in result_text
+        assert timed_out is False
 
     @pytest.mark.asyncio
     async def test_keepalive_event_format(self, runner):
