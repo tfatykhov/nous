@@ -100,7 +100,7 @@ class Claim:
 # First person: "I", "I've", "I have", "I just", "I also" ... The "I" is
 # case-SENSITIVE inside patterns compiled IGNORECASE: a lowercase "i " is not a
 # subject.
-_FIRST = (r"\b(?-i:I)(?:['’]ve|\s+have)?"
+_FIRST = (r"(?<!\bas )\b(?-i:I)(?:['’]ve|\s+have)?"  # "As I wrote earlier, ..." narrates
           r"(?:\s+(?:just|already|also|then|now|successfully|finally)){0,2}\s+")
 _CLAIM_VERBS = (r"(?:saved|wrote|written|created|generated|exported|stored|sent|emailed"
                 r"|forwarded|mailed|pushed|committed|deployed)\b")
@@ -140,7 +140,7 @@ _DET = r"(?:(?:the|a|an|my|our|your|this|that|these|those|all|some|both|every|ea
 _VCS_NOUN = (r"(?:branch(?:es)?|commits?|fix(?:es)?|changes?|patch(?:es)?|PRs?|pull\s+requests?"
              r"|tags?|code|repo(?:sitory)?|remote|origin|main|master|upstream|refactor|features?"
              r"|hotfix(?:es)?|updates?|work|files?|edits?|diffs?|version|release|migrations?"
-             r"|tests?|docs)")
+             r"|tests?|docs|v\d[\w.-]*)")
 # What was pushed or committed must be a version-control object: the head of
 # the object phrase, or a bare pronoun -- "I pushed the fix", "I pushed it",
 # "I committed and pushed", never "I pushed back", "I pushed an approval
@@ -274,6 +274,8 @@ def _dry_run(sub: str, args: tuple[str, ...]) -> bool:
     for a in args:
         if a == "--":
             break
+        if a in ("--help", "-h"):  # shows the manual, runs nothing
+            return True
         name = a.split("=", 1)[0]
         if len(name) >= 5 and "--dry-run".startswith(name):  # getopt abbreviation
             return True
@@ -300,7 +302,7 @@ def _does(kind: str, prog: str, args: tuple[str, ...]) -> bool:
         return prog == "git" and _git_does(args, "commit")
     if kind == "email":
         if prog in _MAIL_SENDERS:
-            return True
+            return "-bp" not in args  # `sendmail -bp` prints the queue
         if prog in _MAIL_CLIENTS:
             return any("@" in a or a.startswith("$") for a in args)
         return prog == "curl" and any(

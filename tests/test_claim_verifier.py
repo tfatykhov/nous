@@ -615,3 +615,14 @@ def test_this_turns_evidence_is_never_capped():
     ledger = ExecutionLedger(session_id="s")
     ledger.record("bash", {"command": cmd}, "Exit code: 0", "success")
     assert ClaimVerifier().verify("I pushed the fix to main.", [], ledger).verified
+
+
+def test_as_i_wrote_is_narration_and_a_version_is_a_vcs_object():
+    assert _kinds("As I wrote in the report, the subtask completed and pushed the branch.") == []
+    assert [k for k, _ in _kinds("I pushed v1.2.0.")] == ["vcs_push"]
+
+
+def test_help_and_queue_listing_do_nothing():
+    assert not _verify("I pushed the fix.", _real_bash("git push --help")).verified
+    assert not _verify("I sent the email.", _real_bash("sendmail -bp")).verified
+    assert _verify("I sent the email.", _real_bash("sendmail -t < mail.txt")).verified
