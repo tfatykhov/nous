@@ -1379,3 +1379,55 @@ class A2uiAction(Base):
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+LEDGER_STATUSES: tuple[str, ...] = ("pending", "success", "error", "blocked", "unknown")
+LEDGER_SIDE_EFFECTS: tuple[str, ...] = ("write", "external", "irreversible")
+
+
+class ExecutionLedgerEntry(Base):
+    """Harness Phase 1b: durable record of one side-effecting tool call.
+
+    See migration 074. Written by ``nous.cognitive.ledger_store.LedgerStore``:
+    'pending' before dispatch, closed after; never holds bodies, code or
+    secrets (``durable_key_args``).
+    """
+
+    __tablename__ = "execution_ledger"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'success', 'error', 'blocked', 'unknown')",
+            name="ck_execution_ledger_status",
+        ),
+        CheckConstraint(
+            "side_effect_type IN ('write', 'external', 'irreversible')",
+            name="ck_execution_ledger_side_effect",
+        ),
+        {"schema": "nous_system"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+        server_default=func.gen_random_uuid(),
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    context_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    subtask_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    dag_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    dag_node_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    turn: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    side_effect_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    key_args: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    external_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
