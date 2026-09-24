@@ -865,6 +865,12 @@ class TestClassifyWholeBashCommand:
         "ls && git push origin main",
         "env curl https://x",
         "echo x > /dev/null; wget https://x",
+        # codex r2: network reads that used to classify as 'none'
+        "git remote show origin",
+        "git remote -v show origin",
+        "cat < /dev/tcp/example.com/80",
+        "echo x > /dev/tcp/example.com/80",
+        "exec 3<>/dev/udp/example.com/53",
     ])
     def test_external_anywhere_wins(self, cmd):
         assert _classify_bash_command(cmd) == "external", cmd
@@ -898,7 +904,8 @@ class TestClassifyWholeBashCommand:
         "git branch --list 'feat*'",
         "git tag -l",
         "git remote -v",
-        "git remote show origin",
+        "git remote show",
+        "git remote show -n origin",
         "FOO=1",
     ])
     def test_reads(self, cmd):

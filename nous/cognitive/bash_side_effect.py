@@ -47,6 +47,8 @@ _OPERATOR = re.compile(r"&>>|&>|>>|>&|>\||<>|<<<|<<|<&|\|\||\|&|&&|;;|[|;&()<>\n
 _OUTPUT_REDIRECTS = frozenset({">", ">>", ">|", "&>", "&>>", "<>"})
 _INPUT_REDIRECTS = frozenset({"<", "<<", "<<<", "<&"})
 _HARMLESS_SINKS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"})
+# bash opens a socket when a redirection names one of these -- in either direction.
+_NETWORK_REDIRECT = ("/dev/tcp/", "/dev/udp/")
 
 
 def classify_bash_command(command: str) -> str:
@@ -67,7 +69,9 @@ def classify_bash_command(command: str) -> str:
     expect: str | None = None  # a redirect waiting for its target word
     for tok in tokens:
         if not tok or not set(tok) <= _OPERATOR_CHARS:
-            if expect == "out" and tok not in _HARMLESS_SINKS:
+            if expect is not None and tok.startswith(_NETWORK_REDIRECT):
+                verdict = _worst(verdict, "external")
+            elif expect == "out" and tok not in _HARMLESS_SINKS:
                 verdict = _worst(verdict, "write")
             elif expect == "dup" and not (tok.isdigit() or tok == "-" or tok in _HARMLESS_SINKS):
                 verdict = _worst(verdict, "write")
@@ -376,7 +380,13 @@ def _classify_git(args: list[str]) -> str:
         return _git_listing(rest, _GIT_TAG_WRITES, _GIT_TAG_LISTS)
     if sub == "remote":
         positional = [a for a in rest if not a.startswith("-")]
-        return "none" if not positional or positional[0] in ("show", "get-url") else "write"
+        if not positional or positional[0] == "get-url":
+            return "none"
+        if positional[0] == "show":
+            # `remote show <name>` queries the remote unless told not to (-n);
+            # a bare `remote show` only lists the configured names.
+            return "none" if len(positional) == 1 or "-n" in rest else "external"
+        return "write"
     return "write"
 
 
