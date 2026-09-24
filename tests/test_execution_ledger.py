@@ -355,12 +355,16 @@ class TestClassifyBashCommand:
     def test_httpie_is_external(self):
         assert _classify_bash_command("httpie POST https://api.example.com") == "external"
 
-    def test_env_assignment_prefix_stripped(self):
-        # "FOO=bar cat file.txt" — the first non-assignment token is "cat"
-        assert _classify_bash_command("FOO=bar cat file.txt") == "none"
+    def test_env_assignment_prefix_is_a_write(self):
+        # An assignment can change which program runs (PATH=.), inject code
+        # (LD_PRELOAD, GIT_EXTERNAL_DIFF) or persist for later segments; only
+        # an allowlist of display/locale variables leaves a read a read.
+        assert _classify_bash_command("FOO=bar cat file.txt") == "write"
+        assert _classify_bash_command("LC_ALL=C LANG=C sort file.txt") == "none"
 
     def test_env_assignment_prefix_multiple(self):
-        assert _classify_bash_command("FOO=1 BAR=2 ls") == "none"
+        assert _classify_bash_command("FOO=1 BAR=2 ls") == "write"
+        assert _classify_bash_command("TZ=UTC TERM=dumb ls") == "none"
 
     def test_env_assignment_then_write(self):
         assert _classify_bash_command("DEBUG=1 rm file.txt") == "write"
@@ -925,6 +929,7 @@ class TestClassifyWholeBashCommand:
         "sudo /usr/bin/scp f host:",
         "/usr/bin/git fetch origin",
         "curl.exe https://example.com",
+        "Curl.EXE https://example.com",
     ])
     def test_external_anywhere_wins(self, cmd):
         assert _classify_bash_command(cmd) == "external", cmd
@@ -960,10 +965,81 @@ class TestClassifyWholeBashCommand:
         "git remote -v",
         "git remote show",
         "git remote show -n origin",
-        "FOO=1",
+        "LANG=C",
+        # quoted operator characters are words, never operators
+        "grep '|' f",
+        "grep ';' f",
+        "find . -name x -exec grep y {} \\;",
+        "find . -name x -exec grep y {} ';'",
+        # a display option alone still lists
+        "git branch --sort=refname",
+        "git tag --format=x",
     ])
     def test_reads(self, cmd):
         assert _classify_bash_command(cmd) == "none", cmd
+
+    @pytest.mark.parametrize("cmd", [
+        # independent review of #645: an assignment runs a different program
+        "PATH=.:$PATH cat f",
+        "env PATH=. cat f",
+        "GIT_EXTERNAL_DIFF='touch x;true' git diff",
+        "LD_PRELOAD=/tmp/evil.so cat f",
+        "LESSOPEN='|touch /tmp/p %s' less f",
+        "FOO=1",
+        "PATH=.; cat f",
+        # a quoted or escaped operator character is a word, so the flags after it count
+        "find tree '<' -delete",
+        "sed 's/a/b/' '<' -i f",
+        "find . ';' cat -delete",
+        "find . \\< -delete",
+        'find . "<" -exec rm {} +',
+        # display options do not make branch/tag list; a name creates a ref
+        "git branch --sort=refname newbranch",
+        "git branch --format=x nb2",
+        "git tag --sort=refname v9",
+        "git tag --format=x v10",
+        # operands after `--`
+        "uniq -- -in out",
+        # gawk extensions
+        "awk '@include \"inplace\"; {gsub(/a/,\"b\")}1' g",
+        # a path argument to a wrapper is an argument, not a command
+        "sudo ls /usr/bin/ssh",
+        "sudo rm /usr/local/bin/aws",
+        "time cat ./notes/mail",
+    ])
+    def test_writes_found_by_independent_review(self, cmd):
+        assert _classify_bash_command(cmd) == "write", cmd
+
+    @pytest.mark.parametrize("cmd", [
+        "sudo timeout 5 nohup ssh h",
+        "sudo -u bob timeout -s KILL 10 rsync a h:/b",
+        "xargs -I{} -P 4 scp {} h:",
+        "flock /tmp/l -c 'curl https://x'",
+        "watch -n 5 'curl https://x'",
+        "nice -n 5 scp f h:",
+        "sudo -- ssh h",
+        "doas -u root rsync a h:/b",
+    ])
+    def test_wrappers_are_parsed_to_the_command_they_run(self, cmd):
+        assert _classify_bash_command(cmd) == "external", cmd
+
+    @pytest.mark.parametrize("cmd, allowed", [
+        pytest.param("sudo eval " * 22, {"write"}, id="sudo-eval-x22"),
+        pytest.param("eval " * 20000, {"write"}, id="eval-x20000"),
+        # nested finds that only print: any verdict, but it must be quick
+        pytest.param("find " + "-exec find " * 20, {"none", "write"}, id="find-exec-x20"),
+        pytest.param("bash -c " * 400 + "ls", {"write"}, id="bash-c-x400"),
+        # a huge but plain read stays a read: the budget is not a size cap
+        pytest.param("cat " + "a " * 50000, {"none"}, id="cat-100kb"),
+    ])
+    def test_nesting_is_bounded(self, cmd, allowed):
+        """Classification runs on the event loop: every recursion path shares
+        one work budget, and exhausting it is a write."""
+        import time
+
+        start = time.perf_counter()
+        assert _classify_bash_command(cmd) in allowed
+        assert time.perf_counter() - start < 2.0
 
     @pytest.mark.parametrize("cmd, expected", [
         ("sudo env " * 1500 + "ssh h", "external"),

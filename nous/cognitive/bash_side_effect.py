@@ -7,22 +7,27 @@ symmetric: a false ``write`` costs one ledger row, a false ``none`` means a
 command that changed something is never recorded. Every ambiguity therefore
 resolves to ``write``.
 
-The first-token classifier this replaces returned ``none`` for
-``echo data > file``, ``find . -delete`` and ``cat file | curl ...``. The
-whole command is classified instead: it is lexed with quoting respected,
-split into simple commands on ``| ; & && || ( )`` and newlines, each simple
-command is classified on its own, and the most severe verdict wins. Output
-redirection to anything but a ``/dev/null``-style sink or a file descriptor
-is a write; command substitution, which the lexer cannot see into, is a
-write; and the read-only commands that have a writing or executing mode
+The whole command is classified: it is lexed with bash quoting (a quoted or
+escaped ``;`` or ``<`` is a word, never an operator), split into simple
+commands on ``| ; & && || ( )`` and newlines, each simple command is
+classified on its own, and the most severe verdict wins. Output redirection
+to anything but a ``/dev/null``-style sink or a file descriptor is a write;
+command substitution, which is opaque here, is a write; an assignment that
+can change what runs (``PATH=.``, ``LD_PRELOAD=``) is a write; wrappers
+(``sudo``, ``timeout``, ``xargs`` ...) are parsed to the command they run;
+and the read-only commands that have a writing or executing mode
 (``find -delete``, ``sed -i``, ``sort -o``, awk programs that redirect or run
 commands, ``git branch -D`` ...) are checked for it.
+
+Classification runs on the event loop, so every recursion path -- ``eval``,
+``bash -c``, ``find -exec``, ``flock -c``, ``watch`` -- shares one work budget,
+and exhausting it is a ``write``.
 """
 
 from __future__ import annotations
 
 import re
-import shlex
+from contextvars import ContextVar
 
 # Commands that only read, unless a mode checked in _READ_COMMAND_RULES says
 # otherwise.
@@ -42,20 +47,56 @@ _EXTERNAL_COMMANDS = frozenset({
     "mail", "mailx", "sendmail", "mutt",
     "gh", "aws", "gcloud", "gsutil", "az", "kubectl", "helm",
 })
-# Run another command. Classified by what they run, never below write.
-_WRAPPERS = frozenset({
-    "sudo", "doas", "timeout", "nohup", "time", "nice", "ionice", "command", "exec",
-    "xargs", "stdbuf", "setsid", "flock", "watch", "chronic", "parallel",
-})
+# Run another command, parsed to it: (short options taking a value, long
+# options taking a value, operands before the command). Never below write.
+_WRAPPERS: dict[str, tuple[str, tuple[str, ...], int]] = {
+    "sudo": ("CDghpRrTtUu", (
+        "--close-from", "--chdir", "--group", "--host", "--prompt", "--chroot",
+        "--role", "--type", "--command-timeout", "--other-user", "--user",
+    ), 0),
+    "doas": ("Cu", (), 0),
+    "timeout": ("sk", ("--signal", "--kill-after"), 1),
+    "nohup": ("", (), 0),
+    "time": ("fo", ("--format", "--output"), 0),
+    "nice": ("n", ("--adjustment",), 0),
+    "ionice": ("cnp", ("--class", "--classdata", "--pid", "--pgid", "--uid"), 0),
+    "command": ("", (), 0),
+    "exec": ("a", (), 0),
+    "xargs": ("adEILnPs", (
+        "--arg-file", "--delimiter", "--eof", "--replace", "--max-lines",
+        "--max-args", "--max-procs", "--max-chars", "--process-slot-var",
+    ), 0),
+    "stdbuf": ("ioe", ("--input", "--output", "--error"), 0),
+    "setsid": ("", (), 0),
+    "chronic": ("", (), 0),
+    "flock": ("wE", ("--wait", "--timeout", "--conflict-exit-code"), 1),
+    "watch": ("n", ("--interval",), 0),
+}
 # Take a command STRING (`-c '...'`) and run it.
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "su"})
 _SEVERITY = {"none": 0, "write": 1, "external": 2}
 
-# Substitution the lexer returns as opaque word text: $(...), `...`, <(...), >(...).
+# Substitution this analysis cannot see into: $(...), `...`, <(...), >(...).
 _OPAQUE = re.compile(r"\$\(|`|<\(|>\(")
-_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# Assignments that cannot change what runs or what it does. Anything else --
+# PATH, LD_PRELOAD, GIT_*, LESSOPEN, a variable a later segment reads -- is a
+# write, including a bare assignment, which persists for the next segment.
+_HARMLESS_ASSIGNMENT = re.compile(r"(?:LANG|LANGUAGE|LC_[A-Z]+|TZ|TERM|COLUMNS|LINES|NO_COLOR)=")
 
-_OPERATOR_CHARS = frozenset("();<>|&\n")
+# bash quoting, as a single scan. A quoted or escaped operator character is
+# part of a word; only a bare run of operator characters is an operator.
+_LEX = re.compile(
+    r"""(?P<ws>[ \t\r]+)
+      | '(?P<sq>[^']*)'
+      | "(?P<dq>(?:[^"\\]|\\.)*)"
+      | \\(?P<esc>.)
+      | (?P<op>[();<>|&\n]+)
+      | (?P<bare>[^ \t\r'"\\();<>|&\n]+)
+      | (?P<bad>['"\\])""",
+    re.VERBOSE | re.DOTALL,
+)
+_DQ_ESCAPE = re.compile(r"\\([$`\"\\\n])")
 _OPERATOR = re.compile(r"&>>|&>|>>|>&|>\||<>|<<<|<<|<&|\|\||\|&|&&|;;|[|;&()<>\n]")
 _OUTPUT_REDIRECTS = frozenset({">", ">>", ">|", "&>", "&>>", "<>"})
 _INPUT_REDIRECTS = frozenset({"<", "<<", "<<<", "<&"})
@@ -63,37 +104,90 @@ _HARMLESS_SINKS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tt
 # bash opens a socket when a redirection names one of these -- in either direction.
 _NETWORK_REDIRECT = ("/dev/tcp/", "/dev/udp/")
 
+# Work units (words and lexed characters) one top-level classification may spend.
+_WORK_LIMIT = 200_000
+_work: ContextVar[list[int] | None] = ContextVar("bash_classifier_work", default=None)
+
+
+class _OverBudget(Exception):
+    """The shared work budget ran out: the verdict is write."""
+
+
+def _spend(units: int) -> None:
+    left = _work.get()
+    if left is not None:
+        left[0] -= units
+        if left[0] < 0:
+            raise _OverBudget
+
 
 def classify_bash_command(command: str) -> str:
     """Classify a bash command as ``'none'`` | ``'write'`` | ``'external'``.
 
     Total: an input this analysis did not anticipate is a ``write``, never an
     exception -- a raise here would fail the durable row open and the call
-    would leave no record at all.
+    would leave no record at all. Nested calls (``eval``, ``bash -c``) share
+    the outermost call's work budget.
     """
+    outer = _work.get()
+    token = _work.set([_WORK_LIMIT]) if outer is None else None
     try:
         return _classify(command)
+    except _OverBudget:
+        if outer is not None:
+            raise  # let the outermost call stop, instead of each level retrying
+        return "write"
     except Exception:
         return "write"
+    finally:
+        if token is not None:
+            _work.reset(token)
+
+
+def _lex(command: str) -> list[tuple[str, bool]] | None:
+    """``(text, is_operator)`` tokens with bash quoting; None if unbalanced."""
+    tokens: list[tuple[str, bool]] = []
+    word: list[str] = []
+    in_word = False
+    for m in _LEX.finditer(command):
+        kind = m.lastgroup
+        if kind == "bad":
+            return None
+        if kind in ("ws", "op"):
+            if in_word:
+                tokens.append(("".join(word), False))
+                word, in_word = [], False
+            if kind == "op":
+                tokens.append((m.group("op"), True))
+        elif kind == "esc":
+            if m.group("esc") != "\n":  # backslash-newline is a line continuation
+                word.append(m.group("esc"))
+                in_word = True
+        elif kind == "dq":
+            word.append(_DQ_ESCAPE.sub(lambda e: "" if e.group(1) == "\n" else e.group(1), m.group("dq")))
+            in_word = True
+        else:  # sq, bare
+            word.append(m.group(kind))
+            in_word = True
+    if in_word:
+        tokens.append(("".join(word), False))
+    return tokens
 
 
 def _classify(command: str) -> str:
     if not command or not command.strip():
         return "write"
-    lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
-    lexer.whitespace = " \t\r"  # newline is a command separator, not whitespace
-    lexer.whitespace_split = True
-    lexer.commenters = ""  # a mid-word '#' must not swallow a trailing '> file'
-    try:
-        tokens = list(lexer)
-    except ValueError:  # unbalanced quote
+    _spend(len(command) // 32 + 1)
+    tokens = _lex(command)
+    if tokens is None:  # unbalanced quote
         return "write"
+    _spend(len(tokens))
 
     verdict = "write" if _OPAQUE.search(command) else "none"
     words: list[str] = []
     expect: str | None = None  # a redirect waiting for its target word
-    for tok in tokens:
-        if not tok or not set(tok) <= _OPERATOR_CHARS:
+    for tok, is_operator in tokens:
+        if not is_operator:
             if expect is not None and tok.startswith(_NETWORK_REDIRECT):
                 verdict = _worst(verdict, "external")
             elif expect == "out" and tok not in _HARMLESS_SINKS:
@@ -125,39 +219,57 @@ def _worst(a: str, b: str) -> str:
     return a if _SEVERITY[a] >= _SEVERITY[b] else b
 
 
-def _classify_simple(words: list[str], in_wrapper: bool = False) -> str:
+def _classify_simple(words: list[str]) -> str:
     """Classify one simple command (no operators, redirections removed).
 
-    ``in_wrapper``: reached from a wrapper's scan, which already covers every
-    later word -- so a nested wrapper is not scanned again (that re-entry is
-    what makes `sudo env sudo env ...` exponential).
+    Assignments, ``env`` and wrappers are peeled off in a loop -- never by
+    recursion, so a chain of any length is linear -- each raising the floor
+    it implies, until the command that actually runs is reached.
     """
+    _spend(len(words) + 1)
+    floor = "none"
     i = 0
-    while i < len(words) and _ASSIGNMENT.match(words[i]):
-        i += 1
-    if i == len(words):
-        return "none"  # an empty segment, or shell variable assignments only
-    cmd, args = words[i], words[i + 1:]
-    prog = _program(cmd)
-    verdict = _classify_program(prog, args, in_wrapper)
-    # A path may name any program: `/usr/bin/curl` is curl and escalates, but
-    # `./cat` is not cat, so a path-qualified name never reads below write.
-    return verdict if prog == cmd else _worst("write", verdict)
+    while True:
+        while i < len(words) and _ASSIGNMENT.match(words[i]):
+            if not _HARMLESS_ASSIGNMENT.match(words[i]):
+                floor = "write"
+            i += 1
+        if i >= len(words):
+            return floor  # assignments only, or a wrapper/env with nothing to run
+        cmd = words[i]
+        prog = _program(cmd)
+        if prog != cmd:
+            # A path may name any program: `/usr/bin/curl` is curl and
+            # escalates, but `./cat` is not cat, so it never reads below write.
+            floor = _worst(floor, "write")
+        if prog == "env":
+            start = _env_command_start(words, i + 1)
+            if start is None:
+                return _worst(floor, "write")
+            i = start
+            continue
+        if prog in _WRAPPERS:
+            floor = _worst(floor, "write")
+            start = _wrapped_command_start(prog, words, i + 1)
+            if isinstance(start, str):  # a command string: flock -c, watch
+                return _worst(floor, classify_bash_command(start))
+            if start is None:
+                return floor
+            i = start
+            continue
+        return _worst(floor, _classify_program(prog, words[i + 1:]))
 
 
 def _program(word: str) -> str:
     """The program a command word names: `/usr/bin/curl`, `curl.exe` -> `curl`."""
     name = word.replace("\\", "/").rsplit("/", 1)[-1]
-    return name[:-4] if name.lower().endswith(".exe") else name
+    # A Windows executable name is case-insensitive: `Curl.exe` is curl.
+    return name[:-4].lower() if name.lower().endswith(".exe") else name
 
 
-def _classify_program(cmd: str, args: list[str], in_wrapper: bool) -> str:
-    if cmd == "env":
-        return _classify_env(args, in_wrapper)
+def _classify_program(cmd: str, args: list[str]) -> str:
     if cmd == "git":
         return _classify_git(args)
-    if cmd in _WRAPPERS:
-        return "write" if in_wrapper else _classify_wrapped(args)
     if cmd in _SHELLS:
         return _classify_shell(cmd, args)
     if cmd == "eval":
@@ -175,28 +287,64 @@ def _classify_program(cmd: str, args: list[str], in_wrapper: bool) -> str:
     return rule(args) if rule else "none"
 
 
-# Words that can start a network-capable command inside a wrapper.
-_WRAPPED_CANDIDATES = _EXTERNAL_COMMANDS | _SHELLS | {"git", "docker", "env", "eval"}
+def _env_command_start(words: list[str], i: int) -> int | None:
+    """Index of the first word after ``env``'s options -- its assignments and
+    command follow. None for an option whose command is not a plain word
+    list (``-S``)."""
+    while i < len(words):
+        a = words[i]
+        if a in ("-i", "-", "--ignore-environment", "-0", "--null"):
+            i += 1
+        elif a in ("-u", "--unset", "-C", "--chdir"):
+            i += 2
+        elif a.startswith(("-u", "--unset=", "-C", "--chdir=")):
+            i += 1
+        elif a == "--":
+            return i + 1
+        elif a.startswith("-"):
+            return None
+        else:
+            return i
+    return i
 
 
-_MAX_WRAPPED_CANDIDATES = 16
-
-
-def _classify_wrapped(args: list[str]) -> str:
-    """sudo / timeout / xargs ...: option syntax differs per wrapper, so each
-    word that could start a network-capable command is classified from there.
-    Bounded: nested wrappers are not re-entered (their words are in this scan)
-    and at most _MAX_WRAPPED_CANDIDATES starts are tried."""
-    programs = [_program(word) for word in args]
-    if any(p in _EXTERNAL_COMMANDS for p in programs):
-        return "external"  # linear, and not subject to the cap below
-    verdict = "write"
-    candidates = (j for j, p in enumerate(programs) if p in _WRAPPED_CANDIDATES)
-    for _, j in zip(range(_MAX_WRAPPED_CANDIDATES), candidates):
-        verdict = _worst(verdict, _classify_simple(args[j:], in_wrapper=True))
-        if verdict == "external":
+def _wrapped_command_start(prog: str, words: list[str], i: int) -> int | str | None:
+    """Where the wrapped command starts: an index, a command STRING (``flock
+    -c``, ``watch``), or None when nothing is run."""
+    short_values, long_values, operands = _WRAPPERS[prog]
+    while i < len(words):
+        a = words[i]
+        if prog == "flock" and (a in ("-c", "--command") or a.startswith("--command=")):
+            return _option_value(words, i)
+        if a == "--":
+            i += 1
             break
-    return verdict
+        if a.startswith("--") and len(a) > 2:
+            i += 2 if "=" not in a and a in long_values else 1
+            continue
+        flags = _short_flags(a)
+        if not flags:
+            break
+        i += 1
+        for k, letter in enumerate(flags):
+            if letter in short_values:
+                if k == len(flags) - 1:
+                    i += 1  # the value is the next word; attached otherwise
+                break
+    i += operands
+    if prog == "flock" and i < len(words) and words[i] in ("-c", "--command"):
+        return _option_value(words, i)
+    if i >= len(words):
+        return None
+    if prog == "watch":
+        return " ".join(words[i:])  # watch runs its arguments through `sh -c`
+    return i
+
+
+def _option_value(words: list[str], i: int) -> str | None:
+    if "=" in words[i]:
+        return words[i].split("=", 1)[1]
+    return words[i + 1] if i + 1 < len(words) else None
 
 
 def _classify_shell(cmd: str, args: list[str]) -> str:
@@ -239,40 +387,23 @@ def _flag_rule(short: str, long: tuple[str, ...]):
     return rule
 
 
-def _classify_env(args: list[str], in_wrapper: bool = False) -> str:
-    """``env`` prints the environment, or runs its argument."""
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a in ("-i", "-", "--ignore-environment", "-0", "--null", "env"):
-            i += 1  # a nested `env` is more env: consumed here, not recursed into
-        elif a in ("-u", "--unset", "-C", "--chdir"):
-            i += 2
-        elif a.startswith(("-u", "--unset=", "-C", "--chdir=")):
-            i += 1
-        elif a.startswith("-"):
-            return "write"  # -S and friends: the command is not a plain word list
-        elif _ASSIGNMENT.match(a):
-            i += 1
-        else:
-            return _classify_simple(args[i:], in_wrapper)
-    return "none"
-
-
 def _classify_find(args: list[str]) -> str:
     verdict = "none"
-    for j, a in enumerate(args):
+    j = 0
+    while j < len(args):
+        a = args[j]
         if a in ("-delete", "-fprint", "-fprint0", "-fprintf", "-fls"):
             return "write"
         if a in ("-exec", "-execdir", "-ok", "-okdir"):
-            sub: list[str] = []
-            for w in args[j + 1:]:
-                if w in (";", "+"):
-                    break
-                sub.append(w)
-            if not sub:
+            end = j + 1
+            while end < len(args) and args[end] not in (";", "+"):
+                end += 1
+            if end == j + 1:
                 return "write"
-            verdict = _worst(verdict, _classify_simple(sub))
+            verdict = _worst(verdict, _classify_simple(args[j + 1:end]))
+            j = end + 1  # past the terminator; an unterminated -exec ends the scan
+            continue
+        j += 1
     return verdict
 
 
@@ -403,7 +534,9 @@ def _classify_awk(args: list[str]) -> str:
             break
     if i >= len(args):
         return "write"
-    return "write" if re.search(r"[>|]|\bsystem\s*\(", args[i]) else "none"
+    # `>` / `|` redirect or pipe to a command, system() runs one, and gawk's
+    # `@include "inplace"` / `@load` edit files or load code.
+    return "write" if re.search(r"[>|@]|\bsystem\s*\(", args[i]) else "none"
 
 
 def _classify_uniq(args: list[str]) -> str:
@@ -412,6 +545,9 @@ def _classify_uniq(args: list[str]) -> str:
     i = 0
     while i < len(args):
         a = args[i]
+        if a == "--":
+            positional += len(args) - i - 1
+            break
         if a in ("-f", "-s", "-w"):
             i += 2
             continue
@@ -446,18 +582,23 @@ _GIT_BRANCH_WRITES = ("dDmMcCuf", (
     "--delete", "--move", "--copy", "--force", "--set-upstream-to",
     "--unset-upstream", "--edit-description", "--track", "--create-reflog",
 ))
+# Listing switches. --sort / --format / --column only change how a listing
+# looks: `git branch --sort=refname x` still creates x.
 _GIT_BRANCH_LISTS = ("lar", (
     "--list", "--all", "--remotes", "--contains", "--no-contains", "--merged",
-    "--no-merged", "--points-at", "--format", "--sort", "--show-current", "--column",
+    "--no-merged", "--points-at", "--show-current",
 ))
 _GIT_TAG_WRITES = ("adsfumFe", (
     "--annotate", "--sign", "--local-user", "--force", "--delete", "--message",
     "--file", "--edit", "--cleanup", "--create-reflog",
 ))
 _GIT_TAG_LISTS = ("ln", (
-    "--list", "--contains", "--no-contains", "--merged", "--no-merged",
-    "--points-at", "--sort", "--format", "--column",
+    "--list", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at",
 ))
+# Options whose separate next word is their value, never a ref name.
+_GIT_LISTING_VALUE_OPTIONS = frozenset({
+    "--sort", "--format", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at",
+})
 
 
 def _classify_git(args: list[str]) -> str:
@@ -516,10 +657,16 @@ def _git_listing(
     and a positional argument only as a pattern to a listing option."""
     listing = False
     positional = False
+    skip_value = False
     for a in args:
+        if skip_value:
+            skip_value = False
+            continue
         flags = _short_flags(a)
         if set(flags) & set(writes[0]) or _long_matches(a, writes[1]):
             return "write"
+        if a in _GIT_LISTING_VALUE_OPTIONS:
+            skip_value = True
         if set(flags) & set(lists[0]) or _long_matches(a, lists[1]):
             listing = True
         elif not a.startswith("-"):
