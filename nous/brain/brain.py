@@ -1092,9 +1092,13 @@ class Brain:
         decision.outcome_result = validated.result
         decision.reviewed_at = datetime.now(UTC)
         decision.reviewer = validated.reviewer
-        # Lineage marker only meaningful for a supersession.
-        if validated.outcome == "superseded":
-            decision.superseded_by = validated.superseded_by
+        # Lineage is only meaningful for a supersession, so it is CLEARED on
+        # any other outcome: a relabel away from 'superseded' (a background
+        # turn marking it noise, or an interactive re-grade) must not keep
+        # pointing at a replacement that no longer describes the row.
+        decision.superseded_by = (
+            validated.superseded_by if validated.outcome == "superseded" else None
+        )
 
         await session.flush()
 

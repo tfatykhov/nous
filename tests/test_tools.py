@@ -252,6 +252,25 @@ class TestResolveDecision:
         assert (await brain.get(uuid.UUID(old_id))).outcome == "superseded"
 
     @pytest.mark.asyncio
+    async def test_background_superseded_to_noise_clears_lineage(self, tools, brain):
+        """superseded -> noise in background drops the replacement pointer, so
+        neither this tool nor list_decisions reports stale lineage."""
+        old_id = await self._make_decision(tools, brain)
+        new_id = await self._make_decision(tools, brain)
+        await tools["resolve_decision"](
+            decision_id=old_id, outcome="superseded", superseded_by=new_id,
+            _is_background=True,
+        )
+        result = await tools["resolve_decision"](
+            decision_id=old_id, outcome="noise", _is_background=True,
+        )
+        assert result.get("is_error") is not True
+        assert "superseded_by" not in result["content"][0]["text"]
+        detail = await brain.get(uuid.UUID(old_id))
+        assert detail.outcome == "noise"
+        assert detail.superseded_by is None
+
+    @pytest.mark.asyncio
     async def test_resolve_decisions_background_batch_is_per_item(self, tools, brain):
         """A background sweep keeps its allowed items; graded outcomes and graded
         rows fail per item, in input order, without aborting the batch."""

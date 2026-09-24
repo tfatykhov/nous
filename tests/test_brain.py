@@ -509,6 +509,21 @@ async def test_review_preserve_graded_refuses_to_overwrite(brain, session):
     assert reviewed.outcome == "superseded"
 
 
+@pytest.mark.parametrize("new_outcome", ["noise", "success", "failure"])
+async def test_relabel_away_from_superseded_clears_lineage(brain, session, new_outcome):
+    """superseded_by only means something on a supersession: relabelling a
+    superseded decision (background -> noise, or an interactive re-grade) must
+    not leave it pointing at a replacement."""
+    old = await brain.record(_record_input(description="old"), session=session)
+    new = await brain.record(_record_input(description="new"), session=session)
+    await brain.review(old.id, "superseded", superseded_by=new.id, session=session)
+
+    reviewed = await brain.review(old.id, new_outcome, session=session)
+    assert reviewed.outcome == new_outcome
+    assert reviewed.superseded_by is None
+    assert (await brain.get(old.id, session=session)).superseded_by is None
+
+
 async def test_review_many_preserve_graded_is_per_item(brain, session):
     """A graded row fails its own item; the rest of the batch still lands."""
     graded = await brain.record(_record_input(description="g"), session=session)
