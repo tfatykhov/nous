@@ -34,6 +34,7 @@ from nous.api.attachments import (
 from nous.api.cache_optimizer import CacheBreakDetector
 from nous.api.cache_optimizer import _hash as cache_hash
 from nous.api.compaction import ConversationCompactor
+from nous.api.execution_context import ExecutionContext, resolve_context
 from nous.api.models import (  # noqa: F401 — re-exported for backward compat
     ApiResponse,
     Attachment,
@@ -358,6 +359,9 @@ class AgentRunner:
         # `dag_nodes.last_activity_at`. None on chat / non-DAG paths — ping
         # site short-circuits.
         dag_node_id: UUID | None = None,
+        # Harness Phase 1a: which harness path runs this turn. Callers that
+        # start a background turn name it; chat/MCP pass interactive/mcp.
+        context: ExecutionContext | None = None,
     ) -> tuple[str, TurnContext, dict[str, int]]:
         """Execute a single conversational turn.
 
@@ -374,6 +378,8 @@ class AgentRunner:
         10. Return (response_text, turn_context)
         """
         _agent_id = agent_id or self._settings.agent_id
+        _ctx = resolve_context(context, is_background=is_background, session_id=session_id)
+        is_background = _ctx.is_background
 
         # Refresh session activity synchronously BEFORE any long-running
         # work. The event-bus path (turn_completed) only fires after the
@@ -608,6 +614,7 @@ class AgentRunner:
                             force_tool_on_penultimate=force_tool_on_penultimate,
                             dag_node_id=dag_node_id,
                             refuse_active=getattr(turn_context, "refuse_active", False),  # F078 R6
+                            context=_ctx,  # harness Phase 1a
                         )
                     finally:
                         CURRENT_TURN_EXCLUDE_IDS.reset(_f071_token)
@@ -1038,6 +1045,8 @@ class AgentRunner:
             raise RuntimeError("No tool dispatcher set -- call set_dispatcher() first")
 
         _agent_id = agent_id or self._settings.agent_id
+        # stream_chat serves REST /chat/stream only — a person is in the loop.
+        _ctx = ExecutionContext(kind="interactive", session_id=session_id)
 
         # Sync activity refresh before any long-running work. See run_turn
         # for rationale — the bus is queued, so message_received emission
@@ -1510,6 +1519,7 @@ class AgentRunner:
                             async for item in self._dispatch_with_keepalive(
                                 tc["name"], dispatch_input, session_id=session_id,
                                 turn_number=_stream_turn_number,  # F091
+                                context=_ctx,  # harness Phase 1a
                             ):
                                 if isinstance(item, StreamEvent):
                                     yield item
@@ -1677,6 +1687,7 @@ class AgentRunner:
         # other session's turn — a row whose session_id and turn_number point
         # at different turns, which is worse than a NULL.
         turn_number: int | None = None,
+        context: ExecutionContext | None = None,  # harness Phase 1a
     ) -> tuple[str, list[ToolResult], dict[str, int], list[str]]:
         """Run the tool use loop until completion or max_turns.
 
@@ -1691,6 +1702,9 @@ class AgentRunner:
         """
         if not self._dispatcher:
             raise RuntimeError("No tool dispatcher set -- call set_dispatcher() first")
+
+        ctx = resolve_context(context, is_background=is_background, session_id=session_id)
+        is_background = ctx.is_background
 
         # Get base tools for current frame (D5)
         base_tools = self._dispatcher.available_tools(frame_id)
@@ -1990,6 +2004,7 @@ class AgentRunner:
                                     tool_name, tool_input, session_id=session_id,
                                     is_background=is_background,
                                     turn_number=turn_number,  # F091 (caller-captured)
+                                    context=ctx,  # harness Phase 1a
                                 )
                             finally:
                                 await self._stop_activity_heartbeat(_hb)
@@ -2711,6 +2726,7 @@ Rules:
     async def _dispatch_with_keepalive(
         self, name: str, args: dict[str, Any], session_id: str | None = None,
         turn_number: int | None = None,  # F091: caller-captured, see _tool_loop
+        context: ExecutionContext | None = None,  # harness Phase 1a
     ) -> AsyncGenerator[StreamEvent | tuple[str, bool], None]:
         """Execute a tool, yielding keepalive events during long execution.
 
@@ -2726,6 +2742,7 @@ Rules:
                 self._dispatcher.dispatch(
                     name, args, session_id=session_id,
                     turn_number=turn_number,  # F091 (caller-captured)
+                    context=context,  # harness Phase 1a
                 ),
                 timeout=timeout,
             )

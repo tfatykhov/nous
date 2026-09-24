@@ -13,7 +13,7 @@ import json
 import logging
 import time
 from typing import Any, AsyncGenerator
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -768,8 +768,10 @@ class TestStreamChat:
         events = [e async for e in runner.stream_chat("s1", "Search for test")]
 
         runner._dispatcher.dispatch.assert_called_once_with(
-            "web_search", {"query": "test"}, session_id="s1", turn_number=1,
+            "web_search", {"query": "test"}, session_id="s1", turn_number=1, context=ANY,
         )
+        # Harness Phase 1a: the streaming path always runs as interactive.
+        assert runner._dispatcher.dispatch.call_args.kwargs["context"].kind == "interactive"
         cognitive.post_turn.assert_called_once()
         turn_result = cognitive.post_turn.call_args[0][2]
         assert len(turn_result.tool_results) == 1
@@ -800,8 +802,10 @@ class TestStreamChat:
         events = [e async for e in runner.stream_chat("s1", "Search")]
 
         runner._dispatcher.dispatch.assert_called_once_with(
-            "web_search", {}, session_id="s1", turn_number=1,
+            "web_search", {}, session_id="s1", turn_number=1, context=ANY,
         )
+        # Harness Phase 1a: the streaming path always runs as interactive.
+        assert runner._dispatcher.dispatch.call_args.kwargs["context"].kind == "interactive"
         cognitive.post_turn.assert_called_once()
         turn_result = cognitive.post_turn.call_args[0][2]
         assert turn_result.tool_results[0].error is None

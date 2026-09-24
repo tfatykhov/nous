@@ -28,6 +28,7 @@ from functools import partial
 from typing import Any
 from uuid import UUID
 
+from nous.api.execution_context import ExecutionContext, resolve_context
 from nous.brain.brain import Brain
 from nous.brain.schemas import NON_PREDICTION_OUTCOMES, ReasonInput, RecordInput
 from nous.config import PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS, Settings
@@ -342,6 +343,12 @@ class ToolDispatcher:
     The dispatcher extracts plain text for the Anthropic API tool_result format.
     """
 
+    # Tools that read the injected ``_is_background`` flag (#541/#642 decision
+    # resolution; F092.1 compose_surface origin). One set for every consumer.
+    _BACKGROUND_AWARE_TOOLS: frozenset[str] = frozenset(
+        {"resolve_decision", "resolve_decisions", "compose_surface"}
+    )
+
     def __init__(
         self,
         *,
@@ -370,6 +377,7 @@ class ToolDispatcher:
     async def dispatch(
         self, name: str, args: dict[str, Any], session_id: str | None = None,
         is_background: bool = False, turn_number: int | None = None,
+        context: ExecutionContext | None = None,
     ) -> tuple[str, bool]:
         """Dispatch a tool call and return (result_text, is_error).
 
@@ -379,7 +387,12 @@ class ToolDispatcher:
         is_background: True for heartbeat/subtask turns. Decision-resolution
         tools read it via the injected _is_background kwarg to restrict
         autopilot resolution to non-prediction outcomes.
+
+        context: the turn's ExecutionContext (harness Phase 1a). When given it
+        is authoritative and ``is_background`` is derived from it.
         """
+        ctx = resolve_context(context, is_background=is_background, session_id=session_id)
+        is_background = ctx.is_background
         handler = self._handlers.get(name)
         if not handler:
             return f"Unknown tool: {name}", True
@@ -435,7 +448,7 @@ class ToolDispatcher:
                     True,
                 )
 
-            if name in ("resolve_decision", "resolve_decisions", "compose_surface"):
+            if name in self._BACKGROUND_AWARE_TOOLS:
                 # compose_surface derives origin from it: a heartbeat or
                 # scheduled turn composes origin="agent" apps (F092.1 push
                 # path); a chat turn composes origin="chat".
