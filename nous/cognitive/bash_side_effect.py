@@ -179,33 +179,64 @@ def command_invocations(command: str) -> list[tuple[str, list[str]]] | None:
 
 
 _MAX_STRING_DEPTH = 3
-# `<<DELIM` / `<<-DELIM` (not the `<<<` here-string), with its delimiter.
-_HEREDOC_OP = re.compile(r"(?<!<)<<(-?)(?!<)\s*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([\w.-]+))")
+# The delimiter after an unquoted `<<` / `<<-`.
+_HEREDOC_DELIM = re.compile(r"(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?(\$?\w[\w.-]*))")
 
 
 def _split_heredocs(command: str) -> tuple[str, list[str]]:
     """Cut every heredoc body out of ``command``; return it and the bodies in
     order. A body is data handed to one command -- lexing it as commands read
     `cat > runbook.md <<EOF ... git push ... EOF` as a push, and made a body
-    with an apostrophe unreadable. Unterminated, it runs to the end (bash)."""
+    with an apostrophe unreadable. Unterminated, it runs to the end (bash).
+
+    Quote-aware, or `git commit -m "explain <<EOF heredocs"` would swallow
+    the lines after it, and a heredoc inside `bash -c "..."` would be cut at
+    the wrong level; only a `<<` outside quotes opens one, and a nested string
+    keeps its body for the recursive read. `<<<` is a here-string.
+    """
     lines = command.split("\n")
     kept: list[str] = []
     bodies: list[str] = []
+    quote: str | None = None  # a quote may span lines
     i = 0
     while i < len(lines):
         line = lines[i]
-        kept.append(line)
         i += 1
-        for m in _HEREDOC_OP.finditer(line):
-            strip_tabs = m.group(1) == "-"
-            delim = m.group(2) or m.group(3) or m.group(4)
+        kept.append(line)
+        pending: list[tuple[str, bool]] = []
+        j, n = 0, len(line)
+        while j < n:
+            c = line[j]
+            if quote == "'":
+                quote = None if c == "'" else quote
+            elif quote == '"':
+                if c == "\\":
+                    j += 1
+                elif c == '"':
+                    quote = None
+            elif c == "\\":
+                j += 1
+            elif c in "'\"":
+                quote = c
+            elif c == "<" and line.startswith("<<", j) and not line.startswith("<<<", j) \
+                    and (j == 0 or line[j - 1] != "<"):
+                m = _HEREDOC_DELIM.match(line, j + 2)
+                if m:
+                    pending.append((m.group(2) or m.group(3) or m.group(4), m.group(1) == "-"))
+                    j = m.end()
+                    continue
+                j += 1
+            j += 1
+        for delim, strip_tabs in pending:
             body: list[str] = []
             while i < len(lines):
-                candidate = lines[i]
+                candidate = lines[i].rstrip("\r")
                 i += 1
-                if (candidate.lstrip("\t") if strip_tabs else candidate) == delim:
+                if strip_tabs:
+                    candidate = candidate.lstrip("\t")
+                if candidate == delim:
                     break
-                body.append(candidate.lstrip("\t") if strip_tabs else candidate)
+                body.append(candidate)
             bodies.append("\n".join(body))
     return "\n".join(kept), bodies
 
@@ -238,8 +269,8 @@ def _invocations(command: str, depth: int) -> list[tuple[str, list[str]]] | None
     found: list[tuple[str, list[str]]] = []
     for words in simple:
         start = _command_start(words)
-        if start is None:
-            continue
+        if start is None or words[start].startswith("\n"):
+            continue  # nothing runs, or a heredoc body left where a program should be
         word = words[start]
         prog, args = _program(word), words[start + 1:]
         if "/" in word.replace("\\", "/"):

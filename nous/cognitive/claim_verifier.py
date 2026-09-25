@@ -138,8 +138,8 @@ _ARTIFACT = (r"(?:companion(?:\s+app)?|dashboards?|micro-?apps?|surfaces?|cards?
              r"|package|directory|folder|source|css|js|ts|svelte|refactor|update|patch)\b)"
              r"(?![/\\-]|\.\w)")  # not a path such as /tmp/dashboard.md; a final "." is fine
 _NOT_ELSEWHERE = (r"(?!(?:[^.\n;]|\.(?=\S)){0,80}?"
-                  r"(?:\b(?:to|in|into|on|as)\s+(?:your\s+|my\s+|the\s+|a\s+|an\s+)?"
-                  rf"(?:memory|chat|facts?|knowledge\s+base|{_ARTIFACT})\b"
+                  r"(?:\b(?:to|in|into|on|as)\s+(?:your\s+|my\s+|the\s+|a\s+|an\s+|this\s+)?"
+                  rf"(?:memory|chat|facts?|knowledge\s+base|repl(?:y|ies)|response|{_ARTIFACT})\b"
                   r"|\b(?:a|an|the|your|my|this|new|live|report|summary|health|status|interactive)"
                   rf"\s+(?:(?:live|report|summary|health|status|interactive)\s+)?{_ARTIFACT}"
                   r"|\b(?:report|summary|draft|notes?|text|content|version|it)\s+(?:below|above)\b))")
@@ -150,12 +150,13 @@ _VCS_NOUN = (r"(?:branch(?:es)?|commits?|fix(?:es)?|changes?|patch(?:es)?|PRs?|p
              r"|tests?|docs|latest|v\d[\w.-]*|fixtures?|configs?|scripts?|schemas?|models?"
              r"|components?|modules?|assets?|templates?|specs?|manifest|lockfile|snapshots?"
              r"|renames?|cleanup|typos?|readme|changelog|deps|dependencies|workflow|ci)")
-# A push "to Friday", "to the wiki", "to the device" is not a git push.
+# A push "to Friday", "to the wiki", "to the device" is not a git push -- but
+# "to the client repo", "to the team branch", "to 3 remotes" is.
 _NOT_A_GIT_DESTINATION = (r"(?![^.\n;]{0,40}?\b(?:to|until|till)\s+(?:next|tomorrow|later|monday"
                           r"|tuesday|wednesday|thursday|friday|saturday|sunday|\d|q[1-4]\b|the\s+"
                           r"(?:wiki|device|afternoon|morning|evening|weekend|team|user|client)"
                           r"|january|february|march|april|may|june|july|august|september|october"
-                          r"|november|december))")
+                          r"|november|december)(?!\S*\s+(?:repo(?:sitory)?|branch|remotes?)\b))")
 # What was pushed or committed must be a version-control object: the head of
 # the object phrase, or a bare pronoun -- "I pushed the fix", "I pushed it",
 # "I committed and pushed", never "I pushed back", "I pushed an approval
@@ -324,8 +325,14 @@ def _positional(args: tuple[str, ...]) -> list[str]:
     return [a for a in args if not a.startswith("-") and not a.startswith("\n")]
 
 
+def _base(prog: str) -> str:
+    """`/usr/bin/rsync` is reported as `./rsync`; the allowlists know `rsync`."""
+    return prog[2:] if prog.startswith("./") else prog
+
+
 def _does(kind: str, prog: str, args: tuple[str, ...]) -> bool:
     """True if one invocation produces the claimed effect."""
+    prog = _base(prog)
     positional = _positional(args)
     if kind == "vcs_push":
         return ((prog == "git" and _git_does(args, "push"))
@@ -336,8 +343,8 @@ def _does(kind: str, prog: str, args: tuple[str, ...]) -> bool:
     if kind == "email":
         if prog in _MAIL_SENDERS:
             return "-bp" not in args  # `sendmail -bp` prints the queue
-        if prog in _MAIL_CLIENTS:
-            return any("@" in a or a.startswith("$") for a in args)
+        if prog in _MAIL_CLIENTS:  # a recipient argument, never one inside the body
+            return any("@" in a or a.startswith("$") for a in args if not a.startswith("\n"))
         return prog == "curl" and any(
             a.lower().startswith(("smtp://", "smtps://", "--mail-rcpt")) or "api.telegram.org" in a
             for a in args)
@@ -361,6 +368,7 @@ def _does(kind: str, prog: str, args: tuple[str, ...]) -> bool:
 def _python_code(prog: str, args: tuple[str, ...]) -> str | None:
     """The code an invocation runs when it is right there: `python -c CODE`,
     or a script fed on stdin by a heredoc (`python3 - <<EOF`)."""
+    prog = _base(prog)
     if prog in _PY_RUNNERS and args[:1] == ("run",):
         for i, a in enumerate(args[1:], 1):
             if a in _INTERPRETERS or a.startswith("python3."):
@@ -396,9 +404,15 @@ def _is_script(prog: str) -> bool:
     return bool(_SCRIPT.search(prog)) or prog.startswith("./")
 
 
+_NOT_A_TASK_MODULE = frozenset({"pip", "venv", "ensurepip", "json.tool", "http.server", "this"})
+
+
 def _runs_file(args: tuple[str, ...]) -> bool:
     """An interpreter given a script file or a module: it decides its own effects."""
-    return "-m" in args or any(_SCRIPT.search(a) for a in _positional(args))
+    if "-m" in args:
+        module = args[args.index("-m") + 1:][:1]
+        return not module or module[0] not in _NOT_A_TASK_MODULE
+    return any(_SCRIPT.search(a) for a in _positional(args))
 
 
 def _opaque_for(kind: str, prog: str, args: tuple[str, ...]) -> bool:
@@ -407,16 +421,17 @@ def _opaque_for(kind: str, prog: str, args: tuple[str, ...]) -> bool:
         return False  # the code is right there: judged as code
     if prog.startswith("$"):
         return True  # `$CMD ...`, `$(cat cmd.txt)`: whatever it expands to
-    if prog in _RUNNERS and command_string(prog, list(args)) is not None:
+    base = _base(prog)
+    if base in _RUNNERS and command_string(base, list(args)) is not None:
         return True  # its command string could not be read
     text = " ".join((prog, *args))
     if _TESTY.search(text):
         return False
-    if prog in _RUNNERS:
-        return prog != "ssh" and _runs_file(args) and bool(_HINTS[kind].search(text))
-    if prog in _INTERPRETERS or prog.startswith("python3."):
+    if base in _RUNNERS:
+        return base != "ssh" and _runs_file(args) and bool(_HINTS[kind].search(text))
+    if base in _INTERPRETERS or base.startswith("python3."):
         return _runs_file(args) and bool(_HINTS[kind].search(text))
-    if _is_script(prog) or prog in _TASK_RUNNERS:
+    if _is_script(prog) or base in _TASK_RUNNERS:
         return bool(_HINTS[kind].search(text))
     return False
 
@@ -477,7 +492,7 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
         variable = any(a.startswith("$") for i in hits for a in runs[i][1])
         levels.append("plausible" if opaque or variable else "none")
     elif claim.kind in ("vcs_push", "vcs_commit") and not failed \
-            and any(runs[i][0] in ("git", "docker") for i in hits):
+            and any(_base(runs[i][0]) in ("git", "docker") for i in hits):
         levels.append("exact")
     else:
         levels.append("plausible")

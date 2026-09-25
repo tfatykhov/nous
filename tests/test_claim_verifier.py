@@ -737,3 +737,68 @@ def test_artifacts_schedules_and_devices_are_not_vcs_or_file_claims(text):
 def test_an_expanded_program_is_opaque():
     assert _verify("I pushed the fix to main.", _real_bash('bash -c "$(cat cmd.txt)"')).verified
     assert _verify("I pushed the fix to main.", _real_bash("$DEPLOY_CMD")).verified
+
+
+# --- review round 4 ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("command", [
+    'git add -A\ngit commit -m "docs: explain <<EOF heredocs"\ngit push origin main',
+    'echo "syntax: cat <<EOF"\ngit push origin main',
+    "grep -n '<<EOF' scripts/*.sh\ngit push origin main",
+    "cat <<'EOF' > x\r\nhi\r\nEOF\r\ngit push origin main\r\n",
+    'bash -c "cat <<EOF > x\nhi\nEOF\ngit push origin main"',
+])
+def test_a_quoted_or_nested_heredoc_marker_never_swallows_the_push(command):
+    assert _verify("I pushed the fix to main.", _real_bash(command)).claims[0].evidence == "exact"
+
+
+def test_a_config_written_over_ssh_then_restarted_is_a_deploy():
+    cmd = "ssh host \"cat > /etc/nous.env <<'EOF'\nA=1\nEOF\nsudo systemctl restart nous\""
+    assert _verify("I deployed the fix to prod.", _real_bash(cmd)).verified
+
+
+def test_a_variable_delimiter_body_is_still_data():
+    cmd = "cat <<$DELIM > notes.md\ngit push origin main\n$DELIM"
+    assert not _verify("I pushed the fix to main.", _real_bash(cmd)).verified
+
+
+@pytest.mark.parametrize("claim, command", [
+    ("I deployed the build to the server.", "/usr/bin/rsync -a build/ host:/srv"),
+    ("I pushed the files to the server with rsync.", "/usr/bin/rsync -a build/ host:/srv"),
+])
+def test_a_path_qualified_program_keeps_its_identity(claim, command):
+    assert _verify(claim, _real_bash(command)).verified
+
+
+def test_a_path_qualified_git_push_is_exact():
+    result = _verify("I pushed the fix to main.", _real_bash("/usr/bin/git push origin main"))
+    assert result.claims[0].evidence == "exact"
+
+
+def test_a_recipient_inside_the_body_is_not_a_recipient():
+    assert not _verify("I sent the email.", _real_bash("mail -s Report <<'EOF'\ncc alice@x.io\nEOF")).verified
+
+
+def test_a_body_is_never_a_program():
+    assert not _verify("I deployed the fix to prod.", _real_bash("diff <(cat <<A) x\ndeploy now\nA")).verified
+
+
+def test_pip_is_not_a_push():
+    assert not _verify("I pushed the fix to main.", _real_bash("python3 -m pip install gitpython")).verified
+
+
+@pytest.mark.parametrize("text", [
+    "I pushed the changes to the client repo.",
+    "I pushed the fix to the team branch.",
+    "I pushed the fix to 3 remotes.",
+    "I pushed the release to the wiki repo.",
+    "I pushed the fix to the device-config branch.",
+])
+def test_a_destination_that_is_a_repo_or_branch_is_a_push(text):
+    assert [k for k, _ in _kinds(text)] == ["vcs_push"]
+
+
+def test_a_heads_up_in_the_reply_is_not_a_message_sent():
+    assert _kinds("I sent a heads-up in the reply.") == []
+    assert _kinds("I sent the summary in this response.") == []
