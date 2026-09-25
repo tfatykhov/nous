@@ -371,13 +371,74 @@ def _literals(node: ast.AST | None) -> list[str] | None:
     return None
 
 
+_DORMANT = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+
+
+def _constant_truth(test: ast.AST) -> bool | None:
+    """The value of an `if` test known without running: `False`, `0`,
+    `True`, `__name__ == "__main__"` (a script); None when it is not."""
+    if isinstance(test, ast.Constant):
+        return bool(test.value)
+    if (isinstance(test, ast.Compare) and isinstance(test.left, ast.Name)
+            and test.left.id == "__name__" and len(test.ops) == 1
+            and isinstance(test.ops[0], ast.Eq) and _literal(test.comparators[0]) == "__main__"):
+        return True
+    return None
+
+
+def _executed(tree: ast.Module) -> list[ast.AST]:
+    """The nodes a script RUNS: module-level statements, the bodies of the
+    functions and methods they call (transitively, by name), and the taken
+    side of a constant `if`. A function merely defined, a lambda, a class
+    method never called, `if False:` -- never."""
+    defs: dict[str, list[ast.AST]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defs.setdefault(node.name, []).append(node)
+    executed: list[ast.AST] = []
+    called: set[str] = set()
+    queue: list[ast.AST] = list(tree.body)
+    while queue:
+        node = queue.pop()
+        if isinstance(node, ast.ClassDef):
+            queue.extend(s for s in node.body if not isinstance(s, _DORMANT))  # class-level code runs
+            continue
+        if isinstance(node, _DORMANT):
+            continue
+        if isinstance(node, ast.If):
+            truth = _constant_truth(node.test)
+            queue.extend(node.body if truth is not False else [])
+            queue.extend(node.orelse if truth is not True else [])
+            continue
+        for sub in _walk_live(node):
+            executed.append(sub)
+            if isinstance(sub, ast.Call):
+                name = _dotted(sub.func).rsplit(".", 1)[-1]
+                if name in defs and name not in called:
+                    called.add(name)
+                    for fn in defs[name]:
+                        queue.extend(fn.body)  # type: ignore[attr-defined]
+    return executed
+
+
+def _walk_live(node: ast.AST):
+    """`ast.walk` that does not descend into a nested definition."""
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        for child in ast.iter_child_nodes(current):
+            if not isinstance(child, _DORMANT):
+                stack.append(child)
+
+
 def _python_facts(code: str) -> _PyFacts | None:
     try:
         tree = ast.parse(code)
     except (SyntaxError, ValueError):
         return None
     facts = _PyFacts()
-    for node in ast.walk(tree):
+    for node in _executed(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             names = [a.name for a in node.names] + ([node.module] if isinstance(node, ast.ImportFrom) else [])
             if any(n and n.split(".")[0] == "smtplib" for n in names):
@@ -432,9 +493,7 @@ def _call_facts(node: ast.Call, facts: _PyFacts) -> None:
         else:
             facts.recipients |= {a for s in found for a in _addresses(s)}
     elif method == "send_message":
-        facts.sends = True
-        if not facts.recipients:
-            facts.recipient_unknown = True
+        facts.sends = True  # recipients come from msg['To'] = ..., in any order
     elif name in _PY_SHELL_CALLS or method in ("system", "popen"):
         found = _literals(args[0]) if args else None
         if found is not None:
@@ -852,11 +911,11 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
         else:
             levels.append("plausible")
         return _best(levels)
-    hits = [i for i, (prog, args, _) in enumerate(runs) if _does(claim.kind, prog, args)]
+    # the hits that may have succeeded: a failed exit is the LAST one's
+    hits = [i for i, (prog, args, _) in enumerate(runs)
+            if _does(claim.kind, prog, args) and not (failed and i == len(runs) - 1)]
     if not hits:
         levels.append("plausible" if opaque else "none")
-    elif failed and hits == [len(runs) - 1]:
-        levels.append("none")
     elif claim.kind == "email" and claim.target and not _addressed(claim.target, runs, hits, opaque):
         levels.append("none")
     elif claim.kind in ("vcs_push", "vcs_commit") \

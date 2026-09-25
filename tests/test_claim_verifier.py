@@ -1117,3 +1117,38 @@ def test_output_options_belong_to_the_programs_that_own_them():
 def test_a_parameter_length_expansion_is_not_a_comment():
     assert _push_level("n=${#files[@]}; git push origin main") == "exact"
     assert _push_level("echo ${#x} # ; git push origin main") == "none"
+
+
+# --- codex round 9 -------------------------------------------------------------
+
+
+@pytest.mark.parametrize("code, level", [
+    ("def later():\n    open('/tmp/report.md', 'w').write(s)", "none"),                    # never called
+    ("def main():\n    open('/tmp/report.md', 'w').write(s)\n\nmain()", "exact"),
+    ("def main():\n    open('/tmp/report.md', 'w').write(s)\n\nif __name__ == '__main__':\n    main()", "exact"),
+    ("def a():\n    b()\ndef b():\n    open('/tmp/report.md', 'w')\na()", "exact"),         # transitively
+    ("if False:\n    open('/tmp/report.md', 'w')", "none"),
+    ("if 0:\n    open('/tmp/report.md', 'w')\nelse:\n    print(1)", "none"),
+    ("if True:\n    open('/tmp/report.md', 'w')", "exact"),
+    ("class W:\n    def run(self):\n        open('/tmp/report.md', 'w')\n\nW().run()", "exact"),
+    ("class W:\n    def run(self):\n        open('/tmp/report.md', 'w')", "none"),
+    ("f = lambda: open('/tmp/report.md', 'w')", "none"),
+    ("for p in paths:\n    open('/tmp/report.md', 'w')", "exact"),
+    ("try:\n    open('/tmp/report.md', 'w')\nexcept OSError:\n    pass", "exact"),
+])
+def test_only_executed_python_counts(code, level):
+    result = _verify("It was saved to /tmp/report.md.", Evidence("run_python", {"code": code}))
+    assert result.claims[0].evidence == level
+
+
+def test_an_uncalled_push_is_not_a_push():
+    dormant = "if False:\n    subprocess.run('git push origin main', shell=True)"
+    assert not _verify("I pushed the fix.", Evidence("run_python", {"code": dormant})).verified
+    defined = "def push():\n    subprocess.run(['git', 'push'])"
+    assert not _verify("I pushed the fix.", Evidence("run_python", {"code": defined})).verified
+
+
+def test_a_failed_final_send_does_not_address_the_claim():
+    two = "sendmail bob@x.io < m; sendmail alice@x.io < m"
+    assert not _verify("Email sent to alice@x.io.", _real_bash(two, exit_code=1)).verified
+    assert _verify("Email sent to bob@x.io.", _real_bash(two, exit_code=1)).verified

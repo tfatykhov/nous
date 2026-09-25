@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/plans/2026-09-24-harness-autonomy-roadmap.md` §2 row P2.7 and §3 row 2c. Anchors from `main` `240c795`.
 
+**v2.13 (codex round 9):** the syntax-tree read covers only what a script *runs* — module-level statements, the functions and methods they call (transitively, by name), the taken side of a constant `if` (`if False:` never; `if __name__ == "__main__":` always) — so a call inside an uncalled `def`, a lambda or a dormant method is not evidence; a failed final send never supplies its recipient even when an earlier send exists.
+
 **v2.12 (codex round 8):** Python evidence is read from the syntax tree (`_python_facts`: the destinations written, whom it sends to, the shell strings it runs, deploy modules), so a comment or a printed string never counts; code that does not parse falls back to the regexes over comment-stripped text. When full turn evidence is supplied, the ledger's bounded copies of this turn's calls are not pooled (a copy past the 64-invocation cap reads as unreadable → plausible and would outvote the untruncated *none*). Output options are scoped to the programs they mean output for (`grep --file` reads patterns; `-o` for pandoc/gcc/curl/sort…, `-O` for wget, `--file` for tar). `${#x}` is not a comment.
 
 **v2.11 (codex round 7):** "I emailed the report to alice@x.io" captures its recipient (object-first form); curl addresses a mail only through `--mail-rcpt` (a `--data` payload, an attachment name or a header never name a recipient); a read command naming the path (`cat /tmp/report.md; touch other`) is not a save to it.
