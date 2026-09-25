@@ -1102,7 +1102,7 @@ class TestEvidenceFields:
         action = ledger.record("bash", {"command": cmd}, "Exit code: 0", "success")
         kept = action.evidence_args["command"]
         assert kept.startswith("git commit") and kept.endswith("git push origin main")
-        assert len(kept) <= EVIDENCE_ARG_CHARS + 5
+        assert len(kept) <= EVIDENCE_ARG_CHARS + 20  # plus the truncation marker
         assert action.key_args["command"] == cmd[:80]  # the prompt-facing summary is unchanged
 
     def test_unbounded_evidence_for_this_turn(self):

@@ -20,7 +20,7 @@ from nous.cognitive.bash_side_effect import (
     git_subcommand,
     program_name,
 )
-from nous.cognitive.execution_ledger import Invocation, bash_invocations
+from nous.cognitive.execution_ledger import EVIDENCE_TRUNCATED, Invocation, bash_invocations
 
 if TYPE_CHECKING:
     from nous.cognitive.execution_ledger import ExecutionLedger
@@ -242,37 +242,7 @@ def _blank(match: re.Match[str]) -> str:
 # The signal an argument must carry for a capable tool to count as evidence.
 # Every pattern is linear: this turn's evidence is untruncated and is scanned
 # on the event loop, so no unbounded class may be followed by a search.
-_PY_WRITES = re.compile(
-    r"open\([^\n]{0,300}?['\"][wax]b?\+?['\"]|\.write_(?:text|bytes|html|image)\("
-    r"|\.to_(?:csv|json|excel|parquet|html|markdown)\(|savefig\(|json\.dump\(|pickle\.dump\("
-    r"|yaml\.(?:safe_)?dump\(|\.save\(|shutil\.(?:copy\w*|move)\(")
-_PY_SENDS = re.compile(r"\bsmtplib\b|\bsendmail\b|api\.telegram\.org")
 _PY_ADDRESS = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")  # an address written out in code
-# Where Python code writes, when the destination is a string literal: the
-# path of open(..., 'w'), Path('...').write_*, .to_*/savefig/.save('...'),
-# shutil.copy(src, '...'). A computed path is a write to somewhere unknown.
-_PY_WRITE_DESTINATIONS = (
-    re.compile(r"open\(\s*['\"]([^'\"\n]+)['\"]\s*,\s*['\"][wax]"),
-    re.compile(r"Path\(\s*['\"]([^'\"\n]+)['\"]\s*\)\s*\.write_(?:text|bytes)\("),
-    re.compile(r"\.(?:to_(?:csv|json|excel|parquet|html|markdown)|savefig|save|write_(?:html|image))"
-               r"\(\s*['\"]([^'\"\n]+)['\"]"),
-    re.compile(r"shutil\.(?:copy\w*|move)\([^)\n]*,\s*['\"]([^'\"\n]+)['\"]"),
-)
-# Who Python code sends TO, when written out: sendmail(from, TO, ...) with a
-# string or list literal, msg['To'|'Cc'|'Bcc'] = '...', to_addrs=...
-_PY_RECIPIENT_FIELDS = (
-    re.compile(r"\.sendmail\(\s*[^,\n]+,\s*(\[[^\]\n]*\]|['\"][^'\"\n]+['\"])"),
-    re.compile(r"\[\s*['\"](?:To|Cc|Bcc)['\"]\s*\]\s*=\s*(['\"][^'\"\n]+['\"])"),
-    re.compile(r"\bto_addrs\s*=\s*(\[[^\]\n]*\]|['\"][^'\"\n]+['\"])"),
-)
-_PY_GIT = {
-    "vcs_push": re.compile(
-        r"\bgit\b[^|;&]{0,200}?\bpush\b(?![^|;&]{0,200}?(?:--dry-run|[\s'\"]-n\b))"),
-    "vcs_commit": re.compile(r"\bgit\b[^|;&]{0,200}?\bcommit\b(?![^|;&]{0,200}?--dry-run)"),
-}
-_PY_DEPLOY = re.compile(
-    r"\b(?:deploy\w*|docker|kubectl|helm|systemctl|terraform|ansible|rsync|scp|ssh|gcloud|aws|az)\b",
-    re.I)
 
 # Nous's own producers: a claim with no named path or recipient may be about
 # what they made ("I created the report" = a micro-app; "I sent you the
@@ -339,7 +309,6 @@ _PY_SHELL_CALLS = frozenset({
     "subprocess.Popen", "os.system", "os.popen", "run", "call", "check_call", "check_output", "Popen",
 })
 _PY_DEPLOY_MODULES = frozenset({"docker", "kubernetes", "boto3", "paramiko", "fabric", "ansible"})
-_PY_COMMENT = re.compile(r"(?m)#[^\n]*$")
 
 
 @dataclass
@@ -379,9 +348,6 @@ def _literals(node: ast.AST | None) -> list[str] | None:
     return None
 
 
-_DORMANT = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
-
-
 def _constant_truth(test: ast.AST) -> bool | None:
     """The value of an `if` test known without running: `False`, `0`,
     `True`, `__name__ == "__main__"` (a script); None when it is not."""
@@ -394,27 +360,53 @@ def _constant_truth(test: ast.AST) -> bool | None:
     return None
 
 
+_FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+
 def _executed(tree: ast.Module) -> list[ast.AST]:
-    """The nodes a script RUNS: module-level statements, the bodies of the
-    functions and methods they call (transitively, by name), and the taken
-    side of a constant `if`. A function merely defined, a lambda, a class
-    method never called, `if False:` -- never."""
-    defs: dict[str, list[ast.AST]] = {}
+    """The nodes a script RUNS: module-level statements (a class body's own
+    statements included), the bodies of the functions and methods they call
+    (transitively), and the taken side of a constant `if`/`while`. A call
+    resolves to ITS definition: a bare `save()` to the module's `save`, an
+    `Obj().save()` to Obj's method, an `x.save()` whose receiver is unknown
+    to every class's `save` -- never to the module function of that name.
+    A function merely defined, a lambda, a method never called, `if
+    False:` -- never."""
+    functions: dict[str, list[ast.AST]] = {}
+    methods: dict[str, dict[str, ast.AST]] = {}  # method name -> class name -> def
+    for node in tree.body:
+        if isinstance(node, _FUNCTIONS):
+            functions.setdefault(node.name, []).append(node)
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            defs.setdefault(node.name, []).append(node)
+        if isinstance(node, ast.ClassDef):
+            for item in node.body:
+                if isinstance(item, _FUNCTIONS):
+                    methods.setdefault(item.name, {})[node.name] = item
     executed: list[ast.AST] = []
-    called: set[str] = set()
+    called: set[tuple[str, str]] = set()
     queue: list[ast.AST] = list(tree.body)
     while queue:
         for sub in _walk_live(queue.pop()):
             executed.append(sub)
-            if isinstance(sub, ast.Call):
-                name = _dotted(sub.func).rsplit(".", 1)[-1]
-                if name in defs and name not in called:
-                    called.add(name)
-                    for fn in defs[name]:
-                        queue.extend(fn.body)  # type: ignore[attr-defined]
+            if not isinstance(sub, ast.Call):
+                continue
+            targets: list[tuple[str, ast.AST]] = []
+            if isinstance(sub.func, ast.Name):
+                targets = [(f"{sub.func.id}", fn) for fn in functions.get(sub.func.id, [])]
+            elif isinstance(sub.func, ast.Attribute):
+                by_class = methods.get(sub.func.attr, {})
+                receiver = sub.func.value
+                if isinstance(receiver, ast.Call):
+                    receiver = receiver.func  # Obj().save() -> Obj
+                owner = receiver.id if isinstance(receiver, ast.Name) else None
+                if owner in by_class:
+                    targets = [(f"{owner}.{sub.func.attr}", by_class[owner])]
+                elif owner is None or owner not in methods and owner != "self":
+                    targets = [(f"{c}.{sub.func.attr}", fn) for c, fn in by_class.items()]
+            for key, fn in targets:
+                if key not in called:
+                    called.add(key)
+                    queue.extend(fn.body)  # type: ignore[attr-defined]
     return executed
 
 
@@ -425,11 +417,11 @@ def _walk_live(node: ast.AST):
     stack = [node]
     while stack:
         current = stack.pop()
-        if isinstance(current, _DORMANT):
+        if isinstance(current, (*_FUNCTIONS, ast.Lambda)):
             continue
         yield current
         if isinstance(current, ast.ClassDef):
-            stack.extend(current.body)
+            stack.extend(s for s in current.body if not isinstance(s, _FUNCTIONS))
         elif isinstance(current, (ast.If, ast.While)):
             truth = _constant_truth(current.test)
             stack.append(current.test)
@@ -854,7 +846,9 @@ def _code_level(claim: Claim, code: str) -> str:
     """Evidence from Python source: a run_python call, `python -c`, or a heredoc."""
     facts = _python_facts(code)
     if facts is None:
-        return _code_level_unparsed(claim, _PY_COMMENT.sub("", code))
+        # a cut made by the ledger is unreadable (a cut string literal is not
+        # code); anything else that does not parse did not run
+        return "plausible" if EVIDENCE_TRUNCATED in code else "none"
     if claim.kind == "file_write":
         if not facts.writes and not facts.write_unknown:
             return "none"
@@ -874,32 +868,6 @@ def _code_level(claim: Claim, code: str) -> str:
     if claim.kind == "deploy" and facts.deploys:
         return "plausible"
     return "plausible" if facts.run_unknown else "none"  # argv not written out: could be anything
-
-
-def _code_level_unparsed(claim: Claim, code: str) -> str:
-    """The regexes, for code that does not parse (a snippet), over comment-stripped text."""
-    if claim.kind == "file_write":
-        if not _PY_WRITES.search(code):
-            return "none"
-        if claim.target:
-            written = [m.group(1) for p in _PY_WRITE_DESTINATIONS for m in p.finditer(code)]
-            if any(_same_path(claim.target, w) for w in written):
-                return "exact"
-            return "none" if written else "plausible"
-        return "plausible"
-    if claim.kind == "email":
-        if not _PY_SENDS.search(code):
-            return "none"
-        if claim.target:
-            recipients = {a for p in _PY_RECIPIENT_FIELDS for m in p.finditer(code)
-                          for a in _addresses(m.group(1))}
-            if claim.target in recipients:
-                return "plausible"
-            return "none" if recipients else "plausible"
-        return "plausible"
-    if claim.kind in ("vcs_push", "vcs_commit"):
-        return "plausible" if _PY_GIT[claim.kind].search(code) else "none"
-    return "plausible" if _PY_DEPLOY.search(code) else "none"
 
 
 def _addressed(target: str, runs: tuple, hits: list[int], opaque: bool) -> bool:

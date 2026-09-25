@@ -93,6 +93,10 @@ _KEY_ARGS: dict[str, list[str]] = {
 # In-memory only -- never persisted, never rendered into the prompt. Bounded
 # head AND tail, so a long commit message still shows the `git push` after it.
 EVIDENCE_ARG_CHARS = 2000
+_CODE_CHARS_FACTOR = 8  # a script is judged from its syntax tree: keep more of it
+# Marks a cut: what carries it cannot be parsed and is unreadable to the
+# verifier, never regex-scanned (a cut string literal is not code).
+EVIDENCE_TRUNCATED = "\n…[truncated]…\n"
 _EVIDENCE_ARGS: dict[str, tuple[str, ...]] = {
     "bash": ("command", "cmd"),
     "run_python": ("code",),
@@ -108,7 +112,7 @@ def _bounded(value: str, limit: int | None) -> str:
     if limit is None or len(value) <= limit:
         return value
     half = limit // 2
-    return f"{value[:half]}\n…\n{value[-half:]}"
+    return f"{value[:half]}{EVIDENCE_TRUNCATED}{value[-half:]}"
 
 
 def evidence_args(
@@ -116,7 +120,8 @@ def evidence_args(
 ) -> dict[str, str]:
     """The argument values a claim about this call can be checked against."""
     return {
-        key: _bounded(str(tool_input[key]), limit)
+        key: _bounded(str(tool_input[key]),
+                      limit * _CODE_CHARS_FACTOR if limit is not None and key == "code" else limit)
         for key in _EVIDENCE_ARGS.get(tool_name, ())
         if tool_input.get(key) is not None
     }
