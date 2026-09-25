@@ -8,12 +8,12 @@ from collections.abc import Collection
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import String, cast, func, or_, select, update
+from sqlalchemy import String, and_, cast, exists, func, or_, select, update
 from sqlalchemy import true as sa_true
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from nous.config import Settings
-from nous.dag.schemas import DAGCreateRequest, DAGNodeType
+from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, DAGCreateRequest, DAGNodeType
 from nous.storage.database import Database
 from nous.storage.models import DAGEdge, DAGNode, DynamicCheckModel, ExecutionDAG, Subtask
 
@@ -48,6 +48,60 @@ _TERMINAL_CHECK_NODE_STATUSES = ("completed", "failed", "cancelled", "skipped")
 _DAG_ID_PREFIX_RE = re.compile(r"^[0-9a-fA-F-]{1,36}$")
 
 
+_WORK_NODE_STATUSES = ("ready", "running", "awaiting_check")
+_RESOLVED_NODE_STATUSES = ("completed", "skipped")
+
+
+def parked_clause():
+    """Harness Phase 3 §3.11 — SQL predicate over ExecutionDAG: the DAG is PARKED.
+
+    It has an awaiting_input node and no work: no node ready / running /
+    awaiting_check, and no pending non-fix node whose predecessors (along
+    PREDECESSOR_EDGE_TYPES) are all completed or skipped — such a node is a
+    sibling about to launch, or one a frame cap or a full pool deferred
+    (_defer_node returns it to pending), and it is work. The ONE definition:
+    create() and count_active() both use it.
+    """
+    waiting = aliased(DAGNode)
+    busy = aliased(DAGNode)
+    pending = aliased(DAGNode)
+    pred = aliased(DAGNode)
+    # Correlation is explicit rather than left to auto-correlation: each outer
+    # EXISTS belongs to the enclosing SELECT over ExecutionDAG, and the inner
+    # one to the `pending` row of has_dispatchable.
+    has_waiting = (
+        exists()
+        .where(waiting.dag_id == ExecutionDAG.id, waiting.status == "awaiting_input")
+        .correlate(ExecutionDAG)
+    )
+    has_busy = (
+        exists()
+        .where(busy.dag_id == ExecutionDAG.id, busy.status.in_(_WORK_NODE_STATUSES))
+        .correlate(ExecutionDAG)
+    )
+    unresolved_pred = (
+        exists()
+        .where(
+            DAGEdge.to_node_id == pending.id,
+            DAGEdge.edge_type.in_(sorted(PREDECESSOR_EDGE_TYPES)),
+            pred.id == DAGEdge.from_node_id,
+            pred.status.not_in(_RESOLVED_NODE_STATUSES),
+        )
+        .correlate(pending)
+    )
+    has_dispatchable = (
+        exists()
+        .where(
+            pending.dag_id == ExecutionDAG.id,
+            pending.status == "pending",
+            pending.node_type != "fix",
+            ~unresolved_pred,
+        )
+        .correlate(ExecutionDAG)
+    )
+    return and_(has_waiting, ~has_busy, ~has_dispatchable)
+
+
 class DAGStore:
     """CRUD operations for DAG orchestration."""
 
@@ -63,18 +117,32 @@ class DAGStore:
         Raises ValueError if the active DAG limit is reached.
         """
         async with self._db.session() as session:
-            # Check active DAG limit
-            active_count = await session.scalar(
+            live = (
                 select(func.count())
                 .select_from(ExecutionDAG)
                 .where(ExecutionDAG.agent_id == self._agent_id)
-                .where(ExecutionDAG.status.in_(["pending", "running"]))
+                .where(ExecutionDAG.status.in_(sorted(LIVE_DAG_STATUSES)))
             )
+            parked = parked_clause()
+            # Harness Phase 3 §3.11: a parked DAG does no work, so it does not
+            # count against MAX_ACTIVE_DAGS.
+            active_count = await session.scalar(live.where(~parked))
             if active_count >= MAX_ACTIVE_DAGS:
                 raise ValueError(
                     f"Active DAG limit reached ({MAX_ACTIVE_DAGS}). "
                     "Cancel or complete existing DAGs first."
                 )
+            # ...but parked DAGs are bounded on their own, and only a request
+            # that could add one is refused, so a backlog of unanswered
+            # questions never blocks ordinary work.
+            if any(spec.type == DAGNodeType.approval for spec in request.nodes):
+                parked_count = await session.scalar(live.where(parked))
+                if parked_count >= self._settings.dag_max_parked_dags:
+                    raise ValueError(
+                        f"{parked_count} DAGs are waiting on your answers (limit "
+                        f"NOUS_DAG_MAX_PARKED_DAGS={self._settings.dag_max_parked_dags}); "
+                        "answer or cancel some first."
+                    )
 
             # Compute wave assignments
             waves = request.compute_waves()
@@ -354,13 +422,22 @@ class DAGStore:
             return list(result.scalars().all())
 
     async def count_active(self) -> int:
-        """Count pending + running DAGs."""
+        """Count live DAGs that are working — parked DAGs excluded (§3.11)."""
+        return await self._count_live(parked=False)
+
+    async def count_parked(self) -> int:
+        """Count live DAGs waiting only on an approval answer (§3.11)."""
+        return await self._count_live(parked=True)
+
+    async def _count_live(self, *, parked: bool) -> int:
+        clause = parked_clause()
         async with self._db.session() as session:
             count = await session.scalar(
                 select(func.count())
                 .select_from(ExecutionDAG)
                 .where(ExecutionDAG.agent_id == self._agent_id)
-                .where(ExecutionDAG.status.in_(["pending", "running"]))
+                .where(ExecutionDAG.status.in_(sorted(LIVE_DAG_STATUSES)))
+                .where(clause if parked else ~clause)
             )
             return count or 0
 
