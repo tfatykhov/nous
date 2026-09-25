@@ -31,6 +31,7 @@ import httpx
 from nous.api.execution_context import ExecutionContext
 from nous.api.idempotency import SUMMARY_SESSION_PREFIX
 from nous.config import Settings
+from nous.dag.approval import approval_line, is_answered_approval, stopped_at_approval
 from nous.events import Event
 from nous.storage.models import ExecutionDAG
 
@@ -170,6 +171,12 @@ class DAGResultDelivery:
         }.get(dag.status, dag.status)
 
         nodes = list(dag.nodes or [])
+        # Harness Phase 3 §3.12: one predicate decides the verb, the summary
+        # and the blocked text. Presentation only — the row and the bus event
+        # stay 'failed'.
+        stopped = dag.status == "failed" and stopped_at_approval(nodes)
+        if stopped:
+            verb = "stopped at an approval"
         tally: dict[str, int] = {}
         for node in nodes:
             tally[node.status] = tally.get(node.status, 0) + 1
@@ -190,12 +197,23 @@ class DAGResultDelivery:
         if dag.result_summary:
             lines.append(f"Summary: {dag.result_summary}")
 
+        approvals = [n for n in nodes if getattr(n, "node_type", None) == "approval"]
+        if approvals:
+            lines.append("")
+            lines.append("Approvals:")
+            for node in approvals[:_TEMPLATE_MAX_NODE_LINES]:
+                lines.append(f"  {approval_line(node)}")
+
         # Failures are what the user needs to see, so they lead. Successful
-        # nodes fill the remaining lines only if there is room.
-        failed = [n for n in nodes if n.status in ("failed", "blocked", "cancelled")]
+        # nodes fill the remaining lines only if there is room. An answered
+        # approval is an answer, not a problem (Harness Phase 3 §3.12).
+        failed = [
+            n for n in nodes
+            if n.status in ("failed", "blocked", "cancelled") and not is_answered_approval(n)
+        ]
         if failed:
             lines.append("")
-            lines.append("Problems:")
+            lines.append("Not run:" if stopped else "Problems:")
             for node in failed[:_TEMPLATE_MAX_NODE_LINES]:
                 detail = (node.error or "").strip().replace("\n", " ")
                 suffix = f" — {detail[:_NODE_ERROR_CHARS]}" if detail else ""

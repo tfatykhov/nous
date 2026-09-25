@@ -59,6 +59,7 @@ from uuid import UUID
 from nous.config import Settings
 from nous.dag._workspace import assert_inside_root, compute_workspace_path
 from nous.dag.approval import (
+    BLOCKED_BY_APPROVAL,
     DEADLINE_ACTOR,
     DEDUP_PREFIX,
     DEFER_LABEL,
@@ -75,6 +76,8 @@ from nous.dag.approval import (
     notify_text,
     option_by_id,
     risk_line,
+    stopped_at_approval,
+    stopped_summary,
 )
 from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, DAGNodeStatus
 from nous.dag.store import (
@@ -2238,10 +2241,14 @@ class DAGOrchestrator:
                     changed = True
 
         # Apply blocked status (predecessor-edge descendants) — conditional.
+        # Harness Phase 3 §3.12: decided once per DAG by the one predicate.
+        blocked_error = (
+            BLOCKED_BY_APPROVAL if stopped_at_approval(dag.nodes) else "Predecessor failed"
+        )
         for node_id in to_block:
             node = node_by_id[node_id]
             if await self._store.transition_node(
-                node.id, from_statuses=_NON_TERMINAL, status="blocked", error="Predecessor failed"
+                node.id, from_statuses=_NON_TERMINAL, status="blocked", error=blocked_error
             ):
                 node.status = "blocked"
 
@@ -3271,12 +3278,14 @@ class DAGOrchestrator:
                 dag.id, "completed", result_summary=summary
             )
         elif any(n.status == "failed" for n in dag.nodes):
-            failed_names = [n.name for n in dag.nodes if n.status == "failed"]
-            await self._store.update_dag_status(
-                dag.id,
-                "failed",
-                result_summary=f"Failed nodes: {', '.join(failed_names)}",
-            )
+            # Harness Phase 3 §3.12: a DAG whose only failures are answered
+            # approvals STOPPED — presentation only; the row stays 'failed'.
+            if stopped_at_approval(dag.nodes):
+                summary = stopped_summary(dag.nodes)
+            else:
+                failed_names = [n.name for n in dag.nodes if n.status == "failed"]
+                summary = f"Failed nodes: {', '.join(failed_names)}"
+            await self._store.update_dag_status(dag.id, "failed", result_summary=summary)
         elif any(n.status == "cancelled" for n in dag.nodes):
             await self._store.update_dag_status(
                 dag.id, "cancelled", result_summary="DAG was cancelled"

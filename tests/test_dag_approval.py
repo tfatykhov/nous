@@ -18,7 +18,7 @@ import pytest_asyncio
 from sqlalchemy import update as sa_update
 
 from nous.config import Settings
-from nous.dag.approval import approval_dedup_key
+from nous.dag.approval import BLOCKED_BY_APPROVAL, approval_dedup_key
 from nous.dag.orchestrator import DAGOrchestrator
 from nous.dag.schemas import DAGCreateRequest, DAGEdgeSpec, DAGNodeSpec, DAGNodeType
 from nous.dag.store import MAX_ACTIVE_DAGS, DAGStore
@@ -714,3 +714,13 @@ async def test_the_agent_may_re_ask_a_question_nobody_answered(store, subtask_mg
     assert node.status == "awaiting_input"
     assert [h["answer_source"] for h in node.answer_history] == ["deadline"]
     assert len(surfaces.pings) == 2
+
+
+async def test_a_stop_reads_as_a_stop(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag, _ = await _stopped(store, orch, source="companion")
+
+    assert (await store.get_dag(dag.id)).result_summary == (
+        "Stopped at approval 'approve': 'Don't send'; 1 step not run"
+    )
+    assert (await _node(store, dag.id, "send")).error == BLOCKED_BY_APPROVAL
