@@ -23,25 +23,48 @@ from tests.test_runner_authorization import (
 
 
 class _FakeStore:
-    def __init__(self, *, fail_open=False, fail_close=False):
+    def __init__(self, *, fail_open=False, fail_close=False, duplicate=None,
+                 duplicate_after_first=False, fail_claim=False):
         self.events: list[tuple] = []
         self.fail_open = fail_open
         self.fail_close = fail_close
         self.failed_id = uuid.uuid4()
         self.output_of: list[str | None] = []
+        # harness Phase 2b
+        self.keys: list[str | None] = []
+        self.closes: list[tuple[str, str | None]] = []
+        self.blocked_keys: list[str | None] = []
+        self.duplicate = duplicate
+        self.duplicate_after_first = duplicate_after_first
+        self.fail_claim = fail_claim
+        self.claimed: list = []
 
-    async def open_entry(self, *, context, tool_name, tool_input, turn):
+    async def open_entry(self, *, context, tool_name, tool_input, turn, idempotency_key=None):
+        from nous.cognitive.ledger_store import DuplicateSend
+
         self.events.append(("open", tool_name, context.kind))
+        self.keys.append(idempotency_key)
         if self.fail_open:
             raise LedgerWriteError(self.failed_id, RuntimeError("db down"))
+        if self.duplicate is not None and idempotency_key is not None and (
+                not self.duplicate_after_first or len(self.keys) > 1):
+            raise DuplicateSend(self.duplicate)
         return f"id-{tool_name}"
 
-    async def record_blocked(self, *, context, tool_name, tool_input, turn, refused_by):
-        self.events.append(("blocked", tool_name, refused_by))
+    async def claim_dispatch(self, entry_id):
+        self.claimed.append(entry_id)
+        return not self.fail_claim
 
-    async def close_entry(self, entry_id, *, status, result_summary, output_of=None):
+    async def record_blocked(self, *, context, tool_name, tool_input, turn, refused_by,
+                             idempotency_key=None):
+        self.events.append(("blocked", tool_name, refused_by))
+        self.blocked_keys.append(idempotency_key)
+
+    async def close_entry(self, entry_id, *, status, result_summary, output_of=None,
+                          external_ref=None, keyed=False):
         self.events.append(("close", entry_id, status))
         self.output_of.append(output_of)
+        self.closes.append((status, external_ref))
         if self.fail_close:
             raise LedgerWriteError(entry_id, RuntimeError("db down"))
 
@@ -330,3 +353,212 @@ async def test_stream_closed_mid_call_closes_unknown():
     await asyncio.wait_for(consume(), timeout=5)
     await gen.aclose()
     assert store.events[-1] == ("close", "id-write_file", "unknown")
+
+
+# ---------------------------------------------------------------------------
+# Harness Phase 2b: keyed sends
+# ---------------------------------------------------------------------------
+
+
+def _dag_ctx():
+    return ExecutionContext(kind="dag_node", dag_id=uuid.uuid4(), dag_node_name="send")
+
+
+def _held(status, subject="s"):
+    from datetime import UTC, datetime
+
+    from nous.cognitive.ledger_store import HeldKey, _digest
+
+    return HeldKey(uuid.uuid4(), status, "<m1@x>", datetime.now(UTC), datetime.now(UTC),
+                   {"subject_sha256": _digest(subject)[0]})
+
+
+def _email_call(subject="s"):
+    from tests.test_runner_authorization import _one_tool_call_then_done_with
+
+    return _one_tool_call_then_done_with("send_email", {"to": "a@x.io", "subject": subject, "body": "b"})
+
+
+@pytest.mark.asyncio
+async def test_a_dag_node_send_opens_with_its_key_and_claims_dispatch():
+    store = _FakeStore()
+    r, d = _runner(store, offered=("send_email",))
+    r._call_api = _email_call()
+    await _run_loop(r, is_background=True, context=_dag_ctx())
+    assert store.keys[0].startswith("dag:") and store.claimed == ["id-send_email"]
+    assert [c[0] for c in d.calls] == ["send_email"]
+    assert store.closes[-1][0] == "success"
+
+
+@pytest.mark.asyncio
+async def test_an_unkeyed_write_is_never_claimed():
+    store = _FakeStore()
+    r, d = _runner(store, offered=("write_file",))
+    r._call_api = _one_tool_call_then_done("write_file")
+    await _run_loop(r, is_background=True, context=_dag_ctx())
+    assert store.keys == [None] and store.claimed == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("subject", ["s", "a reworded subject"])
+async def test_a_key_held_from_an_earlier_turn_is_already_sent_whatever_the_wording(subject):
+    """A retry rewrites the subject; it must never be told how to send again."""
+    from nous.cognitive.execution_ledger import ExecutionLedger
+
+    store = _FakeStore(duplicate=_held("success", subject="s"))
+    r, d = _runner(store, offered=("send_email",))
+    r._call_api = _email_call(subject)
+    ledger = ExecutionLedger(session_id="s1")
+    _text, results, _usage, _thinking = await _run_loop(
+        r, is_background=True, ledger=ledger, context=_dag_ctx())
+    assert d.calls == []
+    assert ("blocked", "send_email", "duplicate") in store.events
+    assert store.blocked_keys[0] and store.blocked_keys[0].startswith("dag:")
+    assert [(a.tool_name, a.status) for a in ledger.actions] == [("send_email", "success")]  # 2c stays grounded
+    (res,) = results
+    assert res.error is None and "Already sent" in res.result and "<m1@x>" in res.result
+    assert "send_label" not in res.result
+
+
+@pytest.mark.asyncio
+async def test_a_second_send_in_the_same_turn_asks_for_a_label():
+    from nous.cognitive.execution_ledger import ExecutionLedger
+    from tests.test_runner_authorization import _two_tool_calls_then_done_with
+
+    store = _FakeStore(duplicate=_held("success"), duplicate_after_first=True)
+    r, d = _runner(store, offered=("send_email",))
+    r._call_api = _two_tool_calls_then_done_with("send_email", {"to": "a@x.io", "subject": "s", "body": "b"})
+    ledger = ExecutionLedger(session_id="s1")
+    _text, results, _usage, _thinking = await _run_loop(
+        r, is_background=True, ledger=ledger, context=_dag_ctx())
+    assert [c[0] for c in d.calls] == ["send_email"]                 # the first went out
+    assert ledger.actions[1].status == "blocked"
+    assert "send_label" in results[1].error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["pending", "unknown"])
+async def test_an_in_flight_or_unknown_holder_refuses_the_send(status):
+    store = _FakeStore(duplicate=_held(status))
+    r, d = _runner(store, offered=("send_email",))
+    r._call_api = _email_call()
+    _text, results, _usage, _thinking = await _run_loop(r, is_background=True, context=_dag_ctx())
+    assert d.calls == [] and status in results[0].error and "send_label" not in results[0].error
+
+
+@pytest.mark.asyncio
+async def test_a_keyed_send_fails_closed_on_a_ledger_outage():
+    store = _FakeStore(fail_open=True)
+    r, d = _runner(store, offered=("send_email",))
+    r._call_api = _email_call()
+    _text, results, _usage, _thinking = await _run_loop(r, is_background=True, context=_dag_ctx())
+    assert d.calls == [] and ("close", store.failed_id, "error") in store.events
+    assert "ledger is unavailable" in results[0].error
+
+
+@pytest.mark.asyncio
+async def test_a_failed_dispatch_claim_refuses_the_send():
+    store = _FakeStore(fail_claim=True)
+    r, d = _runner(store, offered=("send_email",))
+    r._call_api = _email_call()
+    await _run_loop(r, is_background=True, context=_dag_ctx())
+    assert d.calls == [] and ("close", "id-send_email", "error") in store.events
+
+
+@pytest.mark.asyncio
+async def test_an_unkeyed_call_still_fails_open():
+    store = _FakeStore(fail_open=True)
+    r, d = _runner(store, offered=("send_email",))
+    r._call_api = _email_call()
+    await _run_loop(r)  # interactive: unkeyed
+    assert [c[0] for c in d.calls] == ["send_email"] and store.keys == [None]
+
+
+@pytest.mark.asyncio
+async def test_the_provider_id_is_recorded_on_success():
+    store = _FakeStore()
+    r, d = _runner(store, offered=("send_email",))
+
+    async def sends(name, inp, *, outcome=None, **kw):
+        d.calls.append((name, kw.get("context"), False))
+        outcome.external_ref = "<m@x>"
+        return "Email sent", False
+
+    d.dispatch = sends
+    r._call_api = _email_call()
+    await _run_loop(r, is_background=True, context=_dag_ctx())
+    assert store.closes[-1] == ("success", "<m@x>")
+
+
+@pytest.mark.asyncio
+async def test_an_uncertain_send_closes_unknown_with_its_ref():
+    store = _FakeStore()
+    r, d = _runner(store, offered=("send_email",))
+
+    async def uncertain(name, inp, *, outcome=None, **kw):
+        outcome.external_ref, outcome.uncertain = "<m@x>", True
+        return "delivery uncertain", True
+
+    d.dispatch = uncertain
+    r._call_api = _email_call()
+    await _run_loop(r, is_background=True, context=_dag_ctx())
+    assert store.closes[-1] == ("unknown", "<m@x>")
+
+
+@pytest.mark.asyncio
+async def test_a_definite_failure_closes_error_and_frees_the_key():
+    store = _FakeStore()
+    r, d = _runner(store, offered=("send_email",))
+
+    async def refused(name, inp, *, outcome=None, **kw):
+        return "email send failed: SMTPDataError", True
+
+    d.dispatch = refused
+    r._call_api = _email_call()
+    await _run_loop(r, is_background=True, context=_dag_ctx())
+    assert store.closes[-1] == ("error", None)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_send_keeps_its_ref():
+    store = _FakeStore()
+    r, d = _runner(store, offered=("send_email",))
+    reached = asyncio.Event()
+
+    async def hang(name, inp, *, outcome=None, **kw):
+        outcome.external_ref = "<m@x>"
+        reached.set()
+        await asyncio.sleep(3600)
+
+    d.dispatch = hang
+    r._call_api = _email_call()
+    task = asyncio.create_task(_run_loop(r, is_background=True, context=_dag_ctx()))
+    await asyncio.wait_for(reached.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert store.closes[-1] == ("unknown", "<m@x>")
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_survives_a_slow_tool_resumed_across_tasks():
+    """rest.py resumes stream_chat with create_task(aiter.__anext__())."""
+    store = _FakeStore()
+
+    async def slow(name, inp, *, outcome=None, **kw):
+        await asyncio.sleep(0.05)
+        outcome.external_ref = "<m@x>"
+        return "done", False
+
+    runner = _stream_runner(store, slow)  # keepalive_interval=0.01 < 0.05
+    runner._settings.tool_timeout = 5
+    runner._call_api_stream = _one_streamed_call()
+    agen = runner.stream_chat("s1", "go").__aiter__()
+    events = []
+    while True:
+        try:
+            events.append(await asyncio.create_task(agen.__anext__()))
+        except StopAsyncIteration:
+            break
+    assert any(getattr(e, "type", None) == "keepalive" for e in events)
+    assert store.events[-1][0] == "close" and store.closes[-1] == ("success", "<m@x>")

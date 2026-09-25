@@ -34,8 +34,10 @@ from nous.api.attachments import (
 )
 from nous.api.cache_optimizer import CacheBreakDetector
 from nous.api.cache_optimizer import _hash as cache_hash
+from nous.api.call_outcome import CallOutcome
 from nous.api.compaction import ConversationCompactor
 from nous.api.execution_context import ExecutionContext, resolve_context
+from nous.api.idempotency import idempotency_key
 from nous.api.models import (  # noqa: F401 — re-exported for backward compat
     ApiResponse,
     Attachment,
@@ -54,7 +56,7 @@ from nous.cognitive.execution_ledger import (
     evidence_args,
 )
 from nous.cognitive.layer import CognitiveLayer
-from nous.cognitive.ledger_store import LedgerStore, LedgerWriteError
+from nous.cognitive.ledger_store import DuplicateSend, HeldKey, LedgerStore, LedgerWriteError
 from nous.cognitive.schemas import ToolResult, TurnContext, TurnResult
 from nous.config import Settings
 from nous.heart.heart import Heart
@@ -70,6 +72,26 @@ class Refusal:
 
     text: str
     code: str
+
+
+def _close_status(is_error: bool, uncertain: bool) -> str:
+    """The durable status of a dispatched call (harness Phase 2b): an error
+    whose effect may still have happened -- a tool timeout, a connection lost
+    mid-send, a partial recipient refusal -- is 'unknown', which holds an
+    idempotency key; only a definite failure is 'error', which frees it."""
+    if is_error and uncertain:
+        return "unknown"
+    return "error" if is_error else "success"
+
+
+@dataclass(frozen=True)
+class Suppressed:
+    """A keyed send the harness did not dispatch (harness Phase 2b): a repeat
+    of a send whose key is held, or a send refused because the ledger could
+    not rule a duplicate out. ``is_error`` False means "already sent"."""
+
+    text: str
+    is_error: bool
 
 MAX_CONVERSATIONS = 100
 MAX_HISTORY_MESSAGES = 20
@@ -354,14 +376,16 @@ class AgentRunner:
 
     async def _ledger_close(
         self, entry_id: Any, status: str, result_summary: str | None, output_of: str | None = None,
+        *, external_ref: str | None = None, keyed: bool = False,
     ) -> None:
         """Close a durable row, shielded: a cancellation arriving now must not
         leave the row 'pending'. The task is strongly referenced until done.
-        ``output_of`` names the tool when ``result_summary`` is its raw output."""
+        ``output_of`` names the tool when ``result_summary`` is its raw output;
+        ``external_ref`` is the provider's id (Phase 2b), on every close path."""
         if self._ledger_store is None or entry_id is None:
             return
         task = asyncio.ensure_future(
-            self._ledger_close_now(entry_id, status, result_summary, output_of)
+            self._ledger_close_now(entry_id, status, result_summary, output_of, external_ref, keyed)
         )
         self._ledger_pending_tasks.add(task)
         task.add_done_callback(self._ledger_pending_tasks.discard)
@@ -369,10 +393,12 @@ class AgentRunner:
 
     async def _ledger_close_now(
         self, entry_id: Any, status: str, result_summary: str | None, output_of: str | None,
+        external_ref: str | None = None, keyed: bool = False,
     ) -> None:
         try:
             await self._ledger_store.close_entry(
                 entry_id, status=status, result_summary=result_summary, output_of=output_of,
+                external_ref=external_ref, keyed=keyed,
             )
         except LedgerWriteError as exc:
             logger.warning(
@@ -381,20 +407,83 @@ class AgentRunner:
 
     async def _ledger_blocked(
         self, ctx: ExecutionContext, tool_name: str, tool_input: dict,
-        turn: int | None, refused_by: str,
+        turn: int | None, refused_by: str, *, idempotency_key: str | None = None,
     ) -> None:
         """A side-effecting call the harness refused. ``refused_by`` is a code
-        (``offered_set`` / ``action_gate`` / ``context_policy`` -- see
-        ``ledger_store.REFUSAL_CODES``), never the refusal's prose."""
+        (``offered_set`` / ``action_gate`` / ``context_policy`` / ``duplicate``
+        -- see ``ledger_store.REFUSAL_CODES``), never the refusal's prose."""
         if self._ledger_store is None or not self._dispatcher.is_registered(tool_name):
             return  # an unregistered name could not have run (see _ledger_open)
         try:
             await self._ledger_store.record_blocked(
                 context=ctx, tool_name=tool_name, tool_input=tool_input, turn=turn,
-                refused_by=refused_by,
+                refused_by=refused_by, idempotency_key=idempotency_key,
             )
         except LedgerWriteError as exc:
             logger.warning("Harness: execution ledger blocked-row write failed: %s", exc)
+
+    async def _open_for_call(
+        self, ctx: ExecutionContext, tool_name: str, tool_input: dict, turn: int | None,
+        keys_this_turn: set[str],
+    ) -> tuple[Any, str | None, Suppressed | None]:
+        """Open the durable row: ``(entry id, idempotency key, suppression)``.
+
+        Harness Phase 2b. An unkeyed call keeps Phase 1b exactly (fail open).
+        A keyed send is dispatched only after its row exists AND its dispatch
+        is claimed; a held key suppresses it; any ledger failure refuses it --
+        fail closed, since a duplicate could not be ruled out.
+        ``keys_this_turn`` holds the keys this loop invocation dispatched.
+        """
+        if self._ledger_store is None or not self._dispatcher.is_registered(tool_name):
+            return None, None, None
+        key = idempotency_key(
+            ctx, tool_name, tool_input, default_chat_id=self._settings.telegram_chat_id,
+        )
+        if key is None:
+            return await self._ledger_open(ctx, tool_name, tool_input, turn), None, None
+        try:
+            entry_id = await self._ledger_store.open_entry(
+                context=ctx, tool_name=tool_name, tool_input=tool_input, turn=turn,
+                idempotency_key=key,
+            )
+            if not await self._ledger_store.claim_dispatch(entry_id):
+                raise LedgerWriteError(entry_id, RuntimeError("dispatch claim lost"))
+        except DuplicateSend as dup:
+            await self._ledger_blocked(ctx, tool_name, tool_input, turn, "duplicate", idempotency_key=key)
+            return None, key, self._suppression(dup.held, same_turn=key in keys_this_turn)
+        except LedgerWriteError as exc:
+            logger.error("Harness: keyed %s refused, execution ledger unavailable: %s", tool_name, exc)
+            await self._ledger_close(exc.entry_id, "error", "ledger write failed; send refused", keyed=True)
+            return None, key, Suppressed(
+                "Send refused: the execution ledger is unavailable, so a duplicate cannot be "
+                "ruled out. Retry later.",
+                True,
+            )
+        keys_this_turn.add(key)
+        return entry_id, key, None
+
+    @staticmethod
+    def _suppression(held: HeldKey, *, same_turn: bool) -> Suppressed:
+        """Decided by ATTEMPT, never by wording: a retry rewrites the subject,
+        so a key held from an earlier turn (a relaunch, an F061 attempt, a
+        delivery retry) is simply "already sent" -- a reply that mentioned
+        labels there would teach the retry how to send a duplicate. Only a
+        second send of the same key within one turn is asked for a label."""
+        when = held.created_at.isoformat(timespec="seconds") if held.created_at else "an earlier time"
+        ref = f" (ref {held.external_ref})" if held.external_ref else ""
+        if held.status != "success":
+            return Suppressed(
+                f"A send to the same recipients from this task is {held.status} since {when}{ref}; "
+                "not sending again, to avoid a duplicate.",
+                True,
+            )
+        if not same_turn:
+            return Suppressed(f"Already sent at {when}{ref}; not sending it again.", False)
+        return Suppressed(
+            f"This turn already sent to the same recipients at {when}{ref}. If this is "
+            "intentionally a second message, call again with a distinct send_label.",
+            True,
+        )
 
     def _log_compaction_guard(
         self, event_type: str, data: dict, session_id: str
@@ -1403,6 +1492,7 @@ class AgentRunner:
             )
 
             all_tool_results: list[ToolResult] = []
+            keys_this_turn: set[str] = set()  # harness 2b: keys this invocation dispatched
             all_thinking_blocks: list[str] = []  # Accumulated across all tool loop iterations
             total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
             response_text = ""
@@ -1713,43 +1803,55 @@ class AgentRunner:
                         if not gated:
                             start_time = time.monotonic()
                             result_text, is_error = "", False
-                            # Harness Phase 1b: durable row before the side effect.
-                            entry_id = await self._ledger_open(
+                            # Harness Phase 1b: durable row before the side effect;
+                            # Phase 2b: a keyed send is claimed first, or suppressed.
+                            entry_id, send_key, suppressed = await self._open_for_call(
                                 _ctx, tc["name"], dispatch_input,
-                                ledger.current_turn if ledger else None,
+                                ledger.current_turn if ledger else None, keys_this_turn,
                             )
-                            timed_out = False
-                            try:
-                                async for item in self._dispatch_with_keepalive(
-                                    tc["name"], dispatch_input, session_id=session_id,
-                                    turn_number=_stream_turn_number,  # F091
-                                    context=_ctx,  # harness Phase 1a
-                                ):
-                                    if isinstance(item, StreamEvent):
-                                        yield item
-                                    else:
-                                        result_text, is_error, timed_out = item
-                            except (asyncio.CancelledError, GeneratorExit):
-                                # Client disconnect / stream closed mid-call: the
-                                # side effect may or may not have happened.
+                            if suppressed is not None:
+                                result_text, is_error = suppressed.text, suppressed.is_error
+                                if ledger:
+                                    ledger.record(
+                                        tc["name"], dispatch_input, result_text,
+                                        "blocked" if is_error else "success",
+                                    )
+                            else:
+                                outcome = CallOutcome()
+                                timed_out = False
+                                try:
+                                    async for item in self._dispatch_with_keepalive(
+                                        tc["name"], dispatch_input, session_id=session_id,
+                                        turn_number=_stream_turn_number,  # F091
+                                        context=_ctx,  # harness Phase 1a
+                                        outcome=outcome,  # harness Phase 2b
+                                    ):
+                                        if isinstance(item, StreamEvent):
+                                            yield item
+                                        else:
+                                            result_text, is_error, timed_out = item
+                                except (asyncio.CancelledError, GeneratorExit):
+                                    # Client disconnect / stream closed mid-call: the
+                                    # side effect may or may not have happened.
+                                    await self._ledger_close(
+                                        entry_id, "unknown", "stream closed mid-call — outcome unknown",
+                                        external_ref=outcome.external_ref, keyed=send_key is not None,
+                                    )
+                                    raise
                                 await self._ledger_close(
-                                    entry_id, "unknown", "stream closed mid-call — outcome unknown",
+                                    entry_id,
+                                    _close_status(is_error, timed_out or outcome.uncertain),
+                                    result_text,
+                                    output_of=tc["name"],
+                                    external_ref=outcome.external_ref, keyed=send_key is not None,
                                 )
-                                raise
-                            await self._ledger_close(
-                                entry_id,
-                                "unknown" if timed_out else ("error" if is_error else "success"),
-                                result_text,
-                                output_of=tc["name"],
-                            )
+                                # F026: Record in execution ledger (post-dispatch)
+                                if ledger:
+                                    ledger.record(
+                                        tc["name"], dispatch_input, result_text,
+                                        "error" if is_error else "success",
+                                    )
                             duration_ms = int((time.monotonic() - start_time) * 1000)
-
-                            # F026: Record in execution ledger (post-dispatch)
-                            if ledger:
-                                ledger.record(
-                                    tc["name"], dispatch_input, result_text,
-                                    "error" if is_error else "success",
-                                )
                         else:
                             duration_ms = 0
 
@@ -1959,6 +2061,7 @@ class AgentRunner:
         messages = self._format_messages(conversation)
 
         all_tool_results: list[ToolResult] = []
+        keys_this_turn: set[str] = set()  # harness 2b: keys this invocation dispatched
         all_thinking_blocks: list[str] = []  # Accumulated across iterations
         # F061: include tool_calls counter so the hardened executor's per-attempt
         # accumulator can populate heart.subtasks.tool_calls_made (was missing).
@@ -2215,6 +2318,7 @@ class AgentRunner:
 
                     if not gated:
                         start_time = time.monotonic()
+                        suppressed: Suppressed | None = None  # harness 2b: set by _open_for_call
                         # F061: per-call dispatch override for extra_tools.
                         # Routes submit_final_report (and any other per-run
                         # tool) to the executor passed by the subtask harness
@@ -2242,52 +2346,66 @@ class AgentRunner:
                             # the side effect. Opened before the activity
                             # heartbeat starts, so a cancellation during the
                             # insert cannot leave the heartbeat running.
-                            entry_id = await self._ledger_open(
+                            # Phase 2b: a keyed send is claimed first, or suppressed.
+                            entry_id, send_key, suppressed = await self._open_for_call(
                                 ctx, tool_name, tool_input,
-                                ledger.current_turn if ledger else None,
+                                ledger.current_turn if ledger else None, keys_this_turn,
                             )
-                            # @codex P1 on e8841b2: in-flight heartbeat
-                            # for tool calls that may exceed stall_timeout.
-                            # Cancels in the finally regardless of success.
-                            _hb = (
-                                self._start_activity_heartbeat(dag_node_id)
-                                if dag_node_id is not None else None
-                            )
-                            try:
-                                result_text, is_error = await self._dispatcher.dispatch(
-                                    tool_name, tool_input, session_id=session_id,
-                                    is_background=is_background,
-                                    turn_number=turn_number,  # F091 (caller-captured)
-                                    context=ctx,  # harness Phase 1a
+                            if suppressed is not None:
+                                result_text, is_error = suppressed.text, suppressed.is_error
+                            else:
+                                outcome = CallOutcome()
+                                keyed = send_key is not None
+                                # @codex P1 on e8841b2: in-flight heartbeat
+                                # for tool calls that may exceed stall_timeout.
+                                # Cancels in the finally regardless of success.
+                                _hb = (
+                                    self._start_activity_heartbeat(dag_node_id)
+                                    if dag_node_id is not None else None
                                 )
-                            except asyncio.CancelledError:
-                                # Subtask timeout / shutdown: the side effect may
-                                # or may not have happened (an orphaned SMTP
-                                # thread can still deliver) — record exactly
-                                # that, then re-raise.
+                                try:
+                                    result_text, is_error = await self._dispatcher.dispatch(
+                                        tool_name, tool_input, session_id=session_id,
+                                        is_background=is_background,
+                                        turn_number=turn_number,  # F091 (caller-captured)
+                                        context=ctx,  # harness Phase 1a
+                                        outcome=outcome,  # harness Phase 2b
+                                    )
+                                except asyncio.CancelledError:
+                                    # Subtask timeout / shutdown: the side effect may
+                                    # or may not have happened (an orphaned SMTP
+                                    # thread can still deliver) — record exactly
+                                    # that, then re-raise.
+                                    await self._ledger_close(
+                                        entry_id, "unknown", "cancelled mid-call — outcome unknown",
+                                        external_ref=outcome.external_ref, keyed=keyed,
+                                    )
+                                    raise
+                                except Exception as exc:
+                                    # The type only: an exception message can echo arguments.
+                                    await self._ledger_close(
+                                        entry_id, _close_status(True, outcome.uncertain),
+                                        f"{type(exc).__name__} raised during dispatch",
+                                        external_ref=outcome.external_ref, keyed=keyed,
+                                    )
+                                    raise
+                                finally:
+                                    await self._stop_activity_heartbeat(_hb)
                                 await self._ledger_close(
-                                    entry_id, "unknown", "cancelled mid-call — outcome unknown",
+                                    entry_id, _close_status(is_error, outcome.uncertain), result_text,
+                                    output_of=tool_name,
+                                    external_ref=outcome.external_ref, keyed=keyed,
                                 )
-                                raise
-                            except Exception as exc:
-                                # The type only: an exception message can echo arguments.
-                                await self._ledger_close(
-                                    entry_id, "error", f"{type(exc).__name__} raised during dispatch",
-                                )
-                                raise
-                            finally:
-                                await self._stop_activity_heartbeat(_hb)
-                            await self._ledger_close(
-                                entry_id, "error" if is_error else "success", result_text,
-                                output_of=tool_name,
-                            )
                         duration_ms = int((time.monotonic() - start_time) * 1000)
 
-                        # F026: Record in execution ledger (post-dispatch)
+                        # F026: Record in execution ledger (post-dispatch). A
+                        # suppressed repeat that was ALREADY SENT records success
+                        # (a 2c claim about the first send stays grounded); a
+                        # refused one records blocked.
                         if ledger:
                             ledger.record(
                                 tool_name, tool_input, result_text,
-                                "error" if is_error else "success",
+                                ("blocked" if suppressed is not None else "error") if is_error else "success",
                             )
                     else:
                         duration_ms = 0
@@ -3020,12 +3138,15 @@ Rules:
         self, name: str, args: dict[str, Any], session_id: str | None = None,
         turn_number: int | None = None,  # F091: caller-captured, see _tool_loop
         context: ExecutionContext | None = None,  # harness Phase 1a
+        outcome: CallOutcome | None = None,  # harness Phase 2b
     ) -> AsyncGenerator[StreamEvent | DispatchOutcome, None]:
         """Execute a tool, yielding keepalive events during long execution.
 
         Yields StreamEvent(type="keepalive") every `keepalive_interval` seconds
         while the tool is running. The final yield is a tuple (result_text, is_error).
         If the tool exceeds `tool_timeout`, it is cancelled and an error is returned.
+        ``outcome`` is handed to dispatch INSIDE its task -- this generator is
+        resumed in new tasks, so nothing context-bound may span a yield.
         """
         interval = self._settings.keepalive_interval
         timeout = self._settings.tool_timeout
@@ -3036,6 +3157,7 @@ Rules:
                     name, args, session_id=session_id,
                     turn_number=turn_number,  # F091 (caller-captured)
                     context=context,  # harness Phase 1a
+                    outcome=outcome,  # harness Phase 2b
                 ),
                 timeout=timeout,
             )

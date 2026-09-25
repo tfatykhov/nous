@@ -279,7 +279,7 @@ async def test_tool_loop_threads_is_background_to_all_iterations():
             }]
 
         async def dispatch(self, name, inp, session_id=None, is_background=False,
-                           turn_number=None, context=None):
+                           turn_number=None, context=None, outcome=None):
             return "tool result", False
 
     r.set_dispatcher(_Dispatcher())

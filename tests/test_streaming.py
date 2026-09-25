@@ -768,7 +768,7 @@ class TestStreamChat:
         events = [e async for e in runner.stream_chat("s1", "Search for test")]
 
         runner._dispatcher.dispatch.assert_called_once_with(
-            "web_search", {"query": "test"}, session_id="s1", turn_number=1, context=ANY,
+            "web_search", {"query": "test"}, session_id="s1", turn_number=1, context=ANY, outcome=ANY,
         )
         # Harness Phase 1a: the streaming path always runs as interactive.
         assert runner._dispatcher.dispatch.call_args.kwargs["context"].kind == "interactive"
@@ -802,7 +802,7 @@ class TestStreamChat:
         events = [e async for e in runner.stream_chat("s1", "Search")]
 
         runner._dispatcher.dispatch.assert_called_once_with(
-            "web_search", {}, session_id="s1", turn_number=1, context=ANY,
+            "web_search", {}, session_id="s1", turn_number=1, context=ANY, outcome=ANY,
         )
         # Harness Phase 1a: the streaming path always runs as interactive.
         assert runner._dispatcher.dispatch.call_args.kwargs["context"].kind == "interactive"
