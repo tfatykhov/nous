@@ -1,8 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { get } from 'svelte/store';
 import Harness from './Harness.svelte';
 import Ledger from './Ledger.svelte';
 import DagView from './DagView.svelte';
+import Overview from './Overview.svelte';
+import { attentionOverride, attentionPoll } from '../lib/stores/attention';
 
 // Render smoke for the harness dashboard views (spec 2026-09-25 v2 §5).
 // Fixtures carry ONLY shapes the backend stores (§4.5): hashed free text,
@@ -30,8 +33,32 @@ const EXECUTION = {
     key_args: { to: ['anna@northwind.example'] }, idempotency_key: 'dag:9f1c:send-report:9b41c0de2a7f53e1',
     dag_name: 'mail-weekly-report', node_name: 'send-report', result_summary: 'cancelled mid-call — outcome unknown',
   })],
+  attention_total: 1,
   rows: [row(), row({ tool_name: 'send_email', status: 'success', key_args: {}, idempotency_key: 'subtask:x:1a2b', tombstone: true })],
   next_before: null,
+};
+
+let execution: Record<string, unknown> = EXECUTION;
+let olderFails = false;
+let harnessPatterns: unknown[] | null = null;
+let attention: Record<string, unknown> = {};
+
+const STATUS = {
+  memory: { total_facts: 1, total_episodes: 1, total_chunks: 0, total_decisions: 1, total_procedures: 0,
+    active_censors: 0, active_conversations: 0 },
+  dashboard: {
+    deltas: { facts: { last_7_days: 0 }, episodes: { last_7_days: 0 }, decisions: { last_7_days: 0 },
+      procedures: { last_7_days: 0 } },
+    distributions: { fact_categories: {}, decision_outcomes: {}, edge_relations: {} },
+    timeseries: { facts: [], episodes: [], decisions: [] },
+    graph_density: null,
+  },
+  calibration: { brier_score: null },
+};
+const ATTENTION = {
+  questions_waiting: 0, next: null, sends_in_doubt: 0, latest_in_doubt: null, ledger_persisted: true,
+  harness: { events_persisted: true, offered_set: { mode: 'warn', warn_7d: 0, refused_7d: 0 },
+    context_policy: { mode: 'warn', warn_7d: 0, refused_7d: 0 } },
 };
 
 const HARNESS = (persisted = true) => ({
@@ -72,10 +99,14 @@ let harnessPersisted = true;
 
 function install() {
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-    const body = url.startsWith('/dashboard/execution') ? EXECUTION
-      : url.startsWith('/dashboard/harness') ? HARNESS(harnessPersisted)
+    // A 4xx is not retried by apiGet, so the failure surfaces at once.
+    if (olderFails && url.includes('before=')) return { ok: false, status: 400, json: async () => ({}) } as Response;
+    const harness = HARNESS(harnessPersisted);
+    const body = url.startsWith('/dashboard/execution') ? execution
+      : url.startsWith('/dashboard/harness') ? (harnessPatterns ? { ...harness, patterns: harnessPatterns } : harness)
       : url.startsWith('/dashboard/dag') ? DAG
-      : url.startsWith('/dashboard/attention') ? { questions_waiting: 1, sends_in_doubt: 1 }
+      : url.startsWith('/dashboard/attention') ? { ...ATTENTION, ...attention }
+      : url.startsWith('/status') ? STATUS
       : null;
     if (!body) throw new Error(`unexpected ${url}`);
     return { ok: true, status: 200, json: async () => body } as Response;
@@ -84,7 +115,11 @@ function install() {
 }
 
 describe('harness dashboard views', () => {
-  beforeEach(() => { harnessPersisted = true; install(); });
+  beforeEach(() => {
+    harnessPersisted = true; execution = EXECUTION; olderFails = false; harnessPatterns = null; attention = {};
+    attentionOverride.set({});
+    install();
+  });
   afterEach(() => { vi.unstubAllGlobals(); });
 
   it('Harness says what enforce would refuse, from the numbers', async () => {
@@ -113,6 +148,49 @@ describe('harness dashboard views', () => {
     expect(container.textContent).not.toContain('connection dropped');
     expect(container.textContent).toContain('command sha256:3f9a1234… (412 chars)');
     expect(container.textContent).toContain('details removed by retention');
+  });
+
+  it('Ledger counts every held send, not the page it shows, and tells the badge the same number', async () => {
+    execution = { ...EXECUTION, attention_total: 25 };
+    const { container } = render(Ledger);
+    expect(await screen.findByText('25 sends ended without confirming delivery')).toBeTruthy();
+    expect(container.textContent).toContain('Showing the newest 1 of 25');
+    expect(container.textContent).toContain('25 hold a send');
+    expect(get(attentionOverride).sends?.value).toBe(25);
+  });
+
+  it('Ledger says when older rows fail to load and does not stay paused', async () => {
+    execution = { ...EXECUTION, next_before: '2026-09-25T12:40:19+00:00,abc' };
+    olderFails = true;
+    render(Ledger);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Load older' }));
+    expect(await screen.findByText(/Could not load older rows/)).toBeTruthy();
+    expect(screen.queryByText(/Paused while you view older rows/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Load older' })).toBeTruthy(); // retry stays available
+  });
+
+  it('Harness explains a gap without inventing why the rule was silent', async () => {
+    const { container } = render(Harness);
+    expect(await screen.findByText(/^A gap is a day the record cannot vouch for/)).toBeTruthy();
+    expect(container.textContent).not.toContain('not recording yet');
+  });
+
+  it('Harness lists one pattern per mode — warn and enforce rows of one kind never collide', async () => {
+    const p = { rule: 'offered_set', context: 'subtask', tool: 'send_file', violation: 'not offered',
+      count: 1, last_seen: '2026-09-25T13:02:00+00:00', latest_session: 's', snippet: null };
+    harnessPatterns = [{ ...p, mode: 'enforce' }, { ...p, mode: 'warn' }];
+    render(Harness);
+    expect((await screen.findAllByText('send_file')).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('Overview never reports "no sends in doubt" or zero calls when the ledger is not recording', async () => {
+    attention = { ledger_persisted: false };
+    execution = { ...EXECUTION, modes: { ...MODES, persist: false } };
+    await attentionPoll.refresh();
+    const { container } = render(Overview);
+    await waitFor(() => expect(container.textContent).toContain('Ledger persistence is off'));
+    expect(container.textContent).not.toContain('no sends in doubt');
+    expect(container.textContent).not.toContain('Calls (24 h)');
   });
 
   it('DAG view lists the question, explains an undelivered card, and names a deadline stop neutrally', async () => {

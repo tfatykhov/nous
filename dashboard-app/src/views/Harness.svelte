@@ -185,7 +185,7 @@
       <div aria-hidden="true">
         <Chart type="line" data={chartData(d)} options={chartOptions} height="220px" />
       </div>
-      <p class="small muted">A gap means the rule was not recording yet that day.</p>
+      <p class="small muted">A gap is a day the record cannot vouch for. The offered-tool rule and the context policy write only when they flag a call, so before a rule's first flag a quiet day may be clean or may predate the rule; a rule that is off records nothing. Claim checks write every turn.</p>
       <table class="sr-only">
         <caption>Flags per day, per rule</caption>
         <thead><tr><th>Day</th><th>Offered-tool rule</th><th>Context policy</th><th>Claims without evidence</th></tr></thead>
@@ -193,9 +193,9 @@
           {#each d.daily as day (day.date)}
             <tr>
               <td>{day.date}</td>
-              <td>{day.offered_set ?? 'not measured'}</td>
-              <td>{day.context_policy ?? 'not measured'}</td>
-              <td>{day.claims_none ?? 'not measured'}</td>
+              <td>{day.offered_set ?? 'no record'}</td>
+              <td>{day.context_policy ?? 'no record'}</td>
+              <td>{day.claims_none ?? 'no record'}</td>
             </tr>
           {/each}
         </tbody>
@@ -212,7 +212,7 @@
       <p class="empty">{d.events_persisted ? 'Nothing flagged in this window.' : 'Not measured — event persistence is off.'}</p>
     {:else}
       <DataTable columns={patternCols} rows={d.patterns} mode="cards"
-        rowKey={(p: HarnessData['patterns'][number], i: number) => `${p.rule}-${p.context}-${p.tool}-${p.violation}-${i}`}
+        rowKey={(p: HarnessData['patterns'][number]) => JSON.stringify([p.rule, p.mode, p.context, p.tool, p.violation])}
         rowLabel={(p: HarnessData['patterns'][number]) => `${RULE_LABEL[p.rule]} ${p.violation}`}>
         {#snippet cell(p: HarnessData['patterns'][number], c: { key: string })}
           {#if c.key === 'rule'}

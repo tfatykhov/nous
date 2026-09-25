@@ -55,7 +55,7 @@ async def test_the_new_routes_answer_with_their_shapes(db, settings, brain, hear
     app = _app(db, settings, brain, heart)
 
     execution = (await _get(app, "/dashboard/execution")).json()
-    assert set(execution) == {"modes", "stats", "attention", "rows", "next_before"}
+    assert set(execution) == {"modes", "stats", "attention", "attention_total", "rows", "next_before"}
     assert execution["modes"]["offered_set"] == settings.tool_offered_set_enforcement_mode
     assert execution["modes"]["events_persisted"] == settings.f026_persistence_enabled
     harness = (await _get(app, "/dashboard/harness")).json()

@@ -3,18 +3,29 @@
 **Status:** v2 after 3-agent review (architecture, UX/mobile/a11y, devil's advocate — all APPROVE WITH REVISIONS; every finding below verified against code) · **Branch:** `feat/harness-dashboard-visibility` off `main` `fe429ab`
 **Design canvas:** https://claude.ai/artifact/BviXvTTbqRyfA7Cz1kkKYc
 
+## 0.0 v2.2 — the verify-by-execution fold
+
+A reviewer probed the implementation (b85e148) against snapshots; these amend everything below.
+
+- **A gap means the record cannot vouch for the day — and nothing more.** The offered-tool rule and the context policy write an event ONLY when they flag a call, so their first flag is not when they started: a quiet day before it may be clean or may predate the rule (prod is deploying the rules now, so a zero there would draw a week of "clean" days before the code existed — false evidence for enforce). Such a day stays `null`; the v2.1 caption "not recording yet" gave it a cause the data cannot show and is replaced. A rule that is `off` now also leaves its quiet days `null`; a day with a count keeps it whatever the mode is now. Claim checks write every turn, so their first event does mark when recording began. Modes are not stored per day: a rule switched off today blanks last week's quiet days too — the trade for never inventing a clean day. **Follow-up:** a startup `harness_modes` event (one row per boot, the four modes) would give every day its real mode and make both directions exact.
+- **One in-doubt count.** `harness_dashboard.in_doubt(session, agent_id, limit)` returns `(COUNT, newest limit rows)`; `/execution` returns it as `attention_total` beside the capped `attention`, and `/attention` uses the same call with `limit=1` (it loaded every held row before — tombstones are never deleted, so that only grew). The Ledger headline, the "N hold a send" note and the nav badge all show the total; the callout adds "Showing the newest 20 of N" when capped.
+- The Overview never reports "no sends in doubt" or zero calls when ledger persistence is off — it says the ledger is not recording.
+- `blocked` (DAG) moves `#dc2626` → `#f25c5c`: 3.55:1 on its own badge tint failed AA at 11px. `status.test.ts` now checks every status colour at 4.5:1 against its tint over `--surface`.
+- Ledger "Load older" reports a failed page ("Could not load older rows — try again.") and resumes polling when no older rows are on screen; loaded older rows stay put and the button retries.
+- Top-pattern rows are keyed by `(rule, mode, context, tool, violation)` — the backend's own grouping — not by index, so an open disclosure stays with its row when a poll re-sorts the list.
+
 ## 0.1 v2.1 — the v2 re-review fold (devil APPROVE; architecture and UX APPROVE WITH REVISIONS)
 
 Implemented as specified below; these points amend §3-§4 where they differ.
 
 - **Search** is an OR of per-column `lower(coalesce(col,'')) LIKE :q ESCAPE` — never a `||` concatenation (NULL on every unkeyed row, and matches across field boundaries).
-- **Unmeasured days are `null`, not 0**: before a series' first event (all-time MIN, one indexed query), before claim evidence levels began, and everywhere when persistence is off. The chart breaks its line there; each rule line has its own dash (the three colours are close in brightness).
+- **Unmeasured days are `null`, not 0** (refined in §0.0): a quiet day before a flag-only rule's first flag or while it is off, before claim evidence levels began, and everywhere when persistence is off. The chart breaks its line there; each rule line has its own dash (the three colours are close in brightness).
 - **Claims** gain `by_mode`; legacy vs new is decided by KEY PRESENCE of `claims` (post-2c events always carry it, even `[]`). Copy: "a correction was queued for the next turn" — one-turn sessions end before it is delivered.
 - **Zero-flag verdicts**: "No flags recorded yet" (no event ever) or "No flags in <window>" + "First flag <date>" — `first_event_at` is the first flag, not a deploy time.
 - **`stopped_by`** is `companion | deadline | mixed | null`, with `stops: [{node_name, answer_source, answer_label}]` so a decline on one branch is never hidden by a default on another.
 - **`reviewing`** lists the outputs under review, not an earlier approval's name (its answer still shows in `card_summary`).
 - **`held_by`** carries the holder's `session_id` and `turn`; the label is "Key currently held by" (a lookup made now cannot prove the refusal's cause).
-- **`sends`** = `idempotency.is_keyed_tool`. The Ledger's "N hold a send" note counts `attention` (window-independent, agrees with the badge).
+- **`sends`** = `idempotency.is_keyed_tool`. The Ledger's "N hold a send" note counts `attention_total` (window-independent, the badge's own COUNT — §0.0).
 - **Release statements append** with `concat_ws(' · ', result_summary, …)` (never erase the stored note); each Copy button sits under its own statement; outcomes read "retries are answered 'already sent'" / "the next retry sends". A tombstone with no provider ref reads "cannot be verified any more — record it either way".
 - **"Card being delivered…"** when an approval is parked but neither linked nor errored yet. The default line reads "the DAG stops here". A past deadline reads "the default applies on the next tick".
 - **`/dashboard/attention`** gains `refused_7d` per rule; the Overview harness line reads each rule's mode (enforce → refused, off → is off, warn → flagged, the calls still ran) over "last 7 days".
@@ -93,7 +104,7 @@ Query: `window` (default `24h`), `context` (a `context_kind` from `execution_con
 ```json
 {"modes": {"persist", "retention_days", "offered_set", "context_policy", "claim_verification", "action_gating", "events_persisted"},
  "stats": {"calls", "sends", "external", "repeat_sends_refused", "blocked", "unknown", "unknown_keyed", "errors", "pending"},
- "attention": [<row>…], "rows": [<row>…], "next_before": "<iso>,<id>"|null}
+ "attention": [<row>…], "attention_total": n, "rows": [<row>…], "next_before": "<iso>,<id>"|null}
 ```
 
 - `stats` follow `window` only (not the other filters). `sends` = `tool_name IN ('send_email','send_file')`; `external` = `side_effect_type IN ('external','irreversible')`; `repeat_sends_refused` = blocked with code `duplicate`; `blocked` = other refusal codes; `unknown_keyed` ⊂ `unknown`.
@@ -120,7 +131,7 @@ Query: `window` (default `7d`). One fetch of the three event types in the window
 
 - `mode` = current Settings; `by_mode` groups by each event's own `data.mode`.
 - Claims: `by_evidence` counts claims in events that carry `claims[]` (post-2c); `evidence_since` = the first such event; older events (`violation_count`, no `claims[]`) go to `legacy`. Claim patterns: `rule=claim`, `context=null` (the event has none), `violation = "no evidence"`, `snippet` = the stored ≤120-char text.
-- `daily` zero-filled across the window.
+- `daily` covers every day of the window; a day the record cannot vouch for is `null` (§0.0).
 
 ### 3.4 `GET /dashboard/attention` (new, cheap; nav badge + Overview)
 
@@ -180,6 +191,6 @@ Only stored shapes: bash/run_python/spawn text as `sha256… (N chars)`; exit co
 
 ## 6. Risks
 
-- `events` has no retention (118 MB on prod); the harness fetch is type-filtered and window-bounded; `/attention`'s harness counts are cached 60 s.
+- `events` has no retention (118 MB on prod); the harness fetch is type-filtered and window-bounded. Nothing is cached server-side: the only 60 s is the client's attention poll. `/harness` at `30d` decodes every claim event in the window (~2.4k today, 0.5–2 KB each) and its all-time `MIN(created_at) GROUP BY event_type` reads through `idx_events_type`; there is no `(event_type, created_at)` index. Fine at today's volume, grows with it. **Follow-up:** that index (a migration) or event retention, whichever comes first.
 - `held_reason` is per process / last tick — a hint.
 - The muted lift changes every muted label app-wide (intended).

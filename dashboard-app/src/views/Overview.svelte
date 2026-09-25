@@ -112,7 +112,11 @@
   {#if a}
     <section class="attention" aria-labelledby="attn-title">
       <h2 id="attn-title">Needs your attention</h2>
-      {#if a.questions_waiting === 0 && a.sends_in_doubt === 0}
+      {#if a.questions_waiting === 0 && a.sends_in_doubt === 0 && !a.ledger_persisted}
+        <p class="all-clear">
+          No questions waiting. Ledger persistence is off (NOUS_EXECUTION_LEDGER_PERSIST_ENABLED), so a send whose delivery went unconfirmed is not recorded — none can be shown here.
+        </p>
+      {:else if a.questions_waiting === 0 && a.sends_in_doubt === 0}
         <p class="all-clear">
           <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="#10b981" stroke-width="2" aria-hidden="true"><path d="M4 10.5l4 4 8-9"/></svg>
           Nothing needs you — no questions waiting and no sends in doubt.
@@ -197,7 +201,14 @@
       <h2>Execution integrity</h2>
       <a class="detail-link" href="#/execution">Open ledger &rsaquo;</a>
     </div>
-    {#if x}
+    {#if x && !x.modes.persist}
+      <p class="muted">Ledger persistence is off (NOUS_EXECUTION_LEDGER_PERSIST_ENABLED) — no calls are recorded and sends are not de-duplicated, so there are no numbers to show.</p>
+      <StatGrid stats={[
+        { label: 'Claim checks',          value: x.modes.claim_verification },
+        { label: 'Context policy',        value: x.modes.context_policy },
+        { label: 'Offered-tool rule',     value: x.modes.offered_set },
+      ]} />
+    {:else if x}
       <StatGrid stats={[
         { label: 'Calls (24 h)',          value: x.stats.calls },
         { label: 'Sends',                 value: x.stats.sends },

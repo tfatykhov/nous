@@ -669,6 +669,8 @@ export interface ExecutionData {
   modes: ExecutionModes;
   stats: ExecutionStats;
   attention: ExecutionRow[];
+  /** Every send in doubt — `attention` is only the newest page of them. */
+  attention_total: number;
   rows: ExecutionRow[];
   next_before: string | null;
 }

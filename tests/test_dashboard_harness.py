@@ -11,7 +11,7 @@ import pytest
 import pytest_asyncio
 
 from nous.api.dashboard_queries import get_dag_dashboard_data
-from nous.api.harness_dashboard import get_attention_data, get_execution_data, get_harness_data
+from nous.api.harness_dashboard import ATTENTION_CAP, get_attention_data, get_execution_data, get_harness_data
 from nous.config import Settings
 from nous.dag.schemas import DAGCreateRequest, DAGEdgeSpec, DAGNodeSpec, DAGNodeType
 from nous.dag.store import DAGStore
@@ -568,12 +568,45 @@ async def test_unmeasured_days_are_gaps_not_zeros(db, agent_id):
 
     offered = [d["offered_set"] for d in data["daily"]]
     claims = [d["claims_none"] for d in data["daily"]]
-    assert offered[:5] == [None] * 5 and offered[5] == 1 and offered[-1] == 0
-    assert claims[:6] == [None] * 6 and claims[-2:] == [0, 0]
-    assert all(d["context_policy"] is None for d in data["daily"])  # never recorded anything
+    # The two rules write an event only when they flag a call, so a quiet
+    # day before the first flag could be clean OR before the rule ran at all
+    # (a fresh deploy) — the record cannot tell, so it is a gap, never a zero
+    # that would read as a clean day. After the first flag, with the rule
+    # still on, a quiet day is a measured zero.
+    assert offered[:5] == [None] * 5 and offered[5] == 1 and offered[-2:] == [0, 0]
+    assert claims[:6] == [None] * 6 and claims[-2:] == [0, 0]  # claims write every turn
+    assert all(d["context_policy"] is None for d in data["daily"])  # never flagged: can't tell
     assert data["rules"]["claims"]["legacy"] == {"events": 1, "violations": 0 + 1}
     assert data["rules"]["claims"]["turns_with_claims"] == 0  # claims: [] is NOT legacy
     assert data["rules"]["claims"]["by_mode"] == {"enforce": 1}
+
+
+async def test_a_rule_that_is_off_draws_gaps_but_keeps_what_it_recorded(db, agent_id):
+    await _event(db, agent_id, "harness_context_policy_violation", _policy("bash", "subtask", "spawn"),
+                 ago=timedelta(days=3))
+    await _event(db, agent_id, "f026_claim_verification",
+                 {"claim_count": 0, "claims": [], "violation_count": 0, "mode": "enforce"}, ago=timedelta(days=6))
+
+    data = await _harness(db, agent_id, window="7d",
+                          modes={**RULE_MODES, "context_policy": "off", "claim_verification": "off"})
+
+    policy = [d["context_policy"] for d in data["daily"]]
+    assert policy[4] == 1  # recorded while it was on: a record, whatever the mode is now
+    assert [v for i, v in enumerate(policy) if i != 4] == [None] * 7  # off now: a zero would claim "clean"
+    assert [d["claims_none"] for d in data["daily"]] == [None] * 8
+
+
+async def test_the_in_doubt_count_is_every_held_send_not_the_page_shown(db, agent_id):
+    for i in range(ATTENTION_CAP + 5):
+        await _row(db, agent_id, tool="send_email", effect="external", status="unknown",
+                   key=f"dag:k:s:{i}", ago=timedelta(minutes=i + 1))
+
+    execution = await _exec(db, agent_id)
+    attention = await _attention(db, agent_id)
+
+    assert len(execution["attention"]) == ATTENTION_CAP
+    assert execution["attention_total"] == attention["sends_in_doubt"] == ATTENTION_CAP + 5
+    assert attention["latest_in_doubt"]["created_at"] == execution["attention"][0]["created_at"]
 
 
 async def test_nothing_recorded_means_no_numbers_at_all(db, agent_id):

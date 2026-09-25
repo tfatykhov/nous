@@ -109,6 +109,21 @@ def attention_filter(agent_id: str):
     return and_(L.agent_id == agent_id, L.status == "unknown", L.idempotency_key.is_not(None))
 
 
+async def in_doubt(session: AsyncSession, agent_id: str, limit: int) -> tuple[int, list[Any]]:
+    """Every send in doubt counted, and the newest ``limit`` of them — the
+    Ledger callout and the nav badge both show THIS count, so they agree
+    however many there are (a page length would cap at the page)."""
+    L = ExecutionLedgerEntry
+    total = (await session.execute(
+        select(func.count()).select_from(L).where(attention_filter(agent_id))
+    )).scalar_one()
+    rows = (await session.execute(
+        select(L).where(attention_filter(agent_id))
+        .order_by(L.created_at.desc(), L.id.desc()).limit(limit)
+    )).scalars().all()
+    return total, list(rows)
+
+
 async def _names(session: AsyncSession, agent_id: str, rows: list[Any]) -> tuple[dict, dict]:
     dag_ids = {r.dag_id for r in rows if r.dag_id}
     node_ids = {r.dag_node_id for r in rows if r.dag_node_id}
@@ -220,10 +235,7 @@ async def get_execution_data(
         .where(in_window)
     )).all()
 
-    attention = (await session.execute(
-        select(L).where(attention_filter(agent_id))
-        .order_by(L.created_at.desc(), L.id.desc()).limit(ATTENTION_CAP)
-    )).scalars().all()
+    attention_total, attention = await in_doubt(session, agent_id, ATTENTION_CAP)
 
     stmt = select(L).where(in_window)
     if context:
@@ -257,6 +269,7 @@ async def get_execution_data(
         "modes": modes,
         "stats": _stats(stat_rows),
         "attention": [_row_view(r, dags, nodes, holders) for r in attention],
+        "attention_total": attention_total,
         "rows": [_row_view(r, dags, nodes, holders) for r in page],
         "next_before": f"{_iso(last.created_at)},{last.id}" if has_more and last else None,
     }
@@ -280,12 +293,26 @@ def _claims_measured_from(evidence_since: datetime | None, first_claim: datetime
     return None if legacy["events"] else as_utc(first_claim)
 
 
-def _blank_unmeasured(days: dict[str, dict], persisted: bool, since: dict[str, datetime | None]) -> None:
-    """A day before a series was recorded is a gap (None), not a zero — a
-    chart must not draw "nothing happened" over "nothing was measured"."""
+def _blank_unmeasured(days: dict[str, dict], persisted: bool,
+                      series: dict[str, tuple[str | None, datetime | None]]) -> None:
+    """A quiet day the record cannot vouch for is a gap (None), never a zero —
+    a chart must not draw "nothing happened" over "nothing was measured".
+
+    ``series`` maps each key to (its rule's mode NOW, the first moment the
+    record shows it running). For the two flag-only rules that moment is the
+    first flag: they write nothing on a clean day, so a quiet day before it
+    may be clean or may predate the rule (a fresh deploy) — it cannot be
+    told apart, so it stays a gap. The claim check writes every turn, so its
+    first event is when recording began. A rule that is off now leaves its
+    quiet days blank; a day with a count keeps it whatever the mode is now.
+    Modes are not stored per day, so a rule switched off today blanks last
+    week's quiet days too — the trade for never inventing a clean day.
+    """
     for day in days.values():
-        for key, start in since.items():
-            if not persisted or start is None or day["date"] < start.date().isoformat():
+        for key, (mode, start) in series.items():
+            quiet = not day[key]
+            before = start is None or day["date"] < start.date().isoformat()
+            if not persisted or (quiet and (before or mode == "off")):
                 day[key] = None
 
 
@@ -395,9 +422,10 @@ async def get_harness_data(
 
     patterns = sorted(groups.values(), key=lambda g: (-g["count"], g["last_seen"] or ""))
     _blank_unmeasured(days, events_persisted, {
-        "offered_set": as_utc(first.get(OFFERED)),
-        "context_policy": as_utc(first.get(POLICY)),
-        "claims_none": _claims_measured_from(evidence_since, first.get(CLAIMS), legacy),
+        "offered_set": (modes.get("offered_set"), as_utc(first.get(OFFERED))),
+        "context_policy": (modes.get("context_policy"), as_utc(first.get(POLICY))),
+        "claims_none": (modes.get("claim_verification"),
+                        _claims_measured_from(evidence_since, first.get(CLAIMS), legacy)),
     })
     return {
         "window": window,
@@ -472,11 +500,8 @@ async def get_attention_data(
     questions.sort(key=lambda r: (r.answer_deadline is None, as_utc(r.answer_deadline) or datetime.max))
     nxt = questions[0] if questions else None
 
-    L = ExecutionLedgerEntry
-    in_doubt = (await session.execute(
-        select(L).where(attention_filter(agent_id)).order_by(L.created_at.desc(), L.id.desc())
-    )).scalars().all()
-    latest = in_doubt[0] if in_doubt else None
+    sends_in_doubt, newest = await in_doubt(session, agent_id, 1)
+    latest = newest[0] if newest else None
     dags, _ = await _names(session, agent_id, [latest] if latest else [])
 
     since = datetime.now(UTC) - timedelta(days=7)
@@ -498,7 +523,7 @@ async def get_attention_data(
             "dag_name": nxt.dag_name, "node_name": nxt.name, "deadline": _iso(nxt.answer_deadline),
             "default_label": label_of(nxt.approval_spec or {}, (nxt.approval_spec or {}).get("default_option")),
         } if nxt else None,
-        "sends_in_doubt": len(in_doubt),
+        "sends_in_doubt": sends_in_doubt,
         "latest_in_doubt": {
             "tool_name": latest.tool_name, "recipients": _recipients(latest.key_args),
             "created_at": _iso(latest.created_at), "dag_name": dags.get(latest.dag_id),

@@ -45,15 +45,17 @@
     if (first) { first = false; return; }
     older = [];
     olderCursor = null;
+    olderError = '';
     paused = false;
     store.start();
     void store.refresh();
   });
 
-  // Keep the nav badge in step with what this tab shows.
+  // Keep the nav badge in step with what this tab shows: the full count,
+  // the same COUNT /dashboard/attention returns — never the page length.
   $effect(() => {
     const d = $store.data;
-    if (d) pushCounts({ sends: d.attention.length });
+    if (d) pushCounts({ sends: d.attention_total });
   });
 
   // "Load older" pauses polling, so rows never shift under the reader.
@@ -61,23 +63,35 @@
   let olderCursor = $state<string | null>(null);
   let paused = $state(false);
   let loadingOlder = $state(false);
+  let olderError = $state('');
 
   async function loadOlder() {
     const cursor = olderCursor ?? $store.data?.next_before ?? null;
     if (!cursor) return;
     loadingOlder = true;
+    olderError = '';
     paused = true;
     store.stop();
     try {
       const page = await apiGet<ExecutionData>(query(cursor));
       older = [...older, ...page.rows];
       olderCursor = page.next_before;
+    } catch {
+      // Say so, and never leave the tab frozen: with nothing older on screen
+      // there is nothing to hold still for, so polling resumes; with older
+      // rows loaded they stay put and the button retries the same page.
+      olderError = 'Could not load older rows — try again.';
+      if (older.length === 0) {
+        paused = false;
+        store.start();
+      }
     } finally {
       loadingOlder = false;
     }
   }
 
   function backToLatest() {
+    olderError = '';
     older = [];
     olderCursor = null;
     paused = false;
@@ -126,9 +140,9 @@
       { label: 'Sends', value: s.sends, note: 'send_email + send_file' },
       { label: 'Repeat sends refused', value: s.repeat_sends_refused, note: 'the key was already held' },
       { label: 'Blocked by a rule', value: s.blocked, note: 'offered-tool · policy · gate' },
-      // "hold a send" counts the callout's rows (window-independent), so it
-      // always agrees with the nav badge — a hold older than the window too.
-      { label: 'Unknown outcome', value: s.unknown, note: `${d.attention.length} hold${d.attention.length === 1 ? 's' : ''} a send`, tone: s.unknown ? 'unknown' as const : undefined },
+      // "hold a send" is every held send (window-independent) — the count
+      // the nav badge shows, including a hold older than the window.
+      { label: 'Unknown outcome', value: s.unknown, note: `${d.attention_total} hold${d.attention_total === 1 ? 's' : ''} a send`, tone: s.unknown ? 'unknown' as const : undefined },
       { label: 'Errors', value: s.errors, note: 'failed calls', tone: s.errors ? 'error' as const : undefined },
     ];
   }
@@ -174,7 +188,7 @@
   {#if d.attention.length > 0}
     <section class="attention" aria-labelledby="attn-title">
       <h2 id="attn-title">
-        {d.attention.length} send{d.attention.length === 1 ? '' : 's'} ended without confirming delivery
+        {d.attention_total} send{d.attention_total === 1 ? '' : 's'} ended without confirming delivery
       </h2>
       <p class="attn-lede">
         While the outcome is <strong class="unknown-text">unknown</strong>, a retry of the send is refused. Check whether
@@ -210,6 +224,9 @@ WHERE id = '{r.id}' AND status = 'unknown';</code>
           </div>
         </div>
       {/each}
+      {#if d.attention_total > d.attention.length}
+        <p class="note">Showing the newest {d.attention.length} of {d.attention_total} — the rest appear here as these are settled.</p>
+      {/if}
       <p class="sr-only" aria-live="polite">{lastCopied ? copied : ''}</p>
     </section>
   {/if}
@@ -305,6 +322,7 @@ WHERE id = '{r.id}' AND status = 'unknown';</code>
       {:else}
         <span class="small muted">Newest first · refreshes every 15 s</span>
       {/if}
+      {#if olderError}<span class="small older-error" role="alert">{olderError}</span>{/if}
       {#if canLoadOlder}
         <button type="button" class="btn" onclick={loadOlder} disabled={loadingOlder}>{loadingOlder ? 'Loading…' : 'Load older'}</button>
       {/if}
@@ -385,6 +403,7 @@ WHERE id = '{r.id}' AND status = 'unknown';</code>
   .muted { color: var(--muted); }
   .state-msg { margin: 0.5rem 0 1rem; color: var(--muted); font-size: 0.875rem; }
   .state-msg.error { color: var(--red); }
+  .older-error { color: var(--red); }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
   @media (max-width: 768px) {

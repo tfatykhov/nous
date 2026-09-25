@@ -29,7 +29,9 @@ const DAG: Record<string, string> = {
   awaiting_input: WAITING,
   completed: '#4ade80',
   failed: '#f87171',
-  blocked: '#dc2626',
+  // #dc2626 was 3.55:1 on its own badge tint (fails AA at 11px); this stays
+  // a deeper red than failed and clears 4.5:1 (status.test.ts checks all).
+  blocked: '#f25c5c',
   cancelled: '#8a8a9a',
   skipped: '#94a3b8',
   partial: '#fb923c',
