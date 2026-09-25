@@ -985,6 +985,12 @@ class Settings(BaseSettings):
     # are prompted to "notify via Telegram" and only succeed because the hole
     # exists; flip to `enforce` once the events show what would break.
     tool_offered_set_enforcement_mode: Literal["off", "warn", "enforce"] = "warn"
+    # Harness Phase 2a: what happens when a call breaks the per-context policy
+    # in nous/api/tool_policy.py (heartbeat triage sending email, a DAG node
+    # spawning, a callback re-enabling its own check, a check using a tool it
+    # did not declare). off = no check; warn = run it, log WARNING, persist
+    # harness_context_policy_violation; enforce = refuse with a blocked row.
+    tool_context_policy_mode: Literal["off", "warn", "enforce"] = "warn"
     # Salvage tool args the model leaked as XML <parameter> tags inside a
     # string arg (dispatch-level repair; see ToolDispatcher.dispatch).
     tool_arg_salvage_enabled: bool = Field(

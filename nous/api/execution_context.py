@@ -57,6 +57,10 @@ class ExecutionContext:
     dag_node_name: str | None = None
     schedule_id: str | None = None
     surface_id: str | None = None
+    # Tools a heartbeat check or callback declared (Phase 2a policy). None:
+    # nothing declared -- an empty list is the DB default and means "all".
+    declared_tools: tuple[str, ...] | None = None
+    check_name: str | None = None  # the check a callback belongs to
 
     def __post_init__(self) -> None:
         if self.kind not in CONTEXT_KINDS:

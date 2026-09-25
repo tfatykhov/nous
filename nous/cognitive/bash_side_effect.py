@@ -30,6 +30,8 @@ from __future__ import annotations
 import re
 from contextvars import ContextVar
 
+from nous.api.tool_classes import code_reaches_network  # a leaf module: no cycle
+
 # Commands that only read, unless a mode checked in _READ_COMMAND_RULES says
 # otherwise.
 READ_COMMANDS: frozenset[str] = frozenset(
@@ -757,12 +759,15 @@ def _classify(command: str) -> str:
     if not command or not command.strip():
         return "write"
     _spend(len(command) // 32 + 1)
+    verdict = "write" if _OPAQUE.search(command) else "none"
+    # a heredoc body is one `\n`-prefixed argument of its command (code an
+    # interpreter reads), never commands of its own
+    command, bodies = _split_heredocs(command)
     tokens = _lex(command)
     if tokens is None:  # unbalanced quote
         return "write"
     _spend(len(tokens))
 
-    verdict = "write" if _OPAQUE.search(command) else "none"
     words: list[str] = []
     expect: str | None = None  # a redirect waiting for its target word
     for tok, is_operator in tokens:
@@ -773,6 +778,8 @@ def _classify(command: str) -> str:
                 verdict = _worst(verdict, "write")
             elif expect == "dup" and not (tok.isdigit() or tok == "-" or tok in _HARMLESS_SINKS):
                 verdict = _worst(verdict, "write")
+            elif expect == "string":  # `<<< WORD`: the word is the command's stdin
+                words.append("\n" + tok)
             elif expect is None:
                 words.append(tok)
             expect = None
@@ -784,8 +791,12 @@ def _classify(command: str) -> str:
                 expect = "out"
             elif op == ">&":
                 expect = "dup"
+            elif op == "<<<":
+                expect = "string"
             elif op in _INPUT_REDIRECTS:
                 expect = "in"
+                if op == "<<" and bodies:
+                    words.append("\n" + bodies.pop(0))
             else:  # a command separator
                 verdict = _worst(verdict, _classify_simple(words))
                 words = []
@@ -861,6 +872,39 @@ def _program(word: str) -> str:
     return name[:-4].lower() if name.lower().endswith(".exe") else name
 
 
+_PYTHON = re.compile(r"python(?:\d+(?:\.\d+)*)?")  # python, python3, python3.12
+
+
+def _python_c_code(args: list[str]) -> str | None:
+    """The code a python invocation runs when it is right there: `-c CODE`,
+    `-cCODE`, `-Ic CODE` (a short-flag bundle), or a heredoc / here-string
+    fed on stdin (`python3 - <<'PY'`, a `\\n`-prefixed argument). None for a
+    script file, a module (`-m`), or stdin from a pipe."""
+    body = next((a[1:] for a in args if a.startswith("\n")), None)
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("\n"):
+            i += 1
+            continue
+        if a == "-":
+            return body
+        if a == "-m":
+            return None
+        if a.startswith("-") and not a.startswith("--"):
+            flags = a[1:]
+            if "c" in flags:
+                after = flags[flags.index("c") + 1:]
+                return after if after else (args[i + 1] if i + 1 < len(args) else "")
+            i += 1
+            continue
+        if a.startswith("--"):
+            i += 1
+            continue
+        return None  # a script file: python's options come before it
+    return body
+
+
 def _classify_program(cmd: str, args: list[str]) -> str:
     if cmd == "git":
         return _classify_git(args)
@@ -873,6 +917,10 @@ def _classify_program(cmd: str, args: list[str]) -> str:
                      for a in args)
         positional = [a for a in args if not a.startswith("-")]
         return "external" if remote or positional[:1] in (["push"], ["pull"], ["login"]) else "write"
+    if _PYTHON.fullmatch(cmd) and (code := _python_c_code(args)) is not None:
+        # harness Phase 2a: the code is right there -- a script that reaches
+        # the network is external, not a local write
+        return "external" if code_reaches_network(code) else "write"
     if cmd in _EXTERNAL_COMMANDS:
         return "external"
     if cmd not in READ_COMMANDS:
