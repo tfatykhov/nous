@@ -629,6 +629,9 @@ class HeartbeatRunner:
 
         tool_filter = check.on_complete_tools if check.on_complete_tools else None
         heartbeat_model = self._settings.heartbeat_model or self._settings.background_model
+        # Harness Phase 2b: one run id across the retry below -- the retry gets a
+        # fresh session but the same idempotency scope, so it cannot re-send.
+        run_id = uuid4().hex
 
         for attempt in range(2):
             if not self._has_budget():
@@ -653,7 +656,7 @@ class HeartbeatRunner:
                     context=ExecutionContext(
                         kind="heartbeat_callback", session_id=session_id,
                         declared_tools=tuple(check.on_complete_tools or ()) or None,
-                        check_name=check.name,
+                        check_name=check.name, run_id=run_id,
                     ),
                 )
                 tokens = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)

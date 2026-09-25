@@ -222,6 +222,11 @@ class TestAgentSummaryLeg:
         # Harness Phase 1a: the summary turn names its context and its DAG.
         ctx = runner.run_turn.await_args.kwargs["context"]
         assert ctx.kind == "dag_summary" and ctx.dag_id == dag.id
+        # Harness Phase 2b: the full DAG id and the delivery generation scope the
+        # summary's sends -- a re-announcement (retry_node) is a new generation.
+        expected = f"dag-summary-{dag.id.hex}-g{dag.delivery_generation}"
+        assert runner.run_turn.await_args.kwargs["session_id"] == expected
+        assert ctx.session_id == expected
 
     @pytest.mark.asyncio
     async def test_agent_summary_timeout_falls_back_to_template(self, store):
