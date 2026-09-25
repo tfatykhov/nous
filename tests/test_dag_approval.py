@@ -911,3 +911,25 @@ async def test_the_budget_path_decides_from_the_rows_it_lost_to(db, store, subta
     await orch._advance_dag(stale)
 
     assert (await store.get_dag(dag.id)).status == "partial"
+
+
+async def test_an_earlier_answer_is_passed_on_as_an_answer_not_approved_input(
+    store, subtask_mgr, surfaces
+):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag = await store.create(_chained_request())
+    await orch.start_dag(dag.id)
+    await store.update_node((await _node(store, dag.id, "draft")).id, status="completed", result="Dear Bob, ...")
+    await orch._advance_dag(await store.get_dag(dag.id))
+    first = await _node(store, dag.id, "approve")
+    await orch.answer_node(first.id, "send", source="companion", actor=None, surface_id=first.surface_id)
+    await orch._advance_dag(await store.get_dag(dag.id))
+    second = await _node(store, dag.id, "approve2")
+    await orch.answer_node(second.id, "send", source="companion", actor=None, surface_id=second.surface_id)
+    subtask_mgr.create.reset_mock()
+
+    await orch._advance_dag(await store.get_dag(dag.id))
+
+    task = subtask_mgr.create.call_args.kwargs["task"]
+    assert "[Approved input from 'approve'" not in task
+    assert "[Earlier answer at 'approve']: Answered in the companion: 'Send it' (send)" in task

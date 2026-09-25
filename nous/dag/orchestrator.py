@@ -3288,6 +3288,7 @@ class DAGOrchestrator:
         # Build context from predecessor results
         parts: list[str] = []
         node_by_id = {str(n.id): n for n in dag.nodes}
+        node_by_name = {n.name: n for n in dag.nodes}  # names are unique per DAG
         for pred_id in context_preds:
             pred = node_by_id.get(pred_id)
             if pred is None:
@@ -3301,7 +3302,12 @@ class DAGOrchestrator:
                 inputs = self._context_results(pred, dag)
                 shown = card_shown_chars(pred.instructions or "", inputs)
                 for (inner_name, inner_result), n in zip(inputs, shown, strict=True):
-                    if n < len(inner_result):
+                    inner = node_by_name.get(inner_name)
+                    if inner is not None and inner.node_type == "approval":
+                        # An earlier approval's answer, walked through a chain:
+                        # an answer, not something this approval approved.
+                        label = f"[Earlier answer at '{inner_name}']"
+                    elif n < len(inner_result):
                         label = (
                             f"[Input from '{inner_name}' — the card at '{pred.name}' "
                             f"showed only the first {n} of {len(inner_result)} chars]"
