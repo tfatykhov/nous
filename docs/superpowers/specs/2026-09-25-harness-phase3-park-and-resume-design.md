@@ -493,8 +493,14 @@ puts up to 5 + 20 DAGs to work together; only 5 subtasks may be pending agent-wi
 and an approved node fails after 30 deferrals (about 15 minutes). So each tick, oldest DAG first,
 a DAG that is not already working (no node `ready`, `running` or `awaiting_check`) may dispatch
 new nodes only while fewer than `MAX_ACTIVE_DAGS` DAGs are working; otherwise its ready nodes stay
-`pending` this tick and no deferral is counted. Without approval nodes the gate never binds —
-creation already keeps working DAGs at 5 or fewer.
+`pending` this tick and no deferral is counted.
+
+This is a structural change to `tick()`: a pre-pass over the loaded DAGs counts the working ones
+before the per-DAG `_advance_dag` loop, and `_advance_dag` receives whether this DAG may dispatch.
+The pre-pass runs **only when some loaded DAG contains an approval node** — otherwise it is skipped
+entirely and every DAG dispatches exactly as today, so the change is inert on a deployment that has
+never created one (prod, while the flag is off), without depending on the flag: parked DAGs left
+from before the flag was turned off are still gated. A test pins the inert case (§7).
 
 `get_active_dags` still returns parked DAGs (the tick applies their deadlines). The dashboard's
 active count is unchanged and includes parked DAGs.
@@ -644,7 +650,8 @@ archived when the next attempt parks).
   - the parked cap refuses a DAG with an approval node and admits one without;
   - `expire_sweep` writes no `no_objection` row for a `dag-approval:` card;
   - the dispatch gate holds a resumed DAG's ready nodes (no deferral counted) while
-    `MAX_ACTIVE_DAGS` others are working, and releases them when a slot frees;
+    `MAX_ACTIVE_DAGS` others are working, and releases them when a slot frees; with no approval
+    node among the loaded DAGs the pre-pass does not run and no ready node is ever held;
   - a relaunch after a crash between push and link replaces the card in place (same id, one ping);
     a crash before the park is recovered by the stale-ready sweep once the DAG is aged past 300 s;
   - a retry retires the previous attempt's still-live card before parking, and a tap on it gets
