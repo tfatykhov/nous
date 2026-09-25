@@ -4346,7 +4346,7 @@ and, right after the `Status: {dag.status}` header line is built, the dispatch g
 
 ```python
                 held = getattr(orchestrator, "held_reason", lambda _dag_id: None)(dag.id)
-                if held:
+                if held and dag.status in ("pending", "running"):
                     lines.insert(2, f"Held: {held}")
 ```
 
