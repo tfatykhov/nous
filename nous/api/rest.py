@@ -1955,6 +1955,83 @@ def create_app(
 
     # --- F038: DAG Orchestration dashboard ---
 
+    # --- Harness dashboard visibility (spec 2026-09-25 v2) ---
+
+    def _harness_modes() -> dict:
+        """Every harness switch as it runs now — the Ledger banner and the
+        Harness verdicts read these, never a guess."""
+        return {
+            "persist": settings.execution_ledger_persist_enabled,
+            "retention_days": settings.execution_ledger_retention_days,
+            "offered_set": settings.tool_offered_set_enforcement_mode,
+            "context_policy": settings.tool_context_policy_mode,
+            "claim_verification": (
+                settings.claim_verification_mode if settings.claim_verification_enabled else "off"
+            ),
+            "action_gating": settings.action_gating_mode if settings.action_gating_enabled else "off",
+            "events_persisted": settings.f026_persistence_enabled,
+        }
+
+    async def dashboard_execution(request: Request) -> JSONResponse:
+        """GET /dashboard/execution — the durable execution ledger (§3.2)."""
+        from nous.api.harness_dashboard import get_execution_data
+
+        qp = request.query_params
+        try:
+            limit = int(qp.get("limit", "50"))
+        except ValueError:
+            return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+        try:
+            async with database.session() as session:
+                data = await get_execution_data(
+                    session, settings.agent_id, modes=_harness_modes(),
+                    window=qp.get("window", "24h"), context=qp.get("context") or None,
+                    status=qp.get("status") or None, effect=qp.get("effect") or None,
+                    q=qp.get("q") or None, limit=limit, before=qp.get("before") or None,
+                )
+            return JSONResponse(data)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except Exception as e:
+            logger.error("Dashboard execution error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def dashboard_harness(request: Request) -> JSONResponse:
+        """GET /dashboard/harness — what each safety rule flagged (§3.3)."""
+        from nous.api.harness_dashboard import get_harness_data
+
+        modes = _harness_modes()
+        try:
+            async with database.session() as session:
+                data = await get_harness_data(
+                    session, settings.agent_id, modes=modes,
+                    events_persisted=modes["events_persisted"],
+                    window=request.query_params.get("window", "7d"),
+                )
+            return JSONResponse(data)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except Exception as e:
+            logger.error("Dashboard harness error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def dashboard_attention(request: Request) -> JSONResponse:
+        """GET /dashboard/attention — the Overview strip and nav badges (§3.4)."""
+        from nous.api.harness_dashboard import get_attention_data
+
+        modes = _harness_modes()
+        try:
+            async with database.session() as session:
+                data = await get_attention_data(
+                    session, settings.agent_id, modes=modes,
+                    events_persisted=modes["events_persisted"],
+                    ledger_persisted=modes["persist"],
+                )
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard attention error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     async def dashboard_dag(request: Request) -> JSONResponse:
         """GET /dashboard/dag - DAG orchestration overview for dashboard."""
         try:
@@ -3182,6 +3259,9 @@ def create_app(
         Route("/dashboard/cache", dashboard_cache),
         # F038: DAG orchestration dashboard
         Route("/dashboard/dag", dashboard_dag),
+        Route("/dashboard/execution", dashboard_execution),
+        Route("/dashboard/harness", dashboard_harness),
+        Route("/dashboard/attention", dashboard_attention),
         # F040: Graph density dashboard
         Route("/dashboard/density", dashboard_density),
         # F035.6: Consolidation audit diff dashboard — detail (path param) MUST
