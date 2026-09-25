@@ -732,3 +732,8 @@ def test_this_repos_vocabulary_and_common_phrasings_are_claims(text, kinds):
 ])
 def test_artifacts_schedules_and_devices_are_not_vcs_or_file_claims(text):
     assert _kinds(text) == []
+
+
+def test_an_expanded_program_is_opaque():
+    assert _verify("I pushed the fix to main.", _real_bash('bash -c "$(cat cmd.txt)"')).verified
+    assert _verify("I pushed the fix to main.", _real_bash("$DEPLOY_CMD")).verified

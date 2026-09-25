@@ -405,6 +405,8 @@ def _opaque_for(kind: str, prog: str, args: tuple[str, ...]) -> bool:
     """A run this reader cannot see into that could have produced the effect."""
     if _python_code(prog, args) is not None:
         return False  # the code is right there: judged as code
+    if prog.startswith("$"):
+        return True  # `$CMD ...`, `$(cat cmd.txt)`: whatever it expands to
     if prog in _RUNNERS and command_string(prog, list(args)) is not None:
         return True  # its command string could not be read
     text = " ".join((prog, *args))
