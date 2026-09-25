@@ -6,6 +6,7 @@ IntentTracker: detects ghost planning (describing work without doing it).
 from __future__ import annotations
 
 import ast
+import builtins
 import re
 from bisect import bisect_left, bisect_right
 from collections.abc import Mapping
@@ -366,16 +367,133 @@ def _constant_truth(test: ast.AST) -> bool | None:
 
 
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
+_TRY = (ast.Try, getattr(ast, "TryStar", ast.Try))
+_EXIT_CALLS = frozenset({"sys.exit", "exit", "quit", "os._exit", "os.abort"})
+
+
+def _exception_name(node: ast.AST | None) -> str:
+    """The class a `raise` names when it is written out (`RuntimeError()`,
+    `RuntimeError`, `errors.Fatal`); "" for a bare `raise` or a variable
+    (`raise err`), whose class the reader cannot see."""
+    if isinstance(node, ast.Call):
+        node = node.func
+    name = _dotted(node) if node is not None else ""
+    return name if name.rsplit(".", 1)[-1][:1].isupper() else ""
+
+
+def _catches(handler_type: ast.AST | None, raised: str) -> bool | None:
+    """Whether an `except` clause catches an exception of class ``raised``:
+    known for a bare clause, `BaseException`, the same name, or two builtin
+    classes (their hierarchy is fixed); None when it depends on a class the
+    reader cannot see (`except Other:` may name a base of `Fatal`)."""
+    if handler_type is None:
+        return True
+    names = [_dotted(n) for n in (handler_type.elts if isinstance(handler_type, ast.Tuple) else [handler_type])]
+    if "BaseException" in names:
+        return True
+    if not raised:
+        return None
+    raised_class = getattr(builtins, raised, None)
+    known = isinstance(raised_class, type) and issubclass(raised_class, BaseException)
+    verdicts: list[bool | None] = []
+    for name in names:
+        if name == raised:
+            return True
+        handler_class = getattr(builtins, name, None)
+        if known and isinstance(handler_class, type) and issubclass(handler_class, BaseException):
+            if issubclass(raised_class, handler_class):
+                return True
+            verdicts.append(False)
+        else:
+            verdicts.append(None)
+    return False if all(v is False for v in verdicts) else None
+
+
+def _handler_taken(handlers: list[ast.ExceptHandler], raised: set[str]) -> tuple[ast.ExceptHandler | None, bool]:
+    """When a `try` body certainly raises one of ``raised``: (the handler that
+    certainly runs, whether the exception certainly escapes them all). (None,
+    False) once a handler is reached that may or may not catch it."""
+    for handler in handlers:
+        verdicts = {_catches(handler.type, r) for r in raised}
+        if verdicts == {True}:
+            return handler, False
+        if verdicts != {False}:
+            return None, False
+    return None, True
+
+
+def _breaks(body: list[ast.stmt]) -> bool:
+    """A `break` that leaves THIS loop (not one nested inside it)."""
+    stack = list(body)
+    while stack:
+        stmt = stack.pop()
+        if isinstance(stmt, ast.Break):
+            return True
+        if isinstance(stmt, ast.If):
+            stack.extend(stmt.body + stmt.orelse)
+        elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+            stack.extend(stmt.body)
+        elif isinstance(stmt, _TRY):
+            stack.extend(stmt.body + stmt.orelse + stmt.finalbody)
+            stack.extend(s for h in stmt.handlers for s in h.body)
+        elif isinstance(stmt, ast.Match):
+            stack.extend(s for case in stmt.cases for s in case.body)
+    return False
+
+
+def _exit_kinds(stmt: ast.stmt) -> frozenset[str]:
+    """How a statement CERTAINLY leaves the body it is in -- {"return"},
+    {"exit"}, {"raise:Class"} (`raise:` alone when the class is unknown),
+    {"loop"} (a `while True` with no `break`: never) -- or empty when control
+    may continue past it. A compound statement leaves when its taken side
+    does (a constant `if`, a `with`), or when both sides of an `if` do; a
+    `try` when its body returns, or raises what no handler catches, or what
+    its certain handler re-raises."""
+    if isinstance(stmt, ast.Return):
+        return frozenset({"return"})
+    if isinstance(stmt, ast.Raise):
+        return frozenset({"raise:" + _exception_name(stmt.exc)})
+    if (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
+            and _dotted(stmt.value.func) in _EXIT_CALLS):
+        return frozenset({"exit"})
+    if isinstance(stmt, ast.If):
+        truth = _constant_truth(stmt.test)
+        body, orelse = _body_exit_kinds(stmt.body), _body_exit_kinds(stmt.orelse)
+        if truth is True:
+            return body
+        if truth is False:
+            return orelse
+        return body | orelse if body and orelse else frozenset()
+    if isinstance(stmt, (ast.With, ast.AsyncWith)):
+        return _body_exit_kinds(stmt.body)
+    if isinstance(stmt, ast.While) and _constant_truth(stmt.test) is True and not _breaks(stmt.body):
+        return _body_exit_kinds(stmt.body) or frozenset({"loop"})
+    if isinstance(stmt, ast.Try):
+        kinds = _body_exit_kinds(stmt.body)
+        raised = {k[6:] for k in kinds if k.startswith("raise:")}
+        if not raised:
+            return kinds  # a return or exit passes through `finally` and leaves
+        if len(raised) < len(kinds):
+            return frozenset()  # a raise on one path, a return on another: unknown
+        taken, escapes = _handler_taken(stmt.handlers, raised)
+        if escapes:
+            return kinds
+        return _body_exit_kinds(taken.body) if taken is not None else frozenset()
+    return frozenset()
+
+
+def _body_exit_kinds(body: list[ast.stmt]) -> frozenset[str]:
+    for stmt in body:
+        if kinds := _exit_kinds(stmt):
+            return kinds
+    return frozenset()
 
 
 def _reachable(body: list[ast.stmt]) -> list[ast.stmt]:
-    """A body up to and including its first unconditional exit: `return`,
-    `raise`, `sys.exit()`/`exit()`/`quit()`/`os._exit()`."""
+    """A body up to and including the first statement that certainly leaves
+    it (see ``_exit_kinds``); what follows never runs."""
     for i, stmt in enumerate(body):
-        if isinstance(stmt, (ast.Return, ast.Raise)):
-            return body[:i + 1]
-        if (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
-                and _dotted(stmt.value.func) in ("sys.exit", "exit", "quit", "os._exit", "os.abort")):
+        if _exit_kinds(stmt):
             return body[:i + 1]
     return body
 
@@ -486,8 +604,10 @@ def _resolve(
 
 def _walk_live(node: ast.AST):
     """`ast.walk` along the paths that run: never into a nested definition,
-    only the taken side of a constant `if`/`while`, never an `except`
-    handler (it may never run), a class body's own statements."""
+    only the taken side of a constant `if`/`while`, every body cut at the
+    statement that certainly leaves it, an `except` handler only when the
+    `try` body certainly raises what it certainly catches (it may never run
+    otherwise), a class body's own statements."""
     stack = [node]
     while stack:
         current = stack.pop()
@@ -495,23 +615,31 @@ def _walk_live(node: ast.AST):
             continue
         yield current
         if isinstance(current, ast.ClassDef):
-            stack.extend(s for s in current.body if not isinstance(s, _FUNCTIONS))
+            stack.extend(s for s in _reachable(current.body) if not isinstance(s, _FUNCTIONS))
         elif isinstance(current, (ast.If, ast.While)):
             truth = _constant_truth(current.test)
             stack.append(current.test)
             if truth is not False:
-                stack.extend(current.body)
+                stack.extend(_reachable(current.body))
             if truth is not True:
-                stack.extend(current.orelse)
+                stack.extend(_reachable(current.orelse))
         elif isinstance(current, (ast.For, ast.AsyncFor)):
             stack.append(current.iter)
             if not _statically_empty(current.iter):  # `for x in []:` never runs its body
-                stack.extend(current.body)
-            stack.extend(current.orelse)
-        elif isinstance(current, (ast.Try, getattr(ast, "TryStar", ast.Try))):
-            body = _reachable(current.body)
-            raises = any(isinstance(s, ast.Raise) for s in body)
-            stack.extend(body + ([] if raises else current.orelse) + current.finalbody)
+                stack.extend(_reachable(current.body))
+            stack.extend(_reachable(current.orelse))
+        elif isinstance(current, (ast.With, ast.AsyncWith)):
+            stack.extend(item.context_expr for item in current.items)
+            stack.extend(_reachable(current.body))
+        elif isinstance(current, _TRY):
+            kinds = _body_exit_kinds(current.body)
+            raised = {k[6:] for k in kinds if k.startswith("raise:")}
+            taken = None
+            if isinstance(current, ast.Try) and raised and len(raised) == len(kinds):
+                taken, _ = _handler_taken(current.handlers, raised)
+            # `else` runs only when the body completes normally
+            stack.extend(_reachable(current.body) + ([] if kinds else _reachable(current.orelse))
+                         + (_reachable(taken.body) if taken is not None else []) + _reachable(current.finalbody))
         else:
             stack.extend(ast.iter_child_nodes(current))
 
@@ -1037,10 +1165,15 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
     kind = CLAIM_KINDS[claim.kind]
     if ev.tool_name not in kind.capable_tools:
         return "none"
+    # a rule that reads no arguments is judged by the target alone, whether
+    # the arguments were kept ({} from the runner: a producer or a Telegram
+    # send carries none the verifier uses) or never given
+    if ev.tool_name in _PRODUCERS:  # writes to memory or the companion: no destination
+        return "none" if claim.target else "plausible"
+    if ev.tool_name == "send_file":  # a Telegram send cannot have reached a named address
+        return "none" if claim.target else "plausible"
     if not ev.args:  # names-only evidence from a legacy caller
         return "plausible"
-    if ev.tool_name in _PRODUCERS:
-        return "none" if claim.target else "plausible"
     if ev.tool_name == "bash":
         return _bash_level(claim, ev)
     if ev.tool_name == "write_file":  # an explicit destination: it must BE the target
@@ -1049,8 +1182,6 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
     if ev.tool_name == "send_email":  # whole addresses: malice@x.io is not alice@x.io
         recipients = _addresses(f"{ev.args.get('to', '')} {ev.args.get('cc', '')}")
         return "exact" if not claim.target or claim.target in recipients else "none"
-    if ev.tool_name == "send_file":  # a Telegram send cannot have reached a named address
-        return "none" if claim.target else "plausible"
     return _code_level(claim, ev.args.get("code", ""))
 
 

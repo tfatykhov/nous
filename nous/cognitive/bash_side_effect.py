@@ -515,7 +515,8 @@ def _invocations(
             last_pipeline = last_list and pi == len(plist) - 1
             # `! cmd` exits 0 precisely when cmd FAILED: never certain
             negated = any("!" in cmd_words[:_skip_reserved(cmd_words)] for cmd_words in cmds)
-            lone = cmds[0][_skip_reserved(cmds[0]):] if len(cmds) == 1 else []
+            # a pipeline's status is its LAST stage's: `true | false && x` skips x
+            lone = cmds[-1][_skip_reserved(cmds[-1]):]
             const = _CONSTANT_COMMANDS.get(lone[0]) if len(lone) == 1 else None
             status = (not const) if const is not None and negated else const
             for ci, cmd_words in enumerate(cmds):

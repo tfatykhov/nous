@@ -1359,3 +1359,72 @@ def test_a_case_arm_runs_only_when_it_matches():
 def test_termination_and_live_assignments(code, level):
     result = _verify("It was saved to /tmp/report.md.", Evidence("run_python", {"code": code}))
     assert result.claims[0].evidence == level
+
+
+# --- codex round 15 ------------------------------------------------------------
+
+
+def test_an_argument_free_rule_does_not_need_arguments():
+    # the runner's evidence_args() is {} for a producer or a Telegram send: that
+    # is not "names only" -- the rule reads no arguments, only the target
+    for tool in ("compose_surface", "push_surface", "learn_fact", "ingest_document"):
+        assert not _verify("It was saved to /tmp/report.md.", Evidence(tool, {})).verified, tool
+        assert not _verify("It was saved to /tmp/report.md.", Evidence(tool)).verified, tool
+        assert _verify("I created the report file.", Evidence(tool, {})).verified, tool
+    for tool in ("compose_surface", "push_surface"):
+        assert not _verify("Email sent to alice@x.io.", Evidence(tool, {})).verified, tool
+        assert _verify("I sent you the summary.", Evidence(tool, {})).verified, tool
+    assert not _verify("Email sent to alice@x.io.", Evidence("send_file", {})).verified
+    assert _verify("I sent the file.", Evidence("send_file", {})).verified
+
+
+def test_a_pipeline_short_circuits_on_its_last_stage():
+    assert not _verify("I pushed the fix.", _real_bash("true | false && git push origin main; true")).verified
+    assert not _verify("I pushed the fix.", _real_bash("cat f | false && git push origin main; true")).verified
+    assert not _verify("I pushed the fix.", _real_bash("false | true || git push origin main; true")).verified
+    assert _push_level("false | true && git push origin main") == "exact"
+    assert _push_level("true | grep -q x && git push origin main; true") == "plausible"  # unknown last stage
+    assert _push_level("! true | false && git push origin main") == "exact"
+
+
+_W = "open('/tmp/report.md', 'w')"
+
+
+@pytest.mark.parametrize("code, level", [
+    (f"def f():\n    if True:\n        return\n        {_W}\nf()", "none"),     # after an exit in a taken branch
+    (f"def f():\n    if True:\n        return\n    {_W}\nf()", "none"),         # a taken branch that leaves
+    (f"def f():\n    if x:\n        return\n    else:\n        raise ValueError()\n    {_W}\nf()", "none"),  # both
+    (f"def f():\n    if False:\n        return\n    {_W}\nf()", "exact"),
+    (f"def f():\n    if x:\n        return\n    {_W}\nf()", "exact"),
+    (f"with lock:\n    raise RuntimeError()\n{_W}", "none"),
+    (f"while True:\n    serve()\n{_W}", "none"),                                 # never leaves the loop
+    (f"while True:\n    if done():\n        break\n{_W}", "exact"),
+    (f"try:\n    raise RuntimeError()\nfinally:\n    print(1)\n{_W}", "none"),   # nothing catches it
+    (f"try:\n    raise RuntimeError()\nexcept ValueError:\n    pass\n{_W}", "none"),
+    (f"try:\n    raise RuntimeError()\nexcept Exception:\n    pass\n{_W}", "exact"),
+    (f"try:\n    return_early()\nexcept Exception:\n    pass\n{_W}", "exact"),
+])
+def test_a_taken_branch_that_leaves_ends_the_body(code, level):
+    result = _verify("It was saved to /tmp/report.md.", Evidence("run_python", {"code": code}))
+    assert result.claims[0].evidence == level
+
+
+@pytest.mark.parametrize("code, level", [
+    (f"try:\n    raise RuntimeError()\nexcept:\n    {_W}", "exact"),
+    (f"try:\n    raise RuntimeError('x')\nexcept Exception:\n    {_W}", "exact"),
+    (f"try:\n    raise RuntimeError\nexcept RuntimeError:\n    {_W}", "exact"),
+    (f"try:\n    raise FileNotFoundError()\nexcept OSError:\n    {_W}", "exact"),     # a builtin base
+    (f"try:\n    raise RuntimeError()\nexcept (ValueError, RuntimeError):\n    {_W}", "exact"),
+    (f"try:\n    raise RuntimeError()\nexcept ValueError:\n    pass\nexcept RuntimeError:\n    {_W}", "exact"),
+    (f"try:\n    raise SystemExit(1)\nexcept Exception:\n    {_W}", "none"),         # Exception misses it
+    (f"try:\n    raise RuntimeError()\nexcept RuntimeError:\n    pass\nexcept:\n    {_W}", "none"),
+    (f"try:\n    raise Fatal()\nexcept Fatal:\n    {_W}", "exact"),
+    (f"try:\n    raise Fatal()\nexcept Other:\n    pass\nexcept Fatal:\n    {_W}", "none"),  # Other may be a base
+    (f"try:\n    raise err\nexcept Exception:\n    {_W}", "none"),                   # an unknown class
+    (f"try:\n    raise err\nexcept:\n    {_W}", "exact"),
+    (f"try:\n    x()\nexcept:\n    {_W}", "none"),                                  # may never raise
+    (f"try:\n    raise RuntimeError()\nexcept RuntimeError:\n    raise\n    {_W}", "none"),
+])
+def test_a_handler_runs_when_its_try_body_certainly_raises_what_it_catches(code, level):
+    result = _verify("It was saved to /tmp/report.md.", Evidence("run_python", {"code": code}))
+    assert result.claims[0].evidence == level
