@@ -489,6 +489,19 @@ class DAGStore:
             )
             await session.commit()
 
+    async def get_node_with_dag_status(self, node_id: UUID) -> tuple[DAGNode, str] | None:
+        """One node plus its DAG's status, agent-scoped (Harness Phase 3)."""
+        async with self._db.session() as session:
+            row = (
+                await session.execute(
+                    select(DAGNode, ExecutionDAG.status)
+                    .join(ExecutionDAG, ExecutionDAG.id == DAGNode.dag_id)
+                    .where(DAGNode.id == node_id)
+                    .where(ExecutionDAG.agent_id == self._agent_id)
+                )
+            ).first()
+            return (row[0], row[1]) if row is not None else None
+
     async def transition_node(
         self,
         node_id: UUID,

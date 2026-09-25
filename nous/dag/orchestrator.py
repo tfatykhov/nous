@@ -59,7 +59,10 @@ from uuid import UUID
 from nous.config import Settings
 from nous.dag._workspace import assert_inside_root, compute_workspace_path
 from nous.dag.approval import (
+    DEADLINE_ACTOR,
     DEFER_LABEL,
+    AnswerResult,
+    answer_values,
     approval_dedup_key,
     as_utc,
     build_card_summary,
@@ -67,6 +70,7 @@ from nous.dag.approval import (
     history_entry,
     label_of,
     notify_text,
+    option_by_id,
     risk_line,
 )
 from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, DAGNodeStatus
@@ -104,6 +108,12 @@ _RESOLVED = frozenset({"completed", "skipped"})
 _NON_TERMINAL = frozenset(s.value for s in DAGNodeStatus) - _TERMINAL
 # Statuses the dispatcher may move to 'ready' (wave-0 nodes are created ready).
 _DISPATCHABLE = frozenset({"pending", "ready"})
+
+# Columns answer_node / a re-read copy onto the tick's in-memory node.
+_APPROVAL_ROW_FIELDS = (
+    "status", "result", "error", "surface_id", "answer", "answered_by", "answered_at",
+    "answer_source", "answer_deadline", "completed_at",
+)
 
 # Budget warning threshold (80%)
 _BUDGET_WARNING_RATIO = 0.80
@@ -795,6 +805,11 @@ class DAGOrchestrator:
 
         # 1.5 Poll awaiting_check nodes
         await self._poll_awaiting_checks(dag)
+
+        # 1.52 Harness Phase 3: approval deadlines and lost-card re-pushes.
+        # Before the budget and failure steps, so a default applied here is
+        # propagated on this same tick.
+        await self._poll_awaiting_input(dag)
 
         # 1.55 F087: retry accounting for terminal nodes whose roll-up failed
         # transiently. Must precede the budget check below so a recovered
@@ -2499,6 +2514,146 @@ class DAGOrchestrator:
         elif node_type == "approval":
             await self._launch_approval_node(node, dag)
 
+    async def answer_node(
+        self,
+        node_id: UUID,
+        option_id: str,
+        *,
+        source: Literal["companion", "deadline"],
+        actor: str | None,
+        surface_id: str | None = None,
+    ) -> AnswerResult:
+        """Harness Phase 3 §3.5: the answer IS the transition.
+
+        One conditional write sets the answer and the terminal status together,
+        so a tap, the deadline and a second tap race on one row and exactly one
+        wins. Takes no orchestrator lock (lock order: _lock → surface lock; the
+        tap path holds only its card's surface lock).
+        """
+        loaded = await self._store.get_node_with_dag_status(node_id)
+        if loaded is None or loaded[0].node_type != "approval" or not loaded[0].approval_spec:
+            return AnswerResult(outcome="not_linked", node_id=node_id)
+        node, _ = loaded
+        option = option_by_id(node.approval_spec, option_id)
+        if option is None:
+            return AnswerResult(outcome="invalid_option", node_id=node_id, dag_id=node.dag_id)
+        now = datetime.now(UTC)
+        values: dict[str, Any] = {
+            "answer": option_id,
+            "answered_by": actor,
+            "answered_at": now,
+            "answer_source": source,
+            "completed_at": now,
+            **answer_values(
+                node.approval_spec, option_id, source=source, actor=actor, at=now,
+                deadline=node.answer_deadline,
+            ),
+        }
+        if surface_id is not None:
+            values["surface_id"] = surface_id  # a tap before the link step links it
+        won = await self._store.transition_node(
+            node_id,
+            from_statuses={"awaiting_input"},
+            dag_statuses=LIVE_DAG_STATUSES,
+            card=surface_id,
+            due_by=now if source == "deadline" else None,
+            **values,
+        )
+        if won:
+            return AnswerResult(
+                outcome="recorded", node_id=node_id, dag_id=node.dag_id,
+                option_label=option["label"], option_outcome=option["outcome"],
+                node_status=values["status"], answer_source=source, answered_by=actor,
+                answered_at=now,
+            )
+        fresh = await self._store.get_node_with_dag_status(node_id)
+        if fresh is None:
+            return AnswerResult(outcome="not_linked", node_id=node_id)
+        row, dag_status = fresh
+        if row.status in ("pending", "ready"):
+            outcome = "not_open"
+        elif row.status == "awaiting_input":
+            outcome = "dag_ended" if dag_status not in LIVE_DAG_STATUSES else "stray_card"
+        else:
+            outcome = "closed"
+        recorded = option_by_id(row.approval_spec, row.answer) or {}
+        return AnswerResult(
+            outcome=outcome, node_id=node_id, dag_id=row.dag_id,
+            option_label=recorded.get("label"), option_outcome=recorded.get("outcome"),
+            node_status=row.status, answer_source=row.answer_source,
+            answered_by=row.answered_by, answered_at=row.answered_at,
+        )
+
+    async def _refresh_node(self, node: DAGNode) -> str | None:
+        """Copy the row's approval columns onto the tick's node; returns the
+        DAG status, or None if the node is gone."""
+        fresh = await self._store.get_node_with_dag_status(node.id)
+        if fresh is None:
+            return None
+        row, dag_status = fresh
+        for field in _APPROVAL_ROW_FIELDS:
+            setattr(node, field, getattr(row, field))
+        return dag_status
+
+    async def _poll_awaiting_input(self, dag: ExecutionDAG) -> None:
+        """Harness Phase 3 §3.6: apply due deadlines; re-push a lost card."""
+        waiting = [n for n in dag.nodes if n.status == "awaiting_input"]
+        if not waiting:
+            return
+        now = datetime.now(UTC)
+        linked = [n.surface_id for n in waiting if n.surface_id]
+        live: set[str] = set()
+        if self._surface_service is not None and linked:
+            try:
+                live = await self._surface_service.live_ids(linked)
+            except Exception:
+                logger.warning("Could not read approval card liveness for DAG %s", dag.id)
+                live = set(linked)  # unknown ≠ dead: do not re-push on a read failure
+        for node in waiting:
+            deadline = as_utc(node.answer_deadline)
+            if deadline is not None and deadline <= now:  # pre-filter; SQL decides
+                result = await self.answer_node(
+                    node.id, (node.approval_spec or {}).get("default_option", ""),
+                    source="deadline", actor=DEADLINE_ACTOR,
+                )
+                if result.outcome == "recorded":
+                    await self._close_card(node.surface_id, node_id=node.id)
+                    await self._refresh_node(node)  # this tick's propagation sees it
+                continue
+            if self._surface_service is None:
+                continue
+            if node.surface_id is None or node.surface_id not in live:
+                # Re-read first: the tick's copy may predate a tap that answered
+                # through the unlinked card — pushing then would create a fresh
+                # card and ping for an answered question.
+                if await self._refresh_node(node) is None or node.status != "awaiting_input":
+                    continue
+                if node.surface_id is not None and node.surface_id in live:
+                    continue
+                if node.surface_id is None and await self._adopt_live_card(node):
+                    continue
+                await self._push_and_link(node, dag)
+
+    async def _adopt_live_card(self, node: DAGNode) -> bool:
+        """§3.6: link a live card that carries the node's key but was never
+        linked (a crash between push and link) instead of replacing it — the
+        person may be tapping it, and a replacement rotates its nonce."""
+        try:
+            cards = await self._surface_service.live_cards_by_prefix(approval_dedup_key(node.id))
+        except Exception:
+            return False
+        if not cards:
+            return False
+        surface_id = cards[0][0]
+        if await self._store.transition_node(
+            node.id, from_statuses={"awaiting_input"}, card=surface_id,
+            surface_id=surface_id, error=None,
+        ):
+            node.surface_id = surface_id
+            node.error = None
+            return True
+        return False
+
     async def _launch_approval_node(self, node: DAGNode, dag: ExecutionDAG) -> None:
         """Harness Phase 3 §3.4: retire the previous attempt's card, park, push, link.
 
@@ -2849,7 +3004,18 @@ class DAGOrchestrator:
         node_by_id = {str(n.id): n for n in dag.nodes}
         for pred_id in context_preds:
             pred = node_by_id.get(pred_id)
-            if pred and pred.result:
+            if pred is None:
+                continue
+            if pred.node_type == "approval":
+                # Harness Phase 3 §3.5: an approval's own result is only the
+                # answer text. Pass its context_flow inputs (the draft the
+                # person saw) through, or the acting node writes its own text.
+                for inner_name, inner_result in self._context_results(pred, dag):
+                    parts.append(
+                        f"[Approved input from '{inner_name}' (approved at '{pred.name}')]: "
+                        f"{inner_result}"
+                    )
+            if pred.result:
                 parts.append(f"[Result from '{pred.name}']: {pred.result}")
 
         context = "\n\n".join(parts)

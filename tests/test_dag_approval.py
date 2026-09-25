@@ -260,3 +260,172 @@ async def test_the_park_write_is_the_reset_point(store, subtask_mgr, surfaces):
 def test_approvals_wired(store, subtask_mgr, surfaces):
     assert _orch(store, subtask_mgr, surfaces).approvals_wired
     assert not _orch(store, subtask_mgr, None).approvals_wired
+
+
+async def test_a_tap_that_proceeds_is_recorded_once(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag, node = await _parked(store, orch)
+
+    first = await orch.answer_node(
+        node.id, "send", source="companion", actor="unattributed", surface_id=node.surface_id
+    )
+    second = await orch.answer_node(
+        node.id, "hold", source="companion", actor="unattributed", surface_id=node.surface_id
+    )
+
+    assert first.outcome == "recorded"
+    assert (second.outcome, second.option_label) == ("closed", "Send it")
+    node = await _node(store, dag.id, "approve")
+    assert (node.status, node.answer, node.answer_source, node.answered_by) == (
+        "completed", "send", "companion", "unattributed",
+    )
+    assert node.result.startswith("Answered in the companion: 'Send it' (send)")
+    assert " by " not in node.result
+
+
+async def test_an_attributed_actor_is_named(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    _, node = await _parked(store, orch)
+    await orch.answer_node(node.id, "send", source="companion", actor="alice@example.com", surface_id=node.surface_id)
+    assert (await _node(store, node.dag_id, "approve")).result.endswith("by alice@example.com")
+
+
+async def test_a_stop_answer_blocks_the_successor_and_stops_the_dag(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag, node = await _parked(store, orch)
+
+    result = await orch.answer_node(
+        node.id, "hold", source="companion", actor="unattributed", surface_id=node.surface_id
+    )
+    await orch._advance_dag(await store.get_dag(dag.id))
+
+    assert result.outcome == "recorded"
+    assert (await _node(store, dag.id, "approve")).error.startswith("declined in the companion")
+    assert (await _node(store, dag.id, "send")).status == "blocked"
+    assert (await store.get_dag(dag.id)).status == "failed"
+
+
+async def test_a_tap_before_the_link_is_recorded_and_links(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    surfaces.push_errors = [RuntimeError("flaky")]
+    dag, node = await _parked(store, orch)
+
+    result = await orch.answer_node(node.id, "send", source="companion", actor="unattributed", surface_id="card-7")
+
+    assert result.outcome == "recorded"
+    assert (await _node(store, dag.id, "approve")).surface_id == "card-7"
+
+
+@pytest.mark.parametrize(
+    "setup, expected",
+    [("stray", "stray_card"), ("dag_ended", "dag_ended"), ("pending", "not_open")],
+)
+async def test_refused_taps_say_why(store, subtask_mgr, surfaces, setup, expected):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag, node = await _parked(store, orch)
+    card = node.surface_id
+    if setup == "stray":
+        card = "some-other-card"
+    elif setup == "dag_ended":
+        await store.update_dag_status(dag.id, "cancelled")
+    else:
+        await store.update_node(node.id, status="pending")
+
+    result = await orch.answer_node(node.id, "send", source="companion", actor="unattributed", surface_id=card)
+
+    assert result.outcome == expected
+
+
+async def test_invalid_option_and_unknown_node(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    _, node = await _parked(store, orch)
+    assert (await orch.answer_node(node.id, "maybe", source="companion", actor=None)).outcome == "invalid_option"
+    assert (await orch.answer_node(uuid.uuid4(), "send", source="companion", actor=None)).outcome == "not_linked"
+
+
+async def test_the_deadline_applies_the_stop_default_in_one_tick(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag, node = await _parked(store, orch)
+    await store.update_node(node.id, answer_deadline=datetime.now(UTC) - timedelta(seconds=1))
+
+    await orch._advance_dag(await store.get_dag(dag.id))
+
+    node = await _node(store, dag.id, "approve")
+    assert (node.status, node.answer, node.answer_source) == ("failed", "hold", "deadline")
+    assert node.error.endswith("default 'Don't send' (hold) applied")
+    assert surfaces.live() == {}
+    assert (await _node(store, dag.id, "send")).status == "blocked"
+    assert (await store.get_dag(dag.id)).status == "failed"
+
+
+async def test_nothing_happens_before_the_deadline(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag, node = await _parked(store, orch)
+    await orch._advance_dag(await store.get_dag(dag.id))
+    assert (await _node(store, dag.id, "approve")).status == "awaiting_input"
+
+
+async def test_a_lost_card_is_pushed_again_and_relinked(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag, node = await _parked(store, orch)
+    surfaces.cards[node.surface_id]["status"] = "expired"  # closed behind the node's back
+
+    await orch._advance_dag(await store.get_dag(dag.id))
+
+    relinked = await _node(store, dag.id, "approve")
+    assert relinked.surface_id != node.surface_id
+    assert relinked.surface_id in surfaces.live()
+    assert len(surfaces.pings) == 2
+
+
+async def test_a_transient_push_failure_heals_on_the_next_tick(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    surfaces.push_errors = [RuntimeError("flaky")]
+    dag, _ = await _parked(store, orch)
+
+    await orch._advance_dag(await store.get_dag(dag.id))
+
+    node = await _node(store, dag.id, "approve")
+    assert node.surface_id in surfaces.live() and node.error is None
+
+
+async def test_a_crash_between_push_and_link_adopts_the_card(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag, node = await _parked(store, orch)
+    card = node.surface_id
+    await store.update_node(node.id, surface_id=None)  # the link write never landed
+
+    await orch._advance_dag(await store.get_dag(dag.id))
+
+    assert (await _node(store, dag.id, "approve")).surface_id == card
+    assert len(surfaces.cards) == 1 and len(surfaces.pings) == 1  # adopted, not re-pushed
+
+
+async def test_the_acting_node_receives_the_approved_draft(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag = await store.create(_request(with_draft=True))
+    await orch.start_dag(dag.id)
+    draft = await _node(store, dag.id, "draft")
+    await store.update_node(draft.id, status="completed", result="Dear Bob, ...")
+    await orch._advance_dag(await store.get_dag(dag.id))  # the approval parks
+    node = await _node(store, dag.id, "approve")
+    await orch.answer_node(node.id, "send", source="companion", actor=None, surface_id=node.surface_id)
+    subtask_mgr.create.reset_mock()
+
+    await orch._advance_dag(await store.get_dag(dag.id))  # 'send' launches
+
+    task = subtask_mgr.create.call_args.kwargs["task"]
+    assert "[Approved input from 'draft' (approved at 'approve')]: Dear Bob, ..." in task
+    assert "Answered in the companion: 'Send it' (send)" in task
+
+
+async def test_no_repush_for_a_node_a_tap_already_answered(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    surfaces.push_errors = [RuntimeError("flaky")]
+    dag, node = await _parked(store, orch)
+    stale = await store.get_dag(dag.id)  # the tick's copy: parked, unlinked
+    await orch.answer_node(node.id, "send", source="companion", actor=None, surface_id="card-9")
+
+    await orch._poll_awaiting_input(stale)
+
+    assert surfaces.cards == {}
