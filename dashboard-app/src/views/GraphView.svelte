@@ -178,7 +178,7 @@
         height: 'mapData(edge_count, 0, 30, 14, 44)',
         label: '',
         'font-size': '9px',
-        color: '#6b6b8a',
+        color: '#8e8eab',
         'text-valign': 'bottom',
         'text-margin-y': 4,
         'text-outline-color': '#0a0a0f',

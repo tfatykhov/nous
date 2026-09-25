@@ -2,79 +2,148 @@
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
-  import type { LedgerData, LedgerAction, LedgerSession } from '../lib/types/api';
+  import { pushCounts } from '../lib/stores/attention';
+  import type { ExecutionData, ExecutionRow } from '../lib/types/api';
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import DataTable from '../lib/ui/DataTable.svelte';
+  import FilterBar from '../lib/ui/FilterBar.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
+  import { ledgerStatusColor, badgeStyle } from '../lib/status';
+  import { fmtWhen, fmtUtc, ledgerTarget, recipients } from '../lib/harness';
 
-  // Poll every 15 s — matches legacy ledger.js setInterval(…, 15000)
+  // Harness dashboard §3.2 / §4: the durable execution ledger. Filters are
+  // component-local $state and survive polls by construction.
+  let windowSel = $state('24h');
+  let context = $state('');
+  let status = $state('');
+  let effectSel = $state('');
+  let q = $state('');
+
+  const CONTEXTS = ['interactive', 'mcp', 'subtask', 'dag_node', 'scheduled', 'agent_action',
+    'heartbeat_triage', 'heartbeat_check', 'heartbeat_callback', 'dag_summary', 'background'];
+  const STATUSES = ['pending', 'success', 'error', 'blocked', 'unknown'];
+  const EFFECTS = ['write', 'external', 'irreversible'];
+
+  function query(before: string | null = null): string {
+    const p = new URLSearchParams({ window: windowSel, limit: '50' });
+    if (context) p.set('context', context);
+    if (status) p.set('status', status);
+    if (effectSel) p.set('effect', effectSel);
+    if (q.trim()) p.set('q', q.trim().slice(0, 100));
+    if (before) p.set('before', before);
+    return `/dashboard/execution?${p}`;
+  }
+
   const store = usePoll(
-    makePollStore<LedgerData>(
-      (signal) => apiGet<LedgerData>('/dashboard/ledger', { signal }),
-      15_000,
-    ),
+    makePollStore<ExecutionData>((signal) => apiGet<ExecutionData>(query(), { signal }), 15_000),
   );
 
-  // ── Filters — component-local $state, survive polls automatically ──────────
-  // The whole point: no save/restore code. Changing a filter or expanding a
-  // session row, then waiting 15 s, preserves both — by construction.
-  let statusFilter = $state<string>('all');
-  let effectFilter = $state<string>('all');
-
-  const STATUS_OPTIONS = ['all', 'success', 'blocked', 'error', 'timeout'] as const;
-  const EFFECT_OPTIONS = ['all', 'none', 'write', 'external', 'irreversible'] as const;
-
-  // ── Derived: aggregate stats ───────────────────────────────────────────────
-  const totals = $derived.by(() => {
-    const sessions = $store.data?.sessions ?? [];
-    let totalActions = 0, totalBlocked = 0, totalErrors = 0, totalTimeouts = 0;
-    for (const s of sessions) {
-      totalActions += s.total_actions;
-      totalBlocked += s.blocked_actions;
-      totalErrors += s.error_actions;
-      totalTimeouts += s.timeout_actions;
-    }
-    const successCount = totalActions - totalBlocked - totalErrors - totalTimeouts;
-    const successRate = totalActions > 0
-      ? Math.round((successCount / totalActions) * 100) + '%'
-      : '—';
-    return { sessions: sessions.length, totalActions, totalBlocked, totalErrors, totalTimeouts, successRate };
+  // Refetch on a filter change (the poll itself keeps the head fresh).
+  let first = true;
+  $effect(() => {
+    void [windowSel, context, status, effectSel, q];
+    if (first) { first = false; return; }
+    older = [];
+    olderCursor = null;
+    paused = false;
+    store.start();
+    void store.refresh();
   });
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
-  function filterActions(actions: LedgerAction[]): LedgerAction[] {
-    return actions.filter((a) => {
-      const matchStatus = statusFilter === 'all' || a.status === statusFilter;
-      const matchEffect = effectFilter === 'all' || (a.side_effect_type ?? 'none') === effectFilter;
-      return matchStatus && matchEffect;
-    });
+  // Keep the nav badge in step with what this tab shows.
+  $effect(() => {
+    const d = $store.data;
+    if (d) pushCounts({ sends: d.attention.length });
+  });
+
+  // "Load older" pauses polling, so rows never shift under the reader.
+  let older = $state<ExecutionRow[]>([]);
+  let olderCursor = $state<string | null>(null);
+  let paused = $state(false);
+  let loadingOlder = $state(false);
+
+  async function loadOlder() {
+    const cursor = olderCursor ?? $store.data?.next_before ?? null;
+    if (!cursor) return;
+    loadingOlder = true;
+    paused = true;
+    store.stop();
+    try {
+      const page = await apiGet<ExecutionData>(query(cursor));
+      older = [...older, ...page.rows];
+      olderCursor = page.next_before;
+    } finally {
+      loadingOlder = false;
+    }
   }
 
-  function formatTime(ts: string): string {
-    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  function backToLatest() {
+    older = [];
+    olderCursor = null;
+    paused = false;
+    store.start();
+    void store.refresh();
   }
 
-  function modeClass(mode: string): string {
-    if (mode === 'enforce') return 'mode-enforce';
-    if (mode === 'warn') return 'mode-warn';
-    return 'mode-shadow';
-  }
+  let rows = $derived([...($store.data?.rows ?? []), ...older]);
+  let canLoadOlder = $derived(paused ? olderCursor !== null : ($store.data?.next_before ?? null) !== null);
 
-  // ── Table columns for sessions ─────────────────────────────────────────────
-  const sessionCols = [
-    { key: 'session_id',    label: 'Session ID' },
-    { key: 'current_turn',  label: 'Turn' },
-    { key: 'total_actions', label: 'Actions' },
-    { key: 'blocked_fmt',   label: 'Blocked' },
-    { key: 'error_fmt',     label: 'Errors' },
-    { key: 'summary',       label: 'Summary' },
+  // ── Copy an operator statement (Clipboard API needs a secure context; the
+  //    LAN host serves plain http, so fall back to selecting the text).
+  let copied = $state('');
+  async function copySql(id: string, el: HTMLElement | null) {
+    const text = el?.textContent ?? '';
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = 'Copied to the clipboard.';
+    } catch {
+      if (el) {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+      }
+      copied = 'Selected — press Ctrl+C (or ⌘C) to copy.';
+    }
+    lastCopied = id;
+  }
+  let lastCopied = $state('');
+
+  const cols = [
+    { key: 'when', label: 'When' },
+    { key: 'tool', label: 'Tool' },
+    { key: 'context', label: 'Context' },
+    { key: 'effect', label: 'Effect' },
+    { key: 'status', label: 'Status' },
+    { key: 'target', label: 'Target' },
   ];
+
+  function stats(d: ExecutionData) {
+    const s = d.stats;
+    return [
+      { label: 'Side-effecting calls', value: s.calls, note: `in ${windowSel.replace('h', ' h').replace('d', ' d')}` },
+      { label: 'Sends', value: s.sends, note: 'send_email + send_file' },
+      { label: 'Repeat sends refused', value: s.repeat_sends_refused, note: 'the key was already held' },
+      { label: 'Blocked by a rule', value: s.blocked, note: 'offered-tool · policy · gate' },
+      { label: 'Unknown outcome', value: s.unknown, note: `${s.unknown_keyed} hold a send`, tone: s.unknown ? 'unknown' as const : undefined },
+      { label: 'Errors', value: s.errors, note: 'failed calls', tone: s.errors ? 'error' as const : undefined },
+    ];
+  }
+
+  function modePillClass(mode: string): string {
+    if (mode === 'enforce') return 'mode-enforce';
+    if (mode === 'warn' || mode === 'shadow') return 'mode-warn';
+    return 'mode-off';
+  }
+
+  const sqlEls: Record<string, HTMLElement | null> = {};
 </script>
 
 <header class="view-head">
   <div>
     <h1>Execution Ledger</h1>
-    <p class="subtitle">Real-time tool execution tracking and action gating</p>
+    <p class="subtitle">Every side-effecting tool call, kept durably — it survives restarts and ended sessions</p>
   </div>
   <StaleBadge state={$store} />
 </header>
@@ -82,493 +151,243 @@
 {#if $store.data}
   {@const d = $store.data}
 
-  <!-- ── Mode banner ────────────────────────────────────────────────────── -->
-  <div class="banner" class:banner-disabled={!d.enabled.ledger} class:banner-blocked={totals.totalBlocked > 0}>
+  <div class="banner" class:banner-off={!d.modes.persist}>
     <div class="banner-left">
-      <span class="banner-dot"></span>
-      <span class="banner-label">{d.enabled.ledger ? 'Ledger Active' : 'Ledger Disabled'}</span>
+      <span class="banner-dot" aria-hidden="true"></span>
+      <span class="banner-label">{d.modes.persist ? 'Ledger persisting' : 'Ledger persistence is off'}</span>
+      {#if d.modes.persist}<span class="banner-note">· {d.modes.retention_days}-day retention · send de-duplication on</span>{/if}
     </div>
     <div class="banner-modes">
-      {#if !d.enabled.claim_verification}
-        <span class="mode-pill mode-off">Claim Verification: off</span>
-      {:else}
-        <span class="mode-pill {modeClass(d.modes.claim_verification)}">
-          Claim Verification: {d.modes.claim_verification}
-        </span>
-      {/if}
-      {#if !d.enabled.action_gating}
-        <span class="mode-pill mode-off">Action Gating: off</span>
-      {:else}
-        <span class="mode-pill {modeClass(d.modes.action_gating)}">
-          Action Gating: {d.modes.action_gating}
-        </span>
-      {/if}
+      <span class="mode-pill {modePillClass(d.modes.offered_set)}">Offered-tool rule: {d.modes.offered_set}</span>
+      <span class="mode-pill {modePillClass(d.modes.context_policy)}">Context policy: {d.modes.context_policy}</span>
+      <span class="mode-pill {modePillClass(d.modes.claim_verification)}">Claim checks: {d.modes.claim_verification}</span>
+      <span class="mode-pill {modePillClass(d.modes.action_gating)}">Action gating: {d.modes.action_gating}</span>
     </div>
   </div>
 
-  <!-- ── Stat cards ────────────────────────────────────────────────────── -->
-  <StatGrid stats={[
-    { label: 'Active sessions', value: totals.sessions },
-    { label: 'Total actions',   value: totals.totalActions.toLocaleString() },
-    { label: 'Blocked',         value: totals.totalBlocked.toLocaleString() },
-    { label: 'Errors',          value: totals.totalErrors.toLocaleString() },
-    { label: 'Timeouts',        value: totals.totalTimeouts.toLocaleString() },
-    { label: 'Success rate',    value: totals.successRate },
-  ]} />
+  {#if !d.modes.persist}
+    <p class="state-msg">Nothing below is new: with NOUS_EXECUTION_LEDGER_PERSIST_ENABLED off, no calls are recorded and sends are not de-duplicated.</p>
+  {/if}
 
-  <!-- ── Global filter bar ─────────────────────────────────────────────── -->
-  <div class="filter-bar">
-    <div class="filter-group">
-      <span class="filter-label">Status</span>
-      {#each STATUS_OPTIONS as opt}
-        <button
-          class="filter-btn"
-          class:active={statusFilter === opt}
-          onclick={() => { statusFilter = opt; }}
-        >{opt}</button>
-      {/each}
-    </div>
-    <div class="filter-group">
-      <span class="filter-label">Effect</span>
-      {#each EFFECT_OPTIONS as opt}
-        <button
-          class="filter-btn"
-          class:active={effectFilter === opt}
-          onclick={() => { effectFilter = opt; }}
-        >{opt}</button>
-      {/each}
-    </div>
-  </div>
-
-  <!-- ── Sessions table ────────────────────────────────────────────────── -->
-  {#if d.sessions.length === 0}
-    <div class="empty-state">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48" aria-hidden="true">
-        <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
-      </svg>
-      <h3>No Active Sessions</h3>
-      <p>Execution data appears here when sessions are active. Auto-refreshes every 15 seconds.</p>
-    </div>
-  {:else}
-    <section class="table-card">
-      <h2>Sessions ({d.sessions.length})</h2>
-      <DataTable
-        columns={sessionCols}
-        rows={d.sessions.map((s) => ({
-          ...s,
-          blocked_fmt: s.blocked_actions > 0 ? s.blocked_actions.toString() : '—',
-          error_fmt:   s.error_actions   > 0 ? s.error_actions.toString()   : '—',
-        }))}
-        mode="cards"
-        rowKey={(r: LedgerSession) => r.session_id}
-      >
-        {#snippet detail(row: LedgerSession)}
-          {@const visible = filterActions(row.actions)}
-          <div class="session-detail">
-            {#if row.actions_truncated}
-              <p class="truncated-note">Showing last 50 actions (truncated)</p>
-            {/if}
-            {#if visible.length === 0}
-              <p class="no-actions">No actions match the current filters.</p>
-            {:else}
-              <!-- Group by turn -->
-              {#each [...new Set(visible.map((a) => a.turn))].sort((a, b) => a - b) as turn}
-                {@const turnActions = visible.filter((a) => a.turn === turn)}
-                <div class="turn-group">
-                  <div class="turn-header">
-                    <span class="turn-dot"></span>
-                    <span class="turn-label">Turn {turn}</span>
-                    <span class="turn-count">{turnActions.length} action{turnActions.length !== 1 ? 's' : ''}</span>
-                  </div>
-                  {#each turnActions as action}
-                    <div class="action-row status-{action.status}">
-                      <div class="action-left">
-                        <span class="action-dot dot-{action.status}"></span>
-                        <span class="action-tool">{action.tool_name}</span>
-                      </div>
-                      <div class="action-args">
-                        {#each Object.entries(action.key_args) as [k, v]}
-                          <span class="arg"><span class="arg-key">{k}</span>=<span class="arg-val">{v}</span></span>
-                        {/each}
-                      </div>
-                      <div class="action-right">
-                        {#if action.side_effect_type && action.side_effect_type !== 'none'}
-                          <span class="effect-pill effect-{action.side_effect_type}">{action.side_effect_type}</span>
-                        {/if}
-                        <span class="status-pill status-pill-{action.status}">{action.status}</span>
-                        <span class="action-time">{formatTime(action.timestamp)}</span>
-                      </div>
-                      {#if action.status !== 'success' && action.result_summary}
-                        <div class="action-detail-text">{action.result_summary}</div>
-                      {/if}
-                    </div>
-                  {/each}
-                </div>
-              {/each}
-            {/if}
+  {#if d.attention.length > 0}
+    <section class="attention" aria-labelledby="attn-title">
+      <h2 id="attn-title">
+        {d.attention.length} send{d.attention.length === 1 ? '' : 's'} ended without confirming delivery
+      </h2>
+      <p class="attn-lede">
+        The outcome is <strong class="unknown-text">unknown</strong>, so each keeps its duplicate-send hold: a retry of
+        that send is refused until you record what happened. Check whether the recipients got it.
+      </p>
+      {#each d.attention as r (r.id)}
+        {@const to = recipients(r.key_args)}
+        <div class="attn-row">
+          <dl class="attn-facts">
+            <dt>Tool</dt><dd class="mono">{r.tool_name}</dd>
+            <dt>To</dt><dd>{r.tombstone ? 'recipients no longer stored (retention)' : to.length ? to.join(', ') : ledgerTarget(r.key_args)}</dd>
+            {#if r.dag_name}<dt>From</dt><dd>DAG {r.dag_name}{r.node_name ? ` · ${r.node_name}` : ''}</dd>{/if}
+            <dt>When</dt><dd>{fmtWhen(r.created_at)}</dd>
+            {#if r.external_ref}<dt>Provider ref</dt><dd class="mono">{r.external_ref}</dd>{/if}
+            {#if r.result_summary}<dt>Stored note</dt><dd class="mono">{r.result_summary}</dd>{/if}
+          </dl>
+          <div class="attn-actions">
+            <div>
+              <div class="sql-title">They got it — keep the hold</div>
+              <code class="sql" bind:this={sqlEls[`ok-${r.id}`]}>UPDATE nous_system.execution_ledger SET status = 'success', result_summary = 'confirmed delivered by operator'
+WHERE id = '{r.id}' AND status = 'unknown';</code>
+            </div>
+            <div>
+              <div class="sql-title">Nobody got it — release the hold</div>
+              <code class="sql" bind:this={sqlEls[`rel-${r.id}`]}>UPDATE nous_system.execution_ledger SET status = 'error', result_summary = 'released by operator'
+WHERE id = '{r.id}' AND status = 'unknown';</code>
+            </div>
+            <p class="note">Releasing re-sends nothing — retry the step to send again. If only some recipients got it, keep the hold.</p>
+            <div class="btn-row">
+              <button type="button" class="btn" onclick={() => copySql(`ok-${r.id}`, sqlEls[`ok-${r.id}`])}>Copy “got it”</button>
+              <button type="button" class="btn" onclick={() => copySql(`rel-${r.id}`, sqlEls[`rel-${r.id}`])}>Copy “nobody got it”</button>
+            </div>
           </div>
-        {/snippet}
-      </DataTable>
+        </div>
+      {/each}
+      <p class="sr-only" aria-live="polite">{lastCopied ? copied : ''}</p>
     </section>
   {/if}
 
+  <StatGrid stats={stats(d)} />
+
+  <div class="filters">
+    <div class="filter-group">
+      <span class="filter-label" id="win-label">Window</span>
+      <FilterBar label="Window" required bind:value={windowSel}
+        options={[{ value: '24h', label: '24 h' }, { value: '7d', label: '7 d' }, { value: '30d', label: '30 d' }]} />
+    </div>
+    <label class="filter-group">
+      <span class="filter-label">Context</span>
+      <select bind:value={context}>
+        <option value="">All contexts</option>
+        {#each CONTEXTS as c}<option value={c}>{c}</option>{/each}
+      </select>
+    </label>
+    <label class="filter-group">
+      <span class="filter-label">Status</span>
+      <select bind:value={status}>
+        <option value="">All statuses</option>
+        {#each STATUSES as s}<option value={s}>{s}</option>{/each}
+      </select>
+    </label>
+    <label class="filter-group">
+      <span class="filter-label">Effect</span>
+      <select bind:value={effectSel}>
+        <option value="">All effects</option>
+        {#each EFFECTS as e}<option value={e}>{e}</option>{/each}
+      </select>
+    </label>
+    <label class="search">
+      <span class="sr-only">Search the ledger</span>
+      <input type="search" maxlength="100" placeholder="tool, recipient, key, message id…" bind:value={q} />
+    </label>
+  </div>
+
+  <section class="table-card">
+    <div class="table-head">
+      <h2>Calls</h2>
+      <span class="small muted">Free-text arguments are stored as sha256 + length; tool output is never stored.</span>
+    </div>
+    {#if rows.length === 0}
+      <p class="empty">{d.modes.persist ? 'No side-effecting calls match these filters.' : 'Nothing is being recorded.'}</p>
+    {:else}
+      <DataTable
+        columns={cols}
+        rows={rows}
+        mode="cards"
+        rowKey={(r: ExecutionRow) => r.id}
+        rowLabel={(r: ExecutionRow) => `${r.tool_name} at ${fmtUtc(r.created_at)}`}
+      >
+        {#snippet cell(r: ExecutionRow, c: { key: string })}
+          {#if c.key === 'when'}
+            <span class="mono small">{fmtUtc(r.created_at)}</span>
+          {:else if c.key === 'tool'}
+            <span class="mono">{r.tool_name}</span>
+          {:else if c.key === 'context'}
+            <span class="small muted">{r.context_kind}</span>
+          {:else if c.key === 'effect'}
+            <span class="pill effect-{r.side_effect_type}">{r.side_effect_type}</span>
+          {:else if c.key === 'status'}
+            <span class="pill" style={badgeStyle(ledgerStatusColor(r.status))}>{r.status}</span>
+            {#if r.refusal_code}<span class="small muted"> {r.refusal_code}</span>{/if}
+            {#if r.status === 'unknown'}<span class="small muted"> {r.idempotency_key ? 'holds a send' : 'nothing held'}</span>{/if}
+          {:else if c.key === 'target'}
+            <span class="target">{ledgerTarget(r.key_args, r.tombstone)}</span>
+          {/if}
+        {/snippet}
+        {#snippet detail(r: ExecutionRow)}
+          <dl class="detail-grid">
+            {#if r.held_by}
+              <div><dt>{r.status === 'blocked' ? 'Refused as a repeat of' : 'Key currently held by'}</dt>
+                <dd>row {r.held_by.id.slice(0, 8)} · {r.held_by.status} (since {fmtUtc(r.held_by.created_at)})</dd></div>
+            {/if}
+            {#if r.idempotency_key}<div><dt>Idempotency key</dt><dd class="mono wrap">{r.idempotency_key}</dd></div>{/if}
+            <div><dt>Context</dt><dd>{r.context_kind}{r.dag_name ? ` · ${r.dag_name}${r.node_name ? ` / ${r.node_name}` : ''}` : ''}{r.turn != null ? ` · turn ${r.turn}` : ''}</dd></div>
+            {#if r.session_id}<div><dt>Session</dt><dd class="mono wrap">{r.session_id}{r.parent_session_id ? ` (parent ${r.parent_session_id})` : ''}</dd></div>{/if}
+            <div><dt>Key args</dt><dd class="mono wrap">{r.tombstone ? 'removed by retention' : JSON.stringify(r.key_args)}</dd></div>
+            {#if r.result_summary}<div><dt>Stored note</dt><dd class="mono wrap">{r.result_summary}</dd></div>{/if}
+            {#if r.external_ref}<div><dt>Provider ref</dt><dd class="mono wrap">{r.external_ref}</dd></div>{/if}
+            <div><dt>Recorded</dt><dd>{fmtWhen(r.created_at)}{r.completed_at ? ` · closed ${fmtUtc(r.completed_at)}` : ''}</dd></div>
+          </dl>
+        {/snippet}
+      </DataTable>
+    {/if}
+    <div class="table-foot">
+      {#if paused}
+        <span class="small muted">Paused while you view older rows.</span>
+        <button type="button" class="btn" onclick={backToLatest}>Back to latest</button>
+      {:else}
+        <span class="small muted">Newest first · refreshes every 15 s</span>
+      {/if}
+      {#if canLoadOlder}
+        <button type="button" class="btn" onclick={loadOlder} disabled={loadingOlder}>{loadingOlder ? 'Loading…' : 'Load older'}</button>
+      {/if}
+    </div>
+  </section>
 {:else if $store.error}
-  <p class="status-msg error">Failed to load execution ledger — retrying…</p>
+  <p class="state-msg error">Failed to load the execution ledger — retrying…</p>
 {:else}
-  <p class="status-msg">Loading…</p>
+  <p class="state-msg">Loading…</p>
 {/if}
 
 <style>
-  /* ── Header ────────────────────────────────────────────────────────── */
-  .view-head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 1rem;
-    margin-bottom: 1.25rem;
-  }
+  .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 1.25rem; }
+  h1 { font-size: 1.375rem; font-weight: 700; color: var(--text); margin: 0 0 0.125rem; }
+  .subtitle { font-size: 0.8125rem; color: var(--muted); margin: 0; }
+  h2 { font-size: 0.9375rem; font-weight: 600; color: var(--text); margin: 0; }
 
-  h1 {
-    font-size: 1.4rem;
-    font-weight: 700;
-    color: var(--text);
-    margin: 0 0 0.125rem;
-  }
+  .banner { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;
+    padding: 0.75rem 1rem; border-radius: 8px; background: var(--surface); border: 1px solid var(--border); margin-bottom: 1rem; }
+  .banner-left { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  .banner-dot { width: 8px; height: 8px; border-radius: 50%; background: #10b981; flex-shrink: 0; }
+  .banner-off .banner-dot { background: #f59e0b; }
+  .banner-label { font-size: 0.875rem; font-weight: 600; }
+  .banner-note { font-size: 0.75rem; color: var(--muted); }
+  .banner-modes { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .mode-pill { font-size: 0.6875rem; font-weight: 600; padding: 0.125rem 0.5rem; border-radius: 999px; border: 1px solid currentColor; }
+  .mode-off { color: var(--muted); border-color: var(--border); }
+  .mode-enforce { color: #10b981; }
+  .mode-warn { color: #f59e0b; }
 
-  .subtitle {
-    font-size: 0.8125rem;
-    color: var(--muted);
-    margin: 0;
-  }
+  .attention { border-radius: 8px; background: rgba(244, 114, 182, 0.06); border: 1px solid rgba(244, 114, 182, 0.35);
+    padding: 1rem 1.125rem; margin-bottom: 1rem; display: flex; flex-direction: column; gap: 0.75rem; }
+  .attn-lede { font-size: 0.8125rem; margin: 0; }
+  .unknown-text { color: var(--unknown); }
+  .attn-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 1.5rem; align-items: start;
+    padding-top: 0.75rem; border-top: 1px solid rgba(244, 114, 182, 0.2); }
+  .attn-facts { display: grid; grid-template-columns: 6rem minmax(0, 1fr); gap: 0.25rem 0.75rem; font-size: 0.8125rem; margin: 0; }
+  .attn-facts dt { color: var(--muted); }
+  .attn-facts dd { margin: 0; overflow-wrap: anywhere; }
+  .attn-actions { display: flex; flex-direction: column; gap: 0.625rem; }
+  .sql-title { font-size: 0.8125rem; font-weight: 600; }
+  .sql { display: block; margin-top: 0.25rem; padding: 0.5rem 0.625rem; border-radius: 8px; background: var(--bg);
+    border: 1px solid var(--border); font-family: var(--font-mono); font-size: 0.6875rem; line-height: 1.6;
+    white-space: pre-wrap; overflow-wrap: anywhere; }
+  .note { font-size: 0.75rem; color: var(--muted); margin: 0; }
+  .btn-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .btn { min-height: 32px; padding: 0 0.75rem; border-radius: 8px; border: 1px solid var(--border); background: var(--surface);
+    color: var(--text); font-family: inherit; font-size: 0.75rem; font-weight: 500; cursor: pointer; }
+  .btn:hover { background: var(--surface-hover); }
+  .btn:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
+  .btn:disabled { opacity: 0.6; cursor: default; }
 
-  h2 {
-    font-size: 0.875rem;
-    font-weight: 600;
-    color: var(--text);
-    margin: 0 0 0.75rem;
-  }
+  .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem 1.25rem; margin: 1rem 0 0.75rem; }
+  .filter-group { display: flex; align-items: center; gap: 0.5rem; }
+  .filter-label { font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  select, input[type='search'] { min-height: 32px; padding: 0 0.625rem; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); font-family: inherit; font-size: 0.8125rem; }
+  .search { margin-left: auto; flex: 1 1 14rem; max-width: 18rem; }
+  .search input { width: 100%; border-radius: 999px; }
 
-  h3 {
-    font-size: 1rem;
-    font-weight: 600;
-    color: var(--text);
-    margin: 0.75rem 0 0.25rem;
-  }
+  .table-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; }
+  .table-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+  .table-foot { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.75rem; }
+  .empty { color: var(--muted); font-size: 0.875rem; text-align: center; padding: 1.5rem 0; margin: 0; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.6875rem; font-weight: 600;
+    white-space: nowrap; border: 1px solid transparent; }
+  .effect-write { background: rgba(96, 165, 250, 0.15); color: #60a5fa; }
+  .effect-external { background: rgba(251, 191, 36, 0.15); color: #f59e0b; }
+  .effect-irreversible { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+  .target { overflow-wrap: anywhere; font-size: 0.8125rem; }
+  .detail-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.625rem 1.5rem; margin: 0; padding: 0.5rem 0; }
+  .detail-grid dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .detail-grid dd { margin: 0.125rem 0 0; font-size: 0.8125rem; }
+  .mono { font-family: var(--font-mono); font-size: 0.75rem; }
+  .wrap { overflow-wrap: anywhere; }
+  .small { font-size: 0.75rem; }
+  .muted { color: var(--muted); }
+  .state-msg { margin: 0.5rem 0 1rem; color: var(--muted); font-size: 0.875rem; }
+  .state-msg.error { color: var(--red); }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
-  /* ── Mode banner ───────────────────────────────────────────────────── */
-  .banner {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    padding: 0.75rem 1rem;
-    border-radius: 8px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    margin-bottom: 1rem;
-  }
-
-  .banner-disabled {
-    opacity: 0.6;
-  }
-
-  .banner-blocked {
-    border-color: var(--red, #ef4444);
-  }
-
-  .banner-left {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
-  .banner-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--green, #10b981);
-    flex-shrink: 0;
-  }
-
-  .banner-disabled .banner-dot {
-    background: var(--muted);
-  }
-
-  .banner-label {
-    font-size: 0.875rem;
-    font-weight: 600;
-    color: var(--text);
-  }
-
-  .banner-modes {
-    display: flex;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-  }
-
-  .mode-pill {
-    font-size: 0.6875rem;
-    font-weight: 600;
-    padding: 0.125rem 0.5rem;
-    border-radius: 999px;
-    border: 1px solid currentColor;
-  }
-
-  .mode-off      { color: var(--muted); border-color: var(--border); }
-  .mode-enforce  { color: var(--green, #10b981); }
-  .mode-warn     { color: #f59e0b; }
-  .mode-shadow   { color: #60a5fa; }
-
-  /* ── Filter bar ────────────────────────────────────────────────────── */
-  .filter-bar {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 1rem;
-    padding: 0.75rem 0;
-    margin-bottom: 0.5rem;
-  }
-
-  .filter-group {
-    display: flex;
-    align-items: center;
-    gap: 0.375rem;
-    flex-wrap: wrap;
-  }
-
-  .filter-label {
-    font-size: 0.75rem;
-    font-weight: 600;
-    color: var(--muted);
-    margin-right: 0.125rem;
-  }
-
-  .filter-btn {
-    font-size: 0.75rem;
-    padding: 0.25rem 0.625rem;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-    color: var(--muted);
-    cursor: pointer;
-    transition: background 0.1s, color 0.1s, border-color 0.1s;
-    white-space: nowrap;
-  }
-
-  .filter-btn:hover {
-    background: var(--surface-hover);
-    color: var(--text);
-  }
-
-  .filter-btn.active {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-  }
-
-  /* ── Table card ────────────────────────────────────────────────────── */
-  .table-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 1rem;
-    margin-top: 1rem;
-  }
-
-  /* ── Session detail (rendered by DataTable's detail snippet) ───────── */
-  .session-detail {
-    padding: 0.5rem 0;
-  }
-
-  .truncated-note {
-    font-size: 0.75rem;
-    color: var(--muted);
-    font-style: italic;
-    margin: 0 0 0.5rem;
-  }
-
-  .no-actions {
-    font-size: 0.8125rem;
-    color: var(--muted);
-    padding: 0.5rem 0;
-    margin: 0;
-  }
-
-  /* ── Turn group ────────────────────────────────────────────────────── */
-  .turn-group {
-    margin-bottom: 0.75rem;
-  }
-
-  .turn-header {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.25rem 0;
-    margin-bottom: 0.25rem;
-  }
-
-  .turn-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--accent);
-    flex-shrink: 0;
-  }
-
-  .turn-label {
-    font-size: 0.75rem;
-    font-weight: 600;
-    color: var(--text);
-  }
-
-  .turn-count {
-    font-size: 0.6875rem;
-    color: var(--muted);
-  }
-
-  /* ── Action row ────────────────────────────────────────────────────── */
-  .action-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.4rem 0.5rem;
-    border-radius: 6px;
-    margin-bottom: 0.25rem;
-    background: var(--bg, #0f172a);
-    font-size: 0.8125rem;
-  }
-
-  .action-left {
-    display: flex;
-    align-items: center;
-    gap: 0.375rem;
-    flex-shrink: 0;
-    min-width: 0;
-  }
-
-  .action-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .dot-success     { background: var(--green, #10b981); }
-  .dot-blocked     { background: #f59e0b; }
-  .dot-error       { background: var(--red, #ef4444); }
-  .dot-timeout     { background: #dc2626; }
-
-  .action-tool {
-    font-family: monospace;
-    font-size: 0.8125rem;
-    color: var(--text);
-    font-weight: 600;
-  }
-
-  .action-args {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.375rem;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .arg {
-    font-size: 0.75rem;
-    color: var(--muted);
-    font-family: monospace;
-  }
-
-  .arg-key {
-    color: #60a5fa;
-  }
-
-  .arg-val {
-    color: var(--text);
-  }
-
-  .action-right {
-    display: flex;
-    align-items: center;
-    gap: 0.375rem;
-    flex-shrink: 0;
-    margin-left: auto;
-  }
-
-  .effect-pill {
-    font-size: 0.625rem;
-    font-weight: 600;
-    padding: 0.125rem 0.375rem;
-    border-radius: 999px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-
-  .effect-write        { background: rgba(96,165,250,0.15); color: #60a5fa; }
-  .effect-external     { background: rgba(251,191,36,0.15); color: #f59e0b; }
-  .effect-irreversible { background: rgba(239,68,68,0.15);  color: #ef4444; }
-
-  .status-pill {
-    font-size: 0.625rem;
-    font-weight: 700;
-    padding: 0.125rem 0.5rem;
-    border-radius: 999px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-
-  .status-pill-success { background: rgba(16,185,129,0.15); color: #10b981; }
-  .status-pill-blocked { background: rgba(245,158,11,0.15); color: #f59e0b; }
-  .status-pill-error   { background: rgba(239,68,68,0.15);  color: #ef4444; }
-  .status-pill-timeout { background: rgba(220,38,38,0.15);  color: #dc2626; }
-
-  .action-time {
-    font-size: 0.6875rem;
-    color: var(--muted);
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-  }
-
-  .action-detail-text {
-    width: 100%;
-    font-size: 0.75rem;
-    color: var(--muted);
-    padding: 0.125rem 0 0 1.25rem;
-  }
-
-  /* ── Empty state ───────────────────────────────────────────────────── */
-  .empty-state {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    padding: 4rem 2rem;
-    color: var(--muted);
-    text-align: center;
-  }
-
-  .empty-state svg {
-    color: var(--muted);
-    opacity: 0.4;
-    margin-bottom: 0.5rem;
-  }
-
-  .empty-state p {
-    margin: 0;
-    font-size: 0.875rem;
-    max-width: 28rem;
-  }
-
-  /* ── Generic status messages ───────────────────────────────────────── */
-  .status-msg {
-    color: var(--muted);
-    font-size: 0.9375rem;
-    padding: 3rem 2rem;
-    text-align: center;
-  }
-
-  .status-msg.error {
-    color: var(--red, #ef4444);
+  @media (max-width: 768px) {
+    .attn-row { grid-template-columns: 1fr; }
+    .search { margin-left: 0; max-width: none; }
+    .btn { min-height: 44px; }
+    select, input[type='search'] { min-height: 44px; }
   }
 </style>

@@ -18,7 +18,15 @@
     --accent-dim: #4f46a8;
     --accent-glow: rgba(124, 106, 247, 0.15);
     --text: #e2e2f0;
-    --muted: #6b6b8a;
+    /* Harness dashboard §4.1: lifted from #6b6b8a (3.6:1 on --surface) to
+       #8e8eab (5.9:1) — secondary text must pass WCAG AA. */
+    --muted: #8e8eab;
+    /* Text in the accent colour: #a99df9 is 6.7:1 on --accent-glow. */
+    --accent-text: #a99df9;
+    /* One meaning each (spec §4.1); status.ts mirrors these as hex. */
+    --waiting: #a78bfa;
+    --unknown: #f472b6;
+    --pending: #22d3ee;
 
     /* Status / type colours */
     --green: #34d399;
@@ -62,8 +70,8 @@
     --secondary: 240 16% 11%;          /* #181824 */
     --secondary-foreground: 240 33% 92%;
 
-    --muted-token: 240 13% 47%;        /* #6b6b8a  (--muted is taken as a raw hex above) */
-    --muted-foreground: 240 13% 47%;
+    --muted-token: 240 17% 61%;        /* #8e8eab  (--muted is taken as a raw hex above) */
+    --muted-foreground: 240 17% 61%;
 
     --accent-token: 249 89% 63%;
     --accent-foreground: 0 0% 100%;
@@ -91,7 +99,7 @@
   --color-nous-accent:    #7c6af7;
   --color-nous-accent-dim:#4f46a8;
   --color-nous-text:      #e2e2f0;
-  --color-nous-muted:     #6b6b8a;
+  --color-nous-muted:     #8e8eab;
   --color-nous-green:     #34d399;
   --color-nous-red:       #f87171;
   --color-nous-yellow:    #fbbf24;
