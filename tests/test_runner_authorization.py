@@ -357,3 +357,23 @@ def test_every_production_run_turn_call_passes_a_context():
             ):
                 offenders.append(f"{path.as_posix()}:{node.lineno}")
     assert offenders == [], offenders
+
+
+# ---------------------------------------------------------------------------
+# Harness Phase 2a, Task 2: the F078 refuse denylist derives from the table
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_refuse_active_strips_previously_unclassified_tools():
+    r, _ = _runner(["recall_deep", "dag_create"])
+    sent: list[set[str]] = []
+
+    async def capture(system_prompt, messages, tools=None, skip_thinking=False,
+                      model_override=None, is_background=False):
+        sent.append({t["name"] for t in tools or []})
+        return ApiResponse(content=[{"type": "text", "text": "done"}], stop_reason="end_turn")
+
+    r._call_api = capture
+    await _run_loop(r, refuse_active=True)
+    assert sent and "dag_create" not in sent[0] and "recall_deep" in sent[0]

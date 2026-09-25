@@ -42,13 +42,11 @@ from nous.api.models import (  # noqa: F401 — re-exported for backward compat
     Message,
 )
 from nous.api.smart_compress import smart_compress
+from nous.api.tool_classes import refuse_denylist
 from nous.brain.brain import Brain
 from nous.cognitive.action_gate import ActionGate
 from nous.cognitive.claim_verifier import ClaimVerifier, Evidence, IntentTracker
 from nous.cognitive.execution_ledger import (
-    EXTERNAL_TOOLS,
-    IRREVERSIBLE_TOOLS,
-    WRITE_TOOLS,
     ExecutionLedger,
     bash_exit_code,
     classify_side_effect,
@@ -1306,7 +1304,7 @@ class AgentRunner:
             # external/irreversible/bash to a refused turn. refuse_active already accounts for
             # refuse_keep_tools (set in cognitive/layer.py).
             if getattr(turn_context, "refuse_active", False) and tools:
-                _refuse_denylist = WRITE_TOOLS | EXTERNAL_TOOLS | IRREVERSIBLE_TOOLS | {"bash"}
+                _refuse_denylist = refuse_denylist()  # harness 2a: every classified non-read tool
                 _before = len(tools)
                 tools = [t for t in tools if t["name"] not in _refuse_denylist]
                 logger.info("F078 refuse: stripped %d state-modifying tool(s) (streaming)", _before - len(tools))
@@ -1904,10 +1902,10 @@ class AgentRunner:
         # F078 (R6): a `refuse`-tier censor matched. The LLM still runs, but its
         # state-modifying tools are stripped for the turn so it can only decline
         # gracefully (or answer read-only). This is a DENYLIST removal, distinct
-        # from the whitelist `tool_filter` above. Denylist sourced from
-        # execution_ledger (NOT ActionGate, which is disabled in prod).
+        # from the whitelist `tool_filter` above. Denylist sourced from the
+        # tool-class table (harness 2a; NOT ActionGate, which is disabled in prod).
         if refuse_active:
-            _refuse_denylist = WRITE_TOOLS | EXTERNAL_TOOLS | IRREVERSIBLE_TOOLS | {"bash"}
+            _refuse_denylist = refuse_denylist()
             before = len(base_tools)
             base_tools = [t for t in base_tools if t["name"] not in _refuse_denylist]
             logger.warning(
