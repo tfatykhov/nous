@@ -52,7 +52,7 @@
 | `nous/dag/delivery.py` | `Approvals:` section, `stopped at an approval` verb | 14 |
 | `nous/api/tools.py` | `dag_create` schema/threading/refusals; `dag_manage` output | 15 |
 | `nous/main.py`, `CLAUDE.md` | wiring move; settings rows | 16 |
-| Tests | `tests/test_dag_approval_prereqs.py`, `tests/test_dag_approval_store.py`, `tests/test_dag_approval_schemas.py`, `tests/test_dag_approval_text.py`, `tests/test_dag_approval.py`, `tests/test_dag_approval_tools.py`, `tests/test_dag_approval_e2e.py`, additions to `tests/test_migrator_split.py`, `tests/test_a2ui_builders.py`, `tests/test_a2ui_service.py`, `tests/test_a2ui_actions.py`, `tests/test_dag_delivery.py` | all |
+| Tests | New: `tests/test_dag_approval_prereqs.py`, `tests/test_dag_approval_store.py`, `tests/test_dag_approval_schemas.py`, `tests/test_dag_approval_text.py`, `tests/test_dag_approval.py`, `tests/test_a2ui_dag_approval_actions.py`, `tests/test_dag_approval_tools.py`, `tests/test_dag_approval_e2e.py`. Additions: `tests/test_migrator_split.py`, `tests/test_a2ui_builders.py`, `tests/test_a2ui_service.py`, `tests/test_dag_delivery.py` | all |
 
 ---
 
@@ -216,7 +216,7 @@ git commit -q -F <msgfile>   # "fix(dag): one predecessor-edge set for readiness
 
 **Files:**
 - Modify: `nous/dag/store.py` (constants; new `transition_node`; `apply_retry`)
-- Modify: `nous/dag/orchestrator.py` (module constants; `_mark_ready_and_launch`; `_cancel_one`; `cancel_dag`; `_propagate_failures`; `retry_node`; `_dispatch_ready_nodes`)
+- Modify: `nous/dag/orchestrator.py` (module constants; `_mark_ready_and_launch`; `_cancel_one`; `cancel_dag`; `_propagate_failures`; `retry_node`; `_dispatch_ready_nodes`; `_defer_node`)
 - Test: `tests/test_dag_approval_prereqs.py`; update every caller of `apply_retry` found by `grep -rn "apply_retry" nous tests`
 
 **Interfaces:**
@@ -298,6 +298,55 @@ async def test_retry_refuses_when_the_node_changed_after_its_load(
     with pytest.raises(ValueError, match="changed state"):
         await orch.retry_node(dag.id, "draft")
     assert (await store.get_dag(dag.id)).status == "failed"  # not reactivated
+
+
+async def test_a_cascade_target_that_finished_first_does_not_block_its_dependents(
+    store, subtask_mgr, monkeypatch
+):
+    orch = _orch(store, subtask_mgr)
+    dag = await store.create(
+        DAGCreateRequest(
+            name="cascade",
+            nodes=[
+                DAGNodeSpec(name="src", type=DAGNodeType.subtask, instructions="s"),
+                DAGNodeSpec(name="mid", type=DAGNodeType.subtask, instructions="m"),
+                DAGNodeSpec(name="leaf", type=DAGNodeType.subtask, instructions="l"),
+            ],
+            edges=[
+                DAGEdgeSpec(from_node="src", to_node="mid", edge_type="cancel_cascade"),
+                DAGEdgeSpec(from_node="mid", to_node="leaf"),
+            ],
+        )
+    )
+    await store.update_dag_status(dag.id, "running")
+    await store.update_node((await _node(store, dag.id, "src")).id, status="failed", error="boom")
+    mid = await _node(store, dag.id, "mid")
+    await store.update_node(mid.id, status="running", started_at=datetime.now(UTC))
+    real_cancel = orch._cancel_node
+
+    async def mid_finishes_first(node):
+        if node.name == "mid":
+            await store.update_node(node.id, status="completed", result="done")
+        await real_cancel(node)
+
+    monkeypatch.setattr(orch, "_cancel_node", mid_finishes_first)
+
+    await orch._advance_dag(await store.get_dag(dag.id))
+
+    assert (await _node(store, dag.id, "mid")).status == "completed"
+    assert (await _node(store, dag.id, "leaf")).status == "pending"  # not blocked
+
+
+async def test_a_deferral_does_not_resurrect_a_cancelled_node(store, subtask_mgr):
+    orch = _orch(store, subtask_mgr)
+    dag = await store.create(_two_node("dependency"))
+    stale = await store.get_dag(dag.id)
+    draft = next(n for n in stale.nodes if n.name == "draft")  # 'ready' in the tick's copy
+    await store.update_node(draft.id, status="cancelled", error="cancelled")
+
+    await orch._defer_node(draft, stale, "pool saturated")
+
+    assert (await _node(store, dag.id, "draft")).status == "cancelled"
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -447,14 +496,32 @@ Replace the four `update_node(node.id, status="ready")` + `node.status = "ready"
                 await self._cancel_one(node, reason)
 ```
 
-`_propagate_failures`, the two apply loops:
+`_propagate_failures`: apply the cancels FIRST and build `poison` from the cancels that won, then compute and apply the blocks. A cascade target that completed between the tick's load and the write keeps its outcome, and its dependents must not be blocked for a cancellation that never happened. Replace everything from `# Transitively find nodes to block` to the end of the method with:
 
 ```python
         # Apply cancelled status (cancel_cascade targets) — conditional (§3.3).
+        # Only a cancel that WON poisons its dependents: a target that finished
+        # between the tick's load and this write keeps its outcome.
+        cancelled: set[str] = set()
         for node_id in to_cancel:
-            await self._cancel_one(node_by_id[node_id], "Cancelled by predecessor failure")
+            if await self._cancel_one(node_by_id[node_id], "Cancelled by predecessor failure"):
+                cancelled.add(node_id)
 
-        # Apply blocked status (predecessor-edge descendants) — conditional.
+        # Transitively find nodes to block (predecessor edges).
+        poison = failed_ids | cancelled
+        to_block: set[str] = set()
+        changed = True
+        while changed:
+            changed = False
+            for node_id, predecessors in dep_map.items():
+                node = node_by_id[node_id]
+                if node.status in _TERMINAL or node_id in to_block or node_id in to_cancel:
+                    continue
+                if predecessors & (poison | to_block):
+                    to_block.add(node_id)
+                    changed = True
+
+        # Apply blocked status — conditional.
         for node_id in to_block:
             node = node_by_id[node_id]
             if await self._store.transition_node(
@@ -462,6 +529,17 @@ Replace the four `update_node(node.id, status="ready")` + `node.status = "ready"
             ):
                 node.status = "blocked"
 ```
+
+`_defer_node`: its demotion to `pending` becomes conditional — Task 8's fail-closed launch path calls it on a `ready` node that `cancel_dag` may have cancelled meanwhile. Replace `await self._store.update_node(node.id, status="pending")` / `node.status = "pending"` with:
+
+```python
+        if await self._store.transition_node(
+            node.id, from_statuses={"ready"}, status="pending"
+        ):
+            node.status = "pending"
+```
+
+(The failure write after `_MAX_DEFERRALS` stays as it is.)
 
 `retry_node`: annotate `node_updates: list[tuple[UUID, dict, frozenset[str]]]`; the retried node's entry gets `frozenset({"failed"})` as its third element, each unblock entry `frozenset({"blocked", "cancelled"})`. Replace the final `await self._store.apply_retry(...)` with:
 
@@ -488,7 +566,7 @@ Expected: all new tests PASS; no new failures in the existing DAG suites (compar
 
 ```bash
 git add nous/dag/store.py nous/dag/orchestrator.py tests/test_dag_approval_prereqs.py <any updated apply_retry test files>
-git commit -q -F <msgfile>   # "fix(dag): conditional status writes — dispatch, cancel, cascade, block, retry"
+git commit -q -F <msgfile>   # "fix(dag): conditional status writes — dispatch, defer, cancel, cascade, block, retry"
 ```
 
 ---
@@ -523,9 +601,16 @@ def test_split_full_migration_076():
 
     path = Path(__file__).resolve().parents[1] / "sql" / "migrations" / "076_dag_approval_nodes.sql"
     stmts = _split_sql_statements(path.read_text(encoding="utf-8"))
-    assert len(stmts) == 7
-    assert stmts[-1].startswith("ALTER TABLE nous_system.dag_nodes")
+    assert len(stmts) == 7, stmts
+    assert "ALTER TABLE nous_system.dag_nodes" in stmts[-1]
     assert "ADD COLUMN IF NOT EXISTS answer_history JSONB" in stmts[-1]
+    # Comments must stay apostrophe-free: an unbalanced quote in one would
+    # open a string for the splitter and swallow the statements after it.
+    comments = [
+        line for line in path.read_text(encoding="utf-8").splitlines()
+        if line.lstrip().startswith("--")
+    ]
+    assert not [line for line in comments if "'" in line or ";" in line], comments
 ```
 
 Create `tests/test_dag_approval_store.py`:
@@ -632,7 +717,7 @@ Expected: FAIL — the migration file is missing; `status='awaiting_input'` viol
 - [ ] **Step 3: Write the migration** — `sql/migrations/076_dag_approval_nodes.sql`:
 
 ```sql
--- Harness Phase 3: approval nodes wait durably on a person's answer.
+-- Harness Phase 3: approval nodes wait durably on an answer from a person.
 -- New node type approval and new status awaiting_input, plus the columns
 -- that hold the authored question, the deadline and the answer on the node.
 -- Drop both possible constraint names first (the 048 pattern): 032 created
@@ -1871,7 +1956,8 @@ async def test_notify_text_becomes_the_ping_body(service, monkeypatch) -> None:
         approval_gate(_DAG_CARD), dedup_key=f"dag-approval:{uuid.uuid4()}",
         reserved_key_ok=True, notify=True, notify_text="dag · approve\nSend it?",
     )
-    await asyncio.sleep(0)
+    # _schedule_bg keeps strong refs in _pending_tasks; drain them.
+    await asyncio.gather(*list(service._pending_tasks))
     assert sent == [("dag · approve", sid, "dag · approve\nSend it?")]
 ```
 
@@ -2009,6 +2095,11 @@ New methods (after `resolve`):
 
 Run: `UV_PROJECT_ENVIRONMENT=E:/Projects/nous/.venv uv run --frozen pytest tests/test_a2ui_builders.py tests/test_a2ui_service.py tests/test_a2ui_actions.py -q`
 Expected: PASS locally (postgres-only tests skipped; CI runs them).
+
+Import smoke (the new `nous.a2ui.service → nous.dag.approval` edge must not form a cycle; `nous/dag/__init__.py` is a docstring today):
+
+Run: `UV_PROJECT_ENVIRONMENT=E:/Projects/nous/.venv uv run --frozen python -c "import nous.a2ui.service, nous.a2ui.actions, nous.dag.orchestrator, nous.dag.delivery"`
+Expected: exits 0.
 
 - [ ] **Step 6: Commit**
 
@@ -2934,6 +3025,9 @@ async def test_the_budget_path_cancels_a_waiting_node(db, store, subtask_mgr, su
 
 
 async def test_the_sweep_closes_leaked_cards_and_leaves_fresh_ones(store, subtask_mgr, surfaces):
+    """Two live cards under one dedup key cannot happen on Postgres (the
+    partial UNIQUE index on (agent_id, dedup_key) WHERE live) — the stray
+    rule is defensive, and the fake lets us exercise it."""
     orch = _orch(store, subtask_mgr, surfaces)
     dag, node = await _parked(store, orch)
     key = approval_dedup_key(node.id)
@@ -3067,7 +3161,7 @@ git commit -q -F <msgfile>   # "feat(dag): cancels and budget close approval car
 
 **Interfaces:**
 - Consumes: `MAX_ACTIVE_DAGS` from `nous.dag.store`.
-- Produces: `_advance_dag(self, dag, *, may_start: bool = True)`.
+- Produces: `_advance_dag(self, dag, *, may_start: bool = True)`. `grep -rn "_advance_dag(" nous tests` (on `1daa004`): `tick()` is the only production caller; tests call it positionally, which the default keeps working.
 
 - [ ] **Step 1: Write the failing tests** — append to `tests/test_dag_approval.py`:
 
@@ -3670,6 +3764,17 @@ class _Cards:
     async def close_by_dedup_key(self, key, status="expired"):
         return []
 
+    async def close(self, surface_id, status="expired"):
+        # Present so a path that closes a card is exercised, not swallowed:
+        # _close_card catches exceptions, so a missing method would pass silently.
+        return None
+
+    async def live_ids(self, surface_ids):
+        return set(surface_ids)
+
+    async def live_cards_by_prefix(self, prefix, limit):
+        return []
+
     async def push_built(self, built, **_):
         return "card-1"
 
@@ -4137,7 +4242,12 @@ UV_PROJECT_ENVIRONMENT=E:/Projects/nous/.venv uv run --frozen pytest tests -q -p
 
 - [ ] **Lint** — no new ruff findings in the touched files relative to `main`.
 - [ ] **Verify-by-execution reviewer** — dispatch the usual reviewer on the branch diff (race injections, the SQLite/Postgres split, the flag-off path, the deploy note in spec §3.8) and fix by class before opening the PR.
-- [ ] **PR** — body names the deploy note (spec §3.8: count DAGs wedged by the old propagation on prod, read-only, before deploy), the rollback note (cancel approval DAGs before rolling back past 076), and that the dispatch gate had no spec-level database review. Check `gh pr view --json files` lists only intended paths. The merge is the user's call.
+- [ ] **PR** — the body names:
+  - the deploy note (spec §3.8: count DAGs wedged by the old propagation on prod, read-only, before deploy);
+  - the rollback note (cancel approval DAGs before rolling back past 076);
+  - that these land **unflagged, for every DAG and node type**, behavior-identical outside the races they close: `PREDECESSOR_EDGE_TYPES` (failure propagation and retry now follow `context_flow`), the conditional writes in `_dispatch_ready_nodes` (four sites), `_defer_node`, `cancel_dag`, the cascade cancel, the block write and `apply_retry`, and the unblock clearing `started_at`/`completed_at`;
+  - that the dispatch gate had no spec-level database review.
+  Check `gh pr view --json files` lists only intended paths. The merge is the user's call.
 
 ## Self-review (writing-plans checklist, done)
 
