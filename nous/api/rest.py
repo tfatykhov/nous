@@ -85,6 +85,7 @@ def create_app(
     context_logger: Any | None = None,
     surface_service: Any | None = None,
     action_router: Any | None = None,
+    dag_orchestrator: Any | None = None,
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
 
@@ -1959,8 +1960,16 @@ def create_app(
         try:
             from nous.api.dashboard_queries import get_dag_dashboard_data
 
+            # Harness dashboard §3.1: the orchestrator's held_reason is a
+            # per-process hint; main.py passes a lazy proxy (falsy until the
+            # DAG subsystem exists).
+            held = dag_orchestrator.held_reason if dag_orchestrator else None
             async with database.session() as session:
-                data = await get_dag_dashboard_data(session, settings.agent_id)
+                data = await get_dag_dashboard_data(
+                    session, settings.agent_id,
+                    public_base_url=settings.a2ui_public_base_url or None,
+                    held_reason=held,
+                )
             return JSONResponse(data)
         except Exception as e:
             logger.error("Dashboard DAG error: %s", e)

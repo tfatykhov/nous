@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import UUID
 
 from collections import Counter, defaultdict
 
@@ -1875,8 +1876,157 @@ def _dag_iso(val: Any) -> str | None:
     return str(val)
 
 
-async def get_dag_dashboard_data(session: AsyncSession, agent_id: str) -> dict[str, Any]:
-    """Return DAG orchestration dashboard data: active DAGs, recent DAGs, stats."""
+def _approval_actor(answered_by: str | None) -> str | None:
+    """A person's identity, or None — never the 'unattributed' placeholder
+    or the deadline actor (the answer source already says who acted)."""
+    from nous.dag.approval import DEADLINE_ACTOR, UNATTRIBUTED
+
+    if not answered_by or answered_by in (UNATTRIBUTED, DEADLINE_ACTOR):
+        return None
+    return answered_by
+
+
+def _approval_iso(ts: Any) -> str | None:
+    from nous.dag.approval import as_utc
+
+    return as_utc(ts).isoformat() if ts else None
+
+
+def _approval_view(node: Any, nodes: list[Any], edges: list[Any], base_url: str | None) -> dict:
+    """Harness dashboard §3.1: everything an approval step shows, from the
+    same helpers the orchestrator and the companion card use."""
+    from nous.dag import approval as ap
+
+    spec = node.approval_spec or {}
+    question = node.instructions or ""
+    inputs = ap.context_results(node, nodes, edges)
+    undelivered = node.status == "awaiting_input" and not node.surface_id
+    return {
+        "question": question,
+        "options": list(spec.get("options") or []),
+        "default_option": spec.get("default_option"),
+        "default_label": ap.label_of(spec, spec.get("default_option")),
+        "asked_at": _approval_iso(node.started_at),
+        "deadline": _approval_iso(node.answer_deadline),
+        "answer": node.answer,
+        "answer_label": ap.label_of(spec, node.answer) if node.answer else None,
+        "answer_source": node.answer_source,
+        "answered_by": _approval_actor(node.answered_by),
+        "answered_at": _approval_iso(node.answered_at),
+        "card_url": ap.card_link(node.surface_id, base_url) if node.surface_id else None,
+        "card_error": (node.error or None) if undelivered else None,
+        "card_summary": ap.build_card_summary(question, inputs),
+        "reviewing": [name for name, _ in inputs],
+        "attempts": [
+            {**entry, "answered_by": _approval_actor(entry.get("answered_by"))}
+            for entry in (node.answer_history or [])
+        ],
+    }
+
+
+def _held(held_reason: Any, dag_id: UUID) -> str | None:
+    """The orchestrator's in-memory hint. main.py passes a lazy proxy that
+    raises when DAGs are disabled — a hint must never break the tab."""
+    if held_reason is None:
+        return None
+    try:
+        return held_reason(dag_id)
+    except Exception:
+        logger.debug("held_reason unavailable for DAG %s", dag_id, exc_info=True)
+        return None
+
+
+async def _attach_approvals(
+    session: AsyncSession, active_dags: list[dict], base_url: str | None, held_reason: Any
+) -> list[dict]:
+    """Attach approval views, per-DAG waiting counts and held reasons to the
+    active DAGs; return waiting_on_you ordered by deadline (spec §3.1)."""
+    from sqlalchemy import select
+
+    from nous.dag.store import LIVE_DAG_STATUSES
+    from nous.storage.models import DAGEdge, DAGNode
+
+    waiting: list[dict] = []
+    ids = [UUID(str(d["id"])) for d in active_dags]
+    for d in active_dags:
+        d["waiting"] = 0
+        d["held_reason"] = _held(held_reason, UUID(str(d["id"])))
+    if not ids:
+        return waiting
+    nodes = (await session.execute(select(DAGNode).where(DAGNode.dag_id.in_(ids)))).scalars().all()
+    edges = (await session.execute(select(DAGEdge).where(DAGEdge.dag_id.in_(ids)))).scalars().all()
+    nodes_by_dag: dict[UUID, list[Any]] = defaultdict(list)
+    edges_by_dag: dict[UUID, list[Any]] = defaultdict(list)
+    for n in nodes:
+        nodes_by_dag[n.dag_id].append(n)
+    for e in edges:
+        edges_by_dag[e.dag_id].append(e)
+    for d in active_dags:
+        dag_id = UUID(str(d["id"]))
+        dag_nodes = nodes_by_dag.get(dag_id, [])
+        views: dict[UUID, dict] = {}
+        for node in dag_nodes:
+            if node.node_type != "approval":
+                continue
+            view = _approval_view(node, dag_nodes, edges_by_dag.get(dag_id, []), base_url)
+            views[node.id] = view
+            if node.status == "awaiting_input" and d["status"] in LIVE_DAG_STATUSES:
+                d["waiting"] += 1
+                waiting.append({
+                    "dag_id": d["id"], "dag_name": d["name"],
+                    "node_id": str(node.id), "node_name": node.name,
+                    "question": view["question"], "deadline": view["deadline"],
+                    "default_label": view["default_label"], "card_url": view["card_url"],
+                    "card_error": view["card_error"], "reviewing": view["reviewing"],
+                })
+        for nd in d["nodes"]:
+            view = views.get(UUID(str(nd["id"])))
+            if view is not None:
+                nd["approval"] = view
+    waiting.sort(key=lambda w: w["deadline"] or "9999")
+    return waiting
+
+
+async def _attach_stopped_by(session: AsyncSession, recent_dags: list[dict]) -> None:
+    """stopped_by (spec §3.1): only a FAILED DAG whose every failed node is an
+    answered approval — the F087 predicate — says who stopped it."""
+    from sqlalchemy import select
+
+    from nous.dag.approval import is_answered_approval, stopped_at_approval
+    from nous.storage.models import DAGNode
+
+    for d in recent_dags:
+        d["stopped_by"] = None
+    failed = [UUID(str(d["id"])) for d in recent_dags if d["status"] == "failed"]
+    if not failed:
+        return
+    rows = (await session.execute(
+        select(DAGNode.dag_id, DAGNode.status, DAGNode.node_type, DAGNode.answer_source)
+        .where(DAGNode.dag_id.in_(failed))
+    )).all()
+    by_dag: dict[UUID, list[Any]] = defaultdict(list)
+    for r in rows:
+        by_dag[r.dag_id].append(r)
+    for d in recent_dags:
+        nodes = by_dag.get(UUID(str(d["id"])))
+        if d["status"] != "failed" or not nodes or not stopped_at_approval(nodes):
+            continue
+        stops = [n for n in nodes if n.status == "failed" and is_answered_approval(n)]
+        d["stopped_by"] = (
+            "companion" if all(n.answer_source == "companion" for n in stops) else "deadline"
+        )
+
+
+async def get_dag_dashboard_data(
+    session: AsyncSession, agent_id: str, *,
+    public_base_url: str | None = None, held_reason: Any = None,
+) -> dict[str, Any]:
+    """Return DAG orchestration dashboard data: active DAGs, recent DAGs, stats.
+
+    Harness dashboard §3.1: approval views, waiting_on_you, held reasons and
+    stopped_by. ``held_reason`` is the orchestrator's ``held_reason`` (or a
+    lazy proxy of it); ``public_base_url`` builds card links.
+    """
     now = datetime.now(timezone.utc)
     twenty_four_hours_ago = now - timedelta(hours=24)
 
@@ -2052,14 +2202,19 @@ async def get_dag_dashboard_data(session: AsyncSession, agent_id: str) -> dict[s
             pass
     avg_seconds = sum(durations) / len(durations) if durations else 0.0
 
+    waiting_on_you = await _attach_approvals(session, active_dags, public_base_url, held_reason)
+    await _attach_stopped_by(session, recent_dags)
+
     return {
         "active_dags": active_dags,
         "recent_dags": recent_dags,
+        "waiting_on_you": waiting_on_you,
         "stats": {
             "active_count": active_count,
             "nodes_completed_24h": nodes_completed_24h,
             "success_rate": round(success_rate, 3),
             "avg_completion_seconds": round(avg_seconds, 1),
+            "waiting_count": len(waiting_on_you),
         },
         "phase2_signals": await get_dag_phase2_signals(session, agent_id),
     }
