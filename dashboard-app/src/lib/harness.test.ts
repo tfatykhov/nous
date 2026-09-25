@@ -15,6 +15,10 @@ describe('fmtWhen — absolute UTC first, relative second', () => {
 describe('relUntil', () => {
   it('counts down to a deadline and says when it has passed', () => {
     expect(relUntil('2026-09-25T19:33:00Z', NOW)).toBe('in 3 h 02 m');
+    expect(relUntil('2026-09-25T16:40:00Z', NOW)).toBe('in 9 m');
+    // A day or more reads in days + hours (the 7-day approval ceiling is not "167 h").
+    expect(relUntil('2026-10-02T15:33:00Z', NOW)).toBe('in 6 d 23 h');
+    expect(relUntil('2026-09-26T16:31:00Z', NOW)).toBe('in 1 d 0 h');
     expect(relUntil('2026-09-25T16:00:00Z', NOW)).toBe('past the deadline — the default applies on the next tick');
   });
 });

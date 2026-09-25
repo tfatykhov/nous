@@ -39,6 +39,7 @@ export function relUntil(iso: string | null | undefined, now: number = Date.now(
   const mins = Math.floor((new Date(iso).getTime() - now) / 60000);
   if (mins < 0) return 'past the deadline — the default applies on the next tick';
   const h = Math.floor(mins / 60);
+  if (h >= 24) return `in ${Math.floor(h / 24)} d ${h % 24} h`;
   const m = String(mins % 60).padStart(2, '0');
   return h > 0 ? `in ${h} h ${m} m` : `in ${mins % 60} m`;
 }
