@@ -15,12 +15,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import update as sa_update
 
 from nous.config import Settings
 from nous.dag.approval import approval_dedup_key
 from nous.dag.orchestrator import DAGOrchestrator
 from nous.dag.schemas import DAGCreateRequest, DAGEdgeSpec, DAGNodeSpec, DAGNodeType
 from nous.dag.store import DAGStore
+from nous.storage.models import ExecutionDAG
 
 
 class FakeSurfaceService:
@@ -429,3 +431,120 @@ async def test_no_repush_for_a_node_a_tap_already_answered(store, subtask_mgr, s
     await orch._poll_awaiting_input(stale)
 
     assert surfaces.cards == {}
+
+
+async def test_cancel_dag_cancels_a_waiting_node_and_closes_its_card(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag, node = await _parked(store, orch)
+
+    await orch.cancel_dag(dag.id)
+    late = await orch.answer_node(node.id, "send", source="companion", actor=None, surface_id=node.surface_id)
+
+    assert (await _node(store, dag.id, "approve")).status == "cancelled"
+    assert surfaces.live() == {}
+    assert (late.outcome, late.node_status) == ("closed", "cancelled")
+
+
+async def test_cancel_dag_loses_to_an_answer_that_landed_first(store, subtask_mgr, surfaces, monkeypatch):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag, node = await _parked(store, orch)
+    real_cancel = orch._cancel_node
+
+    async def answered_first(n):
+        if n.id == node.id:
+            await orch.answer_node(n.id, "send", source="companion", actor=None, surface_id=node.surface_id)
+        await real_cancel(n)
+
+    monkeypatch.setattr(orch, "_cancel_node", answered_first)
+    await orch.cancel_dag(dag.id)
+
+    assert (await _node(store, dag.id, "approve")).status == "completed"
+
+
+async def test_a_cascade_cancel_closes_the_card(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    request = _request()
+    request.nodes.append(DAGNodeSpec(name="src", type=DAGNodeType.subtask, instructions="s"))
+    request.edges.append(DAGEdgeSpec(from_node="src", to_node="approve", edge_type="cancel_cascade"))
+    dag = await store.create(DAGCreateRequest(name="c", nodes=request.nodes, edges=request.edges))
+    await orch.start_dag(dag.id)
+    src = await _node(store, dag.id, "src")
+    await store.update_node(src.id, status="failed", error="boom")
+
+    await orch._advance_dag(await store.get_dag(dag.id))
+
+    assert (await _node(store, dag.id, "approve")).status == "cancelled"
+    assert surfaces.live() == {}
+
+
+async def test_the_budget_path_cancels_a_waiting_node(db, store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces, dag_token_budget_enforcement_enabled=True)
+    dag = await store.create(
+        DAGCreateRequest(name="b", nodes=_request().nodes, edges=_request().edges, token_budget=10)
+    )
+    await orch.start_dag(dag.id)
+    async with db.session() as session:
+        await session.execute(
+            sa_update(ExecutionDAG).where(ExecutionDAG.id == dag.id).values(tokens_consumed=20)
+        )
+        await session.commit()
+
+    await orch._advance_dag(await store.get_dag(dag.id))
+
+    assert (await _node(store, dag.id, "approve")).status == "cancelled"
+    assert surfaces.live() == {}
+    assert (await store.get_dag(dag.id)).status in ("failed", "partial")
+
+
+async def test_the_sweep_closes_leaked_cards_and_leaves_fresh_ones(store, subtask_mgr, surfaces):
+    """Two live cards under one dedup key cannot happen on Postgres (the
+    partial UNIQUE index on (agent_id, dedup_key) WHERE live) — the stray
+    rule is defensive, and the fake lets us exercise it."""
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag, node = await _parked(store, orch)
+    key = approval_dedup_key(node.id)
+    surfaces.cards["stray"] = {"dedup_key": key, "status": "live", "built": None}
+    surfaces.cards["ghost"] = {"dedup_key": approval_dedup_key(uuid.uuid4()), "status": "live", "built": None}
+
+    await orch._sweep_leaked_approval_cards()
+
+    assert set(surfaces.live()) == {node.surface_id}  # stray + ghost closed, the linked card kept
+
+
+async def test_the_sweep_leaves_an_unlinked_fresh_card_alone(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag = await store.create(_request())
+    node_id = (await _node(store, dag.id, "approve")).id
+
+    async def sweep_between_push_and_link(_sid):
+        await orch._sweep_leaked_approval_cards()
+
+    surfaces.on_push = sweep_between_push_and_link
+    await orch.start_dag(dag.id)
+
+    node = await _node(store, dag.id, "approve")
+    assert node.id == node_id and node.surface_id in surfaces.live()
+
+
+async def test_the_sweep_cancels_a_waiting_node_in_a_finished_dag(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag, node = await _parked(store, orch)
+    await store.update_dag_status(dag.id, "failed")
+
+    await orch._sweep_leaked_approval_cards()
+
+    assert (await _node(store, dag.id, "approve")).status == "cancelled"
+    assert surfaces.live() == {}
+
+
+async def test_the_sweep_finds_a_stranded_node_that_has_no_card(store, subtask_mgr, surfaces):
+    """The probe's end state: awaiting_input in a cancelled DAG, no card.
+    The card-driven pass cannot see it; the node-driven query must."""
+    orch = _orch(store, subtask_mgr, surfaces)
+    surfaces.push_errors = [RuntimeError("flaky")]
+    dag, _ = await _parked(store, orch)  # parked, push failed: no card
+    await store.update_dag_status(dag.id, "cancelled")
+
+    await orch._sweep_leaked_approval_cards()
+
+    assert (await _node(store, dag.id, "approve")).status == "cancelled"

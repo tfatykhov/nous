@@ -502,6 +502,25 @@ class DAGStore:
             ).first()
             return (row[0], row[1]) if row is not None else None
 
+    async def awaiting_input_nodes_in_terminal_dags(self, limit: int) -> list[DAGNode]:
+        """Harness Phase 3 §3.7: awaiting_input nodes whose DAG has ended.
+
+        The card-driven sweep cannot see one that has no card. A probe put a
+        node there with conditional writes only: dag_statuses is a snapshot,
+        so a concurrent retry plus a failed push can park a node in a DAG that
+        turns terminal a moment later. Served by idx_dag_nodes_awaiting_input.
+        """
+        async with self._db.session() as session:
+            rows = await session.execute(
+                select(DAGNode)
+                .join(ExecutionDAG, ExecutionDAG.id == DAGNode.dag_id)
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .where(DAGNode.status == "awaiting_input")
+                .where(ExecutionDAG.status.in_(sorted(TERMINAL_DAG_STATUSES)))
+                .limit(limit)
+            )
+            return list(rows.scalars().all())
+
     async def transition_node(
         self,
         node_id: UUID,

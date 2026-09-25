@@ -60,6 +60,7 @@ from nous.config import Settings
 from nous.dag._workspace import assert_inside_root, compute_workspace_path
 from nous.dag.approval import (
     DEADLINE_ACTOR,
+    DEDUP_PREFIX,
     DEFER_LABEL,
     AnswerResult,
     answer_values,
@@ -69,6 +70,7 @@ from nous.dag.approval import (
     button_label,
     history_entry,
     label_of,
+    node_id_from_dedup_key,
     notify_text,
     option_by_id,
     risk_line,
@@ -77,6 +79,7 @@ from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, DAGNodeStatus
 from nous.dag.store import (
     _TERMINAL_DAG_STATUSES,
     LIVE_DAG_STATUSES,
+    TERMINAL_DAG_STATUSES,
     DAGStore,
 )
 from nous.heart.subtasks import SubtaskQueueFull
@@ -308,6 +311,10 @@ class DAGOrchestrator:
         if won:
             node.status = "cancelled"
             node.error = error
+            if node.node_type == "approval":
+                # The card is the approval's only primitive; close it after the
+                # win so an answer that landed first keeps its card (§3.7).
+                await self._close_card(None, node_id=node.id)
         return won
 
     async def _finish_launch(self, node: DAGNode, *, status: str, **values: object) -> bool:
@@ -333,6 +340,9 @@ class DAGOrchestrator:
                     await self._advance_dag(dag)
                 except Exception:
                     logger.exception("Error advancing DAG %s", dag.id)
+            # Harness Phase 3 §3.7: inside `_lock` — never interleaved with a
+            # launch between push and link.
+            await self._sweep_leaked_approval_cards()
 
         # F087: drain terminal-but-undelivered DAGs. Deliberately outside the
         # per-DAG loop above, which only sees pending/running rows — a DAG that
@@ -369,6 +379,69 @@ class DAGOrchestrator:
         await self._sweep_leaked_heartbeat_checks()
 
         return len(dags)
+
+    _APPROVAL_SWEEP_BATCH = 20
+
+    async def _sweep_leaked_approval_cards(self) -> None:
+        """Harness Phase 3 §3.7: retire approval cards whose node moved on,
+        and cancel waiting nodes stranded in a DAG that has ended.
+
+        Modelled on _sweep_leaked_heartbeat_checks but run INSIDE `_lock`: it
+        must never interleave with a launch between push and link. A card
+        whose node is unlinked (surface_id NULL) is left alone — push and link
+        own it, and it may be the card just pushed.
+        """
+        now = datetime.now(UTC)
+        # Node-driven: a stranded node may have no card at all.
+        try:
+            stranded = await self._store.awaiting_input_nodes_in_terminal_dags(
+                limit=self._APPROVAL_SWEEP_BATCH
+            )
+        except Exception:
+            logger.exception("Error listing stranded approval nodes")
+            stranded = []
+        for node in stranded:
+            if await self._store.transition_node(
+                node.id,
+                from_statuses={"awaiting_input"},
+                dag_statuses=TERMINAL_DAG_STATUSES,
+                status="cancelled",
+                error="DAG ended while waiting",
+                completed_at=now,
+            ):
+                await self._close_card(None, node_id=node.id)
+        if self._surface_service is None:
+            return
+        # Card-driven: EVERY live DAG card — a bounded page would fill with
+        # healthy cards once the parked cap is reached and never reach the
+        # leaked ones. Keys map to nodes in Python (SQLite stores UUIDs
+        # without dashes, so an SQL text join would differ from Postgres).
+        try:
+            cards = await self._surface_service.live_cards_by_prefix(DEDUP_PREFIX)
+        except Exception:
+            logger.exception("Error listing live approval cards")
+            return
+        for surface_id, dedup_key in cards:
+            node_id = node_id_from_dedup_key(dedup_key)
+            loaded = await self._store.get_node_with_dag_status(node_id) if node_id else None
+            if loaded is None:
+                await self._close_card(surface_id)
+                continue
+            node, dag_status = loaded
+            if node.status != "awaiting_input":
+                await self._close_card(surface_id)
+            elif dag_status not in LIVE_DAG_STATUSES:
+                if await self._store.transition_node(
+                    node.id,
+                    from_statuses={"awaiting_input"},
+                    dag_statuses=TERMINAL_DAG_STATUSES,
+                    status="cancelled",
+                    error="DAG ended while waiting",
+                    completed_at=now,
+                ):
+                    await self._close_card(surface_id)
+            elif node.surface_id is not None and node.surface_id != surface_id:
+                await self._close_card(surface_id)
 
     async def _sweep_leaked_heartbeat_checks(self) -> None:
         """Re-issue disable for terminal check-nodes whose heartbeat check
@@ -3149,13 +3222,11 @@ class DAGOrchestrator:
             for node in dag.nodes
         )
         for node in dag.nodes:
-            if node.status in ("pending", "ready", "awaiting_check"):
-                await self._store.update_node(
-                    node.id, status="cancelled", error=_BUDGET_CANCEL_ERROR
-                )
-                node.status = "cancelled"
-                node.error = _BUDGET_CANCEL_ERROR
-                cancelled_any = True
+            if node.status in ("pending", "ready", "awaiting_check", "awaiting_input"):
+                # Conditional (§3.3); awaiting_input (Harness Phase 3) is future
+                # work the budget stops — its card closes with it.
+                if await self._cancel_one(node, _BUDGET_CANCEL_ERROR):
+                    cancelled_any = True
 
         # If there are still running nodes, let them finish
         has_running = any(n.status == "running" for n in dag.nodes)
