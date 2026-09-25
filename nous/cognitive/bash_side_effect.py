@@ -170,15 +170,32 @@ def command_invocations(command: str) -> list[tuple[str, list[str]]] | None:
     read absence into it. ``[]`` means it was read and runs nothing.
     Total and linear.
     """
+    runs = command_runs(command, None)
+    return None if runs is None else [(prog, args) for prog, args, _ in runs]
+
+
+def command_runs(command: str, exit_code: int | None) -> list[tuple[str, list[str], bool]] | None:
+    """``command_invocations`` with, per invocation, whether it CERTAINLY ran
+    and succeeded, as far as the exit code of the whole command can tell.
+
+    Only the last AND-OR list's status is known: with exit 0 and no `||` in
+    it, each of its commands ran and succeeded. A command after `||` (or
+    before one) may have been skipped or masked; a command in an earlier
+    list, joined by `;` or a newline, ran (the first) or may have (the rest)
+    with its success unknown. Certainty never turns absence into a verdict:
+    an uncertain command is still reported.
+    """
     if len(command) > _MAX_COMMAND_CHARS:
         return None
     try:
-        return _invocations(command, 0)
+        return _invocations(command, 0, exit_code)
     except Exception:
         return None
 
 
 _MAX_STRING_DEPTH = 3
+_LIST_JOINS = frozenset({"&&", "||"})
+_PIPES = frozenset({"|", "|&"})
 # The delimiter after an unquoted `<<` / `<<-`.
 _HEREDOC_DELIM = re.compile(r"(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?(\$?\w[\w.-]*))")
 
@@ -192,7 +209,10 @@ def _split_heredocs(command: str) -> tuple[str, list[str]]:
     Quote-aware, or `git commit -m "explain <<EOF heredocs"` would swallow
     the lines after it, and a heredoc inside `bash -c "..."` would be cut at
     the wrong level; only a `<<` outside quotes opens one, and a nested string
-    keeps its body for the recursive read. `<<<` is a here-string.
+    keeps its body for the recursive read. `<<<` is a here-string. The same
+    scan cuts an unquoted comment (`#` starting a word) to the end of its
+    line: the lexer does not know comments, and `echo ok # ; git push` runs
+    no git.
     """
     lines = command.split("\n")
     kept: list[str] = []
@@ -202,7 +222,6 @@ def _split_heredocs(command: str) -> tuple[str, list[str]]:
     while i < len(lines):
         line = lines[i]
         i += 1
-        kept.append(line)
         pending: list[tuple[str, bool]] = []
         j, n = 0, len(line)
         while j < n:
@@ -218,6 +237,9 @@ def _split_heredocs(command: str) -> tuple[str, list[str]]:
                 j += 1
             elif c in "'\"":
                 quote = c
+            elif c == "#" and (j == 0 or line[j - 1] in " \t;&|(){}"):
+                line = line[:j]  # a comment, to the end of the line
+                break
             elif c == "<" and line.startswith("<<", j) and not line.startswith("<<<", j) \
                     and (j == 0 or line[j - 1] != "<"):
                 m = _HEREDOC_DELIM.match(line, j + 2)
@@ -227,6 +249,7 @@ def _split_heredocs(command: str) -> tuple[str, list[str]]:
                     continue
                 j += 1
             j += 1
+        kept.append(line)
         for delim, strip_tabs in pending:
             body: list[str] = []
             while i < len(lines):
@@ -241,15 +264,42 @@ def _split_heredocs(command: str) -> tuple[str, list[str]]:
     return "\n".join(kept), bodies
 
 
-def _invocations(command: str, depth: int) -> list[tuple[str, list[str]]] | None:
+def _invocations(
+    command: str, depth: int, exit_code: int | None,
+) -> list[tuple[str, list[str], bool]] | None:
     command, bodies = _split_heredocs(command)
     tokens = _lex(command)
     if tokens is None:
         return None
-    simple: list[list[str]] = []
+    # lists of pipelines of simple commands: `a; b && c | d`
+    lists: list[list[tuple[str | None, list[list[str]]]]] = []
+    pipelines: list[tuple[str | None, list[list[str]]]] = []
+    commands: list[list[str]] = []
+    join: str | None = None
     words: list[str] = []
     attached: list[str] = []  # heredoc bodies of the current simple command
     expect_target = False
+
+    def end_command() -> None:
+        nonlocal words, attached
+        if words or attached:
+            commands.append(words + attached)
+        words, attached = [], []
+
+    def end_pipeline(next_join: str | None) -> None:
+        nonlocal commands, join
+        end_command()
+        if commands:
+            pipelines.append((join, commands))
+        commands, join = [], next_join
+
+    def end_list() -> None:
+        nonlocal pipelines
+        end_pipeline(None)
+        if pipelines:
+            lists.append(pipelines)
+        pipelines = []
+
     for tok, is_operator in tokens:
         if not is_operator:
             if expect_target:
@@ -262,26 +312,45 @@ def _invocations(command: str, depth: int) -> list[tuple[str, list[str]]] | None
                 expect_target = True
                 if op == "<<" and bodies:
                     attached.append("\n" + bodies.pop(0))
-            else:  # a command separator
-                simple.append(words + attached)
-                words, attached = [], []
-    simple.append(words + attached)
-    found: list[tuple[str, list[str]]] = []
-    for words in simple:
-        start = _command_start(words)
-        if start is None or words[start].startswith("\n"):
-            continue  # nothing runs, or a heredoc body left where a program should be
-        word = words[start]
-        prog, args = _program(word), words[start + 1:]
-        if "/" in word.replace("\\", "/"):
-            prog = "./" + prog  # path-qualified: a script or a local build, marked as such
-        inner = command_string(prog, args)
-        if inner is not None and depth < _MAX_STRING_DEPTH:
-            sub = _invocations(inner, depth + 1)
-            if sub is not None:
-                found.extend(sub)
-                continue
-        found.append((prog, args))
+            elif op in _LIST_JOINS:
+                end_pipeline(op)
+            elif op in _PIPES:
+                end_command()
+            else:  # `;`, a newline, `&`, `(`, `)`: the list ends
+                end_list()
+    end_list()
+
+    found: list[tuple[str, list[str], bool]] = []
+    for li, plist in enumerate(lists):
+        last_list = li == len(lists) - 1
+        has_or = any(j == "||" for j, _ in plist)
+        # every command of the last list ran and succeeded iff it exited 0
+        # with no `||` to skip or mask one
+        certain = last_list and exit_code == 0 and not has_or
+        for pi, (_, cmds) in enumerate(plist):
+            last_pipeline = last_list and pi == len(plist) - 1
+            for cmd_words in cmds:
+                start = _command_start(cmd_words)
+                if start is None or cmd_words[start].startswith("\n"):
+                    continue  # nothing runs, or a heredoc body left where a program should be
+                word = cmd_words[start]
+                prog, args = _program(word), cmd_words[start + 1:]
+                if "/" in word.replace("\\", "/"):
+                    prog = "./" + prog  # path-qualified: a script or a local build, marked as such
+                inner = command_string(prog, args)
+                if inner is not None and depth < _MAX_STRING_DEPTH:
+                    # a runner that certainly succeeded ran its string to exit
+                    # 0; otherwise the string's exit code is the whole
+                    # command's only when the runner is the last pipeline
+                    if certain:
+                        sub_exit: int | None = 0
+                    else:
+                        sub_exit = exit_code if last_pipeline and not has_or else None
+                    sub = _invocations(inner, depth + 1, sub_exit)
+                    if sub is not None:
+                        found.extend((p, a, certain and c) for p, a, c in sub)
+                        continue
+                found.append((prog, args, certain))
     return found
 
 

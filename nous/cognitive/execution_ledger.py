@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from nous.cognitive.bash_side_effect import classify_bash_command as _classify_bash_command
-from nous.cognitive.bash_side_effect import command_invocations as _command_invocations
+from nous.cognitive.bash_side_effect import command_runs as _command_runs
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +122,7 @@ def evidence_args(
     }
 
 
-Invocation = tuple[str, tuple[str, ...]]
+Invocation = tuple[str, tuple[str, ...], bool]  # program, arguments, certainly ran and succeeded
 # Bounds on what the in-memory ledger keeps of a bash command's invocations.
 # Past them the command is kept as UNREADABLE (None), never as fewer commands:
 # a cut list could drop the `git push` at the end.
@@ -136,24 +136,27 @@ def _bound_arg(arg: str) -> str:
     return arg[:_MAX_HEREDOC_CHARS] if arg.startswith("\n") else arg[:_MAX_INVOCATION_ARG_CHARS]
 
 
-def bash_invocations(command: str, *, bound: bool = True) -> tuple[Invocation, ...] | None:
-    """What a bash command runs, read from the WHOLE command; None when it
-    cannot be read (see ``command_invocations``).
+def bash_invocations(
+    command: str, exit_code: int | None, *, bound: bool = True,
+) -> tuple[Invocation, ...] | None:
+    """What a bash command runs, read from the WHOLE command, each marked
+    certain when it ran and succeeded (see ``command_runs``); None when it
+    cannot be read.
 
     ``bound`` (the ledger) caps what is kept in memory. Read at record time
     because the ledger's bounded copy of the command can drop a `git push` in
     its middle, or cut a quote in half and become unreadable.
     """
-    found = _command_invocations(command)
+    found = _command_runs(command, exit_code)
     if found is None:
         return None
     if not bound:
-        return tuple((prog, tuple(args)) for prog, args in found)
+        return tuple((prog, tuple(args), certain) for prog, args, certain in found)
     if len(found) > _MAX_INVOCATIONS:
         return None
     return tuple(
-        (prog, tuple(_bound_arg(a) for a in args[:_MAX_INVOCATION_ARGS]))
-        for prog, args in found
+        (prog, tuple(_bound_arg(a) for a in args[:_MAX_INVOCATION_ARGS]), certain)
+        for prog, args, certain in found
     )
 
 
@@ -227,7 +230,7 @@ class ExecutionLedger:
             side_effect_type=side_effect,
             exit_code=bash_exit_code(str(result)) if tool_name == "bash" else None,
             evidence_args=evidence_args(tool_name, tool_input),
-            invocations=(bash_invocations(_extract_bash_command(tool_input))
+            invocations=(bash_invocations(_extract_bash_command(tool_input), bash_exit_code(str(result)))
                          if tool_name == "bash" else None),
         )
         self.actions.append(action)

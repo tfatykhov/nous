@@ -50,7 +50,8 @@ class Evidence:
         if self.invocations is not _UNREAD:
             return self.invocations
         # this turn's evidence: the full command, nothing capped
-        return bash_invocations(self.args.get("command") or self.args.get("cmd") or "", bound=False)
+        return bash_invocations(self.args.get("command") or self.args.get("cmd") or "",
+                                self.exit_code, bound=False)
 
 
 @dataclass(frozen=True)
@@ -196,11 +197,15 @@ _CLAIM_PATTERNS: list[tuple[str, str]] = [
     # actor-less completion: past tense ("was saved to") or an opening ("Saved to")
     (rf"\b(?:was|were|been|got)\s+(?:saved|written)\s+to[:\s]+{_PATH}{_NOT_BY}", "file_write"),
     (rf"{_OPENING}(?:saved|written)\s+to[:\s]+{_PATH}{_NOT_BY}", "file_write"),
-    (rf"{_SUBJECT}(?:sent|forwarded)\b{_NOT_ELSEWHERE}{_OBJECT}{_MESSAGE}", "email"),
+    # a named recipient is the target, so a send to someone else is not
+    # evidence; the address-first form runs first so its target wins
+    (rf"{_SUBJECT}(?:sent|forwarded)\b{_NOT_ELSEWHERE}\s+{_ADDRESS}\b", "email"),
+    (rf"{_SUBJECT}(?:sent|forwarded)\b{_NOT_ELSEWHERE}{_OBJECT}{_MESSAGE}"
+     rf"(?:\s+to\s+{_ADDRESS})?", "email"),
     # "I sent it to Tim by email": the object may run through "to <person>"
     (rf"{_SUBJECT}(?:sent|forwarded)\b{_NOT_ELSEWHERE}(?:[^.\n;,—]|\.(?=\S)){{0,60}}?\bby\s+e-?mail\b",
      "email"),
-    (rf"{_SUBJECT}(?:e-?mailed|mailed)\b{_NOT_ELSEWHERE}(?=\s+\w)", "email"),
+    (rf"{_SUBJECT}(?:e-?mailed|mailed)\b{_NOT_ELSEWHERE}(?:\s+{_ADDRESS}|(?=\s+\w))", "email"),
     (rf"{_OPENING}e-?mail(?:ed)?\s+sent\s+to\b(?:\s+{_ADDRESS})?{_NOT_BY}", "email"),
     (rf"\be-?mail\s+(?:was|has\s+been|got)\s+sent\s+to\b(?:\s+{_ADDRESS})?{_NOT_BY}", "email"),
     (rf"{_SUBJECT}pushed\b{_NOT_ELSEWHERE}{_VCS_OBJECT}", "vcs_push"),
@@ -231,6 +236,7 @@ _PY_WRITES = re.compile(
     r"|\.to_(?:csv|json|excel|parquet|html|markdown)\(|savefig\(|json\.dump\(|pickle\.dump\("
     r"|yaml\.(?:safe_)?dump\(|\.save\(|shutil\.(?:copy\w*|move)\(")
 _PY_SENDS = re.compile(r"\bsmtplib\b|\bsendmail\b|api\.telegram\.org")
+_PY_ADDRESS = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")  # an address written out in code
 _PY_GIT = {
     "vcs_push": re.compile(
         r"\bgit\b[^|;&]{0,200}?\bpush\b(?![^|;&]{0,200}?(?:--dry-run|[\s'\"]-n\b))"),
@@ -445,8 +451,12 @@ def _code_level(claim: Claim, code: str) -> str:
             return "exact" if _names(claim.target, code) else "none"
         return "plausible"
     if claim.kind == "email":
-        if not _PY_SENDS.search(code) or (claim.target and claim.target not in code.lower()):
+        if not _PY_SENDS.search(code):
             return "none"
+        if claim.target and claim.target not in code.lower():
+            # a recipient held in a variable may be the named one; one written
+            # out as someone else is not
+            return "none" if _PY_ADDRESS.search(code) else "plausible"
         return "plausible"
     if claim.kind in ("vcs_push", "vcs_commit"):
         return "plausible" if _PY_GIT[claim.kind].search(code) else "none"
@@ -459,16 +469,21 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
     Only a command this reader READ can disprove a claim: an unreadable one
     (``runs is None`` -- a quote cut in half, past the ledger's cap) is
     ``plausible``, and so is one that runs something opaque (a script, a
-    hinted task) that could have produced the effect. A non-zero exit is the
-    LAST command's status: it disproves only an effect that command produced.
+    hinted task) that could have produced the effect. ``exact`` needs a
+    command that CERTAINLY ran and succeeded (see ``command_runs``): one
+    after `||`, or before a `;`, may have been skipped or masked and is
+    ``plausible``. A non-zero exit is the LAST command's status: it
+    disproves only an effect that command produced, and a failed opaque
+    last command is no evidence at all.
     """
     runs = ev.runs
     if runs is None:
         return "plausible"
     command = ev.args.get("command") or ev.args.get("cmd") or ""
     failed = ev.exit_code not in (None, 0)
-    opaque = any(_opaque_for(claim.kind, prog, args) for prog, args in runs)
-    levels = [_code_level(claim, code) for prog, args in runs
+    succeeded = runs[:-1] if failed else runs  # the last one did not
+    opaque = any(_opaque_for(claim.kind, prog, args) for prog, args, _ in succeeded)
+    levels = [_code_level(claim, code) for prog, args, _ in succeeded
               if (code := _python_code(prog, args)) is not None]
     if claim.kind == "file_write":
         if ev.side_effect not in ("write", "external"):
@@ -482,7 +497,7 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
         else:
             levels.append("plausible")
         return _best(levels)
-    hits = [i for i, (prog, args) in enumerate(runs) if _does(claim.kind, prog, args)]
+    hits = [i for i, (prog, args, _) in enumerate(runs) if _does(claim.kind, prog, args)]
     if not hits:
         levels.append("plausible" if opaque else "none")
     elif failed and hits == [len(runs) - 1]:
@@ -491,8 +506,8 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
         # a recipient held in a variable may be the named one
         variable = any(a.startswith("$") for i in hits for a in runs[i][1])
         levels.append("plausible" if opaque or variable else "none")
-    elif claim.kind in ("vcs_push", "vcs_commit") and not failed \
-            and any(_base(runs[i][0]) in ("git", "docker") for i in hits):
+    elif claim.kind in ("vcs_push", "vcs_commit") \
+            and any(_base(runs[i][0]) in ("git", "docker") and runs[i][2] for i in hits):
         levels.append("exact")
     else:
         levels.append("plausible")

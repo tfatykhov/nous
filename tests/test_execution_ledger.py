@@ -1155,9 +1155,9 @@ class TestCommandInvocations:
     def test_the_ledger_keeps_invocations_read_from_the_whole_command(self):
         cmd = 'git commit -m "' + "x" * 3000 + '" && git push origin main'
         action = ExecutionLedger(session_id="s").record("bash", {"command": cmd}, "Exit code: 0", "success")
-        assert [p for p, _ in action.invocations] == ["git", "git"]
-        assert action.invocations[1] == ("git", ("push", "origin", "main"))
-        assert all(len(a) <= 120 for _, args in action.invocations for a in args)  # bounded in memory
+        assert [p for p, _, _ in action.invocations] == ["git", "git"]
+        assert action.invocations[1] == ("git", ("push", "origin", "main"), True)
+        assert all(len(a) <= 120 for _, args, _ in action.invocations for a in args)  # bounded in memory
 
 
 class TestCommandStrings:
@@ -1252,3 +1252,44 @@ class TestOptionClusters:
         assert command_invocations("./bin/release prod") == [("./release", ["prod"])]
         assert command_invocations("/usr/bin/git push") == [("./git", ["push"])]
         assert _classify_bash_command("/usr/bin/git push") == "external"  # the classifier is unchanged
+
+
+class TestCommandRuns:
+    """`certain` = the command ran AND succeeded, as far as the exit code of
+    the whole command can tell."""
+
+    @pytest.mark.parametrize("cmd, exit_code, expected", [
+        ("a && b", 0, [("a", [], True), ("b", [], True)]),
+        ("a || b", 0, [("a", [], False), ("b", [], False)]),       # which one ran is unknown
+        ("a; b", 0, [("a", [], False), ("b", [], True)]),          # a ran; its success is unknown
+        ("a && b", 1, [("a", [], False), ("b", [], False)]),
+        ("a && b", None, [("a", [], False), ("b", [], False)]),
+        ("a | b", 0, [("a", [], True), ("b", [], True)]),
+        ("bash -c 'a && b'", 0, [("a", [], True), ("b", [], True)]),
+        ("bash -c 'a; b' && c", 0, [("a", [], False), ("b", [], True), ("c", [], True)]),
+        ("bash -c 'a' || c", 0, [("a", [], False), ("c", [], False)]),
+        ("a\n\nb\n", 0, [("a", [], False), ("b", [], True)]),
+    ])
+    def test_certainty_follows_the_and_or_lists(self, cmd, exit_code, expected):
+        from nous.cognitive.bash_side_effect import command_runs
+
+        assert command_runs(cmd, exit_code) == expected
+
+    @pytest.mark.parametrize("cmd, expected", [
+        ("echo ok # ; git push", [("echo", ["ok"])]),
+        ("echo 'a # b'", [("echo", ["a # b"])]),
+        ("echo a#b", [("echo", ["a#b"])]),
+        ("# only a comment", []),
+        ("cat <<EOF # c\n# not a comment\nEOF", [("cat", ["\n# not a comment"])]),
+    ])
+    def test_comments_are_cut_before_reading(self, cmd, expected):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations(cmd) == expected
+
+    def test_the_ledger_records_certainty_from_the_exit_code(self):
+        ledger = ExecutionLedger(session_id="s")
+        ok = ledger.record("bash", {"command": "cd r && git push"}, "Exit code: 0", "success")
+        bad = ledger.record("bash", {"command": "cd r && git push"}, "rejected\nExit code: 1", "success")
+        assert ok.invocations[1] == ("git", ("push",), True)
+        assert bad.invocations[1] == ("git", ("push",), False)

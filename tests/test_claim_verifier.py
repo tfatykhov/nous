@@ -42,12 +42,21 @@ def test_third_person_narration_is_not_a_claim(narration):
     assert _kinds(narration) == []
 
 
-def test_a_failed_match_never_backtracks_exponentially():
+def _extract_seconds(text):
+    """Time one extraction after a warm-up (the first call compiles the patterns)."""
     import time
 
+    verifier = ClaimVerifier()
+    verifier._extract_claims(text[:200])
     start = time.perf_counter()
-    ClaimVerifier()._extract_claims("I saved " + "etc.," * 32 + " nothing " * 3 + "e.g., " * 32)
-    assert time.perf_counter() - start < 0.05
+    verifier._extract_claims(text)
+    return time.perf_counter() - start
+
+
+def test_a_failed_match_never_backtracks_exponentially():
+    """The overlapping-branch form took 4.5 s at n=20 and would take hours at
+    n=32; a generous bound still separates that from a slow CI runner."""
+    assert _extract_seconds("I saved " + "etc.," * 32 + " nothing " * 3 + "e.g., " * 32) < 1.0
 
 
 @pytest.mark.parametrize("claim", [
@@ -248,7 +257,7 @@ def test_evidence_on_huge_arguments_is_linear():
     start = time.perf_counter()
     for claim in ("I pushed the fix.", "I sent the email.", "I saved the report file."):
         _verify(claim, _bash(command, side_effect="external"), Evidence("run_python", {"code": code}))
-    assert time.perf_counter() - start < 1.0
+    assert time.perf_counter() - start < 3.0  # quadratic on 60 KB would be minutes
 
 
 # --- runner wiring -------------------------------------------------------------
@@ -473,17 +482,19 @@ def test_completion_statements_without_an_actor_stay_claims(text):
     assert len(_kinds(text)) == 1
 
 
-def test_extraction_is_linear_on_a_long_status_report():
-    import time
-
-    lines = [f"- job-{i:03d}: check ran at 0{i % 10}:15 UTC and sent the summary message to #ops"
-             for i in range(600)]
-    report = "Here is the status report.\n\n" + "\n".join(lines)
-    wall = "I sent the email. " + "and sent the message " * 3000
-    start = time.perf_counter()
-    ClaimVerifier()._extract_claims(report)
-    ClaimVerifier()._extract_claims(wall)
-    assert time.perf_counter() - start < 0.2
+@pytest.mark.parametrize("make", [
+    lambda n: "Here is the status report.\n\n" + "\n".join(
+        f"- job-{i:03d}: check ran at 0{i % 10}:15 UTC and sent the summary message to #ops"
+        for i in range(n)),
+    lambda n: "I sent the email. " + "and sent the message " * (5 * n),
+], ids=["status-report", "and-clauses"])
+def test_extraction_is_linear(make):
+    """Pinned as SCALING, not wall-clock: a shared CI runner is several times
+    slower than a laptop. Four times the input costs about 4x when linear
+    and about 16x when quadratic (the pre-fix rescans were quadratic)."""
+    small, big = _extract_seconds(make(600)), _extract_seconds(make(2400))
+    assert big < 6 * small + 0.05, (small, big)
+    assert big < 3.0
 
 
 # --- review round 2 ------------------------------------------------------------
@@ -802,3 +813,65 @@ def test_a_destination_that_is_a_repo_or_branch_is_a_push(text):
 def test_a_heads_up_in_the_reply_is_not_a_message_sent():
     assert _kinds("I sent a heads-up in the reply.") == []
     assert _kinds("I sent the summary in this response.") == []
+
+
+# --- codex round 1 -------------------------------------------------------------
+
+
+@pytest.mark.parametrize("command", [
+    "echo ok # ; git push origin main",
+    "echo ok  # git push origin main",
+    "# git push origin main\necho ok",
+    "echo ok #git push origin main",
+])
+def test_a_comment_never_runs(command):
+    assert not _verify("I pushed the fix.", _real_bash(command)).verified
+
+
+def test_a_hash_inside_a_word_or_quotes_is_not_a_comment():
+    assert _push_level("echo 'a # b' && git push origin main") == "exact"
+    assert _push_level('echo "#1" && git push origin main') == "exact"
+    assert _push_level("echo a#b && git push origin main") == "exact"
+
+
+@pytest.mark.parametrize("command, level", [
+    ("false && git push origin main || true", "plausible"),  # which branch ran is unknowable
+    ("git push origin main || echo failed", "plausible"),      # its failure is masked
+    ("cd repo && git push origin main", "exact"),
+    ("git add -A; git commit -m x; git push origin main", "exact"),
+    ("git push origin main; echo done", "plausible"),          # ran; success unknown
+    ("bash -c 'cd repo && git push origin main'", "exact"),
+    ("git push origin main && gh pr create --fill", "exact"),
+])
+def test_a_command_is_exact_only_when_it_ran_and_succeeded(command, level):
+    assert _push_level(command) == level
+
+
+def test_a_commit_before_a_semicolon_ran_but_may_have_failed():
+    result = _verify("I committed the fix.", _real_bash("git add -A; git commit -m x; git push origin main"))
+    assert result.claims[0].evidence == "plausible"
+
+
+@pytest.mark.parametrize("claim, command", [
+    ("I deployed the fix to prod.", "./deploy.sh production"),
+    ("I pushed the fix.", "./push.sh"),
+    ("I sent the email.", "python3 scripts/send_digest.py"),
+    ("I pushed the fix.", "cd repo && ./push.sh"),
+])
+def test_a_failed_opaque_run_is_not_evidence(claim, command):
+    assert not _verify(claim, _real_bash(command, exit_code=1)).verified
+    assert _verify(claim, _real_bash(command)).verified  # and counts when it exits 0
+
+
+@pytest.mark.parametrize("text", [
+    "I sent the email to alice@x.io.",
+    "I emailed Alice@X.io about it.",
+    "I sent the report to alice@x.io and bob@x.io.",
+    "I sent alice@x.io the summary.",
+])
+def test_first_person_email_claims_capture_the_recipient(text):
+    assert _kinds(text) == [("email", "alice@x.io")]
+    wrong = Evidence("send_email", {"to": "['bob@x.io']", "subject": "s"})
+    assert not _verify(text, wrong).verified
+    right = Evidence("send_email", {"to": "['alice@x.io', 'bob@x.io']", "subject": "s"})
+    assert _verify(text, right).claims[0].evidence == "exact"
