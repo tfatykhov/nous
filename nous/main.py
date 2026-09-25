@@ -540,6 +540,7 @@ async def create_components(settings: Settings) -> dict:
         ledger_store = LedgerStore(
             database, settings.agent_id,
             write_timeout_seconds=settings.execution_ledger_write_timeout_seconds,
+            keyed_write_timeout_seconds=settings.execution_ledger_keyed_write_timeout_seconds,
         )
         runner.set_ledger_store(ledger_store)
 

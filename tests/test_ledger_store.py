@@ -472,3 +472,160 @@ def test_the_model_index_matches_the_migration():
     (index,) = [i for i in ExecutionLedgerEntry.__table__.indexes if i.name == "uq_execution_ledger_idempotency"]
     assert index.unique and [c.name for c in index.columns] == ["agent_id", "tool_name", "idempotency_key"]
     assert "dispatched_at" in ExecutionLedgerEntry.__table__.columns
+
+
+# ---- harness Phase 2b: the store keys sends ----
+
+
+@pytest.mark.asyncio
+async def test_a_repeat_key_raises_duplicate_with_the_held_row(store):
+    from nous.cognitive.ledger_store import DuplicateSend
+
+    ctx = ExecutionContext(kind="dag_node")
+    first = await store.open_entry(context=ctx, tool_name="send_email",
+                                   tool_input={"to": "a@x.io", "subject": "s"}, turn=1, idempotency_key="k")
+    assert await store.claim_dispatch(first)
+    await store.close_entry(first, status="success", result_summary=None, external_ref="<m1@x>", keyed=True)
+    with pytest.raises(DuplicateSend) as exc:
+        await store.open_entry(context=ctx, tool_name="send_email",
+                               tool_input={"to": "a@x.io"}, turn=2, idempotency_key="k")
+    held = exc.value.held
+    assert (held.entry_id, held.status, held.external_ref) == (first, "success", "<m1@x>")
+    assert held.dispatched_at is not None
+    assert "subject_sha256" in held.key_args
+
+
+@pytest.mark.asyncio
+async def test_the_same_key_on_another_tool_is_a_different_send(store):
+    ctx = ExecutionContext(kind="dag_node")
+    await store.open_entry(context=ctx, tool_name="send_email", tool_input={}, turn=1, idempotency_key="kx")
+    assert await store.open_entry(context=ctx, tool_name="send_file", tool_input={}, turn=1,
+                                  idempotency_key="kx") is not None
+
+
+@pytest.mark.asyncio
+async def test_an_errored_first_attempt_does_not_block_the_retry(store):
+    ctx = ExecutionContext(kind="dag_node")
+    first = await store.open_entry(context=ctx, tool_name="send_email", tool_input={}, turn=1,
+                                   idempotency_key="k2")
+    await store.close_entry(first, status="error", result_summary=None)
+    assert await store.open_entry(context=ctx, tool_name="send_email", tool_input={}, turn=2,
+                                  idempotency_key="k2") is not None
+
+
+@pytest.mark.asyncio
+async def test_claim_dispatch_is_once_only(store):
+    entry = await store.open_entry(context=ExecutionContext(kind="dag_node"), tool_name="send_email",
+                                   tool_input={}, turn=1, idempotency_key="k3")
+    assert await store.claim_dispatch(entry) is True
+    assert await store.claim_dispatch(entry) is False
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_frees_a_key_that_was_never_dispatched(store, db):
+    ctx = ExecutionContext(kind="dag_node")
+    never = await store.open_entry(context=ctx, tool_name="send_email", tool_input={}, turn=1,
+                                   idempotency_key="k4")
+    sent = await store.open_entry(context=ctx, tool_name="send_file", tool_input={}, turn=1,
+                                  idempotency_key="k5")
+    await store.claim_dispatch(sent)
+    unkeyed = await store.open_entry(context=ctx, tool_name="learn_fact", tool_input={}, turn=1)
+    assert await store.mark_orphans_unknown(older_than_seconds=None) == 3
+    assert (await _row(db, never)).status == "error"      # never sent: key freed
+    assert (await _row(db, sent)).status == "unknown"     # maybe delivered: key held
+    assert (await _row(db, unkeyed)).status == "unknown"  # Phase 1b behavior
+
+
+@pytest.mark.asyncio
+async def test_a_stale_undispatched_holder_is_freed_on_collision(store, db):
+    ctx = ExecutionContext(kind="dag_node")
+    stale = await store.open_entry(context=ctx, tool_name="send_email", tool_input={}, turn=1,
+                                   idempotency_key="k6")
+    async with db.session() as s:
+        await s.execute(update(ExecutionLedgerEntry).where(ExecutionLedgerEntry.id == stale)
+                        .values(created_at=datetime.now(UTC) - timedelta(minutes=5)))
+        await s.commit()
+    retry = await store.open_entry(context=ctx, tool_name="send_email", tool_input={}, turn=2,
+                                   idempotency_key="k6")
+    assert retry is not None and (await _row(db, stale)).status == "error"
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_undispatched_holder_is_in_flight(store):
+    from nous.cognitive.ledger_store import DuplicateSend
+
+    ctx = ExecutionContext(kind="dag_node")
+    await store.open_entry(context=ctx, tool_name="send_email", tool_input={}, turn=1, idempotency_key="k6b")
+    with pytest.raises(DuplicateSend) as exc:
+        await store.open_entry(context=ctx, tool_name="send_email", tool_input={}, turn=2, idempotency_key="k6b")
+    assert exc.value.held.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_but_dispatched_holder_is_never_freed(store, db):
+    from nous.cognitive.ledger_store import DuplicateSend
+
+    ctx = ExecutionContext(kind="dag_node")
+    held = await store.open_entry(context=ctx, tool_name="send_email", tool_input={}, turn=1,
+                                  idempotency_key="k6c")
+    await store.claim_dispatch(held)
+    async with db.session() as s:
+        await s.execute(update(ExecutionLedgerEntry).where(ExecutionLedgerEntry.id == held)
+                        .values(created_at=datetime.now(UTC) - timedelta(minutes=5)))
+        await s.commit()
+    with pytest.raises(DuplicateSend):
+        await store.open_entry(context=ctx, tool_name="send_email", tool_input={}, turn=2, idempotency_key="k6c")
+    assert (await _row(db, held)).status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_external_ref_and_key_are_written(store, db):
+    entry = await store.open_entry(context=ExecutionContext(kind="dag_node"), tool_name="send_file",
+                                   tool_input={}, turn=1, idempotency_key="k7")
+    await store.close_entry(entry, status="success", result_summary=None, external_ref="42", keyed=True)
+    row = await _row(db, entry)
+    assert (row.idempotency_key, row.external_ref) == ("k7", "42")
+
+
+@pytest.mark.asyncio
+async def test_a_duplicate_blocked_row_carries_the_key(store, db, agent):
+    await store.record_blocked(context=ExecutionContext(kind="dag_node"), tool_name="send_email",
+                               tool_input={}, turn=1, refused_by="duplicate", idempotency_key="k8")
+    async with db.session() as s:
+        row = (await s.execute(select(ExecutionLedgerEntry).where(
+            ExecutionLedgerEntry.agent_id == agent))).scalar_one()
+    assert (row.status, row.idempotency_key) == ("blocked", "k8")
+
+
+@pytest.mark.asyncio
+async def test_prune_keeps_a_held_unknown_key(store, db):
+    entry = await store.open_entry(context=ExecutionContext(kind="dag_node"), tool_name="send_email",
+                                   tool_input={}, turn=1, idempotency_key="k9")
+    await store.close_entry(entry, status="unknown", result_summary=None)
+    async with db.session() as s:
+        await s.execute(update(ExecutionLedgerEntry).where(ExecutionLedgerEntry.id == entry)
+                        .values(created_at=datetime.now(UTC) - timedelta(days=400)))
+        await s.commit()
+    await store.prune(retention_days=90)
+    assert (await _row(db, entry)).status == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_an_outage_is_a_write_error_not_a_duplicate(agent):
+    class _Broken:
+        def session(self):
+            raise RuntimeError("db down")
+
+    with pytest.raises(LedgerWriteError):
+        await LedgerStore(_Broken(), agent).open_entry(
+            context=ExecutionContext(kind="dag_node"), tool_name="send_email", tool_input={},
+            turn=1, idempotency_key="k10")
+    with pytest.raises(LedgerWriteError):
+        await LedgerStore(_Broken(), agent).claim_dispatch(uuid.uuid4())
+
+
+def test_the_keyed_timeout_setting():
+    from nous.config import Settings
+
+    assert Settings(_env_file=None).execution_ledger_keyed_write_timeout_seconds == 10.0
+    assert LedgerStore(object(), "a", keyed_write_timeout_seconds=3.0)._keyed_timeout == 3.0

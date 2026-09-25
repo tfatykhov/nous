@@ -22,12 +22,14 @@ import asyncio
 import hashlib
 import logging
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, update
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 
 from nous.api.execution_context import ExecutionContext
 from nous.cognitive.execution_ledger import bash_exit_code, classify_side_effect, redact_text
@@ -44,7 +46,7 @@ KEY_HOLDING_STATUSES = ("pending", "success", "unknown")
 # Why the harness refused a call. A code, never prose: the ActionGate model's
 # reason is written from a prompt that carries the call's arguments, so it can
 # echo a subject, a body or a bare key.
-REFUSAL_CODES = frozenset({"offered_set", "action_gate", "context_policy"})
+REFUSAL_CODES = frozenset({"offered_set", "action_gate", "context_policy", "duplicate"})
 _TERMINAL = frozenset(s for s in LEDGER_STATUSES if s != "pending")
 
 # Per-tool durable argument policy. Pattern redaction cannot be trusted with
@@ -184,6 +186,29 @@ class LedgerWriteError(Exception):
         self.entry_id = entry_id
 
 
+@dataclass(frozen=True)
+class HeldKey:
+    """The live row that holds an idempotency key (harness Phase 2b)."""
+
+    entry_id: UUID
+    status: str
+    external_ref: str | None
+    created_at: datetime
+    dispatched_at: datetime | None
+    key_args: dict
+
+
+class DuplicateSend(Exception):
+    """A keyed call whose key a live row already holds: never dispatched.
+
+    Distinct from LedgerWriteError on purpose -- a duplicate is a DECISION
+    (suppress the repeat), an outage is a failure (refuse the send)."""
+
+    def __init__(self, held: HeldKey) -> None:
+        super().__init__(f"idempotency key held by {held.entry_id} ({held.status})")
+        self.held = held
+
+
 # bash_tool always appends this trailer; it is the authoritative wrapper status.
 _BASH_TIMEOUT = re.compile(r"\ACommand timed out after \d+s\.")
 
@@ -217,44 +242,95 @@ def _summary(text: str | None, output_of: str | None = None) -> str | None:
 class LedgerStore:
     """Writes ``nous_system.execution_ledger`` (migration 074)."""
 
-    def __init__(self, database: Any, agent_id: str, *, write_timeout_seconds: float = 2.0) -> None:
+    def __init__(
+        self, database: Any, agent_id: str, *, write_timeout_seconds: float = 2.0,
+        keyed_write_timeout_seconds: float = 10.0,
+    ) -> None:
         self._db = database
         self._agent_id = agent_id
         self._timeout = write_timeout_seconds
+        # Phase 2b: a keyed send fails CLOSED on a ledger failure, so its
+        # writes wait longer than an ordinary row's.
+        self._keyed_timeout = keyed_write_timeout_seconds
 
     async def open_entry(
         self, *, context: ExecutionContext, tool_name: str,
         tool_input: dict[str, Any], turn: int | None,
+        idempotency_key: str | None = None,
     ) -> UUID | None:
-        """Insert a 'pending' row. ``None`` only when the call is not side-effecting."""
-        return await self._insert(context, tool_name, tool_input, turn, "pending", None)
+        """Insert a 'pending' row. ``None`` only when the call is not side-effecting.
+
+        With an ``idempotency_key`` (Phase 2b), raises ``DuplicateSend`` when a
+        live row already holds the key -- after freeing a holder that is stale
+        and was never dispatched -- and ``LedgerWriteError`` on any failure.
+        """
+        return await self._insert(context, tool_name, tool_input, turn, "pending", None,
+                                  idempotency_key=idempotency_key)
+
+    async def claim_dispatch(self, entry_id: UUID) -> bool:
+        """Mark a keyed row as about to be dispatched (Phase 2b).
+
+        True only for the one caller whose conditional UPDATE matched: the row
+        is still 'pending' and not yet dispatched. The stale-holder free runs
+        the same condition, so exactly one of the two wins.
+        """
+        async def _claim() -> int:
+            async with self._db.session() as s:
+                result = await s.execute(
+                    update(ExecutionLedgerEntry)
+                    .where(ExecutionLedgerEntry.id == entry_id)
+                    .where(ExecutionLedgerEntry.agent_id == self._agent_id)
+                    .where(ExecutionLedgerEntry.status == "pending")
+                    .where(ExecutionLedgerEntry.dispatched_at.is_(None))
+                    .values(dispatched_at=func.now())
+                )
+                await s.commit()
+                return result.rowcount or 0
+
+        try:
+            return await asyncio.wait_for(_claim(), timeout=self._keyed_timeout) == 1
+        except Exception as exc:
+            raise LedgerWriteError(entry_id, exc) from exc
 
     async def record_blocked(
         self, *, context: ExecutionContext, tool_name: str,
         tool_input: dict[str, Any], turn: int | None, refused_by: str,
+        idempotency_key: str | None = None,
     ) -> None:
         """A side-effecting call the harness refused: one terminal row.
 
         ``refused_by`` is a code from REFUSAL_CODES -- the refusal's prose
-        stays in the session, never in the durable row.
+        stays in the session, never in the durable row. A suppressed repeat
+        (``duplicate``) carries its key; a 'blocked' row is outside the unique
+        index's predicate, so it can never conflict.
         """
         if refused_by not in REFUSAL_CODES:
             raise ValueError(f"unknown refusal code {refused_by!r}")
         await self._insert(
             context, tool_name, tool_input, turn, "blocked", f"refused by {refused_by}",
+            idempotency_key=idempotency_key, conflict_free=True,
         )
 
     async def close_entry(
         self, entry_id: UUID, *, status: str, result_summary: str | None,
-        output_of: str | None = None,
+        output_of: str | None = None, external_ref: str | None = None, keyed: bool = False,
     ) -> None:
         """Move a row out of 'pending' (or a sweep-set 'unknown') to ``status``.
 
         Pass ``output_of`` (the tool name) when ``result_summary`` is the
         tool's raw output, so it is stored in the form that tool allows.
+        ``external_ref`` is the provider's id (SMTP Message-ID, Telegram
+        message_id); ``keyed`` waits the keyed-send timeout.
         """
         if status not in _TERMINAL:
             raise ValueError(f"cannot close a ledger row as {status!r}")
+        values: dict[str, Any] = {
+            "status": status,
+            "result_summary": _summary(result_summary, output_of),
+            "completed_at": func.now(),
+        }
+        if external_ref is not None:
+            values["external_ref"] = external_ref
 
         async def _close() -> None:
             async with self._db.session() as s:
@@ -263,37 +339,51 @@ class LedgerStore:
                     .where(ExecutionLedgerEntry.id == entry_id)
                     .where(ExecutionLedgerEntry.agent_id == self._agent_id)
                     .where(ExecutionLedgerEntry.status.in_(_CLOSABLE))
-                    .values(
-                        status=status,
-                        result_summary=_summary(result_summary, output_of),
-                        completed_at=func.now(),
-                    )
+                    .values(**values)
                 )
                 await s.commit()
 
         try:
-            await asyncio.wait_for(_close(), timeout=self._timeout)
+            await asyncio.wait_for(_close(), timeout=self._keyed_timeout if keyed else self._timeout)
         except Exception as exc:
             raise LedgerWriteError(entry_id, exc) from exc
 
     async def mark_orphans_unknown(self, *, older_than_seconds: float | None) -> int:
-        """Pending rows → 'unknown'. ``None`` = every pending row (process startup)."""
-        stmt = (
-            update(ExecutionLedgerEntry)
-            .where(ExecutionLedgerEntry.agent_id == self._agent_id)
-            .where(ExecutionLedgerEntry.status == "pending")
-        )
-        if older_than_seconds is not None:
-            cutoff = datetime.now(UTC) - timedelta(seconds=older_than_seconds)
-            stmt = stmt.where(ExecutionLedgerEntry.created_at < cutoff)
+        """Pending rows → 'unknown'. ``None`` = every pending row (process startup).
+
+        Phase 2b: a KEYED row still pending and never dispatched was certainly
+        not sent, so it becomes 'error' instead -- freeing its key. A keyed row
+        that was dispatched may have been delivered: 'unknown' holds its key.
+        """
+        cutoff = (datetime.now(UTC) - timedelta(seconds=older_than_seconds)
+                  if older_than_seconds is not None else None)
+
+        def _pending():
+            stmt = (
+                update(ExecutionLedgerEntry)
+                .where(ExecutionLedgerEntry.agent_id == self._agent_id)
+                .where(ExecutionLedgerEntry.status == "pending")
+            )
+            return stmt if cutoff is None else stmt.where(ExecutionLedgerEntry.created_at < cutoff)
+
         async with self._db.session() as s:
-            result = await s.execute(stmt.values(
+            never_sent = await s.execute(
+                _pending()
+                .where(ExecutionLedgerEntry.idempotency_key.is_not(None))
+                .where(ExecutionLedgerEntry.dispatched_at.is_(None))
+                .values(
+                    status="error",
+                    result_summary="never dispatched — outcome certain: not sent",
+                    completed_at=func.now(),
+                )
+            )
+            rest = await s.execute(_pending().values(
                 status="unknown",
                 result_summary="no report back from the call — outcome unknown",
                 completed_at=func.now(),
             ))
             await s.commit()
-            return result.rowcount or 0
+            return (never_sent.rowcount or 0) + (rest.rowcount or 0)
 
     async def prune(self, *, retention_days: int) -> int:
         """Delete this agent's CLOSED rows older than ``retention_days``.
@@ -311,15 +401,62 @@ class LedgerStore:
                 .where(ExecutionLedgerEntry.agent_id == self._agent_id)
                 .where(ExecutionLedgerEntry.status != "pending")
                 .where(ExecutionLedgerEntry.created_at < cutoff)
+                # Phase 2b: a keyed 'unknown' row holds its key (maybe
+                # delivered) until an operator releases it -- deleting it
+                # would silently allow a re-send.
+                .where(~((ExecutionLedgerEntry.idempotency_key.is_not(None))
+                         & (ExecutionLedgerEntry.status == "unknown")))
             )
             await s.commit()
             return result.rowcount or 0
 
+    async def _held(self, tool_name: str, idempotency_key: str) -> HeldKey | None:
+        """The live row holding a key, or None (freed since the conflict)."""
+        async with self._db.session() as s:
+            row = (await s.execute(
+                select(
+                    ExecutionLedgerEntry.id, ExecutionLedgerEntry.status,
+                    ExecutionLedgerEntry.external_ref, ExecutionLedgerEntry.created_at,
+                    ExecutionLedgerEntry.dispatched_at, ExecutionLedgerEntry.key_args,
+                )
+                .where(ExecutionLedgerEntry.agent_id == self._agent_id)
+                .where(ExecutionLedgerEntry.tool_name == tool_name)
+                .where(ExecutionLedgerEntry.idempotency_key == idempotency_key)
+                .where(ExecutionLedgerEntry.status.in_(KEY_HOLDING_STATUSES))
+                .limit(1)
+            )).first()
+        if row is None:
+            return None
+        return HeldKey(row[0], row[1], row[2], row[3], row[4], dict(row[5] or {}))
+
+    async def _free_if_stale_undispatched(self, entry_id: UUID) -> bool:
+        """Free a holder that is still 'pending', was never dispatched, and is
+        older than the keyed timeout -- its owner died between the insert and
+        the claim. The staleness test is IN the UPDATE (Python computes only
+        the cutoff), on the same condition as ``claim_dispatch``: exactly one
+        of the two wins."""
+        cutoff = datetime.now(UTC) - timedelta(seconds=self._keyed_timeout)
+        async with self._db.session() as s:
+            result = await s.execute(
+                update(ExecutionLedgerEntry)
+                .where(ExecutionLedgerEntry.id == entry_id)
+                .where(ExecutionLedgerEntry.agent_id == self._agent_id)
+                .where(ExecutionLedgerEntry.status == "pending")
+                .where(ExecutionLedgerEntry.dispatched_at.is_(None))
+                .where(ExecutionLedgerEntry.created_at < cutoff)
+                .values(status="error", result_summary="never dispatched", completed_at=func.now())
+            )
+            await s.commit()
+            return (result.rowcount or 0) == 1
+
     async def _insert(
         self, context: ExecutionContext, tool_name: str, tool_input: dict[str, Any],
         turn: int | None, status: str, result_summary: str | None,
+        *, idempotency_key: str | None = None, conflict_free: bool = False, _retry: bool = False,
     ) -> UUID | None:
         entry_id = uuid4()
+        keyed = idempotency_key is not None and not conflict_free
+        conflict: IntegrityError | None = None
         try:
             if not isinstance(tool_input, dict):
                 raise TypeError(f"tool_input must be a dict, got {type(tool_input).__name__}")
@@ -341,6 +478,7 @@ class LedgerStore:
                 key_args=durable_key_args(tool_name, tool_input),
                 status=status,
                 result_summary=_summary(result_summary),
+                idempotency_key=idempotency_key,
                 completed_at=None if status == "pending" else datetime.now(UTC),
             )
 
@@ -349,7 +487,30 @@ class LedgerStore:
                     s.add(row)
                     await s.commit()
 
-            await asyncio.wait_for(_write(), timeout=self._timeout)
+            await asyncio.wait_for(_write(), timeout=self._keyed_timeout if keyed else self._timeout)
+        except IntegrityError as exc:
+            if not keyed:
+                raise LedgerWriteError(entry_id, exc) from exc
+            conflict = exc  # resolved below, outside this except clause
         except Exception as exc:
             raise LedgerWriteError(entry_id, exc) from exc
-        return entry_id
+        if conflict is None:
+            return entry_id
+        # A keyed insert conflicted. Decide by LOOKUP, never by the error's
+        # text (it differs per database): a live holder is a duplicate; a
+        # holder freed since, or stale and never dispatched (freed just now),
+        # gets one more insert. Nothing raised while resolving escapes raw.
+        try:
+            held = await asyncio.wait_for(self._held(tool_name, idempotency_key), timeout=self._keyed_timeout)
+            freed = held is None or (not _retry and await asyncio.wait_for(
+                self._free_if_stale_undispatched(held.entry_id), timeout=self._keyed_timeout))
+            if freed:
+                if _retry:
+                    raise LedgerWriteError(entry_id, conflict)
+                return await self._insert(context, tool_name, tool_input, turn, status, result_summary,
+                                          idempotency_key=idempotency_key, _retry=True)
+        except (DuplicateSend, LedgerWriteError):
+            raise
+        except Exception as exc:
+            raise LedgerWriteError(entry_id, exc) from exc
+        raise DuplicateSend(held) from conflict
