@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import ast
 import builtins
+import functools
+import posixpath
 import re
 from bisect import bisect_left, bisect_right
 from collections.abc import Mapping
@@ -307,14 +309,42 @@ _LEVELS = {"none": 0, "plausible": 1, "exact": 2}
 # writes, whom it sends to, the shell strings it runs. Code that does not
 # parse falls back to the regexes over comment-stripped text.
 _PY_WRITE_METHODS = frozenset({
-    "to_csv", "to_json", "to_excel", "to_parquet", "to_html", "to_markdown", "savefig", "save",
-    "write_html", "write_image", "write_text", "write_bytes",
+    "to_csv", "to_json", "to_excel", "to_parquet", "to_html", "to_markdown", "to_pickle", "to_feather",
+    "to_hdf", "savefig", "save", "savetxt", "imwrite", "imsave", "write_html", "write_image",
+    "write_text", "write_bytes",
 })
+# keyword names a writing call takes its destination by
+_PY_WRITE_KWARGS = ("path", "fname", "filename", "fp", "path_or_buf", "file", "buf", "excel_writer",
+                    "dst", "fp_or_buf")
+_PY_OPENERS = frozenset({"open", "io.open", "codecs.open"})
+_PY_ARCHIVE_OPENERS = frozenset({"zipfile.ZipFile", "tarfile.open", "gzip.open", "bz2.open", "lzma.open",
+                                 "h5py.File"})
+_PY_COPIES = frozenset({"shutil.copy", "shutil.copy2", "shutil.copyfile", "shutil.move", "shutil.copytree",
+                        "os.rename", "os.replace", "os.renames", "os.link", "os.symlink"})
+_PY_ARCHIVE_SUFFIX = {"zip": "zip", "tar": "tar", "gztar": "tar.gz", "bztar": "tar.bz2", "xztar": "tar.xz"}
+# a shell call is one QUALIFIED by its module (or an alias proven by an
+# import): a bare `run(...)` is whatever the script defines
 _PY_SHELL_CALLS = frozenset({
     "subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output",
-    "subprocess.Popen", "os.system", "os.popen", "run", "call", "check_call", "check_output", "Popen",
+    "subprocess.Popen", "subprocess.getoutput", "subprocess.getstatusoutput", "os.system", "os.popen",
+    "asyncio.create_subprocess_shell",
 })
 _PY_DEPLOY_MODULES = frozenset({"docker", "kubernetes", "boto3", "paramiko", "fabric", "ansible"})
+# A call into a library this reader does not know, named like the effect
+# (`yag.send(to=...)`, `repo.git.push()`): plausible, never exact -- the
+# same standing as a script whose NAME hints at the effect (_HINTS).
+_PY_CALLEE_HINTS = {
+    # a method plainly about mail; a bare `.send(...)` only with a recipient
+    # argument or a receiver named for messaging (`sock.send`, `gen.send`,
+    # `conn.send` are not mail)
+    "email": re.compile(r"mail|telegram|slack|smtp|deliver", re.I),
+    "email_send": re.compile(r"^send", re.I),
+    "email_receiver": re.compile(r"mail|msg|message|sms|notif|bot|ses|sg|slack|telegram", re.I),
+    "vcs_push": re.compile(r"^push$", re.I),
+    "vcs_commit": re.compile(r"^commit$", re.I),
+    "deploy": re.compile(r"deploy|rollout", re.I),
+}
+_PY_RECIPIENT_KWARGS = ("to", "recipients", "to_addrs", "to_emails", "rcpt", "destination")
 
 
 @dataclass
@@ -328,6 +358,7 @@ class _PyFacts:
     invocations: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
     run_unknown: bool = False                         # a subprocess whose argv is not written out
     deploys: bool = False
+    hints: set[str] = field(default_factory=set)      # claim kinds an unknown callee is named for
 
 
 def _dotted(node: ast.AST) -> str:
@@ -527,7 +558,7 @@ def _executed(tree: ast.Module) -> list[ast.AST]:
     functions: dict[str, list[ast.AST]] = {}
     methods: dict[str, dict[str, ast.AST]] = {}  # method name -> class name -> def
     classes: set[str] = set()
-    instances: dict[str, str] = {}  # `x = Cls(...)`: the variable's class
+    instances: dict[str, list[tuple[int, str]]] = {}  # `x = Cls(...)`: the variable's classes, by line
     for node in tree.body:
         if isinstance(node, _FUNCTIONS):
             functions.setdefault(node.name, []).append(node)
@@ -537,24 +568,30 @@ def _executed(tree: ast.Module) -> list[ast.AST]:
             for item in node.body:
                 if isinstance(item, _FUNCTIONS):
                     methods.setdefault(item.name, {})[node.name] = item
-    # `x = Cls(...)` on a LIVE path (an `if False:` never assigns), the last
-    # in document order winning; a call inside a called function may reveal
-    # more, so resolution repeats until the instances settle
-    assigned: dict[str, tuple[int, str]] = {}
+    # `x = Cls(...)` on a LIVE path (an `if False:` never assigns), each call
+    # reading the latest assignment before it in document order; a call
+    # inside a called function may reveal more, so resolution repeats until
+    # the instances settle
     for _ in range(3):
         executed, seen = _resolve(tree, functions, methods, classes, instances)
+        assigned: dict[str, set[tuple[int, str]]] = {}
         for node in executed:
             if (isinstance(node, ast.Assign) and len(node.targets) == 1
                     and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Call)
                     and isinstance(node.value.func, ast.Name) and node.value.func.id in classes):
-                name, at = node.targets[0].id, node.lineno
-                if name not in assigned or at > assigned[name][0]:
-                    assigned[name] = (at, node.value.func.id)
-        settled = {name: cls for name, (_, cls) in assigned.items()}
+                assigned.setdefault(node.targets[0].id, set()).add((node.lineno, node.value.func.id))
+        settled = {name: sorted(at) for name, at in assigned.items()}
         if settled == instances:
             break
         instances = settled
     return executed
+
+
+def _instance_class(history: list[tuple[int, str]], line: int) -> str:
+    """The class a variable holds at ``line``: its latest assignment before
+    that line, or (a call inside a function defined earlier) its last."""
+    before = [cls for at, cls in history if at <= line]
+    return (before or [history[-1][1]])[-1]
 
 
 def _resolve(
@@ -562,7 +599,7 @@ def _resolve(
     functions: dict[str, list[ast.AST]],
     methods: dict[str, dict[str, ast.AST]],
     classes: set[str],
-    instances: dict[str, str],
+    instances: dict[str, list[tuple[int, str]]],
 ) -> tuple[list[ast.AST], set[str]]:
     executed: list[ast.AST] = []
     called: set[str] = set()
@@ -585,7 +622,7 @@ def _resolve(
                 if owner == "self" and self_class:
                     owner = self_class
                 elif owner in instances:
-                    owner = instances[owner]
+                    owner = _instance_class(instances[owner], sub.lineno)
                 if owner in by_class:
                     candidates = {owner: by_class[owner]}
                 elif owner in classes:
@@ -640,24 +677,76 @@ def _walk_live(node: ast.AST):
             # `else` runs only when the body completes normally
             stack.extend(_reachable(current.body) + ([] if kinds else _reachable(current.orelse))
                          + (_reachable(taken.body) if taken is not None else []) + _reachable(current.finalbody))
+        elif isinstance(current, ast.BoolOp):
+            stop = isinstance(current.op, ast.Or)  # `False and x`, `True or x`: x is never evaluated
+            for value in current.values:
+                stack.append(value)
+                if _constant_truth(value) is stop:
+                    break
+        elif isinstance(current, ast.IfExp):
+            truth = _constant_truth(current.test)
+            stack.append(current.test)
+            if truth is not False:
+                stack.append(current.body)
+            if truth is not True:
+                stack.append(current.orelse)
+        elif isinstance(current, _COMPREHENSIONS):
+            # a generator's element runs only when something consumes it (a call, below)
+            stack.extend(_comprehension_live(current, consumed=not isinstance(current, ast.GeneratorExp)))
+        elif isinstance(current, ast.Call):
+            stack.append(current.func)
+            for arg in (*current.args, *(k.value for k in current.keywords)):
+                if isinstance(arg, ast.GeneratorExp):
+                    stack.extend(_comprehension_live(arg, consumed=True))
+                else:
+                    stack.append(arg)
         else:
             stack.extend(ast.iter_child_nodes(current))
 
 
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _comprehension_live(comp: ast.AST, consumed: bool) -> list[ast.AST]:
+    """The parts of a comprehension that run: every iterable; its filters and
+    element only when the first iterable is not an empty literal, no filter
+    is a constant False, and (a generator) something consumes it."""
+    parts: list[ast.AST] = [gen.iter for gen in comp.generators]  # type: ignore[attr-defined]
+    if not consumed or _statically_empty(comp.generators[0].iter):  # type: ignore[attr-defined]
+        return parts
+    ifs = [test for gen in comp.generators for test in gen.ifs]  # type: ignore[attr-defined]
+    if any(_constant_truth(test) is False for test in ifs):
+        return parts
+    parts.extend(ifs)
+    parts.extend([comp.key, comp.value] if isinstance(comp, ast.DictComp) else [comp.elt])  # type: ignore[attr-defined]
+    return parts
+
+
+@functools.lru_cache(maxsize=128)
 def _python_facts(code: str) -> _PyFacts | None:
+    """What a script DOES, read once per script (a reply's claims are each
+    checked against every call, so the read is cached; the facts are never
+    mutated by a reader)."""
     try:
         tree = ast.parse(code)
     except (SyntaxError, ValueError):
         return None
     facts = _PyFacts()
-    for node in _executed(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            names = [a.name for a in node.names] + ([node.module] if isinstance(node, ast.ImportFrom) else [])
-            if any(n and n.split(".")[0] == "smtplib" for n in names):
-                facts.sends = True
-            if any(n and n.split(".")[0] in _PY_DEPLOY_MODULES for n in names):
-                facts.deploys = True
-        elif isinstance(node, ast.Assign):
+    executed = _executed(tree)
+    # a name bound by an import (`import subprocess as sp`, `from subprocess
+    # import run as sh`) is the module's: a constant binding
+    aliases: dict[str, str] = {}
+    for node in executed:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                head = alias.name.split(".")[0]
+                aliases[alias.asname or head] = alias.name if alias.asname else head
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    local = {node.name for node in ast.walk(tree) if isinstance(node, _FUNCTIONS)}
+    for node in executed:
+        if isinstance(node, ast.Assign):
             for target in node.targets:  # msg['To'] = '...'
                 if isinstance(target, ast.Subscript) and _literal(target.slice) in ("To", "Cc", "Bcc"):
                     found = _literals(node.value)
@@ -666,38 +755,55 @@ def _python_facts(code: str) -> _PyFacts | None:
                     else:
                         facts.recipients |= {a for s in found for a in _addresses(s)}
         elif isinstance(node, ast.Call):
-            _call_facts(node, facts)
+            _call_facts(node, facts, aliases, local)
     if facts.sends and not facts.recipients:
         facts.recipient_unknown = True  # it sends, to whom is not written out
     return facts
 
 
-def _call_facts(node: ast.Call, facts: _PyFacts) -> None:
-    name = _dotted(node.func)
+def _qualified(name: str, aliases: dict[str, str], local: set[str]) -> str:
+    """`sp.run` -> `subprocess.run`, `sh` -> `subprocess.run` (imported as);
+    a name the script defines itself is its own."""
+    head, dot, rest = name.partition(".")
+    if head in aliases and name not in local:
+        return aliases[head] + dot + rest
+    return name
+
+
+def _call_facts(node: ast.Call, facts: _PyFacts, aliases: dict[str, str], local: set[str]) -> None:
+    name = _qualified(_dotted(node.func), aliases, local)
     method = name.rsplit(".", 1)[-1]
     args = node.args
     kws = {k.arg: k.value for k in node.keywords if k.arg}
-    if name == "open":
+    if name in _PY_OPENERS or name in _PY_ARCHIVE_OPENERS:  # open(x, 'w'), zipfile.ZipFile(x, 'w')
         mode = _literal(args[1]) if len(args) > 1 else _literal(kws.get("mode"))
         if mode and mode[:1] in "wax":
-            _note_write(facts, args[0] if args else kws.get("file"))
+            _note_write(facts, args[0] if args else kws.get("file") or kws.get("filename") or kws.get("name"))
+    elif method == "open" and isinstance(node.func, ast.Attribute):  # Path('...').open('w')
+        mode = _literal(args[0]) if args else _literal(kws.get("mode"))
+        if mode and mode[:1] in "wax":
+            _note_write(facts, _path_receiver(node.func.value))
     elif method in ("write_text", "write_bytes") and isinstance(node.func, ast.Attribute):
-        receiver = node.func.value  # Path('...').write_text(...)
-        inner = receiver.args[0] if isinstance(receiver, ast.Call) and receiver.args else None
-        _note_write(facts, inner if _dotted(receiver.func if isinstance(receiver, ast.Call) else receiver)
-                    .endswith("Path") else None)
-    elif method in _PY_WRITE_METHODS and (args or "path" in kws or "fname" in kws):
+        _note_write(facts, _path_receiver(node.func.value))  # Path('...').write_text(...)
+    elif method in _PY_WRITE_METHODS and (args or any(k in kws for k in _PY_WRITE_KWARGS)):
         # a file-writing method takes its destination; `obj.save()` bare is
         # whatever a user-defined `save` does (resolved through _executed)
-        _note_write(facts, args[0] if args else kws.get("path") or kws.get("fname"))
+        _note_write(facts, args[0] if args else next(kws[k] for k in _PY_WRITE_KWARGS if k in kws))
+    elif name == "shutil.make_archive":  # writes base_name + the format's suffix
+        base = _literal(args[0]) if args else _literal(kws.get("base_name"))
+        fmt = _literal(args[1]) if len(args) > 1 else _literal(kws.get("format"))
+        if base is not None and fmt is not None:
+            facts.writes.append(f"{base}.{_PY_ARCHIVE_SUFFIX.get(fmt, fmt)}")
+        else:
+            facts.write_unknown = True
     elif name in ("json.dump", "pickle.dump", "yaml.dump", "yaml.safe_dump"):
         sink = args[1] if len(args) > 1 else kws.get("fp") or kws.get("stream")
         if isinstance(sink, ast.Call):  # json.dump(data, open('/tmp/x', 'w'))
-            _call_facts(sink, facts)
+            _call_facts(sink, facts, aliases, local)
         else:
             facts.write_unknown = True
-    elif name in ("shutil.copy", "shutil.copy2", "shutil.copyfile", "shutil.move"):
-        _note_write(facts, args[1] if len(args) > 1 else kws.get("dst"))
+    elif name in _PY_COPIES:
+        _note_copy(facts, args[0] if args else kws.get("src"), args[1] if len(args) > 1 else kws.get("dst"))
     elif method == "sendmail":
         facts.sends = True
         to = args[1] if len(args) > 1 else kws.get("to_addrs")
@@ -708,8 +814,12 @@ def _call_facts(node: ast.Call, facts: _PyFacts) -> None:
             facts.recipients |= {a for s in found for a in _addresses(s)}
     elif method == "send_message":
         facts.sends = True  # recipients come from msg['To'] = ..., in any order
-    elif name in _PY_SHELL_CALLS or method in ("system", "popen"):
-        argv = args[0] if args else kws.get("args")
+    elif name in _PY_SHELL_CALLS or name == "asyncio.create_subprocess_exec":
+        argv: ast.AST | None
+        if name == "asyncio.create_subprocess_exec":
+            argv = ast.List(elts=list(args)) if args else None  # the argv IS the arguments
+        else:
+            argv = args[0] if args else kws.get("args")
         if isinstance(argv, (ast.List, ast.Tuple)):  # argv: the executable and ITS arguments
             items = _literals(argv)
             if items:
@@ -725,10 +835,74 @@ def _call_facts(node: ast.Call, facts: _PyFacts) -> None:
         else:
             facts.run_unknown = True
     else:
-        url = _literal(args[0]) if args else _literal(kws.get("url"))
+        if name.split(".")[0] in _PY_DEPLOY_MODULES:
+            facts.deploys = True  # an operation on a deployment integration (an import alone is none)
+        target = args[0] if args else kws.get("url")
+        if isinstance(target, ast.Call) and _dotted(target.func).endswith("Request"):  # urlopen(Request(url))
+            target = target.args[0] if target.args else next((k.value for k in target.keywords if k.arg == "url"), None)
+        url = _text_of(target)
         if url and "api.telegram.org" in url and method in ("post", "get", "request", "urlopen"):
             facts.sends = True
             facts.recipient_unknown = True
+        elif method not in local and not (isinstance(node.func, ast.Name) and node.func.id in local):
+            _hint_facts(_callee_text(node.func), method, kws, facts)
+
+
+def _callee_text(func: ast.AST) -> str:
+    """`Repo('.').remote().push` for a call chain (calls elided), for a
+    what-is-this-named-for check."""
+    if isinstance(func, ast.Call):
+        return _callee_text(func.func)
+    if isinstance(func, ast.Attribute):
+        return f"{_callee_text(func.value)}.{func.attr}"
+    return func.id if isinstance(func, ast.Name) else ""
+
+
+def _hint_facts(name: str, method: str, kws: dict[str, ast.AST], facts: _PyFacts) -> None:
+    """A call into a library this reader does not know, named like the
+    effect: `yag.send(to=...)`, `repo.git.push()`, `client.deploy(...)`."""
+    addressed = [key for key in _PY_RECIPIENT_KWARGS if key in kws]
+    receiver = name.rsplit(".", 1)[0] if "." in name else ""
+    if _PY_CALLEE_HINTS["email"].search(method) or (
+            _PY_CALLEE_HINTS["email_send"].search(method)
+            and (addressed or _PY_CALLEE_HINTS["email_receiver"].search(receiver))):
+        facts.sends = True
+        for key in addressed:
+            found = _literals(kws[key])
+            if found is None:
+                facts.recipient_unknown = True
+            else:
+                facts.recipients |= {a for s in found for a in _addresses(s)}
+    for kind in ("vcs_push", "vcs_commit"):
+        if _PY_CALLEE_HINTS[kind].search(method) and re.search(r"git|repo|remote|index", name, re.I):
+            facts.hints.add(kind)
+    if _PY_CALLEE_HINTS["deploy"].search(method):
+        facts.hints.add("deploy")
+
+
+def _path_receiver(receiver: ast.AST) -> ast.AST | None:
+    """The path a `Path('...')` receiver was built from; None otherwise."""
+    if isinstance(receiver, ast.Call) and receiver.args and _dotted(receiver.func).endswith("Path"):
+        return receiver.args[0]
+    return None
+
+
+def _text_of(node: ast.AST | None) -> str | None:
+    """The literal text of a string expression with its computed parts
+    blanked: a constant, an f-string, `'a' + x + 'b'`, `'a%s' % x`,
+    `'a{}'.format(x)`. For a CONTAINS check, never an equality."""
+    if (text := _literal(node)) is not None:
+        return text
+    if isinstance(node, ast.JoinedStr):
+        return "".join(_literal(v) or "{}" for v in node.values)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _text_of(node.left), _text_of(node.right)
+        return None if left is None and right is None else (left or "{}") + (right or "{}")
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        return _text_of(node.left)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "format":
+        return _text_of(node.func.value)
+    return None
 
 
 def _note_write(facts: _PyFacts, destination: ast.AST | None) -> None:
@@ -736,6 +910,17 @@ def _note_write(facts: _PyFacts, destination: ast.AST | None) -> None:
         facts.writes.append(path)
     else:
         facts.write_unknown = True
+
+
+def _note_copy(facts: _PyFacts, source: ast.AST | None, destination: ast.AST | None) -> None:
+    """A copy or move: its destination, and -- a copy INTO a directory lands
+    at dir/basename -- the source's name under it."""
+    if (path := _literal(destination)) is None:
+        facts.write_unknown = True
+        return
+    facts.writes.append(path)
+    if (src := _literal(source)) is not None and (name := src.rstrip("/").rsplit("/", 1)[-1]):
+        facts.writes.append(path.rstrip("/") + "/" + name)
 
 
 def _names(target: str, text: str) -> bool:
@@ -759,8 +944,9 @@ def _same_path(target: str, path: str) -> bool:
     in `/x`, a relative target the path's tail on a `/` boundary."""
     if not target or not path:
         return False
-    target = _HOME.sub("~/", target.replace("\\", "/")).rstrip("/")
-    path = _HOME.sub("~/", path.replace("\\", "/")).rstrip("/")
+    # `/tmp//x`, `/tmp/./x`, `/tmp/../tmp/x`, `./x` are the same path
+    target = posixpath.normpath(_HOME.sub("~/", target.replace("\\", "/")))
+    path = posixpath.normpath(_HOME.sub("~/", path.replace("\\", "/")))
     if path == target:
         return True
     if target.startswith("/"):
@@ -829,7 +1015,12 @@ def _destinations(prog: str, args: tuple[str, ...]) -> list[str]:
     positional = _positional(args)
     if prog in _WRITERS_LAST and positional:
         last = positional[-1]
-        dests.append(last.split(":", 1)[1] if ":" in last and not last.startswith("/") else last)
+        dest = last.split(":", 1)[1] if ":" in last and not last.startswith("/") else last
+        dests.append(dest)
+        # a copy INTO a directory lands at dir/basename(source)
+        for src in positional[:-1]:
+            if name := src.rstrip("/").rsplit("/", 1)[-1]:
+                dests.append(dest.rstrip("/") + "/" + name)
     elif prog in _WRITERS_ALL:
         dests += positional
     elif prog == "tar" and _tar_writes_archive(args):  # only a create/append writes the archive
@@ -884,12 +1075,27 @@ def _writes(target: str, runs: tuple) -> str:
         dests = _destinations(base, args)
         if any(_same_path(target, d) for d in dests):
             best = _best([best, "exact" if certain else "plausible"])
+        elif base in _WRITERS_LAST and _copies_tree(base, args) and any(_inside(target, d) for d in dests):
+            best = _best([best, "plausible"])  # a tree copied into it: the file may be anywhere under it
         elif base in _DESTROYERS or base in _WRITERS_LAST or base in _WRITERS_ALL or dests \
                 or base in READ_COMMANDS or base in ("tar", "dd"):
             continue  # a delete, a known writer writing elsewhere, or a read naming the path
         elif _names(target, " ".join(args)):
             best = _best([best, "plausible"])
     return best
+
+
+def _copies_tree(prog: str, args: tuple[str, ...]) -> bool:
+    """`cp -r`, `rsync`, `scp -r`: the destination receives a whole tree."""
+    return prog == "rsync" or any(a in ("--recursive", "--archive") or
+                                  any(f in "rRa" for f in _short_flags(a)) for a in args)
+
+
+def _inside(target: str, directory: str) -> bool:
+    """True if ``target`` lies under ``directory`` (both normalized)."""
+    target = posixpath.normpath(_HOME.sub("~/", target.replace("\\", "/")))
+    directory = posixpath.normpath(_HOME.sub("~/", directory.replace("\\", "/")))
+    return directory not in ("", ".") and target.startswith(directory.rstrip("/") + "/")
 
 
 # Options whose value is not a recipient: a subject, a sender, a body, an
@@ -910,6 +1116,16 @@ def _recipients(prog: str, args: tuple[str, ...]) -> tuple[set[str], bool]:
     variable = False
     take_next = False  # the next argument is a recipient (curl --mail-rcpt X)
     skip = False
+    if prog in ("sendmail", "msmtp", "ssmtp") and (
+            "--read-recipients" in args or any("t" in _short_flags(a) for a in args)):
+        # `-t`: the recipients are the message's To/Cc/Bcc headers -- read
+        # from a heredoc body, unreadable from a file or a pipe
+        bodies = [a[1:] for a in args if a.startswith("\n")]
+        for body in bodies:
+            for line in body.splitlines():
+                if line.lower().startswith(("to:", "cc:", "bcc:")):
+                    found |= _addresses(line)
+        variable |= not bodies
     for a in args:
         if a.startswith(("\n", "\t")):
             continue
@@ -1076,21 +1292,35 @@ def _code_level(claim: Claim, code: str) -> str:
         # a cut made by the ledger is unreadable (a cut string literal is not
         # code); anything else that does not parse did not run
         return "plausible" if EVIDENCE_TRUNCATED in code else "none"
+    # what it runs through a shell is read like bash -- never certain, and a
+    # subprocess whose argv is not written out could be anything
+    runs = tuple((prog, args, False) for prog, args in facts.invocations)
     if claim.kind == "file_write":
-        if not facts.writes and not facts.write_unknown:
-            return "none"
         if claim.target:
             if any(_same_path(claim.target, w) for w in facts.writes):
                 return "exact"
-            return "plausible" if facts.write_unknown else "none"  # a computed path; or elsewhere
-        return "plausible"
+            if _writes(claim.target, runs) != "none" or facts.write_unknown or facts.run_unknown:
+                return "plausible"  # a computed path, or a shell write to it
+            return "none"  # writes elsewhere, or nothing
+        if facts.writes or facts.write_unknown or facts.run_unknown:
+            return "plausible"
+        return "plausible" if any(_destinations(_base(p), a) for p, a, _ in runs) else "none"
     if claim.kind == "email":
-        if not facts.sends:
-            return "none"
-        if claim.target and claim.target not in facts.recipients:
-            return "plausible" if facts.recipient_unknown else "none"  # held in a variable; or someone else
+        hits = [i for i, (prog, args, _) in enumerate(runs) if _does("email", prog, args)]
+        if not facts.sends and not hits:
+            return "plausible" if facts.run_unknown else "none"
+        if claim.target:
+            recipients, held = set(facts.recipients), facts.recipient_unknown
+            for i in hits:
+                found, variable = _recipients(_base(runs[i][0]), runs[i][1])
+                recipients |= found
+                held |= variable
+            if claim.target in recipients:
+                return "plausible"
+            # held in a variable, or run opaquely, with no other recipient written out; or someone else
+            return "plausible" if not recipients and (held or facts.run_unknown) else "none"
         return "plausible"
-    if any(_does(claim.kind, prog, args) for prog, args in facts.invocations):
+    if any(_does(claim.kind, prog, args) for prog, args in facts.invocations) or claim.kind in facts.hints:
         return "plausible"
     if claim.kind == "deploy" and facts.deploys:
         return "plausible"

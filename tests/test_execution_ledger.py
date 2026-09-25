@@ -1308,7 +1308,8 @@ class TestRedirectTargets:
     def test_sinks_inputs_and_dups_are_not_destinations(self):
         from nous.cognitive.bash_side_effect import command_invocations
 
-        assert command_invocations("cmd > /dev/null 2>&1") == [("cmd", ["2"])]  # the fd word is a lexer quirk
+        assert command_invocations("cmd > /dev/null 2>&1") == [("cmd", [])]  # `2` is the fd, not a word
+        assert command_invocations("cmd 2 > f") == [("cmd", ["2", "\t>f"])]  # ...unless it stands alone
         assert command_invocations("sort < in.txt") == [("sort", [])]
 
 

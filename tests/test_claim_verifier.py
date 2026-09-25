@@ -1428,3 +1428,188 @@ def test_a_taken_branch_that_leaves_ends_the_body(code, level):
 def test_a_handler_runs_when_its_try_body_certainly_raises_what_it_catches(code, level):
     result = _verify("It was saved to /tmp/report.md.", Evidence("run_python", {"code": code}))
     assert result.claims[0].evidence == level
+
+
+# --- codex round 16 + final independent pass ------------------------------------
+
+
+def test_commands_after_a_literal_case_run():
+    assert _push_level("case x in x) echo;; esac; git push origin main") == "exact"
+    assert _push_level("case x in y) echo;; esac\ngit push origin main") == "exact"
+    assert _push_level("case x in\n  x) echo ;;\nesac\ngit push origin main") == "exact"
+    assert _push_level("case x in x) echo;; esac\ncase y in y) git push origin main;; esac") == "plausible"
+    assert _push_level("case x in x) echo;;& *) git push origin main;; esac") == "plausible"   # keeps testing
+    assert _push_level("case x in x) echo;& *) git push origin main;; esac") == "plausible"    # falls through
+    assert not _verify("I pushed the fix.", _real_bash("case x in y) echo;& *) git push origin main;; esac")).verified
+
+
+def test_every_function_definition_form_is_a_definition():
+    assert not _verify("I pushed the fix.", _real_bash("f() ( git push origin main )")).verified
+    assert not _verify("I pushed the fix.", _real_bash("function f () { git push origin main; }")).verified
+    assert _push_level("f() ( git push origin main ); f") == "plausible"
+    assert _push_level("function f () { git push origin main; }; f") == "plausible"
+    # a called body keeps its own branches
+    skipped = "release() { if false; then git push origin main; fi; }; release; true"
+    assert not _verify("I pushed the fix.", _real_bash(skipped)).verified
+    assert _push_level("release() { if true; then git push origin main; fi; }; release; true") == "plausible"
+    assert _push_level("release() { false && git push origin main; }; release; true") == "none"
+
+
+def test_a_file_descriptor_before_a_redirect_is_not_an_argument():
+    from nous.cognitive.bash_side_effect import command_runs
+
+    assert command_runs("git push 2>&1 | tail", 0) == [("git", ["push"], False), ("tail", [], True)]
+    assert command_runs("{ git push; } 2>&1", 0) == [("git", ["push"], False)]
+    assert command_runs("echo 2 > f", 0) == [("echo", ["2", "\t>f"], True)]
+
+
+def test_unbalanced_parentheses_are_linear():
+    import time
+
+    from nous.cognitive.bash_side_effect import command_runs
+
+    start = time.perf_counter()
+    command_runs("(" * 40_000, 0)
+    command_runs("(x;" * 20_000, 0)
+    assert time.perf_counter() - start < 3.0
+
+
+@pytest.mark.parametrize("code, level", [
+    ("import subprocess as sp\nsp.run(['git', 'push', 'origin', 'main'])", "plausible"),
+    ("from subprocess import run as sh\nsh(['git', 'push', 'origin', 'main'])", "plausible"),
+    ("from subprocess import check_call\ncheck_call(['git', 'push'])", "plausible"),
+    ("def run(x):\n    pass\nrun(['git', 'push', 'origin', 'main'])", "none"),          # the script's own run
+    ("run(['git', 'push', 'origin', 'main'])", "none"),                                 # a bare name: unknown
+    ("import asyncio\nasyncio.run(asyncio.create_subprocess_exec('git', 'push'))", "plausible"),
+    ("from git import Repo\nRepo('.').remote().push()", "plausible"),                  # named for the effect
+    ("import sh\nsh.git.push('origin', 'main')", "plausible"),
+    ("stack.push(1)", "none"),                                                          # not a repository
+    ("conn.commit()", "none"),
+])
+def test_shell_and_library_pushes_in_python(code, level):
+    result = _verify("I pushed the fix.", Evidence("run_python", {"code": code}))
+    assert result.claims[0].evidence == level
+
+
+@pytest.mark.parametrize("code, level", [
+    ("import smtplib", "none"),                                                         # an import is not a send
+    ("import smtplib\nsmtplib.SMTP('h').sendmail('me', ['alice@x.io'], 'hi')", "plausible"),
+    ("import subprocess\nsubprocess.run(['sendmail', 'alice@x.io'], input=b'hi')", "plausible"),
+    ("import subprocess\nsubprocess.run('echo body | mail -s Report alice@x.io', shell=True)", "plausible"),
+    ("import subprocess\nsubprocess.run(['sendmail', 'bob@x.io'], input=b'hi')", "none"),
+    ("import subprocess\nsubprocess.run(['sendmail', '-t'], input=msg)", "plausible"),  # recipients in the message
+    ("import requests\nrequests.post(f'https://api.telegram.org/bot{token}/sendMessage', json=p)", "plausible"),
+    ("import requests\nrequests.post('https://api.telegram.org/bot' + token + '/sendMessage')", "plausible"),
+    ("import httpx\nhttpx.post('https://api.telegram.org/bot%s/sendMessage' % t)", "plausible"),
+    ("from urllib.request import urlopen, Request\nurlopen(Request(f'https://api.telegram.org/bot{t}/x'))",
+     "plausible"),
+    ("import requests\nrequests.post('https://example.com/hook', json=p)", "none"),
+    ("yag.send(to='alice@x.io', subject='hi')", "plausible"),
+    ("yag.send(to='bob@x.io', subject='hi')", "none"),
+    ("ses.send_email(Destination={'ToAddresses': ['alice@x.io']})", "plausible"),
+    ("resend.Emails.send({'to': 'alice@x.io'})", "plausible"),
+    ("sock.send(b'alice@x.io')", "none"),                                               # not mail
+    ("gen.send(None)", "none"),
+    ("cond.notify()", "none"),
+])
+def test_python_sends_by_shell_and_by_library(code, level):
+    result = _verify("Email sent to alice@x.io.", Evidence("run_python", {"code": code}))
+    assert result.claims[0].evidence == level
+
+
+@pytest.mark.parametrize("code, level", [
+    ("False and open('/tmp/report.md', 'w')", "none"),
+    ("True or open('/tmp/report.md', 'w')", "none"),
+    ("x and open('/tmp/report.md', 'w')", "exact"),                                    # may run
+    ("open('/tmp/report.md', 'w') if False else None", "none"),
+    ("open('/tmp/report.md', 'w') if x else None", "exact"),
+    ("[open('/tmp/report.md', 'w') for p in []]", "none"),
+    ("[open('/tmp/report.md', 'w') for p in paths if False]", "none"),
+    ("[open('/tmp/report.md', 'w') for p in paths]", "exact"),
+    ("g = (open('/tmp/report.md', 'w') for p in paths)", "none"),                      # never consumed
+    ("list(open('/tmp/report.md', 'w') for p in paths)", "exact"),
+    ("{p: open('/tmp/report.md', 'w') for p in paths}", "exact"),
+])
+def test_expression_short_circuits_are_evaluated(code, level):
+    result = _verify("It was saved to /tmp/report.md.", Evidence("run_python", {"code": code}))
+    assert result.claims[0].evidence == level
+
+
+@pytest.mark.parametrize("code, level", [
+    ("from pathlib import Path\nPath('/tmp/report.md').open('w').write(d)", "exact"),
+    ("wb.save(filename='/tmp/report.md')", "exact"),
+    ("img.save(fp='/tmp/report.md')", "exact"),
+    ("df.to_csv(path_or_buf='/tmp/report.md')", "exact"),
+    ("df.to_pickle('/tmp/report.md')", "exact"),
+    ("import numpy as np\nnp.savetxt('/tmp/report.md', arr)", "exact"),
+    ("import os\nos.replace('/tmp/r.tmp', '/tmp/report.md')", "exact"),
+    ("import os\nos.rename('/tmp/r.tmp', '/tmp/report.md')", "exact"),
+    ("import io\nio.open('/tmp/report.md', 'w')", "exact"),
+    ("import codecs\ncodecs.open('/tmp/report.md', 'w', 'utf-8')", "exact"),
+    ("import shutil\nshutil.copy('report.md', '/tmp/')", "exact"),                     # into a directory
+    ("import shutil\nshutil.copy('report.md', '/tmp')", "exact"),
+    ("import shutil\nshutil.copy('other.md', '/tmp/')", "none"),
+    ("import shutil\nshutil.copytree('out', '/tmp/report.md')", "exact"),
+    ("import zipfile\nzipfile.ZipFile('/tmp/report.md', 'w')", "exact"),
+    ("import zipfile\nzipfile.ZipFile('/tmp/report.md')", "none"),                      # read
+    ("import tarfile\ntarfile.open('/tmp/report.md', 'w:gz')", "exact"),
+    ("import shutil\nshutil.make_archive('/tmp/report', 'zip', 'out')", "none"),       # writes /tmp/report.zip
+    ("import subprocess\nsubprocess.run('python3 gen.py > /tmp/report.md', shell=True)", "plausible"),
+    ("import subprocess\nsubprocess.run(['tee', '/tmp/report.md'], input=b'x')", "plausible"),
+    ("import subprocess\nsubprocess.run(['pandoc', 'r.md', '-o', '/tmp/report.md'])", "plausible"),
+    ("import subprocess\nsubprocess.run(['cat', '/tmp/report.md'])", "none"),
+    ("import subprocess\nsubprocess.run(cmd)", "plausible"),                            # argv unknown
+    (_TWO_SAVES.replace("Writer", "A").replace("Noop", "B")
+     + "x = A()\nx.save()\nx = B()\nx.save()", "exact"),                                # each call, its own binding
+])
+def test_write_apis_and_shell_writes_in_python(code, level):
+    result = _verify("It was saved to /tmp/report.md.", Evidence("run_python", {"code": code}))
+    assert result.claims[0].evidence == level
+
+
+def test_an_archive_is_written_under_its_format_suffix():
+    code = "import shutil\nshutil.make_archive('/tmp/report', 'zip', 'out')"
+    assert _verify("It was saved to /tmp/report.zip.", Evidence("run_python", {"code": code})).verified
+
+
+def test_a_copy_into_a_directory_lands_under_its_name():
+    claim = "I saved the report to /tmp/report.md."
+    for command in ("cp report.md /tmp/", "mv report.md /tmp/", "cp ./report.md /tmp",
+                    "rsync -a report.md host:/tmp/", "install -m 644 report.md /tmp/"):
+        assert _verify(claim, _real_bash(command)).verified, command
+    assert not _verify(claim, _real_bash("cp other.md /tmp/")).verified
+    # a tree copied into it: the file may be anywhere under it
+    assert _verify(claim, _real_bash("cp -r out/ /tmp/")).claims[0].evidence == "plausible"
+    assert _verify(claim, _real_bash("rsync -a out/ /tmp/")).claims[0].evidence == "plausible"
+    assert not _verify(claim, _real_bash("cp other.md /var/")).verified
+
+
+def test_paths_compare_normalized():
+    claim = "It was saved to /tmp/report.md."
+    for path in ("/tmp//report.md", "/tmp/./report.md", "/tmp/../tmp/report.md"):
+        assert _verify(claim, Evidence("write_file", {"path": path})).verified, path
+    assert _verify("It was saved to ./out/report.md.", _real_bash("tee out/report.md < x")).verified
+    assert _verify("It was saved to ./report.md.", _real_bash("cp r.md report.md")).verified
+    assert _verify("It was saved to out/report.md.", _real_bash("cp r.md ./out/report.md")).verified
+
+
+def test_sendmail_reads_its_recipients_from_the_message():
+    claim = "Email sent to alice@x.io."
+    for command in ("sendmail -t < msg.txt", "cat msg.txt | sendmail -t", "sendmail -i -t < msg.txt",
+                    "msmtp -t < msg.txt", "msmtp --read-recipients < msg.txt"):
+        assert _verify(claim, _real_bash(command)).claims[0].evidence == "plausible", command
+    with_header = "sendmail -t <<'EOF'\nTo: alice@x.io\nSubject: hi\n\nbody\nEOF"
+    assert _verify(claim, _real_bash(with_header)).verified
+    other_header = "sendmail -t <<'EOF'\nTo: bob@x.io\nSubject: hi\n\nbody\nEOF"
+    assert not _verify(claim, _real_bash(other_header)).verified
+
+
+def test_python_facts_are_read_once_per_script():
+    import time
+
+    script = "import os\nfor i in range(300):\n    os.replace('/tmp/a%d' % i, '/tmp/b')\n" * 20
+    reply = "\n".join(f"I saved the report to /tmp/report{i}.md." for i in range(40))
+    evidence = [Evidence("run_python", {"code": script + f"\nx = {i}"}) for i in range(5)]
+    start = time.perf_counter()
+    _verify(reply, *evidence)
+    assert time.perf_counter() - start < 2.0
