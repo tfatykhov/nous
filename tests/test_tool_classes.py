@@ -3,6 +3,8 @@
 import ast
 from pathlib import Path
 
+import pytest
+
 from nous.api.tool_classes import TOOL_CLASSES, code_reaches_network, refuse_denylist, tool_class
 from nous.cognitive import execution_ledger as el
 from nous.cognitive.bash_side_effect import classify_bash_command
@@ -91,3 +93,52 @@ def test_refuse_strips_every_non_read_tool():
     assert {"dag_create", "push_surface", "compose_surface", "ingest_document",
             "resolve_decision", "spawn_sync", "send_email", "bash"} <= denied
     assert not denied & {"recall_deep", "read_file", "submit_final_report"}
+
+
+# --- after the verify-by-execution review ----------------------------------------
+
+
+@pytest.mark.parametrize("command, level", [
+    ("python3 -c\"import smtplib; smtplib.SMTP('h')\"", "external"),      # code attached to the flag
+    ("python3 -Ic 'import smtplib'", "external"),                          # combined short flags
+    ("python3 -uc 'import requests'", "external"),
+    ("python3 -c 'print(1)'", "write"),
+    ("python3 - <<'PY'\nimport smtplib\nsmtplib.SMTP('h')\nPY", "external"),  # fed on stdin by a heredoc
+    ("python3 <<'PY'\nprint(1)\nPY", "write"),
+    ("python3 <<< 'import httpx'", "external"),                            # a here-string
+    ("echo 'import smtplib' | python3", "write"),                          # a pipe: not readable
+    ("python3 send.py", "write"),                                          # a script file: not inspectable
+    ("uv run python -c 'import smtplib'", "write"),                        # not unwrapped (plan)
+    ("python3 -m smtplib", "write"),
+])
+def test_python_code_is_read_however_it_is_handed_over(command, level):
+    assert classify_bash_command(command) == level
+
+
+@pytest.mark.parametrize("code", [
+    "import urllib3",
+    "from http import client",
+    "import imaplib",
+    "import poplib",
+    "import websockets",
+    "asyncio.open_connection('h', 25)",
+    "os.system('curl -d x api.telegram.org/bot/sendMessage')",
+    "subprocess.run(['curl', 'x'])",
+    "subprocess.run(['ssh', 'prod', 'uptime'])",
+    "requests.get(u)",
+    "s = socket.socket()",
+    "# see https://example.com",          # a URL literal anywhere: documented over-classification
+])
+def test_network_detector_sees_every_route_out(code):
+    assert code_reaches_network(code)
+
+
+@pytest.mark.parametrize("code", [
+    "learn_fact('User requests a daily digest', 'preference')",   # prose, not the module
+    "x = 'socket wrench'",
+    "print('the requests were urgent')",
+    "import json\njson.loads(s)",
+    "sockets = 3",
+])
+def test_network_detector_does_not_fire_on_prose(code):
+    assert not code_reaches_network(code)

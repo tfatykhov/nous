@@ -49,12 +49,22 @@ TOOL_CLASSES: Mapping[str, ToolClass] = MappingProxyType({
     "send_file": _EXTERNAL, "send_email": _EXTERNAL,
 })
 
-# Python that opens a connection to another host. Errs toward external by
-# design: any URL literal or a bare `socket` mention counts, even when
-# nothing is sent.
+# Python that opens a connection to another host: a network module imported
+# or used (`requests.get`, `socket.socket` -- not the English word in a
+# string), a connection helper, a URL literal, or a network program run
+# through a shell. Errs toward external by design: a URL in a comment counts,
+# even when nothing is sent.
+_NETWORK_MODULES = (
+    r"(?:smtplib|requests|httpx|aiohttp|urllib3?|http\.client|socket|ssl|ftplib|paramiko|telnetlib"
+    r"|imaplib|poplib|nntplib|websockets?|pycurl|xmlrpc\.client)")
 _NETWORK_CODE = re.compile(
-    r"\b(?:smtplib|requests|httpx|aiohttp|urllib|http\.client|socket|ftplib|paramiko|telnetlib)\b"
-    r"|https?://")
+    r"^\s*(?:import|from)\s+" + _NETWORK_MODULES + r"\b"        # import smtplib / from urllib.request import
+    r"|^\s*from\s+http\s+import\b"                               # from http import client
+    r"|\b" + _NETWORK_MODULES + r"\."                            # requests.get(...), socket.socket()
+    r"|\b(?:open_connection|create_connection|create_server)\("  # asyncio / socket helpers
+    r"|https?://|\bapi\.telegram\.org\b"
+    r"|\b(?:curl|wget|ssh|scp|sftp|rsync|telnet)\b",             # a network program run by the script
+    re.MULTILINE)
 
 
 def tool_class(name: str) -> ToolClass | None:

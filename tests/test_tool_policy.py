@@ -76,3 +76,23 @@ def test_submit_final_report_is_allowed_in_hardened_subtasks():
 def test_generic_background_is_local_only():
     assert evaluate(_ctx("background"), "send_file", {}) == "level:external"
     assert evaluate(_ctx("background"), "write_file", {}) is None
+
+
+# --- after the verify-by-execution review ----------------------------------------
+
+
+def test_reenable_compares_normalized_names_on_both_sides():
+    ctx = _ctx("heartbeat_callback", declared_tools=("heartbeat_check_manage",), check_name="watch-ci ")
+    assert evaluate(ctx, "heartbeat_check_manage", {"action": "enable", "name": "watch-ci"}) == "reenable"
+    assert evaluate(ctx, "heartbeat_check_manage", {"action": " ENABLE ", "name": " Watch-CI "}) == "reenable"
+
+
+def test_a_callback_may_not_recreate_its_own_check():
+    ctx = _ctx("heartbeat_callback", declared_tools=("heartbeat_check_manage", "heartbeat_check_create"),
+               check_name="watch-ci")
+    assert evaluate(ctx, "heartbeat_check_manage", {"action": "delete", "name": "watch-ci"}) is None
+    assert evaluate(ctx, "heartbeat_check_create", {"name": "watch-ci", "prompt": "x"}) == "reenable"
+    assert evaluate(ctx, "heartbeat_check_create", {"name": "watch-ci-2", "prompt": "x"}) is None
+    # a check (not a callback) may recreate anything it declared
+    check = _ctx("heartbeat_check", declared_tools=("heartbeat_check_create",), check_name="watch-ci")
+    assert evaluate(check, "heartbeat_check_create", {"name": "watch-ci"}) is None

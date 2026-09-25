@@ -491,3 +491,32 @@ async def test_stream_chat_hands_the_call_input_to_the_choke_point():
 
 def test_policy_setting_defaults_to_warn():
     assert _settings().tool_context_policy_mode == "warn"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_refuse_strips_the_denylist():
+    """The streaming path strips exactly refuse_denylist(); reads survive."""
+    from unittest.mock import MagicMock
+
+    from nous.api.anthropic_client import StreamEvent
+    from tests.test_streaming import _make_mock_cognitive, _make_mock_settings, _make_runner
+
+    cognitive, turn_context = _make_mock_cognitive()
+    turn_context.refuse_active = True
+    runner = _make_runner(cognitive, _make_mock_settings())
+    runner._dispatcher.available_tools.return_value = [
+        {"name": n, "description": n, "input_schema": {"type": "object"}}
+        for n in ("recall_deep", "dag_create", "push_surface", "bash", "web_fetch")
+    ]
+    offered: list[set[str]] = []
+
+    async def fake_stream(*args, **kwargs):
+        tools = kwargs.get("tools") or next((a for a in args if isinstance(a, list)
+                                             and a and isinstance(a[0], dict) and "name" in a[0]), [])
+        offered.append({t["name"] for t in tools})
+        yield StreamEvent(type="text_delta", text="ok")
+        yield StreamEvent(type="done", stop_reason="end_turn")
+
+    runner._call_api_stream = MagicMock(side_effect=fake_stream)
+    [e async for e in runner.stream_chat("s1", "hi")]
+    assert offered == [{"recall_deep", "web_fetch"}]

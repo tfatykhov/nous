@@ -384,7 +384,8 @@ class AgentRunner:
         turn: int | None, refused_by: str,
     ) -> None:
         """A side-effecting call the harness refused. ``refused_by`` is a code
-        (``offered_set`` / ``action_gate``), never the refusal's prose."""
+        (``offered_set`` / ``action_gate`` / ``context_policy`` -- see
+        ``ledger_store.REFUSAL_CODES``), never the refusal's prose."""
         if self._ledger_store is None or not self._dispatcher.is_registered(tool_name):
             return  # an unregistered name could not have run (see _ledger_open)
         try:

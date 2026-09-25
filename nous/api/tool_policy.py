@@ -67,9 +67,13 @@ def evaluate(ctx: ExecutionContext, tool_name: str, tool_input: Mapping[str, Any
         or (declared is not None and tool_name in declared)
     ):
         return "spawn"
-    if (ctx.kind == "heartbeat_callback" and tool_name == "heartbeat_check_manage"
-            and str(tool_input.get("action", "")).lower() == "enable"
-            and ctx.check_name is not None
-            and str(tool_input.get("name", "")).strip().lower() == ctx.check_name.lower()):
-        return "reenable"
+    # a callback may not resurrect the check that triggered it: neither by
+    # enabling it nor by creating one under its name (after deleting it)
+    own = (ctx.check_name or "").strip().lower()
+    if ctx.kind == "heartbeat_callback" and own:
+        named = str(tool_input.get("name", "")).strip().lower() == own
+        action = str(tool_input.get("action", "")).strip().lower()
+        if named and ((tool_name == "heartbeat_check_manage" and action == "enable")
+                      or tool_name == "heartbeat_check_create"):
+            return "reenable"
     return None
