@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/plans/2026-09-24-harness-autonomy-roadmap.md` §2 row P2.7 and §3 row 2c. Anchors from `main` `240c795`.
 
+**v2.12 (codex round 8):** Python evidence is read from the syntax tree (`_python_facts`: the destinations written, whom it sends to, the shell strings it runs, deploy modules), so a comment or a printed string never counts; code that does not parse falls back to the regexes over comment-stripped text. When full turn evidence is supplied, the ledger's bounded copies of this turn's calls are not pooled (a copy past the 64-invocation cap reads as unreadable → plausible and would outvote the untruncated *none*). Output options are scoped to the programs they mean output for (`grep --file` reads patterns; `-o` for pandoc/gcc/curl/sort…, `-O` for wget, `--file` for tar). `${#x}` is not a comment.
+
 **v2.11 (codex round 7):** "I emailed the report to alice@x.io" captures its recipient (object-first form); curl addresses a mail only through `--mail-rcpt` (a `--data` payload, an attachment name or a header never name a recipient); a read command naming the path (`cat /tmp/report.md; touch other`) is not a save to it.
 
 **v2.10 (codex round 6):** substitution contents are emitted *before* the outer commands, so the last invocation is always the outer command a non-zero exit belongs to (`git push origin $(git branch --show-current)` exiting 1 is a failed push, not a failed branch lookup); a `$(…)` folded inside a quoted word is read (uncertain), a backtick or unbalanced one is opaque; git's terminal global options (`--version`, `-v`, `--help`, `--exec-path` …) run no subcommand, for the ledger classifier too.

@@ -5,6 +5,7 @@ IntentTracker: detects ghost planning (describing work without doing it).
 """
 from __future__ import annotations
 
+import ast
 import re
 from bisect import bisect_left, bisect_right
 from collections.abc import Mapping
@@ -319,6 +320,139 @@ _HINTS = {
 _LEVELS = {"none": 0, "plausible": 1, "exact": 2}
 
 
+# What Python code DOES, read from its syntax tree so that a comment or a
+# string ("open('/tmp/x', 'w')" printed) never counts: the destinations it
+# writes, whom it sends to, the shell strings it runs. Code that does not
+# parse falls back to the regexes over comment-stripped text.
+_PY_WRITE_METHODS = frozenset({
+    "to_csv", "to_json", "to_excel", "to_parquet", "to_html", "to_markdown", "savefig", "save",
+    "write_html", "write_image", "write_text", "write_bytes",
+})
+_PY_SHELL_CALLS = frozenset({
+    "subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output",
+    "subprocess.Popen", "os.system", "os.popen", "run", "call", "check_call", "check_output", "Popen",
+})
+_PY_DEPLOY_MODULES = frozenset({"docker", "kubernetes", "boto3", "paramiko", "fabric", "ansible"})
+_PY_COMMENT = re.compile(r"(?m)#[^\n]*$")
+
+
+@dataclass
+class _PyFacts:
+    writes: list[str] = field(default_factory=list)   # literal destinations written
+    write_unknown: bool = False                       # a write to a computed destination
+    sends: bool = False
+    recipients: set[str] = field(default_factory=set)
+    recipient_unknown: bool = False                   # a recipient held in a variable
+    shell: list[str] = field(default_factory=list)    # strings handed to a shell / subprocess
+    deploys: bool = False
+
+
+def _dotted(node: ast.AST) -> str:
+    """`shutil.copy` for the callee of a call, `.to_csv` for a method."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value)
+        return f"{base}.{node.attr}" if base else f".{node.attr}"
+    return ""
+
+
+def _literal(node: ast.AST | None) -> str | None:
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
+def _literals(node: ast.AST | None) -> list[str] | None:
+    """The strings of a string or list/tuple-of-strings literal; None otherwise."""
+    if (s := _literal(node)) is not None:
+        return [s]
+    if isinstance(node, (ast.List, ast.Tuple)):
+        items = [_literal(e) for e in node.elts]
+        return [i for i in items if i is not None] if all(i is not None for i in items) else None
+    return None
+
+
+def _python_facts(code: str) -> _PyFacts | None:
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return None
+    facts = _PyFacts()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = [a.name for a in node.names] + ([node.module] if isinstance(node, ast.ImportFrom) else [])
+            if any(n and n.split(".")[0] == "smtplib" for n in names):
+                facts.sends = True
+            if any(n and n.split(".")[0] in _PY_DEPLOY_MODULES for n in names):
+                facts.deploys = True
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:  # msg['To'] = '...'
+                if isinstance(target, ast.Subscript) and _literal(target.slice) in ("To", "Cc", "Bcc"):
+                    found = _literals(node.value)
+                    if found is None:
+                        facts.recipient_unknown = True
+                    else:
+                        facts.recipients |= {a for s in found for a in _addresses(s)}
+        elif isinstance(node, ast.Call):
+            _call_facts(node, facts)
+    if facts.sends and not facts.recipients:
+        facts.recipient_unknown = True  # it sends, to whom is not written out
+    return facts
+
+
+def _call_facts(node: ast.Call, facts: _PyFacts) -> None:
+    name = _dotted(node.func)
+    method = name.rsplit(".", 1)[-1]
+    args = node.args
+    kws = {k.arg: k.value for k in node.keywords if k.arg}
+    if name == "open":
+        mode = _literal(args[1]) if len(args) > 1 else _literal(kws.get("mode"))
+        if mode and mode[:1] in "wax":
+            _note_write(facts, args[0] if args else kws.get("file"))
+    elif method in ("write_text", "write_bytes") and isinstance(node.func, ast.Attribute):
+        receiver = node.func.value  # Path('...').write_text(...)
+        inner = receiver.args[0] if isinstance(receiver, ast.Call) and receiver.args else None
+        _note_write(facts, inner if _dotted(receiver.func if isinstance(receiver, ast.Call) else receiver)
+                    .endswith("Path") else None)
+    elif method in _PY_WRITE_METHODS:
+        _note_write(facts, args[0] if args else None)
+    elif name in ("json.dump", "pickle.dump", "yaml.dump", "yaml.safe_dump"):
+        sink = args[1] if len(args) > 1 else kws.get("fp") or kws.get("stream")
+        if isinstance(sink, ast.Call):  # json.dump(data, open('/tmp/x', 'w'))
+            _call_facts(sink, facts)
+        else:
+            facts.write_unknown = True
+    elif name in ("shutil.copy", "shutil.copy2", "shutil.copyfile", "shutil.move"):
+        _note_write(facts, args[1] if len(args) > 1 else kws.get("dst"))
+    elif method == "sendmail":
+        facts.sends = True
+        to = args[1] if len(args) > 1 else kws.get("to_addrs")
+        found = _literals(to)
+        if found is None:
+            facts.recipient_unknown = True
+        else:
+            facts.recipients |= {a for s in found for a in _addresses(s)}
+    elif method == "send_message":
+        facts.sends = True
+        if not facts.recipients:
+            facts.recipient_unknown = True
+    elif name in _PY_SHELL_CALLS or method in ("system", "popen"):
+        found = _literals(args[0]) if args else None
+        if found is not None:
+            facts.shell.append(" ".join(found))
+    else:
+        url = _literal(args[0]) if args else _literal(kws.get("url"))
+        if url and "api.telegram.org" in url and method in ("post", "get", "request", "urlopen"):
+            facts.sends = True
+            facts.recipient_unknown = True
+
+
+def _note_write(facts: _PyFacts, destination: ast.AST | None) -> None:
+    if (path := _literal(destination)) is not None:
+        facts.writes.append(path)
+    else:
+        facts.write_unknown = True
+
+
 def _names(target: str, text: str) -> bool:
     """True if a command's text names the claimed target: an absolute path in
     full (`/tmp/report.md` is not `/var/archive/report.md`), `~/x` also as
@@ -395,10 +529,14 @@ def _positional(args: tuple[str, ...]) -> list[str]:
 _WRITERS_LAST = frozenset({"cp", "mv", "install", "ln", "rsync", "scp", "sftp"})  # last positional
 _WRITERS_ALL = frozenset({"tee", "touch", "truncate", "mkdir", "mkfifo"})           # every positional
 _DESTROYERS = frozenset({"rm", "rmdir", "unlink", "shred"})
-_OUTPUT_OPTIONS = frozenset({"-o", "-O", "--output", "--out", "--outfile", "--out-file", "--dest",
-                             "--destination", "--file"})
-_OUTPUT_OPTION_PREFIXES = ("--output=", "--out=", "--outfile=", "--out-file=", "--dest=",
-                           "--destination=", "--file=")
+# Output options, scoped to the programs they mean output for: a long
+# `--output`-style option for any program that is not a known read (`grep
+# --file` reads patterns), `-o` for the programs that write with it, `-O`
+# for wget, `-f`/`--file` for tar.
+_OUTPUT_LONG = frozenset({"--output", "--out", "--outfile", "--out-file", "--dest", "--destination"})
+_OUTPUT_LONG_PREFIXES = ("--output=", "--out=", "--outfile=", "--out-file=", "--dest=", "--destination=")
+_DASH_O_PROGRAMS = frozenset({"pandoc", "gcc", "cc", "clang", "g++", "c++", "ld", "curl", "sort",
+                              "wkhtmltopdf", "wkhtmltoimage", "pdftotext", "convert", "magick"})
 
 
 def _destinations(prog: str, args: tuple[str, ...]) -> list[str]:
@@ -409,17 +547,28 @@ def _destinations(prog: str, args: tuple[str, ...]) -> list[str]:
         dests.append(last.split(":", 1)[1] if ":" in last and not last.startswith("/") else last)
     elif prog in _WRITERS_ALL:
         dests += positional
-    elif prog == "tar" and args and "f" in args[0].lstrip("-") and len(positional) > 1:
-        dests.append(positional[1] if not args[0].startswith("-") else positional[0])
+    elif prog == "tar":
+        if args and not args[0].startswith("-") and "f" in args[0] and len(positional) > 1:
+            dests.append(positional[1])  # `tar czf X`
+        for i, a in enumerate(args):
+            if (a in ("-f", "--file") or ("f" in _short_flags(a) and "-" in a[:1])) and i + 1 < len(args):
+                dests.append(args[i + 1])
+            elif a.startswith("--file="):
+                dests.append(a.split("=", 1)[1])
     elif prog == "sed" and any("i" in _short_flags(a) or a.startswith("--in-place") for a in args):
         dests += positional
     elif prog == "dd":
         dests += [a[3:] for a in args if a.startswith("of=")]
     for i, a in enumerate(args):
-        if a in _OUTPUT_OPTIONS and i + 1 < len(args):
-            dests.append(args[i + 1])
-        elif a.startswith(_OUTPUT_OPTION_PREFIXES):
+        value = args[i + 1] if i + 1 < len(args) else None
+        if a in _OUTPUT_LONG and prog not in READ_COMMANDS and value is not None:
+            dests.append(value)
+        elif a.startswith(_OUTPUT_LONG_PREFIXES) and prog not in READ_COMMANDS:
             dests.append(a.split("=", 1)[1])
+        elif a == "-o" and prog in _DASH_O_PROGRAMS and value is not None:
+            dests.append(value)
+        elif a == "-O" and prog == "wget" and value is not None:
+            dests.append(value)
     return dests
 
 
@@ -606,26 +755,49 @@ def _opaque_for(kind: str, prog: str, args: tuple[str, ...]) -> bool:
 
 def _code_level(claim: Claim, code: str) -> str:
     """Evidence from Python source: a run_python call, `python -c`, or a heredoc."""
+    facts = _python_facts(code)
+    if facts is None:
+        return _code_level_unparsed(claim, _PY_COMMENT.sub("", code))
+    if claim.kind == "file_write":
+        if not facts.writes and not facts.write_unknown:
+            return "none"
+        if claim.target:
+            if any(_same_path(claim.target, w) for w in facts.writes):
+                return "exact"
+            return "plausible" if facts.write_unknown else "none"  # a computed path; or elsewhere
+        return "plausible"
+    if claim.kind == "email":
+        if not facts.sends:
+            return "none"
+        if claim.target and claim.target not in facts.recipients:
+            return "plausible" if facts.recipient_unknown else "none"  # held in a variable; or someone else
+        return "plausible"
+    shell = "\n".join(facts.shell)
+    if claim.kind in ("vcs_push", "vcs_commit"):
+        return "plausible" if _PY_GIT[claim.kind].search(shell) else "none"
+    return "plausible" if facts.deploys or _PY_DEPLOY.search(shell) else "none"
+
+
+def _code_level_unparsed(claim: Claim, code: str) -> str:
+    """The regexes, for code that does not parse (a snippet), over comment-stripped text."""
     if claim.kind == "file_write":
         if not _PY_WRITES.search(code):
             return "none"
         if claim.target:
-            # the destination of the write, not the path's mention anywhere
             written = [m.group(1) for p in _PY_WRITE_DESTINATIONS for m in p.finditer(code)]
             if any(_same_path(claim.target, w) for w in written):
                 return "exact"
-            return "none" if written else "plausible"  # written elsewhere; or a computed path
+            return "none" if written else "plausible"
         return "plausible"
     if claim.kind == "email":
         if not _PY_SENDS.search(code):
             return "none"
         if claim.target:
-            # the recipients written out, not a sender, a body or a comment
             recipients = {a for p in _PY_RECIPIENT_FIELDS for m in p.finditer(code)
                           for a in _addresses(m.group(1))}
             if claim.target in recipients:
                 return "plausible"
-            return "none" if recipients else "plausible"  # someone else; or held in a variable
+            return "none" if recipients else "plausible"
         return "plausible"
     if claim.kind in ("vcs_push", "vcs_commit"):
         return "plausible" if _PY_GIT[claim.kind].search(code) else "none"
@@ -760,6 +932,12 @@ class ClaimVerifier:
             # or failed call must not let "I pushed the code" verify.
             recent = ledger.actions[-10:]
             current = [a for a in ledger.actions if a.turn == ledger.current_turn]
+            if turn_evidence is not None:
+                # this turn's calls are in turn_evidence, untruncated; the
+                # ledger's bounded copies of them must not outvote it (a copy
+                # past the invocation cap reads as unreadable -> plausible)
+                current = []
+                recent = [a for a in recent if a.turn != ledger.current_turn]
             for action in {id(a): a for a in [*current, *recent]}.values():
                 if action.status == "success":
                     pool.append(Evidence(

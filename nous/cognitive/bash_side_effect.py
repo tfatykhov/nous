@@ -237,8 +237,8 @@ def _split_heredocs(command: str) -> tuple[str, list[str]]:
                 j += 1
             elif c in "'\"":
                 quote = c
-            elif c == "#" and (j == 0 or line[j - 1] in " \t;&|(){}"):
-                line = line[:j]  # a comment, to the end of the line
+            elif c == "#" and (j == 0 or line[j - 1] in " \t;&|"):
+                line = line[:j]  # a comment, to the end of the line (`${#x}` is not one)
                 break
             elif c == "<" and line.startswith("<<", j) and not line.startswith("<<<", j) \
                     and (j == 0 or line[j - 1] != "<"):

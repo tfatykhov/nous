@@ -1062,3 +1062,58 @@ def test_a_read_naming_the_path_is_not_a_save():
     assert not _verify(claim, _real_bash("grep x /tmp/report.md && touch /tmp/other")).verified
     assert not _verify(claim, _real_bash("stat /tmp/report.md; mkdir -p /tmp/d")).verified
     assert _verify(claim, _real_bash("cat draft.md > /tmp/report.md")).verified
+
+
+# --- codex round 8 -------------------------------------------------------------
+
+
+def test_a_capped_ledger_copy_never_outvotes_full_turn_evidence():
+    cmd = " && ".join(["true"] * 65)  # past the ledger's cap: its copy reads as unreadable
+    ledger = ExecutionLedger(session_id="s")
+    ledger.record("bash", {"command": cmd}, "Exit code: 0", "success")
+    assert not ClaimVerifier().verify("I pushed the changes.", [], ledger, turn_evidence=[_real_bash(cmd)]).verified
+    assert ClaimVerifier().verify("I pushed the changes.", [], ledger).verified  # a legacy caller has only the copy
+
+
+@pytest.mark.parametrize("code, level", [
+    ("# open('/tmp/report.md', 'w')", "none"),
+    ("print(\"open('/tmp/report.md', 'w')\")", "none"),
+    ("path = '/tmp/report.md'  # open(path, 'w') later\nopen(path, 'w').write(s)", "plausible"),
+    ("open('/tmp/report.md', mode='w').write(s)", "exact"),
+    ("with open('/tmp/report.md', 'w') as f:\n    f.write(s)", "exact"),
+    ("json.dump(data, open('/tmp/report.md', 'w'))", "exact"),
+])
+def test_python_writes_come_from_executable_code(code, level):
+    result = _verify("It was saved to /tmp/report.md.", Evidence("run_python", {"code": code}))
+    assert result.claims[0].evidence == level
+
+
+def test_python_sends_come_from_executable_code():
+    assert not _verify("I sent the email.", Evidence("run_python", {"code": "# import smtplib\nprint(1)"})).verified
+    quoted = "s = 'sendmail alice@x.io'\nprint(s)"
+    assert not _verify("Email sent to alice@x.io.", Evidence("run_python", {"code": quoted})).verified
+    ok = "import smtplib\nsmtplib.SMTP('h').sendmail('me@x.io', ['alice@x.io'], m)"
+    assert _verify("Email sent to alice@x.io.", Evidence("run_python", {"code": ok})).verified
+
+
+def test_python_git_comes_from_a_subprocess_string():
+    commented = "# subprocess.run(['git', 'push'])\nprint(1)"
+    assert not _verify("I pushed the fix.", Evidence("run_python", {"code": commented})).verified
+    real = "subprocess.run(['git', 'push', 'origin', 'main'], check=True)"
+    assert _verify("I pushed the fix.", Evidence("run_python", {"code": real})).verified
+    dry = "subprocess.run('git push -n origin main', shell=True)"
+    assert not _verify("I pushed the fix.", Evidence("run_python", {"code": dry})).verified
+
+
+def test_output_options_belong_to_the_programs_that_own_them():
+    claim = "It was saved to /tmp/report.md."
+    assert not _verify(claim, _real_bash("touch /tmp/unrelated; grep --file /tmp/report.md /tmp/input")).verified
+    assert not _verify(claim, _real_bash("touch /tmp/other; cat --file /tmp/report.md")).verified
+    assert _verify(claim, _real_bash("tar --create --file /tmp/report.md site/")).verified
+    assert _verify(claim, _real_bash("sort -o /tmp/report.md input")).verified
+    assert _verify(claim, _real_bash("curl -o /tmp/report.md https://x")).verified
+
+
+def test_a_parameter_length_expansion_is_not_a_comment():
+    assert _push_level("n=${#files[@]}; git push origin main") == "exact"
+    assert _push_level("echo ${#x} # ; git push origin main") == "none"
