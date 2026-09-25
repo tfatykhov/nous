@@ -28,6 +28,8 @@ from functools import partial
 from typing import Any
 from uuid import UUID
 
+from nous.api.call_outcome import CallOutcome
+from nous.api.call_outcome import _current as _outcome_var  # the one setter (harness 2b)
 from nous.api.execution_context import ExecutionContext, resolve_context
 from nous.brain.brain import Brain
 from nous.brain.schemas import NON_PREDICTION_OUTCOMES, ReasonInput, RecordInput
@@ -381,7 +383,7 @@ class ToolDispatcher:
     async def dispatch(
         self, name: str, args: dict[str, Any], session_id: str | None = None,
         is_background: bool = False, turn_number: int | None = None,
-        context: ExecutionContext | None = None,
+        context: ExecutionContext | None = None, outcome: CallOutcome | None = None,
     ) -> tuple[str, bool]:
         """Dispatch a tool call and return (result_text, is_error).
 
@@ -394,6 +396,10 @@ class ToolDispatcher:
 
         context: the turn's ExecutionContext (harness Phase 1a). When given it
         is authoritative and ``is_background`` is derived from it.
+
+        outcome: the call's CallOutcome (harness Phase 2b). The handler reads
+        it through ``current_outcome()``; it is set and reset around the
+        handler call here, inside this one task.
         """
         ctx = resolve_context(context, is_background=is_background, session_id=session_id)
         is_background = ctx.is_background
@@ -502,7 +508,11 @@ class ToolDispatcher:
                 # F092: surfaces record the chat session that pushed them so
                 # a companion card can be traced back to its conversation.
                 args = {**args, "_session_id": session_id}
-            result = await handler(**args)  # P0-6: **kwargs unpacking
+            token = _outcome_var.set(outcome)
+            try:
+                result = await handler(**args)  # P0-6: **kwargs unpacking
+            finally:
+                _outcome_var.reset(token)
             # P1-1: Extract text from MCP-format response. is_error honors
             # the MCP field when a handler sets it (#179: run_python error
             # returns) — absent means success, as before.
