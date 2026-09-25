@@ -21,7 +21,7 @@ from nous.config import Settings
 from nous.dag.approval import approval_dedup_key
 from nous.dag.orchestrator import DAGOrchestrator
 from nous.dag.schemas import DAGCreateRequest, DAGEdgeSpec, DAGNodeSpec, DAGNodeType
-from nous.dag.store import DAGStore
+from nous.dag.store import MAX_ACTIVE_DAGS, DAGStore
 from nous.storage.models import ExecutionDAG
 
 
@@ -548,3 +548,114 @@ async def test_the_sweep_finds_a_stranded_node_that_has_no_card(store, subtask_m
     await orch._sweep_leaked_approval_cards()
 
     assert (await _node(store, dag.id, "approve")).status == "cancelled"
+
+
+async def _working_dag(store):
+    dag = await store.create(
+        DAGCreateRequest(name="w", nodes=[DAGNodeSpec(name="n", type=DAGNodeType.subtask, instructions="x")])
+    )
+    await store.update_dag_status(dag.id, "running")
+    await store.update_node(dag.nodes[0].id, status="running", started_at=datetime.now(UTC))
+    return dag
+
+
+async def test_a_resumed_dag_waits_for_a_working_slot(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    resumed, node = await _parked(store, orch)  # created first: the oldest DAG
+    others = [await _working_dag(store) for _ in range(MAX_ACTIVE_DAGS)]
+    await orch.answer_node(node.id, "send", source="companion", actor=None, surface_id=node.surface_id)
+    subtask_mgr.create.reset_mock()
+
+    await orch.tick()
+
+    assert (await _node(store, resumed.id, "send")).status == "pending"
+    subtask_mgr.create.assert_not_called()
+    assert orch._defer_counts.get((await _node(store, resumed.id, "send")).id) is None
+
+    assert orch.held_reason(resumed.id) == (
+        f"approved — waiting for a free slot ({MAX_ACTIVE_DAGS}/{MAX_ACTIVE_DAGS} DAGs working)"
+    )
+
+    await store.update_node(others[0].nodes[0].id, status="completed")
+    await orch.tick()
+
+    assert (await _node(store, resumed.id, "send")).status == "running"
+    assert orch.held_reason(resumed.id) is None
+
+
+async def test_a_held_dag_still_asks_its_next_question(store, subtask_mgr, surfaces):
+    """Parking an approval takes no subtask; holding it would only delay the question."""
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag = await store.create(
+        DAGCreateRequest(
+            name="two-step",
+            nodes=[
+                _approve(),
+                _approve(name="approve2", instructions="And the follow-up?"),
+                DAGNodeSpec(name="send", type=DAGNodeType.subtask, instructions="send"),
+            ],
+            edges=[
+                DAGEdgeSpec(from_node="approve", to_node="approve2", edge_type="context_flow"),
+                DAGEdgeSpec(from_node="approve2", to_node="send", edge_type="context_flow"),
+            ],
+        )
+    )
+    await orch.start_dag(dag.id)
+    for _ in range(MAX_ACTIVE_DAGS):
+        await _working_dag(store)
+    first = await _node(store, dag.id, "approve")
+    await orch.answer_node(first.id, "send", source="companion", actor=None, surface_id=first.surface_id)
+
+    await orch.tick()
+
+    assert (await _node(store, dag.id, "approve2")).status == "awaiting_input"
+
+
+async def test_a_dag_without_an_approval_is_never_held(store, subtask_mgr, surfaces):
+    """Even while the gate runs (an approval DAG exists) and every slot is
+    taken, a plain DAG between waves dispatches as it always has."""
+    orch = _orch(store, subtask_mgr, surfaces)
+    await _parked(store, orch)  # an approval DAG exists, so the gate runs
+    late = await _working_dag(store)
+    await store.update_dag_status(late.id, "completed")  # outside admission's count for now
+    plain = await store.create(
+        DAGCreateRequest(
+            name="plain",
+            nodes=[
+                DAGNodeSpec(name="a", type=DAGNodeType.gate),
+                DAGNodeSpec(name="b", type=DAGNodeType.subtask, instructions="b"),
+            ],
+            edges=[DAGEdgeSpec(from_node="a", to_node="b")],
+        )
+    )
+    for _ in range(MAX_ACTIVE_DAGS - 1):
+        await _working_dag(store)
+    await store.update_dag_status(late.id, "running")  # a retry reactivates it past the limit
+    await store.update_dag_status(plain.id, "running")
+    await store.update_node(next(n for n in plain.nodes if n.name == "a").id, status="completed")
+
+    await orch.tick()  # MAX_ACTIVE_DAGS DAGs are working; 'plain' is between waves
+
+    assert (await _node(store, plain.id, "b")).status == "running"
+
+
+def test_a_dag_polling_a_check_is_not_working():
+    from nous.dag.orchestrator import _is_working
+
+    assert not _is_working(SimpleNamespace(nodes=[SimpleNamespace(status="awaiting_check")]))
+    assert _is_working(SimpleNamespace(nodes=[SimpleNamespace(status="running")]))
+
+
+async def test_the_gate_is_inert_without_approval_nodes(store, subtask_mgr, surfaces, monkeypatch):
+    orch = _orch(store, subtask_mgr, surfaces)
+    for _ in range(3):
+        await _working_dag(store)
+    calls: list[bool] = []
+
+    async def record(dag, *, may_start=True):
+        calls.append(may_start)
+
+    monkeypatch.setattr(orch, "_advance_dag", record)
+    await orch.tick()
+
+    assert calls == [True, True, True]

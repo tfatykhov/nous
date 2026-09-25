@@ -79,6 +79,7 @@ from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, DAGNodeStatus
 from nous.dag.store import (
     _TERMINAL_DAG_STATUSES,
     LIVE_DAG_STATUSES,
+    MAX_ACTIVE_DAGS,
     TERMINAL_DAG_STATUSES,
     DAGStore,
 )
@@ -117,6 +118,22 @@ _APPROVAL_ROW_FIELDS = (
     "status", "result", "error", "surface_id", "answer", "answered_by", "answered_at",
     "answer_source", "answer_deadline", "completed_at",
 )
+
+# awaiting_check holds no subtask-queue slot — the resource the gate protects —
+# so a DAG polling a check does not count (spec §3.11).
+_WORKING_NODE_STATUSES = frozenset({"ready", "running"})
+
+
+def _is_working(dag: ExecutionDAG) -> bool:
+    """A node ready or running. The counter rule (§3.11): a parked approval or
+    an instant gate/callback leaves a DAG NOT working, so it takes no slot."""
+    return any(n.status in _WORKING_NODE_STATUSES for n in dag.nodes)
+
+
+def _has_approval(dag: ExecutionDAG) -> bool:
+    """Only a DAG with an approval node can resume from parking — the only
+    DAGs the gate ever holds (§3.11)."""
+    return any(n.node_type == "approval" for n in dag.nodes)
 
 # Budget warning threshold (80%)
 _BUDGET_WARNING_RATIO = 0.80
@@ -200,6 +217,12 @@ class DAGOrchestrator:
         # construction (main.py builds SurfaceService first) — None means the
         # companion is off and dag_create refuses approval nodes.
         self._surface_service = surface_service
+        # Harness Phase 3 §3.11: DAGs the dispatch gate held on the LAST tick
+        # (rebuilt every tick, so a DAG cancelled while held drops out), and
+        # the working count it saw — read by dag_manage via held_reason().
+        self._held: set[UUID] = set()
+        self._held_this_tick: set[UUID] = set()
+        self._working_count = 0
         # F087: set True by whoever installs the tick. Explicit rather than
         # inferred from last_tick_at, which would false-negative during the
         # first tick interval. dag_create refuses when this is False so the
@@ -327,6 +350,22 @@ class DAGOrchestrator:
             return True
         return False
 
+    def _costs_nothing(self, node: DAGNode) -> bool:
+        """Never held by the gate: parking an approval takes no subtask, a gate
+        auto-passes, and a callback executes nothing while its flag is off."""
+        return node.node_type in ("approval", "gate") or (
+            node.node_type == "callback" and not self._settings.dag_callback_execution_enabled
+        )
+
+    def held_reason(self, dag_id: UUID) -> str | None:
+        """Why a DAG the person approved has not moved yet (§3.11)."""
+        if dag_id not in self._held:
+            return None
+        return (
+            f"approved — waiting for a free slot "
+            f"({self._working_count}/{MAX_ACTIVE_DAGS} DAGs working)"
+        )
+
     async def tick(self) -> int:
         """Advance all active DAGs. Returns number of DAGs processed.
 
@@ -334,14 +373,45 @@ class DAGOrchestrator:
         """
         async with self._lock:
             self.last_tick_at = datetime.now(UTC)
-            dags = await self._store.get_active_dags()
+            dags = await self._store.get_active_dags()  # oldest first
+            # Harness Phase 3 §3.11: resuming parked DAGs is admission-
+            # controlled at dispatch. Parked DAGs do not count at creation, so
+            # answering many at once could put up to MAX_ACTIVE_DAGS + the
+            # parked cap to work together, overflow the agent-wide subtask
+            # queue, and fail approved nodes after _MAX_DEFERRALS. The pre-
+            # pass runs only when a loaded DAG has an approval node — without
+            # one, creation already keeps the working set at the limit, and
+            # every DAG dispatches exactly as before.
+            gated = any(_has_approval(d) for d in dags)
+            working = sum(1 for d in dags if _is_working(d)) if gated else 0
+            self._working_count = working
+            self._held_this_tick = set()
             for dag in dags:
+                was_working = _is_working(dag)
+                # Only a DAG with an approval node is ever held: a DAG without
+                # one keeps today's scheduling even while another waits on a
+                # person (between waves, after a deferral, after a retry).
+                may_start = (
+                    not gated
+                    or was_working
+                    or not _has_approval(dag)
+                    or working < MAX_ACTIVE_DAGS
+                )
                 try:
-                    await self._advance_dag(dag)
+                    await self._advance_dag(dag, may_start=may_start)
                 except Exception:
                     logger.exception("Error advancing DAG %s", dag.id)
-            # Harness Phase 3 §3.7: inside `_lock` — never interleaved with a
-            # launch between push and link.
+                # Counter rule: count a DAG only if it now has real work. A
+                # DAG that finished this tick frees its slot on the next one.
+                # "Working" is re-counted every tick, so an approval DAG
+                # between waves (nothing ready/running at tick start) can be
+                # held too, not only a resumed one — oldest first, benign.
+                if gated and not was_working and _is_working(dag):
+                    working += 1
+                    self._working_count = working
+            # Fresh each tick: a DAG cancelled while held is never advanced
+            # again, and must not keep reporting "waiting for a free slot".
+            self._held = self._held_this_tick
             await self._sweep_leaked_approval_cards()
 
         # F087: drain terminal-but-undelivered DAGs. Deliberately outside the
@@ -871,7 +941,7 @@ class DAGOrchestrator:
     # Internal: DAG advancement
     # ------------------------------------------------------------------
 
-    async def _advance_dag(self, dag: ExecutionDAG) -> None:
+    async def _advance_dag(self, dag: ExecutionDAG, *, may_start: bool = True) -> None:
         """Core state machine: sync → stall → budget → failures → launch → complete."""
         # 1. Sync node statuses from underlying primitives
         await self._sync_node_statuses(dag)
@@ -945,7 +1015,20 @@ class DAGOrchestrator:
 
         # 4. Find and launch ready nodes (F064.2 dispatch with optional per-
         # frame caps; falls back to legacy behavior when flag is off).
+        # Harness Phase 3 §3.11: a DAG held by the dispatch gate keeps its
+        # costly ready nodes 'pending' this tick — no deferral is counted —
+        # and still dispatches the ones that cost nothing (an approval's next
+        # question, a gate, an inert callback).
         ready_nodes = self._find_ready_nodes(dag)
+        if not may_start:
+            held = [n for n in ready_nodes if not self._costs_nothing(n)]
+            ready_nodes = [n for n in ready_nodes if self._costs_nothing(n)]
+            if held:
+                self._held_this_tick.add(dag.id)
+                logger.info(
+                    "DAG %s holds %d ready node(s): %d of %d working slots in use",
+                    dag.id, len(held), self._working_count, MAX_ACTIVE_DAGS,
+                )
         await self._dispatch_ready_nodes(dag, ready_nodes)
 
         # 5. Check if DAG is complete
