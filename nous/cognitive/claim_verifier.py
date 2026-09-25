@@ -374,11 +374,13 @@ def _executed(tree: ast.Module) -> list[ast.AST]:
     False:` -- never."""
     functions: dict[str, list[ast.AST]] = {}
     methods: dict[str, dict[str, ast.AST]] = {}  # method name -> class name -> def
+    classes: set[str] = set()
     for node in tree.body:
         if isinstance(node, _FUNCTIONS):
             functions.setdefault(node.name, []).append(node)
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef):
+            classes.add(node.name)
             for item in node.body:
                 if isinstance(item, _FUNCTIONS):
                     methods.setdefault(item.name, {})[node.name] = item
@@ -401,7 +403,7 @@ def _executed(tree: ast.Module) -> list[ast.AST]:
                 owner = receiver.id if isinstance(receiver, ast.Name) else None
                 if owner in by_class:
                     targets = [(f"{owner}.{sub.func.attr}", by_class[owner])]
-                elif owner is None or owner not in methods and owner != "self":
+                elif owner not in classes:  # self, or an instance whose class is unknown
                     targets = [(f"{c}.{sub.func.attr}", fn) for c, fn in by_class.items()]
             for key, fn in targets:
                 if key not in called:
@@ -477,8 +479,10 @@ def _call_facts(node: ast.Call, facts: _PyFacts) -> None:
         inner = receiver.args[0] if isinstance(receiver, ast.Call) and receiver.args else None
         _note_write(facts, inner if _dotted(receiver.func if isinstance(receiver, ast.Call) else receiver)
                     .endswith("Path") else None)
-    elif method in _PY_WRITE_METHODS:
-        _note_write(facts, args[0] if args else None)
+    elif method in _PY_WRITE_METHODS and (args or "path" in kws or "fname" in kws):
+        # a file-writing method takes its destination; `obj.save()` bare is
+        # whatever a user-defined `save` does (resolved through _executed)
+        _note_write(facts, args[0] if args else kws.get("path") or kws.get("fname"))
     elif name in ("json.dump", "pickle.dump", "yaml.dump", "yaml.safe_dump"):
         sink = args[1] if len(args) > 1 else kws.get("fp") or kws.get("stream")
         if isinstance(sink, ast.Call):  # json.dump(data, open('/tmp/x', 'w'))

@@ -1201,7 +1201,8 @@ def test_untaken_loops_and_handlers_are_not_executed(code, level):
 
 
 @pytest.mark.parametrize("code, level", [
-    ("def save():\n    open('/tmp/report.md', 'w')\nclass Obj:\n    def save(self):\n        pass\nObj().save()", "none"),
+    ("def save():\n    open('/tmp/report.md', 'w')\nclass Obj:\n    def save(self):\n        pass\nObj().save()",
+     "none"),
     ("def save():\n    open('/tmp/report.md', 'w')\nsave()", "exact"),
     ("class Obj:\n    def save(self):\n        open('/tmp/report.md', 'w')\nObj().save()", "exact"),
     ("class A:\n    def save(self):\n        pass\nclass B:\n    def save(self):\n        open('/tmp/report.md', 'w')\n"
@@ -1218,15 +1219,22 @@ def test_calls_resolve_to_their_own_definition(code, level):
     assert result.claims[0].evidence == level
 
 
-def test_truncated_ledger_code_is_unreadable_never_regex_scanned():
-    code = "s = '''open('/tmp/report.md', 'w')" + "x" * 40_000 + "'''\nprint(len(s))"
+def _later_turn_level(code):
     ledger = ExecutionLedger(session_id="s")
     ledger.set_turn(1)
-    ledger.record("run_python", {"code": code}, "40030", "success")
+    ledger.record("run_python", {"code": code}, "ok", "success")
     ledger.set_turn(2)
-    result = ClaimVerifier().verify("It was saved to /tmp/report.md.", [], ledger, turn_evidence=[])
-    assert result.claims[0].evidence == "plausible"   # unreadable is not no-signal, and never exact
+    return ClaimVerifier().verify("It was saved to /tmp/report.md.", [], ledger, turn_evidence=[]).claims[0].evidence
+
+
+def test_truncated_ledger_code_is_unreadable_never_regex_scanned():
+    # the cut lands inside a string literal: still parses, and a string is not a write
+    assert _later_turn_level("s = '''open('/tmp/report.md', 'w')" + "x" * 40_000 + "'''\nprint(len(s))") == "none"
+    # the cut breaks the code: unreadable, so plausible -- never a regex hit on the head
+    broken = "open('/tmp/report.md.bak', 'w')\ndata = [" + "1, " * 20_000 + "]"
+    assert _later_turn_level(broken) == "plausible"
 
 
 def test_code_that_does_not_parse_is_no_evidence():
-    assert not _verify("It was saved to /tmp/report.md.", Evidence("run_python", {"code": "open('/tmp/report.md', 'w'"})).verified
+    snippet = Evidence("run_python", {"code": "open('/tmp/report.md', 'w'"})
+    assert not _verify("It was saved to /tmp/report.md.", snippet).verified
