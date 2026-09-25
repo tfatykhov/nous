@@ -724,3 +724,87 @@ async def test_a_stop_reads_as_a_stop(store, subtask_mgr, surfaces):
         "Stopped at approval 'approve': 'Don't send'; 1 step not run"
     )
     assert (await _node(store, dag.id, "send")).error == BLOCKED_BY_APPROVAL
+
+
+def _chained_request() -> DAGCreateRequest:
+    return DAGCreateRequest(
+        name="chain",
+        nodes=[
+            DAGNodeSpec(name="draft", type=DAGNodeType.subtask, instructions="draft"),
+            _approve(),
+            _approve(name="approve2", instructions="Really send it?"),
+            DAGNodeSpec(name="send", type=DAGNodeType.subtask, instructions="send"),
+        ],
+        edges=[
+            DAGEdgeSpec(from_node="draft", to_node="approve", edge_type="context_flow"),
+            DAGEdgeSpec(from_node="approve", to_node="approve2", edge_type="context_flow"),
+            DAGEdgeSpec(from_node="approve2", to_node="send", edge_type="context_flow"),
+        ],
+    )
+
+
+async def test_chained_approvals_carry_the_draft_through(store, subtask_mgr, surfaces):
+    """The documented wiring applied twice: the second question must still
+    show the draft, and the acting node must still receive it."""
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag = await store.create(_chained_request())
+    await orch.start_dag(dag.id)
+    await store.update_node((await _node(store, dag.id, "draft")).id, status="completed", result="Dear Bob, ...")
+    await orch._advance_dag(await store.get_dag(dag.id))
+    first = await _node(store, dag.id, "approve")
+    await orch.answer_node(first.id, "send", source="companion", actor=None, surface_id=first.surface_id)
+    await orch._advance_dag(await store.get_dag(dag.id))  # approve2 parks
+
+    second = await _node(store, dag.id, "approve2")
+    summary = surfaces.cards[second.surface_id]["built"].data_model["summary"]
+    assert summary.startswith("Really send it?")
+    assert "From 'draft':\nDear Bob, ..." in summary
+    assert "From 'approve':\nAnswered in the companion: 'Send it' (send)" in summary
+
+    await orch.answer_node(second.id, "send", source="companion", actor=None, surface_id=second.surface_id)
+    subtask_mgr.create.reset_mock()
+    await orch._advance_dag(await store.get_dag(dag.id))  # 'send' launches
+
+    task = subtask_mgr.create.call_args.kwargs["task"]
+    assert "[Approved input from 'draft' (approved at 'approve2')]: Dear Bob, ..." in task
+
+
+async def test_a_draft_the_card_cut_is_not_labelled_approved(store, subtask_mgr, surfaces):
+    """The person saw only the head of a long draft; the acting node must not
+    be told the whole text was approved."""
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag = await store.create(_request(with_draft=True))
+    await orch.start_dag(dag.id)
+    long_draft = "x" * 9000
+    await store.update_node((await _node(store, dag.id, "draft")).id, status="completed", result=long_draft)
+    await orch._advance_dag(await store.get_dag(dag.id))
+    node = await _node(store, dag.id, "approve")
+    await orch.answer_node(node.id, "send", source="companion", actor=None, surface_id=node.surface_id)
+    subtask_mgr.create.reset_mock()
+
+    await orch._advance_dag(await store.get_dag(dag.id))
+
+    task = subtask_mgr.create.call_args.kwargs["task"]
+    assert "[Approved input from 'draft'" not in task
+    assert "of 9000 chars]: " + long_draft in task
+    assert "[Input from 'draft' — the card at 'approve' showed only the first " in task
+
+
+async def test_a_dag_held_before_its_approval_is_answered_is_not_called_approved(
+    store, subtask_mgr, surfaces
+):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag = await store.create(_request(with_draft=True))
+    await store.update_dag_status(dag.id, "completed")  # outside admission's count for now
+    for _ in range(MAX_ACTIVE_DAGS):
+        await _working_dag(store)
+    await store.update_dag_status(dag.id, "running")  # a retry reactivates it past the limit
+    draft = await _node(store, dag.id, "draft")
+    await store.update_node(draft.id, status="pending")  # deferred once: back to pending
+
+    await orch.tick()  # 'draft' is due again but every slot is taken
+
+    assert (await _node(store, dag.id, "draft")).status == "pending"
+    assert orch.held_reason(dag.id) == (
+        f"waiting for a free slot ({MAX_ACTIVE_DAGS}/{MAX_ACTIVE_DAGS} DAGs working)"
+    )

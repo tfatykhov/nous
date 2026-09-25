@@ -59,8 +59,14 @@ def parked_clause():
     awaiting_check, and no pending non-fix node whose predecessors (along
     PREDECESSOR_EDGE_TYPES) are all completed or skipped — such a node is a
     sibling about to launch, or one a frame cap or a full pool deferred
-    (_defer_node returns it to pending), and it is work. The ONE definition:
-    create() and count_active() both use it.
+    (_defer_node returns it to pending), and it is work. The ONE definition
+    of parked: create() and count_active() both use it.
+
+    It deliberately differs from the dispatch gate's "working"
+    (orchestrator._is_working: ready/running only). Admission asks whether a
+    DAG waits on nothing but a person, so a DAG polling a check is not parked;
+    the gate asks whether a DAG holds a subtask-queue slot, which a DAG
+    polling a check does not.
     """
     waiting = aliased(DAGNode)
     busy = aliased(DAGNode)

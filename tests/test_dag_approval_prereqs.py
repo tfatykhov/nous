@@ -276,3 +276,65 @@ async def test_a_cancel_during_subtask_creation_is_not_overwritten(store, subtas
 
     assert (await _node(store, dag.id, "draft")).status == "cancelled"
     subtask_mgr.cancel.assert_awaited_once_with(created.id)
+
+
+def _raise_on_running_write(store, *, after_commit: bool = False):
+    """Make the launch's `running` write raise (a transient DB error), before
+    or after it lands; every other transition goes through untouched."""
+    real = store.transition_node
+
+    async def flaky(node_id, **kwargs):
+        if kwargs.get("status") == "running":
+            if after_commit:
+                await real(node_id, **kwargs)
+            raise RuntimeError("connection reset")
+        return await real(node_id, **kwargs)
+
+    store.transition_node = flaky
+
+
+async def test_a_raising_launch_write_cancels_the_subtask_it_created(store, subtask_mgr):
+    """The node reads failed, so the work it launched must not run on."""
+    orch = _orch(store, subtask_mgr)
+    dag = await store.create(_two_node("dependency"))
+    _raise_on_running_write(store)
+
+    await orch.start_dag(dag.id)
+
+    assert (await _node(store, dag.id, "draft")).status == "failed"
+    subtask_mgr.cancel.assert_awaited_once_with(subtask_mgr.create.return_value.id)
+
+
+async def test_a_launch_write_that_landed_before_raising_keeps_its_subtask(store, subtask_mgr):
+    orch = _orch(store, subtask_mgr)
+    dag = await store.create(_two_node("dependency"))
+    _raise_on_running_write(store, after_commit=True)
+
+    await orch.start_dag(dag.id)
+
+    draft = await _node(store, dag.id, "draft")
+    assert draft.status == "running"
+    assert draft.subtask_id == subtask_mgr.create.return_value.id
+    subtask_mgr.cancel.assert_not_awaited()
+
+
+async def test_a_raising_launch_write_disables_the_check_it_created(store, subtask_mgr):
+    """A leaked check is urgent and exempt from quiet hours; record its name so
+    the reconciliation sweep can retry the disable."""
+    orch = _orch(store, subtask_mgr)
+    dag = await store.create(
+        DAGCreateRequest(
+            name="p3-check",
+            nodes=[DAGNodeSpec(name="watch", type=DAGNodeType.check, instructions="watch it")],
+        )
+    )
+    _raise_on_running_write(store)
+
+    await orch.start_dag(dag.id)
+
+    node = await _node(store, dag.id, "watch")
+    assert node.status == "failed"
+    assert node.check_name == f"dag-{dag.id.hex[:8]}-watch"
+    orch._dynamic_loader.manage_check.assert_awaited_once_with(
+        action="disable", name=node.check_name
+    )

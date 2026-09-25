@@ -123,3 +123,14 @@ def test_history_entry_and_retry_refusal():
     }
     assert "dag_monitor" in ap.declined_retry_refusal("approve")
     assert ap.card_link("card-1", "https://n.example/") == "https://n.example/companion#/s/card-1"
+
+
+def test_card_shown_chars_matches_what_the_summary_shows():
+    results = [("draft", "d" * 5000), ("notes", "short")]
+    shown = ap.card_shown_chars("Send it?", results)
+    summary = ap.build_card_summary("Send it?", results)
+    assert shown[1] == len("short")
+    assert 0 < shown[0] < 5000
+    assert "d" * shown[0] + "\n[truncated, 5000 chars]" in summary
+    assert "d" * (shown[0] + 1) not in summary
+    assert ap.card_shown_chars("q", []) == []

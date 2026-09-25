@@ -64,6 +64,23 @@ def label_of(spec: dict[str, Any] | None, option_id: str | None) -> str:
     return option["label"] if option else (option_id or "?")
 
 
+def card_shown_chars(
+    question: str, results: list[tuple[str, str]], max_chars: int = SUMMARY_MAX_CHARS
+) -> list[int]:
+    """How many chars of each result the card shows — the ONE truncation rule,
+    shared by the card and by the acting node's label (§3.5), so a node is
+    never told that text the person did not see was approved."""
+    if not results:
+        return []
+    per_result = max(max_chars - len(question.strip()), 0) // len(results)
+    shown: list[int] = []
+    for name, text in results:
+        room = max(per_result - len(f"From '{name}':\n"), 0)
+        marker = f"\n[truncated, {len(text)} chars]"
+        shown.append(len(text) if len(text) <= room else max(room - len(marker), 0))
+    return shown
+
+
 def build_card_summary(
     question: str, results: list[tuple[str, str]], max_chars: int = SUMMARY_MAX_CHARS
 ) -> str:
@@ -72,15 +89,13 @@ def build_card_summary(
     head = question.strip()
     if not results:
         return head
-    per_result = max(max_chars - len(head), 0) // len(results)
     blocks: list[str] = []
-    for name, text in results:
-        label = f"From '{name}':\n"
-        room = max(per_result - len(label), 0)
-        if len(text) > room:
-            marker = f"\n[truncated, {len(text)} chars]"
-            text = text[: max(room - len(marker), 0)] + marker
-        blocks.append(label + text)
+    for (name, text), n in zip(
+        results, card_shown_chars(question, results, max_chars), strict=True
+    ):
+        if n < len(text):
+            text = text[:n] + f"\n[truncated, {len(text)} chars]"
+        blocks.append(f"From '{name}':\n" + text)
     return head + "\n\n" + "\n\n".join(blocks)
 
 

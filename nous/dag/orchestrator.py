@@ -69,6 +69,7 @@ from nous.dag.approval import (
     as_utc,
     build_card_summary,
     button_label,
+    card_shown_chars,
     declined_retry_refusal,
     history_entry,
     label_of,
@@ -130,7 +131,11 @@ _WORKING_NODE_STATUSES = frozenset({"ready", "running"})
 
 def _is_working(dag: ExecutionDAG) -> bool:
     """A node ready or running. The counter rule (§3.11): a parked approval or
-    an instant gate/callback leaves a DAG NOT working, so it takes no slot."""
+    an instant gate/callback leaves a DAG NOT working, so it takes no slot.
+
+    Not the admission rule: store.parked_clause() also counts awaiting_check as
+    work, because it asks a different question (does the DAG wait only on a
+    person?) — this one asks whether the DAG holds a subtask-queue slot."""
     return any(n.status in _WORKING_NODE_STATUSES for n in dag.nodes)
 
 
@@ -222,10 +227,11 @@ class DAGOrchestrator:
         # companion is off and dag_create refuses approval nodes.
         self._surface_service = surface_service
         # Harness Phase 3 §3.11: DAGs the dispatch gate held on the LAST tick
-        # (rebuilt every tick, so a DAG cancelled while held drops out), and
-        # the working count it saw — read by dag_manage via held_reason().
-        self._held: set[UUID] = set()
-        self._held_this_tick: set[UUID] = set()
+        # (rebuilt every tick, so a DAG cancelled while held drops out), each
+        # mapped to whether a person has already approved one of its steps,
+        # and the working count it saw — read by dag_manage via held_reason().
+        self._held: dict[UUID, bool] = {}
+        self._held_this_tick: dict[UUID, bool] = {}
         self._working_count = 0
         # F087: set True by whoever installs the tick. Explicit rather than
         # inferred from last_tick_at, which would false-negative during the
@@ -362,13 +368,16 @@ class DAGOrchestrator:
         )
 
     def held_reason(self, dag_id: UUID) -> str | None:
-        """Why a DAG the person approved has not moved yet (§3.11)."""
+        """Why a held DAG has not moved yet (§3.11). "approved" only once a
+        person has approved one of its steps — the gate also holds a DAG with
+        an approval node in a gap BEFORE that question is answered."""
         if dag_id not in self._held:
             return None
-        return (
-            f"approved — waiting for a free slot "
+        slot = (
+            f"waiting for a free slot "
             f"({self._working_count}/{MAX_ACTIVE_DAGS} DAGs working)"
         )
+        return f"approved — {slot}" if self._held[dag_id] else slot
 
     async def tick(self) -> int:
         """Advance all active DAGs. Returns number of DAGs processed.
@@ -389,7 +398,7 @@ class DAGOrchestrator:
             gated = any(_has_approval(d) for d in dags)
             working = sum(1 for d in dags if _is_working(d)) if gated else 0
             self._working_count = working
-            self._held_this_tick = set()
+            self._held_this_tick = {}
             for dag in dags:
                 was_working = _is_working(dag)
                 # Only a DAG with an approval node is ever held: a DAG without
@@ -1049,7 +1058,9 @@ class DAGOrchestrator:
             held = [n for n in ready_nodes if not self._costs_nothing(n)]
             ready_nodes = [n for n in ready_nodes if self._costs_nothing(n)]
             if held:
-                self._held_this_tick.add(dag.id)
+                self._held_this_tick[dag.id] = any(
+                    n.node_type == "approval" and n.status == "completed" for n in dag.nodes
+                )
                 logger.info(
                     "DAG %s holds %d ready node(s): %d of %d working slots in use",
                     dag.id, len(held), self._working_count, MAX_ACTIVE_DAGS,
@@ -2983,14 +2994,31 @@ class DAGOrchestrator:
         built.validate()
         return built, notify_text(title, node.instructions or "", deadline, default_label)
 
-    def _context_results(self, node: DAGNode, dag: ExecutionDAG) -> list[tuple[str, str]]:
+    def _context_results(
+        self, node: DAGNode, dag: ExecutionDAG, _seen: set[str] | None = None
+    ) -> list[tuple[str, str]]:
+        """(name, result) of every context_flow input `node` sees — the card's
+        summary and, through an approval, the acting node's approved input.
+
+        Walks THROUGH approval predecessors: an approval's own result is only
+        the answer text, so a second approval chained after a first would
+        otherwise ask its question without the draft (§3.5). An approval's
+        inputs come before its answer; each node appears once (diamonds).
+        """
+        seen = _seen if _seen is not None else set()
         by_id = {str(n.id): n for n in dag.nodes}
         results: list[tuple[str, str]] = []
         for edge in dag.edges:
-            if edge.edge_type == "context_flow" and str(edge.to_node_id) == str(node.id):
-                pred = by_id.get(str(edge.from_node_id))
-                if pred is not None and pred.result:
-                    results.append((pred.name, pred.result))
+            if edge.edge_type != "context_flow" or str(edge.to_node_id) != str(node.id):
+                continue
+            pred = by_id.get(str(edge.from_node_id))
+            if pred is None or str(pred.id) in seen:
+                continue
+            seen.add(str(pred.id))
+            if pred.node_type == "approval":
+                results.extend(self._context_results(pred, dag, seen))
+            if pred.result:
+                results.append((pred.name, pred.result))
         return results
 
     async def _fail_parked(self, node: DAGNode, error: str) -> None:
@@ -3047,6 +3075,7 @@ class DAGOrchestrator:
         # Build augmented instructions with predecessor context
         augmented = await self._build_predecessor_context(node, dag)
 
+        subtask = None
         try:
             # F061 PR-3 Codex round 5: pass dag_node_id so the dashboard's
             # dag_correlation card (which filters WHERE dag_node_id IS NOT NULL)
@@ -3083,10 +3112,7 @@ class DAGOrchestrator:
                     "Node %s in DAG %s changed state while its subtask was being "
                     "created — cancelling subtask %s", node.name, dag.id, subtask.id,
                 )
-                try:
-                    await self._subtask_mgr.cancel(subtask.id)
-                except Exception:
-                    logger.exception("Could not cancel orphaned subtask %s", subtask.id)
+                await self._abandon_subtask(subtask.id)
                 return
             node.status = "running"
             node.last_activity_at = now
@@ -3109,6 +3135,13 @@ class DAGOrchestrator:
             logger.error(
                 "Failed to launch subtask for node %s: %s", node.name, e
             )
+            # The `running` write itself raised after create(): unless it landed
+            # anyway, the node reads failed (or cancelled) while its subtask
+            # runs on — and may send what nobody is tracking.
+            if subtask is not None and not await self._launch_landed(
+                node, subtask_id=subtask.id
+            ):
+                await self._abandon_subtask(subtask.id)
 
     async def _launch_check_node(self, node: DAGNode, dag: ExecutionDAG) -> None:
         """Launch a dynamic check for this node."""
@@ -3121,6 +3154,7 @@ class DAGOrchestrator:
         augmented = await self._build_predecessor_context(node, dag)
         check_name = f"dag-{dag.id.hex[:8]}-{node.name}"
 
+        created = False
         try:
             await self._dynamic_loader.create_check(
                 name=check_name,
@@ -3134,6 +3168,7 @@ class DAGOrchestrator:
                 # heartbeat worker actually runs when the node is created at night.
                 urgent=True,
             )
+            created = True
             launched = await self._store.transition_node(
                 node.id,
                 from_statuses=_DISPATCHABLE,
@@ -3143,16 +3178,8 @@ class DAGOrchestrator:
                 started_at=datetime.now(UTC),
             )
             if not launched:
-                # Harness Phase 3 §3.3: same race as the subtask path. Record the
-                # check on the node so the reconciliation sweep can retry the
-                # disable if this one fails.
-                await self._store.update_node(node.id, check_name=check_name)
-                try:
-                    await self._dynamic_loader.manage_check(action="disable", name=check_name)
-                except Exception:
-                    logger.warning(
-                        "Could not disable orphaned check %s — the sweep retries", check_name
-                    )
+                # Harness Phase 3 §3.3: same race as the subtask path.
+                await self._abandon_check(node.id, check_name)
                 return
             node.status = "running"
             self._defer_counts.pop(node.id, None)  # launched — clear backstop
@@ -3169,6 +3196,45 @@ class DAGOrchestrator:
             await self._finish_launch(node, status="failed", error=str(e))
             logger.error(
                 "Failed to launch check for node %s: %s", node.name, e
+            )
+            if created and not await self._launch_landed(node, check_name=check_name):
+                await self._abandon_check(node.id, check_name)
+
+    async def _launch_landed(self, node: DAGNode, **primitive: object) -> bool:
+        """After a launch's `running` write RAISED: did it commit anyway? Only
+        then does the node own the primitive it just created. An unreadable
+        row counts as not landed — stopping the work is the safe side."""
+        try:
+            row = await self._store.get_node_with_dag_status(node.id)
+        except Exception:
+            return False
+        if row is None:
+            return False
+        fresh, _ = row
+        return fresh.status == "running" and all(
+            getattr(fresh, key) == value for key, value in primitive.items()
+        )
+
+    async def _abandon_subtask(self, subtask_id: UUID) -> None:
+        """Cancel a subtask its node does not own (§3.3)."""
+        try:
+            await self._subtask_mgr.cancel(subtask_id)
+        except Exception:
+            logger.exception("Could not cancel orphaned subtask %s", subtask_id)
+
+    async def _abandon_check(self, node_id: UUID, check_name: str) -> None:
+        """Disable a check its node does not own (§3.3). Record it on the node
+        first, so the reconciliation sweep can retry a disable that fails —
+        a leaked check is urgent and exempt from quiet hours."""
+        try:
+            await self._store.update_node(node_id, check_name=check_name)
+        except Exception:
+            logger.warning("Could not record orphaned check %s on its node", check_name)
+        try:
+            await self._dynamic_loader.manage_check(action="disable", name=check_name)
+        except Exception:
+            logger.warning(
+                "Could not disable orphaned check %s — the sweep retries", check_name
             )
 
     async def _build_predecessor_context(
@@ -3195,11 +3261,19 @@ class DAGOrchestrator:
                 # Harness Phase 3 §3.5: an approval's own result is only the
                 # answer text. Pass its context_flow inputs (the draft the
                 # person saw) through, or the acting node writes its own text.
-                for inner_name, inner_result in self._context_results(pred, dag):
-                    parts.append(
-                        f"[Approved input from '{inner_name}' (approved at '{pred.name}')]: "
-                        f"{inner_result}"
-                    )
+                # Only what the card showed is "approved": a draft cut on the
+                # card says how much of it the person saw.
+                inputs = self._context_results(pred, dag)
+                shown = card_shown_chars(pred.instructions or "", inputs)
+                for (inner_name, inner_result), n in zip(inputs, shown, strict=True):
+                    if n < len(inner_result):
+                        label = (
+                            f"[Input from '{inner_name}' — the card at '{pred.name}' "
+                            f"showed only the first {n} of {len(inner_result)} chars]"
+                        )
+                    else:
+                        label = f"[Approved input from '{inner_name}' (approved at '{pred.name}')]"
+                    parts.append(f"{label}: {inner_result}")
             if pred.result:
                 parts.append(f"[Result from '{pred.name}']: {pred.result}")
 
