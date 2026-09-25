@@ -1,4 +1,4 @@
-# Harness Autonomy Phase 3 — Park-and-Resume Implementation Plan (v1.2)
+# Harness Autonomy Phase 3 — Park-and-Resume Implementation Plan (v1.3)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -560,7 +560,15 @@ Replace the four `update_node(node.id, status="ready")` + `node.status = "ready"
             node.status = "pending"
 ```
 
-(The failure write after `_MAX_DEFERRALS` stays as it is.)
+and its failure write after `_MAX_DEFERRALS` too (this plan rewrites the function, so it follows the global rule):
+
+```python
+            error = f"{reason} — still saturated after {count} deferrals"
+            if await self._store.transition_node(
+                node.id, from_statuses={"ready", "pending"}, status="failed", error=error
+            ):
+                node.status = "failed"
+```
 
 `retry_node`: annotate `node_updates: list[tuple[UUID, dict, frozenset[str]]]`; the retried node's entry gets `frozenset({"failed"})` as its third element, each unblock entry `frozenset({"blocked", "cancelled"})`. Replace the final `await self._store.apply_retry(...)` with:
 
@@ -1436,28 +1444,43 @@ def parked_clause():
     busy = aliased(DAGNode)
     pending = aliased(DAGNode)
     pred = aliased(DAGNode)
-    has_waiting = exists().where(
-        waiting.dag_id == ExecutionDAG.id, waiting.status == "awaiting_input"
+    # Correlation is explicit rather than left to auto-correlation: each outer
+    # EXISTS belongs to the enclosing SELECT over ExecutionDAG, and the inner
+    # one to the `pending` row of has_dispatchable.
+    has_waiting = (
+        exists()
+        .where(waiting.dag_id == ExecutionDAG.id, waiting.status == "awaiting_input")
+        .correlate(ExecutionDAG)
     )
-    has_busy = exists().where(
-        busy.dag_id == ExecutionDAG.id, busy.status.in_(_WORK_NODE_STATUSES)
+    has_busy = (
+        exists()
+        .where(busy.dag_id == ExecutionDAG.id, busy.status.in_(_WORK_NODE_STATUSES))
+        .correlate(ExecutionDAG)
     )
-    unresolved_pred = exists().where(
-        DAGEdge.to_node_id == pending.id,
-        DAGEdge.edge_type.in_(sorted(PREDECESSOR_EDGE_TYPES)),
-        pred.id == DAGEdge.from_node_id,
-        pred.status.not_in(_RESOLVED_NODE_STATUSES),
+    unresolved_pred = (
+        exists()
+        .where(
+            DAGEdge.to_node_id == pending.id,
+            DAGEdge.edge_type.in_(sorted(PREDECESSOR_EDGE_TYPES)),
+            pred.id == DAGEdge.from_node_id,
+            pred.status.not_in(_RESOLVED_NODE_STATUSES),
+        )
+        .correlate(pending)
     )
-    has_dispatchable = exists().where(
-        pending.dag_id == ExecutionDAG.id,
-        pending.status == "pending",
-        pending.node_type != "fix",
-        ~unresolved_pred,
+    has_dispatchable = (
+        exists()
+        .where(
+            pending.dag_id == ExecutionDAG.id,
+            pending.status == "pending",
+            pending.node_type != "fix",
+            ~unresolved_pred,
+        )
+        .correlate(ExecutionDAG)
     )
     return and_(has_waiting, ~has_busy, ~has_dispatchable)
 ```
 
-(If SQLAlchemy does not auto-correlate the nested `EXISTS`, add `.correlate(ExecutionDAG)` to the outer ones and `.correlate(pending)` to `unresolved_pred`; the tests above are the check.)
+(The tests above are the check that each subquery correlates as intended on both SQLite and Postgres.)
 
 In `create`, replace the active-count block:
 
@@ -2150,6 +2173,11 @@ New methods (after `resolve`):
         Harness Phase 3 §3.7: a card no longer live, or already deleted by
         retention (``resolve`` raises KeyError), counts as closed. Database
         work only — the tick holds the orchestrator lock while calling this.
+
+        The per-surface lock is NOT reentrant: a caller already holding this
+        card's lock (an action handler) must never call close() — return
+        ``resolve_surface=True`` instead. Otherwise the handler deadlocks, and
+        the tick then deadlocks on the same card under ``_lock``.
         """
         async with self.surface_lock(surface_id):
             try:
@@ -2524,7 +2552,7 @@ Expected: FAIL — `DAGOrchestrator.__init__() got an unexpected keyword argumen
 
 - [ ] **Step 3: Implement** — `nous/dag/orchestrator.py`:
 
-Imports:
+Imports (the typing line becomes `from typing import TYPE_CHECKING, Any, Literal` — `Any` is not imported today and ruff would flag F821):
 
 ```python
 from datetime import timedelta  # add to the existing datetime import
@@ -3316,6 +3344,8 @@ Expected: FAIL — the card stays live after `cancel_dag`; `_sweep_leaked_approv
 
 (Note in the commit message: `_cancel_one` also tears down an `awaiting_check` node's heartbeat check, which the old blind write left for the reconciliation sweep.)
 
+Orchestrator imports: add `DEDUP_PREFIX, node_id_from_dedup_key` to the `nous.dag.approval` import (`TERMINAL_DAG_STATUSES` came in Task 2).
+
 New store method (`nous/dag/store.py`), the sweep's node-driven query:
 
 ```python
@@ -3587,6 +3617,9 @@ Methods:
                     logger.exception("Error advancing DAG %s", dag.id)
                 # Counter rule: count a DAG only if it now has real work. A
                 # DAG that finished this tick frees its slot on the next one.
+                # "Working" is re-counted every tick, so a DAG between waves
+                # (nothing ready/running at tick start) can be held too, not
+                # only a resumed one — oldest first, that is benign.
                 if gated and not was_working and _is_working(dag):
                     working += 1
                     self._working_count = working
@@ -4006,7 +4039,7 @@ Expected: FAIL — the summary reads `Failed nodes: approve`; the template reads
 
 - [ ] **Step 3: Implement**
 
-`nous/dag/orchestrator.py` — import `BLOCKED_BY_APPROVAL, stopped_at_approval, stopped_summary`. In `_propagate_failures`, before the blocked loop: `blocked_error = BLOCKED_BY_APPROVAL if stopped_at_approval(dag.nodes) else "Predecessor failed"`, and use `error=blocked_error` in the transition. `_check_dag_completion`, the failed branch:
+`nous/dag/orchestrator.py` — import `BLOCKED_BY_APPROVAL, stopped_at_approval, stopped_summary`. In `_propagate_failures`, before the blocked loop: `blocked_error = BLOCKED_BY_APPROVAL if stopped_at_approval(dag.nodes) else "Predecessor failed"`, and use `error=blocked_error` in the transition. (Decided once per DAG, deliberately: in a DAG with both a stop answer and a crashed node, a node blocked only by the approval reads "Predecessor failed" — accurate for the DAG, which is failed, and the completion summary is unaffected. Per-node ancestry is not worth the code in v1.) `_check_dag_completion`, the failed branch:
 
 ```python
         elif any(n.status == "failed" for n in dag.nodes):
@@ -4369,10 +4402,15 @@ def test_main_builds_the_surface_service_before_the_orchestrator():
     from pathlib import Path
 
     source = (Path(__file__).resolve().parents[1] / "nous" / "main.py").read_text(encoding="utf-8")
+    orchestrator_at = source.index("dag_orchestrator = DAGOrchestrator(")
     assert source.count("SurfaceService(database, settings, heart=heart)") == 1
-    assert source.index("SurfaceService(database, settings, heart=heart)") < source.index(
-        "dag_orchestrator = DAGOrchestrator("
-    )
+    assert source.index("SurfaceService(database, settings, heart=heart)") < orchestrator_at
+    # The A2UI block used to start with its own `surface_service = None`; left
+    # in place it would wipe the service built above, and every companion
+    # action — every approval tap — would fail.
+    assert source.count("surface_service = None") == 1
+    assert source.index("surface_service = None") < orchestrator_at
+    assert "surface_service = " not in source[orchestrator_at:]
     assert "surface_service=surface_service" in source
     assert "register_dag_tools(dispatcher, dag_store, dag_orchestrator, settings=settings)" in source
 ```
@@ -4397,7 +4435,7 @@ Expected: FAIL — the service is constructed after the orchestrator.
         surface_service = SurfaceService(database, settings, heart=heart)
 ```
 
-In the DAG block: `DAGOrchestrator(..., surface_service=surface_service)` and `register_dag_tools(dispatcher, dag_store, dag_orchestrator, settings=settings)`. In the A2UI block: delete `from nous.a2ui.service import SurfaceService` and `surface_service = SurfaceService(database, settings, heart=heart)`; nothing else changes.
+In the DAG block: `DAGOrchestrator(..., surface_service=surface_service)` and `register_dag_tools(dispatcher, dag_store, dag_orchestrator, settings=settings)`. In the A2UI block delete THREE lines: its leading `surface_service = None` (`main.py:1066` — left in place it resets the service built above to `None`, so `ActionRouter`, `register_a2ui_tools` and the expiry sweep all get `None` and every approval tap fails), `from nous.a2ui.service import SurfaceService`, and `surface_service = SurfaceService(database, settings, heart=heart)`. Nothing else changes; the later uses (`:1113`, `:1122`, `:1143`, `:1148`, the components dict at `:1187`) read the one service.
 
 `CLAUDE.md`, after the `NOUS_DAG_CALLBACK_EXECUTION_ENABLED` row, add:
 
