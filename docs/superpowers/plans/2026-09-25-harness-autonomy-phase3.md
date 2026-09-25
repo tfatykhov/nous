@@ -1,4 +1,4 @@
-# Harness Autonomy Phase 3 — Park-and-Resume Implementation Plan (v1)
+# Harness Autonomy Phase 3 — Park-and-Resume Implementation Plan (v1.2)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12+, SQLAlchemy 2 async (Core `UPDATE … WHERE status IN …`), PostgreSQL 17 (CI) / SQLite (local tests), pydantic v2, A2UI `SurfaceService` + `ActionRouter`, pytest (`asyncio_mode = "auto"`).
 
-**Spec:** `docs/superpowers/specs/2026-09-25-harness-phase3-park-and-resume-design.md` (v2.3 + dispatch-gate scoping, `756eed7`). Section references below (§3.4 …) are to the spec. Anchors from `main` `1daa004`; branch `feat/harness-phase3-park-and-resume`.
+**Spec:** `docs/superpowers/specs/2026-09-25-harness-phase3-park-and-resume-design.md` (v2.4, `ff841a9`). Section references below (§3.4 …) are to the spec. Anchors from `main` `1daa004`; branch `feat/harness-phase3-park-and-resume`.
 
 **Not yet reviewed by anyone:** the dispatch-time admission gate (spec §3.11, Task 11) was added in v2.2 after the database reviewer's last pass. Plan reviewers: look at it for starvation and for its interaction with F064.2 caps and `_recover_stale_ready_nodes`.
 
@@ -216,7 +216,7 @@ git commit -q -F <msgfile>   # "fix(dag): one predecessor-edge set for readiness
 
 **Files:**
 - Modify: `nous/dag/store.py` (constants; new `transition_node`; `apply_retry`)
-- Modify: `nous/dag/orchestrator.py` (module constants; `_mark_ready_and_launch`; `_cancel_one`; `cancel_dag`; `_propagate_failures`; `retry_node`; `_dispatch_ready_nodes`; `_defer_node`)
+- Modify: `nous/dag/orchestrator.py` (module constants; `_mark_ready_and_launch`; `_cancel_one`; `cancel_dag`; `_propagate_failures`; `retry_node`; `_dispatch_ready_nodes` incl. the F064.2 demotion; `_defer_node`; the `running` writes in `_launch_subtask_node` and `_launch_check_node`)
 - Test: `tests/test_dag_approval_prereqs.py`; update every caller of `apply_retry` found by `grep -rn "apply_retry" nous tests`
 
 **Interfaces:**
@@ -347,6 +347,27 @@ async def test_a_deferral_does_not_resurrect_a_cancelled_node(store, subtask_mgr
     await orch._defer_node(draft, stale, "pool saturated")
 
     assert (await _node(store, dag.id, "draft")).status == "cancelled"
+
+
+async def test_a_cancel_during_subtask_creation_is_not_overwritten(store, subtask_mgr):
+    """The launch's own `running` write came after the await on create(): a
+    cancel_dag in that window saw no subtask_id to cancel, and the blind
+    write resurrected the node — the subtask then ran in a cancelled DAG."""
+    orch = _orch(store, subtask_mgr)
+    dag = await store.create(_two_node("dependency"))
+    draft = await _node(store, dag.id, "draft")
+    created = SimpleNamespace(id=uuid.uuid4(), status="pending")
+
+    async def cancel_lands_during_create(**_):
+        await store.update_node(draft.id, status="cancelled", error="cancelled")
+        return created
+
+    subtask_mgr.create.side_effect = cancel_lands_during_create
+
+    await orch.start_dag(dag.id)
+
+    assert (await _node(store, dag.id, "draft")).status == "cancelled"
+    subtask_mgr.cancel.assert_awaited_once_with(created.id)
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -557,6 +578,65 @@ Replace the four `update_node(node.id, status="ready")` + `node.status = "ready"
 
 Update every other `apply_retry` caller from `grep -rn "apply_retry" nous tests` to pass 3-tuples.
 
+The launch's own `running` writes (spec §3.3). In `_launch_subtask_node`, replace the `await self._store.update_node(node.id, status="running", subtask_id=subtask.id, started_at=now, last_activity_at=now)` call (keep its F064.1 comment) with:
+
+```python
+            launched = await self._store.transition_node(
+                node.id,
+                from_statuses=_DISPATCHABLE,
+                dag_statuses=LIVE_DAG_STATUSES,
+                status="running",
+                subtask_id=subtask.id,
+                started_at=now,
+                last_activity_at=now,
+            )
+            if not launched:
+                # Harness Phase 3 §3.3: a cancel_dag landed during create() —
+                # its snapshot had no subtask_id to cancel, so cancel it here or
+                # it runs inside a cancelled DAG (and may send what the person
+                # just cancelled).
+                logger.warning(
+                    "Node %s in DAG %s changed state while its subtask was being "
+                    "created — cancelling subtask %s", node.name, dag.id, subtask.id,
+                )
+                try:
+                    await self._subtask_mgr.cancel(subtask.id)
+                except Exception:
+                    logger.exception("Could not cancel orphaned subtask %s", subtask.id)
+                return
+```
+
+In `_launch_check_node`, replace the `update_node(node.id, status="running", check_name=check_name, started_at=…)` call with:
+
+```python
+            launched = await self._store.transition_node(
+                node.id,
+                from_statuses=_DISPATCHABLE,
+                dag_statuses=LIVE_DAG_STATUSES,
+                status="running",
+                check_name=check_name,
+                started_at=datetime.now(UTC),
+            )
+            if not launched:
+                # Same race as the subtask path. Record the check on the node so
+                # the reconciliation sweep can retry the disable if this one fails.
+                await self._store.update_node(node.id, check_name=check_name)
+                try:
+                    await self._dynamic_loader.manage_check(action="disable", name=check_name)
+                except Exception:
+                    logger.warning("Could not disable orphaned check %s — the sweep retries", check_name)
+                return
+```
+
+The F064.2 cap demotion in `_dispatch_ready_nodes` (`if node.status == "ready": await self._store.update_node(node.id, status="pending") …`) becomes:
+
+```python
+                if node.status == "ready" and await self._store.transition_node(
+                    node.id, from_statuses={"ready"}, status="pending"
+                ):
+                    node.status = "pending"
+```
+
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `UV_PROJECT_ENVIRONMENT=E:/Projects/nous/.venv uv run --frozen pytest tests/test_dag_approval_prereqs.py tests/test_dag_orchestrator.py tests/test_dag_durability.py tests/test_dag_concurrency_caps.py tests/test_dag_callback_execution.py tests/test_dag_store.py -q`
@@ -601,9 +681,9 @@ def test_split_full_migration_076():
 
     path = Path(__file__).resolve().parents[1] / "sql" / "migrations" / "076_dag_approval_nodes.sql"
     stmts = _split_sql_statements(path.read_text(encoding="utf-8"))
-    assert len(stmts) == 7, stmts
-    assert "ALTER TABLE nous_system.dag_nodes" in stmts[-1]
-    assert "ADD COLUMN IF NOT EXISTS answer_history JSONB" in stmts[-1]
+    assert len(stmts) == 8, stmts
+    assert "ADD COLUMN IF NOT EXISTS answer_history JSONB" in stmts[-2]
+    assert "idx_dag_nodes_awaiting_input" in stmts[-1]
     # Comments must stay apostrophe-free: an unbalanced quote in one would
     # open a string for the splitter and swallow the statements after it.
     comments = [
@@ -753,6 +833,12 @@ ALTER TABLE nous_system.dag_nodes
         CONSTRAINT chk_dag_node_answer_source
         CHECK (answer_source IN ('companion', 'deadline')),
     ADD COLUMN IF NOT EXISTS answer_history JSONB;
+
+-- The sweep reads waiting nodes of terminal DAGs through this index,
+-- never the whole DAG history.
+CREATE INDEX IF NOT EXISTS idx_dag_nodes_awaiting_input
+    ON nous_system.dag_nodes (dag_id)
+    WHERE status = 'awaiting_input';
 ```
 
 - [ ] **Step 4: Mirror it in the ORM and the enums**
@@ -764,7 +850,16 @@ ALTER TABLE nous_system.dag_nodes
             "answer_source IN ('companion', 'deadline')",
             name="chk_dag_node_answer_source",
         ),
+        # Harness Phase 3 (076): the sweep's node-driven query (spec §3.7).
+        Index(
+            "idx_dag_nodes_awaiting_input",
+            "dag_id",
+            postgresql_where=text("status = 'awaiting_input'"),
+            sqlite_where=text("status = 'awaiting_input'"),
+        ),
 ```
+
+(Place it before the trailing `{"schema": "nous_system"}` dict; `Index` and `text` are already imported for 075's index — check the import line.)
 
 and, after `expected_modes`:
 
@@ -1839,7 +1934,7 @@ git commit -q -F <msgfile>   # "feat(dag): approval texts, dedup key and stopped
 
 **Interfaces:**
 - Consumes: `nous.dag.approval.DEDUP_PREFIX` (Task 6).
-- Produces: `approval_gate` params `recommend_first: bool = True`, `defer_label: str | None`, options may carry `outcome` (kept in the data model); `push_built(..., notify_text: str | None = None, reserved_key_ok: bool = False)`; `async close(surface_id: str, status: str = "expired") -> None`; `async close_by_dedup_key(dedup_key: str, status: str = "expired") -> list[str]`; `async live_ids(surface_ids: Iterable[str]) -> set[str]`; `async live_cards_by_prefix(prefix: str, limit: int) -> list[tuple[str, str]]`.
+- Produces: `approval_gate` params `recommend_first: bool = True`, `defer_label: str | None`, options may carry `outcome` (kept in the data model); `push_built(..., notify_text: str | None = None, reserved_key_ok: bool = False)`; `async close(surface_id: str, status: str = "expired") -> None`; `async close_by_dedup_key(dedup_key: str, status: str = "expired") -> list[str]`; `async live_ids(surface_ids: Iterable[str]) -> set[str]`; `async live_cards_by_prefix(prefix: str) -> list[tuple[str, str]]` (no limit — spec §3.7); `class ReservedDedupKeyError(ValueError)`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1896,9 +1991,34 @@ _DAG_CARD = {
 
 async def test_push_built_refuses_the_reserved_dag_approval_prefix(db, a2ui_settings) -> None:
     """Runs on every backend: the refusal fires before any database work."""
+    from nous.a2ui.service import ReservedDedupKeyError
+
     svc = SurfaceService(db, a2ui_settings)
-    with pytest.raises(ValueError, match="reserved"):
+    with pytest.raises(ReservedDedupKeyError, match="reserved"):
         await svc.push_built(approval_gate(_DAG_CARD), dedup_key=f"dag-approval:{uuid.uuid4()}")
+    assert not issubclass(ReservedDedupKeyError, PermissionError)  # never read as a censor refusal
+
+
+def test_every_push_built_retry_forwards_the_new_flags() -> None:
+    """push_built re-enters itself on the dedup race and on IntegrityError.
+    A hop that drops reserved_key_ok refuses the orchestrator's own card
+    (the F092.3 refuse_fallback_overwrite lesson); one that drops
+    notify_text loses the ping body."""
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path(service_module.__file__).read_text(encoding="utf-8"))
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "push_built"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+    ]
+    assert len(calls) == 2, "expected the dedup-race and IntegrityError retries"
+    for call in calls:
+        assert {"reserved_key_ok", "notify_text"} <= {k.arg for k in call.keywords}
 
 
 @pytest.mark.postgres_only
@@ -1908,7 +2028,7 @@ async def test_close_helpers_and_liveness_queries(service, db, a2ui_agent_id: st
     other = await service.push_built(approval_gate(_DAG_CARD))
 
     assert await service.live_ids([sid, other, "missing"]) == {sid, other}
-    assert await service.live_cards_by_prefix("dag-approval:", limit=10) == [(sid, key)]
+    assert await service.live_cards_by_prefix("dag-approval:") == [(sid, key)]
 
     assert await service.close_by_dedup_key(key) == [sid]
     await service.close(sid)          # already closed: a no-op
@@ -1993,6 +2113,18 @@ and `Text("defer_label", params.get("defer_label") or "Ask me later")`.
 
 - [ ] **Step 4: Service** — `nous/a2ui/service.py`: `from nous.dag.approval import DEDUP_PREFIX as _DAG_APPROVAL_PREFIX` (and `Iterable` from `collections.abc`).
 
+Module level:
+
+```python
+class ReservedDedupKeyError(ValueError):
+    """A push used a dedup-key prefix reserved for another producer.
+
+    A ValueError, never a PermissionError: the DAG orchestrator reads a
+    PermissionError from push_built as a censor refusal and fails the node
+    for good (Harness Phase 3 §3.14).
+    """
+```
+
 `push_built` gains `notify_text: str | None = None` and `reserved_key_ok: bool = False` (keyword-only, before `_dedup_retry`). First statement of the body:
 
 ```python
@@ -2000,12 +2132,12 @@ and `Text("defer_label", params.get("defer_label") or "Ask me later")`.
             # Harness Phase 3 §3.14: a push under this prefix would replace a
             # DAG approval card's text in place — same id, taps still answer
             # the node. Only the orchestrator may use it.
-            raise ValueError(
+            raise ReservedDedupKeyError(
                 f"dedup_key prefix {_DAG_APPROVAL_PREFIX!r} is reserved for DAG approval cards"
             )
 ```
 
-Thread `notify_text=notify_text, reserved_key_ok=reserved_key_ok` into the recursive `_dedup_retry=True` call. The notify line becomes `self._schedule_bg(self._notify_telegram(built.title, surface_id, text=notify_text))`.
+`push_built` re-enters itself at TWO sites, and both must forward the new flags (the F092.3 lesson recorded for `refuse_fallback_overwrite`): the `_DedupRaceRetry` retry inside `push_built` (`service.py:351-361`) and the `IntegrityError` retry inside `_push_transaction_inner` (`:577-593`). Add `notify_text=notify_text, reserved_key_ok=reserved_key_ok` to both calls; the two values travel `push_built` → `_push_transaction` (`:309`) → `_push_transaction_inner` (`:363`) exactly the way `refuse_fallback_overwrite` already does (add them to both signatures and both calls). The AST test above fails if either hop drops one. The notify line becomes `self._schedule_bg(self._notify_telegram(built.title, surface_id, text=notify_text))`.
 
 `_notify_telegram(self, title: str, surface_id: str, text: str | None = None)`: the message becomes `f"[companion] {text or title}\n{link}"`.
 
@@ -2055,8 +2187,13 @@ New methods (after `resolve`):
             )
             return set(rows.scalars().all())
 
-    async def live_cards_by_prefix(self, prefix: str, limit: int) -> list[tuple[str, str]]:
-        """Live cards whose dedup key starts with ``prefix``, oldest first."""
+    async def live_cards_by_prefix(self, prefix: str) -> list[tuple[str, str]]:
+        """Every live card whose dedup key starts with ``prefix``, oldest first.
+
+        No limit (Harness Phase 3 §3.7): a bounded page fills with healthy
+        cards and never reaches the leaked ones behind them. For the DAG
+        prefix the set is bounded by the parked cap times approvals per DAG.
+        """
         async with self._db.session() as session:
             rows = await session.execute(
                 select(A2uiSurface.surface_id, A2uiSurface.dedup_key)
@@ -2066,7 +2203,6 @@ New methods (after `resolve`):
                     A2uiSurface.dedup_key.like(f"{prefix}%"),
                 )
                 .order_by(A2uiSurface.created_at)
-                .limit(limit)
             )
             return [(sid, key) for sid, key in rows.all()]
 ```
@@ -2191,11 +2327,11 @@ class FakeSurfaceService:
     async def live_ids(self, surface_ids):
         return {s for s in surface_ids if self.cards.get(s, {}).get("status") == "live"}
 
-    async def live_cards_by_prefix(self, prefix, limit):
+    async def live_cards_by_prefix(self, prefix):
         return [
             (s, c["dedup_key"]) for s, c in self.cards.items()
             if c["status"] == "live" and (c["dedup_key"] or "").startswith(prefix)
-        ][:limit]
+        ]
 
     def live(self) -> dict[str, dict]:
         return {s: c for s, c in self.cards.items() if c["status"] == "live"}
@@ -2625,11 +2761,11 @@ git commit -q -F <msgfile>   # "feat(dag): launch an approval node — retire, p
 
 **Files:**
 - Modify: `nous/dag/store.py` (`get_node_with_dag_status`)
-- Modify: `nous/dag/orchestrator.py` (`answer_node`, `_poll_awaiting_input`, `_refresh_node`, `_advance_dag` step 1.6)
+- Modify: `nous/dag/orchestrator.py` (`answer_node`, `_poll_awaiting_input`, `_refresh_node`, `_adopt_live_card`, `_build_predecessor_context`, `_advance_dag` step 1.52)
 - Test: `tests/test_dag_approval.py`
 
 **Interfaces:**
-- Consumes: `answer_values`, `AnswerResult`, `label_of`, `DEADLINE_ACTOR` (Task 6); `_push_and_link`, `_close_card` (Task 8).
+- Consumes: `answer_values`, `AnswerResult`, `label_of`, `DEADLINE_ACTOR` (Task 6); `live_cards_by_prefix(prefix)` (Task 7); `_push_and_link`, `_close_card`, `_context_results` (Task 8).
 - Produces: `DAGStore.get_node_with_dag_status(node_id) -> tuple[DAGNode, str] | None`; `DAGOrchestrator.answer_node(node_id: UUID, option_id: str, *, source: Literal["companion","deadline"], actor: str | None, surface_id: str | None = None) -> AnswerResult`; `_poll_awaiting_input(dag) -> None`.
 
 - [ ] **Step 1: Write the failing tests** — append to `tests/test_dag_approval.py`:
@@ -2754,6 +2890,36 @@ async def test_a_transient_push_failure_heals_on_the_next_tick(store, subtask_mg
 
     node = await _node(store, dag.id, "approve")
     assert node.surface_id in surfaces.live() and node.error is None
+
+
+async def test_a_crash_between_push_and_link_adopts_the_card(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag, node = await _parked(store, orch)
+    card = node.surface_id
+    await store.update_node(node.id, surface_id=None)  # the link write never landed
+
+    await orch._advance_dag(await store.get_dag(dag.id))
+
+    assert (await _node(store, dag.id, "approve")).surface_id == card
+    assert len(surfaces.cards) == 1 and len(surfaces.pings) == 1  # adopted, not re-pushed
+
+
+async def test_the_acting_node_receives_the_approved_draft(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag = await store.create(_request(with_draft=True))
+    await orch.start_dag(dag.id)
+    draft = await _node(store, dag.id, "draft")
+    await store.update_node(draft.id, status="completed", result="Dear Bob, ...")
+    await orch._advance_dag(await store.get_dag(dag.id))  # the approval parks
+    node = await _node(store, dag.id, "approve")
+    await orch.answer_node(node.id, "send", source="companion", actor=None, surface_id=node.surface_id)
+    subtask_mgr.create.reset_mock()
+
+    await orch._advance_dag(await store.get_dag(dag.id))  # 'send' launches
+
+    task = subtask_mgr.create.call_args.kwargs["task"]
+    assert "[Approved input from 'draft' (approved at 'approve')]: Dear Bob, ..." in task
+    assert "Answered in the companion: 'Send it' (send)" in task
 
 
 async def test_no_repush_for_a_node_a_tap_already_answered(store, subtask_mgr, surfaces):
@@ -2919,7 +3085,49 @@ Methods:
                     continue
                 if node.surface_id is not None and node.surface_id in live:
                     continue
+                if node.surface_id is None and await self._adopt_live_card(node):
+                    continue
                 await self._push_and_link(node, dag)
+
+    async def _adopt_live_card(self, node: DAGNode) -> bool:
+        """§3.6: link a live card that carries the node's key but was never
+        linked (a crash between push and link) instead of replacing it — the
+        person may be tapping it, and a replacement rotates its nonce."""
+        try:
+            cards = await self._surface_service.live_cards_by_prefix(approval_dedup_key(node.id))
+        except Exception:
+            return False
+        if not cards:
+            return False
+        surface_id = cards[0][0]
+        if await self._store.transition_node(
+            node.id, from_statuses={"awaiting_input"}, card=surface_id,
+            surface_id=surface_id, error=None,
+        ):
+            node.surface_id = surface_id
+            node.error = None
+            return True
+        return False
+```
+
+`_build_predecessor_context` — the acting node receives what was approved (spec §3.5). In its loop over `context_preds`, before appending a predecessor's own result:
+
+```python
+        for pred_id in context_preds:
+            pred = node_by_id.get(pred_id)
+            if pred is None:
+                continue
+            if pred.node_type == "approval":
+                # Harness Phase 3 §3.5: an approval's own result is only the
+                # answer text. Pass its context_flow inputs (the draft the
+                # person saw) through, or the acting node writes its own text.
+                for inner_name, inner_result in self._context_results(pred, dag):
+                    parts.append(
+                        f"[Approved input from '{inner_name}' (approved at '{pred.name}')]: "
+                        f"{inner_result}"
+                    )
+            if pred.result:
+                parts.append(f"[Result from '{pred.name}']: {pred.result}")
 ```
 
 `_advance_dag`: after `await self._poll_awaiting_checks(dag)` add
@@ -2947,11 +3155,12 @@ git commit -q -F <msgfile>   # "feat(dag): the answer is the transition; deadlin
 
 **Files:**
 - Modify: `nous/dag/orchestrator.py` (`_cancel_one`, `_handle_budget_exceeded`, new `_sweep_leaked_approval_cards`, `tick`)
+- Modify: `nous/dag/store.py` (new `awaiting_input_nodes_in_terminal_dags`)
 - Test: `tests/test_dag_approval.py`
 
 **Interfaces:**
-- Consumes: `_cancel_one` (Task 2), `_close_card` (Task 8), `get_node_with_dag_status` (Task 9), `node_id_from_dedup_key`, `DEDUP_PREFIX` (Task 6), `TERMINAL_DAG_STATUSES` (Task 2).
-- Produces: `async _sweep_leaked_approval_cards() -> None`, called inside `tick()`'s `_lock` block.
+- Consumes: `_cancel_one` (Task 2), `_close_card` (Task 8), `get_node_with_dag_status` (Task 9), `node_id_from_dedup_key`, `DEDUP_PREFIX` (Task 6), `TERMINAL_DAG_STATUSES` (Task 2), `live_cards_by_prefix(prefix)` (Task 7), `idx_dag_nodes_awaiting_input` (Task 3).
+- Produces: `DAGStore.awaiting_input_nodes_in_terminal_dags(limit: int) -> list[DAGNode]`; `async _sweep_leaked_approval_cards() -> None`, called inside `tick()`'s `_lock` block.
 
 - [ ] **Step 1: Write the failing tests** — append to `tests/test_dag_approval.py`:
 
@@ -3063,6 +3272,19 @@ async def test_the_sweep_cancels_a_waiting_node_in_a_finished_dag(store, subtask
 
     assert (await _node(store, dag.id, "approve")).status == "cancelled"
     assert surfaces.live() == {}
+
+
+async def test_the_sweep_finds_a_stranded_node_that_has_no_card(store, subtask_mgr, surfaces):
+    """The probe's end state: awaiting_input in a cancelled DAG, no card.
+    The card-driven pass cannot see it; the node-driven query must."""
+    orch = _orch(store, subtask_mgr, surfaces)
+    surfaces.push_errors = [RuntimeError("flaky")]
+    dag, _ = await _parked(store, orch)  # parked, push failed: no card
+    await store.update_dag_status(dag.id, "cancelled")
+
+    await orch._sweep_leaked_approval_cards()
+
+    assert (await _node(store, dag.id, "approve")).status == "cancelled"
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -3094,25 +3316,70 @@ Expected: FAIL — the card stays live after `cancel_dag`; `_sweep_leaked_approv
 
 (Note in the commit message: `_cancel_one` also tears down an `awaiting_check` node's heartbeat check, which the old blind write left for the reconciliation sweep.)
 
-New sweep:
+New store method (`nous/dag/store.py`), the sweep's node-driven query:
+
+```python
+    async def awaiting_input_nodes_in_terminal_dags(self, limit: int) -> list[DAGNode]:
+        """Harness Phase 3 §3.7: awaiting_input nodes whose DAG has ended.
+
+        The card-driven sweep cannot see one that has no card. A probe put a
+        node there with conditional writes only: dag_statuses is a snapshot,
+        so a concurrent retry plus a failed push can park a node in a DAG that
+        turns terminal a moment later. Served by idx_dag_nodes_awaiting_input.
+        """
+        async with self._db.session() as session:
+            rows = await session.execute(
+                select(DAGNode)
+                .join(ExecutionDAG, ExecutionDAG.id == DAGNode.dag_id)
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .where(DAGNode.status == "awaiting_input")
+                .where(ExecutionDAG.status.in_(sorted(TERMINAL_DAG_STATUSES)))
+                .limit(limit)
+            )
+            return list(rows.scalars().all())
+```
+
+New sweep (orchestrator):
 
 ```python
     _APPROVAL_SWEEP_BATCH = 20
 
     async def _sweep_leaked_approval_cards(self) -> None:
-        """Harness Phase 3 §3.7: retire approval cards whose node moved on.
+        """Harness Phase 3 §3.7: retire approval cards whose node moved on,
+        and cancel waiting nodes stranded in a DAG that has ended.
 
         Modelled on _sweep_leaked_heartbeat_checks but run INSIDE `_lock`: it
         must never interleave with a launch between push and link. A card
         whose node is unlinked (surface_id NULL) is left alone — push and link
         own it, and it may be the card just pushed.
         """
+        now = datetime.now(UTC)
+        # Node-driven: a stranded node may have no card at all.
+        try:
+            stranded = await self._store.awaiting_input_nodes_in_terminal_dags(
+                limit=self._APPROVAL_SWEEP_BATCH
+            )
+        except Exception:
+            logger.exception("Error listing stranded approval nodes")
+            stranded = []
+        for node in stranded:
+            if await self._store.transition_node(
+                node.id,
+                from_statuses={"awaiting_input"},
+                dag_statuses=TERMINAL_DAG_STATUSES,
+                status="cancelled",
+                error="DAG ended while waiting",
+                completed_at=now,
+            ):
+                await self._close_card(None, node_id=node.id)
         if self._surface_service is None:
             return
+        # Card-driven: EVERY live DAG card — a bounded page would fill with
+        # healthy cards once the parked cap is reached and never reach the
+        # leaked ones. Keys map to nodes in Python (SQLite stores UUIDs
+        # without dashes, so an SQL text join would differ from Postgres).
         try:
-            cards = await self._surface_service.live_cards_by_prefix(
-                DEDUP_PREFIX, limit=self._APPROVAL_SWEEP_BATCH
-            )
+            cards = await self._surface_service.live_cards_by_prefix(DEDUP_PREFIX)
         except Exception:
             logger.exception("Error listing live approval cards")
             return
@@ -3132,7 +3399,7 @@ New sweep:
                     dag_statuses=TERMINAL_DAG_STATUSES,
                     status="cancelled",
                     error="DAG ended while waiting",
-                    completed_at=datetime.now(UTC),
+                    completed_at=now,
                 ):
                     await self._close_card(surface_id)
             elif node.surface_id is not None and node.surface_id != surface_id:
@@ -3149,19 +3416,19 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add nous/dag/orchestrator.py tests/test_dag_approval.py
+git add nous/dag/orchestrator.py nous/dag/store.py tests/test_dag_approval.py
 git commit -q -F <msgfile>   # "feat(dag): cancels and budget close approval cards; leaked-card sweep under _lock"
 ```
 
 ### Task 11: Dispatch-time admission for resumed DAGs
 
 **Files:**
-- Modify: `nous/dag/orchestrator.py` (`_is_working`, `tick`, `_advance_dag(..., may_start=True)`)
+- Modify: `nous/dag/orchestrator.py` (`_is_working`, `_costs_nothing`, `held_reason`, `tick`, `_advance_dag(..., may_start=True)`)
 - Test: `tests/test_dag_approval.py`
 
 **Interfaces:**
 - Consumes: `MAX_ACTIVE_DAGS` from `nous.dag.store`.
-- Produces: `_advance_dag(self, dag, *, may_start: bool = True)`. `grep -rn "_advance_dag(" nous tests` (on `1daa004`): `tick()` is the only production caller; tests call it positionally, which the default keeps working.
+- Produces: `_advance_dag(self, dag, *, may_start: bool = True)`; `held_reason(dag_id: UUID) -> str | None` (Task 15 prints it in `dag_manage status`). `grep -rn "_advance_dag(" nous tests` (on `1daa004`): `tick()` is the only production caller; tests call it positionally, which the default keeps working.
 
 - [ ] **Step 1: Write the failing tests** — append to `tests/test_dag_approval.py`:
 
@@ -3191,10 +3458,43 @@ async def test_a_resumed_dag_waits_for_a_working_slot(store, subtask_mgr, surfac
     subtask_mgr.create.assert_not_called()
     assert orch._defer_counts.get((await _node(store, resumed.id, "send")).id) is None
 
+    assert orch.held_reason(resumed.id) == (
+        f"approved — waiting for a free slot ({MAX_ACTIVE_DAGS}/{MAX_ACTIVE_DAGS} DAGs working)"
+    )
+
     await store.update_node(others[0].nodes[0].id, status="completed")
     await orch.tick()
 
     assert (await _node(store, resumed.id, "send")).status == "running"
+    assert orch.held_reason(resumed.id) is None
+
+
+async def test_a_held_dag_still_asks_its_next_question(store, subtask_mgr, surfaces):
+    """Parking an approval takes no subtask; holding it would only delay the question."""
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag = await store.create(
+        DAGCreateRequest(
+            name="two-step",
+            nodes=[
+                _approve(),
+                _approve(name="approve2", instructions="And the follow-up?"),
+                DAGNodeSpec(name="send", type=DAGNodeType.subtask, instructions="send"),
+            ],
+            edges=[
+                DAGEdgeSpec(from_node="approve", to_node="approve2", edge_type="context_flow"),
+                DAGEdgeSpec(from_node="approve2", to_node="send", edge_type="context_flow"),
+            ],
+        )
+    )
+    await orch.start_dag(dag.id)
+    for _ in range(MAX_ACTIVE_DAGS):
+        await _working_dag(store)
+    first = await _node(store, dag.id, "approve")
+    await orch.answer_node(first.id, "send", source="companion", actor=None, surface_id=first.surface_id)
+
+    await orch.tick()
+
+    assert (await _node(store, dag.id, "approve2")).status == "awaiting_input"
 
 
 async def test_the_gate_is_inert_without_approval_nodes(store, subtask_mgr, surfaces, monkeypatch):
@@ -3226,7 +3526,39 @@ _WORKING_NODE_STATUSES = frozenset({"ready", "running", "awaiting_check"})
 
 
 def _is_working(dag: ExecutionDAG) -> bool:
+    """A node ready, running or awaiting_check. The counter rule (§3.11): a
+    parked approval or an instant gate/callback leaves a DAG NOT working, so
+    it never takes a slot."""
     return any(n.status in _WORKING_NODE_STATUSES for n in dag.nodes)
+```
+
+Constructor additions:
+
+```python
+        # Harness Phase 3 §3.11: DAGs the dispatch gate held on the last tick,
+        # and the working count it saw — read by dag_manage via held_reason().
+        self._held: set[UUID] = set()
+        self._working_count = 0
+```
+
+Methods:
+
+```python
+    def _costs_nothing(self, node: DAGNode) -> bool:
+        """Never held by the gate: parking an approval takes no subtask, a gate
+        auto-passes, and a callback executes nothing while its flag is off."""
+        return node.node_type in ("approval", "gate") or (
+            node.node_type == "callback" and not self._settings.dag_callback_execution_enabled
+        )
+
+    def held_reason(self, dag_id: UUID) -> str | None:
+        """Why a DAG the person approved has not moved yet (§3.11)."""
+        if dag_id not in self._held:
+            return None
+        return (
+            f"approved — waiting for a free slot "
+            f"({self._working_count}/{MAX_ACTIVE_DAGS} DAGs working)"
+        )
 ```
 
 `tick()`, the locked block:
@@ -3245,6 +3577,7 @@ def _is_working(dag: ExecutionDAG) -> bool:
             # every DAG dispatches exactly as before.
             gated = any(n.node_type == "approval" for d in dags for n in d.nodes)
             working = sum(1 for d in dags if _is_working(d)) if gated else 0
+            self._working_count = working
             for dag in dags:
                 was_working = _is_working(dag)
                 may_start = not gated or was_working or working < MAX_ACTIVE_DAGS
@@ -3252,8 +3585,11 @@ def _is_working(dag: ExecutionDAG) -> bool:
                     await self._advance_dag(dag, may_start=may_start)
                 except Exception:
                     logger.exception("Error advancing DAG %s", dag.id)
+                # Counter rule: count a DAG only if it now has real work. A
+                # DAG that finished this tick frees its slot on the next one.
                 if gated and not was_working and _is_working(dag):
                     working += 1
+                    self._working_count = working
             await self._sweep_leaked_approval_cards()
 ```
 
@@ -3263,15 +3599,24 @@ def _is_working(dag: ExecutionDAG) -> bool:
         # 4. Find and launch ready nodes (F064.2 dispatch with optional per-
         # frame caps; falls back to legacy behavior when flag is off).
         # Harness Phase 3 §3.11: a DAG held by the dispatch gate keeps its
-        # ready nodes 'pending' this tick — no deferral is counted.
+        # costly ready nodes 'pending' this tick — no deferral is counted —
+        # and still dispatches the ones that cost nothing (an approval's next
+        # question, a gate, an inert callback).
         ready_nodes = self._find_ready_nodes(dag)
-        if may_start:
-            await self._dispatch_ready_nodes(dag, ready_nodes)
-        elif ready_nodes:
-            logger.info(
-                "DAG %s holds %d ready node(s): %d DAGs are already working",
-                dag.id, len(ready_nodes), MAX_ACTIVE_DAGS,
-            )
+        if not may_start:
+            held = [n for n in ready_nodes if not self._costs_nothing(n)]
+            ready_nodes = [n for n in ready_nodes if self._costs_nothing(n)]
+            if held:
+                self._held.add(dag.id)
+                logger.info(
+                    "DAG %s holds %d ready node(s): %d DAGs are already working",
+                    dag.id, len(held), MAX_ACTIVE_DAGS,
+                )
+            else:
+                self._held.discard(dag.id)
+        else:
+            self._held.discard(dag.id)
+        await self._dispatch_ready_nodes(dag, ready_nodes)
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
@@ -3772,7 +4117,7 @@ class _Cards:
     async def live_ids(self, surface_ids):
         return set(surface_ids)
 
-    async def live_cards_by_prefix(self, prefix, limit):
+    async def live_cards_by_prefix(self, prefix):
         return []
 
     async def push_built(self, built, **_):
@@ -3934,6 +4279,14 @@ Before `return {"content": …}` on success:
                         if node.status == "awaiting_input" and node.surface_id:
                             base = getattr(cfg, "a2ui_public_base_url", "")
                             line += f" | card: {card_link(node.surface_id, base)}"
+```
+
+and, right after the `Status: {dag.status}` header line is built, the dispatch gate's reason (spec §3.11 — a person who said "proceed" can see why nothing moved yet):
+
+```python
+                held = getattr(orchestrator, "held_reason", lambda _dag_id: None)(dag.id)
+                if held:
+                    lines.insert(2, f"Held: {held}")
 ```
 
 Schema: replace the literal type `enum` with `node_type_enum` and extend the description, and splice approval properties into the node item:
@@ -4252,5 +4605,6 @@ UV_PROJECT_ENVIRONMENT=E:/Projects/nous/.venv uv run --frozen pytest tests -q -p
 ## Self-review (writing-plans checklist, done)
 
 - **Spec coverage:** §3.1 → T4 (+ handler flag check T15); §3.2 → T3 (+ rollback in T16 docs); §3.3 → T2, T3; §3.4 → T7, T8 (+ public-URL note T15); §3.5 → T9, T13; §3.6 → T9; §3.7 → T7, T10; §3.8 → T1 (+ deploy note in the PR); §3.9 → T2, T10, T12; §3.10 → T12; §3.11 → T5, T11; §3.12 → T14, T15; §3.13 → T15, T16; §3.14 → T7 (prefix), T15 (tool text); §7 tests → spread across tasks, e2e T17.
-- **Types used across tasks:** `transition_node(node_id, *, from_statuses, dag_statuses=None, card=None, due_by=None, **values) -> bool`; `apply_retry(dag_id, list[tuple[UUID, dict, Collection[str]]], reactivate) -> bool`; `get_node_with_dag_status(node_id) -> tuple[DAGNode, str] | None`; `answer_node(node_id, option_id, *, source, actor, surface_id=None) -> AnswerResult`; `retry_node(dag_id, node_name, *, allow_declined=False)`; `push_built(..., notify_text=None, reserved_key_ok=False)`; `close(surface_id, status="expired")`; `close_by_dedup_key(key, status="expired") -> list[str]`; `live_ids(ids) -> set[str]`; `live_cards_by_prefix(prefix, limit) -> list[tuple[str, str]]`; `register_dag_tools(dispatcher, store, orchestrator, settings=None)`.
+- **Types used across tasks:** `transition_node(node_id, *, from_statuses, dag_statuses=None, card=None, due_by=None, **values) -> bool`; `apply_retry(dag_id, list[tuple[UUID, dict, Collection[str]]], reactivate) -> bool`; `get_node_with_dag_status(node_id) -> tuple[DAGNode, str] | None`; `awaiting_input_nodes_in_terminal_dags(limit) -> list[DAGNode]`; `answer_node(node_id, option_id, *, source, actor, surface_id=None) -> AnswerResult`; `retry_node(dag_id, node_name, *, allow_declined=False)`; `held_reason(dag_id) -> str | None`; `push_built(..., notify_text=None, reserved_key_ok=False)`; `ReservedDedupKeyError(ValueError)`; `close(surface_id, status="expired")`; `close_by_dedup_key(key, status="expired") -> list[str]`; `live_ids(ids) -> set[str]`; `live_cards_by_prefix(prefix) -> list[tuple[str, str]]`; `register_dag_tools(dispatcher, store, orchestrator, settings=None)`.
+- **v1.2 (late spec re-reviews, spec v2.4):** the approved draft reaches the acting node (T9); the launch `running` writes and the F064.2 demotion are conditional, and a lost launch cancels what it created (T2); the node-driven sweep query + `idx_dag_nodes_awaiting_input` (T3, T10); the sweep reads every live card (T7, T10); `push_built`'s two retries forward the flags, with `ReservedDedupKeyError` and an AST guard (T7); adopt a live card before re-pushing (T9); the gate exempts nodes that cost nothing and reports `held_reason` (T11, T15).
 - **Known seams to watch while executing:** the nested `EXISTS` correlation in `parked_clause` (T5 tests are the check); `tick()` now runs `_sweep_leaked_approval_cards` every tick (one small query on `a2ui_surfaces`); `_cancel_one` now tears down an `awaiting_check` node's heartbeat check on the budget path (previously left to the reconciliation sweep).
