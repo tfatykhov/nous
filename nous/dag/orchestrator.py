@@ -49,15 +49,26 @@ from __future__ import annotations
 import asyncio
 import logging
 import tempfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from nous.config import Settings
 from nous.dag._workspace import assert_inside_root, compute_workspace_path
+from nous.dag.approval import (
+    DEFER_LABEL,
+    approval_dedup_key,
+    as_utc,
+    build_card_summary,
+    button_label,
+    history_entry,
+    label_of,
+    notify_text,
+    risk_line,
+)
 from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, DAGNodeStatus
 from nous.dag.store import (
     _TERMINAL_DAG_STATUSES,
@@ -156,6 +167,7 @@ class DAGOrchestrator:
         settings: Settings,
         llm_client: object | None = None,
         delivery: DAGResultDelivery | None = None,
+        surface_service: Any | None = None,
     ) -> None:
         self._store = store
         self._subtask_mgr = subtask_mgr
@@ -171,6 +183,10 @@ class DAGOrchestrator:
         # sweep entirely (the orchestrator still runs, DAGs still finish —
         # they just aren't announced).
         self._delivery = delivery
+        # Harness Phase 3: pushes and closes approval cards. Passed at
+        # construction (main.py builds SurfaceService first) — None means the
+        # companion is off and dag_create refuses approval nodes.
+        self._surface_service = surface_service
         # F087: set True by whoever installs the tick. Explicit rather than
         # inferred from last_tick_at, which would false-negative during the
         # first tick interval. dag_create refuses when this is False so the
@@ -202,6 +218,11 @@ class DAGOrchestrator:
         # fails with a clear error. Counts reset on a successful launch and on
         # process restart (a benign backstop reset).
         self._defer_counts: dict = {}
+
+    @property
+    def approvals_wired(self) -> bool:
+        """Harness Phase 3: approval cards can be pushed (the clock_wired pattern)."""
+        return self._surface_service is not None
 
     # Backstop: ~this many consecutive deferrals (ticks) of a saturated pool
     # before a node is failed rather than deferred again.
@@ -2474,6 +2495,187 @@ class DAGOrchestrator:
                 result="Gate auto-passed (Phase 1)",
                 started_at=now,
                 completed_at=now,
+            )
+        elif node_type == "approval":
+            await self._launch_approval_node(node, dag)
+
+    async def _launch_approval_node(self, node: DAGNode, dag: ExecutionDAG) -> None:
+        """Harness Phase 3 §3.4: retire the previous attempt's card, park, push, link.
+
+        Steps 0-1 fail closed: any exception before a successful park sends
+        the node back to 'pending' via _defer_node. _dispatch_ready_nodes only
+        logs a launch exception, and a node left 'ready' with a kept
+        started_at is invisible to _recover_stale_ready_nodes — it would hold
+        a working slot forever.
+        """
+        spec = node.approval_spec or {}
+        wait = int(
+            spec.get("answer_timeout_seconds") or self._settings.dag_approval_default_wait_seconds
+        )
+        try:
+            # Step 0: a card left live by an earlier attempt carries the same
+            # key and a valid nonce; between this park and the push it could
+            # answer the new attempt with the old content (I2).
+            if self._surface_service is not None:
+                await self._surface_service.close_by_dedup_key(
+                    approval_dedup_key(node.id), "expired"
+                )
+            now = datetime.now(UTC)
+            history = list(node.answer_history or [])
+            previous = history_entry(node)
+            if previous is not None:
+                history.append(previous)
+            # Step 1: the park write is the single reset point for an attempt.
+            parked = await self._store.transition_node(
+                node.id,
+                from_statuses=_DISPATCHABLE,
+                dag_statuses=LIVE_DAG_STATUSES,
+                status="awaiting_input",
+                started_at=now,
+                answer_deadline=now + timedelta(seconds=wait),
+                surface_id=None,
+                answer=None,
+                answered_by=None,
+                answered_at=None,
+                answer_source=None,
+                result=None,
+                error=None,
+                completed_at=None,
+                answer_history=history or None,
+            )
+        except Exception as exc:
+            logger.exception("Could not park approval node %s in DAG %s", node.name, dag.id)
+            await self._defer_node(node, dag, f"approval could not be prepared: {exc}")
+            return
+        if not parked:
+            return  # someone else moved the node
+        self._defer_counts.pop(node.id, None)
+        node.status = "awaiting_input"
+        node.started_at = now
+        node.answer_deadline = now + timedelta(seconds=wait)
+        node.surface_id = None
+        node.answer = node.answered_by = node.answered_at = node.answer_source = None
+        node.result = node.error = node.completed_at = None
+        node.answer_history = history or None
+        await self._push_and_link(node, dag)
+
+    async def _push_and_link(self, node: DAGNode, dag: ExecutionDAG) -> None:
+        """Steps 2-3 (§3.4). Also the same-attempt re-push (§3.6)."""
+        if self._surface_service is None:
+            await self._store.transition_node(
+                node.id, from_statuses={"awaiting_input"},
+                error="approval card not delivered yet: the companion is not wired",
+            )
+            return
+        try:
+            built, ping = self._build_approval_card(node, dag)
+        except Exception as exc:  # deterministic: it will not heal on retry
+            await self._fail_parked(node, f"approval card could not be built: {exc}")
+            return
+        try:
+            surface_id = await self._surface_service.push_built(
+                built,
+                dedup_key=approval_dedup_key(node.id),
+                notify=True,
+                notify_text=ping,
+                reserved_key_ok=True,
+            )
+        except PermissionError as exc:
+            await self._fail_parked(node, f"approval card refused by censor: {exc}")
+            return
+        except Exception as exc:
+            # Transient: stay parked; _poll_awaiting_input pushes again each
+            # tick until the deadline, which bounds the retries.
+            logger.warning("Approval card push failed for node %s: %s", node.name, exc)
+            reason = f"approval card not delivered yet: {exc}"
+            if await self._store.transition_node(
+                node.id, from_statuses={"awaiting_input"}, error=reason
+            ):
+                node.error = reason
+            return
+        if await self._store.transition_node(
+            node.id, from_statuses={"awaiting_input"}, surface_id=surface_id, error=None
+        ):
+            node.surface_id = surface_id
+            node.error = None
+        else:
+            # The node left awaiting_input between park and link (cancelled,
+            # or answered by a tap that found it through the dedup key).
+            await self._close_card(surface_id)
+
+    def _build_approval_card(self, node: DAGNode, dag: ExecutionDAG) -> tuple[Any, str]:
+        """(validated card, ping text) for the node's current attempt (§3.4)."""
+        from nous.a2ui.builders import approval_gate
+
+        spec = node.approval_spec or {}
+        deadline = as_utc(node.answer_deadline)
+        default_label = label_of(spec, spec.get("default_option"))
+        title = f"{dag.name} · {node.description or node.name}"
+        remaining = (
+            max((deadline - datetime.now(UTC)).total_seconds(), 0.0) if deadline else 0.0
+        )
+        built = approval_gate(
+            {
+                "title": title,
+                "summary": build_card_summary(
+                    node.instructions or "", self._context_results(node, dag)
+                ),
+                "risk": risk_line(deadline, default_label),
+                "options": [
+                    {
+                        "id": o["id"],
+                        "label": button_label(o["label"], o["outcome"]),
+                        "outcome": o["outcome"],
+                    }
+                    for o in spec.get("options", [])
+                ],
+                "recommendation": spec.get("recommended_option"),
+                "recommend_first": False,
+                "defer_label": DEFER_LABEL,
+                # Floored at a minute: a re-push right at the deadline must not
+                # produce a zero expiry (falsy → expires_at NULL, no backstop).
+                "expires_hours": max(
+                    remaining + self._settings.dag_approval_card_grace_seconds, 60.0
+                )
+                / 3600,
+            }
+        )
+        built.validate()
+        return built, notify_text(title, node.instructions or "", deadline, default_label)
+
+    def _context_results(self, node: DAGNode, dag: ExecutionDAG) -> list[tuple[str, str]]:
+        by_id = {str(n.id): n for n in dag.nodes}
+        results: list[tuple[str, str]] = []
+        for edge in dag.edges:
+            if edge.edge_type == "context_flow" and str(edge.to_node_id) == str(node.id):
+                pred = by_id.get(str(edge.from_node_id))
+                if pred is not None and pred.result:
+                    results.append((pred.name, pred.result))
+        return results
+
+    async def _fail_parked(self, node: DAGNode, error: str) -> None:
+        if await self._store.transition_node(
+            node.id, from_statuses={"awaiting_input"}, status="failed", error=error,
+            completed_at=datetime.now(UTC),
+        ):
+            node.status = "failed"
+            node.error = error
+
+    async def _close_card(self, surface_id: str | None, *, node_id: UUID | None = None) -> None:
+        """Best-effort card close (§3.7); the leaked-card sweep retries."""
+        if self._surface_service is None:
+            return
+        try:
+            if surface_id:
+                await self._surface_service.close(surface_id, "expired")
+            elif node_id is not None:
+                await self._surface_service.close_by_dedup_key(
+                    approval_dedup_key(node_id), "expired"
+                )
+        except Exception:
+            logger.warning(
+                "Could not close approval card %s — the leaked-card sweep will retry",
+                surface_id or node_id,
             )
 
     async def _launch_subtask_node(self, node: DAGNode, dag: ExecutionDAG) -> None:
