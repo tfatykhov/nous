@@ -400,6 +400,21 @@ async def test_claim_evidence_comes_from_new_events_and_older_ones_are_kept_apar
     assert claims["turns_with_claims"] == 1
     assert claims["legacy"] == {"events": 1, "violations": 2}
     assert claims["evidence_since"] is not None
+    assert claims["none_by_mode"] == {"enforce": 1}
+
+
+async def test_no_evidence_claims_are_counted_under_the_mode_they_ran_in(db, agent_id):
+    # A switch warn -> enforce inside the window: only the enforce-mode claims
+    # had a correction queued, so the two must never be described together.
+    for mode in ("warn", "enforce", "enforce"):
+        await _event(db, agent_id, "f026_claim_verification", {
+            "claim_count": 1, "violation_count": 1, "mode": mode,
+            "claims": [{"kind": "push", "evidence": "none", "text": "I pushed"}]})
+
+    claims = (await _harness(db, agent_id))["rules"]["claims"]
+
+    assert claims["none_by_mode"] == {"warn": 1, "enforce": 2}
+    assert claims["by_evidence"]["none"] == 3
 
 
 async def test_top_patterns_and_one_entry_per_day(db, agent_id):
@@ -631,11 +646,20 @@ async def test_the_in_doubt_count_is_every_held_send_not_the_page_shown(db, agen
 
 
 async def test_nothing_recorded_means_no_numbers_at_all(db, agent_id):
+    # Events from before persistence was switched off are still in the table;
+    # none of them may reach a page that says nothing below was measured.
     await _event(db, agent_id, "harness_unoffered_tool_call", _unoffered("bash", "subtask"))
+    await _event(db, agent_id, "f026_claim_verification", {
+        "claim_count": 1, "violation_count": 1, "mode": "enforce",
+        "claims": [{"kind": "push", "evidence": "none", "text": "I pushed"}]})
 
     data = await _harness(db, agent_id, events_persisted=False)
 
     assert all(v is None for d in data["daily"] for k, v in d.items() if k != "date")
+    assert data["patterns"] == []
+    off = data["rules"]["offered_set"]
+    assert (off["by_mode"], off["by_context"], off["by_tool"], off["first_event_at"]) == ({}, [], [], None)
+    assert data["rules"]["claims"]["by_evidence"] == {"exact": 0, "plausible": 0, "none": 0}
 
 
 async def test_attention_reports_refusals_for_a_rule_in_enforce(db, agent_id):

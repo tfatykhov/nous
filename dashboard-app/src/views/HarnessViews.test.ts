@@ -68,7 +68,7 @@ const HARNESS = (persisted = true) => ({
       by_context: persisted ? [{ key: 'heartbeat_callback', count: 9 }] : [], by_tool: [] },
     context_policy: { mode: 'warn', first_event_at: null, by_mode: {}, by_violation: [], by_context: [] },
     claims: { mode: 'enforce', first_event_at: null, evidence_since: null,
-      by_evidence: { exact: 0, plausible: 0, none: 0 }, turns_with_claims: 0, legacy: { events: 0, violations: 0 } },
+      by_evidence: { exact: 0, plausible: 0, none: 0 }, none_by_mode: {}, turns_with_claims: 0, legacy: { events: 0, violations: 0 } },
   },
   daily: [{ date: '2026-09-25', offered_set: persisted ? 12 : 0, context_policy: 0, claims_none: 0 }],
   patterns: persisted ? [{ rule: 'offered_set', mode: 'warn', context: 'heartbeat_callback', tool: 'send_file',
@@ -206,6 +206,16 @@ describe('harness dashboard views', () => {
     const { container } = render(Harness);
     expect(await screen.findByText(/^A gap is a day the record cannot vouch for/)).toBeTruthy();
     expect(container.textContent).not.toContain('not recording yet');
+  });
+
+  it('Harness names the top pattern from the mode its verdict describes', async () => {
+    const p = { rule: 'offered_set', context: 'subtask', violation: 'not offered',
+      last_seen: '2026-09-25T13:02:00+00:00', latest_session: 's', snippet: null };
+    // Ranked first overall but recorded under enforce: not what warn "would refuse".
+    harnessPatterns = [{ ...p, mode: 'enforce', tool: 'send_email', count: 30 },
+      { ...p, mode: 'warn', tool: 'send_file', count: 9 }];
+    render(Harness);
+    expect(await screen.findByText(/^12 in 7 d\. Most: subtask · send_file · not offered\.$/)).toBeTruthy();
   });
 
   it('Harness lists one pattern per mode — warn and enforce rows of one kind never collide', async () => {

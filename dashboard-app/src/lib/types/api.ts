@@ -698,6 +698,8 @@ export interface HarnessData {
       evidence_since: string | null;
       by_evidence: { exact: number; plausible: number; none: number };
       by_mode: Record<string, number>;
+      /** No-evidence claims per the mode each was recorded under. */
+      none_by_mode: Record<string, number>;
       turns_with_claims: number;
       legacy: { events: number; violations: number };
     };

@@ -33,8 +33,10 @@
     offered_set: 'Offered-tool rule', context_policy: 'Context policy', claims: 'Claim check',
   };
 
-  function top(d: HarnessData, rule: string) {
-    return d.patterns.find((p) => p.rule === rule) ?? null;
+  // The top pattern for the mode a verdict describes: an enforce-mode
+  // pattern is not what warn "would refuse" (patterns carry their own mode).
+  function top(d: HarnessData, rule: string, mode: string | null) {
+    return d.patterns.find((p) => p.rule === rule && p.mode === (mode ?? 'warn')) ?? null;
   }
 
   function cards(d: HarnessData) {
@@ -53,14 +55,14 @@
         mode: off.mode ?? 'off', total: sum(off.by_mode), totalLabel: 'calls to a tool the turn was not offered',
         since: d.events_persisted && off.first_event_at ? `First flag ${fmtUtc(off.first_event_at)}` : '',
         breakdownLabel: 'By context', breakdown: bars(off.by_context),
-        verdict: ruleVerdict(off, w, d.events_persisted, top(d, 'offered_set')),
+        verdict: ruleVerdict(off, w, d.events_persisted, top(d, 'offered_set', off.mode)),
       },
       {
         id: 'context_policy', title: 'Context policy', env: 'NOUS_TOOL_CONTEXT_POLICY_MODE',
         mode: pol.mode ?? 'off', total: sum(pol.by_mode), totalLabel: 'calls outside what their context may do',
         since: d.events_persisted && pol.first_event_at ? `First flag ${fmtUtc(pol.first_event_at)}` : '',
         breakdownLabel: 'By flag', breakdown: bars(pol.by_violation),
-        verdict: ruleVerdict(pol, w, d.events_persisted, top(d, 'context_policy')),
+        verdict: ruleVerdict(pol, w, d.events_persisted, top(d, 'context_policy', pol.mode)),
       },
       {
         id: 'claims', title: 'Claim checks', env: 'NOUS_CLAIM_VERIFICATION_MODE',

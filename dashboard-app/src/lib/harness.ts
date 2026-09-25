@@ -97,10 +97,23 @@ export interface RuleSummary {
 }
 export interface TopPattern { context: string | null; tool: string | null; violation: string }
 
+/** Events recorded under a mode other than the one a verdict describes —
+ *  real records, reported beside the verdict, never folded into it. */
+function alsoUnder(byMode: Record<string, number>, own: string, windowLabel: string): string {
+  const parts = Object.entries(byMode)
+    .filter(([m, n]) => m !== own && n > 0)
+    .map(([m, n]) => (m === 'enforce' ? `${n} refused under enforce`
+      : m === 'unknown' ? `${n} with no recorded mode`
+        : `${n} flagged under ${m} (the calls ran)`));
+  return parts.length ? ` Also in ${windowLabel}: ${parts.join(', ')}.` : '';
+}
+
 /**
  * §4.3 — derived from the numbers, never stored. Absence of events is never
  * reported as "nothing would be refused": it is "not measured", "not
- * checking", or "nothing flagged since <when measuring began>".
+ * checking", or "nothing flagged since <when measuring began>". A verdict
+ * counts only events recorded under the mode it describes (each event
+ * carries its own); `top` must come from that mode too.
  */
 export function ruleVerdict(
   rule: RuleSummary, windowLabel: string, eventsPersisted: boolean, top: TopPattern | null,
@@ -113,9 +126,15 @@ export function ruleVerdict(
   }
   const total = Object.values(rule.by_mode).reduce((a, b) => a + b, 0);
   const most = top ? ` Most: ${[top.context, top.tool, top.violation].filter(Boolean).join(' · ')}.` : '';
-  if (rule.mode === 'enforce') {
+  const own = rule.mode ?? 'warn';
+  const also = alsoUnder(rule.by_mode, own, windowLabel);
+  if (own === 'enforce') {
     const refused = rule.by_mode.enforce ?? 0;
-    return { title: 'Enforcing', detail: `Refused ${refused} in ${windowLabel}.${refused ? most : ''}`, tone: 'ok' };
+    return { title: 'Enforcing', detail: `Refused ${refused} in ${windowLabel}.${refused ? most : ''}${also}`, tone: 'ok' };
+  }
+  const flagged = rule.by_mode[own] ?? 0;
+  if (flagged === 0 && total > 0) {
+    return { title: `Nothing flagged under ${own} in ${windowLabel}`, detail: also.trim(), tone: 'muted' };
   }
   if (total === 0) {
     // first_event_at is the rule's first flag ever, not when it was deployed:
@@ -125,12 +144,14 @@ export function ruleVerdict(
     }
     return { title: `No flags in ${windowLabel}`, detail: `First flag ${fmtUtc(rule.first_event_at)}.`, tone: 'muted' };
   }
-  return { title: 'Enforce would refuse calls like these', detail: `${total} in ${windowLabel}.${most}`, tone: 'warn' };
+  return { title: 'Enforce would refuse calls like these', detail: `${flagged} in ${windowLabel}.${most}${also}`, tone: 'warn' };
 }
 
 export interface ClaimSummary {
   mode: string | null;
   by_evidence: { exact: number; plausible: number; none: number };
+  /** No-evidence claims per the mode each was recorded under. */
+  none_by_mode: Record<string, number>;
   legacy: { events: number; violations: number };
   evidence_since: string | null;
 }
@@ -139,13 +160,22 @@ export function claimVerdict(claims: ClaimSummary, eventsPersisted: boolean): Ve
   if (!eventsPersisted) {
     return { title: 'Not measured', detail: 'Event persistence is off, so no claim checks were recorded.', tone: 'warn' };
   }
-  const none = claims.by_evidence.none;
+  // Only a claim recorded under enforce had a correction queued: count each
+  // by the mode it ran in, never by the mode the rule is in now.
+  const byMode = claims.none_by_mode ?? {};
+  const queued = byMode.enforce ?? 0;
+  const unrecorded = byMode.unknown ?? 0;
+  const others = Object.entries(byMode).filter(([m, n]) => m !== 'enforce' && m !== 'unknown' && n > 0);
+  const noCorrection = others.reduce((a, [, n]) => a + n, 0);
+  const unknownNote = unrecorded ? ` Also ${unrecorded} with no recorded mode.` : '';
   if (claims.mode === 'enforce') {
     // "queued", not "got": a one-turn session (a subtask, a heartbeat turn)
     // ends before the next turn, and end_conversation drops the correction.
-    return { title: 'Enforcing', detail: `${none} claims had no evidence; a correction was queued for the next turn.`, tone: 'ok' };
+    const also = noCorrection ? ` Also ${noCorrection} recorded under ${others.map(([m]) => m).join('/')}, which got no correction.` : '';
+    return { title: 'Enforcing', detail: `${queued} claims had no evidence; a correction was queued for the next turn.${also}${unknownNote}`, tone: 'ok' };
   }
-  return { title: claims.mode === 'off' ? 'Not checking' : 'Checking', detail: `${none} claims had no evidence and would have got a correction.`, tone: none ? 'warn' : 'muted' };
+  const also = queued ? ` Also ${queued} recorded under enforce, each with a correction queued.` : '';
+  return { title: claims.mode === 'off' ? 'Not checking' : 'Checking', detail: `${noCorrection} claims had no evidence and would have got a correction.${also}${unknownNote}`, tone: noCorrection ? 'warn' : 'muted' };
 }
 
 /** Plain-language gloss for each flag code (title attributes + legend). */

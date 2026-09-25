@@ -16,6 +16,8 @@ A reviewer probed the implementation (b85e148) against snapshots; these amend ev
 - **Claims** count from the first claim event EVER when no pre-2c event is in the window (every turn writes one, so a quiet day had no turns); only with pre-2c events in view do they start at the first post-2c one.
 - **Tombstone** = a keyed `success`/`unknown` row with empty `key_args` — not also a NULL summary: the Ledger's own release statements write the summary back, and a confirmed tombstone must still read "details removed by retention".
 - The node sheet says "Card being delivered…", and shows the countdown, only for a step actually `awaiting_input`; an approval not yet reached reads "not asked yet", an ended one "not answered (<status>)".
+- **A verdict counts only its own mode** (codex round 1). Every event carries the mode it ran under: the warn verdict counts `by_mode.warn` and its "Most:" pattern comes from warn patterns; the enforce verdict counts `by_mode.enforce`; events under another mode are reported beside it ("Also in 7 d: 3 refused under enforce"), never folded in. Claims gain `none_by_mode`, so "a correction was queued" describes only claims recorded under enforce. Charts and totals stay mode-agnostic — a flag is a flag whether the call ran or was refused.
+- **Persistence off reads no events at all**: `/dashboard/harness` skips both event queries, so no record written before the switch can reach a page that says nothing below was measured (patterns, bars, first-flag dates included).
 
 ## 0.1 v2.1 — the v2 re-review fold (devil APPROVE; architecture and UX APPROVE WITH REVISIONS)
 

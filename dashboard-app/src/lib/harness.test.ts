@@ -69,6 +69,17 @@ describe('ruleVerdict — never a green light without evidence', () => {
     const never = ruleVerdict({ ...base, first_event_at: null, by_mode: {} }, '7 d', true, null);
     expect(never.title).toBe('No flags recorded yet');
   });
+  it('counts only the current mode, and names events from another mode apart', () => {
+    // enforce -> warn inside the window: the refused calls are not "would refuse"
+    const v = ruleVerdict({ ...base, by_mode: { warn: 5, enforce: 3 } }, '7 d', true, top);
+    expect(v.title).toBe('Enforce would refuse calls like these');
+    expect(v.detail).toBe('5 in 7 d. Most: heartbeat_callback · send_file · not offered. Also in 7 d: 3 refused under enforce.');
+    const onlyOther = ruleVerdict({ ...base, by_mode: { enforce: 3 } }, '7 d', true, null);
+    expect(onlyOther.title).toBe('Nothing flagged under warn in 7 d');
+    expect(onlyOther.detail).toBe('Also in 7 d: 3 refused under enforce.');
+    const enforcing = ruleVerdict({ ...base, mode: 'enforce', by_mode: { enforce: 2, warn: 4 } }, '7 d', true, null);
+    expect(enforcing.detail).toBe('Refused 2 in 7 d. Also in 7 d: 4 flagged under warn (the calls ran).');
+  });
   it('reports what enforce refused', () => {
     const v = ruleVerdict({ ...base, mode: 'enforce', by_mode: { enforce: 3 } }, '7 d', true, top);
     expect(v.title).toBe('Enforcing');
@@ -78,12 +89,22 @@ describe('ruleVerdict — never a green light without evidence', () => {
 });
 
 describe('claimVerdict', () => {
-  const claims = { mode: 'enforce', by_evidence: { exact: 118, plausible: 24, none: 4 },
+  const claims = { mode: 'enforce', by_evidence: { exact: 118, plausible: 24, none: 4 }, none_by_mode: { enforce: 4 },
     legacy: { events: 0, violations: 0 }, evidence_since: '2026-09-24T08:10:00+00:00' };
   it('counts corrections under enforce and would-be corrections under warn', () => {
     expect(claimVerdict(claims, true).detail).toBe('4 claims had no evidence; a correction was queued for the next turn.');
-    expect(claimVerdict({ ...claims, mode: 'warn' }, true).detail)
+    expect(claimVerdict({ ...claims, mode: 'warn', none_by_mode: { warn: 4 } }, true).detail)
       .toBe('4 claims had no evidence and would have got a correction.');
+  });
+  it('describes each no-evidence claim by the mode it was recorded under', () => {
+    const mixed = { ...claims, none_by_mode: { enforce: 2, warn: 3 } };
+    expect(claimVerdict(mixed, true).detail).toBe(
+      '2 claims had no evidence; a correction was queued for the next turn. Also 3 recorded under warn, which got no correction.');
+    expect(claimVerdict({ ...mixed, mode: 'warn' }, true).detail).toBe(
+      '3 claims had no evidence and would have got a correction. Also 2 recorded under enforce, each with a correction queued.');
+    // An event with no mode cannot be said to have got — or not got — a correction.
+    expect(claimVerdict({ ...claims, none_by_mode: { enforce: 1, unknown: 2 } }, true).detail).toBe(
+      '1 claims had no evidence; a correction was queued for the next turn. Also 2 with no recorded mode.');
   });
   it('is "not measured" when nothing is recorded', () => {
     expect(claimVerdict(claims, false).title).toBe('Not measured');

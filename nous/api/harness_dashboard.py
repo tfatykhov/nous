@@ -350,7 +350,9 @@ async def get_harness_data(
     now = datetime.now(UTC)
     since = window_start(window, now)
     types = (OFFERED, POLICY, CLAIMS)
-    first = {
+    # Persistence off: the page says nothing was measured, so no event —
+    # not even one written before the switch — may reach any section of it.
+    first: dict[str, Any] = {} if not events_persisted else {
         r.event_type: r.first
         for r in (await session.execute(
             select(Event.event_type, func.min(Event.created_at).label("first"))
@@ -358,7 +360,7 @@ async def get_harness_data(
             .group_by(Event.event_type)
         ))
     }
-    events = (await session.execute(
+    events = [] if not events_persisted else (await session.execute(
         select(Event.event_type, Event.data, Event.session_id, Event.created_at)
         .where(Event.agent_id == agent_id, Event.event_type.in_(types), Event.created_at >= since)
         .order_by(Event.created_at)
@@ -369,6 +371,7 @@ async def get_harness_data(
     by_tool: dict[str, int] = {}
     by_violation: dict[str, int] = {}
     evidence = {"exact": 0, "plausible": 0, "none": 0}
+    none_by_mode: dict[str, int] = {}  # a correction was queued only under enforce
     claims_by_mode: dict[str, int] = {}
     turns_with_claims = 0
     legacy = {"events": 0, "violations": 0}
@@ -422,6 +425,7 @@ async def get_harness_data(
             if level in evidence:
                 evidence[level] += 1
             if level == "none":
+                _bump(none_by_mode, mode)
                 if bucket:
                     bucket["claims_none"] += 1
                 pattern("claims", mode, None, None, "no evidence", at, ev.session_id,
@@ -451,7 +455,7 @@ async def get_harness_data(
             "claims": {
                 "mode": modes.get("claim_verification"), "first_event_at": _iso(first.get(CLAIMS)),
                 "evidence_since": _iso(evidence_since), "by_evidence": evidence,
-                "by_mode": claims_by_mode,
+                "by_mode": claims_by_mode, "none_by_mode": none_by_mode,
                 "turns_with_claims": turns_with_claims, "legacy": legacy,
             },
         },
