@@ -22,18 +22,33 @@
 
   // ── Selected active DAG for graph view ───────────────────────────────────
   let selectedDagId = $state<string | null>(null);
-  let selectedNode = $state<DagNode | null>(null);
+  // The sheet keeps only the node's id and reads the node from each poll: a
+  // copy would go on saying awaiting_input after the step is answered.
+  let selectedNodeId = $state<string | null>(null);
+  let selectedNode = $derived.by(() => {
+    const n = selectedNodeId ? fullNode(selectedNodeId) : null;
+    return n ? asDagNode(n) : null;
+  });
   let sheetOpen = $state(false);
 
   function selectDag(dag: DagActiveDag) {
     selectedDagId = selectedDagId === dag.id ? null : dag.id;
-    selectedNode = null;
+    selectedNodeId = null;
   }
 
   function onNodeClick(node: DagNode) {
-    selectedNode = node;
+    selectedNodeId = node.id;
     sheetOpen = true;
   }
+
+  // The DAG finished (or the node is gone): close the sheet rather than show
+  // a node the dashboard no longer has.
+  $effect(() => {
+    if (selectedNodeId && $store.data && !fullNode(selectedNodeId)) {
+      selectedNodeId = null;
+      sheetOpen = false;
+    }
+  });
 
   // Close graph when data refreshes and the selected DAG disappears
   $effect(() => {
@@ -42,7 +57,6 @@
     const stillActive = d.active_dags.some((dag) => dag.id === selectedDagId);
     if (!stillActive) {
       selectedDagId = null;
-      selectedNode = null;
     }
   });
 
@@ -102,13 +116,8 @@
   }
 
   function openWaiting(w: DagWaiting) {
-    const n = fullNode(w.node_id);
-    if (!n) return;
-    selectedNode = {
-      id: n.id, name: n.name, status: n.status, node_type: n.node_type, wave: n.wave,
-      started_at: n.started_at ?? undefined, completed_at: n.completed_at ?? undefined,
-      tokens_used: n.tokens_used, description: n.description, result: n.result, error: n.error,
-    };
+    if (!fullNode(w.node_id)) return;
+    selectedNodeId = w.node_id;
     sheetOpen = true;
   }
 
@@ -227,8 +236,8 @@
   );
 
   // ── Nodes cast to DagNode shape for the viz ───────────────────────────────
-  function toVizNodes(dag: DagActiveDag): DagNode[] {
-    return dag.nodes.map((n) => ({
+  function asDagNode(n: DagActiveNode): DagNode {
+    return {
       id: n.id,
       name: n.name,
       status: n.status,
@@ -240,7 +249,11 @@
       description: n.description,
       result: n.result,
       error: n.error,
-    }));
+    };
+  }
+
+  function toVizNodes(dag: DagActiveDag): DagNode[] {
+    return dag.nodes.map(asDagNode);
   }
 
   function toVizEdges(dag: DagActiveDag): DagEdge[] {
@@ -372,7 +385,7 @@
         <div class="graph-panel">
           <div class="graph-header">
             <span class="graph-dag-name">{activeDag.name}</span>
-            <button class="btn-sm" onclick={() => { selectedDagId = null; selectedNode = null; }}>
+            <button class="btn-sm" onclick={() => { selectedDagId = null; selectedNodeId = null; }}>
               Close
             </button>
           </div>

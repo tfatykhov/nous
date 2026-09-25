@@ -263,6 +263,30 @@ describe('harness dashboard views', () => {
     expect(container.textContent).not.toContain('Calls (24 h)');
   });
 
+  it('DAG node sheet follows the poll: an answered step updates, a finished DAG closes it', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      dag = { ...DAG_APPROVALS, waiting_on_you: DAG.waiting_on_you };
+      render(DagView);
+      await fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
+      const badge = () => document.querySelector('.node-detail .status-badge')?.textContent;
+      await waitFor(() => expect(badge()).toBe('awaiting_input'));
+
+      const answered = approval({ asked_at: '2026-09-25T10:00:00+00:00', deadline: '2099-01-01T12:00:00+00:00',
+        answer: 'send', answer_label: 'Send it', answer_source: 'companion', answered_at: '2026-09-25T11:00:00+00:00' });
+      dag = { ...DAG_APPROVALS, waiting_on_you: [], active_dags: [{ ...DAG_APPROVALS.active_dags[0],
+        nodes: [node('n1', 'approve-send', 'completed', { approval: answered })] }] };
+      await vi.advanceTimersByTimeAsync(15_000);
+      await waitFor(() => expect(badge()).toBe('completed'));
+
+      dag = { ...DAG, active_dags: [], waiting_on_you: [] };
+      await vi.advanceTimersByTimeAsync(15_000);
+      await waitFor(() => expect(document.querySelector('.node-detail')).toBeNull());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('DAG node sheet says a card is on its way only for a question actually waiting', async () => {
     dag = DAG_APPROVALS;
     const { container } = render(DagView);

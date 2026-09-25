@@ -39,6 +39,9 @@ export function makePollStore<T>(
   let inFlight = false;
   let stopped = true;
   let ac: AbortController | null = null;
+  // A refresh() that arrived while a fetch was in flight: one re-run with
+  // the latest inputs, resolved when it lands.
+  let again: { promise: Promise<void>; resolve: () => void } | null = null;
 
   function schedule() {
     // Clear any existing timer before arming a new one so that calling
@@ -55,21 +58,46 @@ export function makePollStore<T>(
     // reschedule. Scheduling here too would stack duplicate timers.
     if (inFlight) return;
     inFlight = true;
-    ac = new AbortController();
+    const mine = new AbortController();
+    ac = mine;
     update((s) => ({ ...s, loading: true }));
     try {
-      const data = await fetcher(ac.signal);
-      if (!ac.signal.aborted) {
+      const data = await fetcher(mine.signal);
+      if (!mine.signal.aborted) {
         update((s) => ({ ...s, data, error: null, loading: false, lastUpdated: Date.now() }));
       }
     } catch (err) {
-      if (!ac.signal.aborted) {
+      if (!mine.signal.aborted) {
         update((s) => ({ ...s, error: err as Error, loading: false }));
       }
     } finally {
       inFlight = false;
-      schedule();
+      if (again) {
+        const queued = again;
+        again = null;
+        void tick().then(queued.resolve);
+      } else {
+        schedule();
+      }
     }
+  }
+
+  /**
+   * Fetch now. A timer tick that finds a fetch in flight just lets it finish,
+   * but a refresh means the inputs changed (a filter, a window) or the user
+   * asked: the answer in flight is for the OLD inputs, so it is aborted —
+   * never committed — and one more fetch runs as soon as it settles. Several
+   * refreshes during one fetch share that single re-run.
+   */
+  function refresh(): Promise<void> {
+    if (!inFlight) return tick();
+    ac?.abort();
+    if (!again) {
+      let resolve!: () => void;
+      const promise = new Promise<void>((r) => { resolve = r; });
+      again = { promise, resolve };
+    }
+    return again.promise;
   }
 
   return {
@@ -83,7 +111,10 @@ export function makePollStore<T>(
       stopped = true;
       if (timer) { clearTimeout(timer); timer = null; }
       ac?.abort();
+      // A stopped store fetches nothing more, queued refresh included (the
+      // Ledger stops to hold its rows still while older ones are shown).
+      if (again) { again.resolve(); again = null; }
     },
-    refresh: tick,
+    refresh,
   };
 }
