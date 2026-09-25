@@ -168,14 +168,15 @@ export function claimVerdict(claims: ClaimSummary, eventsPersisted: boolean): Ve
   const others = Object.entries(byMode).filter(([m, n]) => m !== 'enforce' && m !== 'unknown' && n > 0);
   const noCorrection = others.reduce((a, [, n]) => a + n, 0);
   const unknownNote = unrecorded ? ` Also ${unrecorded} with no recorded mode.` : '';
+  const claimsN = (n: number) => `${n} claim${n === 1 ? '' : 's'}`;
   if (claims.mode === 'enforce') {
     // "queued", not "got": a one-turn session (a subtask, a heartbeat turn)
     // ends before the next turn, and end_conversation drops the correction.
     const also = noCorrection ? ` Also ${noCorrection} recorded under ${others.map(([m]) => m).join('/')}, which got no correction.` : '';
-    return { title: 'Enforcing', detail: `${queued} claims had no evidence; a correction was queued for the next turn.${also}${unknownNote}`, tone: 'ok' };
+    return { title: 'Enforcing', detail: `${claimsN(queued)} had no evidence; a correction was queued for the next turn.${also}${unknownNote}`, tone: 'ok' };
   }
-  const also = queued ? ` Also ${queued} recorded under enforce, each with a correction queued.` : '';
-  return { title: claims.mode === 'off' ? 'Not checking' : 'Checking', detail: `${noCorrection} claims had no evidence and would have got a correction.${also}${unknownNote}`, tone: noCorrection ? 'warn' : 'muted' };
+  const also = queued ? ` Also ${queued} recorded under enforce, ${queued === 1 ? 'with' : 'each with'} a correction queued.` : '';
+  return { title: claims.mode === 'off' ? 'Not checking' : 'Checking', detail: `${claimsN(noCorrection)} had no evidence and would have got a correction.${also}${unknownNote}`, tone: noCorrection ? 'warn' : 'muted' };
 }
 
 /** Plain-language gloss for each flag code (title attributes + legend). */

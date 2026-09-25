@@ -308,6 +308,19 @@ async def test_a_refused_repeat_names_the_row_currently_holding_its_key(db, agen
     assert next(r for r in rows if r["status"] == "unknown")["held_by"] is None  # not its own holder
 
 
+async def test_with_ledger_persistence_off_no_row_is_named_as_holding_a_key(db, agent_id):
+    # Nothing holds a key while no LedgerStore is installed: the Ledger must
+    # not say "Key currently held by" beside a row reading "holds nothing".
+    await _row(db, agent_id, tool="send_email", effect="external", status="unknown", key="dag:k:send:9b41",
+               ago=timedelta(hours=2))
+    await _row(db, agent_id, tool="send_email", effect="external", status="blocked",
+               summary="refused by duplicate", key="dag:k:send:9b41")
+
+    rows = (await _exec(db, agent_id, modes={**MODES, "persist": False}))["rows"]
+
+    assert [r["held_by"] for r in rows] == [None, None]
+
+
 async def test_tombstones_are_flagged_and_other_agents_never_appear(db, agent_id):
     await _row(db, agent_id, tool="send_email", effect="external", status="success", key="s:1",
                key_args={}, summary=None)

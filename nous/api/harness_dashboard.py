@@ -156,11 +156,13 @@ async def _names(session: AsyncSession, agent_id: str, rows: list[Any]) -> tuple
     return dags, nodes
 
 
-async def _holders(session: AsyncSession, agent_id: str, rows: list[Any]) -> dict[tuple, Any]:
-    """The row currently holding each (tool, key) seen on this page."""
+async def _holders(session: AsyncSession, agent_id: str, rows: list[Any], *,
+                   ledger_persisted: bool) -> dict[tuple, Any]:
+    """The row currently holding each (tool, key) seen on this page — none
+    while ledger persistence is off, when nothing holds a key (see in_doubt)."""
     L = ExecutionLedgerEntry
     pairs = {(r.tool_name, r.idempotency_key) for r in rows if r.idempotency_key}
-    if not pairs:
+    if not pairs or not ledger_persisted:
         return {}
     res = await session.execute(
         select(L.id, L.tool_name, L.idempotency_key, L.status, L.created_at, L.external_ref,
@@ -276,7 +278,7 @@ async def get_execution_data(
 
     both = [*page, *attention]
     dags, nodes = await _names(session, agent_id, both)
-    holders = await _holders(session, agent_id, both)
+    holders = await _holders(session, agent_id, both, ledger_persisted=bool(modes.get("persist")))
     last = page[-1] if page else None
     return {
         "modes": modes,

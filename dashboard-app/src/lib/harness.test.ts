@@ -104,7 +104,9 @@ describe('claimVerdict', () => {
       '3 claims had no evidence and would have got a correction. Also 2 recorded under enforce, each with a correction queued.');
     // An event with no mode cannot be said to have got — or not got — a correction.
     expect(claimVerdict({ ...claims, none_by_mode: { enforce: 1, unknown: 2 } }, true).detail).toBe(
-      '1 claims had no evidence; a correction was queued for the next turn. Also 2 with no recorded mode.');
+      '1 claim had no evidence; a correction was queued for the next turn. Also 2 with no recorded mode.');
+    expect(claimVerdict({ ...claims, mode: 'warn', none_by_mode: { warn: 1 } }, true).detail)
+      .toBe('1 claim had no evidence and would have got a correction.');
   });
   it('is "not measured" when nothing is recorded', () => {
     expect(claimVerdict(claims, false).title).toBe('Not measured');
