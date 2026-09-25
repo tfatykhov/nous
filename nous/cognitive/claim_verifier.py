@@ -267,6 +267,11 @@ _DEPLOY_CHANGE = frozenset({
     "daemon-reload", "update-service", "update-function-code", "create-deployment",
     "container:release", "container:push", "releases:rollback", "ps:restart",
 })
+# How many leading operands may carry a deploy CLI's verb: `docker compose
+# up`, `aws s3 sync`, `service nginx restart` (2); `kubectl rollout`,
+# `systemctl restart`, `pm2 restart` (1, the default).
+_DEPLOY_VERB_DEPTH = {"docker": 2, "docker-compose": 2, "podman": 2, "aws": 2, "gcloud": 2, "az": 2,
+                      "cap": 2, "service": 2}
 _TASK_RUNNERS = frozenset({
     "make", "just", "npm", "npx", "pnpm", "yarn", "uv", "poetry", "pipenv", "pdm", "hatch", "tox",
     "nox", "invoke", "fab", "rake", "gradle", "mvn",
@@ -625,7 +630,7 @@ def _destinations(prog: str, args: tuple[str, ...]) -> list[str]:
         dests.append(last.split(":", 1)[1] if ":" in last and not last.startswith("/") else last)
     elif prog in _WRITERS_ALL:
         dests += positional
-    elif prog == "tar":
+    elif prog == "tar" and _tar_writes_archive(args):  # only a create/append writes the archive
         if args and not args[0].startswith("-") and "f" in args[0] and len(positional) > 1:
             dests.append(positional[1])  # `tar czf X`
         for i, a in enumerate(args):
@@ -654,6 +659,19 @@ def _short_flags(word: str) -> str:
     return word[1:] if len(word) > 1 and word.startswith("-") and not word.startswith("--") else ""
 
 
+def _tar_writes_archive(args: tuple[str, ...]) -> bool:
+    """`-c`/`-r`/`-u`/`-A` (create, append, update, concatenate) write the
+    archive; `-t` lists it and `-x` reads it."""
+    if not args:
+        return False
+    modes = args[0] if not args[0].startswith("-") else ""  # old style: `tar czf`
+    for a in args:
+        if a in ("--create", "--append", "--update", "--concatenate", "--catenate"):
+            return True
+        modes += _short_flags(a)
+    return any(m in modes for m in "cruA")
+
+
 def _writes(target: str, runs: tuple) -> str:
     """How well the invocations show a write to ``target``: exact for a
     certain write to that destination, plausible for an uncertain one or a
@@ -665,7 +683,7 @@ def _writes(target: str, runs: tuple) -> str:
         if any(_same_path(target, d) for d in dests):
             best = _best([best, "exact" if certain else "plausible"])
         elif base in _DESTROYERS or base in _WRITERS_LAST or base in _WRITERS_ALL or dests \
-                or base in READ_COMMANDS:
+                or base in READ_COMMANDS or base in ("tar", "dd"):
             continue  # a delete, a known writer writing elsewhere, or a read naming the path
         elif _names(target, " ".join(args)):
             best = _best([best, "plausible"])
@@ -766,11 +784,14 @@ def _does(kind: str, prog: str, args: tuple[str, ...]) -> bool:
         return True
     if prog == "gh":
         return positional[:2] == ["workflow", "run"]
+    # the CLI's SUBCOMMAND, not any operand: `systemctl status restart` shows
+    # the status of a unit named restart
+    verbs = positional[:_DEPLOY_VERB_DEPTH.get(prog, 1)]
     if prog in _TASK_RUNNERS:
         return any(p in ("deploy", "release", "publish", "ship", "start", "serve") or "deploy" in p
-                   for p in positional)
+                   for p in positional[:2])
     if prog in _DEPLOY_CLIS:
-        return ((prog == "vercel" and not positional) or any(p in _DEPLOY_CHANGE for p in positional)
+        return ((prog == "vercel" and not positional) or any(p in _DEPLOY_CHANGE for p in verbs)
                 or any(a in ("--prod", "--production") for a in args))
     return False
 

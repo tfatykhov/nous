@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/plans/2026-09-24-harness-autonomy-roadmap.md` §2 row P2.7 and §3 row 2c. Anchors from `main` `240c795`.
 
+**v2.16 (codex round 12):** a shell branch whose condition is a constant command never runs (`if false; then git push; fi`, `while false; do …`, nested) and its commands are not evidence; a real condition's branch may have run and stays uncertain. A deploy CLI is judged by its subcommand, not any operand (`systemctl status restart` shows a unit's status). `tar` writes its archive only when creating or appending (`-tf`/`-xf` read it).
+
 **v2.15 (codex round 11):** a Python call resolves to *its* definition — a bare `save()` to the module's `save`, `Obj().save()` to Obj's method, an `x.save()` with an unknown receiver to every class's `save`, never to the module function of that name; a class body's own statements run at definition; the ledger marks a cut in a stored argument (`EVIDENCE_TRUNCATED`) and cut code is unreadable (plausible), never regex-scanned — the regex fallback is gone, code that does not parse is no evidence (it did not run).
 
 **v2.14 (codex round 10):** a program named by a path is the trusted tool only from a system directory (`/usr/bin/git` is git; `./git`, `bin/git`, `/tmp/evil/git` are local executables — plausible at most, never exact); a `subprocess` call is read as argv (`['echo', 'git', 'push']` runs echo) or, for a shell line, through the bash reader; the executable walk resolves constant `while` tests and never enters an `except` handler.

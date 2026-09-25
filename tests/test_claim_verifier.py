@@ -1238,3 +1238,38 @@ def test_truncated_ledger_code_is_unreadable_never_regex_scanned():
 def test_code_that_does_not_parse_is_no_evidence():
     snippet = Evidence("run_python", {"code": "open('/tmp/report.md', 'w'"})
     assert not _verify("It was saved to /tmp/report.md.", snippet).verified
+
+
+# --- codex round 12 ------------------------------------------------------------
+
+
+def test_a_constant_untaken_shell_branch_does_not_run():
+    assert not _verify("I pushed the fix.", _real_bash("if false; then git push origin main; fi")).verified
+    assert not _verify("I pushed the fix.", _real_bash("while false; do git push origin main; done")).verified
+    assert not _verify("I pushed the fix.", _real_bash("if false; then if true; then git push; fi; fi")).verified
+    untaken_else = "if true; then echo yes; else git push origin main; fi"
+    assert not _verify("I pushed the fix.", _real_bash(untaken_else)).verified
+    assert _push_level("if true; then git push origin main; fi") == "plausible"
+    assert _push_level("if false; then echo no; else git push origin main; fi") == "plausible"
+    assert _push_level("if grep -q x f; then git push origin main; fi") == "plausible"   # unknown: may have run
+    assert _push_level("if ! false; then git push origin main; fi") == "plausible"
+
+
+def test_a_deploy_cli_is_judged_by_its_subcommand():
+    assert not _verify("I deployed the app.", _real_bash("systemctl status restart")).verified
+    assert not _verify("I deployed the app.", _real_bash("kubectl get deploy apply")).verified
+    assert not _verify("I deployed the app.", _real_bash("docker ps --filter name=up")).verified
+    assert _verify("I deployed the app.", _real_bash("systemctl restart nous")).verified
+    assert _verify("I deployed the app.", _real_bash("service nginx restart")).verified
+    assert _verify("I deployed the app.", _real_bash("kubectl rollout restart deploy/nous")).verified
+    assert _verify("I deployed the app.", _real_bash("docker compose up -d")).verified
+
+
+def test_tar_writes_its_archive_only_when_creating():
+    claim = "It was saved to /tmp/report.md."
+    assert not _verify(claim, _real_bash("tar -tf /tmp/report.md")).verified
+    assert not _verify(claim, _real_bash("tar -xf /tmp/report.md -C out/")).verified
+    assert not _verify(claim, _real_bash("tar --list --file=/tmp/report.md")).verified
+    assert _verify(claim, _real_bash("tar -czf /tmp/report.md site/")).verified
+    assert _verify(claim, _real_bash("tar --create --file=/tmp/report.md site/")).verified
+    assert _verify(claim, _real_bash("tar rf /tmp/report.md extra.txt")).verified

@@ -194,6 +194,7 @@ def command_runs(command: str, exit_code: int | None) -> list[tuple[str, list[st
 
 
 _MAX_STRING_DEPTH = 3
+_CONSTANT_COMMANDS = {"true": True, ":": True, "false": False}
 _LIST_JOINS = frozenset({"&&", "||"})
 _PIPES = frozenset({"|", "|&"})
 # The delimiter after an unquoted `<<` / `<<-`.
@@ -392,7 +393,34 @@ def _invocations(
                 return
         found.append((prog, args, certain))
 
+    # `if false; then ...; fi` / `while false; do ...; done`: a branch whose
+    # condition is a constant command never runs; one whose condition is a
+    # real command may have (its commands stay, uncertain)
+    frames: list[list[bool | None]] = []  # per open if/while: [taken, skipping this body]
     for li, (plist, unknown) in enumerate(lists):
+        head = plist[0][1][0] if plist and plist[0][1] and plist[0][1][0] else []
+        first = head[0] if head else None
+        if first in ("if", "elif", "while", "until"):
+            cond = head[1:]
+            negate = first == "until"
+            while cond and cond[0] == "!":
+                negate, cond = not negate, cond[1:]
+            taken = (_CONSTANT_COMMANDS.get(cond[0])
+                     if len(cond) == 1 and len(plist) == 1 and len(plist[0][1]) == 1 else None)
+            if taken is not None and negate:
+                taken = not taken
+            if first == "elif" and frames:
+                frames[-1] = [taken, False]
+            else:
+                frames.append([taken, False])
+        elif first in ("then", "do") and frames:
+            frames[-1][1] = frames[-1][0] is False
+        elif first == "else" and frames:
+            frames[-1][1] = frames[-1][0] is True
+        elif first in ("fi", "done") and frames:
+            frames.pop()
+        if any(f[1] for f in frames):
+            continue  # inside a body that did not run
         last_list = li == len(lists) - 1
         has_or = any(j == "||" for j, _ in plist)
         # every command of the last list ran and succeeded iff it exited 0
