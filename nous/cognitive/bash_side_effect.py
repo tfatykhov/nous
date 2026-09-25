@@ -184,6 +184,17 @@ def command_runs(command: str, exit_code: int | None) -> list[tuple[str, list[st
     list, joined by `;` or a newline, ran (the first) or may have (the rest)
     with its success unknown. Certainty never turns absence into a verdict:
     an uncertain command is still reported.
+
+    SCOPE. This reader is not a shell. It resolves control flow only where a
+    CONSTANT decides it -- `if`/`elif`/`while`/`until` on `true`/`false`/`:`,
+    a `case` on a literal word against literal patterns, `false && x` /
+    `true || x`, a function body never called, a heredoc body, a quoted or
+    substituted string, `!`, `&`, `|`, `$(...)`, an unmatched `elif`/`else`
+    arm -- and reports everything else as an uncertain invocation. The
+    verifier turns uncertain into "plausible", which by construction cannot
+    produce a false violation. It does not evaluate non-constant conditions,
+    track variables, or follow data flow; a construction built to fool it
+    (`bash -c "$(base64 -d ...)"`) has unbounded means and is out of scope.
     """
     if len(command) > _MAX_COMMAND_CHARS:
         return None
@@ -195,6 +206,20 @@ def command_runs(command: str, exit_code: int | None) -> list[tuple[str, list[st
 
 _MAX_STRING_DEPTH = 3
 _CONSTANT_COMMANDS = {"true": True, ":": True, "false": False}
+_GLOB = re.compile(r"[*?\[]")  # a case pattern that is not a literal word
+
+
+def _case_arm(frame: list, patterns: list[str]) -> None:
+    """Decide a `case` arm from its patterns: the first literal match runs,
+    every arm after a match never does, a variable word or a glob pattern
+    (other than `*`) is unknown."""
+    if frame[2]:
+        taken: bool | None = False
+    elif frame[3] is None or any(_GLOB.search(p) for p in patterns if p != "*"):
+        taken = None
+    else:
+        taken = "*" in patterns or frame[3] in patterns
+    frame[0], frame[1], frame[4] = taken, taken is False, False
 _LIST_JOINS = frozenset({"&&", "||"})
 _PIPES = frozenset({"|", "|&"})
 # The delimiter after an unquoted `<<` / `<<-`.
@@ -272,14 +297,15 @@ def _invocations(
     tokens = _lex(command)
     if tokens is None:
         return None
-    # lists of pipelines of simple commands: `a; b && c | d`; a list ended by
-    # `&` runs in the background, so its status is never the exit code's. A
-    # command inside `$(...)` / `<(...)` hands its output to the OUTER command,
-    # whose status is what the shell reports: it is parsed into ``nested``
-    # (never certain) while the outer command's words continue after `)`. A
-    # function definition (`name() { ...; }`, `function name { ...; }`) runs
-    # nothing: its body is kept aside and emitted only if the name is called.
-    lists: list[tuple[list[tuple[str | None, list[list[str]]]], bool]] = []
+    # lists of pipelines of simple commands: `a; b && c | d`, each with the
+    # operator that ended it; a list ended by `&` runs in the background, so
+    # its status is never the exit code's. A command inside `$(...)` / `<(...)`
+    # hands its output to the OUTER command, whose status is what the shell
+    # reports: it is parsed into ``nested`` (never certain) while the outer
+    # command's words continue after `)`. A function definition (`name() {
+    # ...; }`, `function name { ...; }`) runs nothing: its body is kept aside
+    # and emitted only if the name is called.
+    lists: list[tuple[list[tuple[str | None, list[list[str]]]], bool, str | None]] = []
     pipelines: list[tuple[str | None, list[list[str]]]] = []
     commands: list[list[str]] = []
     nested: list[list[str]] = []
@@ -315,13 +341,13 @@ def _invocations(
             pipelines.append((join, commands))
         commands, join = [], next_join
 
-    def end_list(unknown: bool = False) -> None:
+    def end_list(unknown: bool = False, terminator: str | None = None) -> None:
         nonlocal pipelines
         end_pipeline(None)
         if in_substitution() or defining:
             return
         if pipelines:
-            lists.append((pipelines, unknown))
+            lists.append((pipelines, unknown, terminator))
         pipelines = []
 
     for tok, is_operator in tokens:
@@ -367,7 +393,7 @@ def _invocations(
                     saved.append((words, attached))  # the outer command resumes after `)`
                     words, attached = [], []
                 else:
-                    end_list()  # a plain subshell `(...)`: its status is its own
+                    end_list(terminator="(")  # a plain subshell `(...)`: its status is its own
                 parens.append(substitution)
             elif op == ")":
                 if skip_close:
@@ -377,11 +403,11 @@ def _invocations(
                     parens.pop()
                     words, attached = saved.pop()
                 else:
-                    end_list()
+                    end_list(terminator=")")  # also a case arm's `pattern)`
                     if parens:
                         parens.pop()
-            else:  # `;`, a newline, `&`: the list ends
-                end_list(unknown=op == "&")
+            else:  # `;`, `;;`, a newline, `&`: the list ends
+                end_list(unknown=op == "&", terminator=op)
     if defining:  # unterminated: the body never closed, so it never ran either
         words, attached, defining = [], [], []
     while parens:  # unbalanced: whatever was inside is uncertain
@@ -427,11 +453,29 @@ def _invocations(
     # `if false; then ...; fi` / `while false; do ...; done`: a branch whose
     # condition is a constant command never runs; one whose condition is a
     # real command may have (its commands stay, uncertain)
-    # per open if/while: [this arm taken, skipping this body, an earlier arm taken]
-    frames: list[list[bool | None]] = []
-    for li, (plist, unknown) in enumerate(lists):
+    # per open if/while: [this arm taken, skipping this body, an earlier arm
+    # taken]; per open case: [.., .., an arm already matched, the word (None
+    # when a variable), a pattern list comes next]. Only a CONSTANT decides:
+    # `if false`, `case x in y)`, `false && ...`; anything else may have run.
+    frames: list[list] = []
+    for li, (plist, unknown, terminator) in enumerate(lists):
         head = plist[0][1][0] if plist and plist[0][1] and plist[0][1][0] else []
         first = head[0] if head else None
+        top = frames[-1] if frames else None
+        if top is not None and len(top) == 5 and top[4]:  # a case arm's pattern: `y)`, `a|b)`
+            _case_arm(top, [cmd[0] for _, cmds in plist for cmd in cmds if cmd])
+            continue  # a pattern runs nothing
+        if first == "case" and "in" in head:
+            at = head.index("in")
+            literal = at == 2 and "$" not in head[1] and "`" not in head[1]
+            frame: list = [None, False, False, head[1] if literal else None, True]
+            frames.append(frame)
+            # the first pattern may sit on the same line: `case x in y) ...`
+            patterns = head[at + 1:] + [cmd[0] for pi, (_, cmds) in enumerate(plist)
+                                        for ci, cmd in enumerate(cmds) if (pi, ci) != (0, 0) and cmd]
+            if patterns:
+                _case_arm(frame, patterns)
+            continue
         if first in ("if", "elif", "while", "until"):
             cond = head[1:]
             negate = first == "until"
@@ -451,8 +495,11 @@ def _invocations(
             frames[-1][1] = frames[-1][0] is False
         elif first == "else" and frames:
             frames[-1][1] = frames[-1][2] or frames[-1][0] is True
-        elif first in ("fi", "done") and frames:
+        elif first in ("fi", "done", "esac") and frames:
             frames.pop()
+        if top is not None and len(top) == 5 and terminator == ";;":
+            top[2] = top[2] or top[0] is True  # this arm matched: the rest never run
+            top[4] = True  # the next list is a pattern
         if any(f[1] for f in frames):
             continue  # inside a body that did not run
         last_list = li == len(lists) - 1
@@ -461,10 +508,16 @@ def _invocations(
         # with no `||` to skip or mask one -- unless it was backgrounded (the
         # shell reports 0 on STARTING a `&` job)
         certain = last_list and exit_code == 0 and not has_or and not unknown
-        for pi, (_, cmds) in enumerate(plist):
+        status: bool | None = None  # the constant status of the last pipeline that ran
+        for pi, (join_op, cmds) in enumerate(plist):
+            if (join_op == "&&" and status is False) or (join_op == "||" and status is True):
+                continue  # short-circuited: `false && git push` never ran the push
             last_pipeline = last_list and pi == len(plist) - 1
             # `! cmd` exits 0 precisely when cmd FAILED: never certain
             negated = any("!" in cmd_words[:_skip_reserved(cmd_words)] for cmd_words in cmds)
+            lone = cmds[0][_skip_reserved(cmds[0]):] if len(cmds) == 1 else []
+            const = _CONSTANT_COMMANDS.get(lone[0]) if len(lone) == 1 else None
+            status = (not const) if const is not None and negated else const
             for ci, cmd_words in enumerate(cmds):
                 # a pipeline's status is its LAST stage's: `git push | true`
                 # exits 0 whatever the push did

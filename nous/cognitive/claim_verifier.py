@@ -368,6 +368,18 @@ def _constant_truth(test: ast.AST) -> bool | None:
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 
 
+def _reachable(body: list[ast.stmt]) -> list[ast.stmt]:
+    """A body up to and including its first unconditional exit: `return`,
+    `raise`, `sys.exit()`/`exit()`/`quit()`/`os._exit()`."""
+    for i, stmt in enumerate(body):
+        if isinstance(stmt, (ast.Return, ast.Raise)):
+            return body[:i + 1]
+        if (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
+                and _dotted(stmt.value.func) in ("sys.exit", "exit", "quit", "os._exit", "os.abort")):
+            return body[:i + 1]
+    return body
+
+
 def _statically_empty(node: ast.AST) -> bool:
     """`[]`, `()`, `{}`, `""`, `range(0)`: an iterable known to be empty."""
     if isinstance(node, (ast.List, ast.Tuple, ast.Set)) and not node.elts:
@@ -383,12 +395,17 @@ def _statically_empty(node: ast.AST) -> bool:
 def _executed(tree: ast.Module) -> list[ast.AST]:
     """The nodes a script RUNS: module-level statements (a class body's own
     statements included), the bodies of the functions and methods they call
-    (transitively), and the taken side of a constant `if`/`while`. A call
-    resolves to ITS definition: a bare `save()` to the module's `save`, an
-    `Obj().save()` to Obj's method, an `x.save()` whose receiver is unknown
-    to every class's `save` -- never to the module function of that name.
-    A function merely defined, a lambda, a method never called, `if
-    False:` -- never."""
+    (transitively), up to an unconditional `return`/`raise`/`exit`, and the
+    taken side of a constant `if`/`while`/`for`. A call resolves to ITS
+    definition: a bare `save()` to the module's `save`, `Obj().save()` or
+    `x = Obj(); x.save()` to Obj's method, `self.save()` to the enclosing
+    class; an ambiguous receiver is withheld. A function merely defined, a
+    lambda, a method never called, `if False:`, an `except` handler -- never.
+
+    SCOPE. This is not an interpreter: it follows constant control flow and
+    literal constructor assignments, nothing that needs a value at runtime.
+    What it cannot decide it reports as uncertain, which the verifier reads
+    as "plausible" -- never a false violation."""
     functions: dict[str, list[ast.AST]] = {}
     methods: dict[str, dict[str, ast.AST]] = {}  # method name -> class name -> def
     classes: set[str] = set()
@@ -402,14 +419,36 @@ def _executed(tree: ast.Module) -> list[ast.AST]:
             for item in node.body:
                 if isinstance(item, _FUNCTIONS):
                     methods.setdefault(item.name, {})[node.name] = item
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Call)
-                and isinstance(node.value.func, ast.Name) and node.value.func.id in classes):
-            instances[node.targets[0].id] = node.value.func.id
+    # `x = Cls(...)` on a LIVE path (an `if False:` never assigns), the last
+    # in document order winning; a call inside a called function may reveal
+    # more, so resolution repeats until the instances settle
+    assigned: dict[str, tuple[int, str]] = {}
+    for _ in range(3):
+        executed, seen = _resolve(tree, functions, methods, classes, instances)
+        for node in executed:
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name) and node.value.func.id in classes):
+                name, at = node.targets[0].id, node.lineno
+                if name not in assigned or at > assigned[name][0]:
+                    assigned[name] = (at, node.value.func.id)
+        settled = {name: cls for name, (_, cls) in assigned.items()}
+        if settled == instances:
+            break
+        instances = settled
+    return executed
+
+
+def _resolve(
+    tree: ast.Module,
+    functions: dict[str, list[ast.AST]],
+    methods: dict[str, dict[str, ast.AST]],
+    classes: set[str],
+    instances: dict[str, str],
+) -> tuple[list[ast.AST], set[str]]:
     executed: list[ast.AST] = []
-    called: set[tuple[str, str]] = set()
-    queue: list[tuple[ast.AST, str | None]] = [(s, None) for s in tree.body]  # node, its `self` class
+    called: set[str] = set()
+    queue: list[tuple[ast.AST, str | None]] = [(s, None) for s in _reachable(tree.body)]  # node, `self`
     while queue:
         node, self_class = queue.pop()
         for sub in _walk_live(node):
@@ -441,8 +480,8 @@ def _executed(tree: ast.Module) -> list[ast.AST]:
             for key, fn, cls in targets:
                 if key not in called:
                     called.add(key)
-                    queue.extend((s, cls) for s in fn.body)  # type: ignore[attr-defined]
-    return executed
+                    queue.extend((s, cls) for s in _reachable(fn.body))  # type: ignore[attr-defined]
+    return executed, called
 
 
 def _walk_live(node: ast.AST):
@@ -470,7 +509,9 @@ def _walk_live(node: ast.AST):
                 stack.extend(current.body)
             stack.extend(current.orelse)
         elif isinstance(current, (ast.Try, getattr(ast, "TryStar", ast.Try))):
-            stack.extend(current.body + current.orelse + current.finalbody)
+            body = _reachable(current.body)
+            raises = any(isinstance(s, ast.Raise) for s in body)
+            stack.extend(body + ([] if raises else current.orelse) + current.finalbody)
         else:
             stack.extend(ast.iter_child_nodes(current))
 

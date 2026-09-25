@@ -835,7 +835,7 @@ def test_a_hash_inside_a_word_or_quotes_is_not_a_comment():
 
 
 @pytest.mark.parametrize("command, level", [
-    ("false && git push origin main || true", "plausible"),  # which branch ran is unknowable
+    ("false && git push origin main || true", "none"),       # a constant decides: the push never ran
     ("git push origin main || echo failed", "plausible"),      # its failure is masked
     ("cd repo && git push origin main", "exact"),
     ("git add -A; git commit -m x; git push origin main", "exact"),
@@ -1318,5 +1318,44 @@ _TWO_SAVES = ("class Noop:\n    def save(self):\n        pass\n"
     ("for item in items:\n    open('/tmp/report.md', 'w')", "exact"),
 ])
 def test_receivers_and_empty_loops_resolve(code, level):
+    result = _verify("It was saved to /tmp/report.md.", Evidence("run_python", {"code": code}))
+    assert result.claims[0].evidence == level
+
+
+# --- codex round 14 ------------------------------------------------------------
+
+
+def test_constant_short_circuits_are_evaluated():
+    assert not _verify("I pushed the fix.", _real_bash("false && git push origin main; true")).verified
+    assert not _verify("I pushed the fix.", _real_bash("true || git push origin main; true")).verified
+    assert not _verify("I pushed the fix.", _real_bash("false && true && git push origin main; true")).verified
+    assert _push_level("false || git push origin main") == "plausible"
+    assert _push_level("true && git push origin main") == "exact"
+    assert _push_level("grep -q x f && git push origin main; true") == "plausible"  # unknown: may have run
+
+
+def test_a_case_arm_runs_only_when_it_matches():
+    assert not _verify("I pushed the fix.", _real_bash("case x in y) git push origin main;; esac; true")).verified
+    first_arm_wins = "case x in x) :;; *) git push origin main;; esac; true"
+    assert not _verify("I pushed the fix.", _real_bash(first_arm_wins)).verified
+    assert _push_level("case x in x) git push origin main;; esac") == "plausible"
+    assert _push_level("case x in y|x) git push origin main;; esac") == "plausible"
+    assert _push_level("case x in *) git push origin main;; esac") == "plausible"
+    assert _push_level("case $mode in deploy) git push origin main;; esac") == "plausible"  # unknown word
+
+
+@pytest.mark.parametrize("code, level", [
+    ("def f():\n    return\n    open('/tmp/report.md', 'w')\nf()", "none"),
+    ("def f():\n    raise RuntimeError()\n    open('/tmp/report.md', 'w')\nf()", "none"),
+    ("import sys\nsys.exit(0)\nopen('/tmp/report.md', 'w')", "none"),
+    ("def f():\n    if x:\n        return\n    open('/tmp/report.md', 'w')\nf()", "exact"),
+    ("try:\n    raise RuntimeError()\nexcept RuntimeError:\n    pass\nelse:\n    open('/tmp/report.md', 'w')", "none"),
+    ("try:\n    x()\nexcept RuntimeError:\n    pass\nelse:\n    open('/tmp/report.md', 'w')", "exact"),
+    (_TWO_SAVES + "x = Noop()\nif False:\n    x = Writer()\nx.save()", "none"),
+    (_TWO_SAVES + "x = Writer()\nx = Noop()\nx.save()", "none"),
+    (_TWO_SAVES + "x = Noop()\nx = Writer()\nx.save()", "exact"),
+    (_TWO_SAVES + "def main():\n    w = Writer()\n    w.save()\nmain()", "exact"),
+])
+def test_termination_and_live_assignments(code, level):
     result = _verify("It was saved to /tmp/report.md.", Evidence("run_python", {"code": code}))
     assert result.claims[0].evidence == level
