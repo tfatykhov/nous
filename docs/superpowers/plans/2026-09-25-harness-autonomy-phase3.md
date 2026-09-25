@@ -1,4 +1,4 @@
-# Harness Autonomy Phase 3 — Park-and-Resume Implementation Plan (v1.4)
+# Harness Autonomy Phase 3 — Park-and-Resume Implementation Plan (v1.5)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12+, SQLAlchemy 2 async (Core `UPDATE … WHERE status IN …`), PostgreSQL 17 (CI) / SQLite (local tests), pydantic v2, A2UI `SurfaceService` + `ActionRouter`, pytest (`asyncio_mode = "auto"`).
 
-**Spec:** `docs/superpowers/specs/2026-09-25-harness-phase3-park-and-resume-design.md` (v2.4, `ff841a9`). Section references below (§3.4 …) are to the spec. Anchors from `main` `1daa004`; branch `feat/harness-phase3-park-and-resume`.
+**Spec:** `docs/superpowers/specs/2026-09-25-harness-phase3-park-and-resume-design.md` (v2.5, `53c179d`). Section references below (§3.4 …) are to the spec. Anchors from `main` `1daa004`; branch `feat/harness-phase3-park-and-resume`.
 
 **Not yet reviewed by anyone:** the dispatch-time admission gate (spec §3.11, Task 11) was added in v2.2 after the database reviewer's last pass. Plan reviewers: look at it for starvation and for its interaction with F064.2 caps and `_recover_stale_ready_nodes`.
 
@@ -172,6 +172,39 @@ async def test_retry_unblocks_a_context_flow_only_successor_and_clears_started_a
     assert send.status == "pending"
     assert send.started_at is None
     assert send.completed_at is None
+
+
+async def test_a_downstream_node_left_ready_by_a_crash_is_recovered(db, store, subtask_mgr):
+    """Why the unblock must clear started_at: _recover_stale_ready_nodes only
+    takes `ready` nodes with started_at IS NULL (spec §3.9, §5)."""
+    from datetime import timedelta
+
+    from sqlalchemy import update as sa_update
+
+    from nous.storage.models import ExecutionDAG
+
+    orch = _orch(store, subtask_mgr)
+    dag = await store.create(_two_node("context_flow"))
+    await store.update_dag_status(dag.id, "running")
+    draft = await _node(store, dag.id, "draft")
+    await store.update_node(draft.id, status="failed", error="boom")
+    await orch._advance_dag(await store.get_dag(dag.id))
+    send = await _node(store, dag.id, "send")
+    await store.update_node(send.id, started_at=datetime.now(UTC))
+    await orch.retry_node(dag.id, "draft")
+    # Crash between the dispatcher's `ready` write and the launch.
+    await store.update_node(send.id, status="ready")
+    async with db.session() as session:
+        await session.execute(
+            sa_update(ExecutionDAG)
+            .where(ExecutionDAG.id == dag.id)
+            .values(started_at=datetime.now(UTC) - timedelta(seconds=400))
+        )
+        await session.commit()
+
+    await orch._recover_stale_ready_nodes(await store.get_dag(dag.id))
+
+    assert (await _node(store, dag.id, "send")).status == "pending"
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1030,6 +1063,12 @@ def test_bad_approval_nodes_are_rejected(overrides, match):
         _approval(**overrides)
 
 
+def test_empty_values_count_as_not_given():
+    """LLM-authored JSON emits [] / 0 for "none"; that must not fail the DAG."""
+    assert _approval(tools=[], stall_timeout_seconds=0, fix_actions=[]).tools == []
+    assert _send(options=[]).options == []
+
+
 def test_bad_option_id_is_rejected():
     with pytest.raises(ValidationError):
         _approval(options=[{"id": "Send It", "label": "x", "outcome": "proceed"}, _OPTIONS[1]])
@@ -1188,14 +1227,15 @@ class ApprovalOption(BaseModel):
             "answer_timeout_seconds": self.answer_timeout_seconds,
         }
         if self.type != DAGNodeType.approval:
-            given = sorted(k for k, v in approval_only.items() if v is not None)
+            given = sorted(k for k, v in approval_only.items() if v)
             if given:
                 raise ValueError(
                     f"Node '{self.name}': {given} are allowed only on approval nodes"
                 )
             return self
-        # dag_create passes every one of these as n.get(...), so None is
-        # "not given"; a real value would be silently meaningless — reject it.
+        # dag_create passes every one of these as n.get(...), and LLM-authored
+        # JSON routinely emits [] / "" / 0 for "none" — all falsy values count
+        # as "not given"; a real value would be silently meaningless, so reject it.
         runs_nothing = {
             "tools": self.tools, "frame_type": self.frame_type, "model": self.model,
             "timeout_seconds": self.timeout_seconds,
@@ -1206,7 +1246,7 @@ class ApprovalOption(BaseModel):
             "max_check_attempts": self.max_check_attempts,
             "parent_node": self.parent_node, "fix_actions": self.fix_actions,
         }
-        given = sorted(k for k, v in runs_nothing.items() if v is not None)
+        given = sorted(k for k, v in runs_nothing.items() if v)
         if given:
             raise ValueError(
                 f"Approval node '{self.name}' does not take {given}: it runs nothing"
@@ -1694,7 +1734,7 @@ def test_stopped_at_approval_and_its_summary():
 
 def test_approval_lines():
     assert ap.approval_line(_node(status="completed", answer="send", answer_source="companion", answered_at=AT)) == (
-        "approve: 'Send it' in the companion at 2026-09-25 12:00 UTC"
+        "approve: approved — 'Send it' in the companion at 2026-09-25 12:00 UTC"
     )
     assert ap.approval_line(_node(status="failed", answer="hold", answer_source="deadline")) == (
         "approve: no answer by 2026-09-25 12:00 UTC; default 'Don't send' applied"
@@ -1917,7 +1957,12 @@ def approval_line(node: Any) -> str:
     spec = node.approval_spec or {}
     label = label_of(spec, node.answer)
     if node.answer_source == "companion":
-        return f"{node.name}: '{label}' in the companion at {fmt_time(node.answered_at)}"
+        outcome = (option_by_id(spec, node.answer) or {}).get("outcome")
+        verdict = "approved" if outcome == "proceed" else "declined"
+        return (
+            f"{node.name}: {verdict} — '{label}' in the companion at "
+            f"{fmt_time(node.answered_at)}"
+        )
     if node.answer_source == "deadline":
         return f"{node.name}: no answer by {fmt_time(node.answer_deadline)}; default '{label}' applied"
     if node.status == "awaiting_input":
@@ -2484,6 +2529,10 @@ async def test_launch_parks_pushes_one_card_and_links_it(store, subtask_mgr, sur
     assert [o["label"] for o in data["options"]] == ["Send it — continues", "Don't send — stops here"]
     assert data["recommendation"] == ""
     assert len(surfaces.pings) == 1 and "No answer by" in surfaces.pings[0]
+    # I3: the card outlives the node's deadline — the card never decides.
+    deadline = node.answer_deadline
+    deadline = deadline.replace(tzinfo=UTC) if deadline.tzinfo is None else deadline
+    assert datetime.now(UTC) + card["built"].expires_in > deadline
 
 
 async def test_the_card_carries_the_draft(store, subtask_mgr, surfaces):
@@ -3495,7 +3544,7 @@ git commit -q -F <msgfile>   # "feat(dag): cancels and budget close approval car
 ### Task 11: Dispatch-time admission for resumed DAGs
 
 **Files:**
-- Modify: `nous/dag/orchestrator.py` (`_is_working`, `_costs_nothing`, `held_reason`, `tick`, `_advance_dag(..., may_start=True)`)
+- Modify: `nous/dag/orchestrator.py` (`_is_working`, `_has_approval`, `_costs_nothing`, `held_reason`, `tick`, `_advance_dag(..., may_start=True)`)
 - Test: `tests/test_dag_approval.py`
 
 **Interfaces:**
@@ -3569,6 +3618,41 @@ async def test_a_held_dag_still_asks_its_next_question(store, subtask_mgr, surfa
     assert (await _node(store, dag.id, "approve2")).status == "awaiting_input"
 
 
+async def test_a_dag_without_an_approval_is_never_held(store, subtask_mgr, surfaces):
+    """Even while the gate runs (an approval DAG exists) and every slot is
+    taken, a plain DAG between waves dispatches as it always has."""
+    orch = _orch(store, subtask_mgr, surfaces)
+    await _parked(store, orch)  # an approval DAG exists, so the gate runs
+    late = await _working_dag(store)
+    await store.update_dag_status(late.id, "completed")  # outside admission's count for now
+    plain = await store.create(
+        DAGCreateRequest(
+            name="plain",
+            nodes=[
+                DAGNodeSpec(name="a", type=DAGNodeType.gate),
+                DAGNodeSpec(name="b", type=DAGNodeType.subtask, instructions="b"),
+            ],
+            edges=[DAGEdgeSpec(from_node="a", to_node="b")],
+        )
+    )
+    for _ in range(MAX_ACTIVE_DAGS - 1):
+        await _working_dag(store)
+    await store.update_dag_status(late.id, "running")  # a retry reactivates it past the limit
+    await store.update_dag_status(plain.id, "running")
+    await store.update_node(next(n for n in plain.nodes if n.name == "a").id, status="completed")
+
+    await orch.tick()  # MAX_ACTIVE_DAGS DAGs are working; 'plain' is between waves
+
+    assert (await _node(store, plain.id, "b")).status == "running"
+
+
+def test_a_dag_polling_a_check_is_not_working():
+    from nous.dag.orchestrator import _is_working
+
+    assert not _is_working(SimpleNamespace(nodes=[SimpleNamespace(status="awaiting_check")]))
+    assert _is_working(SimpleNamespace(nodes=[SimpleNamespace(status="running")]))
+
+
 async def test_the_gate_is_inert_without_approval_nodes(store, subtask_mgr, surfaces, monkeypatch):
     orch = _orch(store, subtask_mgr, surfaces)
     for _ in range(3):
@@ -3594,14 +3678,21 @@ Expected: FAIL — the resumed DAG's `send` launches on the first tick; `_advanc
 Import `MAX_ACTIVE_DAGS` from `nous.dag.store`. Module level:
 
 ```python
-_WORKING_NODE_STATUSES = frozenset({"ready", "running", "awaiting_check"})
+# awaiting_check holds no subtask-queue slot — the resource the gate protects —
+# so a DAG polling a check does not count (spec §3.11).
+_WORKING_NODE_STATUSES = frozenset({"ready", "running"})
 
 
 def _is_working(dag: ExecutionDAG) -> bool:
-    """A node ready, running or awaiting_check. The counter rule (§3.11): a
-    parked approval or an instant gate/callback leaves a DAG NOT working, so
-    it never takes a slot."""
+    """A node ready or running. The counter rule (§3.11): a parked approval or
+    an instant gate/callback leaves a DAG NOT working, so it takes no slot."""
     return any(n.status in _WORKING_NODE_STATUSES for n in dag.nodes)
+
+
+def _has_approval(dag: ExecutionDAG) -> bool:
+    """Only a DAG with an approval node can resume from parking — the only
+    DAGs the gate ever holds (§3.11)."""
+    return any(n.node_type == "approval" for n in dag.nodes)
 ```
 
 Constructor additions:
@@ -3649,13 +3740,21 @@ Methods:
             # pass runs only when a loaded DAG has an approval node — without
             # one, creation already keeps the working set at the limit, and
             # every DAG dispatches exactly as before.
-            gated = any(n.node_type == "approval" for d in dags for n in d.nodes)
+            gated = any(_has_approval(d) for d in dags)
             working = sum(1 for d in dags if _is_working(d)) if gated else 0
             self._working_count = working
             self._held_this_tick = set()
             for dag in dags:
                 was_working = _is_working(dag)
-                may_start = not gated or was_working or working < MAX_ACTIVE_DAGS
+                # Only a DAG with an approval node is ever held: a DAG without
+                # one keeps today's scheduling even while another waits on a
+                # person (between waves, after a deferral, after a retry).
+                may_start = (
+                    not gated
+                    or was_working
+                    or not _has_approval(dag)
+                    or working < MAX_ACTIVE_DAGS
+                )
                 try:
                     await self._advance_dag(dag, may_start=may_start)
                 except Exception:
@@ -3690,8 +3789,8 @@ Methods:
             if held:
                 self._held_this_tick.add(dag.id)
                 logger.info(
-                    "DAG %s holds %d ready node(s): %d DAGs are already working",
-                    dag.id, len(held), MAX_ACTIVE_DAGS,
+                    "DAG %s holds %d ready node(s): %d of %d working slots in use",
+                    dag.id, len(held), self._working_count, MAX_ACTIVE_DAGS,
                 )
         await self._dispatch_ready_nodes(dag, ready_nodes)
 ```
@@ -3746,6 +3845,14 @@ async def test_the_companion_can_re_ask_a_declined_question(store, subtask_mgr, 
     dag, first = await _stopped(store, orch, source="companion")
 
     await orch.retry_node(dag.id, "approve", allow_declined=True)
+
+    # The retry itself archives and clears the answer: a retried node that
+    # never parks (cancelled, or failed by the deferral cap) keeps no stale
+    # "declined".
+    reset = await _node(store, dag.id, "approve")
+    assert reset.answer_source is None and reset.answer is None
+    assert [h["answer_source"] for h in reset.answer_history] == ["companion"]
+
     await orch._advance_dag(await store.get_dag(dag.id))
 
     node = await _node(store, dag.id, "approve")
@@ -3786,6 +3893,21 @@ Expected: FAIL — `retry_node()` got an unexpected keyword argument `allow_decl
             and not allow_declined
         ):
             raise ValueError(declined_retry_refusal(node_name))
+```
+
+Then, where Task 2 builds `primary`: build the reset dict as `reset = {…}` first, and for an approval node archive and clear the answer in the same write (import `history_entry`; spec §3.10 — a retried node that never parks, being cancelled or failed by the deferral cap, must not keep a stale "declined"; the park write then finds nothing to archive, so the entry is not duplicated):
+
+```python
+        if node.node_type == "approval":
+            previous = history_entry(node)
+            reset.update(
+                answer=None, answered_by=None, answered_at=None, answer_source=None,
+                surface_id=None,
+                answer_history=[*(node.answer_history or []), previous]
+                if previous is not None
+                else node.answer_history,
+            )
+        primary = (node.id, reset, frozenset({"failed"}))
 ```
 
 `nous/a2ui/actions.py`, `_dag_verb`: `await orchestrator.retry_node(UUID(dag_id), node, allow_declined=True)` with the comment `# Harness Phase 3 §3.10: a person tapping Retry may re-ask their own "no".`
@@ -4071,7 +4193,7 @@ def test_template_for_a_dag_stopped_at_an_approval():
     text = DAGResultDelivery(Settings(_env_file=None), agent_id="t", bus=None, runner=None).build_template(dag)
 
     assert text.splitlines()[0].startswith("DAG 'mail' stopped at an approval")
-    assert "Approvals:\n  approve: 'Don't send' in the companion at 2026-09-25 12:00 UTC" in text
+    assert "Approvals:\n  approve: declined — 'Don't send' in the companion at 2026-09-25 12:00 UTC" in text
     assert "Not run:\n  [blocked] send" in text
     assert "Problems:" not in text and "[failed] approve" not in text
 ```
@@ -4634,6 +4756,33 @@ async def test_a_stop_tap_stops_the_dag(world):
     assert final.status == "failed" and final.result_summary.startswith("Stopped at approval")
 
 
+async def test_a_tap_between_push_and_link_is_recorded(world, monkeypatch):
+    """The v1 P1, end to end: a REAL live card, not yet linked to its node,
+    is tapped through the real router; the dedup key finds the node."""
+    real_push = world.orch._surface_service.push_built
+    taps: list[tuple] = []
+
+    async def push_then_tap(built, **kwargs):
+        surface_id = await real_push(built, **kwargs)
+        if not taps:
+            taps.append(await _tap(world, surface_id, "send"))
+        return surface_id
+
+    monkeypatch.setattr(world.orch._surface_service, "push_built", push_then_tap)
+    dag = await world.store.create(_request())
+
+    await world.orch.start_dag(dag.id)
+
+    assert taps[0][0] == 200
+    node = await _node(world, dag.id, "approve")
+    assert (node.status, node.answer) == ("completed", "send")
+    async with world.db.session() as session:
+        card = (
+            await session.execute(select(A2uiSurface).where(A2uiSurface.surface_id == node.surface_id))
+        ).scalar_one()
+    assert card.status == "resolved"
+
+
 async def test_a_second_tap_is_refused_and_the_card_stays_up_until_the_sweep(world):
     dag, node = await _started(world)
     await world.orch.answer_node(node.id, "send", source="companion", actor="other-device", surface_id=node.surface_id)
@@ -4655,7 +4804,7 @@ async def test_a_second_tap_is_refused_and_the_card_stays_up_until_the_sweep(wor
 - [ ] **Step 2: Run** — locally these are skipped (SQLite). Confirm they collect:
 
 Run: `UV_PROJECT_ENVIRONMENT=E:/Projects/nous/.venv uv run --frozen pytest tests/test_dag_approval_e2e.py -q`
-Expected: `3 skipped`. They run in CI; if a Postgres is available locally, `NOUS_TEST_DB=postgres` runs them.
+Expected: `4 skipped`. They run in CI; if a Postgres is available locally, `NOUS_TEST_DB=postgres` runs them.
 
 - [ ] **Step 3: Commit**
 
