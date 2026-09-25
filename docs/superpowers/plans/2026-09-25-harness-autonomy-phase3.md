@@ -216,7 +216,7 @@ git commit -q -F <msgfile>   # "fix(dag): one predecessor-edge set for readiness
 
 **Files:**
 - Modify: `nous/dag/store.py` (constants; new `transition_node`; `apply_retry`)
-- Modify: `nous/dag/orchestrator.py` (module constants; `_mark_ready_and_launch`; `_cancel_one`; `cancel_dag`; `_propagate_failures`; `retry_node`; `_dispatch_ready_nodes` incl. the F064.2 demotion; `_defer_node`; the `running` writes in `_launch_subtask_node` and `_launch_check_node`)
+- Modify: `nous/dag/orchestrator.py` (module constants; `_mark_ready_and_launch`; `_cancel_one`; `cancel_dag`; `_propagate_failures`; `retry_node`; `_dispatch_ready_nodes` incl. the F064.2 demotion; `_defer_node`; the `running` writes in `_launch_subtask_node` and `_launch_check_node`; new `_finish_launch` for the launch path's terminal writes, incl. the gate auto-pass in `_launch_node`)
 - Test: `tests/test_dag_approval_prereqs.py`; update every caller of `apply_retry` found by `grep -rn "apply_retry" nous tests`
 
 **Interfaces:**
@@ -640,6 +640,22 @@ In `_launch_check_node`, replace the `update_node(node.id, status="running", che
                     logger.warning("Could not disable orphaned check %s — the sweep retries", check_name)
                 return
 ```
+
+The launch path's remaining terminal writes — the gate auto-pass in `_launch_node`, the inert-callback completion and the two failure writes in `_launch_subtask_node` (`"No subtask manager available"` and the generic `except Exception`), and the two in `_launch_check_node` (`"No dynamic check loader available"` and its `except Exception`) — go through one helper, so a `cancel_dag` landing after the conditional `ready` write can no longer be turned into `completed`/`failed` (database plan review; the Global Constraint then holds without exceptions):
+
+```python
+    async def _finish_launch(self, node: DAGNode, *, status: str, **values: object) -> bool:
+        """A launch-path terminal write (an instant completion or a launch
+        failure), conditional on the node still being dispatchable (§3.3)."""
+        if await self._store.transition_node(
+            node.id, from_statuses=_DISPATCHABLE, status=status, **values
+        ):
+            node.status = status
+            return True
+        return False
+```
+
+Each site replaces its `await self._store.update_node(node.id, status=…, …)` + `node.status = …` pair with `await self._finish_launch(node, status=…, …)`, keeping its other values (`result`, `error`, `started_at`, `completed_at`) and its logging.
 
 The F064.2 cap demotion in `_dispatch_ready_nodes` (`if node.status == "ready": await self._store.update_node(node.id, status="pending") …`) becomes:
 
