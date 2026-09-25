@@ -665,7 +665,8 @@ def _register_phase2_handlers(router: ActionRouter) -> None:
                 offered = {n["name"] for n in (ctx.surface.data_model or {}).get("nodes", [])}
                 if node not in offered:
                     return ActionResult(ok=False, message=f"node {node!r} is not on this surface")
-                await orchestrator.retry_node(UUID(dag_id), node)
+                # Harness Phase 3 §3.10: a person tapping Retry may re-ask their own "no".
+                await orchestrator.retry_node(UUID(dag_id), node, allow_declined=True)
                 return ActionResult(
                     message=f"retrying {node}",
                     data_patches=[("/banner", f"Retry requested for {node}.")],

@@ -68,6 +68,7 @@ from nous.dag.approval import (
     as_utc,
     build_card_summary,
     button_label,
+    declined_retry_refusal,
     history_entry,
     label_of,
     node_id_from_dedup_key,
@@ -778,7 +779,9 @@ class DAGOrchestrator:
             dag_id, "cancelled", result_summary=reason
         )
 
-    async def retry_node(self, dag_id: UUID, node_name: str) -> None:
+    async def retry_node(
+        self, dag_id: UUID, node_name: str, *, allow_declined: bool = False
+    ) -> None:
         """Reset a failed node to ready for re-execution."""
         dag = await self._store.get_dag(dag_id)
         if dag is None:
@@ -789,6 +792,15 @@ class DAGOrchestrator:
             raise ValueError(f"Node '{node_name}' not found in DAG {dag_id}")
         if node.status != "failed":
             raise ValueError(f"Node '{node_name}' is {node.status}, expected failed")
+        # Harness Phase 3 §3.10: a person's "no" stays a "no". The agent may
+        # re-ask a question nobody answered (deadline), never one a person
+        # declined — only the companion's dag.retry passes allow_declined.
+        if (
+            node.node_type == "approval"
+            and node.answer_source == "companion"
+            and not allow_declined
+        ):
+            raise ValueError(declined_retry_refusal(node_name))
         # F087: only 'failed'/'partial' DAGs are reactivated below, and
         # get_active_dags() serves only pending/running — so retrying a node
         # in a CANCELLED DAG used to report success while leaving the node
@@ -827,30 +839,40 @@ class DAGOrchestrator:
         # Harness Phase 3 §3.3: every write is conditional on the status read
         # here — the retried node from {'failed'}, each unblock from
         # {'blocked','cancelled'} — and a lost primary rolls the retry back.
-        primary: tuple[UUID, dict, frozenset[str]] = (
-                node.id,
-                {
-                    # was "ready" — _find_ready_nodes only checks "pending"
-                    "status": "pending",
-                    "error": None,
-                    "result": None,
-                    "subtask_id": None,
-                    "check_name": None,
-                    "started_at": None,
-                    "completed_at": None,
-                    "check_attempts": 0,
-                    "last_check_at": None,
-                    "awaiting_check_at": None,
-                    # @codex P2 on b3c78c3: the token claim is PER ATTEMPT.
-                    # Leaving it set means the replacement subtask's terminal
-                    # sync loses the claim race against its own predecessor and
-                    # silently adds none of the retry's usage — permanently
-                    # under-reporting tokens_consumed and letting later waves
-                    # run past an enforced budget.
-                    "tokens_counted": False,
-                },
-                frozenset({"failed"}),
-        )
+        reset: dict = {
+            # was "ready" — _find_ready_nodes only checks "pending"
+            "status": "pending",
+            "error": None,
+            "result": None,
+            "subtask_id": None,
+            "check_name": None,
+            "started_at": None,
+            "completed_at": None,
+            "check_attempts": 0,
+            "last_check_at": None,
+            "awaiting_check_at": None,
+            # @codex P2 on b3c78c3: the token claim is PER ATTEMPT.
+            # Leaving it set means the replacement subtask's terminal
+            # sync loses the claim race against its own predecessor and
+            # silently adds none of the retry's usage — permanently
+            # under-reporting tokens_consumed and letting later waves
+            # run past an enforced budget.
+            "tokens_counted": False,
+        }
+        if node.node_type == "approval":
+            # Harness Phase 3 §3.10: archive and clear the answer HERE, so a
+            # retried node that never parks (cancelled, or failed by the
+            # deferral cap) keeps no stale "declined"; the park write then
+            # finds nothing to archive, so the entry is not duplicated.
+            previous = history_entry(node)
+            reset.update(
+                answer=None, answered_by=None, answered_at=None, answer_source=None,
+                surface_id=None,
+                answer_history=[*(node.answer_history or []), previous]
+                if previous is not None
+                else node.answer_history,
+            )
+        primary: tuple[UUID, dict, frozenset[str]] = (node.id, reset, frozenset({"failed"}))
         unblocks: list[tuple[UUID, dict, frozenset[str]]] = []
 
         # Selectively unblock only nodes downstream of the retried node

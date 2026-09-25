@@ -659,3 +659,58 @@ async def test_the_gate_is_inert_without_approval_nodes(store, subtask_mgr, surf
     await orch.tick()
 
     assert calls == [True, True, True]
+
+
+async def _stopped(store, orch, *, source: str):
+    dag, node = await _parked(store, orch)
+    if source == "companion":
+        await orch.answer_node(node.id, "hold", source="companion", actor=None, surface_id=node.surface_id)
+    else:
+        await store.update_node(node.id, answer_deadline=datetime.now(UTC) - timedelta(seconds=1))
+    await orch._advance_dag(await store.get_dag(dag.id))
+    assert (await store.get_dag(dag.id)).status == "failed"
+    return dag, node
+
+
+async def test_the_agent_cannot_re_ask_a_declined_question(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag, _ = await _stopped(store, orch, source="companion")
+
+    with pytest.raises(ValueError, match="dag_monitor"):
+        await orch.retry_node(dag.id, "approve")
+
+
+async def test_the_companion_can_re_ask_a_declined_question(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag, first = await _stopped(store, orch, source="companion")
+
+    await orch.retry_node(dag.id, "approve", allow_declined=True)
+
+    # The retry itself archives and clears the answer: a retried node that
+    # never parks (cancelled, or failed by the deferral cap) keeps no stale
+    # "declined".
+    reset = await _node(store, dag.id, "approve")
+    assert reset.answer_source is None and reset.answer is None
+    assert [h["answer_source"] for h in reset.answer_history] == ["companion"]
+
+    await orch._advance_dag(await store.get_dag(dag.id))
+
+    node = await _node(store, dag.id, "approve")
+    assert node.status == "awaiting_input"
+    assert node.surface_id != first.surface_id
+    assert surfaces.cards[first.surface_id]["status"] == "expired"  # step 0 retired it
+    assert [h["answer_source"] for h in node.answer_history] == ["companion"]
+    assert (await _node(store, dag.id, "send")).status == "pending"
+
+
+async def test_the_agent_may_re_ask_a_question_nobody_answered(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag, _ = await _stopped(store, orch, source="deadline")
+
+    await orch.retry_node(dag.id, "approve")
+    await orch._advance_dag(await store.get_dag(dag.id))
+
+    node = await _node(store, dag.id, "approve")
+    assert node.status == "awaiting_input"
+    assert [h["answer_source"] for h in node.answer_history] == ["deadline"]
+    assert len(surfaces.pings) == 2
