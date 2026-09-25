@@ -112,7 +112,7 @@
     sheetOpen = true;
   }
 
-  function answerLine(a: NonNullable<DagActiveNode['approval']>): string {
+  function answerLine(a: NonNullable<DagActiveNode['approval']>, status: string): string {
     if (a.answer_source === 'companion') {
       const opt = a.options.find((o) => o.id === a.answer);
       const verdict = opt?.outcome === 'proceed' ? 'approved' : 'declined';
@@ -121,7 +121,10 @@
     if (a.answer_source === 'deadline') {
       return `no answer by ${fmtUtc(a.deadline)}; default '${a.answer_label}' applied`;
     }
-    return 'not answered yet';
+    // Every approval node carries its view, asked or not: say where it is.
+    if (status === 'awaiting_input') return 'not answered yet';
+    if (status === 'pending' || status === 'ready') return 'not asked yet';
+    return `not answered (${status})`;
   }
 
   function attemptLine(t: NonNullable<DagActiveNode['approval']>['attempts'][number]): string {
@@ -477,7 +480,9 @@
         <span class="status-badge" style={badgeStyle(statusColor(n.status))}>{n.status}</span>
       </div>
       {#if fullNode(n.id)?.approval}
-        {@const a = fullNode(n.id)!.approval!}
+        {@const live = fullNode(n.id)!}
+        {@const a = live.approval!}
+        {@const waiting = live.status === 'awaiting_input'}
         <div class="detail-section">
           <div class="detail-label">Question</div>
           <div class="detail-text q-question">{a.question}</div>
@@ -498,15 +503,15 @@
         </div>
         <dl class="approval-dl">
           <div><dt>Asked</dt><dd>{fmtUtc(a.asked_at)}</dd></div>
-          <div><dt>Answer by</dt><dd>{fmtUtc(a.deadline)}{#if !a.answer} ({relUntil(a.deadline)}){/if}</dd></div>
+          <div><dt>Answer by</dt><dd>{fmtUtc(a.deadline)}{#if waiting && !a.answer && a.deadline} ({relUntil(a.deadline)}){/if}</dd></div>
           <div><dt>If no answer</dt><dd>'{a.default_label}' — the DAG stops here</dd></div>
-          <div><dt>Answer</dt><dd>{answerLine(a)}</dd></div>
+          <div><dt>Answer</dt><dd>{answerLine(a, live.status)}</dd></div>
         </dl>
         {#if a.card_url}
           <a class="card-link" href={a.card_url} target="_blank" rel="noopener">Open card in companion</a>
         {:else if a.card_error}
           <p class="q-error">{a.card_error}</p>
-        {:else if !a.answer}
+        {:else if waiting && !a.answer}
           <p class="small muted">Card being delivered…</p>
         {/if}
         {#if a.attempts.length}

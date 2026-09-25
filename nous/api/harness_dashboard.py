@@ -53,12 +53,16 @@ def _refusal_code(status: str, summary: str | None) -> str | None:
 
 
 def _is_tombstone(row: Any) -> bool:
-    """Retention keeps a key-holding row but clears what it held (ledger_store.prune)."""
+    """Retention keeps a key-holding row but clears what it held (ledger_store.prune).
+
+    Decided by the empty ``key_args`` alone: a keyed send always stores its
+    recipients or chat (durable_key_args), so only retention empties them —
+    while ``result_summary`` is written again by the Ledger's own release
+    statements (concat_ws), so it cannot tell a trimmed row apart."""
     return bool(
         row.idempotency_key
         and row.status in ("success", "unknown")
         and not row.key_args
-        and row.result_summary is None
     )
 
 
@@ -286,11 +290,14 @@ PATTERN_CAP = 20
 
 def _claims_measured_from(evidence_since: datetime | None, first_claim: datetime | None,
                           legacy: dict[str, int]) -> datetime | None:
-    """When claim evidence levels start: the first post-2c event in the window,
-    or — with no legacy events in view — the first claim event ever."""
-    if evidence_since is not None:
+    """When claim evidence levels are known from. Every turn writes a claim
+    event, so with no pre-2c event in the window every turn in it carried
+    evidence levels (a day with none had no turns): measured since the first
+    claim event ever. With pre-2c events in view, only from the first
+    post-2c one."""
+    if legacy["events"]:
         return evidence_since
-    return None if legacy["events"] else as_utc(first_claim)
+    return as_utc(first_claim)
 
 
 def _blank_unmeasured(days: dict[str, dict], persisted: bool,

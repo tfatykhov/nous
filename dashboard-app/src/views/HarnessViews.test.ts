@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import Harness from './Harness.svelte';
 import Ledger from './Ledger.svelte';
@@ -95,6 +95,31 @@ const DAG = {
   phase2_signals: {},
 };
 
+const approval = (over: Record<string, unknown> = {}) => ({
+  question: 'Send the drafted weekly report?',
+  options: [{ id: 'send', label: 'Send it', outcome: 'proceed' }, { id: 'hold', label: "Don't send", outcome: 'stop' }],
+  default_option: 'hold', default_label: "Don't send", asked_at: null, deadline: null, answer: null,
+  answer_label: null, answer_source: null, answered_by: null, answered_at: null, card_url: null, card_error: null,
+  card_summary: 'Send the drafted weekly report?', reviewing: [], attempts: [], ...over,
+});
+const node = (id: string, name: string, status: string, over: Record<string, unknown> = {}) => ({
+  id, name, description: '', node_type: 'approval', wave: 1, status, result: '', error: '', tokens_used: 0,
+  started_at: null, completed_at: null, ...over,
+});
+const DAG_APPROVALS = {
+  ...DAG,
+  active_dags: [{
+    ...DAG.active_dags[0],
+    nodes: [
+      node('n1', 'approve-send', 'awaiting_input',
+        { approval: approval({ asked_at: '2026-09-25T10:00:00+00:00', deadline: '2099-01-01T12:00:00+00:00' }) }),
+      node('n2', 'approve-later', 'pending', { wave: 2, approval: approval() }),
+    ],
+  }],
+};
+
+let dag: Record<string, unknown> = DAG;
+
 let harnessPersisted = true;
 
 function install() {
@@ -104,7 +129,7 @@ function install() {
     const harness = HARNESS(harnessPersisted);
     const body = url.startsWith('/dashboard/execution') ? execution
       : url.startsWith('/dashboard/harness') ? (harnessPatterns ? { ...harness, patterns: harnessPatterns } : harness)
-      : url.startsWith('/dashboard/dag') ? DAG
+      : url.startsWith('/dashboard/dag') ? dag
       : url.startsWith('/dashboard/attention') ? { ...ATTENTION, ...attention }
       : url.startsWith('/status') ? STATUS
       : null;
@@ -112,15 +137,23 @@ function install() {
     return { ok: true, status: 200, json: async () => body } as Response;
   }));
   vi.stubGlobal('Chart', class { destroy() {} update() {} data = {}; options = {}; });
+  // d3 is a CDN global in the app: a chainable no-op stands in for it.
+  const d3: any = new Proxy(function () {}, {
+    get: (_t, k) => (k === Symbol.toPrimitive ? () => '' : k === 'then' ? undefined : d3),
+    apply: () => d3,
+  });
+  vi.stubGlobal('d3', d3);
 }
 
 describe('harness dashboard views', () => {
   beforeEach(() => {
-    harnessPersisted = true; execution = EXECUTION; olderFails = false; harnessPatterns = null; attention = {};
+    harnessPersisted = true; execution = EXECUTION; dag = DAG; olderFails = false; harnessPatterns = null; attention = {};
     attentionOverride.set({});
     install();
   });
-  afterEach(() => { vi.unstubAllGlobals(); });
+  // globals: false (vite.config.ts) — testing-library cannot register its
+  // own cleanup, so every render would otherwise stay mounted in <body>.
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
   it('Harness says what enforce would refuse, from the numbers', async () => {
     render(Harness);
@@ -191,6 +224,19 @@ describe('harness dashboard views', () => {
     await waitFor(() => expect(container.textContent).toContain('Ledger persistence is off'));
     expect(container.textContent).not.toContain('no sends in doubt');
     expect(container.textContent).not.toContain('Calls (24 h)');
+  });
+
+  it('DAG node sheet says a card is on its way only for a question actually waiting', async () => {
+    dag = DAG_APPROVALS;
+    const { container } = render(DagView);
+    await fireEvent.click(await screen.findByRole('button', { name: 'View Graph' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /approve-send/ }));
+    expect(await screen.findByText('Card being delivered…')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: /approve-later/ }));
+    await waitFor(() => expect(container.ownerDocument.body.textContent).toContain('not asked yet'));
+    const sheet = container.ownerDocument.body.textContent ?? '';
+    expect(sheet).not.toContain('Card being delivered');
+    expect(sheet).not.toContain('()');
   });
 
   it('DAG view lists the question, explains an undelivered card, and names a deadline stop neutrally', async () => {

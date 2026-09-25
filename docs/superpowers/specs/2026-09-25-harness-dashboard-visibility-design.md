@@ -13,6 +13,9 @@ A reviewer probed the implementation (b85e148) against snapshots; these amend ev
 - `blocked` (DAG) moves `#dc2626` → `#f25c5c`: 3.55:1 on its own badge tint failed AA at 11px. `status.test.ts` now checks every status colour at 4.5:1 against its tint over `--surface`.
 - Ledger "Load older" reports a failed page ("Could not load older rows — try again.") and resumes polling when no older rows are on screen; loaded older rows stay put and the button retries.
 - Top-pattern rows are keyed by `(rule, mode, context, tool, violation)` — the backend's own grouping — not by index, so an open disclosure stays with its row when a poll re-sorts the list.
+- **Claims** count from the first claim event EVER when no pre-2c event is in the window (every turn writes one, so a quiet day had no turns); only with pre-2c events in view do they start at the first post-2c one.
+- **Tombstone** = a keyed `success`/`unknown` row with empty `key_args` — not also a NULL summary: the Ledger's own release statements write the summary back, and a confirmed tombstone must still read "details removed by retention".
+- The node sheet says "Card being delivered…", and shows the countdown, only for a step actually `awaiting_input`; an approval not yet reached reads "not asked yet", an ended one "not answered (<status>)".
 
 ## 0.1 v2.1 — the v2 re-review fold (devil APPROVE; architecture and UX APPROVE WITH REVISIONS)
 

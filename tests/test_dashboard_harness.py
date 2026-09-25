@@ -318,6 +318,15 @@ async def test_tombstones_are_flagged_and_other_agents_never_appear(db, agent_id
     assert len(data["rows"]) == 1 and data["rows"][0]["tombstone"] is True
 
 
+async def test_a_confirmed_tombstone_is_still_a_tombstone(db, agent_id):
+    # The Ledger's "they got it" statement appends to result_summary; the
+    # row's recipients are still gone, so it must still read as trimmed.
+    await _row(db, agent_id, tool="send_email", effect="external", status="success", key="s:1",
+               key_args={}, summary="confirmed delivered by operator")
+
+    assert (await _exec(db, agent_id))["rows"][0]["tombstone"] is True
+
+
 async def test_a_bad_window_or_filter_is_refused(db, agent_id):
     for bad in ({"window": "1y"}, {"context": "heartbeat"}, {"status": "done"}, {"effect": "none!"},
                 {"limit": 0}, {"limit": 201}, {"before": "garbage"}, {"q": "x" * 101}):
@@ -579,6 +588,18 @@ async def test_unmeasured_days_are_gaps_not_zeros(db, agent_id):
     assert data["rules"]["claims"]["legacy"] == {"events": 1, "violations": 0 + 1}
     assert data["rules"]["claims"]["turns_with_claims"] == 0  # claims: [] is NOT legacy
     assert data["rules"]["claims"]["by_mode"] == {"enforce": 1}
+
+
+async def test_claim_days_count_from_the_first_claim_event_ever_when_all_are_post_2c(db, agent_id):
+    new = {"claim_count": 0, "claims": [], "violation_count": 0, "mode": "enforce"}
+    await _event(db, agent_id, "f026_claim_verification", new, ago=timedelta(days=10))  # before the window
+    await _event(db, agent_id, "f026_claim_verification", new, ago=timedelta(days=2))
+
+    data = await _harness(db, agent_id, window="7d")
+
+    # Every turn writes a claim event, and none in view is pre-2c: a quiet
+    # day in the window had no turns, so zero unsupported claims is measured.
+    assert [d["claims_none"] for d in data["daily"]] == [0] * 8
 
 
 async def test_a_rule_that_is_off_draws_gaps_but_keeps_what_it_recorded(db, agent_id):
