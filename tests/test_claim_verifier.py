@@ -922,3 +922,44 @@ def test_send_file_never_grounds_an_addressed_email_claim():
     sent = Evidence("send_file", {"file_path": "/tmp/r.png"})
     assert not _verify("Email sent to alice@x.io.", sent).verified
     assert _verify("I sent the report.", sent).verified
+
+
+# --- codex round 3 -------------------------------------------------------------
+
+
+@pytest.mark.parametrize("command, level", [
+    ("cp a /tmp/report.md", "exact"),
+    ("python3 gen.py > /tmp/report.md", "exact"),
+    ("python3 gen.py >> /tmp/report.md", "exact"),
+    ("tee /tmp/report.md < a", "exact"),
+    ("pandoc r.md -o /tmp/report.md", "exact"),
+    ("python3 scripts/plot.py --output /tmp/report.md", "exact"),
+    ("mv draft.md /tmp/report.md", "exact"),
+    ("rsync -a r.md host:/tmp/report.md", "exact"),
+    ("tar czf /tmp/report.md site/", "exact"),
+    ("sed -i s/a/b/ /tmp/report.md", "exact"),
+    ("rm /tmp/report.md", "none"),                      # a delete is not a save
+    ("touch /tmp/report.md.bak", "none"),               # a known writer, writing elsewhere
+    ("cp a /var/archive/report.md", "none"),
+    ("grep x /tmp/report.md > out.txt", "none"),        # the write went to out.txt
+    ("cat /tmp/report.md", "none"),
+    ("python3 gen.py --target /tmp/report.md", "plausible"),  # an unknown option of a script
+    ("uv run python scripts/export.py", "plausible"),          # a hinted script decides its own path
+])
+def test_a_bash_save_must_write_to_that_destination(command, level):
+    result = _verify("It was saved to /tmp/report.md.", _real_bash(command))
+    assert result.claims[0].evidence == level
+
+
+def test_only_recipient_arguments_address_a_mail():
+    in_body = "sendmail bob@x.io <<'EOF'\nhello alice@x.io\nEOF"
+    assert not _verify("Email sent to alice@x.io.", _real_bash(in_body)).verified
+    in_subject = 'mail -s "re: alice@x.io" bob@x.io < m'
+    assert not _verify("Email sent to alice@x.io.", _real_bash(in_subject)).verified
+    to_alice = "sendmail alice@x.io <<'EOF'\nhello bob@x.io\nEOF"
+    assert _verify("Email sent to alice@x.io.", _real_bash(to_alice)).verified
+    rcpt = "curl smtps://smtp.x.io --mail-from me@x.io --mail-rcpt alice@x.io -T m"
+    assert _verify("Email sent to alice@x.io.", _real_bash(rcpt)).verified
+    sender = "curl smtps://smtp.x.io --mail-from alice@x.io --mail-rcpt bob@x.io -T m"
+    assert not _verify("Email sent to alice@x.io.", _real_bash(sender)).verified
+    assert _verify("Email sent to alice@x.io.", _real_bash('mail -s Report "$TO" < m')).verified

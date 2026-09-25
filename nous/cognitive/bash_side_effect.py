@@ -277,8 +277,8 @@ def _invocations(
     commands: list[list[str]] = []
     join: str | None = None
     words: list[str] = []
-    attached: list[str] = []  # heredoc bodies of the current simple command
-    expect_target = False
+    attached: list[str] = []  # heredoc bodies and output targets of the current simple command
+    expect_target: str | None = None  # "out" keeps the target as a destination
 
     def end_command() -> None:
         nonlocal words, attached
@@ -302,14 +302,16 @@ def _invocations(
 
     for tok, is_operator in tokens:
         if not is_operator:
-            if expect_target:
-                expect_target = False
+            if expect_target is not None:
+                if expect_target == "out" and tok not in _HARMLESS_SINKS:
+                    attached.append("\t>" + tok)  # where this command writes
+                expect_target = None
             else:
                 words.append(tok)
             continue
         for op in _OPERATOR.findall(tok):
             if op in _OUTPUT_REDIRECTS or op in _INPUT_REDIRECTS or op == ">&":
-                expect_target = True
+                expect_target = "out" if op in _OUTPUT_REDIRECTS else "other"
                 if op == "<<" and bodies:
                     attached.append("\n" + bodies.pop(0))
             elif op in _LIST_JOINS:

@@ -1209,7 +1209,7 @@ class TestHeredocs:
     def test_an_apostrophe_in_the_body_is_readable(self):
         from nous.cognitive.bash_side_effect import command_invocations
 
-        assert command_invocations("cat > x <<'EOF'\nIt's\nEOF") == [("cat", ["\nIt's"])]
+        assert command_invocations("cat > x <<'EOF'\nIt's\nEOF") == [("cat", ["\t>x", "\nIt's"])]
 
     def test_dash_strips_leading_tabs_and_two_heredocs_stay_in_order(self):
         from nous.cognitive.bash_side_effect import command_invocations
@@ -1293,3 +1293,20 @@ class TestCommandRuns:
         bad = ledger.record("bash", {"command": "cd r && git push"}, "rejected\nExit code: 1", "success")
         assert ok.invocations[1] == ("git", ("push",), True)
         assert bad.invocations[1] == ("git", ("push",), False)
+
+
+class TestRedirectTargets:
+    """An output redirect's target is kept as a `\\t>`-marked argument: a
+    command's destination, never a positional."""
+
+    def test_output_targets_are_kept(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("python3 gen.py > /tmp/r.md") == [("python3", ["gen.py", "\t>/tmp/r.md"])]
+        assert command_invocations("cat a >> log.txt") == [("cat", ["a", "\t>log.txt"])]
+
+    def test_sinks_inputs_and_dups_are_not_destinations(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("cmd > /dev/null 2>&1") == [("cmd", ["2"])]  # the fd word is a lexer quirk
+        assert command_invocations("sort < in.txt") == [("sort", [])]

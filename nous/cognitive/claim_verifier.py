@@ -320,8 +320,8 @@ def _same_path(target: str, path: str) -> bool:
     in `/x`, a relative target the path's tail on a `/` boundary."""
     if not target or not path:
         return False
-    target = target.replace("\\", "/").rstrip("/")
-    path = path.replace("\\", "/").rstrip("/")
+    target = _HOME.sub("~/", target.replace("\\", "/")).rstrip("/")
+    path = _HOME.sub("~/", path.replace("\\", "/")).rstrip("/")
     if path == target:
         return True
     if target.startswith("/"):
@@ -329,6 +329,9 @@ def _same_path(target: str, path: str) -> bool:
     if target.startswith("~/"):
         return path.startswith("/") and path.endswith(target[1:])
     return path.endswith("/" + target.removeprefix("./"))
+
+
+_HOME = re.compile(r"^\$\{?HOME\}?/")  # `$HOME/x` is `~/x`
 
 
 def _addresses(text: str) -> set[str]:
@@ -361,7 +364,93 @@ def _git_does(args: tuple[str, ...], sub: str) -> bool:
 
 
 def _positional(args: tuple[str, ...]) -> list[str]:
-    return [a for a in args if not a.startswith("-") and not a.startswith("\n")]
+    """Arguments that are neither options nor a heredoc body (`\\n…`) nor an
+    output target (`\\t>…`)."""
+    return [a for a in args if not a.startswith(("-", "\n", "\t"))]
+
+
+# Where a command writes: its output redirects, plus the destination of the
+# programs whose destination is a known argument. A program known to write
+# elsewhere, or to delete, is not a save to the claimed path.
+_WRITERS_LAST = frozenset({"cp", "mv", "install", "ln", "rsync", "scp", "sftp"})  # last positional
+_WRITERS_ALL = frozenset({"tee", "touch", "truncate", "mkdir", "mkfifo"})           # every positional
+_DESTROYERS = frozenset({"rm", "rmdir", "unlink", "shred"})
+_OUTPUT_OPTIONS = frozenset({"-o", "-O", "--output", "--out", "--outfile", "--out-file", "--dest",
+                             "--destination", "--file"})
+_OUTPUT_OPTION_PREFIXES = ("--output=", "--out=", "--outfile=", "--out-file=", "--dest=",
+                           "--destination=", "--file=")
+
+
+def _destinations(prog: str, args: tuple[str, ...]) -> list[str]:
+    dests = [a[2:] for a in args if a.startswith("\t>")]
+    positional = _positional(args)
+    if prog in _WRITERS_LAST and positional:
+        last = positional[-1]
+        dests.append(last.split(":", 1)[1] if ":" in last and not last.startswith("/") else last)
+    elif prog in _WRITERS_ALL:
+        dests += positional
+    elif prog == "tar" and args and "f" in args[0].lstrip("-") and len(positional) > 1:
+        dests.append(positional[1] if not args[0].startswith("-") else positional[0])
+    elif prog == "sed" and any("i" in _short_flags(a) or a.startswith("--in-place") for a in args):
+        dests += positional
+    elif prog == "dd":
+        dests += [a[3:] for a in args if a.startswith("of=")]
+    for i, a in enumerate(args):
+        if a in _OUTPUT_OPTIONS and i + 1 < len(args):
+            dests.append(args[i + 1])
+        elif a.startswith(_OUTPUT_OPTION_PREFIXES):
+            dests.append(a.split("=", 1)[1])
+    return dests
+
+
+def _short_flags(word: str) -> str:
+    return word[1:] if len(word) > 1 and word.startswith("-") and not word.startswith("--") else ""
+
+
+def _writes(target: str, runs: tuple) -> str:
+    """How well the invocations show a write to ``target``: exact for a
+    certain write to that destination, plausible for an uncertain one or a
+    mention by a program whose destinations this reader does not know."""
+    best = "none"
+    for prog, args, certain in runs:
+        base = _base(prog)
+        dests = _destinations(base, args)
+        if any(_same_path(target, d) for d in dests):
+            best = _best([best, "exact" if certain else "plausible"])
+        elif base in _DESTROYERS or base in _WRITERS_LAST or base in _WRITERS_ALL or dests:
+            continue  # a delete, or a known writer writing elsewhere
+        elif _names(target, " ".join(args)):
+            best = _best([best, "plausible"])
+    return best
+
+
+# Options whose value is not a recipient: a subject, a sender, a body.
+_NOT_RECIPIENT_OPTIONS = frozenset({"-s", "--subject", "-f", "--from", "--mail-from", "--body",
+                                    "-h", "--header", "--add-header", "-r"})
+_NOT_RECIPIENT_PREFIXES = ("--subject=", "--from=", "--mail-from=", "--body=", "--header=")
+
+
+def _recipients(prog: str, args: tuple[str, ...]) -> tuple[set[str], bool]:
+    """The addresses a mail invocation sends TO (not its subject, sender or
+    body), and whether one is held in a variable."""
+    found: set[str] = set()
+    variable = False
+    skip = False
+    for a in args:
+        if a.startswith(("\n", "\t")):
+            continue
+        if skip:
+            skip = False
+            continue
+        if a in _NOT_RECIPIENT_OPTIONS:
+            skip = True
+            continue
+        if a.startswith(_NOT_RECIPIENT_PREFIXES) or a.lower().startswith(("smtp://", "smtps://")):
+            continue
+        if a.startswith("$"):
+            variable = True
+        found |= _addresses(a)
+    return found, variable
 
 
 def _base(prog: str) -> str:
@@ -496,6 +585,21 @@ def _code_level(claim: Claim, code: str) -> str:
     return "plausible" if _PY_DEPLOY.search(code) else "none"
 
 
+def _addressed(target: str, runs: tuple, hits: list[int], opaque: bool) -> bool:
+    """True if the sending invocations address ``target``: among their
+    recipient ARGUMENTS (never a body or subject), or held in a variable
+    (or run opaquely) with no other recipient written out."""
+    recipients: set[str] = set()
+    variable = False
+    for i in hits:
+        found, held = _recipients(_base(runs[i][0]), runs[i][1])
+        recipients |= found
+        variable |= held
+    if target in recipients:
+        return True
+    return not recipients and (variable or opaque)
+
+
 def _bash_level(claim: Claim, ev: Evidence) -> str:
     """Evidence from one successful bash call.
 
@@ -512,7 +616,6 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
     runs = ev.runs
     if runs is None:
         return "plausible"
-    command = ev.args.get("command") or ev.args.get("cmd") or ""
     failed = ev.exit_code not in (None, 0)
     succeeded = runs[:-1] if failed else runs  # the last one did not
     opaque = any(_opaque_for(claim.kind, prog, args) for prog, args, _ in succeeded)
@@ -523,10 +626,10 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
             levels.append("none")  # a read cannot have saved anything
         elif failed and len(runs) <= 1:
             levels.append("none")
-        elif claim.target and not _names(claim.target, command):
-            levels.append("plausible" if opaque else "none")
-        elif claim.target and not failed:
-            levels.append("exact")
+        elif claim.target:
+            # a write to THAT destination; `rm x` and `touch x.bak` are not one
+            written = _writes(claim.target, succeeded)
+            levels.append("plausible" if written == "none" and opaque else written)
         else:
             levels.append("plausible")
         return _best(levels)
@@ -535,11 +638,8 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
         levels.append("plausible" if opaque else "none")
     elif failed and hits == [len(runs) - 1]:
         levels.append("none")
-    elif claim.kind == "email" and claim.target and claim.target not in _addresses(command):
-        # a recipient held in a variable may be the named one; one written
-        # out as someone else is not
-        variable = any(a.startswith("$") for i in hits for a in runs[i][1])
-        levels.append("plausible" if (opaque or variable) and not _addresses(command) else "none")
+    elif claim.kind == "email" and claim.target and not _addressed(claim.target, runs, hits, opaque):
+        levels.append("none")
     elif claim.kind in ("vcs_push", "vcs_commit") \
             and any(_base(runs[i][0]) in ("git", "docker") and runs[i][2] for i in hits):
         levels.append("exact")
