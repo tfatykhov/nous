@@ -13,7 +13,13 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
-from nous.cognitive.bash_side_effect import READ_COMMANDS, command_string, git_subcommand
+from nous.cognitive.bash_side_effect import (
+    READ_COMMANDS,
+    command_invocations,
+    command_string,
+    git_subcommand,
+    program_name,
+)
 from nous.cognitive.execution_ledger import Invocation, bash_invocations
 
 if TYPE_CHECKING:
@@ -343,7 +349,9 @@ class _PyFacts:
     sends: bool = False
     recipients: set[str] = field(default_factory=set)
     recipient_unknown: bool = False                   # a recipient held in a variable
-    shell: list[str] = field(default_factory=list)    # strings handed to a shell / subprocess
+    # what it runs through a shell / subprocess, read like bash (argv kept)
+    invocations: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
+    run_unknown: bool = False                         # a subprocess whose argv is not written out
     deploys: bool = False
 
 
@@ -399,18 +407,7 @@ def _executed(tree: ast.Module) -> list[ast.AST]:
     called: set[str] = set()
     queue: list[ast.AST] = list(tree.body)
     while queue:
-        node = queue.pop()
-        if isinstance(node, ast.ClassDef):
-            queue.extend(s for s in node.body if not isinstance(s, _DORMANT))  # class-level code runs
-            continue
-        if isinstance(node, _DORMANT):
-            continue
-        if isinstance(node, ast.If):
-            truth = _constant_truth(node.test)
-            queue.extend(node.body if truth is not False else [])
-            queue.extend(node.orelse if truth is not True else [])
-            continue
-        for sub in _walk_live(node):
+        for sub in _walk_live(queue.pop()):
             executed.append(sub)
             if isinstance(sub, ast.Call):
                 name = _dotted(sub.func).rsplit(".", 1)[-1]
@@ -422,14 +419,28 @@ def _executed(tree: ast.Module) -> list[ast.AST]:
 
 
 def _walk_live(node: ast.AST):
-    """`ast.walk` that does not descend into a nested definition."""
+    """`ast.walk` along the paths that run: never into a nested definition,
+    only the taken side of a constant `if`/`while`, never an `except`
+    handler (it may never run), a class body's own statements."""
     stack = [node]
     while stack:
         current = stack.pop()
+        if isinstance(current, _DORMANT):
+            continue
         yield current
-        for child in ast.iter_child_nodes(current):
-            if not isinstance(child, _DORMANT):
-                stack.append(child)
+        if isinstance(current, ast.ClassDef):
+            stack.extend(current.body)
+        elif isinstance(current, (ast.If, ast.While)):
+            truth = _constant_truth(current.test)
+            stack.append(current.test)
+            if truth is not False:
+                stack.extend(current.body)
+            if truth is not True:
+                stack.extend(current.orelse)
+        elif isinstance(current, (ast.Try, getattr(ast, "TryStar", ast.Try))):
+            stack.extend(current.body + current.orelse + current.finalbody)
+        else:
+            stack.extend(ast.iter_child_nodes(current))
 
 
 def _python_facts(code: str) -> _PyFacts | None:
@@ -495,9 +506,21 @@ def _call_facts(node: ast.Call, facts: _PyFacts) -> None:
     elif method == "send_message":
         facts.sends = True  # recipients come from msg['To'] = ..., in any order
     elif name in _PY_SHELL_CALLS or method in ("system", "popen"):
-        found = _literals(args[0]) if args else None
-        if found is not None:
-            facts.shell.append(" ".join(found))
+        argv = args[0] if args else kws.get("args")
+        if isinstance(argv, (ast.List, ast.Tuple)):  # argv: the executable and ITS arguments
+            items = _literals(argv)
+            if items:
+                facts.invocations.append((program_name(items[0]), tuple(items[1:])))
+            else:
+                facts.run_unknown = True
+        elif (line := _literal(argv)) is not None:  # a shell line: read like bash
+            found = command_invocations(line)
+            if found is None:
+                facts.run_unknown = True
+            else:
+                facts.invocations.extend((p, tuple(a)) for p, a in found)
+        else:
+            facts.run_unknown = True
     else:
         url = _literal(args[0]) if args else _literal(kws.get("url"))
         if url and "api.telegram.org" in url and method in ("post", "get", "request", "urlopen"):
@@ -701,9 +724,24 @@ def _recipients(prog: str, args: tuple[str, ...]) -> tuple[set[str], bool]:
     return found, variable
 
 
+_SYSTEM_DIRS = frozenset({
+    "/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin", "/sbin", "/usr/local/sbin",
+    "/opt/homebrew/bin", "/opt/local/bin", "/snap/bin",
+})
+
+
 def _base(prog: str) -> str:
-    """`/usr/bin/rsync` is reported as `./rsync`; the allowlists know `rsync`."""
-    return prog[2:] if prog.startswith("./") else prog
+    """The trusted tool a program is, or the local executable it stays:
+    `/usr/bin/rsync` is rsync, `./git` and `/tmp/evil/git` are not git."""
+    if prog.startswith("./"):
+        return prog
+    if "/" in prog:
+        head, _, tail = prog.rpartition("/")
+        trusted = (head in _SYSTEM_DIRS or "program files" in head.lower()
+                   or head.lower().endswith("system32"))
+        name = tail[:-4].lower() if tail.lower().endswith(".exe") else tail
+        return name if trusted else "./" + name
+    return prog
 
 
 def _does(kind: str, prog: str, args: tuple[str, ...]) -> bool:
@@ -777,7 +815,7 @@ def _skip_value(args: tuple[str, ...], i: int) -> str | None:
 
 
 def _is_script(prog: str) -> bool:
-    return bool(_SCRIPT.search(prog)) or prog.startswith("./")
+    return bool(_SCRIPT.search(prog)) or _base(prog).startswith("./")
 
 
 _NOT_A_TASK_MODULE = frozenset({"pip", "venv", "ensurepip", "json.tool", "http.server", "this"})
@@ -831,10 +869,11 @@ def _code_level(claim: Claim, code: str) -> str:
         if claim.target and claim.target not in facts.recipients:
             return "plausible" if facts.recipient_unknown else "none"  # held in a variable; or someone else
         return "plausible"
-    shell = "\n".join(facts.shell)
-    if claim.kind in ("vcs_push", "vcs_commit"):
-        return "plausible" if _PY_GIT[claim.kind].search(shell) else "none"
-    return "plausible" if facts.deploys or _PY_DEPLOY.search(shell) else "none"
+    if any(_does(claim.kind, prog, args) for prog, args in facts.invocations):
+        return "plausible"
+    if claim.kind == "deploy" and facts.deploys:
+        return "plausible"
+    return "plausible" if facts.run_unknown else "none"  # argv not written out: could be anything
 
 
 def _code_level_unparsed(claim: Claim, code: str) -> str:

@@ -383,9 +383,7 @@ def _invocations(
         if start is None or cmd_words[start].startswith("\n"):
             return  # nothing runs, or a heredoc body left where a program should be
         word = cmd_words[start]
-        prog, args = _program(word), cmd_words[start + 1:]
-        if "/" in word.replace("\\", "/"):
-            prog = "./" + prog  # path-qualified: a script or a local build, marked as such
+        prog, args = program_name(word), cmd_words[start + 1:]
         inner = command_string(prog, args)
         if inner is not None and depth < _MAX_STRING_DEPTH:
             sub = _invocations(inner, depth + 1, sub_exit)
@@ -652,6 +650,21 @@ def _classify_simple(words: list[str]) -> str:
             i = start
             continue
         return _worst(floor, _classify_program(prog, words[i + 1:]))
+
+
+_DRIVE = re.compile(r"^[A-Za-z]:/")
+
+
+def program_name(word: str) -> str:
+    """The program a command word names, for evidence: a bare name as is, an
+    absolute path kept whole (the verifier trusts system directories and no
+    others), a relative path as `./<name>` -- `./git` is not git."""
+    path = word.replace("\\", "/")
+    if "/" not in path:
+        return _program(word)
+    if path.startswith("/") or _DRIVE.match(path):
+        return path
+    return "./" + _program(word)
 
 
 def _program(word: str) -> str:

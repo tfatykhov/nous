@@ -1250,7 +1250,7 @@ class TestOptionClusters:
         from nous.cognitive.bash_side_effect import command_invocations
 
         assert command_invocations("./bin/release prod") == [("./release", ["prod"])]
-        assert command_invocations("/usr/bin/git push") == [("./git", ["push"])]
+        assert command_invocations("/usr/bin/git push") == [("/usr/bin/git", ["push"])]  # absolute: kept
         assert _classify_bash_command("/usr/bin/git push") == "external"  # the classifier is unchanged
 
 

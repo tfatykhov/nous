@@ -1152,3 +1152,46 @@ def test_a_failed_final_send_does_not_address_the_claim():
     two = "sendmail bob@x.io < m; sendmail alice@x.io < m"
     assert not _verify("Email sent to alice@x.io.", _real_bash(two, exit_code=1)).verified
     assert _verify("Email sent to bob@x.io.", _real_bash(two, exit_code=1)).verified
+
+
+# --- codex round 10 ------------------------------------------------------------
+
+
+def test_a_local_executable_is_not_the_named_tool():
+    assert _push_level("./git push origin main") == "plausible"          # a wrapper, maybe: never exact
+    assert _push_level("bin/git push origin main") == "plausible"
+    assert _push_level("/tmp/evil/git push origin main") == "plausible"
+    assert _push_level("/usr/bin/git push origin main") == "exact"
+    assert _push_level("/opt/homebrew/bin/git push origin main") == "exact"
+    assert _verify("I sent the email.", _real_bash("./sendmail bob@x.io < m")).claims[0].evidence == "plausible"
+    assert not _verify("It was saved to /tmp/report.md.", _real_bash("./touch /tmp/other")).verified
+
+
+def test_subprocess_argv_boundaries_are_kept():
+    def run(code):
+        return _verify("I pushed the fix.", Evidence("run_python", {"code": code})).verified
+
+    assert not run("subprocess.run(['echo', 'git', 'push'])")
+    assert not run("subprocess.run('echo git push', shell=True)")
+    assert run("subprocess.run(['git', 'push', 'origin', 'main'])")
+    assert run("subprocess.run('cd r && git push origin main', shell=True)")
+    assert run("subprocess.run(cmd)")                                     # argv held in a variable
+    assert not run("subprocess.run(['git', 'push', '--dry-run'])")
+    deploy = "subprocess.check_call(['docker', 'compose', 'up', '-d'])"
+    assert _verify("I deployed the fix.", Evidence("run_python", {"code": deploy})).verified
+    echoed = "subprocess.run(['echo', 'docker', 'compose', 'up'])"
+    assert not _verify("I deployed the fix.", Evidence("run_python", {"code": echoed})).verified
+
+
+@pytest.mark.parametrize("code, level", [
+    ("while False:\n    open('/tmp/report.md', 'w')", "none"),
+    ("while True:\n    open('/tmp/report.md', 'w')\n    break", "exact"),
+    ("while pending():\n    open('/tmp/report.md', 'w')", "exact"),                 # may run
+    ("try:\n    pass\nexcept Exception:\n    open('/tmp/report.md', 'w')", "none"),  # a handler may never run
+    ("try:\n    open('/tmp/report.md', 'w')\nexcept Exception:\n    pass\nfinally:\n    print(1)", "exact"),
+    ("try:\n    x()\nfinally:\n    open('/tmp/report.md', 'w')", "exact"),
+    ("with lock:\n    if False:\n        open('/tmp/report.md', 'w')", "none"),
+])
+def test_untaken_loops_and_handlers_are_not_executed(code, level):
+    result = _verify("It was saved to /tmp/report.md.", Evidence("run_python", {"code": code}))
+    assert result.claims[0].evidence == level
