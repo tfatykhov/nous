@@ -437,7 +437,8 @@ class AgentRunner:
         if self._ledger_store is None or not self._dispatcher.is_registered(tool_name):
             return None, None, None
         key = idempotency_key(
-            ctx, tool_name, tool_input, default_chat_id=self._settings.telegram_chat_id,
+            ctx, tool_name, self._handler_args(tool_name, tool_input),
+            default_chat_id=self._settings.telegram_chat_id,
         )
         if key is None:
             return await self._ledger_open(ctx, tool_name, tool_input, turn), None, None
@@ -461,6 +462,20 @@ class AgentRunner:
             )
         keys_this_turn.add(key)
         return entry_id, key, None
+
+    def _handler_args(self, tool_name: str, tool_input: dict) -> dict:
+        """The arguments the handler will actually receive: the dispatcher's
+        own repair (a required arg leaked as XML inside another is salvaged
+        inside dispatch). A dispatcher without it -- a test double -- passes
+        the input through."""
+        repair = getattr(self._dispatcher, "repaired_args", None)
+        if not callable(repair):
+            return tool_input
+        try:
+            repaired = repair(tool_name, tool_input)
+        except Exception:  # noqa: BLE001 -- dispatch will report the real error
+            return tool_input
+        return repaired if isinstance(repaired, dict) else tool_input
 
     @staticmethod
     def _suppression(held: HeldKey, *, same_turn: bool) -> Suppressed:

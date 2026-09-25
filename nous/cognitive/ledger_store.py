@@ -395,17 +395,28 @@ class LedgerStore:
         dead 'pending' row first; retention takes it after that.
         """
         cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+        # Phase 2b: a keyed row that HOLDS its key ('success' = sent, 'unknown'
+        # = maybe delivered) is the only thing standing between a late retry
+        # -- a retry_node after the window -- and a second delivery. It is not
+        # deleted but reduced to a tombstone: the key, its status, the
+        # provider id and the context ids stay; the recipients and the summary
+        # go, so retention still applies to what the row held.
+        holds_key = (ExecutionLedgerEntry.idempotency_key.is_not(None)
+                     & ExecutionLedgerEntry.status.in_(("success", "unknown")))
         async with self._db.session() as s:
+            await s.execute(
+                update(ExecutionLedgerEntry)
+                .where(ExecutionLedgerEntry.agent_id == self._agent_id)
+                .where(ExecutionLedgerEntry.created_at < cutoff)
+                .where(holds_key)
+                .values(key_args={}, result_summary=None)
+            )
             result = await s.execute(
                 delete(ExecutionLedgerEntry)
                 .where(ExecutionLedgerEntry.agent_id == self._agent_id)
                 .where(ExecutionLedgerEntry.status != "pending")
                 .where(ExecutionLedgerEntry.created_at < cutoff)
-                # Phase 2b: a keyed 'unknown' row holds its key (maybe
-                # delivered) until an operator releases it -- deleting it
-                # would silently allow a re-send.
-                .where(~((ExecutionLedgerEntry.idempotency_key.is_not(None))
-                         & (ExecutionLedgerEntry.status == "unknown")))
+                .where(~holds_key)
             )
             await s.commit()
             return result.rowcount or 0

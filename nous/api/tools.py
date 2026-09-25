@@ -380,6 +380,28 @@ class ToolDispatcher:
         self._schemas[name] = schema
         self._tool_schema_cache.clear()  # F036: invalidate on registration
 
+    def _repair(self, name: str, args: dict[str, Any]) -> tuple[dict[str, Any], list[str], list[str]]:
+        """``(args, still missing, salvaged keys)``: the schema-required keys
+        a call is missing, with any value the model leaked as an XML
+        <parameter> tag inside another string arg recovered. The ONE repair --
+        ``dispatch`` runs it, and ``repaired_args`` exposes its result."""
+        schema = self._schemas.get(name) or {}
+        missing = [k for k in schema.get("required") or [] if k not in args]
+        salvaged_keys: list[str] = []
+        if missing and self._arg_salvage_enabled:
+            before = set(missing)
+            args, missing = _salvage_leaked_args(name, args, missing, schema)
+            salvaged_keys = sorted(before - set(missing))
+        return args, missing, salvaged_keys
+
+    def repaired_args(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """The arguments ``name``'s handler would receive for ``args`` (harness
+        Phase 2b): an idempotency key must be derived from THESE, or a repaired
+        call and a clean relaunch of the same send hash differently."""
+        if not isinstance(args, dict):
+            return args
+        return self._repair(name, args)[0]
+
     async def dispatch(
         self, name: str, args: dict[str, Any], session_id: str | None = None,
         is_background: bool = False, turn_number: int | None = None,
@@ -414,12 +436,7 @@ class ToolDispatcher:
             # the handler signature would actually raise — schema-required
             # keys with handler defaults keep today's lenient behavior.
             schema = self._schemas.get(name) or {}
-            missing = [k for k in schema.get("required") or [] if k not in args]
-            salvaged_keys: list[str] = []
-            if missing and self._arg_salvage_enabled:
-                before = set(missing)
-                args, missing = _salvage_leaked_args(name, args, missing, schema)
-                salvaged_keys = sorted(before - set(missing))
+            args, missing, salvaged_keys = self._repair(name, args)
             if missing:
                 handler_required = _required_handler_params(handler)
                 # None == variadic handler, signature tells us nothing; fall

@@ -969,3 +969,33 @@ class TestSettingsFlag:
         from nous.config import Settings
 
         assert Settings().tool_arg_salvage_enabled is True
+
+
+
+class TestRepairedArgs:
+    """Harness 2b (codex r1): the arguments a handler receives, computed by the
+    same repair dispatch() runs -- the idempotency key is derived from them."""
+
+    def test_a_leaked_required_arg_is_repaired(self):
+        dispatcher, _ = _make_decision_dispatcher()
+        args = {"description": _OBSERVED_DESCRIPTION + _OBSERVED_TAIL, "category": "c", "stakes": "low"}
+        repaired = dispatcher.repaired_args("record_decision", args)
+        assert repaired["confidence"] == 0.55 and repaired["description"] == _OBSERVED_DESCRIPTION
+
+    def test_a_complete_call_is_unchanged(self):
+        dispatcher, _ = _make_decision_dispatcher()
+        args = {"description": "d", "confidence": 0.8, "category": "c", "stakes": "low"}
+        assert dispatcher.repaired_args("record_decision", args) == args
+
+    def test_salvage_off_repairs_nothing(self):
+        dispatcher, _ = _make_decision_dispatcher(arg_salvage_enabled=False)
+        args = {"description": _OBSERVED_DESCRIPTION + _OBSERVED_TAIL, "category": "c", "stakes": "low"}
+        assert dispatcher.repaired_args("record_decision", args) == args
+
+    @pytest.mark.asyncio
+    async def test_the_handler_receives_exactly_the_repaired_args(self):
+        dispatcher, received = _make_decision_dispatcher()
+        args = {"description": _OBSERVED_DESCRIPTION + _OBSERVED_TAIL, "category": "c", "stakes": "low"}
+        expected = dispatcher.repaired_args("record_decision", args)
+        await dispatcher.dispatch("record_decision", args)
+        assert received == expected

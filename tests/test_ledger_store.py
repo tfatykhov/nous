@@ -629,3 +629,40 @@ def test_the_keyed_timeout_setting():
 
     assert Settings(_env_file=None).execution_ledger_keyed_write_timeout_seconds == 10.0
     assert LedgerStore(object(), "a", keyed_write_timeout_seconds=3.0)._keyed_timeout == 3.0
+
+
+
+@pytest.mark.asyncio
+async def test_prune_keeps_every_key_holder_as_a_tombstone(store, db, agent):
+    """Codex r1: a keyed SUCCESS row is the only holder of its key -- deleting it
+    at retention would let a late retry_node send again. It is kept, emptied of
+    everything but what the de-duplication needs."""
+    ctx = ExecutionContext(kind="dag_node")
+    sent = await store.open_entry(context=ctx, tool_name="send_email",
+                                  tool_input={"to": "a@x.io", "subject": "s"}, turn=1, idempotency_key="kp1")
+    await store.claim_dispatch(sent)
+    await store.close_entry(sent, status="success", result_summary="Email sent", external_ref="<m@x>", keyed=True)
+    failed = await store.open_entry(context=ctx, tool_name="send_email", tool_input={}, turn=1,
+                                    idempotency_key="kp2")
+    await store.close_entry(failed, status="error", result_summary=None)
+    unkeyed = await store.open_entry(context=ctx, tool_name="write_file", tool_input={"path": "/tmp/x"}, turn=1)
+    await store.close_entry(unkeyed, status="success", result_summary=None)
+    async with db.session() as s:
+        await s.execute(update(ExecutionLedgerEntry).where(ExecutionLedgerEntry.agent_id == agent)
+                        .values(created_at=datetime.now(UTC) - timedelta(days=400)))
+        await s.commit()
+
+    await store.prune(retention_days=90)
+
+    kept = await _row(db, sent)
+    assert (kept.status, kept.idempotency_key, kept.external_ref) == ("success", "kp1", "<m@x>")
+    assert kept.key_args == {} and kept.result_summary is None      # tombstone: nothing else retained
+    async with db.session() as s:
+        remaining = {r.id for r in (await s.execute(
+            select(ExecutionLedgerEntry).where(ExecutionLedgerEntry.agent_id == agent))).scalars()}
+    assert remaining == {sent}                                      # the error and the unkeyed row are gone
+    from nous.cognitive.ledger_store import DuplicateSend
+
+    with pytest.raises(DuplicateSend):                             # and the key still holds
+        await store.open_entry(context=ctx, tool_name="send_email", tool_input={}, turn=2,
+                               idempotency_key="kp1")

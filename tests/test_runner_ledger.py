@@ -633,3 +633,37 @@ async def test_a_definite_failure_lets_the_relaunch_send_with_the_real_store(db)
     await _run_loop(relaunch, is_background=True, context=ExecutionContext(subtask_id=uuid.uuid4(), **ctx_kwargs))
     assert [c[0] for c in d2.calls] == ["send_email"]
     assert [r.status for r in await _rows(db, agent)] == ["error", "success"]
+
+
+
+@pytest.mark.asyncio
+async def test_the_key_is_derived_from_the_arguments_the_handler_receives():
+    """Codex r1: a `to` leaked as XML inside the body is salvaged by dispatch;
+    the key must see it, or a relaunch that emits `to` correctly re-sends."""
+    from nous.api.email_tools import _SEND_EMAIL_SCHEMA
+    from nous.api.tools import ToolDispatcher
+    from tests.test_runner_authorization import _one_tool_call_then_done_with
+
+    sent: list[str] = []
+
+    def _dispatcher():
+        d = ToolDispatcher()
+
+        async def send_email(to, subject, body, **_):
+            sent.append(to)
+            return {"content": [{"type": "text", "text": "Email sent"}]}
+
+        d.register("send_email", send_email, _SEND_EMAIL_SCHEMA)
+        return d
+
+    store = _FakeStore()
+    ctx_kwargs = {"kind": "dag_node", "dag_id": uuid.uuid4(), "dag_node_name": "send"}
+    leaked = {"subject": "Premarket", "body": 'Numbers.</body>\n<parameter name="to">tim@example.com'}
+    clean = {"to": "tim@example.com", "subject": "Premarket (retry)", "body": "Numbers."}
+    for tool_input in (leaked, clean):
+        r = AgentRunner(_MockCognitive(), _MockBrain(), _MockHeart(), _settings())
+        r.set_dispatcher(_dispatcher())
+        r.set_ledger_store(store)
+        r._call_api = _one_tool_call_then_done_with("send_email", tool_input)
+        await _run_loop(r, is_background=True, context=ExecutionContext(subtask_id=uuid.uuid4(), **ctx_kwargs))
+    assert store.keys[0] == store.keys[1] and store.keys[0].startswith("dag:")
