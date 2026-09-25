@@ -1454,6 +1454,30 @@ class TestOnCompleteExecution:
         assert context.check_name == "cb_check"
 
     @pytest.mark.asyncio
+    async def test_a_retried_callback_keeps_its_run_id(self):
+        """Harness 2b: both attempts of one callback run share a run_id (one
+        idempotency scope), while each attempt gets a fresh session."""
+        runner = self._make_runner_for_callback()
+        triage_runner = AsyncMock()
+        triage_runner.run_turn = AsyncMock(side_effect=[
+            RuntimeError("first attempt fails"),
+            ("ok", MagicMock(), {"input_tokens": 1, "output_tokens": 1}),
+        ])
+        triage_runner.end_conversation = AsyncMock()
+        runner._get_triage_runner = MagicMock(return_value=triage_runner)
+
+        check = DynamicCheck(
+            check_id="cb-004", name="cb_check", prompt="Check X",
+            tools=["web_search"], on_complete_prompt="Notify", on_complete_tools=["bash"],
+        )
+        with patch("nous.heartbeat.runner.CALLBACK_RETRY_DELAY_SECONDS", 0):
+            await runner._execute_callback(check)
+        contexts = [c[1]["context"] for c in triage_runner.run_turn.call_args_list]
+        assert len(contexts) == 2
+        assert contexts[0].run_id and contexts[0].run_id == contexts[1].run_id
+        assert contexts[0].session_id != contexts[1].session_id
+
+    @pytest.mark.asyncio
     async def test_callback_context_with_no_tools_declares_nothing(self):
         runner = self._make_runner_for_callback()
         triage_runner = AsyncMock()

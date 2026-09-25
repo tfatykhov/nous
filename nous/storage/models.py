@@ -12,12 +12,14 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     SmallInteger,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -1405,6 +1407,16 @@ class ExecutionLedgerEntry(Base):
             "side_effect_type IN ('write', 'external', 'irreversible')",
             name="ck_execution_ledger_side_effect",
         ),
+        # Harness Phase 2b (migration 075): at most one LIVE row per key --
+        # pending, success or unknown hold it; error and blocked free it.
+        Index(
+            "uq_execution_ledger_idempotency", "agent_id", "tool_name", "idempotency_key",
+            unique=True,
+            postgresql_where=text(
+                "idempotency_key IS NOT NULL AND status IN ('pending', 'success', 'unknown')"),
+            sqlite_where=text(
+                "idempotency_key IS NOT NULL AND status IN ('pending', 'success', 'unknown')"),
+        ),
         {"schema": "nous_system"},
     )
 
@@ -1431,5 +1443,10 @@ class ExecutionLedgerEntry(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Phase 2b: set just before a KEYED call is dispatched; NULL on a pending
+    # keyed row = never sent, so the sweep may free its key.
+    dispatched_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

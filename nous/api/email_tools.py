@@ -25,13 +25,22 @@ import time
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import make_msgid
 from html.parser import HTMLParser
 from typing import Any
 
+from nous.api.call_outcome import current_outcome
+from nous.api.idempotency import normalize_recipients
 from nous.api.tools import _tool_error
 from nous.config import Settings
 
 logger = logging.getLogger(__name__)
+
+
+class DeliveryUncertain(Exception):
+    """The server may have accepted the message: the connection failed during
+    the send transaction. Never reported as a definite failure (harness 2b):
+    a definite failure frees the send's idempotency key, and this one must not."""
 
 # Secret patterns scanned across subject + body. A hit rejects the send.
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -52,19 +61,9 @@ def _error(text: str) -> dict[str, Any]:
     return _tool_error(f"Error: {text}")
 
 
-def _normalize_recipients(value: Any) -> list[str]:
-    """Coerce a recipient field (str or list) into a list of stripped addresses."""
-    if value is None:
-        return []
-    if isinstance(value, str):
-        items = value.split(",")
-    elif isinstance(value, (list, tuple)):
-        items = []
-        for v in value:
-            items.extend(str(v).split(","))
-    else:
-        items = [str(value)]
-    return [a.strip() for a in items if a and a.strip()]
+# Harness Phase 2b: ONE definition, shared with the idempotency key -- the key
+# must read the recipients exactly as the send does.
+_normalize_recipients = normalize_recipients
 
 
 def _parse_allowlist(raw: str) -> set[str]:
@@ -583,6 +582,9 @@ def _build_message(
     msg["To"] = ", ".join(to_list)
     if cc_list:
         msg["Cc"] = ", ".join(cc_list)
+    # Harness Phase 2b: the provider id of this send, known before it is sent
+    # -- recorded in the durable ledger as the send's external_ref.
+    msg["Message-ID"] = make_msgid(domain=(from_addr.rsplit("@", 1)[-1] or "nous.local"))
     return msg, None
 
 
@@ -611,8 +613,17 @@ def _send_email_sync(
     settings: Settings,
     recipients: list[str],
     msg: Any,  # MIMEText or MIMEMultipart (with attachments)
-) -> None:
-    """Blocking SMTP send. Runs in a worker thread via asyncio.to_thread."""
+) -> dict[str, Any]:
+    """Blocking SMTP send. Runs in a worker thread via asyncio.to_thread.
+
+    Returns the recipients the server refused (empty when all were accepted).
+    Harness Phase 2b: a connection failure DURING the send transaction raises
+    ``DeliveryUncertain`` -- the server may have accepted the message -- while
+    an answer that says no (an ``SMTPException``) is a definite failure.
+    ``SMTPServerDisconnected`` is an ``SMTPException`` and both are
+    ``OSError``s, so the order of the except clauses matters. A failing QUIT
+    never changes the send's outcome.
+    """
     server = smtplib.SMTP(
         settings.email_smtp_host, settings.email_smtp_port,
         timeout=settings.email_smtp_timeout_seconds,
@@ -620,7 +631,15 @@ def _send_email_sync(
     try:
         server.starttls()
         server.login(settings.email_user, settings.email_password)
-        server.send_message(msg, to_addrs=recipients)
+        try:
+            refused = server.send_message(msg, to_addrs=recipients)
+        except (smtplib.SMTPServerDisconnected, TimeoutError) as exc:
+            raise DeliveryUncertain(exc) from exc
+        except smtplib.SMTPException:
+            raise  # the server answered and said no: definite
+        except OSError as exc:
+            raise DeliveryUncertain(exc) from exc
+        return refused or {}
     finally:
         try:
             server.quit()
@@ -646,6 +665,7 @@ def create_send_email_tool(settings: Settings):
         cc: Any = None,
         attachments: Any = None,
         html_body: Any = None,
+        send_label: str | None = None,  # harness 2b: read by the idempotency key, not by the send
     ) -> dict[str, Any]:
         """Send an email to allowlisted recipient(s).
 
@@ -763,9 +783,21 @@ def create_send_email_tool(settings: Settings):
         )
         if build_err:
             return _error(build_err)
+        outcome = current_outcome()
+        if outcome is not None:
+            outcome.external_ref = msg["Message-ID"]  # known before the send
 
         try:
-            await asyncio.to_thread(_send_email_sync, settings, all_recipients, msg)
+            refused = await asyncio.to_thread(_send_email_sync, settings, all_recipients, msg)
+        except DeliveryUncertain as exc:
+            if outcome is not None:
+                outcome.uncertain = True
+            _send_times.append(now)  # it may have gone out: counts against the limit
+            logger.error("send_email delivery uncertain (to=%s): %s", to_list, type(exc.__cause__).__name__)
+            return _error(
+                "email delivery uncertain: the connection failed during the send, so the "
+                "server may have accepted it. Not retrying automatically."
+            )
         except Exception as e:  # noqa: BLE001 — sanitize: never leak smtplib/creds detail
             # Sanitize exceptions: log full server-side, return generic to the model.
             logger.error(
@@ -778,6 +810,12 @@ def create_send_email_tool(settings: Settings):
 
         # 7. Record success for rate limiting and return confirmation.
         _send_times.append(now)
+        if refused:
+            # Delivered to some recipients but not all: never a plain success,
+            # never a definite failure either (a retry would re-send to the rest).
+            if outcome is not None:
+                outcome.uncertain = True
+            return _error(f"email sent to some recipients but refused for: {', '.join(sorted(refused))}")
         cc_note = f" (cc: {', '.join(cc_list)})" if cc_list else ""
         att_note = f" with {len(attach_list)} attachment(s)" if attach_list else ""
         return _ok(f"Email sent to {', '.join(to_list)}{cc_note}{att_note}.")
@@ -830,6 +868,13 @@ _SEND_EMAIL_SCHEMA = {
             "description": (
                 "Optional file path(s) to attach (e.g. a generated .docx/.pdf report). "
                 "String or list. Each must be a readable file; total size within the cap."
+            ),
+        },
+        "send_label": {
+            "type": "string",
+            "description": (
+                "Only when one task intentionally sends several messages to the same "
+                "recipients: a short label that tells them apart."
             ),
         },
     },

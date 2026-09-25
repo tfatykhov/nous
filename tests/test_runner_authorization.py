@@ -31,7 +31,7 @@ class _RecordingDispatcher:
         return [{"name": n, "description": n, "input_schema": {"type": "object"}} for n in self.offered]
 
     async def dispatch(self, name, inp, session_id=None, is_background=False,
-                       turn_number=None, context=None):
+                       turn_number=None, context=None, outcome=None):
         if self.store is not None:
             self.store.events.append(("dispatch", name))
         self.calls.append((name, context, is_background))
@@ -47,6 +47,31 @@ def _one_tool_call_then_done(tool_name: str):
         if calls["n"] == 1:
             return ApiResponse(
                 content=[{"type": "tool_use", "id": "t1", "name": tool_name, "input": {}}],
+                stop_reason="tool_use",
+            )
+        return ApiResponse(content=[{"type": "text", "text": "done"}], stop_reason="end_turn")
+
+    return fake_call_api
+
+
+def _one_tool_call_then_done_with(tool_name: str, tool_input: dict):
+    return _tool_calls_then_done_with(tool_name, tool_input, times=1)
+
+
+def _two_tool_calls_then_done_with(tool_name: str, tool_input: dict):
+    return _tool_calls_then_done_with(tool_name, tool_input, times=2)
+
+
+def _tool_calls_then_done_with(tool_name: str, tool_input: dict, *, times: int):
+    calls = {"n": 0}
+
+    async def fake_call_api(system_prompt, messages, tools=None, skip_thinking=False,
+                            model_override=None, is_background=False):
+        calls["n"] += 1
+        if calls["n"] <= times:
+            return ApiResponse(
+                content=[{"type": "tool_use", "id": f"t{calls['n']}", "name": tool_name,
+                          "input": dict(tool_input)}],
                 stop_reason="tool_use",
             )
         return ApiResponse(content=[{"type": "text", "text": "done"}], stop_reason="end_turn")

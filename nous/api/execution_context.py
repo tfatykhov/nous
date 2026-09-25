@@ -61,6 +61,9 @@ class ExecutionContext:
     # nothing declared -- an empty list is the DB default and means "all".
     declared_tools: tuple[str, ...] | None = None
     check_name: str | None = None  # the check a callback belongs to
+    # One logical run across its retries (a heartbeat callback's attempts):
+    # the Phase 2b idempotency scope, so a retry cannot re-send.
+    run_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in CONTEXT_KINDS:

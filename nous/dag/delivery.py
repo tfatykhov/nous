@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from nous.api.execution_context import ExecutionContext
+from nous.api.idempotency import SUMMARY_SESSION_PREFIX
 from nous.config import Settings
 from nous.events import Event
 from nous.storage.models import ExecutionDAG
@@ -273,15 +274,19 @@ class DAGResultDelivery:
             )
 
         prompt = self._build_summary_prompt(dag, template)
+        # Harness Phase 2b: the full DAG id (8 hex chars could collide) and the
+        # delivery generation -- a retry_node re-announces deliberately -- scope
+        # the idempotency keys of every send this turn and its subtasks make.
+        session_id = f"{SUMMARY_SESSION_PREFIX}{dag.id.hex}-g{dag.delivery_generation}"
         try:
             result = await asyncio.wait_for(
                 self._runner.run_turn(
-                    session_id=f"dag-summary-{dag.id.hex[:8]}",
+                    session_id=session_id,
                     user_message=prompt,
                     is_background=True,
                     context=ExecutionContext(  # harness Phase 1a
                         kind="dag_summary",
-                        session_id=f"dag-summary-{dag.id.hex[:8]}",
+                        session_id=session_id,
                         dag_id=dag.id,
                     ),
                 ),

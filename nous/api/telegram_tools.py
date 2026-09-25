@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 
+from nous.api.call_outcome import current_outcome
 from nous.api.tools import _tool_error
 from nous.config import Settings
 
@@ -77,6 +78,7 @@ def create_send_file_tool(settings: Settings, http_client: httpx.AsyncClient):
         caption: str | None = None,
         chat_id: str | None = None,
         cleanup: bool = False,
+        send_label: str | None = None,  # harness 2b: read by the idempotency key, not by the send
     ) -> dict[str, Any]:
         """Send a file to Telegram via sendPhoto or sendDocument.
 
@@ -125,6 +127,11 @@ def create_send_file_tool(settings: Settings, http_client: httpx.AsyncClient):
         file_key = "photo" if method == "sendPhoto" else "document"
         url = _TG_API.format(token=token, method=method)
 
+        # Harness Phase 2b: what REACHED Telegram decides the outcome. Before
+        # the request leaves (the file read, a connection or pool that never
+        # opened) a failure is definite -- it frees the send's idempotency key.
+        # Once it may have arrived, a failure is uncertain -- it holds the key,
+        # so a retry never sends twice.
         try:
             # AS-6: read off the event loop so a large/slow file doesn't block it.
             content = await asyncio.to_thread(_read_bytes, file_path)
@@ -132,35 +139,70 @@ def create_send_file_tool(settings: Settings, http_client: httpx.AsyncClient):
             data: dict[str, str] = {"chat_id": target_chat}
             if caption:
                 data["caption"] = caption
+        except Exception as e:
+            logger.error("Unexpected error sending file %s: %s", file_path, type(e).__name__)
+            return _error(f"Failed to send file: {type(e).__name__}")
 
+        try:
             response = await http_client.post(url, files=files, data=data)
+        except _NEVER_SENT as e:
+            logger.error("Telegram send failed for %s: %s", file_path, type(e).__name__)
+            return _error(f"Failed to send file: network error ({type(e).__name__})")
+        except Exception as e:
+            # a read/write timeout, a dropped response, anything unforeseen:
+            # the upload may have been delivered
+            return _unconfirmed(file_path, type(e).__name__)
 
+        status = response.status_code if isinstance(response.status_code, int) else None
+        try:
             result = response.json()
-            if not result.get("ok"):
-                desc = result.get("description", "Unknown Telegram error")
-                return _error(f"Telegram API error: {desc}")
+        except Exception:
+            result = None
+        if not isinstance(result, dict):
+            result = None
 
-            # Success — optionally clean up
+        if result is not None and result.get("ok"):
+            # Sent. Nothing after this line may turn a delivered file into a failure.
+            if (outcome := current_outcome()) is not None:
+                sent = result.get("result")
+                message_id = sent.get("message_id") if isinstance(sent, dict) else None
+                outcome.external_ref = str(message_id) if message_id not in (None, "") else None
             if cleanup:
                 try:
                     os.remove(file_path)
                 except OSError:
                     logger.warning("Failed to clean up file: %s", file_path)
-
             filename = os.path.basename(file_path)
             warning = f" (Note: {size_msg})" if size_msg else ""
             return _ok(
                 f"File sent successfully: {filename} via {method} to chat {target_chat}.{warning}"
             )
-
-        except httpx.HTTPError as e:
-            logger.error("Telegram send failed for %s: %s", file_path, type(e).__name__)
-            return _error(f"Failed to send file: network error ({type(e).__name__})")
-        except Exception as e:
-            logger.error("Unexpected error sending file %s: %s", file_path, type(e).__name__)
-            return _error(f"Failed to send file: {type(e).__name__}")
+        if status is not None and status >= 500:
+            # a gateway or server error after the upload: it may have been delivered
+            return _unconfirmed(file_path, f"HTTP {status}")
+        if result is None and not (status is not None and 400 <= status < 500):
+            # a reply we cannot read, not a refusal: it may have been delivered
+            return _unconfirmed(file_path, f"unreadable reply (HTTP {status})")
+        # the API (or a proxy in front of it) answered and refused: definite
+        desc = (result or {}).get("description", f"HTTP {status}")
+        return _error(f"Telegram API error: {desc}")
 
     return send_file
+
+
+# Errors raised before the request leaves the client: nothing reached Telegram.
+_NEVER_SENT = (
+    httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout,
+    httpx.LocalProtocolError, httpx.UnsupportedProtocol, httpx.ProxyError,
+)
+
+
+def _unconfirmed(file_path: str, why: str) -> dict[str, Any]:
+    """A send that may have been delivered: never a definite failure."""
+    if (outcome := current_outcome()) is not None:
+        outcome.uncertain = True
+    logger.error("Telegram send unconfirmed for %s: %s", file_path, why)
+    return _error(f"Could not confirm the file was sent ({why}); it may have been delivered.")
 
 
 def _ok(text: str) -> dict[str, Any]:
@@ -200,6 +242,13 @@ _SEND_FILE_SCHEMA = {
         "cleanup": {
             "type": "boolean",
             "description": "If true, delete the file after successful send. Default: false.",
+        },
+        "send_label": {
+            "type": "string",
+            "description": (
+                "Only when one task intentionally sends the same file to the same chat more "
+                "than once: a short label that tells the sends apart."
+            ),
         },
     },
     "required": ["file_path"],

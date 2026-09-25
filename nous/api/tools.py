@@ -28,6 +28,8 @@ from functools import partial
 from typing import Any
 from uuid import UUID
 
+from nous.api.call_outcome import CallOutcome
+from nous.api.call_outcome import _current as _outcome_var  # the one setter (harness 2b)
 from nous.api.execution_context import ExecutionContext, resolve_context
 from nous.brain.brain import Brain
 from nous.brain.schemas import NON_PREDICTION_OUTCOMES, ReasonInput, RecordInput
@@ -378,10 +380,32 @@ class ToolDispatcher:
         self._schemas[name] = schema
         self._tool_schema_cache.clear()  # F036: invalidate on registration
 
+    def _repair(self, name: str, args: dict[str, Any]) -> tuple[dict[str, Any], list[str], list[str]]:
+        """``(args, still missing, salvaged keys)``: the schema-required keys
+        a call is missing, with any value the model leaked as an XML
+        <parameter> tag inside another string arg recovered. The ONE repair --
+        ``dispatch`` runs it, and ``repaired_args`` exposes its result."""
+        schema = self._schemas.get(name) or {}
+        missing = [k for k in schema.get("required") or [] if k not in args]
+        salvaged_keys: list[str] = []
+        if missing and self._arg_salvage_enabled:
+            before = set(missing)
+            args, missing = _salvage_leaked_args(name, args, missing, schema)
+            salvaged_keys = sorted(before - set(missing))
+        return args, missing, salvaged_keys
+
+    def repaired_args(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """The arguments ``name``'s handler would receive for ``args`` (harness
+        Phase 2b): an idempotency key must be derived from THESE, or a repaired
+        call and a clean relaunch of the same send hash differently."""
+        if not isinstance(args, dict):
+            return args
+        return self._repair(name, args)[0]
+
     async def dispatch(
         self, name: str, args: dict[str, Any], session_id: str | None = None,
         is_background: bool = False, turn_number: int | None = None,
-        context: ExecutionContext | None = None,
+        context: ExecutionContext | None = None, outcome: CallOutcome | None = None,
     ) -> tuple[str, bool]:
         """Dispatch a tool call and return (result_text, is_error).
 
@@ -394,6 +418,10 @@ class ToolDispatcher:
 
         context: the turn's ExecutionContext (harness Phase 1a). When given it
         is authoritative and ``is_background`` is derived from it.
+
+        outcome: the call's CallOutcome (harness Phase 2b). The handler reads
+        it through ``current_outcome()``; it is set and reset around the
+        handler call here, inside this one task.
         """
         ctx = resolve_context(context, is_background=is_background, session_id=session_id)
         is_background = ctx.is_background
@@ -408,12 +436,7 @@ class ToolDispatcher:
             # the handler signature would actually raise — schema-required
             # keys with handler defaults keep today's lenient behavior.
             schema = self._schemas.get(name) or {}
-            missing = [k for k in schema.get("required") or [] if k not in args]
-            salvaged_keys: list[str] = []
-            if missing and self._arg_salvage_enabled:
-                before = set(missing)
-                args, missing = _salvage_leaked_args(name, args, missing, schema)
-                salvaged_keys = sorted(before - set(missing))
+            args, missing, salvaged_keys = self._repair(name, args)
             if missing:
                 handler_required = _required_handler_params(handler)
                 # None == variadic handler, signature tells us nothing; fall
@@ -502,7 +525,11 @@ class ToolDispatcher:
                 # F092: surfaces record the chat session that pushed them so
                 # a companion card can be traced back to its conversation.
                 args = {**args, "_session_id": session_id}
-            result = await handler(**args)  # P0-6: **kwargs unpacking
+            token = _outcome_var.set(outcome)
+            try:
+                result = await handler(**args)  # P0-6: **kwargs unpacking
+            finally:
+                _outcome_var.reset(token)
             # P1-1: Extract text from MCP-format response. is_error honors
             # the MCP field when a handler sets it (#179: run_python error
             # returns) — absent means success, as before.

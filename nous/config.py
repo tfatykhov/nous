@@ -1481,6 +1481,10 @@ class Settings(BaseSettings):
     # nous_system.execution_ledger (migration 074). Additive; kill switch only.
     execution_ledger_persist_enabled: bool = True
     execution_ledger_write_timeout_seconds: float = Field(default=2.0, gt=0)
+    # Harness Phase 2b: bound on each ledger write for a KEYED send. A keyed
+    # send fails CLOSED when its row cannot be written or its dispatch claimed
+    # (a duplicate could not be ruled out), so it waits longer.
+    execution_ledger_keyed_write_timeout_seconds: float = Field(default=10.0, gt=0)
     execution_ledger_retention_days: int = Field(default=90, ge=0)  # 0 disables pruning
     # 'pending' rows older than this are swept to 'unknown'. The effective
     # threshold is never below the longest legitimate call (see
