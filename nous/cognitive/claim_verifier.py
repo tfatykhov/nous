@@ -368,6 +368,18 @@ def _constant_truth(test: ast.AST) -> bool | None:
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 
 
+def _statically_empty(node: ast.AST) -> bool:
+    """`[]`, `()`, `{}`, `""`, `range(0)`: an iterable known to be empty."""
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)) and not node.elts:
+        return True
+    if isinstance(node, ast.Dict) and not node.keys:
+        return True
+    if isinstance(node, ast.Constant) and not node.value:
+        return True
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "range"
+            and len(node.args) == 1 and isinstance(node.args[0], ast.Constant) and node.args[0].value == 0)
+
+
 def _executed(tree: ast.Module) -> list[ast.AST]:
     """The nodes a script RUNS: module-level statements (a class body's own
     statements included), the bodies of the functions and methods they call
@@ -380,6 +392,7 @@ def _executed(tree: ast.Module) -> list[ast.AST]:
     functions: dict[str, list[ast.AST]] = {}
     methods: dict[str, dict[str, ast.AST]] = {}  # method name -> class name -> def
     classes: set[str] = set()
+    instances: dict[str, str] = {}  # `x = Cls(...)`: the variable's class
     for node in tree.body:
         if isinstance(node, _FUNCTIONS):
             functions.setdefault(node.name, []).append(node)
@@ -389,31 +402,46 @@ def _executed(tree: ast.Module) -> list[ast.AST]:
             for item in node.body:
                 if isinstance(item, _FUNCTIONS):
                     methods.setdefault(item.name, {})[node.name] = item
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name) and node.value.func.id in classes):
+            instances[node.targets[0].id] = node.value.func.id
     executed: list[ast.AST] = []
     called: set[tuple[str, str]] = set()
-    queue: list[ast.AST] = list(tree.body)
+    queue: list[tuple[ast.AST, str | None]] = [(s, None) for s in tree.body]  # node, its `self` class
     while queue:
-        for sub in _walk_live(queue.pop()):
+        node, self_class = queue.pop()
+        for sub in _walk_live(node):
             executed.append(sub)
             if not isinstance(sub, ast.Call):
                 continue
-            targets: list[tuple[str, ast.AST]] = []
+            targets: list[tuple[str, ast.AST, str | None]] = []
             if isinstance(sub.func, ast.Name):
-                targets = [(f"{sub.func.id}", fn) for fn in functions.get(sub.func.id, [])]
+                targets = [(sub.func.id, fn, None) for fn in functions.get(sub.func.id, [])]
             elif isinstance(sub.func, ast.Attribute):
                 by_class = methods.get(sub.func.attr, {})
                 receiver = sub.func.value
                 if isinstance(receiver, ast.Call):
                     receiver = receiver.func  # Obj().save() -> Obj
                 owner = receiver.id if isinstance(receiver, ast.Name) else None
+                if owner == "self" and self_class:
+                    owner = self_class
+                elif owner in instances:
+                    owner = instances[owner]
                 if owner in by_class:
-                    targets = [(f"{owner}.{sub.func.attr}", by_class[owner])]
-                elif owner not in classes:  # self, or an instance whose class is unknown
-                    targets = [(f"{c}.{sub.func.attr}", fn) for c, fn in by_class.items()]
-            for key, fn in targets:
+                    candidates = {owner: by_class[owner]}
+                elif owner in classes:
+                    candidates = {}  # that class has no such method
+                elif len(by_class) == 1:
+                    candidates = by_class  # an unknown receiver, one possible method
+                else:
+                    candidates = {}  # ambiguous: withheld rather than guessed
+                targets = [(f"{c}.{sub.func.attr}", fn, c) for c, fn in candidates.items()]
+            for key, fn, cls in targets:
                 if key not in called:
                     called.add(key)
-                    queue.extend(fn.body)  # type: ignore[attr-defined]
+                    queue.extend((s, cls) for s in fn.body)  # type: ignore[attr-defined]
     return executed
 
 
@@ -436,6 +464,11 @@ def _walk_live(node: ast.AST):
                 stack.extend(current.body)
             if truth is not True:
                 stack.extend(current.orelse)
+        elif isinstance(current, (ast.For, ast.AsyncFor)):
+            stack.append(current.iter)
+            if not _statically_empty(current.iter):  # `for x in []:` never runs its body
+                stack.extend(current.body)
+            stack.extend(current.orelse)
         elif isinstance(current, (ast.Try, getattr(ast, "TryStar", ast.Try))):
             stack.extend(current.body + current.orelse + current.finalbody)
         else:

@@ -276,13 +276,19 @@ def _invocations(
     # `&` runs in the background, so its status is never the exit code's. A
     # command inside `$(...)` / `<(...)` hands its output to the OUTER command,
     # whose status is what the shell reports: it is parsed into ``nested``
-    # (never certain) while the outer command's words continue after `)`.
+    # (never certain) while the outer command's words continue after `)`. A
+    # function definition (`name() { ...; }`, `function name { ...; }`) runs
+    # nothing: its body is kept aside and emitted only if the name is called.
     lists: list[tuple[list[tuple[str | None, list[list[str]]]], bool]] = []
     pipelines: list[tuple[str | None, list[list[str]]]] = []
     commands: list[list[str]] = []
     nested: list[list[str]] = []
     parens: list[bool] = []  # per open parenthesis: True for a substitution
     saved: list[tuple[list[str], list[str]]] = []  # the outer command around a substitution
+    functions: dict[str, list[list[str]]] = {}
+    defining: list = []  # [name, brace depth] while inside a function body
+    pending_def: str | None = None  # `name()` seen, its `{` body to come
+    skip_close = False  # the `)` of `name()`
     join: str | None = None
     words: list[str] = []
     attached: list[str] = []  # heredoc bodies and output targets of the current simple command
@@ -294,13 +300,16 @@ def _invocations(
     def end_command() -> None:
         nonlocal words, attached
         if words or attached:
-            (nested if in_substitution() else commands).append(words + attached)
+            if defining:
+                functions.setdefault(defining[0], []).append(words + attached)
+            else:
+                (nested if in_substitution() else commands).append(words + attached)
         words, attached = [], []
 
     def end_pipeline(next_join: str | None) -> None:
         nonlocal commands, join
         end_command()
-        if in_substitution():
+        if in_substitution() or defining:
             return
         if commands:
             pipelines.append((join, commands))
@@ -309,7 +318,7 @@ def _invocations(
     def end_list(unknown: bool = False) -> None:
         nonlocal pipelines
         end_pipeline(None)
-        if in_substitution():
+        if in_substitution() or defining:
             return
         if pipelines:
             lists.append((pipelines, unknown))
@@ -321,10 +330,24 @@ def _invocations(
                 if expect_target == "out" and tok not in _HARMLESS_SINKS:
                     attached.append("\t>" + tok)  # where this command writes
                 expect_target = None
+            elif tok == "{" and (pending_def or (len(words) == 2 and words[0] == "function")):
+                defining = [pending_def or words[1], 1]  # the body opens
+                pending_def, words = None, []
+            elif defining and tok == "{":
+                defining[1] += 1
+                words.append(tok)
+            elif defining and tok == "}":
+                defining[1] -= 1
+                if defining[1] == 0:
+                    end_command()
+                    defining = []
+                else:
+                    words.append(tok)
             else:
                 words.append(tok)
             continue
-        for op in _OPERATOR.findall(tok):
+        ops = _OPERATOR.findall(tok)
+        for k, op in enumerate(ops):
             if op in _OUTPUT_REDIRECTS or op in _INPUT_REDIRECTS or op == ">&":
                 expect_target = "out" if op in _OUTPUT_REDIRECTS else "other"
                 if op == "<<" and bodies:
@@ -334,6 +357,10 @@ def _invocations(
             elif op in _PIPES:
                 end_command()
             elif op == "(":
+                if (k + 1 < len(ops) and ops[k + 1] == ")" and len(words) == 1 and expect_target is None
+                        and not words[0].endswith("$") and words[0] not in _RESERVED):
+                    pending_def, words, skip_close = words[0], [], True  # `name()`: a definition
+                    continue
                 substitution = bool(words and words[-1].endswith("$")) or expect_target is not None
                 expect_target = None
                 if substitution:
@@ -343,7 +370,9 @@ def _invocations(
                     end_list()  # a plain subshell `(...)`: its status is its own
                 parens.append(substitution)
             elif op == ")":
-                if parens and parens[-1]:
+                if skip_close:
+                    skip_close = False
+                elif parens and parens[-1]:
                     end_command()
                     parens.pop()
                     words, attached = saved.pop()
@@ -353,6 +382,8 @@ def _invocations(
                         parens.pop()
             else:  # `;`, a newline, `&`: the list ends
                 end_list(unknown=op == "&")
+    if defining:  # unterminated: the body never closed, so it never ran either
+        words, attached, defining = [], [], []
     while parens:  # unbalanced: whatever was inside is uncertain
         if parens.pop() and saved:
             end_command()
@@ -396,7 +427,8 @@ def _invocations(
     # `if false; then ...; fi` / `while false; do ...; done`: a branch whose
     # condition is a constant command never runs; one whose condition is a
     # real command may have (its commands stay, uncertain)
-    frames: list[list[bool | None]] = []  # per open if/while: [taken, skipping this body]
+    # per open if/while: [this arm taken, skipping this body, an earlier arm taken]
+    frames: list[list[bool | None]] = []
     for li, (plist, unknown) in enumerate(lists):
         head = plist[0][1][0] if plist and plist[0][1] and plist[0][1][0] else []
         first = head[0] if head else None
@@ -410,13 +442,15 @@ def _invocations(
             if taken is not None and negate:
                 taken = not taken
             if first == "elif" and frames:
-                frames[-1] = [taken, False]
+                earlier = frames[-1][2] or frames[-1][0] is True
+                # an arm after one already taken never runs, whatever its test
+                frames[-1] = [False if earlier else taken, False, earlier]
             else:
-                frames.append([taken, False])
+                frames.append([taken, False, False])
         elif first in ("then", "do") and frames:
             frames[-1][1] = frames[-1][0] is False
         elif first == "else" and frames:
-            frames[-1][1] = frames[-1][0] is True
+            frames[-1][1] = frames[-1][2] or frames[-1][0] is True
         elif first in ("fi", "done") and frames:
             frames.pop()
         if any(f[1] for f in frames):
@@ -446,6 +480,17 @@ def _invocations(
                 else:
                     sub_exit = None
                 emit(cmd_words, stage_certain, sub_exit)
+    # a defined function ran only if something called it (transitively);
+    # its body's status is unknown
+    expanded: set[str] = set()
+    while True:
+        called = {p for p, _, _ in found} & set(functions) - expanded
+        if not called:
+            break
+        for name in sorted(called):
+            expanded.add(name)
+            for cmd_words in functions[name]:
+                emit(cmd_words, False, None)
     outer = found
     found = found_nested
     for cmd_words in nested:  # inside `$(...)` / `<(...)`: status masked by the outer command

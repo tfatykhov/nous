@@ -1208,7 +1208,7 @@ def test_untaken_loops_and_handlers_are_not_executed(code, level):
     ("class A:\n    def save(self):\n        pass\nclass B:\n    def save(self):\n        open('/tmp/report.md', 'w')\n"
      "A().save()", "none"),
     ("class A:\n    def save(self):\n        pass\nclass B:\n    def save(self):\n        open('/tmp/report.md', 'w')\n"
-     "obj.save()", "exact"),                                                 # receiver unknown: any class may
+     "obj.save()", "none"),                                                  # unknown receiver, 2 candidates: withheld
     ("class Report:\n    open('/tmp/report.md', 'w').write(data)", "exact"),  # a class body runs at definition
     ("class Report:\n    def write(self):\n        open('/tmp/report.md', 'w')", "none"),
     ("class Obj:\n    def run(self):\n        self.save()\n    def save(self):\n        open('/tmp/report.md', 'w')\n"
@@ -1273,3 +1273,50 @@ def test_tar_writes_its_archive_only_when_creating():
     assert _verify(claim, _real_bash("tar -czf /tmp/report.md site/")).verified
     assert _verify(claim, _real_bash("tar --create --file=/tmp/report.md site/")).verified
     assert _verify(claim, _real_bash("tar rf /tmp/report.md extra.txt")).verified
+
+
+# --- codex round 13 ------------------------------------------------------------
+
+
+def test_a_shell_function_body_runs_only_when_called():
+    defined = "release() { git push origin main; }; true"
+    assert not _verify("I pushed the changes.", _real_bash(defined)).verified
+    keyword = "function release { git push origin main; }\necho defined"
+    assert not _verify("I pushed the changes.", _real_bash(keyword)).verified
+    assert _verify("I pushed the changes.", _real_bash("release() { git push origin main; }; release")).verified
+    assert _verify("I pushed the changes.", _real_bash("function release { git push origin main; }\nrelease")).verified
+    nested = "deploy() { release; }; release() { git push origin main; }; deploy"
+    assert _verify("I pushed the changes.", _real_bash(nested)).verified
+
+
+def test_an_elif_after_a_taken_arm_never_runs():
+    elif_after_taken = "if true; then :; elif true; then git push origin main; fi"
+    assert not _verify("I pushed the fix.", _real_bash(elif_after_taken)).verified
+    else_after_taken = "if true; then :; elif false; then :; else git push origin main; fi"
+    assert not _verify("I pushed the fix.", _real_bash(else_after_taken)).verified
+    assert _push_level("if false; then :; elif true; then git push origin main; fi") == "plausible"
+    unknown_first = "if grep -q x f; then :; elif true; then git push origin main; fi"
+    assert _push_level(unknown_first) == "plausible"
+
+
+_TWO_SAVES = ("class Noop:\n    def save(self):\n        pass\n"
+              "class Writer:\n    def save(self):\n        open('/tmp/report.md', 'w')\n")
+
+
+@pytest.mark.parametrize("code, level", [
+    (_TWO_SAVES + "x = Noop()\nx.save()", "none"),                           # the instance's class
+    (_TWO_SAVES + "w = Writer()\nw.save()", "exact"),
+    ("class Writer:\n    def run(self):\n        self.save()\n    def save(self):\n"
+     "        open('/tmp/report.md', 'w')\nclass Noop:\n    def save(self):\n        pass\nWriter().run()",
+     "exact"),                                                               # self is the enclosing class
+    (_TWO_SAVES + "def go(obj):\n    obj.save()\ngo(thing)", "none"),        # ambiguous: withheld
+    ("class Writer:\n    def save(self):\n        open('/tmp/report.md', 'w')\ndef go(obj):\n    obj.save()\ngo(thing)",
+     "exact"),                                                               # only one class has a save
+    ("for item in []:\n    open('/tmp/report.md', 'w')", "none"),
+    ("for item in ():\n    open('/tmp/report.md', 'w')\nelse:\n    print(1)", "none"),
+    ("for item in range(0):\n    open('/tmp/report.md', 'w')", "none"),
+    ("for item in items:\n    open('/tmp/report.md', 'w')", "exact"),
+])
+def test_receivers_and_empty_loops_resolve(code, level):
+    result = _verify("It was saved to /tmp/report.md.", Evidence("run_python", {"code": code}))
+    assert result.claims[0].evidence == level
