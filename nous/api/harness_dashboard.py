@@ -463,7 +463,12 @@ async def get_harness_data(
             },
             "claims": {
                 "mode": modes.get("claim_verification"), "first_event_at": _iso(first.get(CLAIMS)),
-                "evidence_since": _iso(evidence_since), "by_evidence": evidence,
+                # The first post-2c event IN the window is when evidence
+                # levels began only if pre-2c events are in view too (the
+                # switch happened inside it); otherwise it began earlier and
+                # no date from this window is true.
+                "evidence_since": _iso(evidence_since) if legacy["events"] else None,
+                "by_evidence": evidence,
                 "by_mode": claims_by_mode, "none_by_mode": none_by_mode,
                 "turns_with_claims": turns_with_claims, "legacy": legacy,
             },

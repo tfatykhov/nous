@@ -615,6 +615,9 @@ async def test_claim_days_count_from_the_first_claim_event_ever_when_all_are_pos
     # Every turn writes a claim event, and none in view is pre-2c: a quiet
     # day in the window had no turns, so zero unsupported claims is measured.
     assert [d["claims_none"] for d in data["daily"]] == [0] * 8
+    # The switch to evidence levels happened before the window, so no start
+    # date inside it is true: the first event in view is not when it began.
+    assert data["rules"]["claims"]["evidence_since"] is None
 
 
 async def test_a_rule_that_is_off_draws_gaps_but_keeps_what_it_recorded(db, agent_id):

@@ -73,7 +73,9 @@
           : cl.legacy.events && cl.evidence_since
             ? `Evidence levels recorded since ${fmtUtc(cl.evidence_since)} · ${cl.legacy.events} older checks without them`
             : cl.legacy.events ? `${cl.legacy.events} older checks without evidence levels`
-              : cl.evidence_since ? `Evidence levels recorded since ${fmtUtc(cl.evidence_since)}` : '',
+              // No pre-2c check in view: evidence levels began before the
+              // window, so there is no start date to give — only coverage.
+              : sum(cl.by_mode) ? 'Every check in this window recorded evidence levels' : '',
         breakdownLabel: 'By evidence',
         breakdown: bars(['exact', 'plausible', 'none'].map((k) => ({
           key: k, count: cl.by_evidence[k as 'exact' | 'plausible' | 'none'],

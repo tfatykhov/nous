@@ -68,7 +68,8 @@ const HARNESS = (persisted = true) => ({
       by_context: persisted ? [{ key: 'heartbeat_callback', count: 9 }] : [], by_tool: [] },
     context_policy: { mode: 'warn', first_event_at: null, by_mode: {}, by_violation: [], by_context: [] },
     claims: { mode: 'enforce', first_event_at: null, evidence_since: null,
-      by_evidence: { exact: 0, plausible: 0, none: 0 }, none_by_mode: {}, turns_with_claims: 0, legacy: { events: 0, violations: 0 } },
+      by_evidence: { exact: 0, plausible: 0, none: 0 }, by_mode: persisted ? { enforce: 40 } : {}, none_by_mode: {},
+      turns_with_claims: 0, legacy: { events: 0, violations: 0 } },
   },
   daily: [{ date: '2026-09-25', offered_set: persisted ? 12 : 0, context_policy: 0, claims_none: 0 }],
   patterns: persisted ? [{ rule: 'offered_set', mode: 'warn', context: 'heartbeat_callback', tool: 'send_file',
@@ -225,6 +226,13 @@ describe('harness dashboard views', () => {
     // One in the chart panel, one where the patterns table would be.
     expect(await screen.findAllByText('Not measured — event persistence is off.', { selector: '.empty' })).toHaveLength(2);
     expect(container.textContent).not.toContain('send_file');
+  });
+
+  it('Harness gives no evidence start date it cannot know', async () => {
+    // Post-2c events only, none older in view: the switch predates the window.
+    const { container } = render(Harness);
+    expect(await screen.findByText('Every check in this window recorded evidence levels')).toBeTruthy();
+    expect(container.textContent).not.toContain('Evidence levels recorded since');
   });
 
   it('Harness names the top pattern from the mode its verdict describes', async () => {
