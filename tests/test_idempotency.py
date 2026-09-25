@@ -116,3 +116,16 @@ def test_a_semicolon_is_not_a_separator_to_either():
     from nous.api.idempotency import normalize_recipients
 
     assert normalize_recipients("a@x.io;b@x.io") == ["a@x.io;b@x.io"]
+
+
+def test_fields_are_encoded_unambiguously():
+    """Codex r2: joining fields with a delimiter let two different sends share
+    material when a field contains the delimiter."""
+    a = idempotency_key(_node(), "send_file", {"file_path": "/tmp/report|draft.pdf", "send_label": "final"},
+                        default_chat_id="123")
+    b = idempotency_key(_node(), "send_file", {"file_path": "/tmp/report", "send_label": "draft.pdf|final"},
+                        default_chat_id="123")
+    assert a != b
+    c = idempotency_key(_node(), "send_email", dict(EMAIL, to="a@x.io", send_label="x|y"))
+    d = idempotency_key(_node(), "send_email", dict(EMAIL, to="a@x.io|x", send_label="y"))
+    assert c != d

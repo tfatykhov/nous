@@ -10,6 +10,7 @@ message to the same recipients carries a `send_label`.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from collections.abc import Mapping
 from typing import Any
@@ -71,14 +72,18 @@ def canonical_recipients(value: Any) -> list[str]:
 
 
 def _material(tool_name: str, args: Mapping[str, Any], default_chat_id: str | None) -> str | None:
+    """The fields that name the send, as a canonical JSON array: no field
+    value can contain a delimiter that makes two different sends collide."""
     label = str(args.get("send_label") or "").strip()
     if tool_name == "send_email":
-        to = ",".join(canonical_recipients(args.get("to")) + canonical_recipients(args.get("cc")))
-        return f"{to}|{label}"
-    if tool_name == "send_file":
+        recipients = sorted(set(canonical_recipients(args.get("to")) + canonical_recipients(args.get("cc"))))
+        fields: list[Any] = [recipients, label]
+    elif tool_name == "send_file":
         chat = str(args.get("chat_id") or default_chat_id or "")
-        return f"{chat}|{os.path.basename(str(args.get('file_path') or ''))}|{label}"
-    return None
+        fields = [chat, os.path.basename(str(args.get("file_path") or "")), label]
+    else:
+        return None
+    return json.dumps(fields, ensure_ascii=False, separators=(",", ":"))
 
 
 def idempotency_key(
