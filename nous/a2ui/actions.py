@@ -26,6 +26,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
 
+from nous.dag.approval import node_id_from_dedup_key, refusal_message
 from nous.storage.models import A2uiAction, A2uiSurface
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,9 @@ class ActionContext:
     context: dict
     data_model: dict | None
     services: ActionRouter
+    # Harness Phase 3: who acted, as the router recorded it for the audit
+    # row — 'unattributed' unless forwarded identity is trusted.
+    actor: str = "unattributed"
 
 
 @dataclass
@@ -195,7 +199,9 @@ class ActionRouter:
         audit_id = None
         if meta.mutating:
             audit_id = await self._audit(surface, name, args, None, "dispatched", None, actor)
-        ctx = ActionContext(surface=surface, name=name, context=args, data_model=None, services=self)
+        ctx = ActionContext(
+            surface=surface, name=name, context=args, data_model=None, services=self, actor=actor
+        )
         try:
             value = await meta.fn(ctx)
         except ValueError as exc:
@@ -349,7 +355,10 @@ class ActionRouter:
             source_component_id=action.get("sourceComponentId"),
         )
 
-        ctx = ActionContext(surface=surface, name=name, context=context, data_model=data_model, services=self)
+        ctx = ActionContext(
+            surface=surface, name=name, context=context, data_model=data_model,
+            services=self, actor=actor,
+        )
         try:
             result = await meta.fn(ctx)
         except Exception as exc:
@@ -483,13 +492,48 @@ def _register_default_handlers(router: ActionRouter) -> None:
         offered = {str(o.get("id")) for o in (ctx.surface.data_model or {}).get("options", []) if isinstance(o, dict)}
         if option not in offered:
             return ActionResult(ok=False, message=f"option {option!r} was not offered by this surface")
+        node_id = node_id_from_dedup_key(getattr(ctx.surface, "dedup_key", None))
+        if node_id is not None:
+            return await _dag_approval_choose(ctx, node_id, option)
         return ActionResult(
             message=f"chose {option}",
             resolve_surface=True,
             data_patches=[("/summary", f"Decided: {option}.")],
         )
 
+    async def _dag_approval_choose(ctx: ActionContext, node_id: UUID, option: str) -> ActionResult:
+        """Harness Phase 3 §3.5: a DAG card never takes the generic path.
+
+        A recorded answer retires the card — its disappearing is the
+        confirmation. Every refusal leaves the card up with the reason: the
+        companion shows a message only when ok is false, and a card that
+        vanished on a late tap would read as accepted. The orchestrator
+        retires it (leaked-card sweep, or the next attempt's step 0).
+        """
+        orchestrator = router._dag_orchestrator
+        if orchestrator is None:
+            return ActionResult(
+                ok=False,
+                message="DAG orchestration is not running; the answer cannot be recorded now",
+            )
+        result = await orchestrator.answer_node(
+            node_id, option, source="companion", actor=ctx.actor,
+            surface_id=ctx.surface.surface_id,
+        )
+        if result.outcome == "recorded":
+            return ActionResult(message=f"recorded {option}", resolve_surface=True)
+        return ActionResult(ok=False, message=refusal_message(result, option))
+
     async def approval_defer(ctx: ActionContext) -> ActionResult:
+        if node_id_from_dedup_key(getattr(ctx.surface, "dedup_key", None)) is not None:
+            # Harness Phase 3: a DAG card's /summary holds what the person is
+            # approving — never overwrite it; restate what the deadline does.
+            risk = str((ctx.surface.data_model or {}).get("risk") or "")
+            patched = risk if risk.startswith("Deferred.") else f"Deferred. {risk}".strip()
+            return ActionResult(
+                message="deferred — the default applies at the deadline",
+                data_patches=[("/risk", patched)],
+            )
         # Defer must NOT resolve (codex P2): nothing reschedules a resolved
         # card, so "Ask me later" would permanently destroy the approval.
         # The card stays live until the user decides or it expires — and
