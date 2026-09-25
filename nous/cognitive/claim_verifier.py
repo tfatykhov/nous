@@ -124,9 +124,10 @@ _OBJECT = (rf"(?:{_STOP}(?:[^.\n;,—]|\.(?=\S)|(?<=\be\.g)\.(?=\s)|(?<=\bi\.e)\
 # The object of a TARGETED claim ("saved <the report> to <path>"): short, so a
 # path named later in the sentence is not its target.
 _OBJ = rf"(?:{_STOP}(?:[^.\n;,(—]|\.(?=\S))){{0,40}}?"
-# A path, or a bare file name whose extension starts with a letter (`v1.2`
-# and `3.30pm` are not files).
-_PATH = r"(?P<target>(?:~|\.{0,2})/[\w./-]*\w|[\w-]+\.[A-Za-z]\w{0,5})"
+# A path (absolute, `~/`, `./`, or `dir/file.ext`), or a bare file name; an
+# extension starts with a letter (`v1.2` and `3.30pm` are not files).
+_PATH = (r"(?P<target>(?:~|\.{0,2})/[\w./-]*\w|(?:[\w.-]+/)+[\w-]+\.[A-Za-z]\w{0,5}"
+         r"|[\w-]+\.[A-Za-z]\w{0,5})")
 _ADDRESS = r"(?P<target>[\w.+-]+@[\w-]+(?:\.[\w-]+)+)"
 _SUBJECT = rf"(?P<subj>{_FIRST}|{_AND})"
 # The effect landed somewhere no file / git / deploy tool reaches: memory, a
@@ -299,8 +300,40 @@ _LEVELS = {"none": 0, "plausible": 1, "exact": 2}
 
 
 def _names(target: str, text: str) -> bool:
-    """True if ``text`` names the claimed target (full path or basename)."""
-    return bool(target and text) and (target in text or target.rsplit("/", 1)[-1] in text)
+    """True if a command's text names the claimed target: an absolute path in
+    full (`/tmp/report.md` is not `/var/archive/report.md`), `~/x` also as
+    `/x` (`$HOME/x`), a relative one in full or by basename."""
+    if not target or not text:
+        return False
+    if target in text:
+        return True
+    if target.startswith("~/"):
+        return target[1:] in text
+    if target.startswith("/"):
+        return False
+    return target.rsplit("/", 1)[-1] in text
+
+
+def _same_path(target: str, path: str) -> bool:
+    """True if an explicit written path IS the claimed target, normalized:
+    an absolute target must match in full, `~/x` any absolute path ending
+    in `/x`, a relative target the path's tail on a `/` boundary."""
+    if not target or not path:
+        return False
+    target = target.replace("\\", "/").rstrip("/")
+    path = path.replace("\\", "/").rstrip("/")
+    if path == target:
+        return True
+    if target.startswith("/"):
+        return False
+    if target.startswith("~/"):
+        return path.startswith("/") and path.endswith(target[1:])
+    return path.endswith("/" + target.removeprefix("./"))
+
+
+def _addresses(text: str) -> set[str]:
+    """Every whole e-mail address written in ``text``, lowercased."""
+    return {a.lower() for a in _PY_ADDRESS.findall(text)}
 
 
 def _best(levels: list[str]) -> str:
@@ -453,10 +486,10 @@ def _code_level(claim: Claim, code: str) -> str:
     if claim.kind == "email":
         if not _PY_SENDS.search(code):
             return "none"
-        if claim.target and claim.target not in code.lower():
+        if claim.target and claim.target not in _addresses(code):
             # a recipient held in a variable may be the named one; one written
             # out as someone else is not
-            return "none" if _PY_ADDRESS.search(code) else "plausible"
+            return "none" if _addresses(code) else "plausible"
         return "plausible"
     if claim.kind in ("vcs_push", "vcs_commit"):
         return "plausible" if _PY_GIT[claim.kind].search(code) else "none"
@@ -502,10 +535,11 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
         levels.append("plausible" if opaque else "none")
     elif failed and hits == [len(runs) - 1]:
         levels.append("none")
-    elif claim.kind == "email" and claim.target and claim.target not in command.lower():
-        # a recipient held in a variable may be the named one
+    elif claim.kind == "email" and claim.target and claim.target not in _addresses(command):
+        # a recipient held in a variable may be the named one; one written
+        # out as someone else is not
         variable = any(a.startswith("$") for i in hits for a in runs[i][1])
-        levels.append("plausible" if opaque or variable else "none")
+        levels.append("plausible" if (opaque or variable) and not _addresses(command) else "none")
     elif claim.kind in ("vcs_push", "vcs_commit") \
             and any(_base(runs[i][0]) in ("git", "docker") and runs[i][2] for i in hits):
         levels.append("exact")
@@ -525,14 +559,14 @@ def evidence_level(claim: Claim, ev: Evidence) -> str:
         return "none" if claim.target else "plausible"
     if ev.tool_name == "bash":
         return _bash_level(claim, ev)
-    if ev.tool_name == "write_file":
+    if ev.tool_name == "write_file":  # an explicit destination: it must BE the target
         path = ev.args.get("path") or ev.args.get("file_path") or ""
-        return "exact" if not claim.target or _names(claim.target, path) else "none"
-    if ev.tool_name == "send_email":
-        recipients = f"{ev.args.get('to', '')} {ev.args.get('cc', '')}".lower()
+        return "exact" if not claim.target or _same_path(claim.target, path) else "none"
+    if ev.tool_name == "send_email":  # whole addresses: malice@x.io is not alice@x.io
+        recipients = _addresses(f"{ev.args.get('to', '')} {ev.args.get('cc', '')}")
         return "exact" if not claim.target or claim.target in recipients else "none"
-    if ev.tool_name == "send_file":
-        return "plausible"
+    if ev.tool_name == "send_file":  # a Telegram send cannot have reached a named address
+        return "none" if claim.target else "plausible"
     return _code_level(claim, ev.args.get("code", ""))
 
 

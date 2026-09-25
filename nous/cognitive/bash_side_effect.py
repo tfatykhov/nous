@@ -329,7 +329,11 @@ def _invocations(
         certain = last_list and exit_code == 0 and not has_or
         for pi, (_, cmds) in enumerate(plist):
             last_pipeline = last_list and pi == len(plist) - 1
-            for cmd_words in cmds:
+            for ci, cmd_words in enumerate(cmds):
+                # a pipeline's status is its LAST stage's: `git push | true`
+                # exits 0 whatever the push did
+                last_stage = ci == len(cmds) - 1
+                stage_certain = certain and last_stage
                 start = _command_start(cmd_words)
                 if start is None or cmd_words[start].startswith("\n"):
                     continue  # nothing runs, or a heredoc body left where a program should be
@@ -341,16 +345,19 @@ def _invocations(
                 if inner is not None and depth < _MAX_STRING_DEPTH:
                     # a runner that certainly succeeded ran its string to exit
                     # 0; otherwise the string's exit code is the whole
-                    # command's only when the runner is the last pipeline
-                    if certain:
+                    # command's only when the runner is the last stage of the
+                    # last pipeline
+                    if stage_certain:
                         sub_exit: int | None = 0
+                    elif last_pipeline and last_stage and not has_or:
+                        sub_exit = exit_code
                     else:
-                        sub_exit = exit_code if last_pipeline and not has_or else None
+                        sub_exit = None
                     sub = _invocations(inner, depth + 1, sub_exit)
                     if sub is not None:
-                        found.extend((p, a, certain and c) for p, a, c in sub)
+                        found.extend((p, a, stage_certain and c) for p, a, c in sub)
                         continue
-                found.append((prog, args, certain))
+                found.append((prog, args, stage_certain))
     return found
 
 

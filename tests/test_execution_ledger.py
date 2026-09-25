@@ -1264,7 +1264,7 @@ class TestCommandRuns:
         ("a; b", 0, [("a", [], False), ("b", [], True)]),          # a ran; its success is unknown
         ("a && b", 1, [("a", [], False), ("b", [], False)]),
         ("a && b", None, [("a", [], False), ("b", [], False)]),
-        ("a | b", 0, [("a", [], True), ("b", [], True)]),
+        ("a | b", 0, [("a", [], False), ("b", [], True)]),        # the exit code is the last stage's
         ("bash -c 'a && b'", 0, [("a", [], True), ("b", [], True)]),
         ("bash -c 'a; b' && c", 0, [("a", [], False), ("b", [], True), ("c", [], True)]),
         ("bash -c 'a' || c", 0, [("a", [], False), ("c", [], False)]),

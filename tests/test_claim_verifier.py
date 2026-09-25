@@ -211,14 +211,14 @@ def test_claims_are_reported_even_when_verified():
 # --- evidence reads the command the way bash does ---------------------------
 
 
-@pytest.mark.parametrize("command", [
-    "git push origin main 2>&1 | tail -n 5",          # a -n elsewhere is not a dry run
-    "cd /srv/app && sudo -u deploy git -C /srv/app push",
-    "GIT_SSH_COMMAND='ssh -i k' timeout 60 git push --force-with-lease",
+@pytest.mark.parametrize("command, level", [
+    ("git push origin main 2>&1 | tail -n 5", "plausible"),  # a -n elsewhere is not a dry run; piped: masked
+    ("cd /srv/app && sudo -u deploy git -C /srv/app push", "exact"),
+    ("GIT_SSH_COMMAND='ssh -i k' timeout 60 git push --force-with-lease", "exact"),
 ])
-def test_a_real_push_is_grounded_however_it_is_wrapped(command):
+def test_a_real_push_is_grounded_however_it_is_wrapped(command, level):
     result = _verify("I pushed the fix.", _bash(command, side_effect="external"))
-    assert result.verified and result.claims[0].evidence == "exact"
+    assert result.verified and result.claims[0].evidence == level
 
 
 def test_commit_dash_n_is_no_verify_not_a_dry_run():
@@ -875,3 +875,50 @@ def test_first_person_email_claims_capture_the_recipient(text):
     assert not _verify(text, wrong).verified
     right = Evidence("send_email", {"to": "['alice@x.io', 'bob@x.io']", "subject": "s"})
     assert _verify(text, right).claims[0].evidence == "exact"
+
+
+# --- codex round 2 -------------------------------------------------------------
+
+
+def test_a_pipelines_status_belongs_to_its_last_stage():
+    assert _push_level("git push bad-remote | true") == "plausible"          # the push ran; masked
+    assert _push_level("git push origin main 2>&1 | tail -n 5") == "plausible"
+    assert _push_level("true | git push origin main") == "exact"
+
+
+@pytest.mark.parametrize("claim_path, written, level", [
+    ("/tmp/report.md", "/tmp/report.md", "exact"),
+    ("/tmp/report.md", "/var/archive/report.md", "none"),      # same name, elsewhere
+    ("/tmp/report.md", "/tmp/report.md.bak", "none"),
+    ("~/reports/q3.md", "/home/u/reports/q3.md", "exact"),
+    ("out/report.md", "/srv/app/out/report.md", "exact"),
+    ("report.md", "/srv/app/out/report.md", "exact"),
+    ("report.md", "/srv/app/out/report.md.bak", "none"),
+    ("report.md", "C:\\srv\\out\\report.md", "exact"),
+])
+def test_write_file_evidence_must_agree_on_the_path(claim_path, written, level):
+    result = _verify(f"It was saved to {claim_path}.", Evidence("write_file", {"path": written}))
+    assert result.claims[0].evidence == level
+
+
+def test_bash_evidence_for_an_absolute_target_needs_the_full_path():
+    assert not _verify("It was saved to /tmp/report.md.", _real_bash("cp a /var/archive/report.md")).verified
+    assert _verify("It was saved to /tmp/report.md.", _real_bash("cp a /tmp/report.md")).verified
+    assert _verify("It was saved to ~/reports/q3.md.", _real_bash("cp a $HOME/reports/q3.md")).verified
+
+
+def test_a_recipient_is_a_whole_address():
+    wrong = Evidence("send_email", {"to": "['malice@x.io']", "subject": "s"})
+    assert not _verify("Email sent to alice@x.io.", wrong).verified
+    named = Evidence("send_email", {"to": "Alice Smith <Alice@X.io>", "subject": "s"})
+    assert _verify("Email sent to alice@x.io.", named).claims[0].evidence == "exact"
+    code = Evidence("run_python", {"code": "smtplib.SMTP('h').sendmail('me', 'malice@x.io', m)"})
+    assert not _verify("Email sent to alice@x.io.", code).verified
+    assert not _verify("Email sent to alice@x.io.", _real_bash("sendmail malice@x.io < m")).verified
+    assert _verify("Email sent to alice@x.io.", _real_bash("sendmail alice@x.io < m")).verified
+
+
+def test_send_file_never_grounds_an_addressed_email_claim():
+    sent = Evidence("send_file", {"file_path": "/tmp/r.png"})
+    assert not _verify("Email sent to alice@x.io.", sent).verified
+    assert _verify("I sent the report.", sent).verified
