@@ -650,7 +650,11 @@ class HeartbeatRunner:
                     tool_filter=tool_filter,
                     model_override=heartbeat_model,
                     is_background=True,
-                    context=ExecutionContext(kind="heartbeat_callback", session_id=session_id),
+                    context=ExecutionContext(
+                        kind="heartbeat_callback", session_id=session_id,
+                        declared_tools=tuple(check.on_complete_tools or ()) or None,
+                        check_name=check.name,
+                    ),
                 )
                 tokens = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)
                 self._tokens_used_today += tokens

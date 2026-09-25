@@ -319,6 +319,37 @@ class TestDynamicCheckRun:
         assert call_kwargs[1]["tool_filter"] == ["web_search", "bash"]
 
     @pytest.mark.asyncio
+    async def test_run_context_carries_the_declared_tools(self):
+        """Harness 2a: the check's tools and name reach the ExecutionContext."""
+        runner = AsyncMock()
+        runner.run_turn = AsyncMock(return_value=(
+            '{"has_findings": false, "findings": []}', MagicMock(), {"input_tokens": 1, "output_tokens": 1},
+        ))
+        runner.end_conversation = AsyncMock()
+
+        check = _make_dynamic_check(tools=["web_search", "bash"], runner=runner)
+        await check.run()
+        context = runner.run_turn.call_args[1]["context"]
+        assert context.kind == "heartbeat_check"
+        assert context.declared_tools == ("web_search", "bash")
+        assert context.check_name == check.name
+
+    @pytest.mark.asyncio
+    async def test_run_context_with_no_tools_declares_nothing(self):
+        """Harness 2a: [] is the DB default and means "all" -- undeclared, not "nothing"."""
+        runner = AsyncMock()
+        runner.run_turn = AsyncMock(return_value=(
+            '{"has_findings": false, "findings": []}', MagicMock(), {"input_tokens": 1, "output_tokens": 1},
+        ))
+        runner.end_conversation = AsyncMock()
+
+        check = _make_dynamic_check(tools=[], runner=runner)
+        await check.run()
+        call_kwargs = runner.run_turn.call_args[1]
+        assert call_kwargs["tool_filter"] is None
+        assert call_kwargs["context"].declared_tools is None
+
+    @pytest.mark.asyncio
     async def test_run_tracks_tokens(self):
         """17. tokens_used populated from usage dict."""
         runner = AsyncMock()
@@ -1402,6 +1433,42 @@ class TestOnCompleteExecution:
         triage_runner.run_turn.assert_called_once()
         assert runner._tokens_used_today == initial_tokens + 300
         triage_runner.end_conversation.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_callback_context_carries_the_declared_tools_and_check_name(self):
+        """Harness 2a: on_complete_tools and the check's name reach the ExecutionContext."""
+        runner = self._make_runner_for_callback()
+        triage_runner = AsyncMock()
+        triage_runner.run_turn = AsyncMock(return_value=("ok", MagicMock(), {"input_tokens": 1, "output_tokens": 1}))
+        triage_runner.end_conversation = AsyncMock()
+        runner._get_triage_runner = MagicMock(return_value=triage_runner)
+
+        check = DynamicCheck(
+            check_id="cb-002", name="cb_check", prompt="Check X",
+            tools=["web_search"], on_complete_prompt="Notify", on_complete_tools=["bash"],
+        )
+        await runner._execute_callback(check)
+        context = triage_runner.run_turn.call_args[1]["context"]
+        assert context.kind == "heartbeat_callback"
+        assert context.declared_tools == ("bash",)
+        assert context.check_name == "cb_check"
+
+    @pytest.mark.asyncio
+    async def test_callback_context_with_no_tools_declares_nothing(self):
+        runner = self._make_runner_for_callback()
+        triage_runner = AsyncMock()
+        triage_runner.run_turn = AsyncMock(return_value=("ok", MagicMock(), {"input_tokens": 1, "output_tokens": 1}))
+        triage_runner.end_conversation = AsyncMock()
+        runner._get_triage_runner = MagicMock(return_value=triage_runner)
+
+        check = DynamicCheck(
+            check_id="cb-003", name="cb_check", prompt="Check X",
+            tools=["web_search"], on_complete_prompt="Notify", on_complete_tools=[],
+        )
+        await runner._execute_callback(check)
+        call_kwargs = triage_runner.run_turn.call_args[1]
+        assert call_kwargs["tool_filter"] is None
+        assert call_kwargs["context"].declared_tools is None
 
     @pytest.mark.asyncio
     async def test_execute_callback_retry_on_failure(self):

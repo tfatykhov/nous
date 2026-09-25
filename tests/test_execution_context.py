@@ -96,3 +96,18 @@ def test_resolve_context_rejects_a_contradiction():
         resolve_context(ExecutionContext(kind="interactive"), is_background=True, session_id="s")
     with pytest.raises(ValueError, match="contradicts"):
         resolve_context(ExecutionContext(kind="mcp"), is_background=True, session_id="s")
+
+
+# ---------------------------------------------------------------------------
+# Harness Phase 2a: what a check or callback declared travels with the context
+# ---------------------------------------------------------------------------
+
+
+def test_declared_tools_and_check_name_default_to_none():
+    ctx = ExecutionContext(kind="heartbeat_check")
+    assert ctx.declared_tools is None and ctx.check_name is None
+
+
+def test_declared_tools_are_carried_verbatim():
+    ctx = ExecutionContext(kind="heartbeat_callback", declared_tools=("bash",), check_name="watch-ci")
+    assert ctx.declared_tools == ("bash",) and ctx.check_name == "watch-ci"

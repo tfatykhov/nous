@@ -139,7 +139,10 @@ class DynamicCheck(BaseCheck):
                 tool_filter=self._tools if self._tools else None,
                 model_override=self._model_override,
                 is_background=True,
-                context=ExecutionContext(kind="heartbeat_check", session_id=session_id),
+                context=ExecutionContext(
+                    kind="heartbeat_check", session_id=session_id,
+                    declared_tools=tuple(self._tools) or None, check_name=self.name,
+                ),
             )
 
             findings = self._parse_findings(response_text or "")
