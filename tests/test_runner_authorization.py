@@ -377,3 +377,117 @@ async def test_refuse_active_strips_previously_unclassified_tools():
     r._call_api = capture
     await _run_loop(r, refuse_active=True)
     assert sent and "dag_create" not in sent[0] and "recall_deep" in sent[0]
+
+
+# ---------------------------------------------------------------------------
+# Harness Phase 2a, Task 5: the choke point consults the context policy
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_policy_warn_runs_an_offered_call_and_records_it():
+    r, d = _runner(["send_email"], tool_context_policy_mode="warn")
+    events = []
+    r._log_f026_decision = lambda kind, data, session_id: events.append((kind, data))
+    r._call_api = _one_tool_call_then_done("send_email")
+    await _run_loop(r, is_background=True, context=ExecutionContext(kind="heartbeat_triage"))
+    assert [c[0] for c in d.calls] == ["send_email"]
+    assert ("harness_context_policy_violation",
+            {"tool_name": "send_email", "context_kind": "heartbeat_triage",
+             "violation": "level:external", "mode": "warn"}) in events
+
+
+@pytest.mark.asyncio
+async def test_policy_enforce_refuses_and_records_a_blocked_row():
+    from tests.test_runner_ledger import _FakeStore
+
+    store = _FakeStore()
+    r, d = _runner(["spawn_task"], tool_context_policy_mode="enforce")
+    r.set_ledger_store(store)
+    r._call_api = _one_tool_call_then_done("spawn_task")
+    _text, results, _usage, _thinking = await _run_loop(
+        r, is_background=True, context=ExecutionContext(kind="dag_node"),
+    )
+    assert d.calls == []
+    assert store.events == [("blocked", "spawn_task", "context_policy")]
+    (res,) = results
+    assert res.tool_name == "spawn_task" and "not allowed in a dag_node turn (spawn)" in res.error
+
+
+@pytest.mark.asyncio
+async def test_policy_off_is_silent():
+    r, d = _runner(["spawn_task"], tool_context_policy_mode="off")
+    events = []
+    r._log_f026_decision = lambda kind, data, session_id: events.append(kind)
+    r._call_api = _one_tool_call_then_done("spawn_task")
+    await _run_loop(r, is_background=True, context=ExecutionContext(kind="dag_node"))
+    assert [c[0] for c in d.calls] == ["spawn_task"] and events == []
+
+
+@pytest.mark.asyncio
+async def test_an_unoffered_call_is_checked_by_both_rules():
+    r, d = _runner(["recall_deep", "spawn_task"],
+                   tool_offered_set_enforcement_mode="warn", tool_context_policy_mode="warn")
+    events = []
+    r._log_f026_decision = lambda kind, data, session_id: events.append(kind)
+    r._call_api = _one_tool_call_then_done("spawn_task")
+    await _run_loop(r, is_background=True, tool_filter=["recall_deep"],
+                    context=ExecutionContext(kind="dag_node"))
+    assert events == ["harness_unoffered_tool_call", "harness_context_policy_violation"]
+
+
+@pytest.mark.asyncio
+async def test_a_foreground_turn_is_never_policed():
+    r, d = _runner(["dag_create"], tool_context_policy_mode="enforce")
+    events = []
+    r._log_f026_decision = lambda kind, data, session_id: events.append(kind)
+    r._call_api = _one_tool_call_then_done("dag_create")
+    await _run_loop(r, context=ExecutionContext(kind="interactive"))
+    assert [c[0] for c in d.calls] == ["dag_create"] and events == []
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_hands_the_call_input_to_the_choke_point():
+    """/chat/stream is always interactive (never policed), but it consults the
+    same choke point with the call's INPUT, so the policy sees what the
+    non-streaming loop sees."""
+    from unittest.mock import MagicMock
+
+    from nous.api.anthropic_client import StreamEvent
+    from tests.test_streaming import _make_mock_cognitive, _make_mock_settings, _make_runner
+
+    cognitive, _ = _make_mock_cognitive()
+    settings = _make_mock_settings()
+    settings.tool_offered_set_enforcement_mode = "off"
+    settings.tool_context_policy_mode = "enforce"
+    runner = _make_runner(cognitive, settings)
+    seen = []
+    original = runner._authorize_tool_call
+
+    def recording(ctx, tool_name, offered_names, session_id, tool_input):
+        seen.append((ctx.kind, tool_name, tool_input))
+        return original(ctx, tool_name, offered_names, session_id, tool_input)
+
+    runner._authorize_tool_call = recording
+    calls = {"n": 0}
+
+    async def fake_stream(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield StreamEvent(type="tool_start", tool_name="web_search", tool_id="t1", block_index=1)
+            yield StreamEvent(type="tool_input_delta", text='{"query": "nous"}', block_index=1)
+            yield StreamEvent(type="block_stop", block_index=1)
+            yield StreamEvent(type="done", stop_reason="tool_use")
+        else:
+            yield StreamEvent(type="text_delta", text="ok")
+            yield StreamEvent(type="done", stop_reason="end_turn")
+
+    runner._call_api_stream = MagicMock(side_effect=fake_stream)
+    [e async for e in runner.stream_chat("s1", "search it")]
+
+    assert seen == [("interactive", "web_search", {"query": "nous"})]
+    assert runner._dispatcher.dispatch.called  # a foreground turn is never policed
+
+
+def test_policy_setting_defaults_to_warn():
+    assert _settings().tool_context_policy_mode == "warn"

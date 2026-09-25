@@ -41,7 +41,7 @@ _CLOSABLE = ("pending", "unknown")
 # Why the harness refused a call. A code, never prose: the ActionGate model's
 # reason is written from a prompt that carries the call's arguments, so it can
 # echo a subject, a body or a bare key.
-REFUSAL_CODES = frozenset({"offered_set", "action_gate"})
+REFUSAL_CODES = frozenset({"offered_set", "action_gate", "context_policy"})
 _TERMINAL = frozenset(s for s in LEDGER_STATUSES if s != "pending")
 
 # Per-tool durable argument policy. Pattern redaction cannot be trusted with

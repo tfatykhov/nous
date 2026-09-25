@@ -14,10 +14,11 @@ import time
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, Callable
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any, NamedTuple
 from uuid import UUID
 
-from nous.api import attachment_store
+from nous.api import attachment_store, tool_policy
 from nous.api.anthropic_client import (
     AnthropicClient,
     StreamEvent,
@@ -60,6 +61,15 @@ from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """A call the harness would not execute: the tool error the model sees
+    and the durable-ledger code (a ``ledger_store.REFUSAL_CODES`` entry)."""
+
+    text: str
+    code: str
 
 MAX_CONVERSATIONS = 100
 MAX_HISTORY_MESSAGES = 20
@@ -250,37 +260,65 @@ class AgentRunner:
 
     def _authorize_tool_call(
         self, ctx: ExecutionContext, tool_name: str,
-        offered_names: frozenset[str], session_id: str | None,
-    ) -> str | None:
+        offered_names: frozenset[str], session_id: str | None, tool_input: dict,
+    ) -> Refusal | None:
         """Return a refusal for a call the harness must not execute, else None.
 
-        Harness Phase 1a: the single choke point both loops call before gating
-        and dispatch. Today it only knows the OFFERED set; Phase 2a adds the
-        capability policy here, so one place decides whether a call may run.
+        The single choke point both loops call before gating and dispatch:
+        the offered-set rule (Phase 1a), then the per-context policy (2a).
+        Both rules run for every call; each returns early only when IT
+        refuses, so a warn-mode deviation is recorded by both.
         """
-        mode = self._settings.tool_offered_set_enforcement_mode
-        if mode == "off" or tool_name in offered_names:
+        offered_mode = self._settings.tool_offered_set_enforcement_mode
+        if offered_mode != "off" and tool_name not in offered_names:
+            logger.warning(
+                "Harness: %s unoffered tool call %r (context=%s, session=%s)",
+                "refused" if offered_mode == "enforce" else "allowed (warn mode)",
+                tool_name, ctx.kind, session_id,
+            )
+            self._log_f026_decision(
+                "harness_unoffered_tool_call",
+                {
+                    "tool_name": tool_name,
+                    "context_kind": ctx.kind,
+                    "mode": offered_mode,
+                    "offered_count": len(offered_names),
+                },
+                session_id=session_id,
+            )
+            if offered_mode == "enforce":
+                return Refusal(
+                    f"Tool error: '{tool_name}' is not available in this turn. "
+                    "Use only the tools offered to you.",
+                    "offered_set",
+                )
+
+        policy_mode = self._settings.tool_context_policy_mode
+        if policy_mode == "off":
+            return None
+        violation = tool_policy.evaluate(ctx, tool_name, tool_input)
+        if violation is None:
             return None
         logger.warning(
-            "Harness: %s unoffered tool call %r (context=%s, session=%s)",
-            "refused" if mode == "enforce" else "allowed (warn mode)",
-            tool_name, ctx.kind, session_id,
+            "Harness: %s %r in a %s turn breaks the context policy (%s)",
+            "refused" if policy_mode == "enforce" else "allowed (warn mode)",
+            tool_name, ctx.kind, violation,
         )
         self._log_f026_decision(
-            "harness_unoffered_tool_call",
+            "harness_context_policy_violation",
             {
                 "tool_name": tool_name,
                 "context_kind": ctx.kind,
-                "mode": mode,
-                "offered_count": len(offered_names),
+                "violation": violation,
+                "mode": policy_mode,
             },
             session_id=session_id,
         )
-        if mode != "enforce":
+        if policy_mode != "enforce":
             return None
-        return (
-            f"Tool error: '{tool_name}' is not available in this turn. "
-            "Use only the tools offered to you."
+        return Refusal(
+            f"Tool error: '{tool_name}' is not allowed in a {ctx.kind} turn ({violation}).",
+            "context_policy",
         )
 
     def set_ledger_store(self, store: LedgerStore | None) -> None:
@@ -1603,27 +1641,29 @@ class AgentRunner:
                             yield StreamEvent(type="tool_end", tool_name=tc["name"])
                             continue
 
-                        # Harness Phase 1a: was this tool offered this turn?
-                        refusal = self._authorize_tool_call(_ctx, tc["name"], offered_names, session_id)
+                        # Harness: was this tool offered this turn, and may this context use it?
+                        refusal = self._authorize_tool_call(
+                            _ctx, tc["name"], offered_names, session_id, tc.get("input", {}),
+                        )
                         if refusal is not None:
                             tool_results_for_message.append({
                                 "type": "tool_result",
                                 "tool_use_id": tc["id"],
-                                "content": refusal,
+                                "content": refusal.text,
                                 "is_error": True,
                             })
                             all_tool_results.append(ToolResult(
                                 tool_name=tc["name"],
                                 arguments=tc.get("input", {}),
                                 result=None,
-                                error=refusal,
+                                error=refusal.text,
                                 duration_ms=0,
                             ))
                             if ledger:
-                                ledger.record(tc["name"], tc.get("input", {}), refusal, "blocked")
+                                ledger.record(tc["name"], tc.get("input", {}), refusal.text, "blocked")
                             await self._ledger_blocked(
                                 _ctx, tc["name"], tc.get("input", {}),
-                                ledger.current_turn if ledger else None, "offered_set",
+                                ledger.current_turn if ledger else None, refusal.code,
                             )
                             yield StreamEvent(type="tool_end", tool_name=tc["name"])
                             continue
@@ -2109,27 +2149,27 @@ class AgentRunner:
                         ))
                         continue
 
-                    # Harness Phase 1a: was this tool offered this iteration?
-                    refusal = self._authorize_tool_call(ctx, tool_name, offered_names, session_id)
+                    # Harness: was this tool offered this iteration, and may this context use it?
+                    refusal = self._authorize_tool_call(ctx, tool_name, offered_names, session_id, tool_input)
                     if refusal is not None:
                         tool_results_for_message.append({
                             "type": "tool_result",
                             "tool_use_id": tool_use_id,
-                            "content": refusal,
+                            "content": refusal.text,
                             "is_error": True,
                         })
                         all_tool_results.append(ToolResult(
                             tool_name=tool_name,
                             arguments=tool_input,
                             result=None,
-                            error=refusal,
+                            error=refusal.text,
                             duration_ms=0,
                         ))
                         if ledger:
-                            ledger.record(tool_name, tool_input, refusal, "blocked")
+                            ledger.record(tool_name, tool_input, refusal.text, "blocked")
                         await self._ledger_blocked(
                             ctx, tool_name, tool_input,
-                            ledger.current_turn if ledger else None, "offered_set",
+                            ledger.current_turn if ledger else None, refusal.code,
                         )
                         continue
 
