@@ -1764,7 +1764,8 @@ class Settings(BaseSettings):
     )
     dag_max_parked_dags: int = Field(
         20, ge=1,
-        description="Max DAGs waiting on answers before a DAG with an approval node is refused.",
+        description="Max live DAGs with an unanswered approval node (parked, or still running "
+        "the steps before their question) before a DAG with an approval node is refused.",
     )
 
     # F087: act on tokens_consumed, which only becomes non-zero once the

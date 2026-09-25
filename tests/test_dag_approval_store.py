@@ -174,7 +174,7 @@ async def test_the_parked_cap_refuses_only_dags_with_an_approval(db):
         _settings(dag_max_parked_dags=1),
     )
     await _parked_dag(capped)
-    with pytest.raises(ValueError, match="waiting on your answers"):
+    with pytest.raises(ValueError, match="your answers"):
         await _parked_dag(capped)
     await _one_node(capped)  # no approval node: never refused by this cap
 
@@ -194,3 +194,34 @@ async def test_finalize_dag_refuses_while_a_node_is_open_or_the_dag_has_ended(st
 
     assert not await store.finalize_dag(dag.id, "completed", "again")  # no longer live
     assert (await store.get_dag(dag.id)).status == "failed"
+
+
+async def test_an_approval_dag_that_has_not_parked_yet_reserves_a_parked_slot(db):
+    """codex P2: counting only DAGs parked NOW let DAGs still running the steps
+    before their question be admitted past the cap, then all park."""
+    capped = DAGStore(db, f"test-p3res-{uuid.uuid4().hex[:8]}", _settings(dag_max_parked_dags=1))
+    await capped.create(
+        DAGCreateRequest(
+            name="drafting",
+            nodes=[
+                DAGNodeSpec(name="draft", type=DAGNodeType.subtask, instructions="d"),
+                _approval_spec(),
+                DAGNodeSpec(name="send", type=DAGNodeType.subtask, instructions="s"),
+            ],
+            edges=[
+                DAGEdgeSpec(from_node="draft", to_node="approve", edge_type="context_flow"),
+                DAGEdgeSpec(from_node="approve", to_node="send", edge_type="context_flow"),
+            ],
+        )
+    )
+    with pytest.raises(ValueError, match="your answers"):
+        await _parked_dag(capped)
+    await _one_node(capped)  # no approval node: never refused by this cap
+
+
+async def test_an_answered_approval_frees_its_parked_slot(db):
+    capped = DAGStore(db, f"test-p3free-{uuid.uuid4().hex[:8]}", _settings(dag_max_parked_dags=1))
+    _, by_name = await _parked_dag(capped)
+    await capped.update_node(by_name["approve"].id, status="completed")
+
+    await _parked_dag(capped)  # admitted: the first DAG has no question left to ask

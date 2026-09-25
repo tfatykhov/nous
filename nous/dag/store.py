@@ -113,6 +113,22 @@ def parked_clause():
     return and_(has_waiting, ~has_busy, ~has_dispatchable)
 
 
+def open_approval_clause():
+    """Harness Phase 3 §3.11 — SQL predicate over ExecutionDAG: the DAG has an
+    approval node that is not terminal, i.e. it is parked or can still park.
+    The parked cap reserves its slot from admission on."""
+    node = aliased(DAGNode)
+    return (
+        exists()
+        .where(
+            node.dag_id == ExecutionDAG.id,
+            node.node_type == "approval",
+            node.status.not_in(sorted(TERMINAL_NODE_STATUSES)),
+        )
+        .correlate(ExecutionDAG)
+    )
+
+
 class DAGStore:
     """CRUD operations for DAG orchestration."""
 
@@ -145,13 +161,17 @@ class DAGStore:
                 )
             # ...but parked DAGs are bounded on their own, and only a request
             # that could add one is refused, so a backlog of unanswered
-            # questions never blocks ordinary work.
+            # questions never blocks ordinary work. The cap counts every live
+            # DAG with an unanswered approval node — parked now, or still
+            # running the steps before its question — so a slot is reserved
+            # at admission: counting only DAGs parked NOW admitted several
+            # still-drafting DAGs under the cap that all parked later.
             if any(spec.type == DAGNodeType.approval for spec in request.nodes):
-                parked_count = await session.scalar(live.where(parked))
-                if parked_count >= self._settings.dag_max_parked_dags:
+                asking = await session.scalar(live.where(open_approval_clause()))
+                if asking >= self._settings.dag_max_parked_dags:
                     raise ValueError(
-                        f"{parked_count} DAGs are waiting on your answers (limit "
-                        f"NOUS_DAG_MAX_PARKED_DAGS={self._settings.dag_max_parked_dags}); "
+                        f"{asking} DAGs are waiting on, or will ask for, your answers "
+                        f"(limit NOUS_DAG_MAX_PARKED_DAGS={self._settings.dag_max_parked_dags}); "
                         "answer or cancel some first."
                     )
 

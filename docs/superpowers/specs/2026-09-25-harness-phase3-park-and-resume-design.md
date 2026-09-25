@@ -543,9 +543,11 @@ full pool (`_defer_node` returns it to `pending`), and it is work.
 
 - refuses when non-parked `pending`/`running` DAGs ≥ `MAX_ACTIVE_DAGS` (5) — parked DAGs do not
   count, as decided;
-- refuses a request **that contains an approval node** when parked DAGs ≥
-  `NOUS_DAG_MAX_PARKED_DAGS` (default 20): "20 DAGs are waiting on your answers; answer or cancel
-  some first". Without it a looping agent could create any number of DAGs that park at once — each
+- refuses a request **that contains an approval node** when live DAGs with an unanswered approval
+  node — parked now, or still running the steps before their question — are ≥
+  `NOUS_DAG_MAX_PARKED_DAGS` (default 20): "20 DAGs are waiting on, or will ask for, your answers;
+  answer or cancel some first". Counting only DAGs parked *now* would admit several still-drafting
+  DAGs under the cap that all park later (codex P2 on #649), so the slot is reserved at admission. Without it a looping agent could create any number of DAGs that park at once — each
   a priority-2 card, a Telegram ping and a larger tick. A DAG with no approval node is never
   refused by this cap, so a backlog of unanswered questions cannot block ordinary work (or the work
   queue) for up to a week.
