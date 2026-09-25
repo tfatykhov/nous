@@ -127,3 +127,22 @@ async def test_dag_manage_shows_who_is_waiting(store):
     assert "[?] approve (approval, w0) — awaiting_input" in status
     assert "waiting for an answer until" in status
     assert "card: https://n.example/companion#/s/card-1" in status
+
+
+def test_main_builds_the_surface_service_before_the_orchestrator():
+    """Harness Phase 3 §3.13: the orchestrator receives the service at
+    construction, so the service must exist first."""
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "nous" / "main.py").read_text(encoding="utf-8")
+    orchestrator_at = source.index("dag_orchestrator = DAGOrchestrator(")
+    assert source.count("SurfaceService(database, settings, heart=heart)") == 1
+    assert source.index("SurfaceService(database, settings, heart=heart)") < orchestrator_at
+    # The A2UI block used to start with its own `surface_service = None`; left
+    # in place it would wipe the service built above, and every companion
+    # action — every approval tap — would fail.
+    assert source.count("surface_service = None") == 1
+    assert source.index("surface_service = None") < orchestrator_at
+    assert "surface_service = " not in source[orchestrator_at:]
+    assert "surface_service=surface_service" in source
+    assert "register_dag_tools(dispatcher, dag_store, dag_orchestrator, settings=settings)" in source

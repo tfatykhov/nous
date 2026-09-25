@@ -968,6 +968,17 @@ async def create_components(settings: Settings) -> dict:
         from nous.api.tools import register_heartbeat_tools
         register_heartbeat_tools(dispatcher, heartbeat_runner.dynamic_loader)
 
+    # Harness Phase 3 §3.13: built BEFORE the DAG block so the orchestrator
+    # can push approval cards. Only the constructor moves — it needs only the
+    # database, settings and heart; the composer, ActionRouter,
+    # register_a2ui_tools and the sweep task need the DAG store and
+    # orchestrator, so they stay in the A2UI block below.
+    surface_service = None
+    if settings.a2ui_enabled:
+        from nous.a2ui.service import SurfaceService
+
+        surface_service = SurfaceService(database, settings, heart=heart)
+
     # F038: DAG Orchestration
     dag_orchestrator = None
     dag_store = None
@@ -999,6 +1010,8 @@ async def create_components(settings: Settings) -> dict:
                 # (prod). Previously llm_client defaulted to None → the flag was
                 # inert and every fix node used rule-based dispatch only.
                 llm_client=api_client,
+                # Harness Phase 3: pushes and closes approval cards.
+                surface_service=surface_service,
             )
 
             if heartbeat_runner is not None:
@@ -1020,7 +1033,7 @@ async def create_components(settings: Settings) -> dict:
                 )
 
             from nous.api.tools import register_dag_tools
-            register_dag_tools(dispatcher, dag_store, dag_orchestrator)
+            register_dag_tools(dispatcher, dag_store, dag_orchestrator, settings=settings)
 
             # F064.1: late-bind DAGStore so runner._tool_loop can fire
             # activity pings to dag_nodes.last_activity_at for subtasks
@@ -1062,18 +1075,16 @@ async def create_components(settings: Settings) -> dict:
         except ImportError:
             logger.debug("F038: DAG module not available yet")
 
-    # F092: A2UI companion surfaces
-    surface_service = None
+    # F092: A2UI companion surfaces (the SurfaceService itself is built above
+    # the DAG block — Harness Phase 3).
     action_router = None
     a2ui_sweep_task = None
     if settings.a2ui_enabled:
         from nous.a2ui.actions import ActionRouter
         from nous.a2ui.compose import SurfaceComposer
-        from nous.a2ui.service import SurfaceService
         from nous.a2ui.sources import build_default_registry
         from nous.a2ui.tools import register_a2ui_tools
 
-        surface_service = SurfaceService(database, settings, heart=heart)
         # F092.1: ephemeral micro-apps. The composer needs the same client
         # the background handlers use; the source registry gives every
         # micro-app its server-resolved data (self-sourcing, extended from
