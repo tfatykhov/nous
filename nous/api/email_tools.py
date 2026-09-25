@@ -30,6 +30,7 @@ from html.parser import HTMLParser
 from typing import Any
 
 from nous.api.call_outcome import current_outcome
+from nous.api.idempotency import normalize_recipients
 from nous.api.tools import _tool_error
 from nous.config import Settings
 
@@ -60,19 +61,9 @@ def _error(text: str) -> dict[str, Any]:
     return _tool_error(f"Error: {text}")
 
 
-def _normalize_recipients(value: Any) -> list[str]:
-    """Coerce a recipient field (str or list) into a list of stripped addresses."""
-    if value is None:
-        return []
-    if isinstance(value, str):
-        items = value.split(",")
-    elif isinstance(value, (list, tuple)):
-        items = []
-        for v in value:
-            items.extend(str(v).split(","))
-    else:
-        items = [str(value)]
-    return [a.strip() for a in items if a and a.strip()]
+# Harness Phase 2b: ONE definition, shared with the idempotency key -- the key
+# must read the recipients exactly as the send does.
+_normalize_recipients = normalize_recipients
 
 
 def _parse_allowlist(raw: str) -> set[str]:

@@ -453,7 +453,7 @@ async def test_a_keyed_send_fails_closed_on_a_ledger_outage():
     r._call_api = _email_call()
     _text, results, _usage, _thinking = await _run_loop(r, is_background=True, context=_dag_ctx())
     assert d.calls == [] and ("close", store.failed_id, "error") in store.events
-    assert "ledger is unavailable" in results[0].error
+    assert "could not record this send" in results[0].error
 
 
 @pytest.mark.asyncio
@@ -562,3 +562,74 @@ async def test_stream_chat_survives_a_slow_tool_resumed_across_tasks():
             break
     assert any(getattr(e, "type", None) == "keepalive" for e in events)
     assert store.events[-1][0] == "close" and store.closes[-1] == ("success", "<m@x>")
+
+
+# ---------------------------------------------------------------------------
+# Harness Phase 2b with the REAL LedgerStore (SQLite test DB)
+# ---------------------------------------------------------------------------
+
+
+def _real_runner(db, agent, offered=("send_email",)):
+    from nous.cognitive.ledger_store import LedgerStore
+
+    store = LedgerStore(db, agent)
+    r = AgentRunner(_MockCognitive(), _MockBrain(), _MockHeart(), _settings())
+    d = _RecordingDispatcher(list(offered))
+    r.set_dispatcher(d)
+    r.set_ledger_store(store)
+    return r, d
+
+
+async def _rows(db, agent):
+    from sqlalchemy import select
+
+    from nous.storage.models import ExecutionLedgerEntry
+
+    async with db.session() as s:
+        return (await s.execute(
+            select(ExecutionLedgerEntry).where(ExecutionLedgerEntry.agent_id == agent)
+            .order_by(ExecutionLedgerEntry.created_at)
+        )).scalars().all()
+
+
+@pytest.mark.asyncio
+async def test_a_relaunched_node_does_not_send_twice_with_the_real_store(db):
+    agent = f"r2b-{uuid.uuid4().hex[:8]}"
+    ctx_kwargs = {"kind": "dag_node", "dag_id": uuid.uuid4(), "dag_node_name": "send"}
+
+    first, d1 = _real_runner(db, agent)
+    first._call_api = _email_call("Premarket brief")
+    await _run_loop(first, is_background=True, context=ExecutionContext(subtask_id=uuid.uuid4(), **ctx_kwargs))
+
+    relaunch, d2 = _real_runner(db, agent)
+    relaunch._call_api = _email_call("Premarket brief (retry)")
+    _text, results, _usage, _thinking = await _run_loop(
+        relaunch, is_background=True, context=ExecutionContext(subtask_id=uuid.uuid4(), **ctx_kwargs))
+
+    assert [c[0] for c in d1.calls] == ["send_email"] and d2.calls == []
+    assert "Already sent" in results[0].result
+    rows = await _rows(db, agent)
+    assert [(r.status, r.dispatched_at is not None) for r in rows] == [("success", True), ("blocked", False)]
+    assert rows[0].idempotency_key == rows[1].idempotency_key
+
+
+@pytest.mark.asyncio
+async def test_a_definite_failure_lets_the_relaunch_send_with_the_real_store(db):
+    agent = f"r2b-{uuid.uuid4().hex[:8]}"
+    ctx_kwargs = {"kind": "dag_node", "dag_id": uuid.uuid4(), "dag_node_name": "send"}
+
+    first, d1 = _real_runner(db, agent)
+
+    async def refused(name, inp, **kw):
+        d1.calls.append((name, kw.get("context"), False))
+        return "email send failed: SMTPDataError", True
+
+    d1.dispatch = refused
+    first._call_api = _email_call()
+    await _run_loop(first, is_background=True, context=ExecutionContext(subtask_id=uuid.uuid4(), **ctx_kwargs))
+
+    relaunch, d2 = _real_runner(db, agent)
+    relaunch._call_api = _email_call()
+    await _run_loop(relaunch, is_background=True, context=ExecutionContext(subtask_id=uuid.uuid4(), **ctx_kwargs))
+    assert [c[0] for c in d2.calls] == ["send_email"]
+    assert [r.status for r in await _rows(db, agent)] == ["error", "success"]

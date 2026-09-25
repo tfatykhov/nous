@@ -92,3 +92,27 @@ def test_send_file_key_uses_the_resolved_chat_and_file_name():
     other_chat = idempotency_key(_node(), "send_file", {"file_path": "/tmp/r.png", "chat_id": "999"},
                                  default_chat_id="123")
     assert other_chat != implicit
+
+
+# --- after the verify-by-execution review ----------------------------------------
+
+
+def test_the_key_reads_recipients_exactly_as_the_send_does():
+    """One definition: the handler's normalization. A list element holding a
+    comma is two recipients to the handler, so it is two to the key too."""
+    from nous.api.email_tools import _normalize_recipients
+    from nous.api.idempotency import normalize_recipients
+
+    assert _normalize_recipients is normalize_recipients
+    as_list = idempotency_key(_node(), "send_email", dict(EMAIL, to=["tim@example.com, alice@example.com"]))
+    as_string = idempotency_key(_node(), "send_email", dict(EMAIL, to="tim@example.com, alice@example.com"))
+    split = idempotency_key(_node(), "send_email", dict(EMAIL, to=["tim@example.com", "alice@example.com"]))
+    assert as_list == as_string == split
+    assert idempotency_key(_node(), "send_email", dict(EMAIL, cc=["b@x.io, c@x.io"])) == idempotency_key(
+        _node(), "send_email", dict(EMAIL, cc="b@x.io, c@x.io"))
+
+
+def test_a_semicolon_is_not_a_separator_to_either():
+    from nous.api.idempotency import normalize_recipients
+
+    assert normalize_recipients("a@x.io;b@x.io") == ["a@x.io;b@x.io"]

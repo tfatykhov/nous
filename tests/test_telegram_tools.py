@@ -396,3 +396,85 @@ async def test_send_label_is_accepted(tmp_png, mock_settings, mock_http):
         create_send_file_tool(mock_settings, mock_http)(file_path=tmp_png, send_label="second"))
     assert not resp.get("is_error")
     assert "send_label" in _SEND_FILE_SCHEMA["properties"]
+
+
+# --- after the verify-by-execution review: what reached Telegram decides ---
+
+
+def _response(status, body=None, text=None):
+    resp = MagicMock()
+    resp.status_code = status
+    if body is not None:
+        resp.json.return_value = body
+    else:
+        resp.json.side_effect = ValueError("not JSON")
+        resp.text = text or "<html>Bad Gateway</html>"
+    return resp
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", [
+    _response(502),                                                        # gateway HTML after the upload
+    _response(504),
+    _response(200),                                                        # a 200 we cannot read
+    _response(502, {"ok": False, "description": "Bad Gateway"}),           # JSON, but a 5xx
+    _response(500, {"ok": False, "error_code": 500, "description": "Internal Server Error"}),
+])
+async def test_a_reply_that_may_follow_delivery_is_uncertain(tmp_png, mock_settings, mock_http, response):
+    from nous.api.telegram_tools import create_send_file_tool
+
+    mock_http.post = AsyncMock(return_value=response)
+    resp, outcome = await _run_with_outcome(create_send_file_tool(mock_settings, mock_http)(file_path=tmp_png))
+    assert resp.get("is_error") and outcome.uncertain
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", [
+    _response(400, {"ok": False, "error_code": 400, "description": "Bad Request: chat not found"}),
+    _response(403, {"ok": False, "error_code": 403, "description": "Forbidden"}),
+    _response(429, {"ok": False, "error_code": 429, "description": "Too Many Requests"}),
+    _response(404),                                                        # a 4xx we cannot read
+])
+async def test_a_refusal_is_definite(tmp_png, mock_settings, mock_http, response):
+    from nous.api.telegram_tools import create_send_file_tool
+
+    mock_http.post = AsyncMock(return_value=response)
+    resp, outcome = await _run_with_outcome(create_send_file_tool(mock_settings, mock_http)(file_path=tmp_png))
+    assert resp.get("is_error") and not outcome.uncertain
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_name", [
+    "ConnectError", "ConnectTimeout", "PoolTimeout", "LocalProtocolError", "UnsupportedProtocol", "ProxyError",
+])
+async def test_a_request_that_never_left_is_definite(tmp_png, mock_settings, mock_http, error_name):
+    import httpx
+
+    from nous.api.telegram_tools import create_send_file_tool
+
+    mock_http.post = AsyncMock(side_effect=getattr(httpx, error_name)("never sent"))
+    resp, outcome = await _run_with_outcome(create_send_file_tool(mock_settings, mock_http)(file_path=tmp_png))
+    assert resp.get("is_error") and not outcome.uncertain
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_name", [
+    "ReadTimeout", "WriteTimeout", "ReadError", "WriteError", "RemoteProtocolError",
+])
+async def test_a_request_that_may_have_arrived_is_uncertain(tmp_png, mock_settings, mock_http, error_name):
+    import httpx
+
+    from nous.api.telegram_tools import create_send_file_tool
+
+    mock_http.post = AsyncMock(side_effect=getattr(httpx, error_name)("mid-flight"))
+    resp, outcome = await _run_with_outcome(create_send_file_tool(mock_settings, mock_http)(file_path=tmp_png))
+    assert resp.get("is_error") and outcome.uncertain
+
+
+@pytest.mark.asyncio
+async def test_an_ok_reply_is_a_success_whatever_its_result_shape(tmp_png, mock_settings, mock_http):
+    from nous.api.telegram_tools import create_send_file_tool
+
+    mock_http.post = AsyncMock(return_value=_response(200, {"ok": True, "result": True}))
+    resp, outcome = await _run_with_outcome(create_send_file_tool(mock_settings, mock_http)(file_path=tmp_png))
+    assert not resp.get("is_error") and not outcome.uncertain and outcome.external_ref is None

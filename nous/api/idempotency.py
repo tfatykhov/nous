@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -45,10 +44,30 @@ def _scope(ctx: ExecutionContext) -> str | None:
     return None
 
 
+def normalize_recipients(value: Any) -> list[str]:
+    """A recipient field (a string or a list) as the stripped addresses it names.
+
+    The ONE definition: ``send_email`` sends to exactly these, and the
+    idempotency key is built from exactly these, so a relaunch that passes
+    ``["a, b"]`` where the first attempt passed ``"a, b"`` is the same send.
+    Only a comma separates (a list element may hold several).
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        items = []
+        for v in value:
+            items.extend(str(v).split(","))
+    else:
+        items = [str(value)]
+    return [a.strip() for a in items if a and a.strip()]
+
+
 def canonical_recipients(value: Any) -> list[str]:
-    """Sorted, lowercased, de-duplicated recipients from a string or a list."""
-    items = value if isinstance(value, (list, tuple)) else re.split(r"[,;]", str(value or ""))
-    return sorted({str(v).strip().lower() for v in items if str(v).strip()})
+    """Sorted, lowercased, de-duplicated recipients -- ``normalize_recipients``."""
+    return sorted({a.lower() for a in normalize_recipients(value)})
 
 
 def _material(tool_name: str, args: Mapping[str, Any], default_chat_id: str | None) -> str | None:

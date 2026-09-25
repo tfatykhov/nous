@@ -452,11 +452,11 @@ class AgentRunner:
             await self._ledger_blocked(ctx, tool_name, tool_input, turn, "duplicate", idempotency_key=key)
             return None, key, self._suppression(dup.held, same_turn=key in keys_this_turn)
         except LedgerWriteError as exc:
-            logger.error("Harness: keyed %s refused, execution ledger unavailable: %s", tool_name, exc)
+            logger.error("Harness: keyed %s refused, execution ledger could not record it: %s", tool_name, exc)
             await self._ledger_close(exc.entry_id, "error", "ledger write failed; send refused", keyed=True)
             return None, key, Suppressed(
-                "Send refused: the execution ledger is unavailable, so a duplicate cannot be "
-                "ruled out. Retry later.",
+                "Send refused: the execution ledger could not record this send, so a duplicate "
+                "cannot be ruled out. Retry later.",
                 True,
             )
         keys_this_turn.add(key)

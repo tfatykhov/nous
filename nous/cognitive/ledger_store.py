@@ -487,7 +487,11 @@ class LedgerStore:
                     s.add(row)
                     await s.commit()
 
-            await asyncio.wait_for(_write(), timeout=self._keyed_timeout if keyed else self._timeout)
+            # any row that carries a key (a keyed send, or its suppressed repeat)
+            # waits the keyed timeout; only a keyed SEND resolves a conflict
+            await asyncio.wait_for(
+                _write(), timeout=self._keyed_timeout if idempotency_key is not None else self._timeout,
+            )
         except IntegrityError as exc:
             if not keyed:
                 raise LedgerWriteError(entry_id, exc) from exc
