@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 
+from nous.api.call_outcome import current_outcome
 from nous.api.tools import _tool_error
 from nous.config import Settings
 
@@ -77,6 +78,7 @@ def create_send_file_tool(settings: Settings, http_client: httpx.AsyncClient):
         caption: str | None = None,
         chat_id: str | None = None,
         cleanup: bool = False,
+        send_label: str | None = None,  # harness 2b: read by the idempotency key, not by the send
     ) -> dict[str, Any]:
         """Send a file to Telegram via sendPhoto or sendDocument.
 
@@ -139,6 +141,9 @@ def create_send_file_tool(settings: Settings, http_client: httpx.AsyncClient):
             if not result.get("ok"):
                 desc = result.get("description", "Unknown Telegram error")
                 return _error(f"Telegram API error: {desc}")
+            # Harness Phase 2b: the provider id of this send, for the ledger.
+            if (outcome := current_outcome()) is not None:
+                outcome.external_ref = str((result.get("result") or {}).get("message_id") or "") or None
 
             # Success — optionally clean up
             if cleanup:
@@ -153,9 +158,19 @@ def create_send_file_tool(settings: Settings, http_client: httpx.AsyncClient):
                 f"File sent successfully: {filename} via {method} to chat {target_chat}.{warning}"
             )
 
-        except httpx.HTTPError as e:
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            # never reached Telegram: a definite failure
             logger.error("Telegram send failed for %s: %s", file_path, type(e).__name__)
             return _error(f"Failed to send file: network error ({type(e).__name__})")
+        except httpx.HTTPError as e:
+            # the upload may have been delivered (a read timeout after it, a
+            # dropped response): uncertain, never a definite failure
+            if (outcome := current_outcome()) is not None:
+                outcome.uncertain = True
+            logger.error("Telegram send unconfirmed for %s: %s", file_path, type(e).__name__)
+            return _error(
+                f"Could not confirm the file was sent ({type(e).__name__}); it may have been delivered."
+            )
         except Exception as e:
             logger.error("Unexpected error sending file %s: %s", file_path, type(e).__name__)
             return _error(f"Failed to send file: {type(e).__name__}")
@@ -200,6 +215,13 @@ _SEND_FILE_SCHEMA = {
         "cleanup": {
             "type": "boolean",
             "description": "If true, delete the file after successful send. Default: false.",
+        },
+        "send_label": {
+            "type": "string",
+            "description": (
+                "Only when one task intentionally sends the same file to the same chat more "
+                "than once: a short label that tells the sends apart."
+            ),
         },
     },
     "required": ["file_path"],

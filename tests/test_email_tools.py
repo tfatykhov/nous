@@ -1315,3 +1315,88 @@ def test_embedded_tab_in_href_scheme_rejected(no_real_send):
     )
     assert "insecure" in _text(resp).lower()
     assert len(no_real_send) == 0
+
+
+# --- harness Phase 2b: provider ids and uncertain delivery ---
+
+
+def _with_outcome(coro):
+    from nous.api.call_outcome import CallOutcome, _current
+
+    outcome = CallOutcome()
+    token = _current.set(outcome)
+    try:
+        return asyncio.run(coro), outcome
+    finally:
+        _current.reset(token)
+
+
+def test_every_message_has_a_message_id():
+    from nous.api.email_tools import _build_message
+
+    msg, err = _build_message(_make_settings(), "s", "b", "nous@example.com", ["tim@example.com"], [], [])
+    assert err is None and msg["Message-ID"].startswith("<") and msg["Message-ID"].endswith(">")
+    assert msg["Message-ID"].rstrip(">").endswith("@example.com")
+
+
+def test_the_message_id_reaches_the_outcome(no_real_send):
+    resp, outcome = _with_outcome(create_send_email_tool(_make_settings())(
+        to="tim@example.com", subject="hi", body="hello"))
+    assert not resp.get("is_error")
+    sent_msg = no_real_send[0][1][2]
+    assert outcome.external_ref and outcome.external_ref == sent_msg["Message-ID"]
+    assert not outcome.uncertain
+
+
+def test_a_timeout_during_send_is_uncertain(monkeypatch):
+    from nous.api.email_tools import DeliveryUncertain
+
+    async def boom(func, *a, **k):
+        raise DeliveryUncertain(TimeoutError("reply"))
+
+    monkeypatch.setattr("nous.api.email_tools.asyncio.to_thread", boom)
+    resp, outcome = _with_outcome(create_send_email_tool(_make_settings())(
+        to="tim@example.com", subject="hi", body="hello"))
+    assert resp.get("is_error") and outcome.uncertain and "uncertain" in _text(resp)
+    assert outcome.external_ref  # the Message-ID is known before the send
+
+
+def test_a_definite_failure_is_not_uncertain(monkeypatch):
+    import smtplib
+
+    async def rejected(func, *a, **k):
+        raise smtplib.SMTPDataError(554, b"rejected")
+
+    monkeypatch.setattr("nous.api.email_tools.asyncio.to_thread", rejected)
+    resp, outcome = _with_outcome(create_send_email_tool(_make_settings())(
+        to="tim@example.com", subject="hi", body="hello"))
+    assert resp.get("is_error") and not outcome.uncertain
+
+
+def test_a_partial_refusal_is_uncertain_and_named(monkeypatch):
+    async def partial(func, *a, **k):
+        return {"alice@example.com": (550, b"no such user")}
+
+    monkeypatch.setattr("nous.api.email_tools.asyncio.to_thread", partial)
+    resp, outcome = _with_outcome(create_send_email_tool(_make_settings())(
+        to="tim@example.com, alice@example.com", subject="hi", body="hello"))
+    assert resp.get("is_error") and outcome.uncertain and "alice@example.com" in _text(resp)
+
+
+def test_send_label_is_accepted(no_real_send):
+    resp, _ = _with_outcome(create_send_email_tool(_make_settings())(
+        to="tim@example.com", subject="hi", body="hello", send_label="second"))
+    assert not resp.get("is_error")
+
+
+def test_the_schema_advertises_send_label():
+    from nous.api.email_tools import _SEND_EMAIL_SCHEMA
+
+    assert "send_label" in _SEND_EMAIL_SCHEMA["properties"]
+    assert "send_label" not in _SEND_EMAIL_SCHEMA["required"]
+
+
+def test_outside_dispatch_there_is_no_outcome_and_no_crash(no_real_send):
+    resp = asyncio.run(create_send_email_tool(_make_settings())(
+        to="tim@example.com", subject="hi", body="hello"))
+    assert not resp.get("is_error")

@@ -328,3 +328,71 @@ def test_send_file_in_frame_tools():
     assert "send_file" in FRAME_TOOLS["conversation"]
     assert "send_file" in FRAME_TOOLS["debug"]
     # task uses "*" wildcard, so it implicitly includes all tools
+
+
+# --- harness Phase 2b: provider ids and uncertain delivery ---
+
+
+async def _run_with_outcome(coro):
+    from nous.api.call_outcome import CallOutcome, _current
+
+    outcome = CallOutcome()
+    token = _current.set(outcome)
+    try:
+        return await coro, outcome
+    finally:
+        _current.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_message_id_reaches_the_outcome(tmp_png, mock_settings, mock_http):
+    from nous.api.telegram_tools import create_send_file_tool
+
+    mock_http.post = AsyncMock(return_value=_ok_response())
+    resp, outcome = await _run_with_outcome(create_send_file_tool(mock_settings, mock_http)(file_path=tmp_png))
+    assert not resp.get("is_error") and outcome.external_ref == "42" and not outcome.uncertain
+
+
+@pytest.mark.asyncio
+async def test_a_read_timeout_after_upload_is_uncertain(tmp_png, mock_settings, mock_http):
+    import httpx
+
+    from nous.api.telegram_tools import create_send_file_tool
+
+    mock_http.post = AsyncMock(side_effect=httpx.ReadTimeout("slow"))
+    resp, outcome = await _run_with_outcome(create_send_file_tool(mock_settings, mock_http)(file_path=tmp_png))
+    assert resp.get("is_error") and outcome.uncertain
+
+
+@pytest.mark.asyncio
+async def test_a_connect_error_is_a_definite_failure(tmp_png, mock_settings, mock_http):
+    import httpx
+
+    from nous.api.telegram_tools import create_send_file_tool
+
+    for error in (httpx.ConnectError("down"), httpx.ConnectTimeout("slow")):
+        mock_http.post = AsyncMock(side_effect=error)
+        resp, outcome = await _run_with_outcome(create_send_file_tool(mock_settings, mock_http)(file_path=tmp_png))
+        assert resp.get("is_error") and not outcome.uncertain
+
+
+@pytest.mark.asyncio
+async def test_an_api_refusal_is_definite(tmp_png, mock_settings, mock_http):
+    from nous.api.telegram_tools import create_send_file_tool
+
+    refused = MagicMock()
+    refused.json.return_value = {"ok": False, "description": "Bad Request"}
+    mock_http.post = AsyncMock(return_value=refused)
+    resp, outcome = await _run_with_outcome(create_send_file_tool(mock_settings, mock_http)(file_path=tmp_png))
+    assert resp.get("is_error") and not outcome.uncertain and outcome.external_ref is None
+
+
+@pytest.mark.asyncio
+async def test_send_label_is_accepted(tmp_png, mock_settings, mock_http):
+    from nous.api.telegram_tools import _SEND_FILE_SCHEMA, create_send_file_tool
+
+    mock_http.post = AsyncMock(return_value=_ok_response())
+    resp, _ = await _run_with_outcome(
+        create_send_file_tool(mock_settings, mock_http)(file_path=tmp_png, send_label="second"))
+    assert not resp.get("is_error")
+    assert "send_label" in _SEND_FILE_SCHEMA["properties"]
