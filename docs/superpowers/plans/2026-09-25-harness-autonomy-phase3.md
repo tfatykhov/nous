@@ -1,4 +1,4 @@
-# Harness Autonomy Phase 3 — Park-and-Resume Implementation Plan (v1.3)
+# Harness Autonomy Phase 3 — Park-and-Resume Implementation Plan (v1.4)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -21,7 +21,7 @@
 - v1: `default_option` must be a `stop` option.
 - Dedup prefix `dag-approval:` is reserved: `SurfaceService.push_built` refuses it unless `reserved_key_ok=True`, which only the orchestrator passes.
 - Migration `076`: `IF NOT EXISTS`, full-line `--` comments only, no `;` inside comments, no `BEGIN`/`COMMIT`.
-- New settings (plain pydantic fields in `nous/config.py`): `dag_approval_nodes_enabled: bool = False`; `dag_approval_default_wait_seconds = 86400` (`ge=900`); `dag_approval_max_wait_seconds = 604800` (`ge=900`); `dag_approval_card_grace_seconds = 3600` (`ge=0`); `dag_max_parked_dags = 20` (`ge=1`).
+- New settings (plain pydantic fields in `nous/config.py`): `dag_approval_nodes_enabled: bool = False`; `dag_approval_default_wait_seconds = 86400` (`ge=900`); `dag_approval_max_wait_seconds = 604800` (`ge=900`); `dag_approval_card_grace_seconds = 3600` (`ge=60`); `dag_max_parked_dags = 20` (`ge=1`).
 - Tests: `UV_PROJECT_ENVIRONMENT=E:/Projects/nous/.venv uv run --frozen pytest <path> -q`. Local runs use SQLite; `SurfaceService`/`ActionRouter` database tests carry `@pytest.mark.postgres_only` and run in CI (`NOUS_TEST_DB=postgres`). The local baseline has ~230 pre-existing failures (`test_config` reads the developer `.env`, `test_database`, `test_tools`) — judge by diff against `main`; CI is the gate.
 - Lint: no NEW ruff findings in touched files (several touched files carry pre-existing findings CI tolerates).
 - Commits: explicit paths only — never a directory, `.`, `-A` or `commit -a` (public repo). Message from a file, ending with the session's attribution lines. Put `set -o pipefail` before any `pytest … | … && git commit` chain, and never end such a chain with a `grep` that may match nothing.
@@ -220,7 +220,7 @@ git commit -q -F <msgfile>   # "fix(dag): one predecessor-edge set for readiness
 - Test: `tests/test_dag_approval_prereqs.py`; update every caller of `apply_retry` found by `grep -rn "apply_retry" nous tests`
 
 **Interfaces:**
-- Produces (store): `LIVE_DAG_STATUSES = frozenset({"pending","running"})`; `TERMINAL_DAG_STATUSES = frozenset(_TERMINAL_DAG_STATUSES)`; `async def transition_node(self, node_id: UUID, *, from_statuses: Collection[str], dag_statuses: Collection[str] | None = None, **values: object) -> bool` (Task 3 adds `card`, `due_by`); `apply_retry(dag_id, node_updates: list[tuple[UUID, dict, Collection[str]]], reactivate: bool) -> bool`.
+- Produces (store): `LIVE_DAG_STATUSES = frozenset({"pending","running"})`; `TERMINAL_DAG_STATUSES = frozenset(_TERMINAL_DAG_STATUSES)`; `async def transition_node(self, node_id: UUID, *, from_statuses: Collection[str], dag_statuses: Collection[str] | None = None, **values: object) -> bool` (Task 3 adds `card`, `due_by`); `apply_retry(dag_id, primary: tuple[UUID, dict, Collection[str]], unblocks: list[tuple[UUID, dict, Collection[str]]], reactivate: bool) -> bool`.
 - Produces (orchestrator): `_NON_TERMINAL: frozenset[str]` (derived from `DAGNodeStatus`), `_DISPATCHABLE = frozenset({"pending","ready"})`; `async def _mark_ready_and_launch(self, node, dag) -> None`; `async def _cancel_one(self, node, error: str) -> bool`.
 
 - [ ] **Step 1: Write the failing tests** — append to `tests/test_dag_approval_prereqs.py`:
@@ -421,18 +421,21 @@ Add to `DAGStore` (next to `update_node`):
             return result.rowcount == 1
 ```
 
-Change `apply_retry` to take a status set per update and report whether the retry applied (docstring: add one paragraph — "Harness Phase 3 §3.3: each write is conditional on the status retry_node read; if the retried node's own write does not apply, the whole retry rolls back and False is returned"):
+Change `apply_retry` to take the retried node's update separately from the unblocks — explicit, so a future reorder cannot turn a lost primary into a partial retry — with a status set per update, and to report whether the retry applied (docstring: add one paragraph — "Harness Phase 3 §3.3: each write is conditional on the status retry_node read; if the retried node's own write does not apply, the whole retry rolls back and False is returned"):
 
 ```python
     async def apply_retry(
         self,
         dag_id: UUID,
-        node_updates: list[tuple[UUID, dict, Collection[str]]],
+        primary: tuple[UUID, dict, Collection[str]],
+        unblocks: list[tuple[UUID, dict, Collection[str]]],
         reactivate: bool,
     ) -> bool:
         async with self._db.session() as session:
             scoped = select(ExecutionDAG.id).where(ExecutionDAG.agent_id == self._agent_id)
-            for index, (node_id, values, from_statuses) in enumerate(node_updates):
+            for is_primary, (node_id, values, from_statuses) in [(True, primary)] + [
+                (False, u) for u in unblocks
+            ]:
                 result = await session.execute(
                     update(DAGNode)
                     .where(DAGNode.id == node_id)
@@ -440,7 +443,7 @@ Change `apply_retry` to take a status set per update and report whether the retr
                     .where(DAGNode.status.in_(sorted(from_statuses)))
                     .values(**values)
                 )
-                if index == 0 and result.rowcount != 1:
+                if is_primary and result.rowcount != 1:
                     await session.rollback()
                     return False
             if reactivate:
@@ -570,11 +573,11 @@ and its failure write after `_MAX_DEFERRALS` too (this plan rewrites the functio
                 node.status = "failed"
 ```
 
-`retry_node`: annotate `node_updates: list[tuple[UUID, dict, frozenset[str]]]`; the retried node's entry gets `frozenset({"failed"})` as its third element, each unblock entry `frozenset({"blocked", "cancelled"})`. Replace the final `await self._store.apply_retry(...)` with:
+`retry_node`: split the list — `primary = (node.id, {…the existing reset dict…}, frozenset({"failed"}))` and `unblocks: list[tuple[UUID, dict, frozenset[str]]] = []`, each unblock appended as `(n.id, {…}, frozenset({"blocked", "cancelled"}))`. Replace the final `await self._store.apply_retry(...)` with:
 
 ```python
         applied = await self._store.apply_retry(
-            dag_id, node_updates, reactivate=dag.status in ("failed", "partial")
+            dag_id, primary, unblocks, reactivate=dag.status in ("failed", "partial")
         )
         if not applied:
             raise ValueError(
@@ -584,7 +587,9 @@ and its failure write after `_MAX_DEFERRALS` too (this plan rewrites the functio
             )
 ```
 
-Update every other `apply_retry` caller from `grep -rn "apply_retry" nous tests` to pass 3-tuples.
+Update every other `apply_retry` caller from `grep -rn "apply_retry" nous tests` to the `(dag_id, primary, unblocks, reactivate)` form.
+
+Existing tests that assert on `store.update_node` for a write this task converts must assert on `store.transition_node` instead — convert the assertion, never weaken it. Known (database review): `tests/test_dag_orchestrator.py:2493` `test_queue_full_defers_node_to_pending` and `:2541` `test_check_pool_full_defers_node` read the deferral from `store.update_node.await_args_list`; assert `status="pending"` on `store.transition_node.await_args_list`. On a mocked store `transition_node` returns a truthy `MagicMock`, so the converted paths proceed as before. Sweep the DAG suites for any other `update_node` assertion on `status="ready" | "cancelled" | "blocked" | "running" | "pending"` and convert those too.
 
 The launch's own `running` writes (spec §3.3). In `_launch_subtask_node`, replace the `await self._store.update_node(node.id, status="running", subtask_id=subtask.id, started_at=now, last_activity_at=now)` call (keep its F064.1 comment) with:
 
@@ -1099,8 +1104,11 @@ Expected: FAIL — `options` is not a `DAGNodeSpec` field (extra ignored), nothi
         description="Ceiling on an approval node's wait; clamped at insert.",
     )
     dag_approval_card_grace_seconds: int = Field(
-        3600, ge=0,
-        description="Backstop added to an approval card's expiry past the node's deadline.",
+        3600, ge=60,
+        description=(
+            "Backstop added to an approval card's expiry past the node's deadline. "
+            ">= 60: a zero expiry is falsy and push_built would store expires_at NULL."
+        ),
     )
     dag_max_parked_dags: int = Field(
         20, ge=1,
@@ -2042,6 +2050,20 @@ def test_every_push_built_retry_forwards_the_new_flags() -> None:
     assert len(calls) == 2, "expected the dedup-race and IntegrityError retries"
     for call in calls:
         assert {"reserved_key_ok", "notify_text"} <= {k.arg for k in call.keywords}
+    # The ping is sent from _push_transaction_inner, so notify_text must also
+    # ride every hop down to it — a missed hop is a NameError after the push
+    # commits, reached only by postgres_only tests otherwise.
+    hops = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("_push_transaction", "_push_transaction_inner")
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+    ]
+    assert hops, "expected push_built to call its transaction helpers"
+    for call in hops:
+        assert {"reserved_key_ok", "notify_text"} <= {k.arg for k in call.keywords}
 
 
 @pytest.mark.postgres_only
@@ -2730,7 +2752,11 @@ New methods:
                 "recommendation": spec.get("recommended_option"),
                 "recommend_first": False,
                 "defer_label": DEFER_LABEL,
-                "expires_hours": (remaining + self._settings.dag_approval_card_grace_seconds)
+                # Floored at a minute: a re-push right at the deadline must not
+                # produce a zero expiry (falsy → expires_at NULL, no backstop).
+                "expires_hours": max(
+                    remaining + self._settings.dag_approval_card_grace_seconds, 60.0
+                )
                 / 3600,
             }
         )
@@ -3565,9 +3591,11 @@ def _is_working(dag: ExecutionDAG) -> bool:
 Constructor additions:
 
 ```python
-        # Harness Phase 3 §3.11: DAGs the dispatch gate held on the last tick,
-        # and the working count it saw — read by dag_manage via held_reason().
+        # Harness Phase 3 §3.11: DAGs the dispatch gate held on the LAST tick
+        # (rebuilt every tick, so a DAG cancelled while held drops out), and
+        # the working count it saw — read by dag_manage via held_reason().
         self._held: set[UUID] = set()
+        self._held_this_tick: set[UUID] = set()
         self._working_count = 0
 ```
 
@@ -3608,6 +3636,7 @@ Methods:
             gated = any(n.node_type == "approval" for d in dags for n in d.nodes)
             working = sum(1 for d in dags if _is_working(d)) if gated else 0
             self._working_count = working
+            self._held_this_tick = set()
             for dag in dags:
                 was_working = _is_working(dag)
                 may_start = not gated or was_working or working < MAX_ACTIVE_DAGS
@@ -3623,6 +3652,9 @@ Methods:
                 if gated and not was_working and _is_working(dag):
                     working += 1
                     self._working_count = working
+            # Fresh each tick: a DAG cancelled while held is never advanced
+            # again, and must not keep reporting "waiting for a free slot".
+            self._held = self._held_this_tick
             await self._sweep_leaked_approval_cards()
 ```
 
@@ -3640,15 +3672,11 @@ Methods:
             held = [n for n in ready_nodes if not self._costs_nothing(n)]
             ready_nodes = [n for n in ready_nodes if self._costs_nothing(n)]
             if held:
-                self._held.add(dag.id)
+                self._held_this_tick.add(dag.id)
                 logger.info(
                     "DAG %s holds %d ready node(s): %d DAGs are already working",
                     dag.id, len(held), MAX_ACTIVE_DAGS,
                 )
-            else:
-                self._held.discard(dag.id)
-        else:
-            self._held.discard(dag.id)
         await self._dispatch_ready_nodes(dag, ready_nodes)
 ```
 
@@ -4443,7 +4471,7 @@ In the DAG block: `DAGOrchestrator(..., surface_service=surface_service)` and `r
 | `NOUS_DAG_APPROVAL_NODES_ENABLED` | `false` | Harness Phase 3 (park-and-resume). Lets `dag_create` author an `approval` node: it parks in status `awaiting_input`, pushes an `approval_gate` companion card under the reserved dedup key `dag-approval:<node_id>` (a Telegram ping carries the question, deadline and default), and resumes on the answer or — at its deadline — on its default, which v1 requires to be a `stop` option. The answer is one conditional write on the node (migration 076), so a tap, the deadline, a cancel and the budget path race on one row and exactly one wins; every other status write that can race it is conditional too (`DAGStore.transition_node`, conditional `apply_retry`). A `stop` answer fails the node and blocks its successors (now along `context_flow` too — before this, a failed node's context_flow-only successor stayed pending forever); the F087 message reads "stopped at an approval". The agent cannot re-ask a question a person declined; a `dag_monitor` card's Retry can. Gates CREATION only: nodes already waiting still answer and default when it is off. Requires `NOUS_A2UI_ENABLED`. **Rollback:** pre-076 code treats `awaiting_input` as non-terminal forever and counts it toward `MAX_ACTIVE_DAGS` — cancel every DAG with an approval node first. |
 | `NOUS_DAG_APPROVAL_DEFAULT_WAIT_SECONDS` | `86400` | Harness Phase 3: an approval node's wait when its spec sets none (`ge=900`). |
 | `NOUS_DAG_APPROVAL_MAX_WAIT_SECONDS` | `604800` | Harness Phase 3: ceiling on an approval node's wait, clamped at insert. |
-| `NOUS_DAG_APPROVAL_CARD_GRACE_SECONDS` | `3600` | Harness Phase 3: an approval card's expiry is the node's deadline plus this — a backstop only; the orchestrator owns the deadline, and a leaked-card sweep (inside the tick lock) retires cards whose node moved on. `expire_sweep` writes no `no_objection` row for these cards. |
+| `NOUS_DAG_APPROVAL_CARD_GRACE_SECONDS` | `3600` | Harness Phase 3: an approval card's expiry is the node's deadline plus this (`ge=60`) — a backstop only; the orchestrator owns the deadline, and a leaked-card sweep (inside the tick lock) retires cards whose node moved on. `expire_sweep` writes no `no_objection` row for these cards. |
 | `NOUS_DAG_MAX_PARKED_DAGS` | `20` | Harness Phase 3: a DAG waiting only on an approval answer is PARKED and does not count against `MAX_ACTIVE_DAGS=5`; this separately caps parked DAGs, refusing only a request that contains an approval node. Resuming is admission-controlled at dispatch: a resumed DAG starts new nodes only while fewer than 5 DAGs are working (the pre-pass is skipped when no loaded DAG has an approval node). |
 ```
 
@@ -4643,6 +4671,6 @@ UV_PROJECT_ENVIRONMENT=E:/Projects/nous/.venv uv run --frozen pytest tests -q -p
 ## Self-review (writing-plans checklist, done)
 
 - **Spec coverage:** §3.1 → T4 (+ handler flag check T15); §3.2 → T3 (+ rollback in T16 docs); §3.3 → T2, T3; §3.4 → T7, T8 (+ public-URL note T15); §3.5 → T9, T13; §3.6 → T9; §3.7 → T7, T10; §3.8 → T1 (+ deploy note in the PR); §3.9 → T2, T10, T12; §3.10 → T12; §3.11 → T5, T11; §3.12 → T14, T15; §3.13 → T15, T16; §3.14 → T7 (prefix), T15 (tool text); §7 tests → spread across tasks, e2e T17.
-- **Types used across tasks:** `transition_node(node_id, *, from_statuses, dag_statuses=None, card=None, due_by=None, **values) -> bool`; `apply_retry(dag_id, list[tuple[UUID, dict, Collection[str]]], reactivate) -> bool`; `get_node_with_dag_status(node_id) -> tuple[DAGNode, str] | None`; `awaiting_input_nodes_in_terminal_dags(limit) -> list[DAGNode]`; `answer_node(node_id, option_id, *, source, actor, surface_id=None) -> AnswerResult`; `retry_node(dag_id, node_name, *, allow_declined=False)`; `held_reason(dag_id) -> str | None`; `push_built(..., notify_text=None, reserved_key_ok=False)`; `ReservedDedupKeyError(ValueError)`; `close(surface_id, status="expired")`; `close_by_dedup_key(key, status="expired") -> list[str]`; `live_ids(ids) -> set[str]`; `live_cards_by_prefix(prefix) -> list[tuple[str, str]]`; `register_dag_tools(dispatcher, store, orchestrator, settings=None)`.
+- **Types used across tasks:** `transition_node(node_id, *, from_statuses, dag_statuses=None, card=None, due_by=None, **values) -> bool`; `apply_retry(dag_id, primary, unblocks, reactivate) -> bool`; `get_node_with_dag_status(node_id) -> tuple[DAGNode, str] | None`; `awaiting_input_nodes_in_terminal_dags(limit) -> list[DAGNode]`; `answer_node(node_id, option_id, *, source, actor, surface_id=None) -> AnswerResult`; `retry_node(dag_id, node_name, *, allow_declined=False)`; `held_reason(dag_id) -> str | None`; `push_built(..., notify_text=None, reserved_key_ok=False)`; `ReservedDedupKeyError(ValueError)`; `close(surface_id, status="expired")`; `close_by_dedup_key(key, status="expired") -> list[str]`; `live_ids(ids) -> set[str]`; `live_cards_by_prefix(prefix) -> list[tuple[str, str]]`; `register_dag_tools(dispatcher, store, orchestrator, settings=None)`.
 - **v1.2 (late spec re-reviews, spec v2.4):** the approved draft reaches the acting node (T9); the launch `running` writes and the F064.2 demotion are conditional, and a lost launch cancels what it created (T2); the node-driven sweep query + `idx_dag_nodes_awaiting_input` (T3, T10); the sweep reads every live card (T7, T10); `push_built`'s two retries forward the flags, with `ReservedDedupKeyError` and an AST guard (T7); adopt a live card before re-pushing (T9); the gate exempts nodes that cost nothing and reports `held_reason` (T11, T15).
 - **Known seams to watch while executing:** the nested `EXISTS` correlation in `parked_clause` (T5 tests are the check); `tick()` now runs `_sweep_leaked_approval_cards` every tick (one small query on `a2ui_surfaces`); `_cancel_one` now tears down an `awaiting_check` node's heartbeat check on the budget path (previously left to the reconciliation sweep).
