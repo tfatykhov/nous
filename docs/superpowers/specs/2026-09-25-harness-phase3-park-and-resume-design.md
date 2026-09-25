@@ -289,7 +289,7 @@ and a `defer_label` — DAG cards say "Decide later", since nothing will ask aga
 | Slot | Content |
 |---|---|
 | `title` | `<DAG name> · <description or node name>` |
-| `summary` | The question first, then each `context_flow` predecessor's result, each cut separately with a visible `[truncated, N chars]` marker, 4 000 chars in total. The question is never cut. |
+| `summary` | The question first, then each `context_flow` predecessor's result, each cut separately with a visible `[truncated, N chars]` marker, 4 000 chars in total. The question is never cut. A predecessor that is itself an approval contributes its own inputs and then its answer, so a second approval chained after a first still shows the draft. |
 | `risk` | `If nobody answers by <deadline, UTC>, '<default label>' applies.` |
 | `options` | `[{id, label: "<label> — continues" \| "<label> — stops here", outcome}]` |
 | `recommendation` | `recommended_option`, or none |
@@ -394,8 +394,10 @@ acting node, both `context_flow`), the approval's own `result` is only the answe
 `_build_predecessor_context` passes only direct `context_flow` predecessors' results. So the acting
 subtask would never see the draft, and it would write its own text. When a `context_flow`
 predecessor is an approval node, `_build_predecessor_context` therefore also includes that
-approval's own `context_flow` predecessors' results, labelled as approved input. This happens in
-one place and needs nothing from the author. The approval still binds the text, not the action
+approval's own `context_flow` inputs — walking back through chained approvals, the same list the
+card's summary shows — labelled as approved input. An input the card cut is labelled with how much
+of it the card showed, never as approved: the person saw only its head. This happens in one place
+and needs nothing from the author. The approval still binds the text, not the action
 (§6), but now the acting node at least has the approved text in front of it.
 
 **Resumption** needs nothing else: the next tick sees a `completed` node (dependents become ready;
@@ -568,7 +570,8 @@ What the gate is and is not:
   DAG that finishes mid-tick frees its slot on the next tick (≤ one tick).
 - **Oldest first, no preemption.** A held DAG waits until a working DAG finishes or parks.
   `dag_manage status` shows it as `approved — waiting for a free slot (N/5 working)`, so a person
-  who said "proceed" can see why nothing happened yet.
+  who said "proceed" can see why nothing happened yet. A DAG held in a gap before any of its
+  approvals was answered reads `waiting for a free slot (N/5 working)` — nobody approved it yet.
 - **`ready` counts as working.** Wave-0 `ready` nodes of a DAG whose `start_dag` failed hold a
   slot until the stale-ready sweep, at most 300 s. This is benign.
 - **It holds only DAGs that contain an approval node.** Only those can resume from parking, which
