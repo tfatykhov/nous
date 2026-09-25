@@ -118,8 +118,9 @@ A new node type `approval` in `DAGNodeType`, authorable through `dag_create`:
 
 - The four approval fields are allowed only on `approval` nodes, and `options` + `default_option`
   are required there.
-- Rejected on `approval` nodes when set to a non-`None` value (explicitly, not ignored — `dag_create`
-  passes every one of them as `n.get(...)`, so `None` is the "not given" value):
+- Rejected on `approval` nodes when set to a real value (explicitly, not ignored — `dag_create`
+  passes every one of them as `n.get(...)`, and LLM-authored JSON routinely emits `[]` or `0` for
+  "none", so `None`, empty containers, empty strings and `0` all count as "not given"):
   `completion_check*`, `parent_node`, `fix_actions`, `tools`, `frame_type`, `model`,
   `timeout_seconds`, `stall_timeout_seconds`.
 - A fix node may not name an approval node as its `parent_node` (a human "no" is an answer, not a
@@ -511,7 +512,12 @@ successor is `pending`) and decide whether to let them announce or mark them del
 ### 3.10 A human "no" stays a "no"
 
 `retry_node(dag_id, node_name, *, allow_declined=False)` refuses an approval node whose
-`answer_source` is `companion` and whose status is `failed`. The agent's `dag_manage retry`
+`answer_source` is `companion` and whose status is `failed`. When it retries an approval node, its
+reset archives the previous answer into `answer_history` and clears the answer columns. The park
+write would do the same, but a retried node that never parks keeps no stale answer: one failed
+by the deferral cap, or cancelled. A stale answer would otherwise make `approval_line` print the
+old decline, make `stopped_at_approval` misread the cause, and refuse the agent's next retry as
+"declined". The agent's `dag_manage retry`
 (`tools.py:5052`) passes the default; the companion's `dag.retry` handler (`actions.py:668`) passes
 `True`. `dag.retry` exists only on a `dag_monitor` card, which only the agent pushes, so the refusal
 tells the agent the way forward: "'<node>' was declined in the companion; the agent cannot re-ask
@@ -558,17 +564,20 @@ What the gate is and is not:
   while `NOUS_DAG_CALLBACK_EXECUTION_ENABLED` is off. A held DAG dispatches only those, since
   parking takes no subtask and holding it would only delay the question.
 - **Counter rule.** A DAG counts as newly working only when, after its dispatch, it has a node
-  `ready`, `running` or `awaiting_check`. An approval that parks, or an instant gate or callback,
-  takes no slot. A DAG that finishes mid-tick frees its slot on the next tick (≤ one tick).
+  `ready` or `running`. An approval that parks, or an instant gate or callback, takes no slot. A
+  DAG that finishes mid-tick frees its slot on the next tick (≤ one tick).
 - **Oldest first, no preemption.** A held DAG waits until a working DAG finishes or parks.
   `dag_manage status` shows it as `approved — waiting for a free slot (N/5 working)`, so a person
   who said "proceed" can see why nothing happened yet.
 - **`ready` counts as working.** Wave-0 `ready` nodes of a DAG whose `start_dag` failed hold a
   slot until the stale-ready sweep, at most 300 s. This is benign.
-- **Once it runs, it covers every loaded DAG.** When some loaded DAG has an approval node, the gate
-  can also hold a DAG that has none: one `retry_node` reactivated past the limit (retry has no
-  admission check), or one that creation's non-atomic count let through. That is fine: the gate
-  only queues it.
+- **It holds only DAGs that contain an approval node.** Only those can resume from parking, which
+  is what the gate exists for. A DAG without one is never held, even between waves, after a
+  deferral, or after `retry_node` reactivates it. So the ordinary scheduler is unchanged even
+  while some other DAG waits on a person (devil's-advocate plan review).
+- **Working means a node `ready` or `running`.** `awaiting_check` holds no subtask-queue slot, so a
+  DAG polling a check does not count. Counting it would let five slow checks hold a person's
+  approved send for hours.
 
 This is a structural change to `tick()`: a pre-pass over the loaded DAGs counts the working ones
 before the per-DAG `_advance_dag` loop, and `_advance_dag` receives whether this DAG may dispatch.
@@ -582,8 +591,9 @@ active count is unchanged and includes parked DAGs.
 
 ### 3.12 What the person and the agent see afterwards
 
-- **F087 template:** a new `Approvals:` section lists every approval node — `'<label>'` with its
-  source and time, `no answer by <time>; default '<label>' applied`, or `not answered (cancelled)`.
+- **F087 template:** a new `Approvals:` section lists every approval node — `approved — '<label>'`
+  or `declined — '<label>'` with its source and time, `no answer by <time>; default '<label>'
+  applied`, or `not answered (cancelled)`.
   Answered approval nodes are left out of `Problems:`, and a DAG whose only failures are *stop*
   answers and the nodes they blocked is announced as `stopped at an approval` rather than `FAILED`.
 - **`result_summary`:** in that case `_check_dag_completion` writes `Stopped at approval '<node>':
