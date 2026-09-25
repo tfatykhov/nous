@@ -1900,6 +1900,7 @@ def _approval_view(node: Any, nodes: list[Any], edges: list[Any], base_url: str 
     spec = node.approval_spec or {}
     question = node.instructions or ""
     inputs = ap.context_results(node, nodes, edges)
+    approvals = {n.name for n in nodes if n.node_type == "approval"}
     undelivered = node.status == "awaiting_input" and not node.surface_id
     return {
         "question": question,
@@ -1916,7 +1917,9 @@ def _approval_view(node: Any, nodes: list[Any], edges: list[Any], base_url: str 
         "card_url": ap.card_link(node.surface_id, base_url) if node.surface_id else None,
         "card_error": (node.error or None) if undelivered else None,
         "card_summary": ap.build_card_summary(question, inputs),
-        "reviewing": [name for name, _ in inputs],
+        # The outputs under review — an earlier approval's answer is shown on
+        # the card (card_summary) but is not itself under review.
+        "reviewing": [name for name, _ in inputs if name not in approvals],
         "attempts": [
             {**entry, "answered_by": _approval_actor(entry.get("answered_by"))}
             for entry in (node.answer_history or [])
@@ -1988,20 +1991,25 @@ async def _attach_approvals(
 
 
 async def _attach_stopped_by(session: AsyncSession, recent_dags: list[dict]) -> None:
-    """stopped_by (spec §3.1): only a FAILED DAG whose every failed node is an
-    answered approval — the F087 predicate — says who stopped it."""
+    """stopped_by + stops (spec §3.1): only a FAILED DAG whose every failed
+    node is an answered approval — the F087 predicate — says who stopped it.
+    Two stops can differ (a decline on one branch, a deadline default on
+    another): stopped_by is then "mixed" and ``stops`` lists each, so neither
+    source hides the other."""
     from sqlalchemy import select
 
-    from nous.dag.approval import is_answered_approval, stopped_at_approval
+    from nous.dag.approval import is_answered_approval, label_of, stopped_at_approval
     from nous.storage.models import DAGNode
 
     for d in recent_dags:
         d["stopped_by"] = None
+        d["stops"] = []
     failed = [UUID(str(d["id"])) for d in recent_dags if d["status"] == "failed"]
     if not failed:
         return
     rows = (await session.execute(
-        select(DAGNode.dag_id, DAGNode.status, DAGNode.node_type, DAGNode.answer_source)
+        select(DAGNode.dag_id, DAGNode.name, DAGNode.status, DAGNode.node_type,
+               DAGNode.answer_source, DAGNode.answer, DAGNode.approval_spec)
         .where(DAGNode.dag_id.in_(failed))
     )).all()
     by_dag: dict[UUID, list[Any]] = defaultdict(list)
@@ -2012,9 +2020,13 @@ async def _attach_stopped_by(session: AsyncSession, recent_dags: list[dict]) -> 
         if d["status"] != "failed" or not nodes or not stopped_at_approval(nodes):
             continue
         stops = [n for n in nodes if n.status == "failed" and is_answered_approval(n)]
-        d["stopped_by"] = (
-            "companion" if all(n.answer_source == "companion" for n in stops) else "deadline"
-        )
+        sources = {n.answer_source for n in stops}
+        d["stopped_by"] = sources.pop() if len(sources) == 1 else "mixed"
+        d["stops"] = [
+            {"node_name": n.name, "answer_source": n.answer_source,
+             "answer_label": label_of(n.approval_spec or {}, n.answer)}
+            for n in sorted(stops, key=lambda n: n.name)
+        ]
 
 
 async def get_dag_dashboard_data(

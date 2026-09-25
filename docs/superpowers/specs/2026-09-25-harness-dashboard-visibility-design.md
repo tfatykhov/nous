@@ -3,6 +3,23 @@
 **Status:** v2 after 3-agent review (architecture, UX/mobile/a11y, devil's advocate — all APPROVE WITH REVISIONS; every finding below verified against code) · **Branch:** `feat/harness-dashboard-visibility` off `main` `fe429ab`
 **Design canvas:** https://claude.ai/artifact/BviXvTTbqRyfA7Cz1kkKYc
 
+## 0.1 v2.1 — the v2 re-review fold (devil APPROVE; architecture and UX APPROVE WITH REVISIONS)
+
+Implemented as specified below; these points amend §3-§4 where they differ.
+
+- **Search** is an OR of per-column `lower(coalesce(col,'')) LIKE :q ESCAPE` — never a `||` concatenation (NULL on every unkeyed row, and matches across field boundaries).
+- **Unmeasured days are `null`, not 0**: before a series' first event (all-time MIN, one indexed query), before claim evidence levels began, and everywhere when persistence is off. The chart breaks its line there; each rule line has its own dash (the three colours are close in brightness).
+- **Claims** gain `by_mode`; legacy vs new is decided by KEY PRESENCE of `claims` (post-2c events always carry it, even `[]`). Copy: "a correction was queued for the next turn" — one-turn sessions end before it is delivered.
+- **Zero-flag verdicts**: "No flags recorded yet" (no event ever) or "No flags in <window>" + "First flag <date>" — `first_event_at` is the first flag, not a deploy time.
+- **`stopped_by`** is `companion | deadline | mixed | null`, with `stops: [{node_name, answer_source, answer_label}]` so a decline on one branch is never hidden by a default on another.
+- **`reviewing`** lists the outputs under review, not an earlier approval's name (its answer still shows in `card_summary`).
+- **`held_by`** carries the holder's `session_id` and `turn`; the label is "Key currently held by" (a lookup made now cannot prove the refusal's cause).
+- **`sends`** = `idempotency.is_keyed_tool`. The Ledger's "N hold a send" note counts `attention` (window-independent, agrees with the badge).
+- **Release statements append** with `concat_ws(' · ', result_summary, …)` (never erase the stored note); each Copy button sits under its own statement; outcomes read "retries are answered 'already sent'" / "the next retry sends". A tombstone with no provider ref reads "cannot be verified any more — record it either way".
+- **"Card being delivered…"** when an approval is parked but neither linked nor errored yet. The default line reads "the DAG stops here". A past deadline reads "the default applies on the next tick".
+- **`/dashboard/attention`** gains `refused_7d` per rule; the Overview harness line reads each rule's mode (enforce → refused, off → is off, warn → flagged, the calls still ran) over "last 7 days".
+- Harness "not measured" gates the chart, its hidden table and the patterns message too.
+
 ## 0. What v2 changed (review fold)
 
 | Finding | v2 |

@@ -126,7 +126,9 @@
       { label: 'Sends', value: s.sends, note: 'send_email + send_file' },
       { label: 'Repeat sends refused', value: s.repeat_sends_refused, note: 'the key was already held' },
       { label: 'Blocked by a rule', value: s.blocked, note: 'offered-tool · policy · gate' },
-      { label: 'Unknown outcome', value: s.unknown, note: `${s.unknown_keyed} hold a send`, tone: s.unknown ? 'unknown' as const : undefined },
+      // "hold a send" counts the callout's rows (window-independent), so it
+      // always agrees with the nav badge — a hold older than the window too.
+      { label: 'Unknown outcome', value: s.unknown, note: `${d.attention.length} hold${d.attention.length === 1 ? 's' : ''} a send`, tone: s.unknown ? 'unknown' as const : undefined },
       { label: 'Errors', value: s.errors, note: 'failed calls', tone: s.errors ? 'error' as const : undefined },
     ];
   }
@@ -175,15 +177,15 @@
         {d.attention.length} send{d.attention.length === 1 ? '' : 's'} ended without confirming delivery
       </h2>
       <p class="attn-lede">
-        The outcome is <strong class="unknown-text">unknown</strong>, so each keeps its duplicate-send hold: a retry of
-        that send is refused until you record what happened. Check whether the recipients got it.
+        While the outcome is <strong class="unknown-text">unknown</strong>, a retry of the send is refused. Check whether
+        the recipients got it, then record what happened.
       </p>
       {#each d.attention as r (r.id)}
         {@const to = recipients(r.key_args)}
         <div class="attn-row">
           <dl class="attn-facts">
             <dt>Tool</dt><dd class="mono">{r.tool_name}</dd>
-            <dt>To</dt><dd>{r.tombstone ? 'recipients no longer stored (retention)' : to.length ? to.join(', ') : ledgerTarget(r.key_args)}</dd>
+            <dt>To</dt><dd>{r.tombstone ? (r.external_ref ? 'recipients no longer stored (retention) — check by provider ref' : 'cannot be verified any more — record it either way') : to.length ? to.join(', ') : ledgerTarget(r.key_args)}</dd>
             {#if r.dag_name}<dt>From</dt><dd>DAG {r.dag_name}{r.node_name ? ` · ${r.node_name}` : ''}</dd>{/if}
             <dt>When</dt><dd>{fmtWhen(r.created_at)}</dd>
             {#if r.external_ref}<dt>Provider ref</dt><dd class="mono">{r.external_ref}</dd>{/if}
@@ -191,20 +193,20 @@
           </dl>
           <div class="attn-actions">
             <div>
-              <div class="sql-title">They got it — keep the hold</div>
-              <code class="sql" bind:this={sqlEls[`ok-${r.id}`]}>UPDATE nous_system.execution_ledger SET status = 'success', result_summary = 'confirmed delivered by operator'
+              <div class="sql-title">They got it — retries are answered “already sent”</div>
+              <code class="sql" bind:this={sqlEls[`ok-${r.id}`]}>UPDATE nous_system.execution_ledger SET status = 'success',
+  result_summary = concat_ws(' · ', result_summary, 'confirmed delivered by operator')
 WHERE id = '{r.id}' AND status = 'unknown';</code>
+              <button type="button" class="btn" onclick={() => copySql(`ok-${r.id}`, sqlEls[`ok-${r.id}`])}>Copy SQL: they got it</button>
             </div>
             <div>
-              <div class="sql-title">Nobody got it — release the hold</div>
-              <code class="sql" bind:this={sqlEls[`rel-${r.id}`]}>UPDATE nous_system.execution_ledger SET status = 'error', result_summary = 'released by operator'
+              <div class="sql-title">Nobody got it — the next retry sends</div>
+              <code class="sql" bind:this={sqlEls[`rel-${r.id}`]}>UPDATE nous_system.execution_ledger SET status = 'error',
+  result_summary = concat_ws(' · ', result_summary, 'released by operator')
 WHERE id = '{r.id}' AND status = 'unknown';</code>
+              <button type="button" class="btn" onclick={() => copySql(`rel-${r.id}`, sqlEls[`rel-${r.id}`])}>Copy SQL: nobody got it</button>
             </div>
-            <p class="note">Releasing re-sends nothing — retry the step to send again. If only some recipients got it, keep the hold.</p>
-            <div class="btn-row">
-              <button type="button" class="btn" onclick={() => copySql(`ok-${r.id}`, sqlEls[`ok-${r.id}`])}>Copy “got it”</button>
-              <button type="button" class="btn" onclick={() => copySql(`rel-${r.id}`, sqlEls[`rel-${r.id}`])}>Copy “nobody got it”</button>
-            </div>
+            <p class="note">Releasing re-sends nothing by itself — retry the step to send again. If only some recipients got it, keep the hold.</p>
           </div>
         </div>
       {/each}
@@ -282,8 +284,8 @@ WHERE id = '{r.id}' AND status = 'unknown';</code>
         {#snippet detail(r: ExecutionRow)}
           <dl class="detail-grid">
             {#if r.held_by}
-              <div><dt>{r.status === 'blocked' ? 'Refused as a repeat of' : 'Key currently held by'}</dt>
-                <dd>row {r.held_by.id.slice(0, 8)} · {r.held_by.status} (since {fmtUtc(r.held_by.created_at)})</dd></div>
+              <div><dt>Key currently held by</dt>
+                <dd>row {r.held_by.id.slice(0, 8)} · {r.held_by.status} (since {fmtUtc(r.held_by.created_at)}){r.held_by.session_id ? ` · ${r.held_by.session_id}` : ''}{r.held_by.turn != null ? ` · turn ${r.held_by.turn}` : ''}</dd></div>
             {/if}
             {#if r.idempotency_key}<div><dt>Idempotency key</dt><dd class="mono wrap">{r.idempotency_key}</dd></div>{/if}
             <div><dt>Context</dt><dd>{r.context_kind}{r.dag_name ? ` · ${r.dag_name}${r.node_name ? ` / ${r.node_name}` : ''}` : ''}{r.turn != null ? ` · turn ${r.turn}` : ''}</dd></div>
@@ -344,6 +346,7 @@ WHERE id = '{r.id}' AND status = 'unknown';</code>
   .attn-facts dd { margin: 0; overflow-wrap: anywhere; }
   .attn-actions { display: flex; flex-direction: column; gap: 0.625rem; }
   .sql-title { font-size: 0.8125rem; font-weight: 600; }
+  .attn-actions .btn { margin-top: 0.375rem; }
   .sql { display: block; margin-top: 0.25rem; padding: 0.5rem 0.625rem; border-radius: 8px; background: var(--bg);
     border: 1px solid var(--border); font-family: var(--font-mono); font-size: 0.6875rem; line-height: 1.6;
     white-space: pre-wrap; overflow-wrap: anywhere; }

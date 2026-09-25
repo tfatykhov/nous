@@ -15,7 +15,7 @@ describe('fmtWhen — absolute UTC first, relative second', () => {
 describe('relUntil', () => {
   it('counts down to a deadline and says when it has passed', () => {
     expect(relUntil('2026-09-25T19:33:00Z', NOW)).toBe('in 3 h 02 m');
-    expect(relUntil('2026-09-25T16:00:00Z', NOW)).toBe('past the deadline');
+    expect(relUntil('2026-09-25T16:00:00Z', NOW)).toBe('past the deadline — the default applies on the next tick');
   });
 });
 
@@ -58,10 +58,12 @@ describe('ruleVerdict — never a green light without evidence', () => {
     expect(v.detail).toBe('12 in 7 d. Most: heartbeat_callback · send_file · not offered.');
     expect(v.tone).toBe('warn');
   });
-  it('never claims "nothing would be refused" — only that nothing was flagged since', () => {
+  it('never claims "nothing would be refused" — only that nothing was flagged in the window', () => {
     const v = ruleVerdict({ ...base, by_mode: {} }, '7 d', true, null);
-    expect(v.title).toBe('Nothing flagged');
-    expect(v.detail).toContain('since Sep 24 08:10 UTC');
+    expect(v.title).toBe('No flags in 7 d');
+    expect(v.detail).toBe('First flag Sep 24 08:10 UTC.');
+    const never = ruleVerdict({ ...base, first_event_at: null, by_mode: {} }, '7 d', true, null);
+    expect(never.title).toBe('No flags recorded yet');
   });
   it('reports what enforce refused', () => {
     const v = ruleVerdict({ ...base, mode: 'enforce', by_mode: { enforce: 3 } }, '7 d', true, top);
@@ -75,7 +77,7 @@ describe('claimVerdict', () => {
   const claims = { mode: 'enforce', by_evidence: { exact: 118, plausible: 24, none: 4 },
     legacy: { events: 0, violations: 0 }, evidence_since: '2026-09-24T08:10:00+00:00' };
   it('counts corrections under enforce and would-be corrections under warn', () => {
-    expect(claimVerdict(claims, true).detail).toBe('4 claims had no evidence and got a correction in the next turn.');
+    expect(claimVerdict(claims, true).detail).toBe('4 claims had no evidence; a correction was queued for the next turn.');
     expect(claimVerdict({ ...claims, mode: 'warn' }, true).detail)
       .toBe('4 claims had no evidence and would have got a correction.');
   });

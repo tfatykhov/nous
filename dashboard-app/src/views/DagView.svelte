@@ -281,7 +281,11 @@
               <span class="text">{w.dag_name}</span> · step <span class="mono">{w.node_name}</span>
               {#if w.reviewing.length} · reviewing <span class="mono">{w.reviewing.join(', ')}</span>{/if}
             </div>
-            {#if w.card_error}<div class="q-error">{w.card_error}</div>{/if}
+            {#if w.card_error}
+              <div class="q-error">{w.card_error}</div>
+            {:else if !w.card_url}
+              <div class="small muted">Card being delivered…</div>
+            {/if}
           </div>
           <div class="q-when">
             <div class="label">Answer by</div>
@@ -291,7 +295,7 @@
           <div class="q-default">
             <div class="label">If no answer</div>
             <div>'{w.default_label}'</div>
-            <div class="small muted">stops here — nothing below runs</div>
+            <div class="small muted">the DAG stops here</div>
           </div>
           <div class="q-actions">
             {#if w.card_url}
@@ -426,7 +430,13 @@
             {@const col = row._dag.stopped_by ? WAITING : statusColor(row._dag.status)}
             <span class="status-badge" style={badgeStyle(col)}>{row.statusBadge}</span>
           {:else if c.key === 'summary'}
-            <span class="small muted">{row.summary}</span>
+            {#if row._dag.stops.length}
+              <span class="small muted">{row._dag.stops.map((s: { node_name: string; answer_source: string; answer_label: string }) =>
+                s.answer_source === 'companion' ? `${s.node_name}: declined '${s.answer_label}'` : `${s.node_name}: no answer, default '${s.answer_label}' applied`,
+              ).join(' · ')}</span>
+            {:else}
+              <span class="small muted">{row.summary}</span>
+            {/if}
           {:else}
             {row[c.key]}
           {/if}
@@ -489,13 +499,15 @@
         <dl class="approval-dl">
           <div><dt>Asked</dt><dd>{fmtUtc(a.asked_at)}</dd></div>
           <div><dt>Answer by</dt><dd>{fmtUtc(a.deadline)}{#if !a.answer} ({relUntil(a.deadline)}){/if}</dd></div>
-          <div><dt>If no answer</dt><dd>'{a.default_label}' — the DAG stops, nothing below runs</dd></div>
+          <div><dt>If no answer</dt><dd>'{a.default_label}' — the DAG stops here</dd></div>
           <div><dt>Answer</dt><dd>{answerLine(a)}</dd></div>
         </dl>
         {#if a.card_url}
           <a class="card-link" href={a.card_url} target="_blank" rel="noopener">Open card in companion</a>
         {:else if a.card_error}
           <p class="q-error">{a.card_error}</p>
+        {:else if !a.answer}
+          <p class="small muted">Card being delivered…</p>
         {/if}
         {#if a.attempts.length}
           <div class="detail-section">

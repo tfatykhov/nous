@@ -28,7 +28,7 @@ const EXECUTION = {
   attention: [row({
     id: ID, tool_name: 'send_email', side_effect_type: 'external', status: 'unknown',
     key_args: { to: ['anna@northwind.example'] }, idempotency_key: 'dag:9f1c:send-report:9b41c0de2a7f53e1',
-    dag_name: 'mail-weekly-report', node_name: 'send-report', result_summary: 'stream closed mid-call',
+    dag_name: 'mail-weekly-report', node_name: 'send-report', result_summary: 'cancelled mid-call — outcome unknown',
   })],
   rows: [row(), row({ tool_name: 'send_email', status: 'success', key_args: {}, idempotency_key: 'subtask:x:1a2b', tombstone: true })],
   next_before: null,
@@ -59,7 +59,8 @@ const DAG = {
   recent_dags: [{ id: 'r1', name: 'invoice-followup', status: 'failed', source: 'agent', created_at: null,
     completed_at: '2026-09-24T09:00:00+00:00', token_budget: 0, tokens_consumed: 0,
     result_summary: "Stopped at approval 'approve-send': 'Don't send'; 1 step not run", postmortem: null,
-    node_count: 3, completed_count: 1, stopped_by: 'deadline' }],
+    node_count: 3, completed_count: 1, stopped_by: 'deadline',
+    stops: [{ node_name: 'approve-send', answer_source: 'deadline', answer_label: "Don't send" }] }],
   waiting_on_you: [{ dag_id: 'd1', dag_name: 'mail-weekly-report', node_id: 'n1', node_name: 'approve-send',
     question: 'Send the drafted weekly report?', deadline: '2099-01-01T12:00:00+00:00', default_label: "Don't send",
     card_url: null, card_error: 'approval card not delivered yet: companion down', reviewing: ['draft-report'] }],
@@ -90,7 +91,7 @@ describe('harness dashboard views', () => {
     render(Harness);
     expect(await screen.findByText('Enforce would refuse calls like these')).toBeTruthy();
     expect(screen.getByText('12 in 7 d. Most: heartbeat_callback · send_file · not offered.')).toBeTruthy();
-    expect(screen.getByText('Nothing flagged')).toBeTruthy(); // context policy: zero, never "would refuse nothing"
+    expect(screen.getByText('No flags recorded yet')).toBeTruthy(); // context policy: never "would refuse nothing"
   });
 
   it('Harness says "not measured" when nothing is recorded', async () => {
@@ -108,7 +109,7 @@ describe('harness dashboard views', () => {
     expect(sql[0]).toContain(`WHERE id = '${ID}' AND status = 'unknown'`);
     expect(sql[0]).toContain("status = 'success'");
     expect(sql[1]).toContain("status = 'error'");
-    expect(container.textContent).toContain('stream closed mid-call');
+    expect(container.textContent).toContain('cancelled mid-call — outcome unknown');
     expect(container.textContent).not.toContain('connection dropped');
     expect(container.textContent).toContain('command sha256:3f9a1234… (412 chars)');
     expect(container.textContent).toContain('details removed by retention');

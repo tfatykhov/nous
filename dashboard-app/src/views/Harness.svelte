@@ -51,14 +51,14 @@
       {
         id: 'offered_set', title: 'Offered-tool rule', env: 'NOUS_TOOL_OFFERED_SET_ENFORCEMENT_MODE',
         mode: off.mode ?? 'off', total: sum(off.by_mode), totalLabel: 'calls to a tool the turn was not offered',
-        since: off.first_event_at ? `Measured since ${fmtUtc(off.first_event_at)}` : '',
+        since: d.events_persisted && off.first_event_at ? `First flag ${fmtUtc(off.first_event_at)}` : '',
         breakdownLabel: 'By context', breakdown: bars(off.by_context),
         verdict: ruleVerdict(off, w, d.events_persisted, top(d, 'offered_set')),
       },
       {
         id: 'context_policy', title: 'Context policy', env: 'NOUS_TOOL_CONTEXT_POLICY_MODE',
         mode: pol.mode ?? 'off', total: sum(pol.by_mode), totalLabel: 'calls outside what their context may do',
-        since: pol.first_event_at ? `Measured since ${fmtUtc(pol.first_event_at)}` : '',
+        since: d.events_persisted && pol.first_event_at ? `First flag ${fmtUtc(pol.first_event_at)}` : '',
         breakdownLabel: 'By flag', breakdown: bars(pol.by_violation),
         verdict: ruleVerdict(pol, w, d.events_persisted, top(d, 'context_policy')),
       },
@@ -67,9 +67,11 @@
         mode: cl.mode ?? 'off',
         total: cl.by_evidence.exact + cl.by_evidence.plausible + cl.by_evidence.none,
         totalLabel: 'completion claims checked',
-        since: cl.legacy.events
-          ? `Evidence levels recorded since ${fmtUtc(cl.evidence_since)} · ${cl.legacy.events} older checks without them`
-          : cl.evidence_since ? `Evidence levels recorded since ${fmtUtc(cl.evidence_since)}` : '',
+        since: !d.events_persisted ? ''
+          : cl.legacy.events && cl.evidence_since
+            ? `Evidence levels recorded since ${fmtUtc(cl.evidence_since)} · ${cl.legacy.events} older checks without them`
+            : cl.legacy.events ? `${cl.legacy.events} older checks without evidence levels`
+              : cl.evidence_since ? `Evidence levels recorded since ${fmtUtc(cl.evidence_since)}` : '',
         breakdownLabel: 'By evidence',
         breakdown: bars(['exact', 'plausible', 'none'].map((k) => ({
           key: k, count: cl.by_evidence[k as 'exact' | 'plausible' | 'none'],
@@ -83,16 +85,18 @@
   }
 
   function chartData(d: HarnessData) {
-    const line = (label: string, key: 'offered_set' | 'context_policy' | 'claims_none', color: string) => ({
+    // null = not measured: Chart.js breaks the line there (spanGaps off).
+    // A distinct dash per rule — the three colours are close in brightness.
+    const line = (label: string, key: 'offered_set' | 'context_policy' | 'claims_none', color: string, dash: number[]) => ({
       label, data: d.daily.map((x) => x[key]), borderColor: color, backgroundColor: color,
-      borderWidth: 2, pointRadius: 2, tension: 0.2, fill: false,
+      borderWidth: 2, borderDash: dash, pointRadius: 2, tension: 0.2, fill: false, spanGaps: false,
     });
     return {
       labels: d.daily.map((x) => x.date.slice(5)),
       datasets: [
-        line('Offered-tool rule', 'offered_set', SERIES.offered_set),
-        line('Context policy', 'context_policy', SERIES.context_policy),
-        line('Claims without evidence', 'claims_none', SERIES.claims),
+        line('Offered-tool rule', 'offered_set', SERIES.offered_set, []),
+        line('Context policy', 'context_policy', SERIES.context_policy, [6, 4]),
+        line('Claims without evidence', 'claims_none', SERIES.claims, [2, 3]),
       ],
     };
   }
@@ -175,18 +179,28 @@
   <section class="panel">
     <h2>Flags per day</h2>
     <p class="small muted">One line per rule — a call can be flagged by more than one rule, so the lines are never added up.</p>
-    <div aria-hidden="true">
-      <Chart type="line" data={chartData(d)} options={chartOptions} height="220px" />
-    </div>
-    <table class="sr-only">
-      <caption>Flags per day, per rule</caption>
-      <thead><tr><th>Day</th><th>Offered-tool rule</th><th>Context policy</th><th>Claims without evidence</th></tr></thead>
-      <tbody>
-        {#each d.daily as day (day.date)}
-          <tr><td>{day.date}</td><td>{day.offered_set}</td><td>{day.context_policy}</td><td>{day.claims_none}</td></tr>
-        {/each}
-      </tbody>
-    </table>
+    {#if !d.events_persisted}
+      <p class="empty">Not measured — event persistence is off.</p>
+    {:else}
+      <div aria-hidden="true">
+        <Chart type="line" data={chartData(d)} options={chartOptions} height="220px" />
+      </div>
+      <p class="small muted">A gap means the rule was not recording yet that day.</p>
+      <table class="sr-only">
+        <caption>Flags per day, per rule</caption>
+        <thead><tr><th>Day</th><th>Offered-tool rule</th><th>Context policy</th><th>Claims without evidence</th></tr></thead>
+        <tbody>
+          {#each d.daily as day (day.date)}
+            <tr>
+              <td>{day.date}</td>
+              <td>{day.offered_set ?? 'not measured'}</td>
+              <td>{day.context_policy ?? 'not measured'}</td>
+              <td>{day.claims_none ?? 'not measured'}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
   </section>
 
   <section class="panel">
@@ -195,7 +209,7 @@
       <span class="small muted">Fix the source, or accept the refusal, before enforcing.</span>
     </div>
     {#if d.patterns.length === 0}
-      <p class="empty">{d.events_persisted ? 'Nothing flagged in this window.' : 'Nothing recorded.'}</p>
+      <p class="empty">{d.events_persisted ? 'Nothing flagged in this window.' : 'Not measured — event persistence is off.'}</p>
     {:else}
       <DataTable columns={patternCols} rows={d.patterns} mode="cards"
         rowKey={(p: HarnessData['patterns'][number], i: number) => `${p.rule}-${p.context}-${p.tool}-${p.violation}-${i}`}

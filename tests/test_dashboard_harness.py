@@ -60,6 +60,11 @@ async def _approval_dag(store, name="mail"):
     return dag, {n.name: n for n in dag.nodes}
 
 
+def _ask(name: str, question: str) -> DAGNodeSpec:
+    return DAGNodeSpec(name=name, type=DAGNodeType.approval, instructions=question,
+                       options=OPTIONS, default_option="hold")
+
+
 async def _dash(db, agent_id, **kw):
     async with db.session() as session:
         return await get_dag_dashboard_data(session, agent_id, **kw)
@@ -183,6 +188,11 @@ async def test_stopped_by_says_who_stopped_it_and_only_for_failed_dags(db, store
     data = await _dash(db, agent_id)
 
     stopped = {UUID(d["id"]): d["stopped_by"] for d in data["recent_dags"]}
+    stops = {UUID(d["id"]): d["stops"] for d in data["recent_dags"]}
+    assert stops[by_companion.id] == [
+        {"node_name": "approve", "answer_source": "companion", "answer_label": "Don't send"}
+    ]
+    assert stops[cancelled.id] == []
     assert stopped[by_companion.id] == "companion"
     assert stopped[by_deadline.id] == "deadline"
     assert stopped[cancelled.id] is None
@@ -383,7 +393,7 @@ async def test_claim_evidence_comes_from_new_events_and_older_ones_are_kept_apar
     assert claims["evidence_since"] is not None
 
 
-async def test_top_patterns_and_zero_filled_days(db, agent_id):
+async def test_top_patterns_and_one_entry_per_day(db, agent_id):
     for _ in range(3):
         await _event(db, agent_id, "harness_context_policy_violation",
                      _policy("run_python", "heartbeat_check", "undeclared"), session_id="hb-9")
@@ -403,8 +413,8 @@ async def test_top_patterns_and_zero_filled_days(db, agent_id):
     assert claim["snippet"] == "I've pushed the fix"
     days = [d["date"] for d in data["daily"]]
     assert len(days) == 8 and days == sorted(days)
-    assert sum(d["context_policy"] for d in data["daily"]) == 3
-    assert sum(d["claims_none"] for d in data["daily"]) == 1
+    assert sum(d["context_policy"] or 0 for d in data["daily"]) == 3  # earlier days are gaps
+    assert sum(d["claims_none"] or 0 for d in data["daily"]) == 1
 
 
 async def test_harness_says_whether_anything_was_recorded(db, agent_id):
@@ -474,8 +484,111 @@ async def test_attention_harness_counts_warn_events_per_rule_this_week(db, agent
     data = await _attention(db, agent_id, events_persisted=False, ledger_persisted=False)
 
     assert data["harness"] == {"events_persisted": False,
-                               "offered_set": {"mode": "warn", "warn_7d": 1},
-                               "context_policy": {"mode": "warn", "warn_7d": 1}}
+                               "offered_set": {"mode": "warn", "warn_7d": 1, "refused_7d": 0},
+                               "context_policy": {"mode": "warn", "warn_7d": 1, "refused_7d": 1}}
     assert data["ledger_persisted"] is False
     assert (data["questions_waiting"], data["sends_in_doubt"], data["next"], data["latest_in_doubt"]) == (
         0, 0, None, None)
+
+
+async def test_two_stops_from_different_sources_read_mixed_and_list_both(db, store, agent_id):
+    """Parallel branches: one approval declined in the companion, the other
+    defaulted at its deadline — neither source may hide the other."""
+    dag = await store.create(DAGCreateRequest(
+        name="two",
+        nodes=[
+            _ask("a1", "A?"),
+            _ask("a2", "B?"),
+            DAGNodeSpec(name="x", type=DAGNodeType.subtask, instructions="x"),
+            DAGNodeSpec(name="y", type=DAGNodeType.subtask, instructions="y"),
+        ],
+        edges=[DAGEdgeSpec(from_node="a1", to_node="x"), DAGEdgeSpec(from_node="a2", to_node="y")],
+    ))
+    n = {x.name: x for x in dag.nodes}
+    await store.update_node(n["a1"].id, status="failed", answer="hold", answer_source="companion")
+    await store.update_node(n["a2"].id, status="failed", answer="hold", answer_source="deadline")
+    await store.update_node(n["x"].id, status="blocked")
+    await store.update_node(n["y"].id, status="blocked")
+    await store.update_dag_status(dag.id, "failed", result_summary="Stopped at approval")
+
+    recent = next(d for d in (await _dash(db, agent_id))["recent_dags"] if UUID(d["id"]) == dag.id)
+
+    assert recent["stopped_by"] == "mixed"
+    assert sorted(s["answer_source"] for s in recent["stops"]) == ["companion", "deadline"]
+
+
+async def test_reviewing_names_the_outputs_under_review_not_an_earlier_approval(db, store, agent_id):
+    dag = await store.create(DAGCreateRequest(
+        name="chain",
+        nodes=[
+            DAGNodeSpec(name="draft", type=DAGNodeType.subtask, instructions="d"),
+            _ask("a1", "A?"),
+            _ask("a2", "B?"),
+            DAGNodeSpec(name="send", type=DAGNodeType.subtask, instructions="s"),
+        ],
+        edges=[DAGEdgeSpec(from_node="draft", to_node="a1", edge_type="context_flow"),
+               DAGEdgeSpec(from_node="a1", to_node="a2", edge_type="context_flow"),
+               DAGEdgeSpec(from_node="a2", to_node="send", edge_type="context_flow")],
+    ))
+    await store.update_dag_status(dag.id, "running")
+    n = {x.name: x for x in dag.nodes}
+    await store.update_node(n["draft"].id, status="completed", result="DRAFT")
+    await store.update_node(n["a1"].id, status="completed", answer="send", answer_source="companion",
+                            result="Answered in the companion: 'Send it'")
+    await store.update_node(n["a2"].id, status="awaiting_input", answer_deadline=datetime.now(UTC) + timedelta(hours=1))
+
+    view = _node(await _dash(db, agent_id), dag.id, "a2")["approval"]
+
+    assert view["reviewing"] == ["draft"]
+    assert "From 'draft':\nDRAFT" in view["card_summary"]
+    assert "From 'a1':" in view["card_summary"]  # the card still shows the earlier answer
+
+
+async def test_the_holder_carries_its_session_and_turn(db, agent_id):
+    holder = await _row(db, agent_id, tool="send_email", effect="external", status="success", key="subtask:s:k",
+                        session_id="subtask-1", turn=2, ago=timedelta(minutes=30))
+    await _row(db, agent_id, tool="send_email", effect="external", status="blocked",
+               summary="refused by duplicate", key="subtask:s:k", session_id="subtask-1", turn=2)
+
+    refused = next(r for r in (await _exec(db, agent_id))["rows"] if r["status"] == "blocked")
+
+    assert refused["held_by"] == {"id": str(holder.id), "status": "success",
+                                  "created_at": refused["held_by"]["created_at"], "external_ref": None,
+                                  "session_id": "subtask-1", "turn": 2}
+
+
+async def test_unmeasured_days_are_gaps_not_zeros(db, agent_id):
+    await _event(db, agent_id, "harness_unoffered_tool_call", _unoffered("bash", "subtask"), ago=timedelta(days=2))
+    await _event(db, agent_id, "f026_claim_verification", {"violation_count": 1, "mode": "enforce"},
+                 ago=timedelta(days=5))  # legacy: no evidence levels
+    await _event(db, agent_id, "f026_claim_verification",
+                 {"claim_count": 0, "claims": [], "violation_count": 0, "mode": "enforce"}, ago=timedelta(days=1))
+
+    data = await _harness(db, agent_id, window="7d")
+
+    offered = [d["offered_set"] for d in data["daily"]]
+    claims = [d["claims_none"] for d in data["daily"]]
+    assert offered[:5] == [None] * 5 and offered[5] == 1 and offered[-1] == 0
+    assert claims[:6] == [None] * 6 and claims[-2:] == [0, 0]
+    assert all(d["context_policy"] is None for d in data["daily"])  # never recorded anything
+    assert data["rules"]["claims"]["legacy"] == {"events": 1, "violations": 0 + 1}
+    assert data["rules"]["claims"]["turns_with_claims"] == 0  # claims: [] is NOT legacy
+    assert data["rules"]["claims"]["by_mode"] == {"enforce": 1}
+
+
+async def test_nothing_recorded_means_no_numbers_at_all(db, agent_id):
+    await _event(db, agent_id, "harness_unoffered_tool_call", _unoffered("bash", "subtask"))
+
+    data = await _harness(db, agent_id, events_persisted=False)
+
+    assert all(v is None for d in data["daily"] for k, v in d.items() if k != "date")
+
+
+async def test_attention_reports_refusals_for_a_rule_in_enforce(db, agent_id):
+    await _event(db, agent_id, "harness_context_policy_violation", _policy("bash", "subtask", "spawn", mode="enforce"))
+    await _event(db, agent_id, "harness_context_policy_violation", _policy("bash", "subtask", "spawn"))
+
+    h = (await _attention(db, agent_id, modes={**RULE_MODES, "context_policy": "enforce"}))["harness"]
+
+    assert h["context_policy"] == {"mode": "enforce", "warn_7d": 1, "refused_7d": 1}
+    assert h["offered_set"] == {"mode": "warn", "warn_7d": 0, "refused_7d": 0}

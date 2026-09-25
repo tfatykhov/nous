@@ -147,8 +147,14 @@
         {#if !a.harness.events_persisted}
           Harness: not measured — event persistence is off.
         {:else}
-          Harness this week: offered-tool rule flagged <strong>{a.harness.offered_set.warn_7d}</strong> · context policy flagged
-          <strong>{a.harness.context_policy.warn_7d}</strong> in warn mode (nothing was refused).
+          Harness, last 7 days:
+          {#each [['Offered-tool rule', a.harness.offered_set], ['Context policy', a.harness.context_policy]] as [name, r], i (name)}
+            {@const rule = r as { mode: string | null; warn_7d: number; refused_7d: number }}
+            {i ? ' · ' : ''}{name}
+            {#if rule.mode === 'enforce'} refused <strong>{rule.refused_7d}</strong>
+            {:else if rule.mode === 'off'} is off
+            {:else} flagged <strong>{rule.warn_7d}</strong> (warn — the calls still ran){/if}
+          {/each}.
         {/if}
         <a href="#/harness">Open Harness</a>
       </p>

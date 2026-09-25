@@ -37,7 +37,7 @@ export function fmtWhen(iso: string | null | undefined, now: number = Date.now()
 export function relUntil(iso: string | null | undefined, now: number = Date.now()): string {
   if (!iso) return '';
   const mins = Math.floor((new Date(iso).getTime() - now) / 60000);
-  if (mins < 0) return 'past the deadline';
+  if (mins < 0) return 'past the deadline — the default applies on the next tick';
   const h = Math.floor(mins / 60);
   const m = String(mins % 60).padStart(2, '0');
   return h > 0 ? `in ${h} h ${m} m` : `in ${mins % 60} m`;
@@ -117,8 +117,12 @@ export function ruleVerdict(
     return { title: 'Enforcing', detail: `Refused ${refused} in ${windowLabel}.${refused ? most : ''}`, tone: 'ok' };
   }
   if (total === 0) {
-    const since = rule.first_event_at ? `since ${fmtUtc(rule.first_event_at)}` : `in ${windowLabel}`;
-    return { title: 'Nothing flagged', detail: `No calls flagged ${since}.`, tone: 'muted' };
+    // first_event_at is the rule's first flag ever, not when it was deployed:
+    // with none, nothing has been flagged yet — not "nothing would be refused".
+    if (!rule.first_event_at) {
+      return { title: 'No flags recorded yet', detail: 'The rule is on and has flagged nothing so far.', tone: 'muted' };
+    }
+    return { title: `No flags in ${windowLabel}`, detail: `First flag ${fmtUtc(rule.first_event_at)}.`, tone: 'muted' };
   }
   return { title: 'Enforce would refuse calls like these', detail: `${total} in ${windowLabel}.${most}`, tone: 'warn' };
 }
@@ -136,7 +140,9 @@ export function claimVerdict(claims: ClaimSummary, eventsPersisted: boolean): Ve
   }
   const none = claims.by_evidence.none;
   if (claims.mode === 'enforce') {
-    return { title: 'Enforcing', detail: `${none} claims had no evidence and got a correction in the next turn.`, tone: 'ok' };
+    // "queued", not "got": a one-turn session (a subtask, a heartbeat turn)
+    // ends before the next turn, and end_conversation drops the correction.
+    return { title: 'Enforcing', detail: `${none} claims had no evidence; a correction was queued for the next turn.`, tone: 'ok' };
   }
   return { title: claims.mode === 'off' ? 'Not checking' : 'Checking', detail: `${none} claims had no evidence and would have got a correction.`, tone: none ? 'warn' : 'muted' };
 }

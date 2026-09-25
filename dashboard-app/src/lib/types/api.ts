@@ -585,8 +585,10 @@ export interface DagRecentDag {
   postmortem: string | null;
   node_count: number;
   completed_count: number;
-  /** A failed DAG that stopped at an approval: who stopped it. */
-  stopped_by: 'companion' | 'deadline' | null;
+  /** A failed DAG that stopped at an approval: who stopped it ("mixed" when
+   *  a decline and a deadline default both stopped it). */
+  stopped_by: 'companion' | 'deadline' | 'mixed' | null;
+  stops: { node_name: string; answer_source: 'companion' | 'deadline'; answer_label: string }[];
 }
 
 export interface DagStats {
@@ -633,6 +635,8 @@ export interface ExecutionHolder {
   status: string;
   created_at: string | null;
   external_ref: string | null;
+  session_id: string | null;
+  turn: number | null;
 }
 
 export interface ExecutionRow {
@@ -691,11 +695,13 @@ export interface HarnessData {
       first_event_at: string | null;
       evidence_since: string | null;
       by_evidence: { exact: number; plausible: number; none: number };
+      by_mode: Record<string, number>;
       turns_with_claims: number;
       legacy: { events: number; violations: number };
     };
   };
-  daily: { date: string; offered_set: number; context_policy: number; claims_none: number }[];
+  /** null = not measured that day (before the series began, or persistence off). */
+  daily: { date: string; offered_set: number | null; context_policy: number | null; claims_none: number | null }[];
   patterns: {
     rule: 'offered_set' | 'context_policy' | 'claims';
     mode: string;
@@ -725,8 +731,8 @@ export interface AttentionData {
   ledger_persisted: boolean;
   harness: {
     events_persisted: boolean;
-    offered_set: { mode: string | null; warn_7d: number };
-    context_policy: { mode: string | null; warn_7d: number };
+    offered_set: { mode: string | null; warn_7d: number; refused_7d: number };
+    context_policy: { mode: string | null; warn_7d: number; refused_7d: number };
   };
 }
 

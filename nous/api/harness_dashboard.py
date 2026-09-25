@@ -18,6 +18,7 @@ from sqlalchemy import Text, and_, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.api.execution_context import ContextKind
+from nous.api.idempotency import is_keyed_tool
 from nous.cognitive.ledger_store import KEY_HOLDING_STATUSES, REFUSAL_CODES
 from nous.dag.approval import as_utc
 from nous.storage.models import DAGNode, Event, ExecutionDAG, ExecutionLedgerEntry
@@ -29,7 +30,6 @@ WINDOWS: dict[str, timedelta] = {
 }
 LEDGER_STATUSES = ("pending", "success", "error", "blocked", "unknown")
 EFFECTS = ("write", "external", "irreversible")
-SEND_TOOLS = ("send_email", "send_file")
 ATTENTION_CAP = 20
 MAX_Q = 100
 
@@ -84,7 +84,7 @@ def _stats(rows: list[Any]) -> dict[str, int]:
     }
     for r in rows:
         stats["calls"] += 1
-        stats["sends"] += r.tool_name in SEND_TOOLS
+        stats["sends"] += is_keyed_tool(r.tool_name)  # the tools send de-duplication keys
         stats["external"] += r.side_effect_type in ("external", "irreversible")
         if r.status == "blocked":
             if _refusal_code(r.status, r.result_summary) == "duplicate":
@@ -136,7 +136,8 @@ async def _holders(session: AsyncSession, agent_id: str, rows: list[Any]) -> dic
     if not pairs:
         return {}
     res = await session.execute(
-        select(L.id, L.tool_name, L.idempotency_key, L.status, L.created_at, L.external_ref)
+        select(L.id, L.tool_name, L.idempotency_key, L.status, L.created_at, L.external_ref,
+               L.session_id, L.turn)
         .where(
             L.agent_id == agent_id,
             L.status.in_(KEY_HOLDING_STATUSES),
@@ -178,7 +179,7 @@ def _row_view(r: Any, dags: dict, nodes: dict, holders: dict) -> dict:
         "tombstone": _is_tombstone(r),
         "held_by": (
             {"id": str(holder.id), "status": holder.status, "created_at": _iso(holder.created_at),
-             "external_ref": holder.external_ref}
+             "external_ref": holder.external_ref, "session_id": holder.session_id, "turn": holder.turn}
             if holder is not None and holder.id != r.id else None
         ),
     }
@@ -270,6 +271,24 @@ _RULE_OF = {OFFERED: "offered_set", POLICY: "context_policy", CLAIMS: "claims"}
 PATTERN_CAP = 20
 
 
+def _claims_measured_from(evidence_since: datetime | None, first_claim: datetime | None,
+                          legacy: dict[str, int]) -> datetime | None:
+    """When claim evidence levels start: the first post-2c event in the window,
+    or — with no legacy events in view — the first claim event ever."""
+    if evidence_since is not None:
+        return evidence_since
+    return None if legacy["events"] else as_utc(first_claim)
+
+
+def _blank_unmeasured(days: dict[str, dict], persisted: bool, since: dict[str, datetime | None]) -> None:
+    """A day before a series was recorded is a gap (None), not a zero — a
+    chart must not draw "nothing happened" over "nothing was measured"."""
+    for day in days.values():
+        for key, start in since.items():
+            if not persisted or start is None or day["date"] < start.date().isoformat():
+                day[key] = None
+
+
 def _ranked(counter: dict[str, int]) -> list[dict[str, Any]]:
     return [{"key": k, "count": n} for k, n in sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))]
 
@@ -316,6 +335,7 @@ async def get_harness_data(
     by_tool: dict[str, int] = {}
     by_violation: dict[str, int] = {}
     evidence = {"exact": 0, "plausible": 0, "none": 0}
+    claims_by_mode: dict[str, int] = {}
     turns_with_claims = 0
     legacy = {"events": 0, "violations": 0}
     evidence_since: datetime | None = None
@@ -360,6 +380,7 @@ async def get_harness_data(
             legacy["violations"] += int(data.get("violation_count") or 0)
             continue
         evidence_since = evidence_since or at
+        _bump(claims_by_mode, mode)
         if claims:
             turns_with_claims += 1
         for c in claims:
@@ -373,6 +394,11 @@ async def get_harness_data(
                         snippet=(c.get("text") or None))
 
     patterns = sorted(groups.values(), key=lambda g: (-g["count"], g["last_seen"] or ""))
+    _blank_unmeasured(days, events_persisted, {
+        "offered_set": as_utc(first.get(OFFERED)),
+        "context_policy": as_utc(first.get(POLICY)),
+        "claims_none": _claims_measured_from(evidence_since, first.get(CLAIMS), legacy),
+    })
     return {
         "window": window,
         "events_persisted": events_persisted,
@@ -390,6 +416,7 @@ async def get_harness_data(
             "claims": {
                 "mode": modes.get("claim_verification"), "first_event_at": _iso(first.get(CLAIMS)),
                 "evidence_since": _iso(evidence_since), "by_evidence": evidence,
+                "by_mode": claims_by_mode,
                 "turns_with_claims": turns_with_claims, "legacy": legacy,
             },
         },
@@ -454,12 +481,16 @@ async def get_attention_data(
 
     since = datetime.now(UTC) - timedelta(days=7)
     warn = {OFFERED: 0, POLICY: 0}
+    refused = {OFFERED: 0, POLICY: 0}
     for ev in (await session.execute(
         select(Event.event_type, Event.data)
         .where(Event.agent_id == agent_id, Event.event_type.in_((OFFERED, POLICY)), Event.created_at >= since)
     )):
-        if isinstance(ev.data, dict) and ev.data.get("mode") == "warn":
+        mode = ev.data.get("mode") if isinstance(ev.data, dict) else None
+        if mode == "warn":
             warn[ev.event_type] += 1
+        elif mode == "enforce":
+            refused[ev.event_type] += 1
 
     return {
         "questions_waiting": len(questions),
@@ -476,7 +507,9 @@ async def get_attention_data(
         "ledger_persisted": ledger_persisted,
         "harness": {
             "events_persisted": events_persisted,
-            "offered_set": {"mode": modes.get("offered_set"), "warn_7d": warn[OFFERED]},
-            "context_policy": {"mode": modes.get("context_policy"), "warn_7d": warn[POLICY]},
+            "offered_set": {"mode": modes.get("offered_set"), "warn_7d": warn[OFFERED],
+                            "refused_7d": refused[OFFERED]},
+            "context_policy": {"mode": modes.get("context_policy"), "warn_7d": warn[POLICY],
+                               "refused_7d": refused[POLICY]},
         },
     }
