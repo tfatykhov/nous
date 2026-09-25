@@ -113,10 +113,18 @@ def attention_filter(agent_id: str):
     return and_(L.agent_id == agent_id, L.status == "unknown", L.idempotency_key.is_not(None))
 
 
-async def in_doubt(session: AsyncSession, agent_id: str, limit: int) -> tuple[int, list[Any]]:
+async def in_doubt(session: AsyncSession, agent_id: str, limit: int, *,
+                   ledger_persisted: bool) -> tuple[int, list[Any]]:
     """Every send in doubt counted, and the newest ``limit`` of them — the
     Ledger callout and the nav badge both show THIS count, so they agree
-    however many there are (a page length would cap at the page)."""
+    however many there are (a page length would cap at the page).
+
+    With ledger persistence off no LedgerStore is installed (main.py), so no
+    retry is refused: a keyed unknown row written earlier holds nothing, and
+    reporting it as a held send would be false. It stays in the ledger table
+    as history, and holds again only if persistence is switched back on."""
+    if not ledger_persisted:
+        return 0, []
     L = ExecutionLedgerEntry
     total = (await session.execute(
         select(func.count()).select_from(L).where(attention_filter(agent_id))
@@ -239,7 +247,8 @@ async def get_execution_data(
         .where(in_window)
     )).all()
 
-    attention_total, attention = await in_doubt(session, agent_id, ATTENTION_CAP)
+    attention_total, attention = await in_doubt(
+        session, agent_id, ATTENTION_CAP, ledger_persisted=bool(modes.get("persist")))
 
     stmt = select(L).where(in_window)
     if context:
@@ -511,7 +520,7 @@ async def get_attention_data(
     questions.sort(key=lambda r: (r.answer_deadline is None, as_utc(r.answer_deadline) or datetime.max))
     nxt = questions[0] if questions else None
 
-    sends_in_doubt, newest = await in_doubt(session, agent_id, 1)
+    sends_in_doubt, newest = await in_doubt(session, agent_id, 1, ledger_persisted=ledger_persisted)
     latest = newest[0] if newest else None
     dags, _ = await _names(session, agent_id, [latest] if latest else [])
 

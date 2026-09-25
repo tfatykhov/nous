@@ -158,7 +158,7 @@
           <div class="small muted">{c.totalLabel}</div>
           {#if c.since}<div class="small muted">{c.since}</div>{/if}
         </div>
-        {#if c.breakdown.some((b) => b.count > 0)}
+        {#if d.events_persisted && c.breakdown.some((b) => b.count > 0)}
           <div class="breakdown">
             <div class="label">{c.breakdownLabel}</div>
             {#each c.breakdown as b (b.key)}
@@ -210,7 +210,9 @@
       <h2>Top patterns</h2>
       <span class="small muted">Fix the source, or accept the refusal, before enforcing.</span>
     </div>
-    {#if d.patterns.length === 0}
+    <!-- The server reads no events when persistence is off; gate here too, so
+         no payload can put evidence under "nothing below was measured". -->
+    {#if !d.events_persisted || d.patterns.length === 0}
       <p class="empty">{d.events_persisted ? 'Nothing flagged in this window.' : 'Not measured — event persistence is off.'}</p>
     {:else}
       <DataTable columns={patternCols} rows={d.patterns} mode="cards"

@@ -208,6 +208,25 @@ describe('harness dashboard views', () => {
     expect(container.textContent).not.toContain('not recording yet');
   });
 
+  it('Ledger never says an unknown row holds a send while persistence is off', async () => {
+    execution = { ...EXECUTION, modes: { ...MODES, persist: false }, attention: [], attention_total: 0,
+      rows: [row({ tool_name: 'send_email', status: 'unknown', idempotency_key: 'dag:9f1c:send:9b41c0de2a7f53e1' })] };
+    const { container } = render(Ledger);
+    await screen.findByText('Ledger persistence is off');
+    await waitFor(() => expect(container.textContent).toContain('holds nothing while persistence is off'));
+    expect(container.textContent).not.toContain('holds a send');
+  });
+
+  it('Harness shows no pattern when nothing is being recorded, whatever the payload holds', async () => {
+    harnessPersisted = false;
+    harnessPatterns = [{ rule: 'offered_set', mode: 'warn', context: 'subtask', tool: 'send_file',
+      violation: 'not offered', count: 9, last_seen: '2026-09-25T13:02:00+00:00', latest_session: 's', snippet: null }];
+    const { container } = render(Harness);
+    // One in the chart panel, one where the patterns table would be.
+    expect(await screen.findAllByText('Not measured — event persistence is off.', { selector: '.empty' })).toHaveLength(2);
+    expect(container.textContent).not.toContain('send_file');
+  });
+
   it('Harness names the top pattern from the mode its verdict describes', async () => {
     const p = { rule: 'offered_set', context: 'subtask', violation: 'not offered',
       last_seen: '2026-09-25T13:02:00+00:00', latest_session: 's', snippet: null };

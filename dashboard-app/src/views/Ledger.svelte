@@ -293,7 +293,8 @@ WHERE id = '{r.id}' AND status = 'unknown';</code>
           {:else if c.key === 'status'}
             <span class="pill" style={badgeStyle(ledgerStatusColor(r.status))}>{r.status}</span>
             {#if r.refusal_code}<span class="small muted"> {r.refusal_code}</span>{/if}
-            {#if r.status === 'unknown'}<span class="small muted"> {r.idempotency_key ? 'holds a send' : 'nothing held'}</span>{/if}
+            <!-- Persistence off: no LedgerStore is installed, so no retry is refused. -->
+            {#if r.status === 'unknown'}<span class="small muted"> {!r.idempotency_key ? 'nothing held' : d.modes.persist ? 'holds a send' : 'holds nothing while persistence is off'}</span>{/if}
           {:else if c.key === 'target'}
             <span class="target">{ledgerTarget(r.key_args, r.tombstone)}</span>
           {/if}

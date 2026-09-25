@@ -632,6 +632,20 @@ async def test_a_rule_that_is_off_draws_gaps_but_keeps_what_it_recorded(db, agen
     assert [d["claims_none"] for d in data["daily"]] == [None] * 8
 
 
+async def test_with_ledger_persistence_off_no_send_is_in_doubt(db, agent_id):
+    # No LedgerStore is installed then (main.py), so no retry is refused: an
+    # old keyed unknown row holds nothing and must not be reported as held.
+    await _row(db, agent_id, tool="send_email", effect="external", status="unknown", key="dag:k:s:1",
+               key_args={"to": ["anna@x.example"]})
+
+    execution = await _exec(db, agent_id, modes={**MODES, "persist": False})
+    attention = await _attention(db, agent_id, ledger_persisted=False)
+
+    assert (execution["attention"], execution["attention_total"]) == ([], 0)
+    assert (attention["sends_in_doubt"], attention["latest_in_doubt"]) == (0, None)
+    assert [r["status"] for r in execution["rows"]] == ["unknown"]  # history stays in the table
+
+
 async def test_the_in_doubt_count_is_every_held_send_not_the_page_shown(db, agent_id):
     for i in range(ATTENTION_CAP + 5):
         await _row(db, agent_id, tool="send_email", effect="external", status="unknown",
