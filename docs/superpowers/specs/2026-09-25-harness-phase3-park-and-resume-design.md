@@ -43,6 +43,27 @@ admission-controlled at dispatch; the stop-tap censor exemption is dropped; fix 
 approval may not amend it; `_dispatch_ready_nodes`' `ready` write is conditional; the ping carries
 the question; the reserved prefix is enforced in `push_built`.
 
+**v2.4** folds the late spec re-reviews (architect on v2.1, database on v2.2/v2.3), which arrived
+after the plan was written:
+- **P1 (architect).** The acting node never received the draft the person approved. The recommended
+  wiring is draft → approval → acting node, and `_build_predecessor_context` passes only direct
+  results. An approval now passes its own `context_flow` inputs through (§3.5).
+- **P2 (database, probe).** A node could end up `awaiting_input` inside a cancelled DAG with no card,
+  through conditional writes only. `dag_statuses` is a snapshot, and a concurrent companion retry
+  plus a failed push got there. The node-driven sweep query is restored, with a partial index
+  (§3.2, §3.7).
+- **P2 (database).** The leaked-card sweep read a bounded page of cards that healthy cards could
+  fill. It now reads every live DAG card, which the parked cap bounds (§3.7).
+- **P2 (architect).** For subtask and check nodes, the write that resurrects a cancelled node is the
+  launch's own `running` write after an await. It is now conditional, and a lost launch cancels
+  what it just created (§3.3).
+- **P2 (both).** `push_built`'s two internal retries forward the new flags. The reservation raises
+  its own `ValueError` subclass (§3.14).
+- **P3.** A re-push adopts an existing live card (§3.6). The dispatch gate exempts nodes that cost
+  nothing, states its counter rule, and shows a held DAG in `dag_manage` (§3.11). The F064.2 cap
+  demotion is conditional (§3.3). The ping text is built only from strings already on the card
+  (§3.4).
+
 ## 1. Invariant
 
 > A DAG node can wait durably on a human answer, and resumes on the answer or — at its deadline —
@@ -153,8 +174,10 @@ deadline, and a person who declined can ask the agent to re-open the question (�
   | `answer_source TEXT CHECK (answer_source IN ('companion', 'deadline'))` | Where the answer came from — not who. A companion tap is `unattributed` in prod, and the server cannot show that a person made it (§6), so nothing is named `human`. |
   | `answer_history JSONB` | Earlier attempts' answers, archived at each relaunch (§3.4). The node row is the audit record for a deadline default — it writes no `a2ui_actions` row; a companion tap has both. |
 
-  The park time is `started_at`; v1's `awaiting_since` is dropped as a duplicate. No new index: a
-  tap resolves its node by primary key (§3.5), and the tick already loads every active DAG's nodes.
+  The park time is `started_at`; v1's `awaiting_since` is dropped as a duplicate. A tap resolves its
+  node by primary key (§3.5), and the tick already loads every active DAG's nodes. One partial
+  index, `idx_dag_nodes_awaiting_input ON dag_nodes (dag_id) WHERE status = 'awaiting_input'`,
+  keeps the sweep's node-driven query (§3.7) off the DAG history.
 - The ORM mirrors all of it (both CHECK lists, the named `answer_source` CHECK). SQLite enforces
   the ORM's CHECKs, so a drift between migration and ORM fails the SQLite tests.
 - **Rollback:** pre-076 code treats `awaiting_input` as non-terminal forever and counts it toward
@@ -197,10 +220,19 @@ Existing blind writes become conditional too, because they can race a park or an
   retries (agent and companion) with a tap between them let the second blind-write `pending` over
   a recorded answer.
 
+- the launch's own `running` write for subtask and check nodes (`orchestrator.py:2469-2479,
+  2532-2537`), which lands after an await on `SubtaskManager.create` or `create_check`. A
+  `cancel_dag` during that await sees no `subtask_id`, so it cancels nothing, and the blind write
+  overwrote its `cancelled`. The subtask then ran inside a cancelled DAG and could send what the
+  person just cancelled. The write becomes `transition_node(from_statuses={'pending','ready'},
+  dag_statuses=LIVE_DAG, status='running', …)`, and a lost write cancels the subtask or disables
+  the check it just created;
+- the F064.2 cap demotion and `_defer_node`'s demotion to `pending` (`from_statuses={'ready'}`).
+
 These apply to every node type; outside the races they behave exactly as today. `dag_statuses` is
 a snapshot filter — the `UPDATE` takes no lock on the `execution_dags` row — so a DAG that turns
-terminal in the same instant can still gain a parked node; the leaked-card sweep (§3.7) is the
-backstop for that.
+terminal in the same instant can still gain a parked node; the sweep's node-driven query (§3.7) is
+the backstop for that.
 
 ### 3.4 Launch: park, push, link
 
@@ -235,7 +267,9 @@ no `else`). `_launch_approval_node`, inside the tick with `_lock` held:
    notify_text=…, reserved_key_ok=True)`. `notify_text` is a new optional ping body (the title
    alone otherwise): `<title>` / the question's first line, cut at 200 chars / `No answer by
    <deadline UTC> → '<default label>'.` / the link — the ping is the only notice, and in prod its
-   link is not tappable.
+   link is not tappable. It is built only from strings already on the card (title, the question,
+   the risk line's deadline, a default option label), all of which the push censor checked, so the
+   ping adds no uncensored text to an external channel.
    - A censor refusal (`PermissionError`) or a build/validation error → `transition_node` to
      `failed` with `error="approval card refused by censor: …"` or `"approval card could not be
      built: …"`. These do not heal on retry, so they fail at once.
@@ -354,6 +388,15 @@ and a way to keep unscreened client text out of the audit row. It is not worth e
 text already passed the push-time censor, and a refused *stop* tap leaves the node waiting, so the
 *stop* default applies at the deadline anyway.
 
+**The acting node receives what was approved.** With the recommended wiring (draft → approval →
+acting node, both `context_flow`), the approval's own `result` is only the answer text, and
+`_build_predecessor_context` passes only direct `context_flow` predecessors' results. So the acting
+subtask would never see the draft, and it would write its own text. When a `context_flow`
+predecessor is an approval node, `_build_predecessor_context` therefore also includes that
+approval's own `context_flow` predecessors' results, labelled as approved input. This happens in
+one place and needs nothing from the author. The approval still binds the text, not the action
+(§6), but now the acting node at least has the approved text in front of it.
+
 **Resumption** needs nothing else: the next tick sees a `completed` node (dependents become ready;
 the answer is the node's `result`, which `context_flow` successors receive) or a `failed` one
 (`_propagate_failures` blocks every successor along the predecessor edges, §3.8; unrelated
@@ -372,6 +415,9 @@ failure steps, for each `awaiting_input` node:
   stored timestamp naive, so a Python comparison against an aware `now` raises `TypeError` and
   aborts the DAG's whole tick. The in-memory pre-filter normalizes the timezone, as the five
   existing sites do (`orchestrator.py:1142,1182,1614,1832,2134`).
+- else, `surface_id IS NULL` while a live card with the node's key already exists (a crash between
+  push and link) → **adopt** it: a conditional link (`card=<that id>`, `surface_id=<that id>`)
+  instead of a re-push, which would replace the card the person may be tapping;
 - else, `surface_id IS NULL`, or its linked card is no longer live (one
   `SurfaceService.live_ids(surface_ids)` query per tick over the waiting nodes) → push again
   (§3.4 steps 2–3; the link write re-links from the dead card's id). A card lost for any reason
@@ -398,9 +444,12 @@ deadline step, and by `_finish_approval(node, **values)` — the helper that `ca
 to a week (the backstop expiry), and that expiry would then write a false `no_objection`. A tick
 step `_sweep_leaked_approval_cards()`, modelled on `_sweep_leaked_heartbeat_checks`
 (`orchestrator.py:276-310`) but run **inside `_lock`** — the heartbeat sweep runs outside it, and
-this one must not interleave with a launch between push and link — reads live cards whose dedup
-key has the `dag-approval:` prefix (`SurfaceService.live_cards_by_prefix(prefix, limit)`, a
-bounded batch), loads their nodes, and:
+this one must not interleave with a launch between push and link — reads **every** live card whose
+dedup key has the `dag-approval:` prefix (`SurfaceService.live_cards_by_prefix(prefix)`, no limit:
+a bounded page would fill with healthy linked cards once the parked cap is reached, and never
+reach the leaked ones behind them; the parked cap times approvals per DAG bounds the set), maps
+keys to nodes in Python (SQLite stores UUIDs without dashes, so an SQL text join would behave
+differently in tests), loads their nodes, and:
 
 - node missing, or not `awaiting_input` → close the card `expired`;
 - node `awaiting_input` but its DAG terminal → `transition_node(from_statuses={'awaiting_input'},
@@ -409,9 +458,15 @@ bounded batch), loads their nodes, and:
   stray card. A NULL `surface_id` means push and link own the node, and the card may be the one
   just pushed; the sweep leaves it alone.
 
-The same sweep retires cards a refused tap left up (§3.5). With every write conditional (§3.3), an
-`awaiting_input` node cannot end up inside a terminal DAG without a card, so no second query
-guards that state.
+The same sweep retires cards a refused tap left up (§3.5). A second, **node-driven** query covers
+the case the card-driven one cannot see: an `awaiting_input` node inside a terminal DAG with no
+card. A database probe produced that state with conditional writes only. `cancel_dag` loads the
+DAG while the approval is `failed` and skips it, a concurrent companion retry resets it to
+`pending`, and the tick parks it because the `dag_statuses` snapshot still reads `running`. The
+push then fails, and the DAG turns `cancelled`. The query takes those nodes through
+`idx_dag_nodes_awaiting_input` (bounded batch) and cancels each with
+`transition_node(from_statuses={'awaiting_input'}, dag_statuses=terminal)`. It then closes any
+card by dedup key.
 
 `expire_sweep` writes no `no_objection` row for a `dag-approval:` card: the node, not the card, is
 the record of what happened, and after an outage longer than wait + grace the startup expiry
@@ -495,6 +550,26 @@ a DAG that is not already working (no node `ready`, `running` or `awaiting_check
 new nodes only while fewer than `MAX_ACTIVE_DAGS` DAGs are working; otherwise its ready nodes stay
 `pending` this tick and no deferral is counted.
 
+What the gate is and is not:
+- **Scope.** It bounds working DAGs, not subtasks. Five working DAGs with parallel waves can still
+  exceed the agent-wide pending-subtask limit, as they can today. The gate restores the
+  pre-feature bound; it does not remove that older failure mode.
+- **Exempt nodes.** Nodes that cost nothing are never held: `approval`, `gate`, and `callback`
+  while `NOUS_DAG_CALLBACK_EXECUTION_ENABLED` is off. A held DAG dispatches only those, since
+  parking takes no subtask and holding it would only delay the question.
+- **Counter rule.** A DAG counts as newly working only when, after its dispatch, it has a node
+  `ready`, `running` or `awaiting_check`. An approval that parks, or an instant gate or callback,
+  takes no slot. A DAG that finishes mid-tick frees its slot on the next tick (≤ one tick).
+- **Oldest first, no preemption.** A held DAG waits until a working DAG finishes or parks.
+  `dag_manage status` shows it as `approved — waiting for a free slot (N/5 working)`, so a person
+  who said "proceed" can see why nothing happened yet.
+- **`ready` counts as working.** Wave-0 `ready` nodes of a DAG whose `start_dag` failed hold a
+  slot until the stale-ready sweep, at most 300 s. This is benign.
+- **Once it runs, it covers every loaded DAG.** When some loaded DAG has an approval node, the gate
+  can also hold a DAG that has none: one `retry_node` reactivated past the limit (retry has no
+  admission check), or one that creation's non-atomic count let through. That is fine: the gate
+  only queues it.
+
 This is a structural change to `tick()`: a pre-pass over the loaded DAGs counts the working ones
 before the per-DAG `_advance_dag` loop, and `_advance_dag` receives whether this DAG may dispatch.
 The pre-pass runs **only when some loaded DAG contains an approval node** — otherwise it is skipped
@@ -552,7 +627,11 @@ active count is unchanged and includes parked DAGs.
   default must be a *stop* option; and the agent cannot answer the card — it tells the person to
   open the companion.
 - The `dag-approval:` prefix is reserved in `SurfaceService.push_built` itself: any push carrying
-  it is refused unless the caller passes `reserved_key_ok=True`, which only the orchestrator does.
+  it is refused (`ReservedDedupKeyError(ValueError)` — never `PermissionError`, which step 2 reads
+  as a censor refusal and fails the node for good) unless the caller passes `reserved_key_ok=True`,
+  which only the orchestrator does. `push_built` calls itself at two sites (the dedup-race retry
+  and the `IntegrityError` retry); both forward `reserved_key_ok` and `notify_text`, the lesson
+  F092.3 recorded for `refuse_fallback_overwrite`.
   Otherwise an agent push through `push_surface` or `compose_surface` — or a future producer —
   could replace a DAG card's text in place, keeping its id, and taps would still answer the node.
 - `push_surface`'s description stops promising that an approval choice can be "checked": outside
