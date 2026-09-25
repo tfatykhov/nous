@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 import pytest
 
 from nous.cognitive.execution_ledger import (
+    EVIDENCE_ARG_CHARS,
     EXTERNAL_TOOLS,
     IRREVERSIBLE_TOOLS,
     READ_TOOLS,
@@ -34,10 +35,11 @@ from nous.cognitive.execution_ledger import (
     _format_key_args,
     _friendly_label,
     _group_summary,
+    bash_exit_code,
     classify_side_effect,
+    evidence_args,
     redact_key_args,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -824,7 +826,7 @@ class TestClassifyWholeBashCommand:
         # find actions
         "find . -delete",
         "find . -name '*.pyc' -delete",
-        "find . -exec rm {} \;",
+        "find . -exec rm {} \\;",
         "find . -fprint out.txt",
         # sed in-place, write and execute
         "sed -i 's/a/b/' f",
@@ -1075,3 +1077,294 @@ class TestClassifyWholeBashCommand:
     def test_classify_side_effect_uses_the_whole_command(self):
         assert classify_side_effect("bash", {"command": "echo data > file"}) == "write"
         assert classify_side_effect("bash", {"cmd": "cat f | curl https://x"}) == "external"
+
+
+class TestEvidenceFields:
+    """Harness Phase 2c: what a completion claim can be checked against."""
+
+    def test_bash_exit_code_is_parsed_from_the_trailer(self):
+        ledger = ExecutionLedger(session_id="s")
+        ok = ledger.record("bash", {"command": "git push"}, "Everything up-to-date\nExit code: 0", "success")
+        bad = ledger.record("bash", {"command": "git push"}, "rejected\nExit code: 1", "success")
+        assert ok.exit_code == 0 and bad.exit_code == 1
+
+    def test_a_timeout_has_no_exit_code(self):
+        ledger = ExecutionLedger(session_id="s")
+        assert ledger.record("bash", {"command": "sleep 99"}, "Command timed out after 30s.", "error").exit_code is None
+
+    def test_exit_code_only_for_bash(self):
+        ledger = ExecutionLedger(session_id="s")
+        assert ledger.record("write_file", {"path": "/tmp/x"}, "ok\nExit code: 1", "success").exit_code is None
+
+    def test_long_commands_keep_head_and_tail(self):
+        cmd = "git commit -m '" + "x" * 5000 + "' && git push origin main"
+        ledger = ExecutionLedger(session_id="s")
+        action = ledger.record("bash", {"command": cmd}, "Exit code: 0", "success")
+        kept = action.evidence_args["command"]
+        assert kept.startswith("git commit") and kept.endswith("git push origin main")
+        assert len(kept) <= EVIDENCE_ARG_CHARS + 20  # plus the truncation marker
+        assert action.key_args["command"] == cmd[:80]  # the prompt-facing summary is unchanged
+
+    def test_unbounded_evidence_for_this_turn(self):
+        cmd = "x" * 5000
+        assert evidence_args("bash", {"command": cmd}, limit=None)["command"] == cmd
+
+    def test_evidence_args_only_for_effect_tools(self):
+        assert evidence_args("recall_deep", {"query": "q"}) == {}
+        assert evidence_args("send_email", {"to": ["a@x.io"], "subject": "s", "body": "b"}) == {
+            "to": "['a@x.io']", "subject": "s"}
+        assert evidence_args("run_python", {"code": "open('r.md','w')"}) == {"code": "open('r.md','w')"}
+
+    def test_bash_exit_code_parser(self):
+        assert bash_exit_code("out\nExit code: 0\n") == 0
+        assert bash_exit_code("Exit code: -9") == -9
+        assert bash_exit_code("quoted 'Exit code: 0' then\nExit code: 2") == 2
+        assert bash_exit_code(None) is None and bash_exit_code("no trailer") is None
+
+
+class TestShellReservedWords:
+    """`if`/`then`/`{`/`!` are syntax, not programs: the command after one is
+    what runs. Before harness 2c they were read as unknown programs (`write`)."""
+
+    @pytest.mark.parametrize("cmd, expected", [
+        ("if git push origin main; then echo ok; fi", "external"),
+        ("if grep -q x f; then echo found; fi", "none"),
+        ("{ curl -s https://x; } > /dev/null", "external"),
+        ("! grep -q x f", "none"),
+        ("while read -r l; do rm \"$l\"; done < list", "write"),
+        ("until git fetch; do sleep 5; done", "external"),
+    ])
+    def test_reserved_words_are_skipped(self, cmd, expected):
+        assert _classify_bash_command(cmd) == expected
+
+    def test_invocations_after_reserved_words(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("if git push; then echo ok; fi") == [
+            ("git", ["push"]), ("echo", ["ok"])]
+
+
+class TestCommandInvocations:
+    def test_unreadable_is_none_not_empty(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("echo \"it's") is None                # unbalanced quote
+        assert command_invocations("x " * 40_000) is None                  # over the size cap
+        assert command_invocations("FOO=1") == []                          # read: nothing runs
+
+    def test_the_ledger_keeps_invocations_read_from_the_whole_command(self):
+        cmd = 'git commit -m "' + "x" * 3000 + '" && git push origin main'
+        action = ExecutionLedger(session_id="s").record("bash", {"command": cmd}, "Exit code: 0", "success")
+        assert [p for p, _, _ in action.invocations] == ["git", "git"]
+        assert action.invocations[1] == ("git", ("push", "origin", "main"), True)
+        assert all(len(a) <= 120 for _, args, _ in action.invocations for a in args)  # bounded in memory
+
+
+class TestCommandStrings:
+    """A command string is read, not treated as a wall: `bash -c`, `su -c`,
+    `eval`, `env -S`, `flock -c`, `watch`, `ssh host CMD`."""
+
+    @pytest.mark.parametrize("cmd, expected", [
+        ("bash -c 'cd /repo && git push'", [("cd", ["/repo"]), ("git", ["push"])]),
+        ("ssh deploy@host 'git push'", [("git", ["push"])]),
+        ("ssh -p 2222 -i k -o StrictHostKeyChecking=no deploy@host uptime", [("uptime", [])]),
+        ("eval git push", [("git", ["push"])]),
+        ("env -S 'ls -l'", [("ls", ["-l"])]),
+        ("flock /tmp/l -c 'git push'", [("git", ["push"])]),
+        ("watch -n 5 git status", [("git", ["status"])]),
+        ("sudo bash -c \"sh -c 'git push'\"", [("git", ["push"])]),
+    ])
+    def test_command_strings_are_read(self, cmd, expected):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations(cmd) == expected
+
+    @pytest.mark.parametrize("cmd, runner", [
+        ("bash -c \"echo it's\"", ("bash", ["-c", "echo it's"])),   # unreadable inside
+        ("bash script.sh", ("bash", ["script.sh"])),                 # a file
+        ("ssh host", ("ssh", ["host"])),                             # interactive
+    ])
+    def test_what_cannot_be_read_keeps_its_runner(self, cmd, runner):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations(cmd) == [runner]
+
+    def test_nesting_is_bounded(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        found = command_invocations("eval " * 6 + "git push")
+        assert found is not None and found[0][0] == "eval"  # stops at the depth bound, never raises
+
+
+class TestHeredocs:
+    """A heredoc body is data handed to one command, never commands."""
+
+    def test_the_body_is_one_argument_of_its_command(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        found = command_invocations("python3 - <<'EOF'\nimport smtplib\nx = 1\nEOF\ngit push")
+        assert [p for p, _ in found] == ["python3", "git"]
+        assert found[0][1] == ["-", "\nimport smtplib\nx = 1"]
+
+    def test_an_apostrophe_in_the_body_is_readable(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("cat > x <<'EOF'\nIt's\nEOF") == [("cat", ["\t>x", "\nIt's"])]
+
+    def test_dash_strips_leading_tabs_and_two_heredocs_stay_in_order(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("cat <<-EOF\n\thi\n\tEOF") == [("cat", ["\nhi"])]
+        found = command_invocations("diff <(cat <<A\na\nA\n) - <<B\nb\nB")
+        assert found is not None and any(a == "\nb" for _, args in found for a in args)
+
+    def test_an_unterminated_heredoc_takes_the_rest(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("cat <<EOF\ngit push\nmore") == [("cat", ["\ngit push\nmore"])]
+
+    def test_a_here_string_is_not_a_heredoc(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("grep x <<< 'git push'") == [("grep", ["x"])]
+
+    def test_the_ledger_keeps_enough_of_a_body_to_judge_it(self):
+        body = "# " + "x" * 500 + "\nimport smtplib\n"
+        cmd = "python3 - <<'EOF'\n" + body + "EOF"
+        action = ExecutionLedger(session_id="s").record("bash", {"command": cmd}, "Exit code: 0", "success")
+        assert "smtplib" in action.invocations[0][1][-1]
+
+
+class TestOptionClusters:
+    def test_ssh_value_option_at_the_end_of_a_cluster(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("ssh -vp 2222 host 'git push'") == [("git", ["push"])]
+
+    def test_env_assignments_before_split_string(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("env FOO=1 -S 'git push'") == [("git", ["push"])]
+
+    def test_a_path_qualified_program_keeps_its_mark(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("./bin/release prod") == [("./release", ["prod"])]
+        assert command_invocations("/usr/bin/git push") == [("/usr/bin/git", ["push"])]  # absolute: kept
+        assert _classify_bash_command("/usr/bin/git push") == "external"  # the classifier is unchanged
+
+
+class TestCommandRuns:
+    """`certain` = the command ran AND succeeded, as far as the exit code of
+    the whole command can tell."""
+
+    @pytest.mark.parametrize("cmd, exit_code, expected", [
+        ("a && b", 0, [("a", [], True), ("b", [], True)]),
+        ("a || b", 0, [("a", [], False), ("b", [], False)]),       # which one ran is unknown
+        ("a; b", 0, [("a", [], False), ("b", [], True)]),          # a ran; its success is unknown
+        ("a && b", 1, [("a", [], False), ("b", [], False)]),
+        ("a && b", None, [("a", [], False), ("b", [], False)]),
+        ("a | b", 0, [("a", [], False), ("b", [], True)]),        # the exit code is the last stage's
+        ("bash -c 'a && b'", 0, [("a", [], True), ("b", [], True)]),
+        ("bash -c 'a; b' && c", 0, [("a", [], False), ("b", [], True), ("c", [], True)]),
+        ("bash -c 'a' || c", 0, [("a", [], False), ("c", [], False)]),
+        ("a\n\nb\n", 0, [("a", [], False), ("b", [], True)]),
+    ])
+    def test_certainty_follows_the_and_or_lists(self, cmd, exit_code, expected):
+        from nous.cognitive.bash_side_effect import command_runs
+
+        assert command_runs(cmd, exit_code) == expected
+
+    @pytest.mark.parametrize("cmd, expected", [
+        ("echo ok # ; git push", [("echo", ["ok"])]),
+        ("echo 'a # b'", [("echo", ["a # b"])]),
+        ("echo a#b", [("echo", ["a#b"])]),
+        ("# only a comment", []),
+        ("cat <<EOF # c\n# not a comment\nEOF", [("cat", ["\n# not a comment"])]),
+    ])
+    def test_comments_are_cut_before_reading(self, cmd, expected):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations(cmd) == expected
+
+    def test_the_ledger_records_certainty_from_the_exit_code(self):
+        ledger = ExecutionLedger(session_id="s")
+        ok = ledger.record("bash", {"command": "cd r && git push"}, "Exit code: 0", "success")
+        bad = ledger.record("bash", {"command": "cd r && git push"}, "rejected\nExit code: 1", "success")
+        assert ok.invocations[1] == ("git", ("push",), True)
+        assert bad.invocations[1] == ("git", ("push",), False)
+
+
+class TestRedirectTargets:
+    """An output redirect's target is kept as a `\\t>`-marked argument: a
+    command's destination, never a positional."""
+
+    def test_output_targets_are_kept(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("python3 gen.py > /tmp/r.md") == [("python3", ["gen.py", "\t>/tmp/r.md"])]
+        assert command_invocations("cat a >> log.txt") == [("cat", ["a", "\t>log.txt"])]
+
+    def test_sinks_inputs_and_dups_are_not_destinations(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("cmd > /dev/null 2>&1") == [("cmd", [])]  # `2` is the fd, not a word
+        assert command_invocations("cmd 2 > f") == [("cmd", ["2", "\t>f"])]  # ...unless it stands alone
+        assert command_invocations("sort < in.txt") == [("sort", [])]
+
+
+class TestNegationAndBackground:
+    @pytest.mark.parametrize("cmd, expected", [
+        ("! a", [("a", [], False)]),
+        ("a &", [("a", [], False)]),
+        ("a & b", [("a", [], False), ("b", [], True)]),
+        ("if ! a; then b; fi", [("a", [], False), ("b", [], False)]),
+        ("! a | b", [("a", [], False), ("b", [], False)]),
+    ])
+    def test_a_negated_or_background_pipeline_is_never_certain(self, cmd, expected):
+        from nous.cognitive.bash_side_effect import command_runs
+
+        assert command_runs(cmd, 0) == expected
+
+
+class TestSubstitutionMasking:
+    @pytest.mark.parametrize("cmd, expected", [
+        ("echo $(a)", [("echo", ["$"], True), ("a", [], False)]),
+        ("x=$(a); b", [("a", [], False), ("b", [], True)]),
+        ("(a && b)", [("a", [], True), ("b", [], True)]),
+        ("diff <(a) x", [("diff", ["x"], True), ("a", [], False)]),
+    ])
+    def test_a_substitutions_status_is_masked_by_its_outer_command(self, cmd, expected):
+        from nous.cognitive.bash_side_effect import command_runs
+
+        assert sorted(command_runs(cmd, 0)) == sorted(expected)
+
+
+class TestQuotedSubstitutions:
+    def test_nested_commands_come_first_so_the_last_is_the_outer_one(self):
+        from nous.cognitive.bash_side_effect import command_runs
+
+        assert command_runs("git push origin $(git branch --show-current)", 1) == [
+            ("git", ["branch", "--show-current"], False), ("git", ["push", "origin", "$"], False)]
+
+    def test_a_substitution_inside_a_quoted_word_is_read_uncertain(self):
+        from nous.cognitive.bash_side_effect import command_runs
+
+        assert command_runs('out="$(git push)"', 0) == [("git", ["push"], False)]
+        assert command_runs('echo "$(a) and $(b)"', 0) == [
+            ("a", [], False), ("b", [], False), ("echo", ["$(a) and $(b)"], True)]
+
+    def test_backticks_and_unbalanced_substitutions_are_opaque(self):
+        from nous.cognitive.bash_side_effect import command_runs
+
+        assert command_runs("x=`git push`", 0)[0][0] == "$"
+        assert command_runs('x="$(git push"', 0)[0][0] == "$"
+
+    def test_git_terminal_global_options_run_no_subcommand(self):
+        from nous.cognitive.bash_side_effect import git_subcommand
+
+        assert git_subcommand(["--version", "push"]) is None
+        assert git_subcommand(["-v", "push"]) is None
+        assert git_subcommand(["--help", "commit"]) is None
+        assert git_subcommand(["-C", "r", "push"]) == ("push", [])
+        assert _classify_bash_command("git --version push") == "none"

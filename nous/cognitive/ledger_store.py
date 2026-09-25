@@ -30,7 +30,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import delete, func, update
 
 from nous.api.execution_context import ExecutionContext
-from nous.cognitive.execution_ledger import classify_side_effect, redact_text
+from nous.cognitive.execution_ledger import bash_exit_code, classify_side_effect, redact_text
 from nous.storage.models import LEDGER_STATUSES, ExecutionLedgerEntry
 
 logger = logging.getLogger(__name__)
@@ -182,7 +182,6 @@ class LedgerWriteError(Exception):
 
 
 # bash_tool always appends this trailer; it is the authoritative wrapper status.
-_BASH_EXIT_CODE = re.compile(r"(?:\A|\n)Exit code: (-?\d+)\s*\Z")
 _BASH_TIMEOUT = re.compile(r"\ACommand timed out after \d+s\.")
 
 
@@ -205,8 +204,8 @@ def _summary(text: str | None, output_of: str | None = None) -> str | None:
         if output_of == "bash":
             if timeout := _BASH_TIMEOUT.match(text):
                 parts.append(timeout.group(0))
-            if exit_code := _BASH_EXIT_CODE.search(text):
-                parts.append(f"exit code {exit_code.group(1)}")
+            if (exit_code := bash_exit_code(text)) is not None:
+                parts.append(f"exit code {exit_code}")
         parts.append(f"{len(text)} chars of output, not stored")
         return "; ".join(parts)
     return redact_text(text)[:RESULT_SUMMARY_CHARS]

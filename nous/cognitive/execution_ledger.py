@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from nous.cognitive.bash_side_effect import classify_bash_command as _classify_bash_command
+from nous.cognitive.bash_side_effect import command_runs as _command_runs
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,89 @@ _KEY_ARGS: dict[str, list[str]] = {
     "send_email": ["to", "cc", "subject"],
 }
 
+# Argument values a completion claim can be checked against (harness Phase 2c).
+# In-memory only -- never persisted, never rendered into the prompt. Bounded
+# head AND tail, so a long commit message still shows the `git push` after it.
+EVIDENCE_ARG_CHARS = 2000
+_CODE_CHARS_FACTOR = 8  # a script is judged from its syntax tree: keep more of it
+# Marks a cut: what carries it cannot be parsed and is unreadable to the
+# verifier, never regex-scanned (a cut string literal is not code).
+EVIDENCE_TRUNCATED = "\n…[truncated]…\n"
+_EVIDENCE_ARGS: dict[str, tuple[str, ...]] = {
+    "bash": ("command", "cmd"),
+    "run_python": ("code",),
+    "write_file": ("path", "file_path"),
+    "send_email": ("to", "cc", "subject"),
+    "send_file": ("file_path", "chat_id", "caption"),
+}
+# bash_tool always appends this trailer: the authoritative wrapper status.
+_BASH_EXIT_CODE = re.compile(r"(?:\A|\n)Exit code: (-?\d+)\s*\Z")
+
+
+def _bounded(value: str, limit: int | None) -> str:
+    if limit is None or len(value) <= limit:
+        return value
+    half = limit // 2
+    return f"{value[:half]}{EVIDENCE_TRUNCATED}{value[-half:]}"
+
+
+def evidence_args(
+    tool_name: str, tool_input: dict[str, Any], *, limit: int | None = EVIDENCE_ARG_CHARS,
+) -> dict[str, str]:
+    """The argument values a claim about this call can be checked against."""
+    return {
+        key: _bounded(str(tool_input[key]),
+                      limit * _CODE_CHARS_FACTOR if limit is not None and key == "code" else limit)
+        for key in _EVIDENCE_ARGS.get(tool_name, ())
+        if tool_input.get(key) is not None
+    }
+
+
+Invocation = tuple[str, tuple[str, ...], bool]  # program, arguments, certainly ran and succeeded
+# Bounds on what the in-memory ledger keeps of a bash command's invocations.
+# Past them the command is kept as UNREADABLE (None), never as fewer commands:
+# a cut list could drop the `git push` at the end.
+_MAX_INVOCATIONS = 64
+_MAX_INVOCATION_ARGS = 24
+_MAX_INVOCATION_ARG_CHARS = 120
+_MAX_HEREDOC_CHARS = 4000  # a heredoc body (a "\n"-prefixed argument) is judged as code
+
+
+def _bound_arg(arg: str) -> str:
+    return arg[:_MAX_HEREDOC_CHARS] if arg.startswith("\n") else arg[:_MAX_INVOCATION_ARG_CHARS]
+
+
+def bash_invocations(
+    command: str, exit_code: int | None, *, bound: bool = True,
+) -> tuple[Invocation, ...] | None:
+    """What a bash command runs, read from the WHOLE command, each marked
+    certain when it ran and succeeded (see ``command_runs``); None when it
+    cannot be read.
+
+    ``bound`` (the ledger) caps what is kept in memory. Read at record time
+    because the ledger's bounded copy of the command can drop a `git push` in
+    its middle, or cut a quote in half and become unreadable.
+    """
+    found = _command_runs(command, exit_code)
+    if found is None:
+        return None
+    if not bound:
+        return tuple((prog, tuple(args), certain) for prog, args, certain in found)
+    if len(found) > _MAX_INVOCATIONS:
+        return None
+    return tuple(
+        (prog, tuple(_bound_arg(a) for a in args[:_MAX_INVOCATION_ARGS]), certain)
+        for prog, args, certain in found
+    )
+
+
+def bash_exit_code(result: str | None) -> int | None:
+    """Exit code from bash_tool's trailer; None when absent (timeout, spawn error)."""
+    if not result:
+        return None
+    match = _BASH_EXIT_CODE.search(result)
+    return int(match.group(1)) if match else None
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -105,6 +189,10 @@ class ExecutedAction:
     timestamp: datetime
     result_summary: str  # First 100 chars of result
     side_effect_type: str  # "none" | "write" | "external" | "irreversible"
+    exit_code: int | None = None  # bash only: a non-zero exit is not evidence
+    evidence_args: dict[str, str] = field(default_factory=dict)
+    # bash only: what the command runs, read at record time; None = unreadable
+    invocations: tuple[Invocation, ...] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +233,10 @@ class ExecutionLedger:
             timestamp=datetime.now(UTC),
             result_summary=str(result)[:100],
             side_effect_type=side_effect,
+            exit_code=bash_exit_code(str(result)) if tool_name == "bash" else None,
+            evidence_args=evidence_args(tool_name, tool_input),
+            invocations=(bash_invocations(_extract_bash_command(tool_input), bash_exit_code(str(result)))
+                         if tool_name == "bash" else None),
         )
         self.actions.append(action)
         if status == "blocked":

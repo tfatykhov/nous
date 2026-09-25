@@ -98,7 +98,7 @@ _LEX = re.compile(
     re.VERBOSE | re.DOTALL,
 )
 _DQ_ESCAPE = re.compile(r"\\([$`\"\\\n])")
-_OPERATOR = re.compile(r"&>>|&>|>>|>&|>\||<>|<<<|<<|<&|\|\||\|&|&&|;;|[|;&()<>\n]")
+_OPERATOR = re.compile(r"&>>|&>|>>|>&|>\||<>|<<<|<<|<&|\|\||\|&|&&|;;&|;&|;;|[|;&()<>\n]")
 _OUTPUT_REDIRECTS = frozenset({">", ">>", ">|", "&>", "&>>", "<>"})
 _INPUT_REDIRECTS = frozenset({"<", "<<", "<<<", "<&"})
 _HARMLESS_SINKS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"})
@@ -151,30 +151,602 @@ def classify_bash_command(command: str) -> str:
             _work.reset(token)
 
 
+def command_invocations(command: str) -> list[tuple[str, list[str]]] | None:
+    """``(program, arguments)`` of every simple command ``command`` runs, or
+    None when it cannot be read.
+
+    Read with the classifier's lexer and unwrapping: quoting is respected,
+    redirect targets are not arguments, and reserved words, assignments,
+    ``env`` and wrappers (``sudo``, ``timeout`` ...) are peeled off, so
+    `cd r && sudo git push` runs git while `echo "git push"` and `git log
+    --grep push` do not push. The split mirrors ``_classify``. A command
+    STRING (``bash -c``, ``su -c``, ``eval``, ``env -S``, ``flock -c``,
+    ``watch``, ``ssh host CMD``) is read the same way, to a bounded depth;
+    one that cannot be read stays as the program that runs it.
+
+    Evidence for completion claims (harness 2c). None -- an unbalanced quote
+    (a heredoc body with an apostrophe), an input over the classifier's size
+    cap, or anything unexpected -- is NOT "nothing runs": the caller must not
+    read absence into it. ``[]`` means it was read and runs nothing.
+    Total and linear.
+    """
+    runs = command_runs(command, None)
+    return None if runs is None else [(prog, args) for prog, args, _ in runs]
+
+
+def command_runs(command: str, exit_code: int | None) -> list[tuple[str, list[str], bool]] | None:
+    """``command_invocations`` with, per invocation, whether it CERTAINLY ran
+    and succeeded, as far as the exit code of the whole command can tell.
+
+    Only the last AND-OR list's status is known: with exit 0 and no `||` in
+    it, each of its commands ran and succeeded. A command after `||` (or
+    before one) may have been skipped or masked; a command in an earlier
+    list, joined by `;` or a newline, ran (the first) or may have (the rest)
+    with its success unknown. Certainty never turns absence into a verdict:
+    an uncertain command is still reported.
+
+    SCOPE. This reader is not a shell. It resolves control flow only where a
+    CONSTANT decides it -- `if`/`elif`/`while`/`until` on `true`/`false`/`:`,
+    a `case` on a literal word against literal patterns, `false && x` /
+    `true || x`, a function body never called, a heredoc body, a quoted or
+    substituted string, `!`, `&`, `|`, `$(...)`, an unmatched `elif`/`else`
+    arm -- and reports everything else as an uncertain invocation. The
+    verifier turns uncertain into "plausible", which by construction cannot
+    produce a false violation. It does not evaluate non-constant conditions,
+    track variables, or follow data flow; a construction built to fool it
+    (`bash -c "$(base64 -d ...)"`) has unbounded means and is out of scope.
+    """
+    if len(command) > _MAX_COMMAND_CHARS:
+        return None
+    try:
+        return _invocations(command, 0, exit_code)
+    except Exception:
+        return None
+
+
+_MAX_STRING_DEPTH = 3
+_CONSTANT_COMMANDS = {"true": True, ":": True, "false": False}
+_GLOB = re.compile(r"[*?\[]")  # a case pattern that is not a literal word
+
+
+class _Lists:
+    """Lists of pipelines of simple commands being collected -- `a; b && c | d`
+    -- each list with the operator that ended it."""
+
+    __slots__ = ("lists", "pipelines", "commands", "join")
+
+    def __init__(self) -> None:
+        self.lists: list[tuple[list[tuple[str | None, list[list[str]]]], bool, str | None]] = []
+        self.pipelines: list[tuple[str | None, list[list[str]]]] = []
+        self.commands: list[list[str]] = []
+        self.join: str | None = None
+
+
+def _case_arm(frame: list, patterns: list[str]) -> None:
+    """Decide a `case` arm from its patterns: the first literal match runs,
+    every arm after a `;;` match never does, one after `;&` runs iff the
+    last did, a variable word or a glob pattern (other than `*`) is unknown."""
+    if frame[5]:
+        taken: bool | None = frame[0]  # `;&` fell through: no pattern is tested
+    elif frame[2]:
+        taken = False
+    elif frame[3] is None or any(_GLOB.search(p) for p in patterns if p != "*"):
+        taken = None
+    else:
+        taken = "*" in patterns or frame[3] in patterns
+    frame[0], frame[1], frame[4], frame[5] = taken, taken is False, False, False
+_LIST_JOINS = frozenset({"&&", "||"})
+_PIPES = frozenset({"|", "|&"})
+# The delimiter after an unquoted `<<` / `<<-`.
+_HEREDOC_DELIM = re.compile(r"(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?(\$?\w[\w.-]*))")
+
+
+def _split_heredocs(command: str) -> tuple[str, list[str]]:
+    """Cut every heredoc body out of ``command``; return it and the bodies in
+    order. A body is data handed to one command -- lexing it as commands read
+    `cat > runbook.md <<EOF ... git push ... EOF` as a push, and made a body
+    with an apostrophe unreadable. Unterminated, it runs to the end (bash).
+
+    Quote-aware, or `git commit -m "explain <<EOF heredocs"` would swallow
+    the lines after it, and a heredoc inside `bash -c "..."` would be cut at
+    the wrong level; only a `<<` outside quotes opens one, and a nested string
+    keeps its body for the recursive read. `<<<` is a here-string. The same
+    scan cuts an unquoted comment (`#` starting a word) to the end of its
+    line: the lexer does not know comments, and `echo ok # ; git push` runs
+    no git.
+    """
+    lines = command.split("\n")
+    kept: list[str] = []
+    bodies: list[str] = []
+    quote: str | None = None  # a quote may span lines
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        i += 1
+        pending: list[tuple[str, bool]] = []
+        j, n = 0, len(line)
+        while j < n:
+            c = line[j]
+            if quote == "'":
+                quote = None if c == "'" else quote
+            elif quote == '"':
+                if c == "\\":
+                    j += 1
+                elif c == '"':
+                    quote = None
+            elif c == "\\":
+                j += 1
+            elif c in "'\"":
+                quote = c
+            elif c == "#" and (j == 0 or line[j - 1] in " \t;&|"):
+                line = line[:j]  # a comment, to the end of the line (`${#x}` is not one)
+                break
+            elif c == "<" and line.startswith("<<", j) and not line.startswith("<<<", j) \
+                    and (j == 0 or line[j - 1] != "<"):
+                m = _HEREDOC_DELIM.match(line, j + 2)
+                if m:
+                    pending.append((m.group(2) or m.group(3) or m.group(4), m.group(1) == "-"))
+                    j = m.end()
+                    continue
+                j += 1
+            j += 1
+        kept.append(line)
+        for delim, strip_tabs in pending:
+            body: list[str] = []
+            while i < len(lines):
+                candidate = lines[i].rstrip("\r")
+                i += 1
+                if strip_tabs:
+                    candidate = candidate.lstrip("\t")
+                if candidate == delim:
+                    break
+                body.append(candidate)
+            bodies.append("\n".join(body))
+    return "\n".join(kept), bodies
+
+
+def _invocations(
+    command: str, depth: int, exit_code: int | None,
+) -> list[tuple[str, list[str], bool]] | None:
+    command, bodies = _split_heredocs(command)
+    tokens = _lex(command)
+    if tokens is None:
+        return None
+    # lists of pipelines of simple commands: `a; b && c | d`, each with the
+    # operator that ended it; a list ended by `&` runs in the background, so
+    # its status is never the exit code's. A command inside `$(...)` / `<(...)`
+    # hands its output to the OUTER command, whose status is what the shell
+    # reports: it is parsed into ``nested`` (never certain) while the outer
+    # command's words continue after `)`. A function definition (`name() {
+    # ...; }`, `function name { ...; }`) runs nothing: its body is kept aside
+    # and emitted only if the name is called.
+    # the main script and each function body are collected the same way, so a
+    # called function's `if false; then git push; fi` is read with its frames
+    script = _Lists()
+    sink = script  # where lists go: the script, or the function body being defined
+    nested: list[list[str]] = []
+    parens: list[bool] = []  # per open parenthesis: True for a substitution
+    substitutions = 0  # how many of them are open (kept, not recounted per command)
+    saved: list[tuple[list[str], list[str]]] = []  # the outer command around a substitution
+    functions: dict[str, _Lists] = {}
+    defining: list = []  # [name, depth, closer] while inside a function body: `{ }` or `( )`
+    pending_def: str | None = None  # `name()` seen, its `{` or `(` body to come
+    skip_close = False  # the `)` of `name()`
+    words: list[str] = []
+    attached: list[str] = []  # heredoc bodies and output targets of the current simple command
+    expect_target: str | None = None  # "out" keeps the target as a destination
+
+    def in_substitution() -> bool:
+        return substitutions > 0
+
+    def push_paren(substitution: bool) -> None:
+        nonlocal substitutions
+        parens.append(substitution)
+        substitutions += substitution
+
+    def pop_paren() -> bool:
+        nonlocal substitutions
+        substitution = parens.pop()
+        substitutions -= substitution
+        return substitution
+
+    def end_command() -> None:
+        nonlocal words, attached
+        if words or attached:
+            (nested if in_substitution() else sink.commands).append(words + attached)
+        words, attached = [], []
+
+    def end_pipeline(next_join: str | None) -> None:
+        end_command()
+        if in_substitution():
+            return
+        if sink.commands:
+            sink.pipelines.append((sink.join, sink.commands))
+        sink.commands, sink.join = [], next_join
+
+    def end_list(unknown: bool = False, terminator: str | None = None) -> None:
+        end_pipeline(None)
+        if in_substitution():
+            return
+        if sink.pipelines:
+            sink.lists.append((sink.pipelines, unknown, terminator))
+        sink.pipelines = []
+
+    def open_body(name: str, closer: str) -> None:
+        nonlocal defining, pending_def, sink
+        end_list()
+        defining, pending_def = [name, 1, closer], None
+        sink = functions[name] = _Lists()  # a redefinition replaces the earlier body
+
+    def close_body() -> None:
+        nonlocal defining, sink
+        end_list()
+        defining, sink = [], script
+
+    for tok, is_operator in tokens:
+        if not is_operator:
+            if expect_target is not None:
+                if expect_target == "out" and tok not in _HARMLESS_SINKS:
+                    attached.append("\t>" + tok)  # where this command writes
+                expect_target = None
+            elif tok == "{" and (pending_def or (len(words) == 2 and words[0] == "function")):
+                name = pending_def or words[1]
+                words = []
+                open_body(name, "}")
+            elif defining and defining[2] == "}" and tok == "{":
+                defining[1] += 1
+                words.append(tok)
+            elif defining and defining[2] == "}" and tok == "}":
+                defining[1] -= 1
+                if defining[1] == 0:
+                    close_body()
+                else:
+                    words.append(tok)
+            else:
+                words.append(tok)
+            continue
+        ops = _OPERATOR.findall(tok)
+        for k, op in enumerate(ops):
+            if op in _OUTPUT_REDIRECTS or op in _INPUT_REDIRECTS or op == ">&":
+                expect_target = "out" if op in _OUTPUT_REDIRECTS else "other"
+                if op == "<<" and bodies:
+                    attached.append("\n" + bodies.pop(0))
+            elif op in _LIST_JOINS:
+                end_pipeline(op)
+            elif op in _PIPES:
+                end_command()
+            elif op == "(":
+                name_words = len(words) == 1 or (len(words) == 2 and words[0] == "function")
+                if (k + 1 < len(ops) and ops[k + 1] == ")" and name_words and expect_target is None
+                        and not words[-1].endswith("$") and words[-1] not in _RESERVED):
+                    pending_def, words, skip_close = words[-1], [], True  # `name()`: a definition
+                    continue
+                if pending_def and not words and expect_target is None:
+                    open_body(pending_def, ")")  # `name() ( ... )`: a subshell body
+                    continue
+                if defining and defining[2] == ")":
+                    defining[1] += 1
+                substitution = bool(words and words[-1].endswith("$")) or expect_target is not None
+                expect_target = None
+                if substitution:
+                    saved.append((words, attached))  # the outer command resumes after `)`
+                    words, attached = [], []
+                else:
+                    end_list(terminator="(")  # a plain subshell `(...)`: its status is its own
+                push_paren(substitution)
+            elif op == ")":
+                if skip_close:
+                    skip_close = False
+                    continue
+                if defining and defining[2] == ")":
+                    defining[1] -= 1
+                    if defining[1] == 0:
+                        close_body()
+                        continue
+                if parens and parens[-1]:
+                    end_command()
+                    pop_paren()
+                    words, attached = saved.pop()
+                else:
+                    end_list(terminator=")")  # also a case arm's `pattern)`
+                    if parens:
+                        pop_paren()
+            else:  # `;`, `;;`, `;&`, `;;&`, a newline, `&`: the list ends
+                end_list(unknown=op == "&", terminator=op)
+    if defining:  # unterminated: the body never closed, so it never ran either
+        words, attached = [], []
+        functions.pop(defining[0], None)
+        defining, sink = [], script
+    while parens:  # unbalanced: whatever was inside is uncertain
+        if pop_paren() and saved:
+            end_command()
+            words, attached = saved.pop()
+    end_list()
+    lists = script.lists
+
+    found: list[tuple[str, list[str], bool]] = []
+    # substitutions inside a word (`"$(git push)"`, backticks) never reach the
+    # `(` handling: read what can be read, mark the rest opaque. They come
+    # FIRST in the result, so the last invocation is always the outer command
+    # a non-zero exit belongs to.
+    found_nested: list[tuple[str, list[str], bool]] = []
+
+    def emit(cmd_words: list[str], certain: bool, sub_exit: int | None) -> None:
+        for w in cmd_words:
+            if w.startswith(("\n", "\t")):
+                continue
+            inner_commands, readable = _word_substitutions(w)
+            if not readable:
+                found_nested.append(("$", [w], False))
+                continue
+            for inner in inner_commands:
+                sub = _invocations(inner, depth + 1, None) if depth < _MAX_STRING_DEPTH else None
+                if sub is None:
+                    found_nested.append(("$", [w], False))
+                else:
+                    found_nested.extend((p, a, False) for p, a, _ in sub)
+        start = _command_start(cmd_words)
+        if start is None or cmd_words[start].startswith("\n"):
+            return  # nothing runs, or a heredoc body left where a program should be
+        word = cmd_words[start]
+        prog, args = program_name(word), cmd_words[start + 1:]
+        inner = command_string(prog, args)
+        if inner is not None and depth < _MAX_STRING_DEPTH:
+            sub = _invocations(inner, depth + 1, sub_exit)
+            if sub is not None:
+                found.extend((p, a, certain and c) for p, a, c in sub)
+                return
+        found.append((prog, args, certain))
+
+    def run_lists(lists: list, status_of_last: int | None) -> None:
+        """Emit what a sequence of lists runs, resolving the branches a
+        CONSTANT decides -- `if false`, `case x in y)`, `false && ...`;
+        anything else may have run (its commands stay, uncertain).
+        ``status_of_last`` is the exit code the last list's status is known
+        from: the command's for the script, None for a function body."""
+        # per open if/while: [this arm taken, skipping this body, an earlier
+        # arm taken]; per open case: [.., .., an arm already matched, the word
+        # (None when a variable), a pattern list comes next, `;&` fell through]
+        frames: list[list] = []
+        for li, (plist, unknown, terminator) in enumerate(lists):
+            head = plist[0][1][0] if plist and plist[0][1] and plist[0][1][0] else []
+            first = head[0] if head else None
+            top = frames[-1] if frames else None
+            if top is not None and len(top) == 6 and top[4] and first != "esac":  # an arm's pattern: `y)`, `a|b)`
+                _case_arm(top, [cmd[0] for _, cmds in plist for cmd in cmds if cmd])
+                continue  # a pattern runs nothing
+            if first == "case" and "in" in head:
+                at = head.index("in")
+                literal = at == 2 and "$" not in head[1] and "`" not in head[1]
+                frame: list = [None, False, False, head[1] if literal else None, True, False]
+                frames.append(frame)
+                # the first pattern may sit on the same line: `case x in y) ...`
+                patterns = head[at + 1:] + [cmd[0] for pi, (_, cmds) in enumerate(plist)
+                                            for ci, cmd in enumerate(cmds) if (pi, ci) != (0, 0) and cmd]
+                if patterns:
+                    _case_arm(frame, patterns)
+                continue
+            if first in ("if", "elif", "while", "until"):
+                cond = head[1:]
+                negate = first == "until"
+                while cond and cond[0] == "!":
+                    negate, cond = not negate, cond[1:]
+                taken = (_CONSTANT_COMMANDS.get(cond[0])
+                         if len(cond) == 1 and len(plist) == 1 and len(plist[0][1]) == 1 else None)
+                if taken is not None and negate:
+                    taken = not taken
+                if first == "elif" and frames:
+                    earlier = frames[-1][2] or frames[-1][0] is True
+                    # an arm after one already taken never runs, whatever its test
+                    frames[-1] = [False if earlier else taken, False, earlier]
+                else:
+                    frames.append([taken, False, False])
+            elif first in ("then", "do") and frames:
+                frames[-1][1] = frames[-1][0] is False
+            elif first == "else" and frames:
+                frames[-1][1] = frames[-1][2] or frames[-1][0] is True
+            elif first in ("fi", "done", "esac") and frames:
+                frames.pop()
+            if top is not None and len(top) == 6 and terminator in (";;", ";;&", ";&"):
+                if terminator == ";;":
+                    top[2] = top[2] or top[0] is True  # this arm matched: the rest never run
+                top[4] = True  # the next list is a pattern (`;;&` keeps testing them)
+                top[5] = terminator == ";&"  # the next arm's body runs without a test
+            if any(f[1] for f in frames):
+                continue  # inside a body that did not run
+            last_list = li == len(lists) - 1
+            has_or = any(j == "||" for j, _ in plist)
+            # every command of the last list ran and succeeded iff it exited 0
+            # with no `||` to skip or mask one -- unless it was backgrounded
+            # (the shell reports 0 on STARTING a `&` job)
+            certain = last_list and status_of_last == 0 and not has_or and not unknown
+            status: bool | None = None  # the constant status of the last pipeline that ran
+            for pi, (join_op, cmds) in enumerate(plist):
+                if (join_op == "&&" and status is False) or (join_op == "||" and status is True):
+                    continue  # short-circuited: `false && git push` never ran the push
+                last_pipeline = last_list and pi == len(plist) - 1
+                # `! cmd` exits 0 precisely when cmd FAILED: never certain
+                negated = any("!" in cmd_words[:_skip_reserved(cmd_words)] for cmd_words in cmds)
+                # a pipeline's status is its LAST stage's: `true | false && x` skips x
+                lone = cmds[-1][_skip_reserved(cmds[-1]):]
+                const = _CONSTANT_COMMANDS.get(lone[0]) if len(lone) == 1 else None
+                status = (not const) if const is not None and negated else const
+                for ci, cmd_words in enumerate(cmds):
+                    # a pipeline's status is its LAST stage's: `git push | true`
+                    # exits 0 whatever the push did
+                    last_stage = ci == len(cmds) - 1
+                    stage_certain = certain and last_stage and not negated
+                    # a runner that certainly succeeded ran its string to exit
+                    # 0; otherwise the string's exit code is the whole
+                    # command's only when the runner is the last stage of the
+                    # last pipeline
+                    if stage_certain:
+                        sub_exit: int | None = 0
+                    elif last_pipeline and last_stage and not has_or:
+                        sub_exit = status_of_last
+                    else:
+                        sub_exit = None
+                    emit(cmd_words, stage_certain, sub_exit)
+
+    run_lists(lists, exit_code)
+    # a defined function ran only if something called it (transitively); its
+    # body is read like the script, with its own branches, and no list of it
+    # is certain (its status is unknown)
+    expanded: set[str] = set()
+    while True:
+        called = {p for p, _, _ in found} & set(functions) - expanded
+        if not called:
+            break
+        for name in sorted(called):
+            expanded.add(name)
+            run_lists(functions[name].lists, None)
+    outer = found
+    found = found_nested
+    for cmd_words in nested:  # inside `$(...)` / `<(...)`: status masked by the outer command
+        emit(cmd_words, False, None)
+    return found + outer
+
+
+def _word_substitutions(word: str) -> tuple[list[str], bool]:
+    """The balanced `$(...)` contents inside one word, and whether the word
+    is readable: a backtick or an unbalanced `$(` makes it opaque."""
+    if "`" in word:
+        return [], False
+    contents: list[str] = []
+    i = word.find("$(")
+    while i != -1:
+        depth, j = 0, i + 1
+        while j < len(word):
+            if word[j] == "(":
+                depth += 1
+            elif word[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        if j >= len(word):
+            return contents, False  # unbalanced
+        contents.append(word[i + 2:j])
+        i = word.find("$(", j + 1)
+    return contents, True
+
+
+_SSH_VALUE_OPTIONS = frozenset("bBcDEeFIiJLlmOopQRSWw")
+
+
+def _env_split_string(args: list[str]) -> str | None:
+    """The string `env -S` runs, past env's options and assignments."""
+    for j, a in enumerate(args):
+        if a in ("-S", "--split-string"):
+            return args[j + 1] if j + 1 < len(args) else ""
+        if a.startswith("-S"):
+            return a[2:]
+        if a.startswith("--split-string="):
+            return a.split("=", 1)[1]
+        if not a.startswith("-") and not _ASSIGNMENT.match(a):
+            break
+    return None
+
+
+def command_string(prog: str, args: list[str]) -> str | None:
+    """The command STRING an invocation runs, when it runs one that can be
+    found; None when it runs a file, a session, or nothing of the kind."""
+    if prog in _SHELLS:
+        window = args[:8] if prog == "su" else args
+        for j, a in enumerate(window):
+            if a == "-c" or "c" in _short_flags(a):
+                return args[j + 1] if j + 1 < len(args) else ""
+            if prog != "su" and not a.startswith("-"):
+                break
+        return None
+    if prog == "eval":
+        return " ".join(args)
+    if prog == "env":
+        return _env_split_string(args)
+    if prog in ("flock", "watch"):
+        start = _wrapped_command_start(prog, [prog, *args], 1)
+        return start if isinstance(start, str) else None
+    if prog == "ssh":
+        i = 0
+        while i < len(args) and args[i].startswith("-"):
+            flags = _short_flags(args[i])
+            # the LAST letter of a cluster may take the next word: `-vp 2222`
+            i += 2 if flags and flags[-1] in _SSH_VALUE_OPTIONS and len(flags) <= 2 else 1
+        rest = args[i + 1:]  # after the host
+        return " ".join(rest) if rest else None
+    return None
+
+
+# Shell syntax at the start of a simple command, not a program: what follows runs.
+_RESERVED = frozenset({"if", "then", "elif", "else", "fi", "do", "done", "while", "until",
+                       "case", "esac", "!", "{", "}"})
+
+
+def _skip_reserved(words: list[str]) -> int:
+    i = 0
+    while i < len(words) and words[i] in _RESERVED:
+        i += 1
+    return i
+
+
+def _command_start(words: list[str]) -> int | None:
+    """Index of the word naming the program a simple command actually runs,
+    past reserved words, assignments, ``env`` and wrappers. When what runs
+    is a command STRING (``env -S``, ``flock -c``, ``watch``) it is the index
+    of that runner; None when nothing runs."""
+    i = _skip_reserved(words)
+    while True:
+        while i < len(words) and _ASSIGNMENT.match(words[i]):
+            i += 1
+        if i >= len(words):
+            return None
+        prog = _program(words[i])
+        if prog == "env":
+            if _env_split_string(words[i + 1:]) is not None:
+                return i  # env -S: a command string, read by command_string
+            start = _env_command_start(words, i + 1)
+            if start is None:
+                return i
+        elif prog in _WRAPPERS:
+            start = _wrapped_command_start(prog, words, i + 1)
+            if isinstance(start, str):  # flock -c, watch: a command string
+                return i
+            if start is None:
+                return None
+        else:
+            return i
+        i = start
+
+
 def _lex(command: str) -> list[tuple[str, bool]] | None:
     """``(text, is_operator)`` tokens with bash quoting; None if unbalanced."""
     tokens: list[tuple[str, bool]] = []
     word: list[str] = []
-    in_word = False
+    in_word = plain = False  # plain: the word so far is bare (no quote, no escape)
     for m in _LEX.finditer(command):
         kind = m.lastgroup
         if kind == "bad":
             return None
         if kind in ("ws", "op"):
             if in_word:
-                tokens.append(("".join(word), False))
+                text = "".join(word)
+                # `2>&1`, `3<file`: a bare digit right before a redirection is
+                # the file descriptor it redirects, not a word
+                if not (kind == "op" and m.group("op")[0] in "<>" and plain and text.isdigit() and len(text) < 3):
+                    tokens.append((text, False))
                 word, in_word = [], False
             if kind == "op":
                 tokens.append((m.group("op"), True))
         elif kind == "esc":
             if m.group("esc") != "\n":  # backslash-newline is a line continuation
                 word.append(m.group("esc"))
-                in_word = True
+                in_word, plain = True, False
         elif kind == "dq":
             word.append(_DQ_ESCAPE.sub(lambda e: "" if e.group(1) == "\n" else e.group(1), m.group("dq")))
-            in_word = True
+            in_word, plain = True, False
         else:  # sq, bare
             word.append(m.group(kind))
+            plain = kind == "bare" and (plain or not in_word)
             in_word = True
     if in_word:
         tokens.append(("".join(word), False))
@@ -235,7 +807,7 @@ def _classify_simple(words: list[str]) -> str:
     """
     _spend(len(words) + 1)
     floor = "none"
-    i = 0
+    i = _skip_reserved(words)
     while True:
         while i < len(words) and _ASSIGNMENT.match(words[i]):
             if not _HARMLESS_ASSIGNMENT.match(words[i]):
@@ -265,6 +837,21 @@ def _classify_simple(words: list[str]) -> str:
             i = start
             continue
         return _worst(floor, _classify_program(prog, words[i + 1:]))
+
+
+_DRIVE = re.compile(r"^[A-Za-z]:/")
+
+
+def program_name(word: str) -> str:
+    """The program a command word names, for evidence: a bare name as is, an
+    absolute path kept whole (the verifier trusts system directories and no
+    others), a relative path as `./<name>` -- `./git` is not git."""
+    path = word.replace("\\", "/")
+    if "/" not in path:
+        return _program(word)
+    if path.startswith("/") or _DRIVE.match(path):
+        return path
+    return "./" + _program(word)
 
 
 def _program(word: str) -> str:
@@ -608,23 +1195,43 @@ _GIT_LISTING_VALUE_OPTIONS = frozenset({
 })
 
 
-def _classify_git(args: list[str]) -> str:
-    # Configuration can make any git command run a program, so it sets a
-    # floor -- but the subcommand is still classified: `git -c x fetch` is a
-    # fetch.
+_GIT_TERMINAL_OPTIONS = frozenset({
+    "--version", "-v", "--help", "-h", "--html-path", "--man-path", "--info-path", "--exec-path",
+})
+
+
+def _git_global_options(args: list[str]) -> tuple[str, int]:
+    """Skip git's global options: ``(floor, index of the subcommand)``.
+
+    Configuration can make any git command run a program, so it sets a
+    floor -- but the subcommand is still what runs: `git -c x fetch` is a fetch.
+    """
     floor = "none"
     i = 0
     while i < len(args) and args[i].startswith("-"):
         a = args[i]
+        if a in _GIT_TERMINAL_OPTIONS:
+            return floor, len(args)  # prints and exits: `git --version push` runs no push
         if a in ("-c", "--config-env"):
             floor, i = "write", i + 2
         elif a.startswith(("-c", "--config-env=", "--exec-path=")):
             floor, i = "write", i + 1
         else:
             i += 2 if a in ("-C", "--git-dir", "--work-tree", "--namespace") else 1
+    return floor, i
+
+
+def _classify_git(args: list[str]) -> str:
+    floor, i = _git_global_options(args)
     if i >= len(args):
         return floor
     return _worst(floor, _classify_git_subcommand(args[i], args[i + 1:]))
+
+
+def git_subcommand(args: list[str]) -> tuple[str, list[str]] | None:
+    """``(subcommand, its arguments)`` for git's argument list, or None."""
+    _, i = _git_global_options(args)
+    return (args[i], args[i + 1:]) if i < len(args) else None
 
 
 def _classify_git_subcommand(sub: str, rest: list[str]) -> str:
