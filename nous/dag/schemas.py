@@ -62,6 +62,12 @@ class DAGNodeStatus(str, Enum):
 
 EdgeType = Literal["dependency", "cancel_cascade", "context_flow", "on_failure"]
 
+# Harness Phase 3 §3.8: the ONE predecessor-edge set. Readiness, wave
+# computation, failure propagation and retry's unblock all read it — the last
+# two used to follow `dependency` alone, so a failed node's context_flow-only
+# successor stayed pending forever and wedged its DAG `running`.
+PREDECESSOR_EDGE_TYPES: frozenset[str] = frozenset({"dependency", "context_flow"})
+
 
 # F066.1 — vocabulary for the `fix_actions` field on fix nodes.
 FixAction = Literal[
@@ -384,7 +390,7 @@ class DAGCreateRequest(BaseModel):
         in_degree: dict[str, int] = {n.name: 0 for n in self.nodes}
 
         for edge in self.edges:
-            if edge.edge_type in ("dependency", "context_flow"):
+            if edge.edge_type in PREDECESSOR_EDGE_TYPES:
                 adj[edge.from_node].append(edge.to_node)
                 in_degree[edge.to_node] += 1
 

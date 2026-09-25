@@ -58,6 +58,7 @@ from uuid import UUID
 
 from nous.config import Settings
 from nous.dag._workspace import assert_inside_root, compute_workspace_path
+from nous.dag.schemas import PREDECESSOR_EDGE_TYPES
 from nous.dag.store import _TERMINAL_DAG_STATUSES, DAGStore
 from nous.heart.subtasks import SubtaskQueueFull
 from nous.heartbeat.dynamic import DynamicCheckLimitReached
@@ -615,13 +616,13 @@ class DAGOrchestrator:
         # that have no other failed predecessors
         dep_map: dict[str, set[str]] = {str(n.id): set() for n in dag.nodes}
         for edge in dag.edges:
-            if edge.edge_type in ("dependency", "cancel_cascade"):
+            if edge.edge_type in PREDECESSOR_EDGE_TYPES or edge.edge_type == "cancel_cascade":
                 dep_map[str(edge.to_node_id)].add(str(edge.from_node_id))
 
         # Forward reachability from retried node
         adj: dict[str, list[str]] = {str(n.id): [] for n in dag.nodes}
         for edge in dag.edges:
-            if edge.edge_type in ("dependency", "cancel_cascade"):
+            if edge.edge_type in PREDECESSOR_EDGE_TYPES or edge.edge_type == "cancel_cascade":
                 adj[str(edge.from_node_id)].append(str(edge.to_node_id))
 
         reachable: set[str] = set()
@@ -669,8 +670,13 @@ class DAGOrchestrator:
                         n.name,
                     )
                 node_updates.append(
+                    # Harness Phase 3 §3.9: clear started_at/completed_at as
+                    # the direct retry does — _recover_stale_ready_nodes only
+                    # takes `ready` nodes with started_at IS NULL, so a kept
+                    # timestamp strands a node a crash leaves `ready`.
                     (n.id, {"status": "pending", "error": None,
-                            "tokens_counted": False})
+                            "tokens_counted": False,
+                            "started_at": None, "completed_at": None})
                 )
 
         # One transaction: every node reset plus the status/generation/delivery
@@ -1894,7 +1900,7 @@ class DAGOrchestrator:
         node_by_id: dict[str, DAGNode] = {str(n.id): n for n in dag.nodes}
 
         for edge in dag.edges:
-            if edge.edge_type == "dependency":
+            if edge.edge_type in PREDECESSOR_EDGE_TYPES:
                 dep_map[str(edge.to_node_id)].add(str(edge.from_node_id))
             elif edge.edge_type == "cancel_cascade":
                 cancel_map[str(edge.to_node_id)].add(str(edge.from_node_id))
@@ -2376,7 +2382,7 @@ class DAGOrchestrator:
         # Build set of predecessor node_ids per node (dependency + context_flow)
         dep_map: dict[str, set[str]] = {str(n.id): set() for n in dag.nodes}
         for edge in dag.edges:
-            if edge.edge_type in ("dependency", "context_flow"):
+            if edge.edge_type in PREDECESSOR_EDGE_TYPES:
                 dep_map[str(edge.to_node_id)].add(str(edge.from_node_id))
 
         # Completed node IDs
