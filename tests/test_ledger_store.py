@@ -430,3 +430,45 @@ async def test_shutdown_cancels_the_maintenance_loop_and_lets_pending_closes_lan
     })
     assert loop_task.cancelled()
     assert landed == [True]
+
+
+# ---- harness Phase 2b: idempotency keys (migration 075) ----
+
+
+@pytest.mark.asyncio
+async def test_a_live_key_is_unique_but_an_error_frees_it(db, agent):
+    from sqlalchemy.exc import IntegrityError
+
+    async def insert(status):
+        async with db.session() as s:
+            s.add(ExecutionLedgerEntry(
+                id=uuid.uuid4(), agent_id=agent, context_kind="dag_node", tool_name="send_email",
+                side_effect_type="external", key_args={}, status=status, idempotency_key="k1"))
+            await s.commit()
+
+    await insert("error")          # a failed send does not hold the key
+    await insert("blocked")        # nor does a refusal
+    await insert("pending")
+    with pytest.raises(IntegrityError):
+        await insert("success")    # a second live row for the same key
+
+
+def test_the_index_predicate_covers_every_closable_status():
+    from nous.cognitive.ledger_store import _CLOSABLE, KEY_HOLDING_STATUSES
+
+    assert set(_CLOSABLE) <= set(KEY_HOLDING_STATUSES)
+    assert set(KEY_HOLDING_STATUSES) == {"pending", "success", "unknown"}
+
+
+def test_the_model_index_matches_the_migration():
+    from pathlib import Path
+
+    from nous.cognitive.ledger_store import KEY_HOLDING_STATUSES
+
+    sql = Path("sql/migrations/075_execution_ledger_idempotency.sql").read_text(encoding="utf-8")
+    assert "uq_execution_ledger_idempotency" in sql and "dispatched_at" in sql
+    for status in KEY_HOLDING_STATUSES:
+        assert f"'{status}'" in sql
+    (index,) = [i for i in ExecutionLedgerEntry.__table__.indexes if i.name == "uq_execution_ledger_idempotency"]
+    assert index.unique and [c.name for c in index.columns] == ["agent_id", "tool_name", "idempotency_key"]
+    assert "dispatched_at" in ExecutionLedgerEntry.__table__.columns

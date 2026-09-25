@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 KEY_ARG_CHARS = 200
 RESULT_SUMMARY_CHARS = 500
 _CLOSABLE = ("pending", "unknown")
+# Harness Phase 2b: the statuses that HOLD an idempotency key -- the partial
+# unique index's predicate (migration 075), one definition for the lookups.
+KEY_HOLDING_STATUSES = ("pending", "success", "unknown")
 # Why the harness refused a call. A code, never prose: the ActionGate model's
 # reason is written from a prompt that carries the call's arguments, so it can
 # echo a subject, a body or a bare key.
