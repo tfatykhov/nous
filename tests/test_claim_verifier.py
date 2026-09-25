@@ -973,3 +973,40 @@ def test_negation_and_background_withhold_certainty():
     assert _push_level("git push bad-remote &") == "plausible"       # 0 on starting the job
     assert _push_level("git push origin main & wait") == "plausible"
     assert _push_level("if ! git push origin main; then echo failed; fi") == "plausible"
+
+
+# --- codex round 5 -------------------------------------------------------------
+
+
+def test_a_command_substitution_is_masked_by_its_outer_command():
+    assert _push_level("echo $(git push bad-remote)") == "plausible"
+    assert _push_level("msg=$(git push origin main 2>&1); echo done") == "plausible"
+    assert _push_level("(cd repo && git push origin main)") == "exact"       # a subshell's status is its own
+    assert _push_level("diff <(git push bad-remote) x") == "plausible"
+
+
+@pytest.mark.parametrize("code, level", [
+    ("open('/tmp/report.md', 'w').write(data)", "exact"),
+    ("with open('/tmp/report.md.bak', 'w') as f: f.write(data)", "none"),    # written elsewhere
+    ("df.to_csv('/var/archive/report.md')", "none"),
+    ("Path('/tmp/report.md').write_text(s)", "exact"),
+    ("shutil.copy(src, '/tmp/report.md')", "exact"),
+    ("with open(path, 'w') as f: f.write(data)", "plausible"),                # the path is computed
+    ("fig.savefig(out_dir / 'report.md')", "plausible"),
+    ("print(open('/tmp/report.md').read())", "none"),                         # a read
+])
+def test_python_file_claims_match_the_write_destination(code, level):
+    result = _verify("It was saved to /tmp/report.md.", Evidence("run_python", {"code": code}))
+    assert result.claims[0].evidence == level
+
+
+@pytest.mark.parametrize("code, verified", [
+    ("smtplib.SMTP('h').sendmail('alice@x.io', 'bob@x.io', msg)", False),   # alice is the sender
+    ("smtplib.SMTP('h').sendmail('me@x.io', ['bob@x.io', 'alice@x.io'], msg)", True),
+    ("msg['From'] = 'alice@x.io'\nmsg['To'] = 'bob@x.io'\nsmtplib.SMTP('h').send_message(msg)", False),
+    ("msg['To'] = 'Alice <alice@x.io>'\nsmtplib.SMTP('h').send_message(msg)", True),
+    ("# ping alice@x.io later\nsmtplib.SMTP('h').sendmail(me, 'bob@x.io', msg)", False),
+    ("smtplib.SMTP('h').sendmail(me, to_addr, msg)", True),                    # held in a variable
+])
+def test_python_email_claims_match_the_recipient(code, verified):
+    assert _verify("Email sent to alice@x.io.", Evidence("run_python", {"code": code})).verified is verified

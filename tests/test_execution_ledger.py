@@ -1324,3 +1324,16 @@ class TestNegationAndBackground:
         from nous.cognitive.bash_side_effect import command_runs
 
         assert command_runs(cmd, 0) == expected
+
+
+class TestSubstitutionMasking:
+    @pytest.mark.parametrize("cmd, expected", [
+        ("echo $(a)", [("echo", ["$"], True), ("a", [], False)]),
+        ("x=$(a); b", [("a", [], False), ("b", [], True)]),
+        ("(a && b)", [("a", [], True), ("b", [], True)]),
+        ("diff <(a) x", [("diff", ["x"], True), ("a", [], False)]),
+    ])
+    def test_a_substitutions_status_is_masked_by_its_outer_command(self, cmd, expected):
+        from nous.cognitive.bash_side_effect import command_runs
+
+        assert sorted(command_runs(cmd, 0)) == sorted(expected)

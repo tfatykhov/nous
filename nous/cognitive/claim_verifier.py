@@ -238,6 +238,23 @@ _PY_WRITES = re.compile(
     r"|yaml\.(?:safe_)?dump\(|\.save\(|shutil\.(?:copy\w*|move)\(")
 _PY_SENDS = re.compile(r"\bsmtplib\b|\bsendmail\b|api\.telegram\.org")
 _PY_ADDRESS = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")  # an address written out in code
+# Where Python code writes, when the destination is a string literal: the
+# path of open(..., 'w'), Path('...').write_*, .to_*/savefig/.save('...'),
+# shutil.copy(src, '...'). A computed path is a write to somewhere unknown.
+_PY_WRITE_DESTINATIONS = (
+    re.compile(r"open\(\s*['\"]([^'\"\n]+)['\"]\s*,\s*['\"][wax]"),
+    re.compile(r"Path\(\s*['\"]([^'\"\n]+)['\"]\s*\)\s*\.write_(?:text|bytes)\("),
+    re.compile(r"\.(?:to_(?:csv|json|excel|parquet|html|markdown)|savefig|save|write_(?:html|image))"
+               r"\(\s*['\"]([^'\"\n]+)['\"]"),
+    re.compile(r"shutil\.(?:copy\w*|move)\([^)\n]*,\s*['\"]([^'\"\n]+)['\"]"),
+)
+# Who Python code sends TO, when written out: sendmail(from, TO, ...) with a
+# string or list literal, msg['To'|'Cc'|'Bcc'] = '...', to_addrs=...
+_PY_RECIPIENT_FIELDS = (
+    re.compile(r"\.sendmail\(\s*[^,\n]+,\s*(\[[^\]\n]*\]|['\"][^'\"\n]+['\"])"),
+    re.compile(r"\[\s*['\"](?:To|Cc|Bcc)['\"]\s*\]\s*=\s*(['\"][^'\"\n]+['\"])"),
+    re.compile(r"\bto_addrs\s*=\s*(\[[^\]\n]*\]|['\"][^'\"\n]+['\"])"),
+)
 _PY_GIT = {
     "vcs_push": re.compile(
         r"\bgit\b[^|;&]{0,200}?\bpush\b(?![^|;&]{0,200}?(?:--dry-run|[\s'\"]-n\b))"),
@@ -570,15 +587,22 @@ def _code_level(claim: Claim, code: str) -> str:
         if not _PY_WRITES.search(code):
             return "none"
         if claim.target:
-            return "exact" if _names(claim.target, code) else "none"
+            # the destination of the write, not the path's mention anywhere
+            written = [m.group(1) for p in _PY_WRITE_DESTINATIONS for m in p.finditer(code)]
+            if any(_same_path(claim.target, w) for w in written):
+                return "exact"
+            return "none" if written else "plausible"  # written elsewhere; or a computed path
         return "plausible"
     if claim.kind == "email":
         if not _PY_SENDS.search(code):
             return "none"
-        if claim.target and claim.target not in _addresses(code):
-            # a recipient held in a variable may be the named one; one written
-            # out as someone else is not
-            return "none" if _addresses(code) else "plausible"
+        if claim.target:
+            # the recipients written out, not a sender, a body or a comment
+            recipients = {a for p in _PY_RECIPIENT_FIELDS for m in p.finditer(code)
+                          for a in _addresses(m.group(1))}
+            if claim.target in recipients:
+                return "plausible"
+            return "none" if recipients else "plausible"  # someone else; or held in a variable
         return "plausible"
     if claim.kind in ("vcs_push", "vcs_commit"):
         return "plausible" if _PY_GIT[claim.kind].search(code) else "none"

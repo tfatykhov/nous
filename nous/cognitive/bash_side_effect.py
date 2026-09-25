@@ -272,33 +272,46 @@ def _invocations(
     if tokens is None:
         return None
     # lists of pipelines of simple commands: `a; b && c | d`; a list ended by
-    # `&` runs in the background, so its status is never the exit code's
+    # `&` runs in the background, so its status is never the exit code's. A
+    # command inside `$(...)` / `<(...)` hands its output to the OUTER command,
+    # whose status is what the shell reports: it is parsed into ``nested``
+    # (never certain) while the outer command's words continue after `)`.
     lists: list[tuple[list[tuple[str | None, list[list[str]]]], bool]] = []
     pipelines: list[tuple[str | None, list[list[str]]]] = []
     commands: list[list[str]] = []
+    nested: list[list[str]] = []
+    parens: list[bool] = []  # per open parenthesis: True for a substitution
+    saved: list[tuple[list[str], list[str]]] = []  # the outer command around a substitution
     join: str | None = None
     words: list[str] = []
     attached: list[str] = []  # heredoc bodies and output targets of the current simple command
     expect_target: str | None = None  # "out" keeps the target as a destination
 
+    def in_substitution() -> bool:
+        return any(parens)
+
     def end_command() -> None:
         nonlocal words, attached
         if words or attached:
-            commands.append(words + attached)
+            (nested if in_substitution() else commands).append(words + attached)
         words, attached = [], []
 
     def end_pipeline(next_join: str | None) -> None:
         nonlocal commands, join
         end_command()
+        if in_substitution():
+            return
         if commands:
             pipelines.append((join, commands))
         commands, join = [], next_join
 
-    def end_list(background: bool = False) -> None:
+    def end_list(unknown: bool = False) -> None:
         nonlocal pipelines
         end_pipeline(None)
+        if in_substitution():
+            return
         if pipelines:
-            lists.append((pipelines, background))
+            lists.append((pipelines, unknown))
         pipelines = []
 
     for tok, is_operator in tokens:
@@ -319,18 +332,57 @@ def _invocations(
                 end_pipeline(op)
             elif op in _PIPES:
                 end_command()
-            else:  # `;`, a newline, `&`, `(`, `)`: the list ends
-                end_list(background=op == "&")
+            elif op == "(":
+                substitution = bool(words and words[-1].endswith("$")) or expect_target is not None
+                expect_target = None
+                if substitution:
+                    saved.append((words, attached))  # the outer command resumes after `)`
+                    words, attached = [], []
+                else:
+                    end_list()  # a plain subshell `(...)`: its status is its own
+                parens.append(substitution)
+            elif op == ")":
+                if parens and parens[-1]:
+                    end_command()
+                    parens.pop()
+                    words, attached = saved.pop()
+                else:
+                    end_list()
+                    if parens:
+                        parens.pop()
+            else:  # `;`, a newline, `&`: the list ends
+                end_list(unknown=op == "&")
+    while parens:  # unbalanced: whatever was inside is uncertain
+        if parens.pop() and saved:
+            end_command()
+            words, attached = saved.pop()
     end_list()
 
     found: list[tuple[str, list[str], bool]] = []
-    for li, (plist, background) in enumerate(lists):
+
+    def emit(cmd_words: list[str], certain: bool, sub_exit: int | None) -> None:
+        start = _command_start(cmd_words)
+        if start is None or cmd_words[start].startswith("\n"):
+            return  # nothing runs, or a heredoc body left where a program should be
+        word = cmd_words[start]
+        prog, args = _program(word), cmd_words[start + 1:]
+        if "/" in word.replace("\\", "/"):
+            prog = "./" + prog  # path-qualified: a script or a local build, marked as such
+        inner = command_string(prog, args)
+        if inner is not None and depth < _MAX_STRING_DEPTH:
+            sub = _invocations(inner, depth + 1, sub_exit)
+            if sub is not None:
+                found.extend((p, a, certain and c) for p, a, c in sub)
+                return
+        found.append((prog, args, certain))
+
+    for li, (plist, unknown) in enumerate(lists):
         last_list = li == len(lists) - 1
         has_or = any(j == "||" for j, _ in plist)
         # every command of the last list ran and succeeded iff it exited 0
-        # with no `||` to skip or mask one -- and it was not backgrounded
-        # (the shell reports 0 on STARTING a `&` job)
-        certain = last_list and exit_code == 0 and not has_or and not background
+        # with no `||` to skip or mask one -- unless it was backgrounded (the
+        # shell reports 0 on STARTING a `&` job)
+        certain = last_list and exit_code == 0 and not has_or and not unknown
         for pi, (_, cmds) in enumerate(plist):
             last_pipeline = last_list and pi == len(plist) - 1
             # `! cmd` exits 0 precisely when cmd FAILED: never certain
@@ -340,30 +392,18 @@ def _invocations(
                 # exits 0 whatever the push did
                 last_stage = ci == len(cmds) - 1
                 stage_certain = certain and last_stage and not negated
-                start = _command_start(cmd_words)
-                if start is None or cmd_words[start].startswith("\n"):
-                    continue  # nothing runs, or a heredoc body left where a program should be
-                word = cmd_words[start]
-                prog, args = _program(word), cmd_words[start + 1:]
-                if "/" in word.replace("\\", "/"):
-                    prog = "./" + prog  # path-qualified: a script or a local build, marked as such
-                inner = command_string(prog, args)
-                if inner is not None and depth < _MAX_STRING_DEPTH:
-                    # a runner that certainly succeeded ran its string to exit
-                    # 0; otherwise the string's exit code is the whole
-                    # command's only when the runner is the last stage of the
-                    # last pipeline
-                    if stage_certain:
-                        sub_exit: int | None = 0
-                    elif last_pipeline and last_stage and not has_or:
-                        sub_exit = exit_code
-                    else:
-                        sub_exit = None
-                    sub = _invocations(inner, depth + 1, sub_exit)
-                    if sub is not None:
-                        found.extend((p, a, stage_certain and c) for p, a, c in sub)
-                        continue
-                found.append((prog, args, stage_certain))
+                # a runner that certainly succeeded ran its string to exit 0;
+                # otherwise the string's exit code is the whole command's only
+                # when the runner is the last stage of the last pipeline
+                if stage_certain:
+                    sub_exit: int | None = 0
+                elif last_pipeline and last_stage and not has_or:
+                    sub_exit = exit_code
+                else:
+                    sub_exit = None
+                emit(cmd_words, stage_certain, sub_exit)
+    for cmd_words in nested:  # inside `$(...)` / `<(...)`: status masked by the outer command
+        emit(cmd_words, False, None)
     return found
 
 
