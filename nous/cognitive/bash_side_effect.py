@@ -271,8 +271,9 @@ def _invocations(
     tokens = _lex(command)
     if tokens is None:
         return None
-    # lists of pipelines of simple commands: `a; b && c | d`
-    lists: list[list[tuple[str | None, list[list[str]]]]] = []
+    # lists of pipelines of simple commands: `a; b && c | d`; a list ended by
+    # `&` runs in the background, so its status is never the exit code's
+    lists: list[tuple[list[tuple[str | None, list[list[str]]]], bool]] = []
     pipelines: list[tuple[str | None, list[list[str]]]] = []
     commands: list[list[str]] = []
     join: str | None = None
@@ -293,11 +294,11 @@ def _invocations(
             pipelines.append((join, commands))
         commands, join = [], next_join
 
-    def end_list() -> None:
+    def end_list(background: bool = False) -> None:
         nonlocal pipelines
         end_pipeline(None)
         if pipelines:
-            lists.append(pipelines)
+            lists.append((pipelines, background))
         pipelines = []
 
     for tok, is_operator in tokens:
@@ -319,23 +320,26 @@ def _invocations(
             elif op in _PIPES:
                 end_command()
             else:  # `;`, a newline, `&`, `(`, `)`: the list ends
-                end_list()
+                end_list(background=op == "&")
     end_list()
 
     found: list[tuple[str, list[str], bool]] = []
-    for li, plist in enumerate(lists):
+    for li, (plist, background) in enumerate(lists):
         last_list = li == len(lists) - 1
         has_or = any(j == "||" for j, _ in plist)
         # every command of the last list ran and succeeded iff it exited 0
-        # with no `||` to skip or mask one
-        certain = last_list and exit_code == 0 and not has_or
+        # with no `||` to skip or mask one -- and it was not backgrounded
+        # (the shell reports 0 on STARTING a `&` job)
+        certain = last_list and exit_code == 0 and not has_or and not background
         for pi, (_, cmds) in enumerate(plist):
             last_pipeline = last_list and pi == len(plist) - 1
+            # `! cmd` exits 0 precisely when cmd FAILED: never certain
+            negated = any("!" in cmd_words[:_skip_reserved(cmd_words)] for cmd_words in cmds)
             for ci, cmd_words in enumerate(cmds):
                 # a pipeline's status is its LAST stage's: `git push | true`
                 # exits 0 whatever the push did
                 last_stage = ci == len(cmds) - 1
-                stage_certain = certain and last_stage
+                stage_certain = certain and last_stage and not negated
                 start = _command_start(cmd_words)
                 if start is None or cmd_words[start].startswith("\n"):
                     continue  # nothing runs, or a heredoc body left where a program should be

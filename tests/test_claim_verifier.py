@@ -963,3 +963,13 @@ def test_only_recipient_arguments_address_a_mail():
     sender = "curl smtps://smtp.x.io --mail-from alice@x.io --mail-rcpt bob@x.io -T m"
     assert not _verify("Email sent to alice@x.io.", _real_bash(sender)).verified
     assert _verify("Email sent to alice@x.io.", _real_bash('mail -s Report "$TO" < m')).verified
+
+
+# --- codex round 4 -------------------------------------------------------------
+
+
+def test_negation_and_background_withhold_certainty():
+    assert _push_level("! git push bad-remote") == "plausible"       # exit 0 because it FAILED
+    assert _push_level("git push bad-remote &") == "plausible"       # 0 on starting the job
+    assert _push_level("git push origin main & wait") == "plausible"
+    assert _push_level("if ! git push origin main; then echo failed; fi") == "plausible"

@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/plans/2026-09-24-harness-autonomy-roadmap.md` §2 row P2.7 and §3 row 2c. Anchors from `main` `240c795`.
 
+**v2.8 (codex round 4):** a negated pipeline (`! git push`) and a backgrounded list (`git push &`) are never certain — the shell's 0 means the command failed, or merely started.
+
 **v2.7 (codex round 3):** the reader keeps output-redirect targets as a command's destination (`\t>`-marked argument), and a bash save must write to *that* destination — a redirect, a `cp`/`mv`/`tee`/`rsync` target, `-o`/`--output`, `sed -i`, `tar czf` — so `rm x` and `touch x.bak` never ground "saved to x" (a known writer writing elsewhere, or a delete, is none; a script naming the path in an unknown option stays plausible); a mail's recipient is read from the sending invocation's recipient arguments, never its subject or body (`sendmail bob <<EOF hello alice EOF` is not a send to alice).
 
 **v2.6 (codex round 2):** a pipeline's exit code is its last stage's, so a piped push (`git push | tail`) is plausible, never exact; `write_file` evidence must *be* the claimed target after normalization (an absolute target in full — `/var/archive/report.md` is not `/tmp/report.md`); recipients compare as whole addresses everywhere (`malice@x.io` is not `alice@x.io`); `send_file` never grounds a claim that names an address; `_PATH` accepts `dir/file.ext`.

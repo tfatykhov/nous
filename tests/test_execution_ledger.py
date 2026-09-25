@@ -1310,3 +1310,17 @@ class TestRedirectTargets:
 
         assert command_invocations("cmd > /dev/null 2>&1") == [("cmd", ["2"])]  # the fd word is a lexer quirk
         assert command_invocations("sort < in.txt") == [("sort", [])]
+
+
+class TestNegationAndBackground:
+    @pytest.mark.parametrize("cmd, expected", [
+        ("! a", [("a", [], False)]),
+        ("a &", [("a", [], False)]),
+        ("a & b", [("a", [], False), ("b", [], True)]),
+        ("if ! a; then b; fi", [("a", [], False), ("b", [], False)]),
+        ("! a | b", [("a", [], False), ("b", [], False)]),
+    ])
+    def test_a_negated_or_background_pipeline_is_never_certain(self, cmd, expected):
+        from nous.cognitive.bash_side_effect import command_runs
+
+        assert command_runs(cmd, 0) == expected
