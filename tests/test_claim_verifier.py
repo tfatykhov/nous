@@ -1032,3 +1032,33 @@ def test_git_version_or_help_runs_no_subcommand():
     assert not _verify("I pushed the fix.", _real_bash("git --version push")).verified
     assert not _verify("I pushed the fix.", _real_bash("git -v push")).verified
     assert not _verify("I committed the fix.", _real_bash("git --help commit")).verified
+
+
+# --- codex round 7 -------------------------------------------------------------
+
+
+def test_an_emailed_object_captures_its_recipient():
+    assert _kinds("I emailed the report to alice@x.io.") == [("email", "alice@x.io")]
+    assert _kinds("I emailed alice@x.io the report.") == [("email", "alice@x.io")]
+    assert _kinds("I've emailed the summary and the chart to Alice@X.io today.") == [("email", "alice@x.io")]
+    wrong = Evidence("send_email", {"to": "['bob@x.io']", "subject": "s"})
+    assert not _verify("I emailed the report to alice@x.io.", wrong).verified
+    right = Evidence("send_email", {"to": "['alice@x.io']", "subject": "s"})
+    assert _verify("I emailed the report to alice@x.io.", right).claims[0].evidence == "exact"
+
+
+def test_curl_recipients_come_only_from_mail_rcpt():
+    payload = "curl smtp://mail --mail-rcpt bob@x.io --data 'hello alice@x.io'"
+    assert not _verify("Email sent to alice@x.io.", _real_bash(payload)).verified
+    assert _verify("Email sent to alice@x.io.", _real_bash("curl smtp://mail --mail-rcpt=alice@x.io -T m")).verified
+    assert _verify("Email sent to alice@x.io.", _real_bash("curl smtp://mail --mail-rcpt alice@x.io -T m")).verified
+    attach = "mutt -s Hi -a notes-for-alice@x.io.txt -- bob@x.io < m"
+    assert not _verify("Email sent to alice@x.io.", _real_bash(attach)).verified
+
+
+def test_a_read_naming_the_path_is_not_a_save():
+    claim = "It was saved to /tmp/report.md."
+    assert not _verify(claim, _real_bash("cat /tmp/report.md; touch /tmp/unrelated")).verified
+    assert not _verify(claim, _real_bash("grep x /tmp/report.md && touch /tmp/other")).verified
+    assert not _verify(claim, _real_bash("stat /tmp/report.md; mkdir -p /tmp/d")).verified
+    assert _verify(claim, _real_bash("cat draft.md > /tmp/report.md")).verified

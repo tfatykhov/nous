@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
-from nous.cognitive.bash_side_effect import command_string, git_subcommand
+from nous.cognitive.bash_side_effect import READ_COMMANDS, command_string, git_subcommand
 from nous.cognitive.execution_ledger import Invocation, bash_invocations
 
 if TYPE_CHECKING:
@@ -205,6 +205,9 @@ _CLAIM_PATTERNS: list[tuple[str, str]] = [
      rf"(?:\s+to\s+{_ADDRESS})?", "email"),
     # "I sent it to Tim by email": the object may run through "to <person>"
     (rf"{_SUBJECT}(?:sent|forwarded)\b{_NOT_ELSEWHERE}(?:[^.\n;,—]|\.(?=\S)){{0,60}}?\bby\s+e-?mail\b",
+     "email"),
+    # "I emailed the report to alice@x.io": the recipient after the object
+    (rf"{_SUBJECT}(?:e-?mailed|mailed)\b{_NOT_ELSEWHERE}(?:[^.\n;,—]|\.(?=\S)){{0,60}}?\s+to\s+{_ADDRESS}",
      "email"),
     (rf"{_SUBJECT}(?:e-?mailed|mailed)\b{_NOT_ELSEWHERE}(?:\s+{_ADDRESS}|(?=\s+\w))", "email"),
     (rf"{_OPENING}e-?mail(?:ed)?\s+sent\s+to\b(?:\s+{_ADDRESS})?{_NOT_BY}", "email"),
@@ -434,35 +437,55 @@ def _writes(target: str, runs: tuple) -> str:
         dests = _destinations(base, args)
         if any(_same_path(target, d) for d in dests):
             best = _best([best, "exact" if certain else "plausible"])
-        elif base in _DESTROYERS or base in _WRITERS_LAST or base in _WRITERS_ALL or dests:
-            continue  # a delete, or a known writer writing elsewhere
+        elif base in _DESTROYERS or base in _WRITERS_LAST or base in _WRITERS_ALL or dests \
+                or base in READ_COMMANDS:
+            continue  # a delete, a known writer writing elsewhere, or a read naming the path
         elif _names(target, " ".join(args)):
             best = _best([best, "plausible"])
     return best
 
 
-# Options whose value is not a recipient: a subject, a sender, a body.
-_NOT_RECIPIENT_OPTIONS = frozenset({"-s", "--subject", "-f", "--from", "--mail-from", "--body",
-                                    "-h", "--header", "--add-header", "-r"})
-_NOT_RECIPIENT_PREFIXES = ("--subject=", "--from=", "--mail-from=", "--body=", "--header=")
+# Options whose value is not a recipient: a subject, a sender, a body, an
+# attachment, a header. curl addresses a mail ONLY through --mail-rcpt.
+_NOT_RECIPIENT_OPTIONS = frozenset({
+    "-s", "--subject", "-f", "--from", "--mail-from", "--body", "-h", "--header", "--add-header",
+    "-r", "-a", "--attach", "--attach-type", "-i", "-H", "-d", "--data", "--data-raw",
+    "--data-binary", "--data-urlencode", "-T", "--upload-file", "-u", "--user",
+})
+_NOT_RECIPIENT_PREFIXES = ("--subject=", "--from=", "--mail-from=", "--body=", "--header=",
+                           "--data=", "--attach=")
 
 
 def _recipients(prog: str, args: tuple[str, ...]) -> tuple[set[str], bool]:
-    """The addresses a mail invocation sends TO (not its subject, sender or
-    body), and whether one is held in a variable."""
+    """The addresses a mail invocation sends TO (not its subject, sender,
+    body or attachments), and whether one is held in a variable."""
     found: set[str] = set()
     variable = False
+    take_next = False  # the next argument is a recipient (curl --mail-rcpt X)
     skip = False
     for a in args:
         if a.startswith(("\n", "\t")):
             continue
+        if take_next:
+            take_next = False
+            variable |= a.startswith("$")
+            found |= _addresses(a)
+            continue
         if skip:
             skip = False
+            continue
+        if prog == "curl":
+            if a == "--mail-rcpt":
+                take_next = True
+            elif a.startswith("--mail-rcpt="):
+                value = a.split("=", 1)[1]
+                variable |= value.startswith("$")
+                found |= _addresses(value)
             continue
         if a in _NOT_RECIPIENT_OPTIONS:
             skip = True
             continue
-        if a.startswith(_NOT_RECIPIENT_PREFIXES) or a.lower().startswith(("smtp://", "smtps://")):
+        if a.startswith(_NOT_RECIPIENT_PREFIXES):
             continue
         if a.startswith("$"):
             variable = True
