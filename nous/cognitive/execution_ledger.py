@@ -129,6 +129,11 @@ Invocation = tuple[str, tuple[str, ...]]
 _MAX_INVOCATIONS = 64
 _MAX_INVOCATION_ARGS = 24
 _MAX_INVOCATION_ARG_CHARS = 120
+_MAX_HEREDOC_CHARS = 4000  # a heredoc body (a "\n"-prefixed argument) is judged as code
+
+
+def _bound_arg(arg: str) -> str:
+    return arg[:_MAX_HEREDOC_CHARS] if arg.startswith("\n") else arg[:_MAX_INVOCATION_ARG_CHARS]
 
 
 def bash_invocations(command: str, *, bound: bool = True) -> tuple[Invocation, ...] | None:
@@ -147,7 +152,7 @@ def bash_invocations(command: str, *, bound: bool = True) -> tuple[Invocation, .
     if len(found) > _MAX_INVOCATIONS:
         return None
     return tuple(
-        (prog, tuple(a[:_MAX_INVOCATION_ARG_CHARS] for a in args[:_MAX_INVOCATION_ARGS]))
+        (prog, tuple(_bound_arg(a) for a in args[:_MAX_INVOCATION_ARGS]))
         for prog, args in found
     )
 

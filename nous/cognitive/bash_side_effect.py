@@ -179,14 +179,45 @@ def command_invocations(command: str) -> list[tuple[str, list[str]]] | None:
 
 
 _MAX_STRING_DEPTH = 3
+# `<<DELIM` / `<<-DELIM` (not the `<<<` here-string), with its delimiter.
+_HEREDOC_OP = re.compile(r"(?<!<)<<(-?)(?!<)\s*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([\w.-]+))")
+
+
+def _split_heredocs(command: str) -> tuple[str, list[str]]:
+    """Cut every heredoc body out of ``command``; return it and the bodies in
+    order. A body is data handed to one command -- lexing it as commands read
+    `cat > runbook.md <<EOF ... git push ... EOF` as a push, and made a body
+    with an apostrophe unreadable. Unterminated, it runs to the end (bash)."""
+    lines = command.split("\n")
+    kept: list[str] = []
+    bodies: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        kept.append(line)
+        i += 1
+        for m in _HEREDOC_OP.finditer(line):
+            strip_tabs = m.group(1) == "-"
+            delim = m.group(2) or m.group(3) or m.group(4)
+            body: list[str] = []
+            while i < len(lines):
+                candidate = lines[i]
+                i += 1
+                if (candidate.lstrip("\t") if strip_tabs else candidate) == delim:
+                    break
+                body.append(candidate.lstrip("\t") if strip_tabs else candidate)
+            bodies.append("\n".join(body))
+    return "\n".join(kept), bodies
 
 
 def _invocations(command: str, depth: int) -> list[tuple[str, list[str]]] | None:
+    command, bodies = _split_heredocs(command)
     tokens = _lex(command)
     if tokens is None:
         return None
     simple: list[list[str]] = []
     words: list[str] = []
+    attached: list[str] = []  # heredoc bodies of the current simple command
     expect_target = False
     for tok, is_operator in tokens:
         if not is_operator:
@@ -198,17 +229,22 @@ def _invocations(command: str, depth: int) -> list[tuple[str, list[str]]] | None
         for op in _OPERATOR.findall(tok):
             if op in _OUTPUT_REDIRECTS or op in _INPUT_REDIRECTS or op == ">&":
                 expect_target = True
+                if op == "<<" and bodies:
+                    attached.append("\n" + bodies.pop(0))
             else:  # a command separator
-                simple.append(words)
-                words = []
-    simple.append(words)
+                simple.append(words + attached)
+                words, attached = [], []
+    simple.append(words + attached)
     found: list[tuple[str, list[str]]] = []
     for words in simple:
         start = _command_start(words)
         if start is None:
             continue
-        prog, args = _program(words[start]), words[start + 1:]
-        inner = _command_string(prog, args)
+        word = words[start]
+        prog, args = _program(word), words[start + 1:]
+        if "/" in word.replace("\\", "/"):
+            prog = "./" + prog  # path-qualified: a script or a local build, marked as such
+        inner = command_string(prog, args)
         if inner is not None and depth < _MAX_STRING_DEPTH:
             sub = _invocations(inner, depth + 1)
             if sub is not None:
@@ -221,7 +257,21 @@ def _invocations(command: str, depth: int) -> list[tuple[str, list[str]]] | None
 _SSH_VALUE_OPTIONS = frozenset("bBcDEeFIiJLlmOopQRSWw")
 
 
-def _command_string(prog: str, args: list[str]) -> str | None:
+def _env_split_string(args: list[str]) -> str | None:
+    """The string `env -S` runs, past env's options and assignments."""
+    for j, a in enumerate(args):
+        if a in ("-S", "--split-string"):
+            return args[j + 1] if j + 1 < len(args) else ""
+        if a.startswith("-S"):
+            return a[2:]
+        if a.startswith("--split-string="):
+            return a.split("=", 1)[1]
+        if not a.startswith("-") and not _ASSIGNMENT.match(a):
+            break
+    return None
+
+
+def command_string(prog: str, args: list[str]) -> str | None:
     """The command STRING an invocation runs, when it runs one that can be
     found; None when it runs a file, a session, or nothing of the kind."""
     if prog in _SHELLS:
@@ -235,16 +285,7 @@ def _command_string(prog: str, args: list[str]) -> str | None:
     if prog == "eval":
         return " ".join(args)
     if prog == "env":
-        for j, a in enumerate(args):
-            if a in ("-S", "--split-string"):
-                return args[j + 1] if j + 1 < len(args) else ""
-            if a.startswith("-S"):
-                return a[2:]
-            if a.startswith("--split-string="):
-                return a.split("=", 1)[1]
-            if not a.startswith("-"):
-                break
-        return None
+        return _env_split_string(args)
     if prog in ("flock", "watch"):
         start = _wrapped_command_start(prog, [prog, *args], 1)
         return start if isinstance(start, str) else None
@@ -252,7 +293,8 @@ def _command_string(prog: str, args: list[str]) -> str | None:
         i = 0
         while i < len(args) and args[i].startswith("-"):
             flags = _short_flags(args[i])
-            i += 2 if len(flags) == 1 and flags in _SSH_VALUE_OPTIONS else 1
+            # the LAST letter of a cluster may take the next word: `-vp 2222`
+            i += 2 if flags and flags[-1] in _SSH_VALUE_OPTIONS and len(flags) <= 2 else 1
         rest = args[i + 1:]  # after the host
         return " ".join(rest) if rest else None
     return None
@@ -283,8 +325,10 @@ def _command_start(words: list[str]) -> int | None:
             return None
         prog = _program(words[i])
         if prog == "env":
+            if _env_split_string(words[i + 1:]) is not None:
+                return i  # env -S: a command string, read by command_string
             start = _env_command_start(words, i + 1)
-            if start is None:  # env -S: a command string
+            if start is None:
                 return i
         elif prog in _WRAPPERS:
             start = _wrapped_command_start(prog, words, i + 1)

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
-from nous.cognitive.bash_side_effect import git_subcommand
+from nous.cognitive.bash_side_effect import command_string, git_subcommand
 from nous.cognitive.execution_ledger import Invocation, bash_invocations
 
 if TYPE_CHECKING:
@@ -103,7 +103,7 @@ class Claim:
 _FIRST = (r"(?<!\bas )\b(?-i:I)(?:['’]ve|\s+have)?"  # "As I wrote earlier, ..." narrates
           r"(?:\s+(?:just|already|also|then|now|successfully|finally)){0,2}\s+")
 _CLAIM_VERBS = (r"(?:saved|wrote|written|created|generated|exported|stored|sent|emailed"
-                r"|forwarded|mailed|pushed|committed|deployed)\b")
+                r"|forwarded|mailed|pushed|committed|(?:re)?deployed)\b")
 # The second clause of a FIRST-PERSON compound ("I saved X and sent Y"); only
 # accepted when a first-person CLAIM ("I" + claim verb) appears earlier in the
 # same CLAUSE -- "I checked: the DAG ran and sent the email" and "As I wrote
@@ -130,38 +130,59 @@ _ADDRESS = r"(?P<target>[\w.+-]+@[\w-]+(?:\.[\w-]+)+)"
 _SUBJECT = rf"(?P<subj>{_FIRST}|{_AND})"
 # The effect landed somewhere no file / git / deploy tool reaches: memory, a
 # fact, the companion app, a micro-app, or the reply itself ("the report
-# below").
+# below"). A Nous artifact counts only as the HEAD of its phrase: "the
+# dashboard changes" and "the surface renderer fix" are commits.
+_ARTIFACT = (r"(?:companion(?:\s+app)?|dashboards?|micro-?apps?|surfaces?|cards?)"
+             r"(?!\s+(?:changes?|fix(?:es)?|repo(?:sitory)?|branch|renderer|fixtures?|code|pwa"
+             r"|app|components?|tests?|bugs?|features?|modules?|files?|PR|pipeline|build"
+             r"|package|directory|folder|source|css|js|ts|svelte|refactor|update|patch)\b)"
+             r"(?![/\\-]|\.\w)")  # not a path such as /tmp/dashboard.md; a final "." is fine
 _NOT_ELSEWHERE = (r"(?!(?:[^.\n;]|\.(?=\S)){0,80}?"
                   r"(?:\b(?:to|in|into|on|as)\s+(?:your\s+|my\s+|the\s+|a\s+|an\s+)?"
-                  r"(?:memory|companion(?:\s+app)?|dashboard|chat|facts?|knowledge\s+base)\b"
-                  r"|\b(?:micro-?apps?|surfaces?|cards?|dashboards?|companion)\b(?![./\\-])"
+                  rf"(?:memory|chat|facts?|knowledge\s+base|{_ARTIFACT})\b"
+                  r"|\b(?:a|an|the|your|my|this|new|live|report|summary|health|status|interactive)"
+                  rf"\s+(?:(?:live|report|summary|health|status|interactive)\s+)?{_ARTIFACT}"
                   r"|\b(?:report|summary|draft|notes?|text|content|version|it)\s+(?:below|above)\b))")
 _DET = r"(?:(?:the|a|an|my|our|your|this|that|these|those|all|some|both|every|each)\s+)?"
 _VCS_NOUN = (r"(?:branch(?:es)?|commits?|fix(?:es)?|changes?|patch(?:es)?|PRs?|pull\s+requests?"
              r"|tags?|code|repo(?:sitory)?|remote|origin|main|master|upstream|refactor|features?"
              r"|hotfix(?:es)?|updates?|work|files?|edits?|diffs?|version|release|migrations?"
-             r"|tests?|docs|v\d[\w.-]*)")
+             r"|tests?|docs|latest|v\d[\w.-]*|fixtures?|configs?|scripts?|schemas?|models?"
+             r"|components?|modules?|assets?|templates?|specs?|manifest|lockfile|snapshots?"
+             r"|renames?|cleanup|typos?|readme|changelog|deps|dependencies|workflow|ci)")
+# A push "to Friday", "to the wiki", "to the device" is not a git push.
+_NOT_A_GIT_DESTINATION = (r"(?![^.\n;]{0,40}?\b(?:to|until|till)\s+(?:next|tomorrow|later|monday"
+                          r"|tuesday|wednesday|thursday|friday|saturday|sunday|\d|q[1-4]\b|the\s+"
+                          r"(?:wiki|device|afternoon|morning|evening|weekend|team|user|client)"
+                          r"|january|february|march|april|may|june|july|august|september|october"
+                          r"|november|december))")
 # What was pushed or committed must be a version-control object: the head of
 # the object phrase, or a bare pronoun -- "I pushed the fix", "I pushed it",
 # "I committed and pushed", never "I pushed back", "I pushed an approval
 # card", "I committed to a code freeze".
-_VCS_OBJECT = (r"(?=\s+(?!(?:for|back|hard|on|through|ahead|past|against|forward|toward|towards"
-               r"|into|in|out|over|off|away|to|at|with)\b)"
+_VCS_OBJECT = (rf"{_NOT_A_GIT_DESTINATION}"
+               r"(?=\s+(?!(?:for|back|hard|on|through|ahead|past|against|forward|toward|towards"
+               r"|into|in|out|over|off|away|to|at)\b)"
                rf"{_DET}(?:[\w-]+\s+){{0,2}}?{_VCS_NOUN}\b"
                r"|\s+(?:it|them|that|this|those|these|everything|all)\b"
                r"(?:\s+(?:up|too|as\s+well|again))?\s*(?:[.;:!?,)]|$|\b(?:and|to|onto|up)\b)"
-               r"|\s*(?:[.;:!?,)]|$)|\s+(?:and|then)\b)")
-# What was deployed: a build/release/service, a pronoun, or a destination.
+               r"|\s+to\s+(?:origin|github|gitlab|bitbucket|upstream|main|master"
+               r"|the\s+(?:remote|repo(?:sitory)?|branch|server))\b"
+               r"|\s+with\b|\s*(?:[.;:!?,)]|$)|\s+(?:and|then)\b|\s+—)")
+# What was deployed: a build/release/service, a pronoun, a destination, or
+# nothing at all ("I deployed.").
 _DEPLOY_OBJECT = (rf"(?=\s+{_DET}(?:[\w-]+\s+){{0,2}}?(?:builds?|releases?|fix(?:es)?|changes?"
                   r"|services?|apps?|applications?|sites?|versions?|images?|containers?|updates?"
                   r"|code|branch|hotfix(?:es)?|patch(?:es)?|migrations?)\b"
-                  r"|\s+(?:it|them|that|this|everything)\b|\s+to\s+\S)")
+                  r"|\s+(?:it|them|that|this|everything)\b|\s+to\s+\S|\s*(?:[.;:!?,)]|$))")
 # Line- or sentence-initial: "Email sent to x", "Done. Saved to /tmp/x.md".
 _OPENING = r"(?:(?<![^\n])|(?<=[.!?]\s)|(?<=[✓✅]\s))"
-# "... by the scheduled task": someone else's completion, not the agent's.
-# Dots inside words pass, or the target would shrink to `/srv/q3` to keep
-# ".md by" out of reach.
-_NOT_BY = r"(?!(?:[^.\n;]|\.(?=\S)){0,60}?\bby\s+(?!me\b|myself\b)[\w$])"
+# "... by the scheduled task": someone else's completion, not the agent's;
+# "by 9am" and "by me" are not. Dots inside words pass, or the target would
+# shrink to `/srv/q3` to keep ".md by" out of reach.
+_NOT_BY = (r"(?!(?:[^.\n;]|\.(?=\S)){0,60}?\bby\s+(?!me\b|myself\b|\d|noon\b|midnight\b|tonight\b"
+           r"|tomorrow\b|end\b|eod\b|eob\b|then\b|now\b|the\s+end\b)[\w$])")
+_MESSAGE = r"\b(?:e-?mail|message|report|note|reminder|summary|heads-up|invite|notification|alert|digest)\b"
 
 # (pattern, kind). Patterns that open with the subject group are claims only
 # under the first-person rule in _extract_claims; the targeted file pattern
@@ -174,13 +195,16 @@ _CLAIM_PATTERNS: list[tuple[str, str]] = [
     # actor-less completion: past tense ("was saved to") or an opening ("Saved to")
     (rf"\b(?:was|were|been|got)\s+(?:saved|written)\s+to[:\s]+{_PATH}{_NOT_BY}", "file_write"),
     (rf"{_OPENING}(?:saved|written)\s+to[:\s]+{_PATH}{_NOT_BY}", "file_write"),
-    (rf"{_SUBJECT}(?:sent|emailed|forwarded|mailed)\b{_NOT_ELSEWHERE}{_OBJECT}"
-     r"\b(?:e-?mail|message|report)\b", "email"),
+    (rf"{_SUBJECT}(?:sent|forwarded)\b{_NOT_ELSEWHERE}{_OBJECT}{_MESSAGE}", "email"),
+    # "I sent it to Tim by email": the object may run through "to <person>"
+    (rf"{_SUBJECT}(?:sent|forwarded)\b{_NOT_ELSEWHERE}(?:[^.\n;,—]|\.(?=\S)){{0,60}}?\bby\s+e-?mail\b",
+     "email"),
+    (rf"{_SUBJECT}(?:e-?mailed|mailed)\b{_NOT_ELSEWHERE}(?=\s+\w)", "email"),
     (rf"{_OPENING}e-?mail(?:ed)?\s+sent\s+to\b(?:\s+{_ADDRESS})?{_NOT_BY}", "email"),
     (rf"\be-?mail\s+(?:was|has\s+been|got)\s+sent\s+to\b(?:\s+{_ADDRESS})?{_NOT_BY}", "email"),
     (rf"{_SUBJECT}pushed\b{_NOT_ELSEWHERE}{_VCS_OBJECT}", "vcs_push"),
     (rf"{_SUBJECT}committed\b{_NOT_ELSEWHERE}{_VCS_OBJECT}", "vcs_commit"),
-    (rf"{_SUBJECT}deployed\b{_NOT_ELSEWHERE}{_DEPLOY_OBJECT}", "deploy"),
+    (rf"{_SUBJECT}(?:re)?deployed\b{_NOT_ELSEWHERE}{_DEPLOY_OBJECT}", "deploy"),
 ]
 _FIRST_RE = re.compile(_FIRST, re.IGNORECASE)
 _FIRST_CLAIM_RE = re.compile(_FIRST + _CLAIM_VERBS, re.IGNORECASE)
@@ -225,8 +249,9 @@ _MAIL_SENDERS = frozenset({"sendmail", "msmtp", "ssmtp", "swaks"})
 _TRANSFERS = frozenset({"rsync", "scp", "ansible-playbook"})
 _DEPLOY_CLIS = frozenset({
     "docker", "docker-compose", "podman", "kubectl", "helm", "kustomize", "skaffold", "systemctl",
-    "terraform", "pulumi", "ansible", "gcloud", "aws", "az", "vercel", "netlify", "fly", "flyctl",
-    "railway", "firebase", "wrangler", "serverless", "sls", "heroku", "eb", "nomad",
+    "service", "supervisorctl", "pm2", "terraform", "pulumi", "ansible", "gcloud", "aws", "az",
+    "vercel", "netlify", "fly", "flyctl", "railway", "firebase", "wrangler", "serverless", "sls",
+    "heroku", "eb", "nomad", "cap",
 })
 # A deploy CLI's subcommand that CHANGES something: `kubectl get pods`,
 # `docker logs`, `aws s3 ls` look at a deployment.
@@ -235,27 +260,33 @@ _DEPLOY_CHANGE = frozenset({
     "rollback", "publish", "release", "promote", "push", "run", "scale", "set", "sync", "cp",
     "destroy", "update", "create", "patch", "replace", "expose", "enable", "disable",
     "daemon-reload", "update-service", "update-function-code", "create-deployment",
+    "container:release", "container:push", "releases:rollback", "ps:restart",
 })
 _TASK_RUNNERS = frozenset({
-    "make", "just", "npm", "npx", "pnpm", "yarn", "uv", "poetry", "pipenv", "tox", "nox",
-    "invoke", "fab", "rake", "gradle", "mvn",
+    "make", "just", "npm", "npx", "pnpm", "yarn", "uv", "poetry", "pipenv", "pdm", "hatch", "tox",
+    "nox", "invoke", "fab", "rake", "gradle", "mvn",
 })
+_PY_RUNNERS = frozenset({"uv", "poetry", "pipenv", "pdm", "hatch"})  # `uv run python ...`
 _INTERPRETERS = frozenset({"python", "python3", "node", "deno", "bun", "perl", "ruby", "php"})
 # Programs whose command string could not be read (see command_invocations).
 _RUNNERS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "su", "eval", "env", "flock", "watch",
                       "ssh"})
 _SCRIPT = re.compile(r"\.(?:sh|bash|zsh|py|js|mjs|ts|rb|pl|php)\Z")
-# What an interpreter, script or task runner must MENTION for its run to
-# possibly have produced the claimed effect: `uv run python export.py` may have
-# exported; `uv sync` and `python3 --version` cannot have pushed anything.
+# A test run cannot have pushed, sent or deployed anything on purpose.
+_TESTY = re.compile(r"(?:^|[\s/])(?:pytest|unittest|tox|nox)\b|(?:^|/)tests?/|(?:^|/)test_\w*\.py\b"
+                    r"|_test\.(?:py|js|ts)\b|\.spec\.[jt]s\b")
+# What a TASK RUNNER must mention for its run to possibly have produced the
+# claimed effect: `just release` may have pushed; `make lint` cannot have.
 _HINTS = {
-    "vcs_push": re.compile(r"push|commit|git|release|publish|deploy|ship", re.I),
-    "vcs_commit": re.compile(r"push|commit|git|release|publish|deploy|ship", re.I),
-    "email": re.compile(r"mail|smtp|send|notify|telegram|@|message|alert|digest|report", re.I),
-    "deploy": re.compile(r"deploy|release|rollout|restart|publish|ship|\bup\b|apply|install|upgrade",
-                         re.I),
+    "vcs_push": re.compile(r"push|commit|git|release|publish|deploy|ship|bump|version|tag", re.I),
+    "vcs_commit": re.compile(r"push|commit|git|release|publish|deploy|ship|bump|version|tag", re.I),
+    "email": re.compile(r"mail|smtp|send|notify|telegram|@|message|alert|digest|report|brief"
+                        r"|dispatch|post|outreach|slack|announce|deliver|share|publish", re.I),
+    "deploy": re.compile(r"deploy|release|rollout|restart|publish|ship|\bup\b|apply|start|serve"
+                         r"|launch|promote", re.I),
     "file_write": re.compile(r"write|save|export|report|generat|build|render|\bout|dump|convert"
-                             r"|create|compile|backup|make", re.I),
+                             r"|create|compile|backup|plot|chart|fig|draw|snapshot|archive|pack",
+                             re.I),
 }
 _LEVELS = {"none": 0, "plausible": 1, "exact": 2}
 
@@ -290,14 +321,16 @@ def _git_does(args: tuple[str, ...], sub: str) -> bool:
 
 
 def _positional(args: tuple[str, ...]) -> list[str]:
-    return [a for a in args if not a.startswith("-")]
+    return [a for a in args if not a.startswith("-") and not a.startswith("\n")]
 
 
 def _does(kind: str, prog: str, args: tuple[str, ...]) -> bool:
     """True if one invocation produces the claimed effect."""
+    positional = _positional(args)
     if kind == "vcs_push":
         return ((prog == "git" and _git_does(args, "push"))
-                or (prog == "docker" and _positional(args)[:1] == ["push"]))
+                or (prog == "docker" and positional[:1] == ["push"])
+                or prog in _TRANSFERS)  # "I pushed the files to the server with rsync"
     if kind == "vcs_commit":
         return prog == "git" and _git_does(args, "commit")
     if kind == "email":
@@ -311,40 +344,83 @@ def _does(kind: str, prog: str, args: tuple[str, ...]) -> bool:
     # deploy: a deploy or transfer tool doing something, not any network call
     # and not a look at a deployment
     if prog == "git":
-        return _git_does(args, "push")
+        return _git_does(args, "push") or _git_does(args, "pull")
     if prog in _TRANSFERS or "deploy" in prog:
         return True
-    positional = _positional(args)
+    if prog == "gh":
+        return positional[:2] == ["workflow", "run"]
     if prog in _TASK_RUNNERS:
-        return any(p in ("deploy", "release", "publish", "ship") or "deploy" in p for p in positional)
+        return any(p in ("deploy", "release", "publish", "ship", "start", "serve") or "deploy" in p
+                   for p in positional)
     if prog in _DEPLOY_CLIS:
         return ((prog == "vercel" and not positional) or any(p in _DEPLOY_CHANGE for p in positional)
                 or any(a in ("--prod", "--production") for a in args))
     return False
 
 
-def _python_c(prog: str, args: tuple[str, ...]) -> str | None:
-    """The code of `python -c CODE`, which is judged as code."""
-    if (prog in ("python", "python3") or prog.startswith("python3.")) and "-c" in args:
-        i = args.index("-c")
-        return args[i + 1] if i + 1 < len(args) else ""
-    return None
+def _python_code(prog: str, args: tuple[str, ...]) -> str | None:
+    """The code an invocation runs when it is right there: `python -c CODE`,
+    or a script fed on stdin by a heredoc (`python3 - <<EOF`)."""
+    if prog in _PY_RUNNERS and args[:1] == ("run",):
+        for i, a in enumerate(args[1:], 1):
+            if a in _INTERPRETERS or a.startswith("python3."):
+                return _python_code(a, args[i + 1:])
+            if not a.startswith("-"):
+                return None
+        return None
+    if not (prog in ("python", "python3") or prog.startswith("python3.")):
+        return None
+    body = next((a[1:] for a in args if a.startswith("\n")), None)
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "-c":
+            return args[i + 1] if i + 1 < len(args) else ""
+        if a.startswith("-c") and not a.startswith("--"):
+            return a[2:]
+        if a == "-" or a.startswith("\n"):
+            return body
+        if a in ("-m", "-W", "-X", "-Q"):
+            return None if a == "-m" else _skip_value(args, i)
+        if not a.startswith("-"):
+            return None  # a script file: python's options come before it
+        i += 1
+    return body
+
+
+def _skip_value(args: tuple[str, ...], i: int) -> str | None:
+    return _python_code("python", args[i + 2:]) if i + 2 <= len(args) else None
+
+
+def _is_script(prog: str) -> bool:
+    return bool(_SCRIPT.search(prog)) or prog.startswith("./")
+
+
+def _runs_file(args: tuple[str, ...]) -> bool:
+    """An interpreter given a script file or a module: it decides its own effects."""
+    return "-m" in args or any(_SCRIPT.search(a) for a in _positional(args))
 
 
 def _opaque_for(kind: str, prog: str, args: tuple[str, ...]) -> bool:
     """A run this reader cannot see into that could have produced the effect."""
-    if prog in _RUNNERS:
+    if _python_code(prog, args) is not None:
+        return False  # the code is right there: judged as code
+    if prog in _RUNNERS and command_string(prog, list(args)) is not None:
         return True  # its command string could not be read
-    if _python_c(prog, args) is not None:
+    text = " ".join((prog, *args))
+    if _TESTY.search(text):
         return False
-    if prog in _INTERPRETERS or prog in _TASK_RUNNERS or prog.startswith("python3.") \
-            or _SCRIPT.search(prog):
-        return bool(_HINTS[kind].search(" ".join((prog, *args))))
+    if prog in _RUNNERS:
+        return prog != "ssh" and _runs_file(args) and bool(_HINTS[kind].search(text))
+    if prog in _INTERPRETERS or prog.startswith("python3."):
+        return _runs_file(args) and bool(_HINTS[kind].search(text))
+    if _is_script(prog) or prog in _TASK_RUNNERS:
+        return bool(_HINTS[kind].search(text))
     return False
 
 
 def _code_level(claim: Claim, code: str) -> str:
-    """Evidence from Python source: a run_python call, or `python -c`."""
+    """Evidence from Python source: a run_python call, `python -c`, or a heredoc."""
     if claim.kind == "file_write":
         if not _PY_WRITES.search(code):
             return "none"
@@ -364,10 +440,10 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
     """Evidence from one successful bash call.
 
     Only a command this reader READ can disprove a claim: an unreadable one
-    (``runs is None`` -- a heredoc body with an apostrophe, a quote cut in
-    half) is ``plausible``, and so is one that runs something opaque that
-    hints at the effect. A non-zero exit is the LAST command's status: it
-    disproves only an effect that command produced.
+    (``runs is None`` -- a quote cut in half, past the ledger's cap) is
+    ``plausible``, and so is one that runs something opaque (a script, a
+    hinted task) that could have produced the effect. A non-zero exit is the
+    LAST command's status: it disproves only an effect that command produced.
     """
     runs = ev.runs
     if runs is None:
@@ -376,7 +452,7 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
     failed = ev.exit_code not in (None, 0)
     opaque = any(_opaque_for(claim.kind, prog, args) for prog, args in runs)
     levels = [_code_level(claim, code) for prog, args in runs
-              if (code := _python_c(prog, args)) is not None]
+              if (code := _python_code(prog, args)) is not None]
     if claim.kind == "file_write":
         if ev.side_effect not in ("write", "external"):
             levels.append("none")  # a read cannot have saved anything
@@ -398,7 +474,8 @@ def _bash_level(claim: Claim, ev: Evidence) -> str:
         # a recipient held in a variable may be the named one
         variable = any(a.startswith("$") for i in hits for a in runs[i][1])
         levels.append("plausible" if opaque or variable else "none")
-    elif claim.kind in ("vcs_push", "vcs_commit") and not failed:
+    elif claim.kind in ("vcs_push", "vcs_commit") and not failed \
+            and any(runs[i][0] in ("git", "docker") for i in hits):
         levels.append("exact")
     else:
         levels.append("plausible")

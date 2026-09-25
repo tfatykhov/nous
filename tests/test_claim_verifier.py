@@ -626,3 +626,109 @@ def test_help_and_queue_listing_do_nothing():
     assert not _verify("I pushed the fix.", _real_bash("git push --help")).verified
     assert not _verify("I sent the email.", _real_bash("sendmail -bp")).verified
     assert _verify("I sent the email.", _real_bash("sendmail -t < mail.txt")).verified
+
+
+# --- review round 3 ------------------------------------------------------------
+
+_HEREDOC_SCRIPT = ("python3 - <<'EOF'\nimport smtplib\ns = smtplib.SMTP('h')\n"
+                   "s.sendmail('me', 'alice@x.io', 'msg')\nEOF")
+
+
+@pytest.mark.parametrize("command", [
+    _HEREDOC_SCRIPT,
+    "uv run python - <<'EOF'\nimport smtplib\nsmtplib.SMTP('h').sendmail(a, b, m)\nEOF",
+    "python3 - <<'EOF'\n# don't\nimport smtplib\nsmtplib.SMTP('h')\nEOF",  # an apostrophe in the body
+])
+def test_a_script_fed_by_heredoc_is_judged_as_code(command):
+    assert _verify("I sent the email to alice@x.io.", _real_bash(command)).verified
+    assert not _verify("I pushed the fix.", _real_bash(command)).verified
+
+
+def test_a_heredoc_push_in_python_is_a_push():
+    cmd = "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['git', 'push', 'origin', 'main'])\nEOF"
+    assert _verify("I pushed the fix.", _real_bash(cmd)).verified
+
+
+@pytest.mark.parametrize("claim, command", [
+    ("I pushed the fix to main.", "cat <<'EOF' > notes.md\nTODO:\ngit push origin main\nEOF"),
+    ("I pushed the fix to main.", "cat > runbook.md <<'EOF'\n# Runbook\ngit push origin main\nEOF"),
+    ("I committed the fix.", "tee -a HOWTO.md <<'EOF'\ngit commit -am wip\nEOF"),
+    ("I deployed the fix to prod.", "cat > deploy.sh <<'EOF'\n#!/bin/bash\ndocker compose up -d\nEOF"),
+    ("I sent the email.", "cat > send.sh <<'EOF'\nsendmail alice@x.io < body.txt\nEOF"),
+])
+def test_text_written_through_a_heredoc_did_not_run(claim, command):
+    assert not _verify(claim, _real_bash(command)).verified
+
+
+@pytest.mark.parametrize("claim, command", [
+    ("I sent the email to alice@x.io.", "python3 scripts/daily_brief.py"),
+    ("I sent the email to the team.", "python3 scripts/outreach.py --to team"),
+    ("I sent the email.", "uv run python -m nous.tools.dispatch"),
+    ("I sent the message to Telegram.", "node bin/post.js"),
+    ("I deployed the release.", "./bin/release"),
+    ("I deployed the fix to prod.", "npm run build && npm start"),
+    ("I deployed the app.", "pm2 restart app"),
+    ("I deployed the app.", "supervisorctl restart nous"),
+    ("I deployed the app.", "service nginx restart"),
+    ("I deployed the app.", "cap production deploy"),
+    ("I deployed the app.", "heroku container:release web"),
+    ("I deployed the app.", "gh workflow run deploy.yml"),
+    ("I committed the version bump.", "uv run cz bump"),
+    ("I committed the version bump.", "npm version patch"),
+    ("I saved the chart to /tmp/chart.png.", "python3 scripts/plot.py"),
+    ("I sent the email to alice@x.io.", "python3 scripts/gen_report.py -c cfg.yaml"),  # its own -c
+    ("I pushed the files to the server with rsync.", "rsync -a build/ host:/srv"),
+    ("I pushed the fix to main.", "ssh -vp 2222 host 'git push origin main'"),
+    ("I pushed the fix to main.", "env FOO=1 -S 'git push origin main'"),
+])
+def test_a_real_action_through_an_unhinted_program_is_not_a_violation(claim, command):
+    assert _verify(claim, _real_bash(command)).verified
+
+
+@pytest.mark.parametrize("claim, command", [
+    ("I pushed the fix to main.", "uv run pytest tests/test_push.py"),
+    ("I committed the fix.", "uv run pytest -q -k commit"),
+    ("I saved the report to /tmp/report.md.", "make lint"),  # an untargeted file claim + any write stays plausible
+    ("I deployed the fix.", "npm install"),
+    ("I deployed the fix.", "pip install gitpython"),
+    ("I sent the email to alice@x.io.", "ssh host"),
+    ("I sent the email to alice@x.io.", "ssh -i k host"),
+])
+def test_tests_installs_and_sessions_ground_nothing(claim, command):
+    assert not _verify(claim, _real_bash(command)).verified
+
+
+@pytest.mark.parametrize("text, kinds", [
+    ("I committed the dashboard changes.", ["vcs_commit"]),
+    ("I pushed the surface renderer fix.", ["vcs_push"]),
+    ("I committed the micro-app fixture.", ["vcs_commit"]),
+    ("I pushed the branch to the dashboard repo.", ["vcs_push"]),
+    ("I committed and pushed the companion PWA fix.", ["vcs_commit", "vcs_push"]),
+    ("I pushed to origin/main.", ["vcs_push"]),
+    ("I've pushed to GitHub.", ["vcs_push"]),
+    ("I committed with message 'fix: x'.", ["vcs_commit"]),
+    ("I pushed the latest.", ["vcs_push"]),
+    ("I deployed.", ["deploy"]),
+    ("I redeployed the service.", ["deploy"]),
+    ("I emailed Tim.", ["email"]),
+    ("I emailed the summary to Tim.", ["email"]),
+    ("I sent Tim a note about it.", ["email"]),
+    ("I've emailed it.", ["email"]),
+    ("I sent it to Tim by email.", ["email"]),
+    ("Saved to /tmp/r.md by 9am.", ["file_write"]),
+    ("Email sent to alice@x.io by 09:00 UTC.", ["email"]),
+])
+def test_this_repos_vocabulary_and_common_phrasings_are_claims(text, kinds):
+    assert [k for k, _ in _kinds(text)] == kinds
+
+
+@pytest.mark.parametrize("text", [
+    "I created a report dashboard with the Q3 numbers.",
+    "I deployed a live dashboard for your health metrics.",
+    "I pushed the release to Friday.",
+    "I pushed the code review to next week.",
+    "I pushed the new docs to the wiki.",
+    "I pushed the update to the device over USB.",
+])
+def test_artifacts_schedules_and_devices_are_not_vcs_or_file_claims(text):
+    assert _kinds(text) == []

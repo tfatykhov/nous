@@ -1148,7 +1148,7 @@ class TestCommandInvocations:
     def test_unreadable_is_none_not_empty(self):
         from nous.cognitive.bash_side_effect import command_invocations
 
-        assert command_invocations("cat > x <<'EOF'\nIt's\nEOF") is None  # unbalanced quote
+        assert command_invocations("echo \"it's") is None                # unbalanced quote
         assert command_invocations("x " * 40_000) is None                  # over the size cap
         assert command_invocations("FOO=1") == []                          # read: nothing runs
 
@@ -1194,3 +1194,61 @@ class TestCommandStrings:
 
         found = command_invocations("eval " * 6 + "git push")
         assert found is not None and found[0][0] == "eval"  # stops at the depth bound, never raises
+
+
+class TestHeredocs:
+    """A heredoc body is data handed to one command, never commands."""
+
+    def test_the_body_is_one_argument_of_its_command(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        found = command_invocations("python3 - <<'EOF'\nimport smtplib\nx = 1\nEOF\ngit push")
+        assert [p for p, _ in found] == ["python3", "git"]
+        assert found[0][1] == ["-", "\nimport smtplib\nx = 1"]
+
+    def test_an_apostrophe_in_the_body_is_readable(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("cat > x <<'EOF'\nIt's\nEOF") == [("cat", ["\nIt's"])]
+
+    def test_dash_strips_leading_tabs_and_two_heredocs_stay_in_order(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("cat <<-EOF\n\thi\n\tEOF") == [("cat", ["\nhi"])]
+        found = command_invocations("diff <(cat <<A\na\nA\n) - <<B\nb\nB")
+        assert found is not None and any(a == "\nb" for _, args in found for a in args)
+
+    def test_an_unterminated_heredoc_takes_the_rest(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("cat <<EOF\ngit push\nmore") == [("cat", ["\ngit push\nmore"])]
+
+    def test_a_here_string_is_not_a_heredoc(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("grep x <<< 'git push'") == [("grep", ["x"])]
+
+    def test_the_ledger_keeps_enough_of_a_body_to_judge_it(self):
+        body = "# " + "x" * 500 + "\nimport smtplib\n"
+        cmd = "python3 - <<'EOF'\n" + body + "EOF"
+        action = ExecutionLedger(session_id="s").record("bash", {"command": cmd}, "Exit code: 0", "success")
+        assert "smtplib" in action.invocations[0][1][-1]
+
+
+class TestOptionClusters:
+    def test_ssh_value_option_at_the_end_of_a_cluster(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("ssh -vp 2222 host 'git push'") == [("git", ["push"])]
+
+    def test_env_assignments_before_split_string(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("env FOO=1 -S 'git push'") == [("git", ["push"])]
+
+    def test_a_path_qualified_program_keeps_its_mark(self):
+        from nous.cognitive.bash_side_effect import command_invocations
+
+        assert command_invocations("./bin/release prod") == [("./release", ["prod"])]
+        assert command_invocations("/usr/bin/git push") == [("./git", ["push"])]
+        assert _classify_bash_command("/usr/bin/git push") == "external"  # the classifier is unchanged
