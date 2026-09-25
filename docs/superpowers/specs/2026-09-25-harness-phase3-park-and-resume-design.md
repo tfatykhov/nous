@@ -423,7 +423,11 @@ failure steps, for each `awaiting_input` node:
   instead of a re-push, which would replace the card the person may be tapping;
 - else, `surface_id IS NULL`, or its linked card is no longer live (one
   `SurfaceService.live_ids(surface_ids)` query per tick over the waiting nodes) → push again
-  (§3.4 steps 2–3; the link write re-links from the dead card's id). A card lost for any reason
+  (§3.4 steps 2–3). A dead link is first cleared conditionally (`card=<dead id>`,
+  `surface_id=NULL`), so the re-push is a first push: a tap on the new card before its link is
+  recorded (a node still linked to the dead card would refuse it as `stray_card`), the sweep leaves
+  the unlinked card alone, and a link write that fails heals by adoption on the next tick instead of
+  a third card and ping. A card lost for any reason
   heals on the next tick instead of leaving the question unasked until the deadline. The node row
   is re-read immediately before a re-push — the tick's copy may predate a tap that answered it
   through the unlinked card, and pushing then would create a fresh card and ping for an answered
@@ -506,8 +510,8 @@ successor is `pending`) and decide whether to let them announce or mark them del
 | `_handle_budget_exceeded` | Cancels `awaiting_input` like `awaiting_check`, via `_finish_approval`. |
 | Reaper, stall detection, `_sync_node_statuses` | Act on `running` only. |
 | F064.2 frame caps | `approval` is not subtask-backed, so it is cap-exempt like `check`. |
-| `_check_dag_completion` | `awaiting_input` is non-terminal, so the DAG waits. |
-| `_recover_stale_ready_nodes` | Unchanged; with park-first an approval node is never left `ready` across a crash for long. |
+| `_check_dag_completion` | `awaiting_input` is non-terminal, so the DAG waits. The terminal DAG write (and the budget path's) is `DAGStore.finalize_dag`, conditional on the rows: the DAG still live and no node non-terminal. It decides from the tick's snapshot, and a retry that landed after the load — the companion's Retry is the designed way to re-ask — would otherwise be finalized over, leaving pending nodes in a `failed` DAG that no retry or cancel can move. The budget path re-reads the DAG when one of its cancels lost. |
+| `_recover_stale_ready_nodes` | Its `ready → pending` write is conditional (§3.3), so a cancel that landed after the load is not undone. With park-first an approval node is never left `ready` across a crash for long. |
 | Harness 2a policy | An approval does not widen `dag_node`'s tool policy: an approved successor still cannot call an irreversible tool under `enforce`. |
 | Harness 2b keys | The scope `dag:{dag_id}:{node_name}` holds across stop, retry and proceed, because the successor never ran. |
 

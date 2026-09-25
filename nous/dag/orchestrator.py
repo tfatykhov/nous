@@ -86,6 +86,7 @@ from nous.dag.store import (
     LIVE_DAG_STATUSES,
     MAX_ACTIVE_DAGS,
     TERMINAL_DAG_STATUSES,
+    TERMINAL_NODE_STATUSES,
     DAGStore,
 )
 from nous.heart.subtasks import SubtaskQueueFull
@@ -104,7 +105,7 @@ logger = logging.getLogger(__name__)
 # F066.1: 'skipped' is a terminal state introduced by skip_and_continue
 # fix action; it behaves like 'completed' for dependency resolution but
 # is distinguished in telemetry.
-_TERMINAL = frozenset({"completed", "failed", "blocked", "cancelled", "skipped"})
+_TERMINAL = TERMINAL_NODE_STATUSES
 
 # F066.1: statuses that "resolve" a node for dependency-resolution
 # purposes — i.e. _find_ready_nodes treats them as satisfied predecessors.
@@ -484,15 +485,18 @@ class DAGOrchestrator:
             logger.exception("Error listing stranded approval nodes")
             stranded = []
         for node in stranded:
-            if await self._store.transition_node(
-                node.id,
-                from_statuses={"awaiting_input"},
-                dag_statuses=TERMINAL_DAG_STATUSES,
-                status="cancelled",
-                error="DAG ended while waiting",
-                completed_at=now,
-            ):
-                await self._close_card(None, node_id=node.id)
+            try:
+                if await self._store.transition_node(
+                    node.id,
+                    from_statuses={"awaiting_input"},
+                    dag_statuses=TERMINAL_DAG_STATUSES,
+                    status="cancelled",
+                    error="DAG ended while waiting",
+                    completed_at=now,
+                ):
+                    await self._close_card(None, node_id=node.id)
+            except Exception:
+                logger.exception("Error retiring stranded approval node %s", node.id)
         if self._surface_service is None:
             return
         # Card-driven: EVERY live DAG card — a bounded page would fill with
@@ -505,26 +509,34 @@ class DAGOrchestrator:
             logger.exception("Error listing live approval cards")
             return
         for surface_id, dedup_key in cards:
-            node_id = node_id_from_dedup_key(dedup_key)
-            loaded = await self._store.get_node_with_dag_status(node_id) if node_id else None
-            if loaded is None:
+            # One card's transient error must not end the tick: the F087
+            # delivery sweep and the check reconciliation run after this.
+            try:
+                await self._retire_card_if_leaked(surface_id, dedup_key, now)
+            except Exception:
+                logger.exception("Error sweeping approval card %s", surface_id)
+
+    async def _retire_card_if_leaked(self, surface_id: str, dedup_key: str, now: datetime) -> None:
+        node_id = node_id_from_dedup_key(dedup_key)
+        loaded = await self._store.get_node_with_dag_status(node_id) if node_id else None
+        if loaded is None:
+            await self._close_card(surface_id)
+            return
+        node, dag_status = loaded
+        if node.status != "awaiting_input":
+            await self._close_card(surface_id)
+        elif dag_status not in LIVE_DAG_STATUSES:
+            if await self._store.transition_node(
+                node.id,
+                from_statuses={"awaiting_input"},
+                dag_statuses=TERMINAL_DAG_STATUSES,
+                status="cancelled",
+                error="DAG ended while waiting",
+                completed_at=now,
+            ):
                 await self._close_card(surface_id)
-                continue
-            node, dag_status = loaded
-            if node.status != "awaiting_input":
-                await self._close_card(surface_id)
-            elif dag_status not in LIVE_DAG_STATUSES:
-                if await self._store.transition_node(
-                    node.id,
-                    from_statuses={"awaiting_input"},
-                    dag_statuses=TERMINAL_DAG_STATUSES,
-                    status="cancelled",
-                    error="DAG ended while waiting",
-                    completed_at=now,
-                ):
-                    await self._close_card(surface_id)
-            elif node.surface_id is not None and node.surface_id != surface_id:
-                await self._close_card(surface_id)
+        elif node.surface_id is not None and node.surface_id != surface_id:
+            await self._close_card(surface_id)
 
     async def _sweep_leaked_heartbeat_checks(self) -> None:
         """Re-issue disable for terminal check-nodes whose heartbeat check
@@ -2453,7 +2465,12 @@ class DAGOrchestrator:
             )
 
         for node in recoverable:
-            await self._store.update_node(node.id, status="pending")
+            # Conditional (§3.3): a cancel_dag that landed after this tick's
+            # load must not be undone — the node would launch in a cancelled DAG.
+            if not await self._store.transition_node(
+                node.id, from_statuses={"ready"}, status="pending"
+            ):
+                continue
             node.status = "pending"
             logger.warning(
                 "Recovered stale ready node '%s' in DAG %s "
@@ -2826,7 +2843,19 @@ class DAGOrchestrator:
                     continue
                 if node.surface_id is not None and node.surface_id in live:
                     continue
-                if node.surface_id is None and await self._adopt_live_card(node):
+                if node.surface_id is not None:
+                    # Unlink the dead card first, so the re-push is a first push:
+                    # a tap on the new card before its link is recorded (a node
+                    # still linked to the dead card refuses it as stray), the
+                    # sweep leaves an unlinked card alone, and a failed link
+                    # heals by adoption instead of a third card and ping.
+                    if not await self._store.transition_node(
+                        node.id, from_statuses={"awaiting_input"},
+                        card=node.surface_id, surface_id=None,
+                    ):
+                        continue
+                    node.surface_id = None
+                if await self._adopt_live_card(node):
                     continue
                 await self._push_and_link(node, dag)
 
@@ -2908,6 +2937,10 @@ class DAGOrchestrator:
         node.answer = node.answered_by = node.answered_at = node.answer_source = None
         node.result = node.error = node.completed_at = None
         node.answer_history = history or None
+        # A cancel between the park and the push would still get a card and a
+        # Telegram ping for a question nobody may answer; re-read first.
+        if await self._refresh_node(node) is None or node.status != "awaiting_input":
+            return
         await self._push_and_link(node, dag)
 
     async def _push_and_link(self, node: DAGNode, dag: ExecutionDAG) -> None:
@@ -3131,17 +3164,18 @@ class DAGOrchestrator:
             # cap in _defer_node converts an endless bounce into a clear failure.
             await self._defer_node(node, dag, "subtask queue full")
         except Exception as e:
-            await self._finish_launch(node, status="failed", error=str(e))
             logger.error(
                 "Failed to launch subtask for node %s: %s", node.name, e
             )
             # The `running` write itself raised after create(): unless it landed
-            # anyway, the node reads failed (or cancelled) while its subtask
-            # runs on — and may send what nobody is tracking.
+            # anyway, the subtask runs on untracked — and may send. Stop it
+            # BEFORE the failure write, which one DB fault usually fails too;
+            # the node, left ready, is relaunched by the stale-ready sweep.
             if subtask is not None and not await self._launch_landed(
                 node, subtask_id=subtask.id
             ):
                 await self._abandon_subtask(subtask.id)
+            await self._finish_launch(node, status="failed", error=str(e))
 
     async def _launch_check_node(self, node: DAGNode, dag: ExecutionDAG) -> None:
         """Launch a dynamic check for this node."""
@@ -3193,12 +3227,13 @@ class DAGOrchestrator:
             # Defer the node instead of permanently failing it + its dependents.
             await self._defer_node(node, dag, "dynamic check pool full")
         except Exception as e:
-            await self._finish_launch(node, status="failed", error=str(e))
             logger.error(
                 "Failed to launch check for node %s: %s", node.name, e
             )
+            # As on the subtask path: stop the check before the failure write.
             if created and not await self._launch_landed(node, check_name=check_name):
                 await self._abandon_check(node.id, check_name)
+            await self._finish_launch(node, status="failed", error=str(e))
 
     async def _launch_landed(self, node: DAGNode, **primitive: object) -> bool:
         """After a launch's `running` write RAISED: did it commit anyway? Only
@@ -3348,9 +3383,7 @@ class DAGOrchestrator:
                 if not skipped
                 else f"All nodes resolved ({skipped} skipped via skip_and_continue)"
             )
-            await self._store.update_dag_status(
-                dag.id, "completed", result_summary=summary
-            )
+            await self._finalize(dag, "completed", summary)
         elif any(n.status == "failed" for n in dag.nodes):
             # Harness Phase 3 §3.12: a DAG whose only failures are answered
             # approvals STOPPED — presentation only; the row stays 'failed'.
@@ -3359,15 +3392,21 @@ class DAGOrchestrator:
             else:
                 failed_names = [n.name for n in dag.nodes if n.status == "failed"]
                 summary = f"Failed nodes: {', '.join(failed_names)}"
-            await self._store.update_dag_status(dag.id, "failed", result_summary=summary)
+            await self._finalize(dag, "failed", summary)
         elif any(n.status == "cancelled" for n in dag.nodes):
-            await self._store.update_dag_status(
-                dag.id, "cancelled", result_summary="DAG was cancelled"
-            )
+            await self._finalize(dag, "cancelled", "DAG was cancelled")
         else:
             # All blocked — still mark as failed
-            await self._store.update_dag_status(
-                dag.id, "failed", result_summary="All nodes blocked"
+            await self._finalize(dag, "failed", "All nodes blocked")
+
+    async def _finalize(self, dag: ExecutionDAG, status: str, summary: str) -> None:
+        """The terminal DAG write, conditional on the rows (§3.3): a retry or an
+        answer that landed after this tick loaded its copy wins, and the next
+        tick decides again from fresh rows."""
+        if not await self._store.finalize_dag(dag.id, status, summary):
+            logger.info(
+                "DAG %s not finalized as %s: its rows changed after this tick's load",
+                dag.id, status,
             )
 
     async def _handle_budget_exceeded(self, dag: ExecutionDAG) -> bool:
@@ -3409,15 +3448,26 @@ class DAGOrchestrator:
             and (node.error or "").startswith(_BUDGET_CANCEL_ERROR)
             for node in dag.nodes
         )
+        lost_any = False
         for node in dag.nodes:
             if node.status in ("pending", "ready", "awaiting_check", "awaiting_input"):
                 # Conditional (§3.3); awaiting_input (Harness Phase 3) is future
                 # work the budget stops — its card closes with it.
                 if await self._cancel_one(node, _BUDGET_CANCEL_ERROR):
                     cancelled_any = True
+                else:
+                    lost_any = True
+        # A cancel that lost means that node moved after this tick's load (a
+        # tap completed an approval, a retry reset a node): decide the DAG's
+        # status from the rows, not from the copy that lost.
+        nodes = dag.nodes
+        if lost_any:
+            fresh = await self._store.get_dag(dag.id)
+            if fresh is not None:
+                nodes = fresh.nodes
 
         # If there are still running nodes, let them finish
-        has_running = any(n.status == "running" for n in dag.nodes)
+        has_running = any(n.status == "running" for n in nodes)
         if not cancelled_any and not has_running:
             logger.warning(
                 "DAG %s finished over budget (%s/%s) but nothing was left to "
@@ -3427,15 +3477,13 @@ class DAGOrchestrator:
             return False
         if not has_running:
             # Determine final status
-            has_completed = any(n.status == "completed" for n in dag.nodes)
+            has_completed = any(n.status == "completed" for n in nodes)
             if has_completed:
-                await self._store.update_dag_status(
-                    dag.id, "partial",
-                    result_summary="Token budget exceeded, partial completion",
+                await self._finalize(
+                    dag, "partial", "Token budget exceeded, partial completion"
                 )
             else:
-                await self._store.update_dag_status(
-                    dag.id, "failed",
-                    result_summary="Token budget exceeded before any nodes completed",
+                await self._finalize(
+                    dag, "failed", "Token budget exceeded before any nodes completed"
                 )
         return True

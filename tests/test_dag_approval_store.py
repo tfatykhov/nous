@@ -177,3 +177,20 @@ async def test_the_parked_cap_refuses_only_dags_with_an_approval(db):
     with pytest.raises(ValueError, match="waiting on your answers"):
         await _parked_dag(capped)
     await _one_node(capped)  # no approval node: never refused by this cap
+
+
+async def test_finalize_dag_refuses_while_a_node_is_open_or_the_dag_has_ended(store):
+    dag, node = await _one_node(store)
+    await store.update_dag_status(dag.id, "running")
+
+    assert not await store.finalize_dag(dag.id, "failed", "stale")  # the node is still open
+    assert (await store.get_dag(dag.id)).status == "running"
+
+    await store.update_node(node.id, status="failed", error="boom")
+    assert await store.finalize_dag(dag.id, "failed", "Failed nodes: n")
+    ended = await store.get_dag(dag.id)
+    assert (ended.status, ended.result_summary) == ("failed", "Failed nodes: n")
+    assert ended.completed_at is not None
+
+    assert not await store.finalize_dag(dag.id, "completed", "again")  # no longer live
+    assert (await store.get_dag(dag.id)).status == "failed"

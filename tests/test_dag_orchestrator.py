@@ -2397,7 +2397,8 @@ class TestStaleReadyRecovery:
 
 class TestDAGCompletionStatus:
     """Audit DG-1: a DAG that finishes via skip_and_continue (some nodes
-    'skipped', rest 'completed') must finalize 'completed', not 'failed'."""
+    'skipped', rest 'completed') must finalize 'completed', not 'failed'. The terminal write is
+    finalize_dag — conditional on the rows (Harness Phase 3 §3.3)."""
 
     def _orchestrator_with_mock_store(self):
         store = AsyncMock()
@@ -2422,8 +2423,8 @@ class TestDAGCompletionStatus:
             nodes=[self._node("completed", "a"), self._node("skipped", "b")],
         )
         await orch._check_dag_completion(dag)
-        store.update_dag_status.assert_awaited_once()
-        args, kwargs = store.update_dag_status.await_args
+        store.finalize_dag.assert_awaited_once()
+        args, kwargs = store.finalize_dag.await_args
         assert args[1] == "completed"
         assert "skipped" in (kwargs.get("result_summary") or args[2])
 
@@ -2435,7 +2436,7 @@ class TestDAGCompletionStatus:
             nodes=[self._node("completed", "a"), self._node("completed", "b")],
         )
         await orch._check_dag_completion(dag)
-        args, _ = store.update_dag_status.await_args
+        args, _ = store.finalize_dag.await_args
         assert args[1] == "completed"
 
     @pytest.mark.asyncio
@@ -2446,7 +2447,7 @@ class TestDAGCompletionStatus:
             nodes=[self._node("completed", "a"), self._node("failed", "b")],
         )
         await orch._check_dag_completion(dag)
-        args, _ = store.update_dag_status.await_args
+        args, _ = store.finalize_dag.await_args
         assert args[1] == "failed"
 
     @pytest.mark.asyncio
@@ -2457,7 +2458,7 @@ class TestDAGCompletionStatus:
             nodes=[self._node("blocked", "a"), self._node("blocked", "b")],
         )
         await orch._check_dag_completion(dag)
-        args, _ = store.update_dag_status.await_args
+        args, _ = store.finalize_dag.await_args
         assert args[1] == "failed"
 
 

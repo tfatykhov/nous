@@ -338,3 +338,90 @@ async def test_a_raising_launch_write_disables_the_check_it_created(store, subta
     orch._dynamic_loader.manage_check.assert_awaited_once_with(
         action="disable", name=node.check_name
     )
+
+
+async def test_the_subtask_is_abandoned_even_when_the_failure_write_raises_too(store, subtask_mgr):
+    """One DB fault usually fails both writes; the abandon must not sit behind
+    the second one, or the node is relaunched while the first run goes on."""
+    orch = _orch(store, subtask_mgr)
+    dag = await store.create(_two_node("dependency"))
+    real = store.transition_node
+
+    async def down(node_id, **kwargs):
+        if kwargs.get("status") in ("running", "failed"):
+            raise ConnectionError("connection reset")
+        return await real(node_id, **kwargs)
+
+    store.transition_node = down
+
+    await orch.start_dag(dag.id)
+
+    subtask_mgr.cancel.assert_awaited_once_with(subtask_mgr.create.return_value.id)
+
+
+def _running(**kw) -> SimpleNamespace:
+    base = dict(status="running", tokens_in=0, tokens_out=0, result=None, error=None)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+async def test_a_retry_that_lands_mid_tick_is_not_finalized_over(store, subtask_mgr):
+    """The completion check reads the tick's snapshot. A retry that landed
+    after the load must win, or the DAG ends 'failed' with pending nodes and
+    no retry or cancel can move it again."""
+    orch = _orch(store, subtask_mgr)
+    dag = await store.create(
+        DAGCreateRequest(
+            name="p3-par",
+            nodes=[
+                DAGNodeSpec(name="a", type=DAGNodeType.subtask, instructions="a"),
+                DAGNodeSpec(name="b", type=DAGNodeType.subtask, instructions="b"),
+                DAGNodeSpec(name="other", type=DAGNodeType.subtask, instructions="other"),
+            ],
+            edges=[DAGEdgeSpec(from_node="a", to_node="b")],
+        )
+    )
+    await orch.start_dag(dag.id)
+    await store.update_node((await _node(store, dag.id, "a")).id, status="failed", error="boom")
+    subtask_mgr.get.return_value = _running()
+    await orch.tick()  # b blocked; 'other' still running
+    fired: list[int] = []
+
+    async def other_finishes(_subtask_id):
+        if not fired:
+            fired.append(1)
+            await orch.retry_node(dag.id, "a")  # lands while the tick syncs 'other'
+        return _running(status="completed", result="ok")
+
+    subtask_mgr.get.side_effect = other_finishes
+    await orch.tick()
+
+    after = await store.get_dag(dag.id)
+    assert after.status == "running"
+    assert {n.name: n.status for n in after.nodes}["a"] == "pending"
+
+
+async def test_stale_ready_recovery_does_not_resurrect_a_cancelled_node(db, store, subtask_mgr):
+    from datetime import timedelta
+
+    from sqlalchemy import update as sa_update
+
+    from nous.storage.models import ExecutionDAG
+
+    orch = _orch(store, subtask_mgr)
+    dag = await store.create(_two_node("dependency"))
+    await store.update_dag_status(dag.id, "running")  # start_dag bypassed: an orphan ready wave-0
+    async with db.session() as session:
+        await session.execute(
+            sa_update(ExecutionDAG)
+            .where(ExecutionDAG.id == dag.id)
+            .values(started_at=datetime.now(UTC) - timedelta(seconds=400))
+        )
+        await session.commit()
+    stale = await store.get_dag(dag.id)
+    draft = await _node(store, dag.id, "draft")
+    await store.update_node(draft.id, status="cancelled", error="cancelled")  # cancel_dag, after the load
+
+    await orch._recover_stale_ready_nodes(stale)
+
+    assert (await _node(store, dag.id, "draft")).status == "cancelled"

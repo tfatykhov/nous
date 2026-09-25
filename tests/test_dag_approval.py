@@ -8,6 +8,7 @@ card in place (same id) and pings only when it creates one.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -808,3 +809,105 @@ async def test_a_dag_held_before_its_approval_is_answered_is_not_called_approved
     assert orch.held_reason(dag.id) == (
         f"waiting for a free slot ({MAX_ACTIVE_DAGS}/{MAX_ACTIVE_DAGS} DAGs working)"
     )
+
+
+async def test_a_tap_on_a_repushed_card_before_its_link_is_recorded(store, subtask_mgr, surfaces):
+    """The re-push must behave like a first push: the node still linked to its
+    dead card would refuse the only card the person can see as out of date."""
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag, node = await _parked(store, orch)
+    surfaces.cards[node.surface_id]["status"] = "expired"  # the linked card is lost
+    seen: dict[str, str] = {}
+
+    async def tap(surface_id):
+        result = await orch.answer_node(
+            node.id, "send", source="companion", actor=None, surface_id=surface_id
+        )
+        seen["outcome"] = result.outcome
+
+    surfaces.on_push = tap
+    await orch.tick()
+
+    assert seen["outcome"] == "recorded"
+    assert (await _node(store, dag.id, "approve")).status == "completed"
+
+
+async def test_a_repushed_card_whose_link_failed_is_adopted_not_replaced(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag, node = await _parked(store, orch)
+    surfaces.cards[node.surface_id]["status"] = "expired"
+    real = store.transition_node
+
+    async def link_write_fails(node_id, **kwargs):
+        if kwargs.get("surface_id"):
+            raise RuntimeError("link write lost")
+        return await real(node_id, **kwargs)
+
+    store.transition_node = link_write_fails
+    await orch.tick()  # re-push card-2; its link raises; the sweep runs
+    store.transition_node = real
+
+    assert "card-2" in surfaces.live()  # not retired as a stray
+    await orch.tick()
+    assert (await _node(store, dag.id, "approve")).surface_id == "card-2"
+    assert len(surfaces.pings) == 2  # no third card, no third ping
+
+
+async def test_one_card_sweep_error_does_not_skip_the_rest_of_the_tick(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    await _parked(store, orch)
+    started: list[int] = []
+
+    async def delivery_sweep():
+        started.append(1)
+
+    orch._run_delivery_sweep = delivery_sweep
+
+    async def transient(_node_id):
+        raise RuntimeError("transient db error")
+
+    store.get_node_with_dag_status = transient
+
+    await orch.tick()
+    await asyncio.sleep(0)
+
+    assert started == [1]
+
+
+async def test_no_card_or_ping_for_a_question_cancelled_before_its_push(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag = await store.create(_request())
+    real = store.transition_node
+
+    async def cancelled_right_after_park(node_id, **kwargs):
+        won = await real(node_id, **kwargs)
+        if won and kwargs.get("status") == "awaiting_input":
+            await orch.cancel_dag(dag.id)
+        return won
+
+    store.transition_node = cancelled_right_after_park
+    await orch.start_dag(dag.id)
+    store.transition_node = real
+
+    assert (await _node(store, dag.id, "approve")).status == "cancelled"
+    assert surfaces.pings == []
+
+
+async def test_the_budget_path_decides_from_the_rows_it_lost_to(db, store, subtask_mgr, surfaces):
+    """A tap that lands mid-tick completes the approval; the budget cancel then
+    loses on it and must not report that nothing completed."""
+    orch = _orch(store, subtask_mgr, surfaces, dag_token_budget_enforcement_enabled=True)
+    dag, node = await _parked(store, orch)
+    async with db.session() as session:
+        await session.execute(
+            sa_update(ExecutionDAG)
+            .where(ExecutionDAG.id == dag.id)
+            .values(token_budget=10, tokens_consumed=20)
+        )
+        await session.commit()
+    stale = await store.get_dag(dag.id)
+    await orch.answer_node(node.id, "send", source="companion", actor=None, surface_id=node.surface_id)
+
+    await orch._advance_dag(stale)
+
+    assert (await store.get_dag(dag.id)).status == "partial"

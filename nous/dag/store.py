@@ -31,6 +31,11 @@ _TERMINAL_DAG_STATUSES = ("completed", "failed", "partial", "cancelled")
 # sweep's domain, as a set for transition_node's dag_statuses.
 LIVE_DAG_STATUSES: frozenset[str] = frozenset({"pending", "running"})
 TERMINAL_DAG_STATUSES: frozenset[str] = frozenset(_TERMINAL_DAG_STATUSES)
+# A node that will not change again on its own. finalize_dag refuses while any
+# node is outside this set; the orchestrator's completion check uses the same.
+TERMINAL_NODE_STATUSES: frozenset[str] = frozenset(
+    {"completed", "failed", "blocked", "cancelled", "skipped"}
+)
 
 # codex P2 round 4: every non-active DAGNode status, i.e. every status a
 # check-type node can leave its heartbeat check leaked behind on. Broader
@@ -475,6 +480,38 @@ class DAGStore:
                 .values(**values)
             )
             await session.commit()
+
+    async def finalize_dag(self, dag_id: UUID, status: str, result_summary: str) -> bool:
+        """Terminal DAG write decided from a tick's snapshot, conditional on the
+        rows: the DAG is still live and none of its nodes is non-terminal.
+
+        The tick decides "every node is terminal" from the copy it loaded, and
+        retry_node / answer_node / cancel_dag do not take its lock. A retry that
+        lands after the load resets nodes to pending; a blind write would then
+        end the DAG 'failed' over pending nodes that nothing advances again.
+        Refused, the next tick re-derives the outcome from fresh rows.
+        """
+        open_node = (
+            select(DAGNode.id)
+            .where(DAGNode.dag_id == dag_id)
+            .where(DAGNode.status.not_in(sorted(TERMINAL_NODE_STATUSES)))
+            .exists()
+        )
+        async with self._db.session() as session:
+            result = await session.execute(
+                update(ExecutionDAG)
+                .where(ExecutionDAG.id == dag_id)
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .where(ExecutionDAG.status.in_(sorted(LIVE_DAG_STATUSES)))
+                .where(~open_node)
+                .values(
+                    status=status,
+                    completed_at=datetime.now(UTC),
+                    result_summary=result_summary,
+                )
+            )
+            await session.commit()
+            return result.rowcount == 1
 
     async def update_node(self, node_id: UUID, **kwargs: object) -> None:
         """Update any fields on a DAG node (agent-scoped)."""
