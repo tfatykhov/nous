@@ -26,6 +26,8 @@ class DAGNodeType(str, Enum):
     # _dispatch_ready_nodes), so they sit in 'pending' until their parent
     # transitions to 'failed'.
     fix = "fix"
+    # Harness Phase 3 — waits durably on a person's answer on a companion card.
+    approval = "approval"
 
 
 class DAGStatus(str, Enum):
@@ -46,6 +48,8 @@ class DAGNodeStatus(str, Enum):
     ready = "ready"
     running = "running"
     awaiting_check = "awaiting_check"
+    # Harness Phase 3 — an approval node parked on a person's answer.
+    awaiting_input = "awaiting_input"
     completed = "completed"
     failed = "failed"
     blocked = "blocked"

@@ -8,7 +8,7 @@ from collections.abc import Collection
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import String, cast, func, select, update
+from sqlalchemy import String, cast, func, or_, select, update
 from sqlalchemy import true as sa_true
 from sqlalchemy.orm import selectinload
 
@@ -398,6 +398,8 @@ class DAGStore:
         *,
         from_statuses: Collection[str],
         dag_statuses: Collection[str] | None = None,
+        card: str | None = None,
+        due_by: datetime | None = None,
         **values: object,
     ) -> bool:
         """Harness Phase 3 §3.3: one conditional node write.
@@ -409,6 +411,12 @@ class DAGStore:
         through here, so the row's own predicate — not a lock — decides the
         race, across processes. ``dag_statuses`` is a snapshot filter: the
         UPDATE takes no lock on the execution_dags row.
+
+        ``card``: the node must be unlinked (the tap-before-link window) or
+        linked to exactly this card — a card answers only its own attempt.
+        ``due_by``: the node's deadline must have passed; decided in SQL,
+        because SQLite returns stored timestamps naive and a Python comparison
+        against an aware ``now`` raises TypeError.
         """
         dag_scope = select(ExecutionDAG.id).where(ExecutionDAG.agent_id == self._agent_id)
         if dag_statuses is not None:
@@ -420,6 +428,10 @@ class DAGStore:
             .where(DAGNode.dag_id.in_(dag_scope))
             .values(**values)
         )
+        if card is not None:
+            stmt = stmt.where(or_(DAGNode.surface_id.is_(None), DAGNode.surface_id == card))
+        if due_by is not None:
+            stmt = stmt.where(DAGNode.answer_deadline <= due_by)
         async with self._db.session() as session:
             result = await session.execute(stmt)
             await session.commit()

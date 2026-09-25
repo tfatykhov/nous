@@ -128,6 +128,7 @@ class TestEnums:
             DAGNodeType.gate,
             DAGNodeType.callback,
             DAGNodeType.fix,  # F066.1
+            DAGNodeType.approval,  # Harness Phase 3
         }
 
     def test_dag_statuses(self):
@@ -146,6 +147,7 @@ class TestEnums:
             DAGNodeStatus.ready,
             DAGNodeStatus.running,
             DAGNodeStatus.awaiting_check,
+            DAGNodeStatus.awaiting_input,  # Harness Phase 3
             DAGNodeStatus.completed,
             DAGNodeStatus.failed,
             DAGNodeStatus.blocked,
