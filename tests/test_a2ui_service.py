@@ -1015,3 +1015,120 @@ async def test_overflowed_subscriber_still_receives_the_resync_sentinel(
     while not queue.empty():
         drained.append(queue.get_nowait())
     assert drained[-1] is None
+
+
+_DAG_CARD = {
+    "title": "dag · approve",
+    "summary": "Send it?",
+    "options": [
+        {"id": "send", "label": "Send", "outcome": "proceed"},
+        {"id": "hold", "label": "Hold", "outcome": "stop"},
+    ],
+    "recommend_first": False,
+}
+
+
+async def test_push_built_refuses_the_reserved_dag_approval_prefix(db, a2ui_settings) -> None:
+    """Runs on every backend: the refusal fires before any database work."""
+    from nous.a2ui.service import ReservedDedupKeyError
+
+    svc = SurfaceService(db, a2ui_settings)
+    with pytest.raises(ReservedDedupKeyError, match="reserved"):
+        await svc.push_built(approval_gate(_DAG_CARD), dedup_key=f"dag-approval:{uuid.uuid4()}")
+    assert not issubclass(ReservedDedupKeyError, PermissionError)  # never read as a censor refusal
+
+
+def test_every_push_built_retry_forwards_the_new_flags() -> None:
+    """push_built re-enters itself on the dedup race and on IntegrityError.
+    A hop that drops reserved_key_ok refuses the orchestrator's own card
+    (the F092.3 refuse_fallback_overwrite lesson); one that drops
+    notify_text loses the ping body."""
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path(service_module.__file__).read_text(encoding="utf-8"))
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "push_built"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+    ]
+    assert len(calls) == 2, "expected the dedup-race and IntegrityError retries"
+    for call in calls:
+        assert {"reserved_key_ok", "notify_text"} <= {k.arg for k in call.keywords}
+    # The ping is sent from _push_transaction_inner, so notify_text must also
+    # ride every hop down to it — a missed hop is a NameError after the push
+    # commits, reached only by postgres_only tests otherwise.
+    hops = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("_push_transaction", "_push_transaction_inner")
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+    ]
+    assert hops, "expected push_built to call its transaction helpers"
+    for call in hops:
+        assert {"reserved_key_ok", "notify_text"} <= {k.arg for k in call.keywords}
+
+
+@pytest.mark.postgres_only
+async def test_close_helpers_and_liveness_queries(service, db, a2ui_agent_id: str) -> None:
+    key = f"dag-approval:{uuid.uuid4()}"
+    sid = await service.push_built(approval_gate(_DAG_CARD), dedup_key=key, reserved_key_ok=True)
+    other = await service.push_built(approval_gate(_DAG_CARD))
+
+    assert await service.live_ids([sid, other, "missing"]) == {sid, other}
+    assert await service.live_cards_by_prefix("dag-approval:") == [(sid, key)]
+
+    assert await service.close_by_dedup_key(key) == [sid]
+    await service.close(sid)          # already closed: a no-op
+    await service.close("missing")   # never existed: a no-op
+    assert await service.live_ids([sid]) == set()
+    surface = next(s for s in await _surfaces(db, a2ui_agent_id) if s.surface_id == sid)
+    assert surface.status == "expired"
+
+
+@pytest.mark.postgres_only
+async def test_expire_sweep_writes_no_objection_only_for_non_dag_cards(
+    service, db, a2ui_agent_id: str
+) -> None:
+    dag_card = await service.push_built(
+        approval_gate(_DAG_CARD), dedup_key=f"dag-approval:{uuid.uuid4()}", reserved_key_ok=True
+    )
+    agent_card = await service.push_built(approval_gate(_DAG_CARD))
+    async with db.session() as session:
+        await session.execute(
+            text(
+                "UPDATE nous_system.a2ui_surfaces SET expires_at = now() - interval '1 minute' "
+                "WHERE agent_id = :agent"
+            ),
+            {"agent": a2ui_agent_id},
+        )
+        await session.commit()
+
+    assert await service.expire_sweep() == 2
+    evidence = {a.surface_id for a in await _actions(db, a2ui_agent_id) if a.action_name == "no_objection"}
+    assert evidence == {agent_card}
+    assert dag_card not in evidence
+
+
+@pytest.mark.postgres_only
+async def test_notify_text_becomes_the_ping_body(service, monkeypatch) -> None:
+    import asyncio
+
+    sent: list[tuple] = []
+
+    async def record(title, surface_id, text=None):
+        sent.append((title, surface_id, text))
+
+    monkeypatch.setattr(service, "_notify_telegram", record)
+    sid = await service.push_built(
+        approval_gate(_DAG_CARD), dedup_key=f"dag-approval:{uuid.uuid4()}",
+        reserved_key_ok=True, notify=True, notify_text="dag · approve\nSend it?",
+    )
+    # _schedule_bg keeps strong refs in _pending_tasks; drain them.
+    await asyncio.gather(*list(service._pending_tasks))
+    assert sent == [("dag · approve", sid, "dag · approve\nSend it?")]
