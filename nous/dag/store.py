@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Collection
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -25,6 +26,11 @@ MAX_ACTIVE_DAGS = 5
 # orchestrator lock and can reactivate a DAG while deliver() is awaiting
 # Telegram or a 120s summary turn (@codex P1 on fa988e7).
 _TERMINAL_DAG_STATUSES = ("completed", "failed", "partial", "cancelled")
+
+# Harness Phase 3 §3.3. LIVE: DAGs the tick advances. TERMINAL: the delivery
+# sweep's domain, as a set for transition_node's dag_statuses.
+LIVE_DAG_STATUSES: frozenset[str] = frozenset({"pending", "running"})
+TERMINAL_DAG_STATUSES: frozenset[str] = frozenset(_TERMINAL_DAG_STATUSES)
 
 # codex P2 round 4: every non-active DAGNode status, i.e. every status a
 # check-type node can leave its heartbeat check leaked behind on. Broader
@@ -386,6 +392,39 @@ class DAGStore:
             )
             await session.commit()
 
+    async def transition_node(
+        self,
+        node_id: UUID,
+        *,
+        from_statuses: Collection[str],
+        dag_statuses: Collection[str] | None = None,
+        **values: object,
+    ) -> bool:
+        """Harness Phase 3 §3.3: one conditional node write.
+
+        Applies ``values`` only while the node is still in one of
+        ``from_statuses`` (and, when given, its DAG in one of ``dag_statuses``),
+        agent-scoped like ``claim_and_add_node_tokens``. Returns whether it
+        applied. Every write that can race another writer of the same row goes
+        through here, so the row's own predicate — not a lock — decides the
+        race, across processes. ``dag_statuses`` is a snapshot filter: the
+        UPDATE takes no lock on the execution_dags row.
+        """
+        dag_scope = select(ExecutionDAG.id).where(ExecutionDAG.agent_id == self._agent_id)
+        if dag_statuses is not None:
+            dag_scope = dag_scope.where(ExecutionDAG.status.in_(sorted(dag_statuses)))
+        stmt = (
+            update(DAGNode)
+            .where(DAGNode.id == node_id)
+            .where(DAGNode.status.in_(sorted(from_statuses)))
+            .where(DAGNode.dag_id.in_(dag_scope))
+            .values(**values)
+        )
+        async with self._db.session() as session:
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount == 1
+
     async def count_running_subtasks_by_frame_type(
         self, dag_id: UUID | None = None
     ) -> dict[str, int]:
@@ -695,9 +734,10 @@ class DAGStore:
     async def apply_retry(
         self,
         dag_id: UUID,
-        node_updates: list[tuple[UUID, dict]],
+        primary: tuple[UUID, dict, Collection[str]],
+        unblocks: list[tuple[UUID, dict, Collection[str]]],
         reactivate: bool,
-    ) -> None:
+    ) -> bool:
         """F087: apply every retry mutation AND the reactivation atomically.
 
         @codex P2 on a616310. Doing these as separate commits leaves an
@@ -716,18 +756,30 @@ class DAGStore:
         There is no safe ordering because the invalid state is the split
         itself. One transaction removes the window rather than moving it: no
         observer ever sees a DAG whose status and node set disagree.
+
+        Harness Phase 3 §3.3: each write is conditional on the status
+        retry_node read (the third element of each tuple). If the retried
+        node's own write — ``primary``, passed separately so no reorder can
+        turn a lost primary into a partial retry — does not apply, the whole
+        retry rolls back and False is returned. An unblock whose node moved on
+        is simply skipped.
         """
         async with self._db.session() as session:
             scoped = select(ExecutionDAG.id).where(
                 ExecutionDAG.agent_id == self._agent_id
             )
-            for node_id, values in node_updates:
-                await session.execute(
+            writes = [(True, primary)] + [(False, u) for u in unblocks]
+            for is_primary, (node_id, values, from_statuses) in writes:
+                result = await session.execute(
                     update(DAGNode)
                     .where(DAGNode.id == node_id)
                     .where(DAGNode.dag_id.in_(scoped))
+                    .where(DAGNode.status.in_(sorted(from_statuses)))
                     .values(**values)
                 )
+                if is_primary and result.rowcount != 1:
+                    await session.rollback()
+                    return False
             if reactivate:
                 await session.execute(
                     update(ExecutionDAG)
@@ -744,6 +796,7 @@ class DAGStore:
                     )
                 )
             await session.commit()
+            return True
 
     async def reactivate_for_retry(self, dag_id: UUID) -> None:
         """F087: put a terminal DAG back to 'running' AND clear its delivery

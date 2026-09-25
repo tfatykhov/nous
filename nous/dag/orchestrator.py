@@ -58,8 +58,12 @@ from uuid import UUID
 
 from nous.config import Settings
 from nous.dag._workspace import assert_inside_root, compute_workspace_path
-from nous.dag.schemas import PREDECESSOR_EDGE_TYPES
-from nous.dag.store import _TERMINAL_DAG_STATUSES, DAGStore
+from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, DAGNodeStatus
+from nous.dag.store import (
+    _TERMINAL_DAG_STATUSES,
+    LIVE_DAG_STATUSES,
+    DAGStore,
+)
 from nous.heart.subtasks import SubtaskQueueFull
 from nous.heartbeat.dynamic import DynamicCheckLimitReached
 from nous.storage.models import DAGNode, ExecutionDAG
@@ -83,6 +87,12 @@ _TERMINAL = frozenset({"completed", "failed", "blocked", "cancelled", "skipped"}
 # `skipped` joins `completed` here because skip_and_continue says
 # "proceed past this failure"; cascade-failed nodes are NOT in this set.
 _RESOLVED = frozenset({"completed", "skipped"})
+
+# Harness Phase 3 §3.3: statuses a node can still be moved out of by a cancel
+# or a block. Derived from the enum so a new non-terminal status is included.
+_NON_TERMINAL = frozenset(s.value for s in DAGNodeStatus) - _TERMINAL
+# Statuses the dispatcher may move to 'ready' (wave-0 nodes are created ready).
+_DISPATCHABLE = frozenset({"pending", "ready"})
 
 # Budget warning threshold (80%)
 _BUDGET_WARNING_RATIO = 0.80
@@ -205,24 +215,79 @@ class DAGOrchestrator:
         self._defer_counts[node.id] = count
         if count >= self._MAX_DEFERRALS:
             self._defer_counts.pop(node.id, None)
-            await self._store.update_node(
-                node.id,
-                status="failed",
-                error=f"{reason} — still saturated after {count} deferrals",
-            )
-            node.status = "failed"
+            # Harness Phase 3 §3.3: conditional — a cancel_dag that landed
+            # meanwhile keeps its 'cancelled'.
+            error = f"{reason} — still saturated after {count} deferrals"
+            if await self._store.transition_node(
+                node.id, from_statuses={"ready", "pending"}, status="failed", error=error
+            ):
+                node.status = "failed"
             logger.warning(
                 "DAG %s node %s FAILED after %d deferrals: %s",
                 dag.id, node.name, count, reason,
             )
             return
-        await self._store.update_node(node.id, status="pending")
-        node.status = "pending"
+        # Conditional (§3.3): a deferral must never resurrect a node that
+        # cancel_dag cancelled after the tick loaded it.
+        if await self._store.transition_node(
+            node.id, from_statuses={"ready"}, status="pending"
+        ):
+            node.status = "pending"
         log = logger.warning if count >= 10 else logger.info
         log(
             "Deferring node %s in DAG %s (attempt %d) — %s; retry next tick",
             node.name, dag.id, count, reason,
         )
+
+    async def _mark_ready_and_launch(self, node: DAGNode, dag: ExecutionDAG) -> None:
+        """Mark a node ready and launch it, conditionally (spec §3.3).
+
+        The ready write was blind at four sites: a cancel_dag landing between
+        the tick's load and this write had its 'cancelled' overwritten and the
+        node launched inside a DAG being cancelled.
+        """
+        if not await self._store.transition_node(
+            node.id,
+            from_statuses=_DISPATCHABLE,
+            dag_statuses=LIVE_DAG_STATUSES,
+            status="ready",
+        ):
+            logger.info(
+                "Node %s in DAG %s changed state before launch — not launched",
+                node.name, dag.id,
+            )
+            return
+        node.status = "ready"
+        try:
+            await self._launch_node(node, dag)
+        except Exception:
+            logger.exception("Failed to launch node %s in DAG %s", node.name, dag.id)
+
+    async def _cancel_one(self, node: DAGNode, error: str) -> bool:
+        """Cancel one node's primitive, then its row — conditionally (§3.3).
+
+        The row write loses to any writer that already moved the node to a
+        terminal status (a completion, an answer), so a cancellation can no
+        longer overwrite an outcome that landed after the caller's load.
+        """
+        await self._cancel_node(node)
+        won = await self._store.transition_node(
+            node.id, from_statuses=_NON_TERMINAL, status="cancelled", error=error
+        )
+        if won:
+            node.status = "cancelled"
+            node.error = error
+        return won
+
+    async def _finish_launch(self, node: DAGNode, *, status: str, **values: object) -> bool:
+        """A launch-path terminal write (an instant completion or a launch
+        failure), conditional on the node still being dispatchable (§3.3)."""
+        if await self._store.transition_node(
+            node.id, from_statuses=_DISPATCHABLE, status=status, **values
+        ):
+            node.status = status
+            return True
+        return False
 
     async def tick(self) -> int:
         """Advance all active DAGs. Returns number of DAGs processed.
@@ -531,10 +596,9 @@ class DAGOrchestrator:
 
         for node in dag.nodes:
             if node.status not in _TERMINAL:
-                await self._cancel_node(node)
-                await self._store.update_node(
-                    node.id, status="cancelled", error=reason
-                )
+                # Harness Phase 3 §3.3: conditional — an outcome that landed
+                # after this load (a completion, an answer) keeps its status.
+                await self._cancel_one(node, reason)
 
         await self._store.update_dag_status(
             dag_id, "cancelled", result_summary=reason
@@ -586,8 +650,10 @@ class DAGOrchestrator:
         # terminal, re-finalize it via _check_dag_completion, and strand a
         # pending node inside a terminal DAG. The invalid state is the split
         # itself, so no ordering fixes it — only atomicity does.
-        node_updates: list[tuple[UUID, dict]] = [
-            (
+        # Harness Phase 3 §3.3: every write is conditional on the status read
+        # here — the retried node from {'failed'}, each unblock from
+        # {'blocked','cancelled'} — and a lost primary rolls the retry back.
+        primary: tuple[UUID, dict, frozenset[str]] = (
                 node.id,
                 {
                     # was "ready" — _find_ready_nodes only checks "pending"
@@ -609,8 +675,9 @@ class DAGOrchestrator:
                     # run past an enforced budget.
                     "tokens_counted": False,
                 },
-            )
-        ]
+                frozenset({"failed"}),
+        )
+        unblocks: list[tuple[UUID, dict, frozenset[str]]] = []
 
         # Selectively unblock only nodes downstream of the retried node
         # that have no other failed predecessors
@@ -669,24 +736,32 @@ class DAGOrchestrator:
                         "total, but stranding the node would be worse",
                         n.name,
                     )
-                node_updates.append(
+                unblocks.append(
                     # Harness Phase 3 §3.9: clear started_at/completed_at as
                     # the direct retry does — _recover_stale_ready_nodes only
                     # takes `ready` nodes with started_at IS NULL, so a kept
                     # timestamp strands a node a crash leaves `ready`.
                     (n.id, {"status": "pending", "error": None,
                             "tokens_counted": False,
-                            "started_at": None, "completed_at": None})
+                            "started_at": None, "completed_at": None},
+                     frozenset({"blocked", "cancelled"}))
                 )
 
         # One transaction: every node reset plus the status/generation/delivery
         # transition. No observer — tick loop or detached sweep — can see a DAG
         # whose status and node set disagree.
-        await self._store.apply_retry(
+        applied = await self._store.apply_retry(
             dag_id,
-            node_updates,
+            primary,
+            unblocks,
             reactivate=dag.status in ("failed", "partial"),
         )
+        if not applied:
+            raise ValueError(
+                f"Node '{node_name}' changed state while the retry was being "
+                "prepared (another retry or an answer landed first) — nothing "
+                "was changed."
+            )
 
     # ------------------------------------------------------------------
     # Internal: DAG advancement
@@ -1923,9 +1998,19 @@ class DAGOrchestrator:
             if predecessors & failed_ids:
                 to_cancel.add(node_id)
 
-        # Transitively find nodes to block (dependency edges)
-        # Treat both failed and cancel_cascade-cancelled nodes as "poison"
-        poison = failed_ids | to_cancel
+        # Apply cancelled status (cancel_cascade targets) FIRST — conditional
+        # (Harness Phase 3 §3.3). Only a cancel that WON poisons its
+        # dependents: a target that finished between the tick's load and this
+        # write keeps its outcome, and its dependents must not be blocked for a
+        # cancellation that never happened.
+        cancelled: set[str] = set()
+        for node_id in to_cancel:
+            if await self._cancel_one(node_by_id[node_id], "Cancelled by predecessor failure"):
+                cancelled.add(node_id)
+
+        # Transitively find nodes to block (predecessor edges).
+        # Treat both failed and cancel_cascade-cancelled nodes as "poison".
+        poison = failed_ids | cancelled
         to_block: set[str] = set()
         changed = True
         while changed:
@@ -1938,22 +2023,13 @@ class DAGOrchestrator:
                     to_block.add(node_id)
                     changed = True
 
-        # Apply cancelled status (cancel_cascade targets)
-        for node_id in to_cancel:
-            node = node_by_id[node_id]
-            await self._cancel_node(node)
-            await self._store.update_node(
-                node.id, status="cancelled", error="Cancelled by predecessor failure"
-            )
-            node.status = "cancelled"
-
-        # Apply blocked status (dependency descendants)
+        # Apply blocked status (predecessor-edge descendants) — conditional.
         for node_id in to_block:
             node = node_by_id[node_id]
-            await self._store.update_node(
-                node.id, status="blocked", error="Predecessor failed"
-            )
-            node.status = "blocked"
+            if await self._store.transition_node(
+                node.id, from_statuses=_NON_TERMINAL, status="blocked", error="Predecessor failed"
+            ):
+                node.status = "blocked"
 
     def _effective_frame_caps(self, dag: ExecutionDAG) -> dict[str, int]:
         """F064.2: resolve the effective per-frame-type caps for this DAG.
@@ -1997,27 +2073,13 @@ class DAGOrchestrator:
         # per-node error guard. No DB count, no caps.
         if not self._settings.dag_frame_concurrency_enabled:
             for node in ready_nodes:
-                await self._store.update_node(node.id, status="ready")
-                node.status = "ready"
-                try:
-                    await self._launch_node(node, dag)
-                except Exception:
-                    logger.exception(
-                        "Failed to launch node %s in DAG %s", node.name, dag.id
-                    )
+                await self._mark_ready_and_launch(node, dag)
             return
 
         caps = self._effective_frame_caps(dag)
         if not caps:
             for node in ready_nodes:
-                await self._store.update_node(node.id, status="ready")
-                node.status = "ready"
-                try:
-                    await self._launch_node(node, dag)
-                except Exception:
-                    logger.exception(
-                        "Failed to launch node %s in DAG %s", node.name, dag.id
-                    )
+                await self._mark_ready_and_launch(node, dag)
             return
 
         # @codex P1 on aa3c739: scope to current DAG so concurrent DAGs don't
@@ -2050,14 +2112,7 @@ class DAGOrchestrator:
                 and not self._settings.dag_callback_execution_enabled
             )
             if cap_exempt:
-                await self._store.update_node(node.id, status="ready")
-                node.status = "ready"
-                try:
-                    await self._launch_node(node, dag)
-                except Exception:
-                    logger.exception(
-                        "Failed to launch node %s in DAG %s", node.name, dag.id
-                    )
+                await self._mark_ready_and_launch(node, dag)
                 continue
 
             frame = node.frame_type if node.frame_type is not None else "_default"
@@ -2069,24 +2124,19 @@ class DAGOrchestrator:
                 # stuck in 'ready' forever. Demote the row to 'pending' on
                 # deferral — both wave-0 and wave-N use the same semantic
                 # afterward: deferred = pending, re-picked next tick.
-                if node.status == "ready":
-                    await self._store.update_node(node.id, status="pending")
+                if node.status == "ready" and await self._store.transition_node(
+                    node.id, from_statuses={"ready"}, status="pending"
+                ):
                     node.status = "pending"
                 logger.debug(
                     "F064.2: deferring node %s (frame=%s) — cap %d reached",
                     node.name, frame, cap,
                 )
                 continue
-            await self._store.update_node(node.id, status="ready")
-            node.status = "ready"
-            try:
-                await self._launch_node(node, dag)
-            except Exception:
-                logger.exception(
-                    "Failed to launch node %s in DAG %s", node.name, dag.id
-                )
-                # Slot wasn't consumed — don't bump the accumulator.
-                continue
+            # Harness Phase 3 §3.3: conditional ready write + launch. A lost
+            # transition or a failed launch leaves node.status not 'running',
+            # so the accumulator below is not bumped.
+            await self._mark_ready_and_launch(node, dag)
             # _launch_subtask_node swallows its own exceptions internally and
             # sets node.status="failed". Only bump the accumulator when the
             # launch actually produced a 'running' subtask. Other terminal
@@ -2415,15 +2465,16 @@ class DAGOrchestrator:
         elif node_type == "check":
             await self._launch_check_node(node, dag)
         elif node_type == "gate":
-            # Phase 1: auto-pass gates (Phase 2 will add Critic evaluation)
-            await self._store.update_node(
-                node.id,
+            # Phase 1: auto-pass gates (Phase 2 will add Critic evaluation).
+            # Harness Phase 3 §3.3: conditional, like every launch-path write.
+            now = datetime.now(UTC)
+            await self._finish_launch(
+                node,
                 status="completed",
                 result="Gate auto-passed (Phase 1)",
-                started_at=datetime.now(UTC),
-                completed_at=datetime.now(UTC),
+                started_at=now,
+                completed_at=now,
             )
-            node.status = "completed"
 
     async def _launch_subtask_node(self, node: DAGNode, dag: ExecutionDAG) -> None:
         """Launch a subtask for this node."""
@@ -2436,23 +2487,19 @@ class DAGOrchestrator:
             and not self._settings.dag_callback_execution_enabled
         ):
             now = datetime.now(UTC)
-            await self._store.update_node(
-                node.id,
+            await self._finish_launch(
+                node,
                 status="completed",
                 result=node.instructions or "Callback completed",
                 started_at=now,
                 completed_at=now,
             )
-            node.status = "completed"
             return
 
         if not self._subtask_mgr:
-            await self._store.update_node(
-                node.id,
-                status="failed",
-                error="No subtask manager available",
+            await self._finish_launch(
+                node, status="failed", error="No subtask manager available"
             )
-            node.status = "failed"
             return
 
         # Build augmented instructions with predecessor context
@@ -2472,8 +2519,10 @@ class DAGOrchestrator:
                 dag_node_id=node.id,
             )
             now = datetime.now(UTC)
-            await self._store.update_node(
+            launched = await self._store.transition_node(
                 node.id,
+                from_statuses=_DISPATCHABLE,
+                dag_statuses=LIVE_DAG_STATUSES,
                 status="running",
                 subtask_id=subtask.id,
                 started_at=now,
@@ -2483,6 +2532,20 @@ class DAGOrchestrator:
                 # bootstrap error) to also surface via the stall path.
                 last_activity_at=now,
             )
+            if not launched:
+                # Harness Phase 3 §3.3: a cancel_dag landed during create() —
+                # its snapshot had no subtask_id to cancel, so cancel it here or
+                # it runs inside a cancelled DAG (and may send what the person
+                # just cancelled).
+                logger.warning(
+                    "Node %s in DAG %s changed state while its subtask was being "
+                    "created — cancelling subtask %s", node.name, dag.id, subtask.id,
+                )
+                try:
+                    await self._subtask_mgr.cancel(subtask.id)
+                except Exception:
+                    logger.exception("Could not cancel orphaned subtask %s", subtask.id)
+                return
             node.status = "running"
             node.last_activity_at = now
             self._defer_counts.pop(node.id, None)  # launched — clear backstop
@@ -2500,10 +2563,7 @@ class DAGOrchestrator:
             # cap in _defer_node converts an endless bounce into a clear failure.
             await self._defer_node(node, dag, "subtask queue full")
         except Exception as e:
-            await self._store.update_node(
-                node.id, status="failed", error=str(e)
-            )
-            node.status = "failed"
+            await self._finish_launch(node, status="failed", error=str(e))
             logger.error(
                 "Failed to launch subtask for node %s: %s", node.name, e
             )
@@ -2511,12 +2571,9 @@ class DAGOrchestrator:
     async def _launch_check_node(self, node: DAGNode, dag: ExecutionDAG) -> None:
         """Launch a dynamic check for this node."""
         if not self._dynamic_loader:
-            await self._store.update_node(
-                node.id,
-                status="failed",
-                error="No dynamic check loader available",
+            await self._finish_launch(
+                node, status="failed", error="No dynamic check loader available"
             )
-            node.status = "failed"
             return
 
         augmented = await self._build_predecessor_context(node, dag)
@@ -2535,12 +2592,26 @@ class DAGOrchestrator:
                 # heartbeat worker actually runs when the node is created at night.
                 urgent=True,
             )
-            await self._store.update_node(
+            launched = await self._store.transition_node(
                 node.id,
+                from_statuses=_DISPATCHABLE,
+                dag_statuses=LIVE_DAG_STATUSES,
                 status="running",
                 check_name=check_name,
                 started_at=datetime.now(UTC),
             )
+            if not launched:
+                # Harness Phase 3 §3.3: same race as the subtask path. Record the
+                # check on the node so the reconciliation sweep can retry the
+                # disable if this one fails.
+                await self._store.update_node(node.id, check_name=check_name)
+                try:
+                    await self._dynamic_loader.manage_check(action="disable", name=check_name)
+                except Exception:
+                    logger.warning(
+                        "Could not disable orphaned check %s — the sweep retries", check_name
+                    )
+                return
             node.status = "running"
             self._defer_counts.pop(node.id, None)  # launched — clear backstop
             logger.info(
@@ -2553,10 +2624,7 @@ class DAGOrchestrator:
             # Defer the node instead of permanently failing it + its dependents.
             await self._defer_node(node, dag, "dynamic check pool full")
         except Exception as e:
-            await self._store.update_node(
-                node.id, status="failed", error=str(e)
-            )
-            node.status = "failed"
+            await self._finish_launch(node, status="failed", error=str(e))
             logger.error(
                 "Failed to launch check for node %s: %s", node.name, e
             )

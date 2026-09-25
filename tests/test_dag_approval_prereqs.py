@@ -132,3 +132,147 @@ async def test_a_downstream_node_left_ready_by_a_crash_is_recovered(db, store, s
     await orch._recover_stale_ready_nodes(await store.get_dag(dag.id))
 
     assert (await _node(store, dag.id, "send")).status == "pending"
+
+
+async def test_transition_node_applies_only_from_the_listed_statuses(store):
+    dag = await store.create(_two_node("dependency"))
+    draft = await _node(store, dag.id, "draft")  # wave 0 → 'ready'
+
+    assert await store.transition_node(draft.id, from_statuses={"pending"}, status="running") is False
+    assert await store.transition_node(draft.id, from_statuses={"ready"}, status="running") is True
+    assert (await _node(store, dag.id, "draft")).status == "running"
+
+
+async def test_transition_node_honours_dag_statuses(store):
+    dag = await store.create(_two_node("dependency"))
+    draft = await _node(store, dag.id, "draft")
+    await store.update_dag_status(dag.id, "cancelled")
+
+    assert (
+        await store.transition_node(
+            draft.id, from_statuses={"ready"}, dag_statuses={"pending", "running"}, status="running"
+        )
+        is False
+    )
+
+
+async def test_dispatch_does_not_resurrect_a_node_cancelled_after_the_load(store, subtask_mgr):
+    orch = _orch(store, subtask_mgr)
+    dag = await store.create(_two_node("dependency"))
+    stale = await store.get_dag(dag.id)  # the tick's copy: draft is 'ready'
+    draft = next(n for n in stale.nodes if n.name == "draft")
+    await store.update_node(draft.id, status="cancelled", error="cancelled")  # cancel_dag lands
+
+    await orch._dispatch_ready_nodes(stale, [draft])
+
+    assert (await _node(store, dag.id, "draft")).status == "cancelled"
+    subtask_mgr.create.assert_not_called()
+
+
+async def test_cancel_dag_keeps_an_outcome_that_landed_after_its_load(
+    store, subtask_mgr, monkeypatch
+):
+    orch = _orch(store, subtask_mgr)
+    dag = await store.create(_two_node("dependency"))
+    real_cancel = orch._cancel_node
+
+    async def completes_first(node):
+        # The node finishes between cancel_dag's load and its write.
+        await store.update_node(node.id, status="completed", result="done")
+        await real_cancel(node)
+
+    monkeypatch.setattr(orch, "_cancel_node", completes_first)
+
+    await orch.cancel_dag(dag.id)
+
+    assert (await _node(store, dag.id, "draft")).status == "completed"
+
+
+async def test_retry_refuses_when_the_node_changed_after_its_load(
+    store, subtask_mgr, monkeypatch
+):
+    orch = _orch(store, subtask_mgr)
+    dag = await store.create(_two_node("dependency"))
+    draft = await _node(store, dag.id, "draft")
+    await store.update_node(draft.id, status="failed", error="boom")
+    await store.update_dag_status(dag.id, "failed")
+
+    async def another_retry_lands(node, _dag):
+        await store.update_node(node.id, status="pending", error=None)
+        return True
+
+    monkeypatch.setattr(orch, "_account_before_retry", another_retry_lands)
+
+    with pytest.raises(ValueError, match="changed state"):
+        await orch.retry_node(dag.id, "draft")
+    assert (await store.get_dag(dag.id)).status == "failed"  # not reactivated
+
+
+async def test_a_cascade_target_that_finished_first_does_not_block_its_dependents(
+    store, subtask_mgr, monkeypatch
+):
+    orch = _orch(store, subtask_mgr)
+    dag = await store.create(
+        DAGCreateRequest(
+            name="cascade",
+            nodes=[
+                DAGNodeSpec(name="src", type=DAGNodeType.subtask, instructions="s"),
+                DAGNodeSpec(name="mid", type=DAGNodeType.subtask, instructions="m"),
+                DAGNodeSpec(name="leaf", type=DAGNodeType.subtask, instructions="l"),
+            ],
+            edges=[
+                DAGEdgeSpec(from_node="src", to_node="mid", edge_type="cancel_cascade"),
+                DAGEdgeSpec(from_node="mid", to_node="leaf"),
+            ],
+        )
+    )
+    await store.update_dag_status(dag.id, "running")
+    await store.update_node((await _node(store, dag.id, "src")).id, status="failed", error="boom")
+    mid = await _node(store, dag.id, "mid")
+    await store.update_node(mid.id, status="running", started_at=datetime.now(UTC))
+    real_cancel = orch._cancel_node
+
+    async def mid_finishes_first(node):
+        if node.name == "mid":
+            await store.update_node(node.id, status="completed", result="done")
+        await real_cancel(node)
+
+    monkeypatch.setattr(orch, "_cancel_node", mid_finishes_first)
+
+    await orch._advance_dag(await store.get_dag(dag.id))
+
+    assert (await _node(store, dag.id, "mid")).status == "completed"
+    assert (await _node(store, dag.id, "leaf")).status == "pending"  # not blocked
+
+
+async def test_a_deferral_does_not_resurrect_a_cancelled_node(store, subtask_mgr):
+    orch = _orch(store, subtask_mgr)
+    dag = await store.create(_two_node("dependency"))
+    stale = await store.get_dag(dag.id)
+    draft = next(n for n in stale.nodes if n.name == "draft")  # 'ready' in the tick's copy
+    await store.update_node(draft.id, status="cancelled", error="cancelled")
+
+    await orch._defer_node(draft, stale, "pool saturated")
+
+    assert (await _node(store, dag.id, "draft")).status == "cancelled"
+
+
+async def test_a_cancel_during_subtask_creation_is_not_overwritten(store, subtask_mgr):
+    """The launch's own `running` write came after the await on create(): a
+    cancel_dag in that window saw no subtask_id to cancel, and the blind
+    write resurrected the node — the subtask then ran in a cancelled DAG."""
+    orch = _orch(store, subtask_mgr)
+    dag = await store.create(_two_node("dependency"))
+    draft = await _node(store, dag.id, "draft")
+    created = SimpleNamespace(id=uuid.uuid4(), status="pending")
+
+    async def cancel_lands_during_create(**_):
+        await store.update_node(draft.id, status="cancelled", error="cancelled")
+        return created
+
+    subtask_mgr.create.side_effect = cancel_lands_during_create
+
+    await orch.start_dag(dag.id)
+
+    assert (await _node(store, dag.id, "draft")).status == "cancelled"
+    subtask_mgr.cancel.assert_awaited_once_with(created.id)

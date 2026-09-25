@@ -2464,6 +2464,13 @@ class TestDAGCompletionStatus:
 class TestSubtaskNodeDeferral:
     """Audit DG-4: a full subtask queue must DEFER a node, not fail it."""
 
+    @staticmethod
+    def _writes(store, key):
+        """Every value written for ``key`` — through update_node and, since
+        harness Phase 3 made status writes conditional, transition_node."""
+        calls = store.update_node.await_args_list + store.transition_node.await_args_list
+        return [kw.get(key) for (_a, kw) in calls]
+
     def _node(self):
         return SimpleNamespace(
             id=uuid.uuid4(), name="work", status="ready", node_type="subtask",
@@ -2489,9 +2496,7 @@ class TestSubtaskNodeDeferral:
 
         # Deferred, NOT failed.
         assert node.status == "pending"
-        statuses = [
-            kw.get("status") for (_a, kw) in store.update_node.await_args_list
-        ]
+        statuses = self._writes(store, "status")
         assert "pending" in statuses
         assert "failed" not in statuses
 
@@ -2510,9 +2515,7 @@ class TestSubtaskNodeDeferral:
         await orch._launch_subtask_node(node, dag)
 
         assert node.status == "failed"
-        statuses = [
-            kw.get("status") for (_a, kw) in store.update_node.await_args_list
-        ]
+        statuses = self._writes(store, "status")
         assert "failed" in statuses
 
     @pytest.mark.asyncio
@@ -2538,7 +2541,7 @@ class TestSubtaskNodeDeferral:
         await orch._launch_check_node(node, dag)
 
         assert node.status == "pending"
-        statuses = [kw.get("status") for (_a, kw) in store.update_node.await_args_list]
+        statuses = self._writes(store, "status")
         assert "pending" in statuses
         assert "failed" not in statuses
 
@@ -2567,5 +2570,5 @@ class TestSubtaskNodeDeferral:
 
         assert node.status == "failed"
         # final update carries an explanatory error mentioning saturation
-        errors = [kw.get("error") for (_a, kw) in store.update_node.await_args_list]
+        errors = self._writes(store, "error")
         assert any(e and "saturated" in e for e in errors)
