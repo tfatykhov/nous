@@ -3359,7 +3359,7 @@ class DAGOrchestrator:
             parent = node_by_name.get(n.parent_node or "")
             if parent is None:
                 continue
-            if parent.status in ("completed", "skipped", "cancelled"):
+            if parent.status in ("completed", "skipped", "cancelled", "blocked"):
                 n.status = "completed"
                 n.result = (
                     f"Fix-stage not fired — parent '{parent.name}' "

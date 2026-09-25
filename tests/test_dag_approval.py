@@ -933,3 +933,62 @@ async def test_an_earlier_answer_is_passed_on_as_an_answer_not_approved_input(
     task = subtask_mgr.create.call_args.kwargs["task"]
     assert "[Approved input from 'approve'" not in task
     assert "[Earlier answer at 'approve']: Answered in the companion: 'Send it' (send)" in task
+
+
+def _declinable_with_fix() -> DAGCreateRequest:
+    return DAGCreateRequest(
+        name="mail",
+        nodes=[
+            _approve(),
+            DAGNodeSpec(name="send", type=DAGNodeType.subtask, instructions="send"),
+            DAGNodeSpec(
+                name="fix_send", type=DAGNodeType.fix, instructions="retry the send",
+                parent_node="send", fix_actions=["retry_as_is"],
+            ),
+        ],
+        edges=[
+            DAGEdgeSpec(from_node="approve", to_node="send", edge_type="context_flow"),
+            DAGEdgeSpec(from_node="send", to_node="fix_send", edge_type="on_failure"),
+        ],
+    )
+
+
+async def test_a_declined_approval_with_a_fix_below_it_still_ends(store, subtask_mgr, surfaces):
+    """Spec §3.1 allows a retry_as_is fix on the acting node. A stop answer
+    blocks that node, and a fix whose parent is blocked never fires — left
+    pending, it kept the DAG running forever with no stop announcement."""
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag = await store.create(_declinable_with_fix())
+    await orch.start_dag(dag.id)
+    node = await _node(store, dag.id, "approve")
+    await orch.answer_node(node.id, "hold", source="companion", actor=None, surface_id=node.surface_id)
+
+    await orch.tick()
+
+    after = await store.get_dag(dag.id)
+    assert after.status == "failed"
+    assert after.result_summary == "Stopped at approval 'approve': 'Don't send'; 1 step not run"
+    assert {n.name: n.status for n in after.nodes}["fix_send"] == "completed"
+
+
+async def test_the_fix_still_fires_after_the_declined_approval_is_retried(store, subtask_mgr, surfaces):
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag = await store.create(_declinable_with_fix())
+    await orch.start_dag(dag.id)
+    node = await _node(store, dag.id, "approve")
+    await orch.answer_node(node.id, "hold", source="companion", actor=None, surface_id=node.surface_id)
+    await orch.tick()  # the DAG ends; fix_send is retired unfired
+    await orch.retry_node(dag.id, "approve", allow_declined=True)
+    await orch.tick()  # re-asked
+    node = await _node(store, dag.id, "approve")
+    await orch.answer_node(node.id, "send", source="companion", actor=None, surface_id=node.surface_id)
+    await orch.tick()  # 'send' launches
+    send = await _node(store, dag.id, "send")
+    assert send.status == "running"
+    # An error the rule-based chooser retries (fix_executor.choose_action).
+    await store.update_node(send.id, status="failed", error="incomplete_no_terminal")
+
+    await orch._try_fix_failed_nodes(await store.get_dag(dag.id))
+
+    assert (await _node(store, dag.id, "send")).status == "pending"  # retried by its fix
+    assert (await _node(store, dag.id, "fix_send")).fix_attempts_used == 1
