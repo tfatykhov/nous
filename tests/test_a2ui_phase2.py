@@ -126,10 +126,12 @@ class FailingBrain(FakeBrain):
 class FakeOrchestrator:
     def __init__(self) -> None:
         self.retries: list[tuple[str, str]] = []
+        self.retry_flags: list[bool] = []
         self.cancels: list[tuple[str, str]] = []
 
-    async def retry_node(self, dag_id, node_name):
+    async def retry_node(self, dag_id, node_name, *, allow_declined=False):
         self.retries.append((str(dag_id), node_name))
+        self.retry_flags.append(allow_declined)
 
     async def cancel_dag(self, dag_id, reason=""):
         self.cancels.append((str(dag_id), reason))
@@ -559,6 +561,8 @@ async def test_dag_retry_delegates_and_patches_the_banner(
 
     assert status == 200
     assert orchestrator.retries == [(DAG_PARAMS["dag_id"], "analyze")]
+    # Harness Phase 3 §3.10: a person's Retry may re-ask a declined approval.
+    assert orchestrator.retry_flags == [True]
     surface = await _surface_row(db, surface_id)
     assert surface.status == "live"
     assert "analyze" in surface.data_model["banner"]

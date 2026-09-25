@@ -1098,14 +1098,27 @@ class DAGNode(Base):
     __table_args__ = (
         # F066.1 adds 'skipped' to status; 'fix' to node_type.
         CheckConstraint(
-            "status IN ('pending', 'ready', 'running', 'awaiting_check', 'completed', 'failed', 'blocked', 'cancelled', 'skipped')",
+            "status IN ('pending', 'ready', 'running', 'awaiting_check', 'awaiting_input', "
+            "'completed', 'failed', 'blocked', 'cancelled', 'skipped')",
             name="chk_dag_node_status",
         ),
         CheckConstraint(
-            "node_type IN ('subtask', 'check', 'gate', 'callback', 'fix')",
+            "node_type IN ('subtask', 'check', 'gate', 'callback', 'fix', 'approval')",
             name="chk_dag_node_type",
         ),
+        # Harness Phase 3 (migration 076): where an answer came from, not who.
+        CheckConstraint(
+            "answer_source IN ('companion', 'deadline')",
+            name="chk_dag_node_answer_source",
+        ),
         UniqueConstraint("dag_id", "name", name="uq_dag_node_name"),
+        # Harness Phase 3 (076): the sweep's node-driven query (spec §3.7).
+        Index(
+            "idx_dag_nodes_awaiting_input",
+            "dag_id",
+            postgresql_where=text("status = 'awaiting_input'"),
+            sqlite_where=text("status = 'awaiting_input'"),
+        ),
         {"schema": "nous_system"},
     )
 
@@ -1183,6 +1196,18 @@ class DAGNode(Base):
     expected_modes: Mapped[list] = mapped_column(
         JSONB, nullable=False, default=list, server_default="'[]'::jsonb"
     )
+
+    # Harness Phase 3 (migration 076): an approval node owns its question,
+    # deadline and answer. approval_spec is authored and immutable; the rest
+    # is written by the conditional transitions in nous/dag (spec §3.2).
+    approval_spec: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    answer_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    surface_id: Mapped[str | None] = mapped_column(Text)
+    answer: Mapped[str | None] = mapped_column(Text)
+    answered_by: Mapped[str | None] = mapped_column(Text)
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    answer_source: Mapped[str | None] = mapped_column(Text)
+    answer_history: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     dag: Mapped["ExecutionDAG"] = relationship("ExecutionDAG", back_populates="nodes")
 

@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Collection
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import String, cast, func, select, update
+from sqlalchemy import String, and_, cast, exists, func, or_, select, update
 from sqlalchemy import true as sa_true
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from nous.config import Settings
-from nous.dag.schemas import DAGCreateRequest
+from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, DAGCreateRequest, DAGNodeType
 from nous.storage.database import Database
 from nous.storage.models import DAGEdge, DAGNode, DynamicCheckModel, ExecutionDAG, Subtask
 
@@ -25,6 +26,16 @@ MAX_ACTIVE_DAGS = 5
 # orchestrator lock and can reactivate a DAG while deliver() is awaiting
 # Telegram or a 120s summary turn (@codex P1 on fa988e7).
 _TERMINAL_DAG_STATUSES = ("completed", "failed", "partial", "cancelled")
+
+# Harness Phase 3 §3.3. LIVE: DAGs the tick advances. TERMINAL: the delivery
+# sweep's domain, as a set for transition_node's dag_statuses.
+LIVE_DAG_STATUSES: frozenset[str] = frozenset({"pending", "running"})
+TERMINAL_DAG_STATUSES: frozenset[str] = frozenset(_TERMINAL_DAG_STATUSES)
+# A node that will not change again on its own. finalize_dag refuses while any
+# node is outside this set; the orchestrator's completion check uses the same.
+TERMINAL_NODE_STATUSES: frozenset[str] = frozenset(
+    {"completed", "failed", "blocked", "cancelled", "skipped"}
+)
 
 # codex P2 round 4: every non-active DAGNode status, i.e. every status a
 # check-type node can leave its heartbeat check leaked behind on. Broader
@@ -42,6 +53,82 @@ _TERMINAL_CHECK_NODE_STATUSES = ("completed", "failed", "cancelled", "skipped")
 _DAG_ID_PREFIX_RE = re.compile(r"^[0-9a-fA-F-]{1,36}$")
 
 
+_WORK_NODE_STATUSES = ("ready", "running", "awaiting_check")
+_RESOLVED_NODE_STATUSES = ("completed", "skipped")
+
+
+def parked_clause():
+    """Harness Phase 3 §3.11 — SQL predicate over ExecutionDAG: the DAG is PARKED.
+
+    It has an awaiting_input node and no work: no node ready / running /
+    awaiting_check, and no pending non-fix node whose predecessors (along
+    PREDECESSOR_EDGE_TYPES) are all completed or skipped — such a node is a
+    sibling about to launch, or one a frame cap or a full pool deferred
+    (_defer_node returns it to pending), and it is work. The ONE definition
+    of parked: create() and count_active() both use it.
+
+    It deliberately differs from the dispatch gate's "working"
+    (orchestrator._is_working: ready/running only). Admission asks whether a
+    DAG waits on nothing but a person, so a DAG polling a check is not parked;
+    the gate asks whether a DAG holds a subtask-queue slot, which a DAG
+    polling a check does not.
+    """
+    waiting = aliased(DAGNode)
+    busy = aliased(DAGNode)
+    pending = aliased(DAGNode)
+    pred = aliased(DAGNode)
+    # Correlation is explicit rather than left to auto-correlation: each outer
+    # EXISTS belongs to the enclosing SELECT over ExecutionDAG, and the inner
+    # one to the `pending` row of has_dispatchable.
+    has_waiting = (
+        exists()
+        .where(waiting.dag_id == ExecutionDAG.id, waiting.status == "awaiting_input")
+        .correlate(ExecutionDAG)
+    )
+    has_busy = (
+        exists()
+        .where(busy.dag_id == ExecutionDAG.id, busy.status.in_(_WORK_NODE_STATUSES))
+        .correlate(ExecutionDAG)
+    )
+    unresolved_pred = (
+        exists()
+        .where(
+            DAGEdge.to_node_id == pending.id,
+            DAGEdge.edge_type.in_(sorted(PREDECESSOR_EDGE_TYPES)),
+            pred.id == DAGEdge.from_node_id,
+            pred.status.not_in(_RESOLVED_NODE_STATUSES),
+        )
+        .correlate(pending)
+    )
+    has_dispatchable = (
+        exists()
+        .where(
+            pending.dag_id == ExecutionDAG.id,
+            pending.status == "pending",
+            pending.node_type != "fix",
+            ~unresolved_pred,
+        )
+        .correlate(ExecutionDAG)
+    )
+    return and_(has_waiting, ~has_busy, ~has_dispatchable)
+
+
+def open_approval_clause():
+    """Harness Phase 3 §3.11 — SQL predicate over ExecutionDAG: the DAG has an
+    approval node that is not terminal, i.e. it is parked or can still park.
+    The parked cap reserves its slot from admission on."""
+    node = aliased(DAGNode)
+    return (
+        exists()
+        .where(
+            node.dag_id == ExecutionDAG.id,
+            node.node_type == "approval",
+            node.status.not_in(sorted(TERMINAL_NODE_STATUSES)),
+        )
+        .correlate(ExecutionDAG)
+    )
+
+
 class DAGStore:
     """CRUD operations for DAG orchestration."""
 
@@ -57,18 +144,36 @@ class DAGStore:
         Raises ValueError if the active DAG limit is reached.
         """
         async with self._db.session() as session:
-            # Check active DAG limit
-            active_count = await session.scalar(
+            live = (
                 select(func.count())
                 .select_from(ExecutionDAG)
                 .where(ExecutionDAG.agent_id == self._agent_id)
-                .where(ExecutionDAG.status.in_(["pending", "running"]))
+                .where(ExecutionDAG.status.in_(sorted(LIVE_DAG_STATUSES)))
             )
+            parked = parked_clause()
+            # Harness Phase 3 §3.11: a parked DAG does no work, so it does not
+            # count against MAX_ACTIVE_DAGS.
+            active_count = await session.scalar(live.where(~parked))
             if active_count >= MAX_ACTIVE_DAGS:
                 raise ValueError(
                     f"Active DAG limit reached ({MAX_ACTIVE_DAGS}). "
                     "Cancel or complete existing DAGs first."
                 )
+            # ...but parked DAGs are bounded on their own, and only a request
+            # that could add one is refused, so a backlog of unanswered
+            # questions never blocks ordinary work. The cap counts every live
+            # DAG with an unanswered approval node — parked now, or still
+            # running the steps before its question — so a slot is reserved
+            # at admission: counting only DAGs parked NOW admitted several
+            # still-drafting DAGs under the cap that all parked later.
+            if any(spec.type == DAGNodeType.approval for spec in request.nodes):
+                asking = await session.scalar(live.where(open_approval_clause()))
+                if asking >= self._settings.dag_max_parked_dags:
+                    raise ValueError(
+                        f"{asking} DAGs are waiting on, or will ask for, your answers "
+                        f"(limit NOUS_DAG_MAX_PARKED_DAGS={self._settings.dag_max_parked_dags}); "
+                        "answer or cancel some first."
+                    )
 
             # Compute wave assignments
             waves = request.compute_waves()
@@ -96,51 +201,58 @@ class DAGStore:
                     spec.timeout_seconds if spec.timeout_seconds is not None else self._settings.dag_node_default_timeout,
                     self._settings.dag_node_max_timeout,
                 )
-                # F064.1: resolve + clamp per-node stall_timeout. None or 0 = disabled.
-                # When set, clamp to NOUS_DAG_NODE_MAX_STALL_TIMEOUT and ALSO
-                # enforce stall <= resolved_timeout (codex P2-2 fix: the
-                # schema-level validator can't see the resolved default
-                # because it runs before store.create's clamp pipeline. We
-                # check against the resolved value here, raising before any
-                # row is inserted — same semantics, late but pre-commit).
-                resolved_stall: int | None
-                if spec.stall_timeout_seconds == 0:
-                    # Explicitly disabled per-node — no inheritance, no check.
-                    resolved_stall = 0
-                elif spec.stall_timeout_seconds is None:
-                    # Per-node unset → inherits global default at runtime
-                    # (orchestrator._effective_stall_timeout). Persist None
-                    # to preserve the "inherit" semantic, but ALSO validate
-                    # the GLOBAL default against this node's wall-clock
-                    # timeout. Otherwise a node with timeout_seconds=60 and
-                    # global default_stall_timeout=600 silently never
-                    # stalls. @codex P2 on dc914be: skipped this check
-                    # previously when per-node stall was unset.
+                if spec.type == DAGNodeType.approval:
+                    # Harness Phase 3 §3.1: an approval node never runs, so no
+                    # stall timeout applies. timeout_seconds keeps its resolved
+                    # default above — the column is NOT NULL, and nothing reads
+                    # it for an approval node.
                     resolved_stall = None
-                    if self._settings.dag_stall_detection_enabled:
-                        inherited = self._settings.dag_node_default_stall_timeout
-                        if inherited > 0 and inherited > resolved_timeout:
-                            raise ValueError(
-                                f"Node '{spec.name}': inherited global "
-                                f"stall_timeout={inherited} exceeds this node's "
-                                f"effective wall-clock timeout {resolved_timeout} — "
-                                "stall would never fire (silent dead config). Set "
-                                "stall_timeout_seconds=0 on this node to opt out, "
-                                "or raise timeout_seconds."
-                            )
                 else:
-                    resolved_stall = min(
-                        spec.stall_timeout_seconds,
-                        self._settings.dag_node_max_stall_timeout,
-                    )
-                    if resolved_stall > resolved_timeout:
-                        raise ValueError(
-                            f"Node '{spec.name}': stall_timeout_seconds="
-                            f"{spec.stall_timeout_seconds} exceeds effective "
-                            f"wall-clock timeout {resolved_timeout} — stall "
-                            "would never fire (silent dead config). Reduce "
-                            "stall_timeout_seconds or raise timeout_seconds."
+                    # F064.1: resolve + clamp per-node stall_timeout. None or 0 = disabled.
+                    # When set, clamp to NOUS_DAG_NODE_MAX_STALL_TIMEOUT and ALSO
+                    # enforce stall <= resolved_timeout (codex P2-2 fix: the
+                    # schema-level validator can't see the resolved default
+                    # because it runs before store.create's clamp pipeline. We
+                    # check against the resolved value here, raising before any
+                    # row is inserted — same semantics, late but pre-commit).
+                    resolved_stall: int | None
+                    if spec.stall_timeout_seconds == 0:
+                        # Explicitly disabled per-node — no inheritance, no check.
+                        resolved_stall = 0
+                    elif spec.stall_timeout_seconds is None:
+                        # Per-node unset → inherits global default at runtime
+                        # (orchestrator._effective_stall_timeout). Persist None
+                        # to preserve the "inherit" semantic, but ALSO validate
+                        # the GLOBAL default against this node's wall-clock
+                        # timeout. Otherwise a node with timeout_seconds=60 and
+                        # global default_stall_timeout=600 silently never
+                        # stalls. @codex P2 on dc914be: skipped this check
+                        # previously when per-node stall was unset.
+                        resolved_stall = None
+                        if self._settings.dag_stall_detection_enabled:
+                            inherited = self._settings.dag_node_default_stall_timeout
+                            if inherited > 0 and inherited > resolved_timeout:
+                                raise ValueError(
+                                    f"Node '{spec.name}': inherited global "
+                                    f"stall_timeout={inherited} exceeds this node's "
+                                    f"effective wall-clock timeout {resolved_timeout} — "
+                                    "stall would never fire (silent dead config). Set "
+                                    "stall_timeout_seconds=0 on this node to opt out, "
+                                    "or raise timeout_seconds."
+                                )
+                    else:
+                        resolved_stall = min(
+                            spec.stall_timeout_seconds,
+                            self._settings.dag_node_max_stall_timeout,
                         )
+                        if resolved_stall > resolved_timeout:
+                            raise ValueError(
+                                f"Node '{spec.name}': stall_timeout_seconds="
+                                f"{spec.stall_timeout_seconds} exceeds effective "
+                                f"wall-clock timeout {resolved_timeout} — stall "
+                                "would never fire (silent dead config). Reduce "
+                                "stall_timeout_seconds or raise timeout_seconds."
+                            )
                 # F066.1: fix nodes stay in 'pending' regardless of wave —
                 # they only activate when their parent transitions to 'failed'
                 # via _try_fix_failed_nodes. Without this guard, a wave-0
@@ -153,6 +265,18 @@ class DAGStore:
                     initial_status = "ready"
                 else:
                     initial_status = "pending"
+                approval_spec = None
+                if spec.type == DAGNodeType.approval:
+                    approval_spec = {
+                        "options": [o.model_dump() for o in spec.options or []],
+                        "default_option": spec.default_option,
+                        "recommended_option": spec.recommended_option,
+                        "answer_timeout_seconds": min(
+                            spec.answer_timeout_seconds
+                            or self._settings.dag_approval_default_wait_seconds,
+                            self._settings.dag_approval_max_wait_seconds,
+                        ),
+                    }
                 node = DAGNode(
                     dag_id=dag.id,
                     name=spec.name,
@@ -175,6 +299,7 @@ class DAGStore:
                     fix_actions=spec.fix_actions,
                     max_fix_attempts=spec.max_fix_attempts,
                     expected_modes=list(spec.expected_modes),
+                    approval_spec=approval_spec,
                 )
                 session.add(node)
                 node_map[spec.name] = node
@@ -328,13 +453,22 @@ class DAGStore:
             return list(result.scalars().all())
 
     async def count_active(self) -> int:
-        """Count pending + running DAGs."""
+        """Count live DAGs that are working — parked DAGs excluded (§3.11)."""
+        return await self._count_live(parked=False)
+
+    async def count_parked(self) -> int:
+        """Count live DAGs waiting only on an approval answer (§3.11)."""
+        return await self._count_live(parked=True)
+
+    async def _count_live(self, *, parked: bool) -> int:
+        clause = parked_clause()
         async with self._db.session() as session:
             count = await session.scalar(
                 select(func.count())
                 .select_from(ExecutionDAG)
                 .where(ExecutionDAG.agent_id == self._agent_id)
-                .where(ExecutionDAG.status.in_(["pending", "running"]))
+                .where(ExecutionDAG.status.in_(sorted(LIVE_DAG_STATUSES)))
+                .where(clause if parked else ~clause)
             )
             return count or 0
 
@@ -367,6 +501,38 @@ class DAGStore:
             )
             await session.commit()
 
+    async def finalize_dag(self, dag_id: UUID, status: str, result_summary: str) -> bool:
+        """Terminal DAG write decided from a tick's snapshot, conditional on the
+        rows: the DAG is still live and none of its nodes is non-terminal.
+
+        The tick decides "every node is terminal" from the copy it loaded, and
+        retry_node / answer_node / cancel_dag do not take its lock. A retry that
+        lands after the load resets nodes to pending; a blind write would then
+        end the DAG 'failed' over pending nodes that nothing advances again.
+        Refused, the next tick re-derives the outcome from fresh rows.
+        """
+        open_node = (
+            select(DAGNode.id)
+            .where(DAGNode.dag_id == dag_id)
+            .where(DAGNode.status.not_in(sorted(TERMINAL_NODE_STATUSES)))
+            .exists()
+        )
+        async with self._db.session() as session:
+            result = await session.execute(
+                update(ExecutionDAG)
+                .where(ExecutionDAG.id == dag_id)
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .where(ExecutionDAG.status.in_(sorted(LIVE_DAG_STATUSES)))
+                .where(~open_node)
+                .values(
+                    status=status,
+                    completed_at=datetime.now(UTC),
+                    result_summary=result_summary,
+                )
+            )
+            await session.commit()
+            return result.rowcount == 1
+
     async def update_node(self, node_id: UUID, **kwargs: object) -> None:
         """Update any fields on a DAG node (agent-scoped)."""
         if not kwargs:
@@ -385,6 +551,83 @@ class DAGStore:
                 .values(**kwargs)
             )
             await session.commit()
+
+    async def get_node_with_dag_status(self, node_id: UUID) -> tuple[DAGNode, str] | None:
+        """One node plus its DAG's status, agent-scoped (Harness Phase 3)."""
+        async with self._db.session() as session:
+            row = (
+                await session.execute(
+                    select(DAGNode, ExecutionDAG.status)
+                    .join(ExecutionDAG, ExecutionDAG.id == DAGNode.dag_id)
+                    .where(DAGNode.id == node_id)
+                    .where(ExecutionDAG.agent_id == self._agent_id)
+                )
+            ).first()
+            return (row[0], row[1]) if row is not None else None
+
+    async def awaiting_input_nodes_in_terminal_dags(self, limit: int) -> list[DAGNode]:
+        """Harness Phase 3 §3.7: awaiting_input nodes whose DAG has ended.
+
+        The card-driven sweep cannot see one that has no card. A probe put a
+        node there with conditional writes only: dag_statuses is a snapshot,
+        so a concurrent retry plus a failed push can park a node in a DAG that
+        turns terminal a moment later. Served by idx_dag_nodes_awaiting_input.
+        """
+        async with self._db.session() as session:
+            rows = await session.execute(
+                select(DAGNode)
+                .join(ExecutionDAG, ExecutionDAG.id == DAGNode.dag_id)
+                .where(ExecutionDAG.agent_id == self._agent_id)
+                .where(DAGNode.status == "awaiting_input")
+                .where(ExecutionDAG.status.in_(sorted(TERMINAL_DAG_STATUSES)))
+                .limit(limit)
+            )
+            return list(rows.scalars().all())
+
+    async def transition_node(
+        self,
+        node_id: UUID,
+        *,
+        from_statuses: Collection[str],
+        dag_statuses: Collection[str] | None = None,
+        card: str | None = None,
+        due_by: datetime | None = None,
+        **values: object,
+    ) -> bool:
+        """Harness Phase 3 §3.3: one conditional node write.
+
+        Applies ``values`` only while the node is still in one of
+        ``from_statuses`` (and, when given, its DAG in one of ``dag_statuses``),
+        agent-scoped like ``claim_and_add_node_tokens``. Returns whether it
+        applied. Every write that can race another writer of the same row goes
+        through here, so the row's own predicate — not a lock — decides the
+        race, across processes. ``dag_statuses`` is a snapshot filter: the
+        UPDATE takes no lock on the execution_dags row.
+
+        ``card``: the node must be unlinked (the tap-before-link window) or
+        linked to exactly this card — a card answers only its own attempt.
+        ``due_by``: the node's deadline must have passed; decided in SQL,
+        because SQLite returns stored timestamps naive and a Python comparison
+        against an aware ``now`` raises TypeError.
+        """
+        dag_scope = select(ExecutionDAG.id).where(ExecutionDAG.agent_id == self._agent_id)
+        if dag_statuses is not None:
+            dag_scope = dag_scope.where(ExecutionDAG.status.in_(sorted(dag_statuses)))
+        stmt = (
+            update(DAGNode)
+            .where(DAGNode.id == node_id)
+            .where(DAGNode.status.in_(sorted(from_statuses)))
+            .where(DAGNode.dag_id.in_(dag_scope))
+            .values(**values)
+        )
+        if card is not None:
+            stmt = stmt.where(or_(DAGNode.surface_id.is_(None), DAGNode.surface_id == card))
+        if due_by is not None:
+            stmt = stmt.where(DAGNode.answer_deadline <= due_by)
+        async with self._db.session() as session:
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount == 1
 
     async def count_running_subtasks_by_frame_type(
         self, dag_id: UUID | None = None
@@ -695,9 +938,10 @@ class DAGStore:
     async def apply_retry(
         self,
         dag_id: UUID,
-        node_updates: list[tuple[UUID, dict]],
+        primary: tuple[UUID, dict, Collection[str]],
+        unblocks: list[tuple[UUID, dict, Collection[str]]],
         reactivate: bool,
-    ) -> None:
+    ) -> bool:
         """F087: apply every retry mutation AND the reactivation atomically.
 
         @codex P2 on a616310. Doing these as separate commits leaves an
@@ -716,18 +960,30 @@ class DAGStore:
         There is no safe ordering because the invalid state is the split
         itself. One transaction removes the window rather than moving it: no
         observer ever sees a DAG whose status and node set disagree.
+
+        Harness Phase 3 §3.3: each write is conditional on the status
+        retry_node read (the third element of each tuple). If the retried
+        node's own write — ``primary``, passed separately so no reorder can
+        turn a lost primary into a partial retry — does not apply, the whole
+        retry rolls back and False is returned. An unblock whose node moved on
+        is simply skipped.
         """
         async with self._db.session() as session:
             scoped = select(ExecutionDAG.id).where(
                 ExecutionDAG.agent_id == self._agent_id
             )
-            for node_id, values in node_updates:
-                await session.execute(
+            writes = [(True, primary)] + [(False, u) for u in unblocks]
+            for is_primary, (node_id, values, from_statuses) in writes:
+                result = await session.execute(
                     update(DAGNode)
                     .where(DAGNode.id == node_id)
                     .where(DAGNode.dag_id.in_(scoped))
+                    .where(DAGNode.status.in_(sorted(from_statuses)))
                     .values(**values)
                 )
+                if is_primary and result.rowcount != 1:
+                    await session.rollback()
+                    return False
             if reactivate:
                 await session.execute(
                     update(ExecutionDAG)
@@ -744,6 +1000,7 @@ class DAGStore:
                     )
                 )
             await session.commit()
+            return True
 
     async def reactivate_for_retry(self, dag_id: UUID) -> None:
         """F087: put a terminal DAG back to 'running' AND clear its delivery

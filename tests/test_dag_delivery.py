@@ -838,3 +838,38 @@ class TestDeliveryDoesNotBlockTheStateMachine:
         await asyncio.wait_for(orch.wait_for_delivery(), timeout=5)
 
         assert delivery.deliver.await_count == 1
+
+
+def test_template_for_a_dag_stopped_at_an_approval():
+    import uuid
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from nous.config import Settings
+    from nous.dag.delivery import DAGResultDelivery
+
+    spec = {
+        "options": [
+            {"id": "send", "label": "Send it", "outcome": "proceed"},
+            {"id": "hold", "label": "Don't send", "outcome": "stop"},
+        ],
+        "default_option": "hold",
+    }
+    approve = SimpleNamespace(
+        name="approve", node_type="approval", status="failed", approval_spec=spec,
+        answer="hold", answer_source="companion", answered_at=datetime(2026, 9, 25, 12, 0, tzinfo=UTC),
+        answer_deadline=None, error="declined in the companion: …",
+    )
+    send = SimpleNamespace(name="send", node_type="subtask", status="blocked",
+                           error="Blocked: an approval was declined or not answered")
+    dag = SimpleNamespace(
+        id=uuid.uuid4(), name="mail", status="failed", nodes=[approve, send],
+        token_budget=None, tokens_consumed=0, result_summary=None,
+    )
+
+    text = DAGResultDelivery(Settings(_env_file=None), agent_id="t", bus=None, runner=None).build_template(dag)
+
+    assert text.splitlines()[0].startswith("DAG 'mail' stopped at an approval")
+    assert "Approvals:\n  approve: declined — 'Don't send' in the companion at 2026-09-25 12:00 UTC" in text
+    assert "Not run:\n  [blocked] send" in text
+    assert "Problems:" not in text and "[failed] approve" not in text

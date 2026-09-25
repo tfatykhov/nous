@@ -143,3 +143,24 @@ COMMENT ON COLUMN heart.facts.actionable_confidence IS
     assert stmts[3].startswith("COMMENT ON COLUMN")
     # No bogus chunk starts with "backfill".
     assert not any(s.lower().startswith("backfill") for s in stmts)
+
+
+def test_split_full_migration_076():
+    """Harness Phase 3: CI applies migrations with psql, prod with this
+    splitter. Pin 076's statement count on the REAL file, so a stray inline
+    comment (an apostrophe or a ';') that merges statements fails here
+    instead of at prod boot."""
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "sql" / "migrations" / "076_dag_approval_nodes.sql"
+    stmts = _split_sql_statements(path.read_text(encoding="utf-8"))
+    assert len(stmts) == 8, stmts
+    assert "ADD COLUMN IF NOT EXISTS answer_history JSONB" in stmts[-2]
+    assert "idx_dag_nodes_awaiting_input" in stmts[-1]
+    # Comments must stay apostrophe-free: an unbalanced quote in one would
+    # open a string for the splitter and swallow the statements after it.
+    comments = [
+        line for line in path.read_text(encoding="utf-8").splitlines()
+        if line.lstrip().startswith("--")
+    ]
+    assert not [line for line in comments if "'" in line or ";" in line], comments

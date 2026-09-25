@@ -330,3 +330,37 @@ def test_heartbeat_findings_requires_a_fingerprint_per_finding() -> None:
     """The fingerprint is the handle every action verb needs; no default."""
     with pytest.raises(KeyError):
         heartbeat_findings({"findings": [{"message": "no fingerprint here"}]})
+
+
+def test_approval_gate_dag_options():
+    import json
+
+    from nous.a2ui.builders import approval_gate
+
+    built = approval_gate(
+        {
+            "title": "t",
+            "options": [
+                {"id": "send", "label": "Send it — continues", "outcome": "proceed"},
+                {"id": "hold", "label": "Don't send — stops here", "outcome": "stop"},
+            ],
+            "recommend_first": False,
+            "defer_label": "Decide later",
+        }
+    )
+    assert built.data_model["recommendation"] == ""
+    assert [o["outcome"] for o in built.data_model["options"]] == ["proceed", "stop"]
+    rendered = json.dumps(built.components)
+    assert "Decide later" in rendered
+    assert "(recommended)" not in rendered
+
+
+def test_approval_gate_defaults_are_unchanged():
+    import json
+
+    from nous.a2ui.builders import approval_gate
+
+    built = approval_gate({"title": "t", "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]})
+    assert built.data_model["recommendation"] == "a"
+    assert built.data_model["options"] == [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]
+    assert "Ask me later" in json.dumps(built.components)

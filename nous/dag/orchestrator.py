@@ -49,16 +49,46 @@ from __future__ import annotations
 import asyncio
 import logging
 import tempfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from nous.config import Settings
 from nous.dag._workspace import assert_inside_root, compute_workspace_path
-from nous.dag.store import _TERMINAL_DAG_STATUSES, DAGStore
+from nous.dag.approval import (
+    BLOCKED_BY_APPROVAL,
+    DEADLINE_ACTOR,
+    DEDUP_PREFIX,
+    DEFER_LABEL,
+    AnswerResult,
+    answer_values,
+    approval_dedup_key,
+    as_utc,
+    build_card_summary,
+    button_label,
+    card_shown_chars,
+    declined_retry_refusal,
+    history_entry,
+    label_of,
+    node_id_from_dedup_key,
+    notify_text,
+    option_by_id,
+    risk_line,
+    stopped_at_approval,
+    stopped_summary,
+)
+from nous.dag.schemas import PREDECESSOR_EDGE_TYPES, DAGNodeStatus
+from nous.dag.store import (
+    _TERMINAL_DAG_STATUSES,
+    LIVE_DAG_STATUSES,
+    MAX_ACTIVE_DAGS,
+    TERMINAL_DAG_STATUSES,
+    TERMINAL_NODE_STATUSES,
+    DAGStore,
+)
 from nous.heart.subtasks import SubtaskQueueFull
 from nous.heartbeat.dynamic import DynamicCheckLimitReached
 from nous.storage.models import DAGNode, ExecutionDAG
@@ -75,13 +105,45 @@ logger = logging.getLogger(__name__)
 # F066.1: 'skipped' is a terminal state introduced by skip_and_continue
 # fix action; it behaves like 'completed' for dependency resolution but
 # is distinguished in telemetry.
-_TERMINAL = frozenset({"completed", "failed", "blocked", "cancelled", "skipped"})
+_TERMINAL = TERMINAL_NODE_STATUSES
 
 # F066.1: statuses that "resolve" a node for dependency-resolution
 # purposes — i.e. _find_ready_nodes treats them as satisfied predecessors.
 # `skipped` joins `completed` here because skip_and_continue says
 # "proceed past this failure"; cascade-failed nodes are NOT in this set.
 _RESOLVED = frozenset({"completed", "skipped"})
+
+# Harness Phase 3 §3.3: statuses a node can still be moved out of by a cancel
+# or a block. Derived from the enum so a new non-terminal status is included.
+_NON_TERMINAL = frozenset(s.value for s in DAGNodeStatus) - _TERMINAL
+# Statuses the dispatcher may move to 'ready' (wave-0 nodes are created ready).
+_DISPATCHABLE = frozenset({"pending", "ready"})
+
+# Columns answer_node / a re-read copy onto the tick's in-memory node.
+_APPROVAL_ROW_FIELDS = (
+    "status", "result", "error", "surface_id", "answer", "answered_by", "answered_at",
+    "answer_source", "answer_deadline", "completed_at",
+)
+
+# awaiting_check holds no subtask-queue slot — the resource the gate protects —
+# so a DAG polling a check does not count (spec §3.11).
+_WORKING_NODE_STATUSES = frozenset({"ready", "running"})
+
+
+def _is_working(dag: ExecutionDAG) -> bool:
+    """A node ready or running. The counter rule (§3.11): a parked approval or
+    an instant gate/callback leaves a DAG NOT working, so it takes no slot.
+
+    Not the admission rule: store.parked_clause() also counts awaiting_check as
+    work, because it asks a different question (does the DAG wait only on a
+    person?) — this one asks whether the DAG holds a subtask-queue slot."""
+    return any(n.status in _WORKING_NODE_STATUSES for n in dag.nodes)
+
+
+def _has_approval(dag: ExecutionDAG) -> bool:
+    """Only a DAG with an approval node can resume from parking — the only
+    DAGs the gate ever holds (§3.11)."""
+    return any(n.node_type == "approval" for n in dag.nodes)
 
 # Budget warning threshold (80%)
 _BUDGET_WARNING_RATIO = 0.80
@@ -145,6 +207,7 @@ class DAGOrchestrator:
         settings: Settings,
         llm_client: object | None = None,
         delivery: DAGResultDelivery | None = None,
+        surface_service: Any | None = None,
     ) -> None:
         self._store = store
         self._subtask_mgr = subtask_mgr
@@ -160,6 +223,17 @@ class DAGOrchestrator:
         # sweep entirely (the orchestrator still runs, DAGs still finish —
         # they just aren't announced).
         self._delivery = delivery
+        # Harness Phase 3: pushes and closes approval cards. Passed at
+        # construction (main.py builds SurfaceService first) — None means the
+        # companion is off and dag_create refuses approval nodes.
+        self._surface_service = surface_service
+        # Harness Phase 3 §3.11: DAGs the dispatch gate held on the LAST tick
+        # (rebuilt every tick, so a DAG cancelled while held drops out), each
+        # mapped to whether a person has already approved one of its steps,
+        # and the working count it saw — read by dag_manage via held_reason().
+        self._held: dict[UUID, bool] = {}
+        self._held_this_tick: dict[UUID, bool] = {}
+        self._working_count = 0
         # F087: set True by whoever installs the tick. Explicit rather than
         # inferred from last_tick_at, which would false-negative during the
         # first tick interval. dag_create refuses when this is False so the
@@ -192,6 +266,11 @@ class DAGOrchestrator:
         # process restart (a benign backstop reset).
         self._defer_counts: dict = {}
 
+    @property
+    def approvals_wired(self) -> bool:
+        """Harness Phase 3: approval cards can be pushed (the clock_wired pattern)."""
+        return self._surface_service is not None
+
     # Backstop: ~this many consecutive deferrals (ticks) of a saturated pool
     # before a node is failed rather than deferred again.
     _MAX_DEFERRALS = 30
@@ -204,24 +283,102 @@ class DAGOrchestrator:
         self._defer_counts[node.id] = count
         if count >= self._MAX_DEFERRALS:
             self._defer_counts.pop(node.id, None)
-            await self._store.update_node(
-                node.id,
-                status="failed",
-                error=f"{reason} — still saturated after {count} deferrals",
-            )
-            node.status = "failed"
+            # Harness Phase 3 §3.3: conditional — a cancel_dag that landed
+            # meanwhile keeps its 'cancelled'.
+            error = f"{reason} — still saturated after {count} deferrals"
+            if await self._store.transition_node(
+                node.id, from_statuses={"ready", "pending"}, status="failed", error=error
+            ):
+                node.status = "failed"
             logger.warning(
                 "DAG %s node %s FAILED after %d deferrals: %s",
                 dag.id, node.name, count, reason,
             )
             return
-        await self._store.update_node(node.id, status="pending")
-        node.status = "pending"
+        # Conditional (§3.3): a deferral must never resurrect a node that
+        # cancel_dag cancelled after the tick loaded it.
+        if await self._store.transition_node(
+            node.id, from_statuses={"ready"}, status="pending"
+        ):
+            node.status = "pending"
         log = logger.warning if count >= 10 else logger.info
         log(
             "Deferring node %s in DAG %s (attempt %d) — %s; retry next tick",
             node.name, dag.id, count, reason,
         )
+
+    async def _mark_ready_and_launch(self, node: DAGNode, dag: ExecutionDAG) -> None:
+        """Mark a node ready and launch it, conditionally (spec §3.3).
+
+        The ready write was blind at four sites: a cancel_dag landing between
+        the tick's load and this write had its 'cancelled' overwritten and the
+        node launched inside a DAG being cancelled.
+        """
+        if not await self._store.transition_node(
+            node.id,
+            from_statuses=_DISPATCHABLE,
+            dag_statuses=LIVE_DAG_STATUSES,
+            status="ready",
+        ):
+            logger.info(
+                "Node %s in DAG %s changed state before launch — not launched",
+                node.name, dag.id,
+            )
+            return
+        node.status = "ready"
+        try:
+            await self._launch_node(node, dag)
+        except Exception:
+            logger.exception("Failed to launch node %s in DAG %s", node.name, dag.id)
+
+    async def _cancel_one(self, node: DAGNode, error: str) -> bool:
+        """Cancel one node's primitive, then its row — conditionally (§3.3).
+
+        The row write loses to any writer that already moved the node to a
+        terminal status (a completion, an answer), so a cancellation can no
+        longer overwrite an outcome that landed after the caller's load.
+        """
+        await self._cancel_node(node)
+        won = await self._store.transition_node(
+            node.id, from_statuses=_NON_TERMINAL, status="cancelled", error=error
+        )
+        if won:
+            node.status = "cancelled"
+            node.error = error
+            if node.node_type == "approval":
+                # The card is the approval's only primitive; close it after the
+                # win so an answer that landed first keeps its card (§3.7).
+                await self._close_card(None, node_id=node.id)
+        return won
+
+    async def _finish_launch(self, node: DAGNode, *, status: str, **values: object) -> bool:
+        """A launch-path terminal write (an instant completion or a launch
+        failure), conditional on the node still being dispatchable (§3.3)."""
+        if await self._store.transition_node(
+            node.id, from_statuses=_DISPATCHABLE, status=status, **values
+        ):
+            node.status = status
+            return True
+        return False
+
+    def _costs_nothing(self, node: DAGNode) -> bool:
+        """Never held by the gate: parking an approval takes no subtask, a gate
+        auto-passes, and a callback executes nothing while its flag is off."""
+        return node.node_type in ("approval", "gate") or (
+            node.node_type == "callback" and not self._settings.dag_callback_execution_enabled
+        )
+
+    def held_reason(self, dag_id: UUID) -> str | None:
+        """Why a held DAG has not moved yet (§3.11). "approved" only once a
+        person has approved one of its steps — the gate also holds a DAG with
+        an approval node in a gap BEFORE that question is answered."""
+        if dag_id not in self._held:
+            return None
+        slot = (
+            f"waiting for a free slot "
+            f"({self._working_count}/{MAX_ACTIVE_DAGS} DAGs working)"
+        )
+        return f"approved — {slot}" if self._held[dag_id] else slot
 
     async def tick(self) -> int:
         """Advance all active DAGs. Returns number of DAGs processed.
@@ -230,12 +387,46 @@ class DAGOrchestrator:
         """
         async with self._lock:
             self.last_tick_at = datetime.now(UTC)
-            dags = await self._store.get_active_dags()
+            dags = await self._store.get_active_dags()  # oldest first
+            # Harness Phase 3 §3.11: resuming parked DAGs is admission-
+            # controlled at dispatch. Parked DAGs do not count at creation, so
+            # answering many at once could put up to MAX_ACTIVE_DAGS + the
+            # parked cap to work together, overflow the agent-wide subtask
+            # queue, and fail approved nodes after _MAX_DEFERRALS. The pre-
+            # pass runs only when a loaded DAG has an approval node — without
+            # one, creation already keeps the working set at the limit, and
+            # every DAG dispatches exactly as before.
+            gated = any(_has_approval(d) for d in dags)
+            working = sum(1 for d in dags if _is_working(d)) if gated else 0
+            self._working_count = working
+            self._held_this_tick = {}
             for dag in dags:
+                was_working = _is_working(dag)
+                # Only a DAG with an approval node is ever held: a DAG without
+                # one keeps today's scheduling even while another waits on a
+                # person (between waves, after a deferral, after a retry).
+                may_start = (
+                    not gated
+                    or was_working
+                    or not _has_approval(dag)
+                    or working < MAX_ACTIVE_DAGS
+                )
                 try:
-                    await self._advance_dag(dag)
+                    await self._advance_dag(dag, may_start=may_start)
                 except Exception:
                     logger.exception("Error advancing DAG %s", dag.id)
+                # Counter rule: count a DAG only if it now has real work. A
+                # DAG that finished this tick frees its slot on the next one.
+                # "Working" is re-counted every tick, so an approval DAG
+                # between waves (nothing ready/running at tick start) can be
+                # held too, not only a resumed one — oldest first, benign.
+                if gated and not was_working and _is_working(dag):
+                    working += 1
+                    self._working_count = working
+            # Fresh each tick: a DAG cancelled while held is never advanced
+            # again, and must not keep reporting "waiting for a free slot".
+            self._held = self._held_this_tick
+            await self._sweep_leaked_approval_cards()
 
         # F087: drain terminal-but-undelivered DAGs. Deliberately outside the
         # per-DAG loop above, which only sees pending/running rows — a DAG that
@@ -272,6 +463,80 @@ class DAGOrchestrator:
         await self._sweep_leaked_heartbeat_checks()
 
         return len(dags)
+
+    _APPROVAL_SWEEP_BATCH = 20
+
+    async def _sweep_leaked_approval_cards(self) -> None:
+        """Harness Phase 3 §3.7: retire approval cards whose node moved on,
+        and cancel waiting nodes stranded in a DAG that has ended.
+
+        Modelled on _sweep_leaked_heartbeat_checks but run INSIDE `_lock`: it
+        must never interleave with a launch between push and link. A card
+        whose node is unlinked (surface_id NULL) is left alone — push and link
+        own it, and it may be the card just pushed.
+        """
+        now = datetime.now(UTC)
+        # Node-driven: a stranded node may have no card at all.
+        try:
+            stranded = await self._store.awaiting_input_nodes_in_terminal_dags(
+                limit=self._APPROVAL_SWEEP_BATCH
+            )
+        except Exception:
+            logger.exception("Error listing stranded approval nodes")
+            stranded = []
+        for node in stranded:
+            try:
+                if await self._store.transition_node(
+                    node.id,
+                    from_statuses={"awaiting_input"},
+                    dag_statuses=TERMINAL_DAG_STATUSES,
+                    status="cancelled",
+                    error="DAG ended while waiting",
+                    completed_at=now,
+                ):
+                    await self._close_card(None, node_id=node.id)
+            except Exception:
+                logger.exception("Error retiring stranded approval node %s", node.id)
+        if self._surface_service is None:
+            return
+        # Card-driven: EVERY live DAG card — a bounded page would fill with
+        # healthy cards once the parked cap is reached and never reach the
+        # leaked ones. Keys map to nodes in Python (SQLite stores UUIDs
+        # without dashes, so an SQL text join would differ from Postgres).
+        try:
+            cards = await self._surface_service.live_cards_by_prefix(DEDUP_PREFIX)
+        except Exception:
+            logger.exception("Error listing live approval cards")
+            return
+        for surface_id, dedup_key in cards:
+            # One card's transient error must not end the tick: the F087
+            # delivery sweep and the check reconciliation run after this.
+            try:
+                await self._retire_card_if_leaked(surface_id, dedup_key, now)
+            except Exception:
+                logger.exception("Error sweeping approval card %s", surface_id)
+
+    async def _retire_card_if_leaked(self, surface_id: str, dedup_key: str, now: datetime) -> None:
+        node_id = node_id_from_dedup_key(dedup_key)
+        loaded = await self._store.get_node_with_dag_status(node_id) if node_id else None
+        if loaded is None:
+            await self._close_card(surface_id)
+            return
+        node, dag_status = loaded
+        if node.status != "awaiting_input":
+            await self._close_card(surface_id)
+        elif dag_status not in LIVE_DAG_STATUSES:
+            if await self._store.transition_node(
+                node.id,
+                from_statuses={"awaiting_input"},
+                dag_statuses=TERMINAL_DAG_STATUSES,
+                status="cancelled",
+                error="DAG ended while waiting",
+                completed_at=now,
+            ):
+                await self._close_card(surface_id)
+        elif node.surface_id is not None and node.surface_id != surface_id:
+            await self._close_card(surface_id)
 
     async def _sweep_leaked_heartbeat_checks(self) -> None:
         """Re-issue disable for terminal check-nodes whose heartbeat check
@@ -530,16 +795,17 @@ class DAGOrchestrator:
 
         for node in dag.nodes:
             if node.status not in _TERMINAL:
-                await self._cancel_node(node)
-                await self._store.update_node(
-                    node.id, status="cancelled", error=reason
-                )
+                # Harness Phase 3 §3.3: conditional — an outcome that landed
+                # after this load (a completion, an answer) keeps its status.
+                await self._cancel_one(node, reason)
 
         await self._store.update_dag_status(
             dag_id, "cancelled", result_summary=reason
         )
 
-    async def retry_node(self, dag_id: UUID, node_name: str) -> None:
+    async def retry_node(
+        self, dag_id: UUID, node_name: str, *, allow_declined: bool = False
+    ) -> None:
         """Reset a failed node to ready for re-execution."""
         dag = await self._store.get_dag(dag_id)
         if dag is None:
@@ -550,6 +816,15 @@ class DAGOrchestrator:
             raise ValueError(f"Node '{node_name}' not found in DAG {dag_id}")
         if node.status != "failed":
             raise ValueError(f"Node '{node_name}' is {node.status}, expected failed")
+        # Harness Phase 3 §3.10: a person's "no" stays a "no". The agent may
+        # re-ask a question nobody answered (deadline), never one a person
+        # declined — only the companion's dag.retry passes allow_declined.
+        if (
+            node.node_type == "approval"
+            and node.answer_source == "companion"
+            and not allow_declined
+        ):
+            raise ValueError(declined_retry_refusal(node_name))
         # F087: only 'failed'/'partial' DAGs are reactivated below, and
         # get_active_dags() serves only pending/running — so retrying a node
         # in a CANCELLED DAG used to report success while leaving the node
@@ -585,43 +860,60 @@ class DAGOrchestrator:
         # terminal, re-finalize it via _check_dag_completion, and strand a
         # pending node inside a terminal DAG. The invalid state is the split
         # itself, so no ordering fixes it — only atomicity does.
-        node_updates: list[tuple[UUID, dict]] = [
-            (
-                node.id,
-                {
-                    # was "ready" — _find_ready_nodes only checks "pending"
-                    "status": "pending",
-                    "error": None,
-                    "result": None,
-                    "subtask_id": None,
-                    "check_name": None,
-                    "started_at": None,
-                    "completed_at": None,
-                    "check_attempts": 0,
-                    "last_check_at": None,
-                    "awaiting_check_at": None,
-                    # @codex P2 on b3c78c3: the token claim is PER ATTEMPT.
-                    # Leaving it set means the replacement subtask's terminal
-                    # sync loses the claim race against its own predecessor and
-                    # silently adds none of the retry's usage — permanently
-                    # under-reporting tokens_consumed and letting later waves
-                    # run past an enforced budget.
-                    "tokens_counted": False,
-                },
+        # Harness Phase 3 §3.3: every write is conditional on the status read
+        # here — the retried node from {'failed'}, each unblock from
+        # {'blocked','cancelled'} — and a lost primary rolls the retry back.
+        reset: dict = {
+            # was "ready" — _find_ready_nodes only checks "pending"
+            "status": "pending",
+            "error": None,
+            "result": None,
+            "subtask_id": None,
+            "check_name": None,
+            "started_at": None,
+            "completed_at": None,
+            "check_attempts": 0,
+            "last_check_at": None,
+            "awaiting_check_at": None,
+            # @codex P2 on b3c78c3: the token claim is PER ATTEMPT.
+            # Leaving it set means the replacement subtask's terminal
+            # sync loses the claim race against its own predecessor and
+            # silently adds none of the retry's usage — permanently
+            # under-reporting tokens_consumed and letting later waves
+            # run past an enforced budget.
+            "tokens_counted": False,
+        }
+        if node.node_type == "approval":
+            # Harness Phase 3 §3.10: archive and clear the answer HERE, so a
+            # retried node that never parks (cancelled, or failed by the
+            # deferral cap) keeps no stale "declined"; the park write then
+            # finds nothing to archive, so the entry is not duplicated.
+            previous = history_entry(node)
+            reset.update(
+                answer=None, answered_by=None, answered_at=None, answer_source=None,
+                surface_id=None,
+                answer_history=[*(node.answer_history or []), previous]
+                if previous is not None
+                else node.answer_history,
             )
-        ]
+        primary: tuple[UUID, dict, frozenset[str]] = (node.id, reset, frozenset({"failed"}))
+        unblocks: list[tuple[UUID, dict, frozenset[str]]] = []
 
         # Selectively unblock only nodes downstream of the retried node
         # that have no other failed predecessors
         dep_map: dict[str, set[str]] = {str(n.id): set() for n in dag.nodes}
         for edge in dag.edges:
-            if edge.edge_type in ("dependency", "cancel_cascade"):
+            if edge.edge_type in PREDECESSOR_EDGE_TYPES or edge.edge_type == "cancel_cascade":
                 dep_map[str(edge.to_node_id)].add(str(edge.from_node_id))
 
-        # Forward reachability from retried node
+        # Forward reachability from retried node. on_failure too: a fix node
+        # blocked with its parent (_propagate_failures) is unblocked with it,
+        # and so is anything below the fix.
         adj: dict[str, list[str]] = {str(n.id): [] for n in dag.nodes}
         for edge in dag.edges:
-            if edge.edge_type in ("dependency", "cancel_cascade"):
+            if edge.edge_type in PREDECESSOR_EDGE_TYPES or edge.edge_type in (
+                "cancel_cascade", "on_failure",
+            ):
                 adj[str(edge.from_node_id)].append(str(edge.to_node_id))
 
         reachable: set[str] = set()
@@ -668,31 +960,49 @@ class DAGOrchestrator:
                         "total, but stranding the node would be worse",
                         n.name,
                     )
-                node_updates.append(
+                unblocks.append(
+                    # Harness Phase 3 §3.9: clear started_at/completed_at as
+                    # the direct retry does — _recover_stale_ready_nodes only
+                    # takes `ready` nodes with started_at IS NULL, so a kept
+                    # timestamp strands a node a crash leaves `ready`.
                     (n.id, {"status": "pending", "error": None,
-                            "tokens_counted": False})
+                            "tokens_counted": False,
+                            "started_at": None, "completed_at": None},
+                     frozenset({"blocked", "cancelled"}))
                 )
 
         # One transaction: every node reset plus the status/generation/delivery
         # transition. No observer — tick loop or detached sweep — can see a DAG
         # whose status and node set disagree.
-        await self._store.apply_retry(
+        applied = await self._store.apply_retry(
             dag_id,
-            node_updates,
+            primary,
+            unblocks,
             reactivate=dag.status in ("failed", "partial"),
         )
+        if not applied:
+            raise ValueError(
+                f"Node '{node_name}' changed state while the retry was being "
+                "prepared (another retry or an answer landed first) — nothing "
+                "was changed."
+            )
 
     # ------------------------------------------------------------------
     # Internal: DAG advancement
     # ------------------------------------------------------------------
 
-    async def _advance_dag(self, dag: ExecutionDAG) -> None:
+    async def _advance_dag(self, dag: ExecutionDAG, *, may_start: bool = True) -> None:
         """Core state machine: sync → stall → budget → failures → launch → complete."""
         # 1. Sync node statuses from underlying primitives
         await self._sync_node_statuses(dag)
 
         # 1.5 Poll awaiting_check nodes
         await self._poll_awaiting_checks(dag)
+
+        # 1.52 Harness Phase 3: approval deadlines and lost-card re-pushes.
+        # Before the budget and failure steps, so a default applied here is
+        # propagated on this same tick.
+        await self._poll_awaiting_input(dag)
 
         # 1.55 F087: retry accounting for terminal nodes whose roll-up failed
         # transiently. Must precede the budget check below so a recovered
@@ -755,7 +1065,22 @@ class DAGOrchestrator:
 
         # 4. Find and launch ready nodes (F064.2 dispatch with optional per-
         # frame caps; falls back to legacy behavior when flag is off).
+        # Harness Phase 3 §3.11: a DAG held by the dispatch gate keeps its
+        # costly ready nodes 'pending' this tick — no deferral is counted —
+        # and still dispatches the ones that cost nothing (an approval's next
+        # question, a gate, an inert callback).
         ready_nodes = self._find_ready_nodes(dag)
+        if not may_start:
+            held = [n for n in ready_nodes if not self._costs_nothing(n)]
+            ready_nodes = [n for n in ready_nodes if self._costs_nothing(n)]
+            if held:
+                self._held_this_tick[dag.id] = any(
+                    n.node_type == "approval" and n.status == "completed" for n in dag.nodes
+                )
+                logger.info(
+                    "DAG %s holds %d ready node(s): %d of %d working slots in use",
+                    dag.id, len(held), self._working_count, MAX_ACTIVE_DAGS,
+                )
         await self._dispatch_ready_nodes(dag, ready_nodes)
 
         # 5. Check if DAG is complete
@@ -1894,7 +2219,7 @@ class DAGOrchestrator:
         node_by_id: dict[str, DAGNode] = {str(n.id): n for n in dag.nodes}
 
         for edge in dag.edges:
-            if edge.edge_type == "dependency":
+            if edge.edge_type in PREDECESSOR_EDGE_TYPES:
                 dep_map[str(edge.to_node_id)].add(str(edge.from_node_id))
             elif edge.edge_type == "cancel_cascade":
                 cancel_map[str(edge.to_node_id)].add(str(edge.from_node_id))
@@ -1917,9 +2242,31 @@ class DAGOrchestrator:
             if predecessors & failed_ids:
                 to_cancel.add(node_id)
 
-        # Transitively find nodes to block (dependency edges)
-        # Treat both failed and cancel_cascade-cancelled nodes as "poison"
-        poison = failed_ids | to_cancel
+        # Apply cancelled status (cancel_cascade targets) FIRST — conditional
+        # (Harness Phase 3 §3.3). Only a cancel that WON poisons its
+        # dependents: a target that finished between the tick's load and this
+        # write keeps its outcome, and its dependents must not be blocked for a
+        # cancellation that never happened.
+        cancelled: set[str] = set()
+        for node_id in to_cancel:
+            if await self._cancel_one(node_by_id[node_id], "Cancelled by predecessor failure"):
+                cancelled.add(node_id)
+
+        # Transitively find nodes to block (predecessor edges).
+        # Treat both failed and cancel_cascade-cancelled nodes as "poison".
+        poison = failed_ids | cancelled
+        # A fix node whose parent is blocked can never fire — its parent never
+        # runs, so never fails. It is blocked with its parent, never retired
+        # 'completed': that would resolve its own outgoing edges and run work
+        # below a declined approval (codex P1 on #649). Left pending it kept
+        # the DAG 'running' forever. retry_node unblocks it with its parent.
+        id_by_name = {n.name: str(n.id) for n in dag.nodes}
+        fix_parent = {
+            str(n.id): id_by_name[n.parent_node]
+            for n in dag.nodes
+            if n.node_type == "fix" and n.parent_node in id_by_name
+        }
+        already_blocked = {str(n.id) for n in dag.nodes if n.status == "blocked"}
         to_block: set[str] = set()
         changed = True
         while changed:
@@ -1928,26 +2275,24 @@ class DAGOrchestrator:
                 node = node_by_id[node_id]
                 if node.status in _TERMINAL or node_id in to_block or node_id in to_cancel:
                     continue
-                if predecessors & (poison | to_block):
+                parent = fix_parent.get(node_id)
+                if predecessors & (poison | to_block) or (
+                    parent is not None and parent in (to_block | already_blocked)
+                ):
                     to_block.add(node_id)
                     changed = True
 
-        # Apply cancelled status (cancel_cascade targets)
-        for node_id in to_cancel:
-            node = node_by_id[node_id]
-            await self._cancel_node(node)
-            await self._store.update_node(
-                node.id, status="cancelled", error="Cancelled by predecessor failure"
-            )
-            node.status = "cancelled"
-
-        # Apply blocked status (dependency descendants)
+        # Apply blocked status (predecessor-edge descendants) — conditional.
+        # Harness Phase 3 §3.12: decided once per DAG by the one predicate.
+        blocked_error = (
+            BLOCKED_BY_APPROVAL if stopped_at_approval(dag.nodes) else "Predecessor failed"
+        )
         for node_id in to_block:
             node = node_by_id[node_id]
-            await self._store.update_node(
-                node.id, status="blocked", error="Predecessor failed"
-            )
-            node.status = "blocked"
+            if await self._store.transition_node(
+                node.id, from_statuses=_NON_TERMINAL, status="blocked", error=blocked_error
+            ):
+                node.status = "blocked"
 
     def _effective_frame_caps(self, dag: ExecutionDAG) -> dict[str, int]:
         """F064.2: resolve the effective per-frame-type caps for this DAG.
@@ -1991,27 +2336,13 @@ class DAGOrchestrator:
         # per-node error guard. No DB count, no caps.
         if not self._settings.dag_frame_concurrency_enabled:
             for node in ready_nodes:
-                await self._store.update_node(node.id, status="ready")
-                node.status = "ready"
-                try:
-                    await self._launch_node(node, dag)
-                except Exception:
-                    logger.exception(
-                        "Failed to launch node %s in DAG %s", node.name, dag.id
-                    )
+                await self._mark_ready_and_launch(node, dag)
             return
 
         caps = self._effective_frame_caps(dag)
         if not caps:
             for node in ready_nodes:
-                await self._store.update_node(node.id, status="ready")
-                node.status = "ready"
-                try:
-                    await self._launch_node(node, dag)
-                except Exception:
-                    logger.exception(
-                        "Failed to launch node %s in DAG %s", node.name, dag.id
-                    )
+                await self._mark_ready_and_launch(node, dag)
             return
 
         # @codex P1 on aa3c739: scope to current DAG so concurrent DAGs don't
@@ -2044,14 +2375,7 @@ class DAGOrchestrator:
                 and not self._settings.dag_callback_execution_enabled
             )
             if cap_exempt:
-                await self._store.update_node(node.id, status="ready")
-                node.status = "ready"
-                try:
-                    await self._launch_node(node, dag)
-                except Exception:
-                    logger.exception(
-                        "Failed to launch node %s in DAG %s", node.name, dag.id
-                    )
+                await self._mark_ready_and_launch(node, dag)
                 continue
 
             frame = node.frame_type if node.frame_type is not None else "_default"
@@ -2063,24 +2387,19 @@ class DAGOrchestrator:
                 # stuck in 'ready' forever. Demote the row to 'pending' on
                 # deferral — both wave-0 and wave-N use the same semantic
                 # afterward: deferred = pending, re-picked next tick.
-                if node.status == "ready":
-                    await self._store.update_node(node.id, status="pending")
+                if node.status == "ready" and await self._store.transition_node(
+                    node.id, from_statuses={"ready"}, status="pending"
+                ):
                     node.status = "pending"
                 logger.debug(
                     "F064.2: deferring node %s (frame=%s) — cap %d reached",
                     node.name, frame, cap,
                 )
                 continue
-            await self._store.update_node(node.id, status="ready")
-            node.status = "ready"
-            try:
-                await self._launch_node(node, dag)
-            except Exception:
-                logger.exception(
-                    "Failed to launch node %s in DAG %s", node.name, dag.id
-                )
-                # Slot wasn't consumed — don't bump the accumulator.
-                continue
+            # Harness Phase 3 §3.3: conditional ready write + launch. A lost
+            # transition or a failed launch leaves node.status not 'running',
+            # so the accumulator below is not bumped.
+            await self._mark_ready_and_launch(node, dag)
             # _launch_subtask_node swallows its own exceptions internally and
             # sets node.status="failed". Only bump the accumulator when the
             # launch actually produced a 'running' subtask. Other terminal
@@ -2165,7 +2484,12 @@ class DAGOrchestrator:
             )
 
         for node in recoverable:
-            await self._store.update_node(node.id, status="pending")
+            # Conditional (§3.3): a cancel_dag that landed after this tick's
+            # load must not be undone — the node would launch in a cancelled DAG.
+            if not await self._store.transition_node(
+                node.id, from_statuses={"ready"}, status="pending"
+            ):
+                continue
             node.status = "pending"
             logger.warning(
                 "Recovered stale ready node '%s' in DAG %s "
@@ -2376,7 +2700,7 @@ class DAGOrchestrator:
         # Build set of predecessor node_ids per node (dependency + context_flow)
         dep_map: dict[str, set[str]] = {str(n.id): set() for n in dag.nodes}
         for edge in dag.edges:
-            if edge.edge_type in ("dependency", "context_flow"):
+            if edge.edge_type in PREDECESSOR_EDGE_TYPES:
                 dep_map[str(edge.to_node_id)].add(str(edge.from_node_id))
 
         # Completed node IDs
@@ -2409,15 +2733,370 @@ class DAGOrchestrator:
         elif node_type == "check":
             await self._launch_check_node(node, dag)
         elif node_type == "gate":
-            # Phase 1: auto-pass gates (Phase 2 will add Critic evaluation)
-            await self._store.update_node(
-                node.id,
+            # Phase 1: auto-pass gates (Phase 2 will add Critic evaluation).
+            # Harness Phase 3 §3.3: conditional, like every launch-path write.
+            now = datetime.now(UTC)
+            await self._finish_launch(
+                node,
                 status="completed",
                 result="Gate auto-passed (Phase 1)",
-                started_at=datetime.now(UTC),
-                completed_at=datetime.now(UTC),
+                started_at=now,
+                completed_at=now,
             )
-            node.status = "completed"
+        elif node_type == "approval":
+            await self._launch_approval_node(node, dag)
+
+    async def answer_node(
+        self,
+        node_id: UUID,
+        option_id: str,
+        *,
+        source: Literal["companion", "deadline"],
+        actor: str | None,
+        surface_id: str | None = None,
+    ) -> AnswerResult:
+        """Harness Phase 3 §3.5: the answer IS the transition.
+
+        One conditional write sets the answer and the terminal status together,
+        so a tap, the deadline and a second tap race on one row and exactly one
+        wins. Takes no orchestrator lock (lock order: _lock → surface lock; the
+        tap path holds only its card's surface lock).
+        """
+        loaded = await self._store.get_node_with_dag_status(node_id)
+        if loaded is None or loaded[0].node_type != "approval" or not loaded[0].approval_spec:
+            return AnswerResult(outcome="not_linked", node_id=node_id)
+        node, _ = loaded
+        option = option_by_id(node.approval_spec, option_id)
+        if option is None:
+            return AnswerResult(outcome="invalid_option", node_id=node_id, dag_id=node.dag_id)
+        now = datetime.now(UTC)
+        values: dict[str, Any] = {
+            "answer": option_id,
+            "answered_by": actor,
+            "answered_at": now,
+            "answer_source": source,
+            "completed_at": now,
+            **answer_values(
+                node.approval_spec, option_id, source=source, actor=actor, at=now,
+                deadline=node.answer_deadline,
+            ),
+        }
+        if surface_id is not None:
+            values["surface_id"] = surface_id  # a tap before the link step links it
+        won = await self._store.transition_node(
+            node_id,
+            from_statuses={"awaiting_input"},
+            dag_statuses=LIVE_DAG_STATUSES,
+            card=surface_id,
+            due_by=now if source == "deadline" else None,
+            **values,
+        )
+        if won:
+            return AnswerResult(
+                outcome="recorded", node_id=node_id, dag_id=node.dag_id,
+                option_label=option["label"], option_outcome=option["outcome"],
+                node_status=values["status"], answer_source=source, answered_by=actor,
+                answered_at=now,
+            )
+        fresh = await self._store.get_node_with_dag_status(node_id)
+        if fresh is None:
+            return AnswerResult(outcome="not_linked", node_id=node_id)
+        row, dag_status = fresh
+        if row.status in ("pending", "ready"):
+            outcome = "not_open"
+        elif row.status == "awaiting_input":
+            outcome = "dag_ended" if dag_status not in LIVE_DAG_STATUSES else "stray_card"
+        else:
+            outcome = "closed"
+        recorded = option_by_id(row.approval_spec, row.answer) or {}
+        return AnswerResult(
+            outcome=outcome, node_id=node_id, dag_id=row.dag_id,
+            option_label=recorded.get("label"), option_outcome=recorded.get("outcome"),
+            node_status=row.status, answer_source=row.answer_source,
+            answered_by=row.answered_by, answered_at=row.answered_at,
+        )
+
+    async def _refresh_node(self, node: DAGNode) -> str | None:
+        """Copy the row's approval columns onto the tick's node; returns the
+        DAG status, or None if the node is gone."""
+        fresh = await self._store.get_node_with_dag_status(node.id)
+        if fresh is None:
+            return None
+        row, dag_status = fresh
+        for field in _APPROVAL_ROW_FIELDS:
+            setattr(node, field, getattr(row, field))
+        return dag_status
+
+    async def _poll_awaiting_input(self, dag: ExecutionDAG) -> None:
+        """Harness Phase 3 §3.6: apply due deadlines; re-push a lost card."""
+        waiting = [n for n in dag.nodes if n.status == "awaiting_input"]
+        if not waiting:
+            return
+        now = datetime.now(UTC)
+        linked = [n.surface_id for n in waiting if n.surface_id]
+        live: set[str] = set()
+        if self._surface_service is not None and linked:
+            try:
+                live = await self._surface_service.live_ids(linked)
+            except Exception:
+                logger.warning("Could not read approval card liveness for DAG %s", dag.id)
+                live = set(linked)  # unknown ≠ dead: do not re-push on a read failure
+        for node in waiting:
+            deadline = as_utc(node.answer_deadline)
+            if deadline is not None and deadline <= now:  # pre-filter; SQL decides
+                result = await self.answer_node(
+                    node.id, (node.approval_spec or {}).get("default_option", ""),
+                    source="deadline", actor=DEADLINE_ACTOR,
+                )
+                if result.outcome == "recorded":
+                    await self._close_card(node.surface_id, node_id=node.id)
+                    await self._refresh_node(node)  # this tick's propagation sees it
+                continue
+            if self._surface_service is None:
+                continue
+            if node.surface_id is None or node.surface_id not in live:
+                # Re-read first: the tick's copy may predate a tap that answered
+                # through the unlinked card — pushing then would create a fresh
+                # card and ping for an answered question.
+                if await self._refresh_node(node) is None or node.status != "awaiting_input":
+                    continue
+                if node.surface_id is not None and node.surface_id in live:
+                    continue
+                if node.surface_id is not None:
+                    # Unlink the dead card first, so the re-push is a first push:
+                    # a tap on the new card before its link is recorded (a node
+                    # still linked to the dead card refuses it as stray), the
+                    # sweep leaves an unlinked card alone, and a failed link
+                    # heals by adoption instead of a third card and ping.
+                    if not await self._store.transition_node(
+                        node.id, from_statuses={"awaiting_input"},
+                        card=node.surface_id, surface_id=None,
+                    ):
+                        continue
+                    node.surface_id = None
+                if await self._adopt_live_card(node):
+                    continue
+                await self._push_and_link(node, dag)
+
+    async def _adopt_live_card(self, node: DAGNode) -> bool:
+        """§3.6: link a live card that carries the node's key but was never
+        linked (a crash between push and link) instead of replacing it — the
+        person may be tapping it, and a replacement rotates its nonce."""
+        try:
+            cards = await self._surface_service.live_cards_by_prefix(approval_dedup_key(node.id))
+        except Exception:
+            return False
+        if not cards:
+            return False
+        surface_id = cards[0][0]
+        if await self._store.transition_node(
+            node.id, from_statuses={"awaiting_input"}, card=surface_id,
+            surface_id=surface_id, error=None,
+        ):
+            node.surface_id = surface_id
+            node.error = None
+            return True
+        return False
+
+    async def _launch_approval_node(self, node: DAGNode, dag: ExecutionDAG) -> None:
+        """Harness Phase 3 §3.4: retire the previous attempt's card, park, push, link.
+
+        Steps 0-1 fail closed: any exception before a successful park sends
+        the node back to 'pending' via _defer_node. _dispatch_ready_nodes only
+        logs a launch exception, and a node left 'ready' with a kept
+        started_at is invisible to _recover_stale_ready_nodes — it would hold
+        a working slot forever.
+        """
+        spec = node.approval_spec or {}
+        wait = int(
+            spec.get("answer_timeout_seconds") or self._settings.dag_approval_default_wait_seconds
+        )
+        try:
+            # Step 0: a card left live by an earlier attempt carries the same
+            # key and a valid nonce; between this park and the push it could
+            # answer the new attempt with the old content (I2).
+            if self._surface_service is not None:
+                await self._surface_service.close_by_dedup_key(
+                    approval_dedup_key(node.id), "expired"
+                )
+            now = datetime.now(UTC)
+            history = list(node.answer_history or [])
+            previous = history_entry(node)
+            if previous is not None:
+                history.append(previous)
+            # Step 1: the park write is the single reset point for an attempt.
+            parked = await self._store.transition_node(
+                node.id,
+                from_statuses=_DISPATCHABLE,
+                dag_statuses=LIVE_DAG_STATUSES,
+                status="awaiting_input",
+                started_at=now,
+                answer_deadline=now + timedelta(seconds=wait),
+                surface_id=None,
+                answer=None,
+                answered_by=None,
+                answered_at=None,
+                answer_source=None,
+                result=None,
+                error=None,
+                completed_at=None,
+                answer_history=history or None,
+            )
+        except Exception as exc:
+            logger.exception("Could not park approval node %s in DAG %s", node.name, dag.id)
+            await self._defer_node(node, dag, f"approval could not be prepared: {exc}")
+            return
+        if not parked:
+            return  # someone else moved the node
+        self._defer_counts.pop(node.id, None)
+        node.status = "awaiting_input"
+        node.started_at = now
+        node.answer_deadline = now + timedelta(seconds=wait)
+        node.surface_id = None
+        node.answer = node.answered_by = node.answered_at = node.answer_source = None
+        node.result = node.error = node.completed_at = None
+        node.answer_history = history or None
+        # A cancel between the park and the push would still get a card and a
+        # Telegram ping for a question nobody may answer; re-read first.
+        if await self._refresh_node(node) is None or node.status != "awaiting_input":
+            return
+        await self._push_and_link(node, dag)
+
+    async def _push_and_link(self, node: DAGNode, dag: ExecutionDAG) -> None:
+        """Steps 2-3 (§3.4). Also the same-attempt re-push (§3.6)."""
+        if self._surface_service is None:
+            await self._store.transition_node(
+                node.id, from_statuses={"awaiting_input"},
+                error="approval card not delivered yet: the companion is not wired",
+            )
+            return
+        try:
+            built, ping = self._build_approval_card(node, dag)
+        except Exception as exc:  # deterministic: it will not heal on retry
+            await self._fail_parked(node, f"approval card could not be built: {exc}")
+            return
+        try:
+            surface_id = await self._surface_service.push_built(
+                built,
+                dedup_key=approval_dedup_key(node.id),
+                notify=True,
+                notify_text=ping,
+                reserved_key_ok=True,
+            )
+        except PermissionError as exc:
+            await self._fail_parked(node, f"approval card refused by censor: {exc}")
+            return
+        except Exception as exc:
+            # Transient: stay parked; _poll_awaiting_input pushes again each
+            # tick until the deadline, which bounds the retries.
+            logger.warning("Approval card push failed for node %s: %s", node.name, exc)
+            reason = f"approval card not delivered yet: {exc}"
+            if await self._store.transition_node(
+                node.id, from_statuses={"awaiting_input"}, error=reason
+            ):
+                node.error = reason
+            return
+        if await self._store.transition_node(
+            node.id, from_statuses={"awaiting_input"}, surface_id=surface_id, error=None
+        ):
+            node.surface_id = surface_id
+            node.error = None
+        else:
+            # The node left awaiting_input between park and link (cancelled,
+            # or answered by a tap that found it through the dedup key).
+            await self._close_card(surface_id)
+
+    def _build_approval_card(self, node: DAGNode, dag: ExecutionDAG) -> tuple[Any, str]:
+        """(validated card, ping text) for the node's current attempt (§3.4)."""
+        from nous.a2ui.builders import approval_gate
+
+        spec = node.approval_spec or {}
+        deadline = as_utc(node.answer_deadline)
+        default_label = label_of(spec, spec.get("default_option"))
+        title = f"{dag.name} · {node.description or node.name}"
+        remaining = (
+            max((deadline - datetime.now(UTC)).total_seconds(), 0.0) if deadline else 0.0
+        )
+        built = approval_gate(
+            {
+                "title": title,
+                "summary": build_card_summary(
+                    node.instructions or "", self._context_results(node, dag)
+                ),
+                "risk": risk_line(deadline, default_label),
+                "options": [
+                    {
+                        "id": o["id"],
+                        "label": button_label(o["label"], o["outcome"]),
+                        "outcome": o["outcome"],
+                    }
+                    for o in spec.get("options", [])
+                ],
+                "recommendation": spec.get("recommended_option"),
+                "recommend_first": False,
+                "defer_label": DEFER_LABEL,
+                # Floored at a minute: a re-push right at the deadline must not
+                # produce a zero expiry (falsy → expires_at NULL, no backstop).
+                "expires_hours": max(
+                    remaining + self._settings.dag_approval_card_grace_seconds, 60.0
+                )
+                / 3600,
+            }
+        )
+        built.validate()
+        return built, notify_text(title, node.instructions or "", deadline, default_label)
+
+    def _context_results(
+        self, node: DAGNode, dag: ExecutionDAG, _seen: set[str] | None = None
+    ) -> list[tuple[str, str]]:
+        """(name, result) of every context_flow input `node` sees — the card's
+        summary and, through an approval, the acting node's approved input.
+
+        Walks THROUGH approval predecessors: an approval's own result is only
+        the answer text, so a second approval chained after a first would
+        otherwise ask its question without the draft (§3.5). An approval's
+        inputs come before its answer; each node appears once (diamonds).
+        """
+        seen = _seen if _seen is not None else set()
+        by_id = {str(n.id): n for n in dag.nodes}
+        results: list[tuple[str, str]] = []
+        for edge in dag.edges:
+            if edge.edge_type != "context_flow" or str(edge.to_node_id) != str(node.id):
+                continue
+            pred = by_id.get(str(edge.from_node_id))
+            if pred is None or str(pred.id) in seen:
+                continue
+            seen.add(str(pred.id))
+            if pred.node_type == "approval":
+                results.extend(self._context_results(pred, dag, seen))
+            if pred.result:
+                results.append((pred.name, pred.result))
+        return results
+
+    async def _fail_parked(self, node: DAGNode, error: str) -> None:
+        if await self._store.transition_node(
+            node.id, from_statuses={"awaiting_input"}, status="failed", error=error,
+            completed_at=datetime.now(UTC),
+        ):
+            node.status = "failed"
+            node.error = error
+
+    async def _close_card(self, surface_id: str | None, *, node_id: UUID | None = None) -> None:
+        """Best-effort card close (§3.7); the leaked-card sweep retries."""
+        if self._surface_service is None:
+            return
+        try:
+            if surface_id:
+                await self._surface_service.close(surface_id, "expired")
+            elif node_id is not None:
+                await self._surface_service.close_by_dedup_key(
+                    approval_dedup_key(node_id), "expired"
+                )
+        except Exception:
+            logger.warning(
+                "Could not close approval card %s — the leaked-card sweep will retry",
+                surface_id or node_id,
+            )
 
     async def _launch_subtask_node(self, node: DAGNode, dag: ExecutionDAG) -> None:
         """Launch a subtask for this node."""
@@ -2430,28 +3109,25 @@ class DAGOrchestrator:
             and not self._settings.dag_callback_execution_enabled
         ):
             now = datetime.now(UTC)
-            await self._store.update_node(
-                node.id,
+            await self._finish_launch(
+                node,
                 status="completed",
                 result=node.instructions or "Callback completed",
                 started_at=now,
                 completed_at=now,
             )
-            node.status = "completed"
             return
 
         if not self._subtask_mgr:
-            await self._store.update_node(
-                node.id,
-                status="failed",
-                error="No subtask manager available",
+            await self._finish_launch(
+                node, status="failed", error="No subtask manager available"
             )
-            node.status = "failed"
             return
 
         # Build augmented instructions with predecessor context
         augmented = await self._build_predecessor_context(node, dag)
 
+        subtask = None
         try:
             # F061 PR-3 Codex round 5: pass dag_node_id so the dashboard's
             # dag_correlation card (which filters WHERE dag_node_id IS NOT NULL)
@@ -2466,8 +3142,10 @@ class DAGOrchestrator:
                 dag_node_id=node.id,
             )
             now = datetime.now(UTC)
-            await self._store.update_node(
+            launched = await self._store.transition_node(
                 node.id,
+                from_statuses=_DISPATCHABLE,
+                dag_statuses=LIVE_DAG_STATUSES,
                 status="running",
                 subtask_id=subtask.id,
                 started_at=now,
@@ -2477,6 +3155,17 @@ class DAGOrchestrator:
                 # bootstrap error) to also surface via the stall path.
                 last_activity_at=now,
             )
+            if not launched:
+                # Harness Phase 3 §3.3: a cancel_dag landed during create() —
+                # its snapshot had no subtask_id to cancel, so cancel it here or
+                # it runs inside a cancelled DAG (and may send what the person
+                # just cancelled).
+                logger.warning(
+                    "Node %s in DAG %s changed state while its subtask was being "
+                    "created — cancelling subtask %s", node.name, dag.id, subtask.id,
+                )
+                await self._abandon_subtask(subtask.id)
+                return
             node.status = "running"
             node.last_activity_at = now
             self._defer_counts.pop(node.id, None)  # launched — clear backstop
@@ -2494,28 +3183,31 @@ class DAGOrchestrator:
             # cap in _defer_node converts an endless bounce into a clear failure.
             await self._defer_node(node, dag, "subtask queue full")
         except Exception as e:
-            await self._store.update_node(
-                node.id, status="failed", error=str(e)
-            )
-            node.status = "failed"
             logger.error(
                 "Failed to launch subtask for node %s: %s", node.name, e
             )
+            # The `running` write itself raised after create(): unless it landed
+            # anyway, the subtask runs on untracked — and may send. Stop it
+            # BEFORE the failure write, which one DB fault usually fails too;
+            # the node, left ready, is relaunched by the stale-ready sweep.
+            if subtask is not None and not await self._launch_landed(
+                node, subtask_id=subtask.id
+            ):
+                await self._abandon_subtask(subtask.id)
+            await self._finish_launch(node, status="failed", error=str(e))
 
     async def _launch_check_node(self, node: DAGNode, dag: ExecutionDAG) -> None:
         """Launch a dynamic check for this node."""
         if not self._dynamic_loader:
-            await self._store.update_node(
-                node.id,
-                status="failed",
-                error="No dynamic check loader available",
+            await self._finish_launch(
+                node, status="failed", error="No dynamic check loader available"
             )
-            node.status = "failed"
             return
 
         augmented = await self._build_predecessor_context(node, dag)
         check_name = f"dag-{dag.id.hex[:8]}-{node.name}"
 
+        created = False
         try:
             await self._dynamic_loader.create_check(
                 name=check_name,
@@ -2529,12 +3221,19 @@ class DAGOrchestrator:
                 # heartbeat worker actually runs when the node is created at night.
                 urgent=True,
             )
-            await self._store.update_node(
+            created = True
+            launched = await self._store.transition_node(
                 node.id,
+                from_statuses=_DISPATCHABLE,
+                dag_statuses=LIVE_DAG_STATUSES,
                 status="running",
                 check_name=check_name,
                 started_at=datetime.now(UTC),
             )
+            if not launched:
+                # Harness Phase 3 §3.3: same race as the subtask path.
+                await self._abandon_check(node.id, check_name)
+                return
             node.status = "running"
             self._defer_counts.pop(node.id, None)  # launched — clear backstop
             logger.info(
@@ -2547,12 +3246,49 @@ class DAGOrchestrator:
             # Defer the node instead of permanently failing it + its dependents.
             await self._defer_node(node, dag, "dynamic check pool full")
         except Exception as e:
-            await self._store.update_node(
-                node.id, status="failed", error=str(e)
-            )
-            node.status = "failed"
             logger.error(
                 "Failed to launch check for node %s: %s", node.name, e
+            )
+            # As on the subtask path: stop the check before the failure write.
+            if created and not await self._launch_landed(node, check_name=check_name):
+                await self._abandon_check(node.id, check_name)
+            await self._finish_launch(node, status="failed", error=str(e))
+
+    async def _launch_landed(self, node: DAGNode, **primitive: object) -> bool:
+        """After a launch's `running` write RAISED: did it commit anyway? Only
+        then does the node own the primitive it just created. An unreadable
+        row counts as not landed — stopping the work is the safe side."""
+        try:
+            row = await self._store.get_node_with_dag_status(node.id)
+        except Exception:
+            return False
+        if row is None:
+            return False
+        fresh, _ = row
+        return fresh.status == "running" and all(
+            getattr(fresh, key) == value for key, value in primitive.items()
+        )
+
+    async def _abandon_subtask(self, subtask_id: UUID) -> None:
+        """Cancel a subtask its node does not own (§3.3)."""
+        try:
+            await self._subtask_mgr.cancel(subtask_id)
+        except Exception:
+            logger.exception("Could not cancel orphaned subtask %s", subtask_id)
+
+    async def _abandon_check(self, node_id: UUID, check_name: str) -> None:
+        """Disable a check its node does not own (§3.3). Record it on the node
+        first, so the reconciliation sweep can retry a disable that fails —
+        a leaked check is urgent and exempt from quiet hours."""
+        try:
+            await self._store.update_node(node_id, check_name=check_name)
+        except Exception:
+            logger.warning("Could not record orphaned check %s on its node", check_name)
+        try:
+            await self._dynamic_loader.manage_check(action="disable", name=check_name)
+        except Exception:
+            logger.warning(
+                "Could not disable orphaned check %s — the sweep retries", check_name
             )
 
     async def _build_predecessor_context(
@@ -2571,9 +3307,34 @@ class DAGOrchestrator:
         # Build context from predecessor results
         parts: list[str] = []
         node_by_id = {str(n.id): n for n in dag.nodes}
+        node_by_name = {n.name: n for n in dag.nodes}  # names are unique per DAG
         for pred_id in context_preds:
             pred = node_by_id.get(pred_id)
-            if pred and pred.result:
+            if pred is None:
+                continue
+            if pred.node_type == "approval":
+                # Harness Phase 3 §3.5: an approval's own result is only the
+                # answer text. Pass its context_flow inputs (the draft the
+                # person saw) through, or the acting node writes its own text.
+                # Only what the card showed is "approved": a draft cut on the
+                # card says how much of it the person saw.
+                inputs = self._context_results(pred, dag)
+                shown = card_shown_chars(pred.instructions or "", inputs)
+                for (inner_name, inner_result), n in zip(inputs, shown, strict=True):
+                    inner = node_by_name.get(inner_name)
+                    if inner is not None and inner.node_type == "approval":
+                        # An earlier approval's answer, walked through a chain:
+                        # an answer, not something this approval approved.
+                        label = f"[Earlier answer at '{inner_name}']"
+                    elif n < len(inner_result):
+                        label = (
+                            f"[Input from '{inner_name}' — the card at '{pred.name}' "
+                            f"showed only the first {n} of {len(inner_result)} chars]"
+                        )
+                    else:
+                        label = f"[Approved input from '{inner_name}' (approved at '{pred.name}')]"
+                    parts.append(f"{label}: {inner_result}")
+            if pred.result:
                 parts.append(f"[Result from '{pred.name}']: {pred.result}")
 
         context = "\n\n".join(parts)
@@ -2647,24 +3408,30 @@ class DAGOrchestrator:
                 if not skipped
                 else f"All nodes resolved ({skipped} skipped via skip_and_continue)"
             )
-            await self._store.update_dag_status(
-                dag.id, "completed", result_summary=summary
-            )
+            await self._finalize(dag, "completed", summary)
         elif any(n.status == "failed" for n in dag.nodes):
-            failed_names = [n.name for n in dag.nodes if n.status == "failed"]
-            await self._store.update_dag_status(
-                dag.id,
-                "failed",
-                result_summary=f"Failed nodes: {', '.join(failed_names)}",
-            )
+            # Harness Phase 3 §3.12: a DAG whose only failures are answered
+            # approvals STOPPED — presentation only; the row stays 'failed'.
+            if stopped_at_approval(dag.nodes):
+                summary = stopped_summary(dag.nodes)
+            else:
+                failed_names = [n.name for n in dag.nodes if n.status == "failed"]
+                summary = f"Failed nodes: {', '.join(failed_names)}"
+            await self._finalize(dag, "failed", summary)
         elif any(n.status == "cancelled" for n in dag.nodes):
-            await self._store.update_dag_status(
-                dag.id, "cancelled", result_summary="DAG was cancelled"
-            )
+            await self._finalize(dag, "cancelled", "DAG was cancelled")
         else:
             # All blocked — still mark as failed
-            await self._store.update_dag_status(
-                dag.id, "failed", result_summary="All nodes blocked"
+            await self._finalize(dag, "failed", "All nodes blocked")
+
+    async def _finalize(self, dag: ExecutionDAG, status: str, summary: str) -> None:
+        """The terminal DAG write, conditional on the rows (§3.3): a retry or an
+        answer that landed after this tick loaded its copy wins, and the next
+        tick decides again from fresh rows."""
+        if not await self._store.finalize_dag(dag.id, status, summary):
+            logger.info(
+                "DAG %s not finalized as %s: its rows changed after this tick's load",
+                dag.id, status,
             )
 
     async def _handle_budget_exceeded(self, dag: ExecutionDAG) -> bool:
@@ -2706,17 +3473,26 @@ class DAGOrchestrator:
             and (node.error or "").startswith(_BUDGET_CANCEL_ERROR)
             for node in dag.nodes
         )
+        lost_any = False
         for node in dag.nodes:
-            if node.status in ("pending", "ready", "awaiting_check"):
-                await self._store.update_node(
-                    node.id, status="cancelled", error=_BUDGET_CANCEL_ERROR
-                )
-                node.status = "cancelled"
-                node.error = _BUDGET_CANCEL_ERROR
-                cancelled_any = True
+            if node.status in ("pending", "ready", "awaiting_check", "awaiting_input"):
+                # Conditional (§3.3); awaiting_input (Harness Phase 3) is future
+                # work the budget stops — its card closes with it.
+                if await self._cancel_one(node, _BUDGET_CANCEL_ERROR):
+                    cancelled_any = True
+                else:
+                    lost_any = True
+        # A cancel that lost means that node moved after this tick's load (a
+        # tap completed an approval, a retry reset a node): decide the DAG's
+        # status from the rows, not from the copy that lost.
+        nodes = dag.nodes
+        if lost_any:
+            fresh = await self._store.get_dag(dag.id)
+            if fresh is not None:
+                nodes = fresh.nodes
 
         # If there are still running nodes, let them finish
-        has_running = any(n.status == "running" for n in dag.nodes)
+        has_running = any(n.status == "running" for n in nodes)
         if not cancelled_any and not has_running:
             logger.warning(
                 "DAG %s finished over budget (%s/%s) but nothing was left to "
@@ -2726,15 +3502,13 @@ class DAGOrchestrator:
             return False
         if not has_running:
             # Determine final status
-            has_completed = any(n.status == "completed" for n in dag.nodes)
+            has_completed = any(n.status == "completed" for n in nodes)
             if has_completed:
-                await self._store.update_dag_status(
-                    dag.id, "partial",
-                    result_summary="Token budget exceeded, partial completion",
+                await self._finalize(
+                    dag, "partial", "Token budget exceeded, partial completion"
                 )
             else:
-                await self._store.update_dag_status(
-                    dag.id, "failed",
-                    result_summary="Token budget exceeded before any nodes completed",
+                await self._finalize(
+                    dag, "failed", "Token budget exceeded before any nodes completed"
                 )
         return True

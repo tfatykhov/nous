@@ -26,6 +26,8 @@ class DAGNodeType(str, Enum):
     # _dispatch_ready_nodes), so they sit in 'pending' until their parent
     # transitions to 'failed'.
     fix = "fix"
+    # Harness Phase 3 — waits durably on a person's answer on a companion card.
+    approval = "approval"
 
 
 class DAGStatus(str, Enum):
@@ -46,6 +48,8 @@ class DAGNodeStatus(str, Enum):
     ready = "ready"
     running = "running"
     awaiting_check = "awaiting_check"
+    # Harness Phase 3 — an approval node parked on a person's answer.
+    awaiting_input = "awaiting_input"
     completed = "completed"
     failed = "failed"
     blocked = "blocked"
@@ -61,6 +65,12 @@ class DAGNodeStatus(str, Enum):
 # ---------------------------------------------------------------------------
 
 EdgeType = Literal["dependency", "cancel_cascade", "context_flow", "on_failure"]
+
+# Harness Phase 3 §3.8: the ONE predecessor-edge set. Readiness, wave
+# computation, failure propagation and retry's unblock all read it — the last
+# two used to follow `dependency` alone, so a failed node's context_flow-only
+# successor stayed pending forever and wedged its DAG `running`.
+PREDECESSOR_EDGE_TYPES: frozenset[str] = frozenset({"dependency", "context_flow"})
 
 
 # F066.1 — vocabulary for the `fix_actions` field on fix nodes.
@@ -81,6 +91,19 @@ class DAGEdgeSpec(BaseModel):
     from_node: str = Field(..., min_length=1, description="Source node name")
     to_node: str = Field(..., min_length=1, description="Target node name")
     edge_type: EdgeType = "dependency"
+
+
+# Harness Phase 3 §3.1.
+APPROVAL_QUESTION_MAX_CHARS = 2000
+APPROVAL_MIN_WAIT_SECONDS = 900
+
+
+class ApprovalOption(BaseModel):
+    """One answer on an approval card."""
+
+    id: str = Field(..., pattern=r"^[a-z0-9_-]{1,40}$")
+    label: str = Field(..., min_length=1, max_length=80)
+    outcome: Literal["proceed", "stop"]
 
 
 class DAGNodeSpec(BaseModel):
@@ -170,6 +193,89 @@ class DAGNodeSpec(BaseModel):
             "compatibility with the eventual typed-dispatch executor."
         ),
     )
+
+    # Harness Phase 3 — approval nodes (type='approval' only).
+    options: list[ApprovalOption] | None = Field(
+        None, description="2-4 answers, each 'proceed' or 'stop'; at least one of each."
+    )
+    default_option: str | None = Field(
+        None, description="Option id applied when nobody answers by the deadline. Must STOP."
+    )
+    recommended_option: str | None = Field(
+        None, description="Option id highlighted on the card. Default: none."
+    )
+    answer_timeout_seconds: int | None = Field(
+        None, ge=APPROVAL_MIN_WAIT_SECONDS,
+        description="Seconds allowed for an answer (default NOUS_DAG_APPROVAL_DEFAULT_WAIT_SECONDS).",
+    )
+
+    @model_validator(mode="after")
+    def _validate_approval_fields(self) -> DAGNodeSpec:
+        approval_only = {
+            "options": self.options,
+            "default_option": self.default_option,
+            "recommended_option": self.recommended_option,
+            "answer_timeout_seconds": self.answer_timeout_seconds,
+        }
+        if self.type != DAGNodeType.approval:
+            given = sorted(k for k, v in approval_only.items() if v)
+            if given:
+                raise ValueError(
+                    f"Node '{self.name}': {given} are allowed only on approval nodes"
+                )
+            return self
+        # dag_create passes every one of these as n.get(...), and LLM-authored
+        # JSON routinely emits [] / "" / 0 for "none" — all falsy values count
+        # as "not given"; a real value would be silently meaningless, so reject it.
+        runs_nothing = {
+            "tools": self.tools, "frame_type": self.frame_type, "model": self.model,
+            "timeout_seconds": self.timeout_seconds,
+            "stall_timeout_seconds": self.stall_timeout_seconds,
+            "completion_condition": self.completion_condition,
+            "completion_check": self.completion_check,
+            "completion_check_interval": self.completion_check_interval,
+            "max_check_attempts": self.max_check_attempts,
+            "parent_node": self.parent_node, "fix_actions": self.fix_actions,
+        }
+        given = sorted(k for k, v in runs_nothing.items() if v)
+        if given:
+            raise ValueError(
+                f"Approval node '{self.name}' does not take {given}: it runs nothing"
+            )
+        if not self.instructions.strip():
+            raise ValueError(
+                f"Approval node '{self.name}' needs the question in 'instructions'"
+            )
+        if len(self.instructions) > APPROVAL_QUESTION_MAX_CHARS:
+            raise ValueError(
+                f"Approval node '{self.name}': the question is capped at "
+                f"{APPROVAL_QUESTION_MAX_CHARS} characters"
+            )
+        options = self.options or []
+        if not 2 <= len(options) <= 4:
+            raise ValueError(f"Approval node '{self.name}' needs 2-4 options")
+        ids = [o.id for o in options]
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"Approval node '{self.name}': option ids must be unique")
+        if {o.outcome for o in options} != {"proceed", "stop"}:
+            raise ValueError(
+                f"Approval node '{self.name}' needs at least one 'proceed' and one 'stop' option"
+            )
+        by_id = {o.id: o for o in options}
+        if self.default_option not in by_id:
+            raise ValueError(
+                f"Approval node '{self.name}': default_option must name one of {ids}"
+            )
+        if by_id[self.default_option].outcome != "stop":
+            raise ValueError(
+                f"Approval node '{self.name}': default_option must be a 'stop' option — "
+                "an unanswered card must never approve the action it guards"
+            )
+        if self.recommended_option is not None and self.recommended_option not in by_id:
+            raise ValueError(
+                f"Approval node '{self.name}': recommended_option must name one of {ids}"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +454,32 @@ class DAGCreateRequest(BaseModel):
                     "one is allowed"
                 )
 
+        # --- Harness Phase 3 §3.1: approval-node structure ---
+        approval_names = {n.name for n in self.nodes if n.type == DAGNodeType.approval}
+        if approval_names:
+            gating = {e.from_node for e in self.edges if e.edge_type in PREDECESSOR_EDGE_TYPES}
+            for name in sorted(approval_names - gating):
+                raise ValueError(
+                    f"Approval node '{name}' gates nothing: add a context_flow edge "
+                    "from it to the node it guards"
+                )
+            downstream = self._downstream_of(approval_names)
+            for fn in fix_nodes:
+                if fn.parent_node in approval_names:
+                    raise ValueError(
+                        f"Fix node '{fn.name}' cannot attach to approval node "
+                        f"'{fn.parent_node}': a declined answer is an answer, not a "
+                        "failure to repair"
+                    )
+                if fn.parent_node in downstream and "retry_with_amended_prompt" in (
+                    fn.fix_actions or []
+                ):
+                    raise ValueError(
+                        f"Fix node '{fn.name}' may not use retry_with_amended_prompt: "
+                        f"'{fn.parent_node}' runs under an approval, and amending its "
+                        "instructions would run text nobody approved (use retry_as_is)"
+                    )
+
         # --- cycle detection + wave computation ---
         waves = self.compute_waves()
 
@@ -372,6 +504,21 @@ class DAGCreateRequest(BaseModel):
 
         return self
 
+    def _downstream_of(self, roots: set[str]) -> set[str]:
+        """Every node reachable from ``roots`` along PREDECESSOR_EDGE_TYPES."""
+        adj: dict[str, list[str]] = defaultdict(list)
+        for e in self.edges:
+            if e.edge_type in PREDECESSOR_EDGE_TYPES:
+                adj[e.from_node].append(e.to_node)
+        seen: set[str] = set()
+        stack = list(roots)
+        while stack:
+            for child in adj[stack.pop()]:
+                if child not in seen:
+                    seen.add(child)
+                    stack.append(child)
+        return seen
+
     def compute_waves(self) -> dict[str, int]:
         """Topological sort to assign wave numbers to nodes.
 
@@ -384,7 +531,7 @@ class DAGCreateRequest(BaseModel):
         in_degree: dict[str, int] = {n.name: 0 for n in self.nodes}
 
         for edge in self.edges:
-            if edge.edge_type in ("dependency", "context_flow"):
+            if edge.edge_type in PREDECESSOR_EDGE_TYPES:
                 adj[edge.from_node].append(edge.to_node)
                 in_degree[edge.to_node] += 1
 

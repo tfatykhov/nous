@@ -24,7 +24,7 @@ import asyncio
 import logging
 import secrets
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
@@ -34,11 +34,21 @@ import httpx
 from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 
+from nous.dag.approval import DEDUP_PREFIX as _DAG_APPROVAL_PREFIX
 from nous.storage.database import Database
 from nous.storage.models import A2uiAction, A2uiOutbox, A2uiSurface
 
 from .dsl import BuiltSurface, SurfaceValidationError
 from .grammar import lint_micro_app
+
+
+class ReservedDedupKeyError(ValueError):
+    """A push used a dedup-key prefix reserved for another producer.
+
+    A ValueError, never a PermissionError: the DAG orchestrator reads a
+    PermissionError from push_built as a censor refusal and fails the node
+    for good (Harness Phase 3 §3.14).
+    """
 
 
 class _DedupRaceRetry(Exception):
@@ -183,6 +193,8 @@ class SurfaceService:
         session_id: str | None = None,
         notify: bool | None = None,
         refuse_fallback_overwrite: bool = False,
+        notify_text: str | None = None,
+        reserved_key_ok: bool = False,
         pre_broadcast: Callable[[], None] | None = None,
         pre_broadcast_rollback: Callable[[], None] | None = None,
         _dedup_retry: bool = False,
@@ -202,6 +214,13 @@ class SurfaceService:
         :class:`FallbackOverwriteRefused` instead, evaluated under the same
         per-surface lock as the replacement it protects.
         """
+        if dedup_key and dedup_key.startswith(_DAG_APPROVAL_PREFIX) and not reserved_key_ok:
+            # Harness Phase 3 §3.14: a push under this prefix would replace a
+            # DAG approval card's text in place — same id, taps still answer
+            # the node. Only the orchestrator may use it.
+            raise ReservedDedupKeyError(
+                f"dedup_key prefix {_DAG_APPROVAL_PREFIX!r} is reserved for DAG approval cards"
+            )
         if self._push_session_blocked(session_id):
             # F092.2: this session belongs to a cancelled agent-action
             # subtask whose app the user closed mid-action — its completion
@@ -271,6 +290,8 @@ class SurfaceService:
                         now=now,
                         expires_at=expires_at,
                         refuse_fallback_overwrite=refuse_fallback_overwrite,
+                        notify_text=notify_text,
+                        reserved_key_ok=reserved_key_ok,
                         pre_broadcast=pre_broadcast,
                         pre_broadcast_rollback=pre_broadcast_rollback,
                         _race_retries=_race_retries,
@@ -287,6 +308,8 @@ class SurfaceService:
                 now=now,
                 expires_at=expires_at,
                 refuse_fallback_overwrite=refuse_fallback_overwrite,
+                notify_text=notify_text,
+                reserved_key_ok=reserved_key_ok,
                 pre_broadcast=pre_broadcast,
                 pre_broadcast_rollback=pre_broadcast_rollback,
                 _race_retries=_race_retries,
@@ -315,6 +338,8 @@ class SurfaceService:
         notify: bool | None,
         _dedup_retry: bool,
         refuse_fallback_overwrite: bool = False,
+        notify_text: str | None = None,
+        reserved_key_ok: bool = False,
         pre_broadcast: Callable[[], None] | None = None,
         pre_broadcast_rollback: Callable[[], None] | None = None,
         agent_id: str,
@@ -331,6 +356,8 @@ class SurfaceService:
                 notify=notify,
                 _dedup_retry=_dedup_retry,
                 refuse_fallback_overwrite=refuse_fallback_overwrite,
+                notify_text=notify_text,
+                reserved_key_ok=reserved_key_ok,
                 pre_broadcast=pre_broadcast,
                 pre_broadcast_rollback=pre_broadcast_rollback,
                 agent_id=agent_id,
@@ -354,6 +381,8 @@ class SurfaceService:
                 session_id=session_id,
                 notify=notify,
                 refuse_fallback_overwrite=refuse_fallback_overwrite,
+                notify_text=notify_text,
+                reserved_key_ok=reserved_key_ok,
                 pre_broadcast=pre_broadcast,
                 pre_broadcast_rollback=pre_broadcast_rollback,
                 _dedup_retry=_dedup_retry,
@@ -369,6 +398,8 @@ class SurfaceService:
         notify: bool | None,
         _dedup_retry: bool,
         refuse_fallback_overwrite: bool = False,
+        notify_text: str | None = None,
+        reserved_key_ok: bool = False,
         pre_broadcast: Callable[[], None] | None = None,
         pre_broadcast_rollback: Callable[[], None] | None = None,
         agent_id: str,
@@ -587,6 +618,8 @@ class SurfaceService:
                     # flag here would let the degraded render overwrite the
                     # app that just got published.
                     refuse_fallback_overwrite=refuse_fallback_overwrite,
+                    notify_text=notify_text,
+                    reserved_key_ok=reserved_key_ok,
                     pre_broadcast=pre_broadcast,
                     pre_broadcast_rollback=pre_broadcast_rollback,
                     _dedup_retry=True,
@@ -597,7 +630,7 @@ class SurfaceService:
 
         should_notify = built.priority >= 1 if notify is None else notify
         if created and should_notify:
-            self._schedule_bg(self._notify_telegram(built.title, surface_id))
+            self._schedule_bg(self._notify_telegram(built.title, surface_id, text=notify_text))
         return surface_id
 
     def _create_envelope(
@@ -886,6 +919,74 @@ class SurfaceService:
                         "F092.2 resolve-time subtask cancel failed", exc_info=True
                     )
 
+
+    async def close(self, surface_id: str, status: str = "expired") -> None:
+        """Retire a card under its surface lock (``resolve`` takes none).
+
+        Harness Phase 3 §3.7: a card no longer live, or already deleted by
+        retention (``resolve`` raises KeyError), counts as closed. Database
+        work only — the tick holds the orchestrator lock while calling this.
+
+        The per-surface lock is NOT reentrant: a caller already holding this
+        card's lock (an action handler) must never call close() — return
+        ``resolve_surface=True`` instead. Otherwise the handler deadlocks, and
+        the tick then deadlocks on the same card under ``_lock``.
+        """
+        async with self.surface_lock(surface_id):
+            try:
+                await self.resolve(surface_id, status=status)
+            except KeyError:
+                return
+
+    async def close_by_dedup_key(self, dedup_key: str, status: str = "expired") -> list[str]:
+        """Close every live card carrying ``dedup_key``; returns their ids."""
+        async with self._db.session() as session:
+            ids = (
+                await session.execute(
+                    select(A2uiSurface.surface_id).where(
+                        A2uiSurface.agent_id == self._settings.agent_id,
+                        A2uiSurface.dedup_key == dedup_key,
+                        A2uiSurface.status == "live",
+                    )
+                )
+            ).scalars().all()
+        for surface_id in ids:
+            await self.close(surface_id, status)
+        return list(ids)
+
+    async def live_ids(self, surface_ids: Iterable[str]) -> set[str]:
+        wanted = [s for s in surface_ids if s]
+        if not wanted:
+            return set()
+        async with self._db.session() as session:
+            rows = await session.execute(
+                select(A2uiSurface.surface_id).where(
+                    A2uiSurface.agent_id == self._settings.agent_id,
+                    A2uiSurface.surface_id.in_(wanted),
+                    A2uiSurface.status == "live",
+                )
+            )
+            return set(rows.scalars().all())
+
+    async def live_cards_by_prefix(self, prefix: str) -> list[tuple[str, str]]:
+        """Every live card whose dedup key starts with ``prefix``, oldest first.
+
+        No limit (Harness Phase 3 §3.7): a bounded page fills with healthy
+        cards and never reaches the leaked ones behind them. For the DAG
+        prefix the set is bounded by the parked cap times approvals per DAG.
+        """
+        async with self._db.session() as session:
+            rows = await session.execute(
+                select(A2uiSurface.surface_id, A2uiSurface.dedup_key)
+                .where(
+                    A2uiSurface.agent_id == self._settings.agent_id,
+                    A2uiSurface.status == "live",
+                    A2uiSurface.dedup_key.like(f"{prefix}%"),
+                )
+                .order_by(A2uiSurface.created_at)
+            )
+            return [(sid, key) for sid, key in rows.all()]
+
     @staticmethod
     def _is_own_action_push(pending: Any, session_id: str | None) -> bool:
         """Is this push the pending agent action's own recompose? (F092.2 —
@@ -983,25 +1084,29 @@ class SurfaceService:
                                     A2uiSurface.expires_at <= claim_now,
                                 )
                                 .values(status="expired", resolved_at=claim_now)
-                                .returning(A2uiSurface.surface_id)
+                                .returning(A2uiSurface.surface_id, A2uiSurface.dedup_key)
                             )
                         )
-                        .scalars()
                         .all()
                     )
                     if not claimed:
                         continue
-                    session.add(
-                        A2uiAction(
-                            agent_id=agent_id,
-                            surface_id=surface_id,
-                            action_name="no_objection",
-                            actor="system:expiry",
-                            context={"expired_at": now.isoformat()},
-                            status="completed",
-                            completed_at=now,
+                    # Harness Phase 3 §3.7: a DAG approval card's node is the
+                    # record of what happened; after an outage longer than
+                    # wait + grace this startup expiry would otherwise write
+                    # "no objection" for a card that was answered.
+                    if not (claimed[0][1] or "").startswith(_DAG_APPROVAL_PREFIX):
+                        session.add(
+                            A2uiAction(
+                                agent_id=agent_id,
+                                surface_id=surface_id,
+                                action_name="no_objection",
+                                actor="system:expiry",
+                                context={"expired_at": now.isoformat()},
+                                status="completed",
+                                completed_at=now,
+                            )
                         )
-                    )
                     envelope = {"version": "v1.0", "deleteSurface": {"surfaceId": surface_id}}
                     row = A2uiOutbox(agent_id=agent_id, surface_id=surface_id, envelope=envelope)
                     session.add(row)
@@ -1287,8 +1392,12 @@ class SurfaceService:
         self._pending_tasks.add(task)
         task.add_done_callback(self._pending_tasks.discard)
 
-    async def _notify_telegram(self, title: str, surface_id: str) -> None:
-        """One-line Telegram pointer with a deep link (best-effort)."""
+    async def _notify_telegram(self, title: str, surface_id: str, text: str | None = None) -> None:
+        """One-line Telegram pointer with a deep link (best-effort).
+
+        ``text`` (Harness Phase 3) replaces the title as the ping body — built
+        only from strings already on the card, which the push censor checked.
+        """
         token = self._settings.telegram_bot_token
         chat_id = self._settings.telegram_chat_id
         if not token or not chat_id:
@@ -1299,7 +1408,7 @@ class SurfaceService:
             async with httpx.AsyncClient() as client:
                 await client.post(
                     f"https://api.telegram.org/bot{token}/sendMessage",
-                    json={"chat_id": chat_id, "text": f"[companion] {title}\n{link}"},
+                    json={"chat_id": chat_id, "text": f"[companion] {text or title}\n{link}"},
                     timeout=10,
                 )
         except Exception:

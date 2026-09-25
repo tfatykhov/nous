@@ -29,7 +29,10 @@ def approval_gate(params: dict[str, Any]) -> Any:
     if not options:
         raise ValueError("approval_gate requires at least one option")
     trace_id = _validated_trace_id(params.get("trace_id"))
-    recommendation = params.get("recommendation") or options[0]["id"]
+    # Harness Phase 3: a DAG card recommends nothing unless its author said
+    # so; agent-pushed cards keep the options[0] fallback.
+    recommend_first = params.get("recommend_first", True)
+    recommendation = params.get("recommendation") or (options[0]["id"] if recommend_first else "")
 
     s = Surface(
         kind="approval_gate",
@@ -49,7 +52,15 @@ def approval_gate(params: dict[str, Any]) -> Any:
             # handler validates the submitted optionId against THIS (the
             # buttons carry literal ids, but the server must not trust the
             # client's copy of anything).
-            "options": [{"id": o["id"], "label": o["label"]} for o in options],
+            "options": [
+                {
+                    "id": o["id"],
+                    "label": o["label"],
+                    # Harness Phase 3: server-side record of what each answer does.
+                    **({"outcome": o["outcome"]} if "outcome" in o else {}),
+                }
+                for o in options
+            ],
         }
     )
 
@@ -90,6 +101,6 @@ def approval_gate(params: dict[str, Any]) -> Any:
             variant="borderless",
             action=event("approval.defer", {"traceId": trace_id} if trace_id else {}),
         ),
-        Text("defer_label", "Ask me later"),
+        Text("defer_label", params.get("defer_label") or "Ask me later"),
     )
     return s.build()

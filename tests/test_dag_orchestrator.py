@@ -2397,7 +2397,8 @@ class TestStaleReadyRecovery:
 
 class TestDAGCompletionStatus:
     """Audit DG-1: a DAG that finishes via skip_and_continue (some nodes
-    'skipped', rest 'completed') must finalize 'completed', not 'failed'."""
+    'skipped', rest 'completed') must finalize 'completed', not 'failed'. The terminal write is
+    finalize_dag — conditional on the rows (Harness Phase 3 §3.3)."""
 
     def _orchestrator_with_mock_store(self):
         store = AsyncMock()
@@ -2422,8 +2423,8 @@ class TestDAGCompletionStatus:
             nodes=[self._node("completed", "a"), self._node("skipped", "b")],
         )
         await orch._check_dag_completion(dag)
-        store.update_dag_status.assert_awaited_once()
-        args, kwargs = store.update_dag_status.await_args
+        store.finalize_dag.assert_awaited_once()
+        args, kwargs = store.finalize_dag.await_args
         assert args[1] == "completed"
         assert "skipped" in (kwargs.get("result_summary") or args[2])
 
@@ -2435,7 +2436,7 @@ class TestDAGCompletionStatus:
             nodes=[self._node("completed", "a"), self._node("completed", "b")],
         )
         await orch._check_dag_completion(dag)
-        args, _ = store.update_dag_status.await_args
+        args, _ = store.finalize_dag.await_args
         assert args[1] == "completed"
 
     @pytest.mark.asyncio
@@ -2446,7 +2447,7 @@ class TestDAGCompletionStatus:
             nodes=[self._node("completed", "a"), self._node("failed", "b")],
         )
         await orch._check_dag_completion(dag)
-        args, _ = store.update_dag_status.await_args
+        args, _ = store.finalize_dag.await_args
         assert args[1] == "failed"
 
     @pytest.mark.asyncio
@@ -2457,12 +2458,19 @@ class TestDAGCompletionStatus:
             nodes=[self._node("blocked", "a"), self._node("blocked", "b")],
         )
         await orch._check_dag_completion(dag)
-        args, _ = store.update_dag_status.await_args
+        args, _ = store.finalize_dag.await_args
         assert args[1] == "failed"
 
 
 class TestSubtaskNodeDeferral:
     """Audit DG-4: a full subtask queue must DEFER a node, not fail it."""
+
+    @staticmethod
+    def _writes(store, key):
+        """Every value written for ``key`` — through update_node and, since
+        harness Phase 3 made status writes conditional, transition_node."""
+        calls = store.update_node.await_args_list + store.transition_node.await_args_list
+        return [kw.get(key) for (_a, kw) in calls]
 
     def _node(self):
         return SimpleNamespace(
@@ -2489,9 +2497,7 @@ class TestSubtaskNodeDeferral:
 
         # Deferred, NOT failed.
         assert node.status == "pending"
-        statuses = [
-            kw.get("status") for (_a, kw) in store.update_node.await_args_list
-        ]
+        statuses = self._writes(store, "status")
         assert "pending" in statuses
         assert "failed" not in statuses
 
@@ -2510,9 +2516,7 @@ class TestSubtaskNodeDeferral:
         await orch._launch_subtask_node(node, dag)
 
         assert node.status == "failed"
-        statuses = [
-            kw.get("status") for (_a, kw) in store.update_node.await_args_list
-        ]
+        statuses = self._writes(store, "status")
         assert "failed" in statuses
 
     @pytest.mark.asyncio
@@ -2538,7 +2542,7 @@ class TestSubtaskNodeDeferral:
         await orch._launch_check_node(node, dag)
 
         assert node.status == "pending"
-        statuses = [kw.get("status") for (_a, kw) in store.update_node.await_args_list]
+        statuses = self._writes(store, "status")
         assert "pending" in statuses
         assert "failed" not in statuses
 
@@ -2567,5 +2571,5 @@ class TestSubtaskNodeDeferral:
 
         assert node.status == "failed"
         # final update carries an explanatory error mentioning saturation
-        errors = [kw.get("error") for (_a, kw) in store.update_node.await_args_list]
+        errors = self._writes(store, "error")
         assert any(e and "saturated" in e for e in errors)
