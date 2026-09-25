@@ -134,3 +134,26 @@ def test_card_shown_chars_matches_what_the_summary_shows():
     assert "d" * shown[0] + "\n[truncated, 5000 chars]" in summary
     assert "d" * (shown[0] + 1) not in summary
     assert ap.card_shown_chars("q", []) == []
+
+
+def _n(name, node_type="subtask", result=None):
+    return SimpleNamespace(id=uuid.uuid4(), name=name, node_type=node_type, result=result)
+
+
+def _e(src, dst, edge_type="context_flow"):
+    return SimpleNamespace(from_node_id=src.id, to_node_id=dst.id, edge_type=edge_type)
+
+
+def test_context_results_walks_through_chained_approvals_once():
+    """One pure walk shared by the orchestrator (card + acting node) and the
+    dashboard (card_summary, reviewing) — a diamond yields the draft once."""
+    draft = _n("draft", result="DRAFT")
+    a1 = _n("a1", "approval", result="Answered: Send it")
+    a2 = _n("a2", "approval")
+    send = _n("send")
+    nodes = [draft, a1, a2, send]
+    edges = [_e(draft, a1), _e(draft, a2), _e(a1, a2), _e(a2, send), _e(draft, send, "dependency")]
+
+    assert ap.context_results(a2, nodes, edges) == [("draft", "DRAFT"), ("a1", "Answered: Send it")]
+    assert ap.context_results(a1, nodes, edges) == [("draft", "DRAFT")]
+    assert ap.context_results(draft, nodes, edges) == []
