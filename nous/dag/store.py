@@ -13,7 +13,7 @@ from sqlalchemy import true as sa_true
 from sqlalchemy.orm import selectinload
 
 from nous.config import Settings
-from nous.dag.schemas import DAGCreateRequest
+from nous.dag.schemas import DAGCreateRequest, DAGNodeType
 from nous.storage.database import Database
 from nous.storage.models import DAGEdge, DAGNode, DynamicCheckModel, ExecutionDAG, Subtask
 
@@ -102,51 +102,58 @@ class DAGStore:
                     spec.timeout_seconds if spec.timeout_seconds is not None else self._settings.dag_node_default_timeout,
                     self._settings.dag_node_max_timeout,
                 )
-                # F064.1: resolve + clamp per-node stall_timeout. None or 0 = disabled.
-                # When set, clamp to NOUS_DAG_NODE_MAX_STALL_TIMEOUT and ALSO
-                # enforce stall <= resolved_timeout (codex P2-2 fix: the
-                # schema-level validator can't see the resolved default
-                # because it runs before store.create's clamp pipeline. We
-                # check against the resolved value here, raising before any
-                # row is inserted — same semantics, late but pre-commit).
-                resolved_stall: int | None
-                if spec.stall_timeout_seconds == 0:
-                    # Explicitly disabled per-node — no inheritance, no check.
-                    resolved_stall = 0
-                elif spec.stall_timeout_seconds is None:
-                    # Per-node unset → inherits global default at runtime
-                    # (orchestrator._effective_stall_timeout). Persist None
-                    # to preserve the "inherit" semantic, but ALSO validate
-                    # the GLOBAL default against this node's wall-clock
-                    # timeout. Otherwise a node with timeout_seconds=60 and
-                    # global default_stall_timeout=600 silently never
-                    # stalls. @codex P2 on dc914be: skipped this check
-                    # previously when per-node stall was unset.
+                if spec.type == DAGNodeType.approval:
+                    # Harness Phase 3 §3.1: an approval node never runs, so no
+                    # stall timeout applies. timeout_seconds keeps its resolved
+                    # default above — the column is NOT NULL, and nothing reads
+                    # it for an approval node.
                     resolved_stall = None
-                    if self._settings.dag_stall_detection_enabled:
-                        inherited = self._settings.dag_node_default_stall_timeout
-                        if inherited > 0 and inherited > resolved_timeout:
-                            raise ValueError(
-                                f"Node '{spec.name}': inherited global "
-                                f"stall_timeout={inherited} exceeds this node's "
-                                f"effective wall-clock timeout {resolved_timeout} — "
-                                "stall would never fire (silent dead config). Set "
-                                "stall_timeout_seconds=0 on this node to opt out, "
-                                "or raise timeout_seconds."
-                            )
                 else:
-                    resolved_stall = min(
-                        spec.stall_timeout_seconds,
-                        self._settings.dag_node_max_stall_timeout,
-                    )
-                    if resolved_stall > resolved_timeout:
-                        raise ValueError(
-                            f"Node '{spec.name}': stall_timeout_seconds="
-                            f"{spec.stall_timeout_seconds} exceeds effective "
-                            f"wall-clock timeout {resolved_timeout} — stall "
-                            "would never fire (silent dead config). Reduce "
-                            "stall_timeout_seconds or raise timeout_seconds."
+                    # F064.1: resolve + clamp per-node stall_timeout. None or 0 = disabled.
+                    # When set, clamp to NOUS_DAG_NODE_MAX_STALL_TIMEOUT and ALSO
+                    # enforce stall <= resolved_timeout (codex P2-2 fix: the
+                    # schema-level validator can't see the resolved default
+                    # because it runs before store.create's clamp pipeline. We
+                    # check against the resolved value here, raising before any
+                    # row is inserted — same semantics, late but pre-commit).
+                    resolved_stall: int | None
+                    if spec.stall_timeout_seconds == 0:
+                        # Explicitly disabled per-node — no inheritance, no check.
+                        resolved_stall = 0
+                    elif spec.stall_timeout_seconds is None:
+                        # Per-node unset → inherits global default at runtime
+                        # (orchestrator._effective_stall_timeout). Persist None
+                        # to preserve the "inherit" semantic, but ALSO validate
+                        # the GLOBAL default against this node's wall-clock
+                        # timeout. Otherwise a node with timeout_seconds=60 and
+                        # global default_stall_timeout=600 silently never
+                        # stalls. @codex P2 on dc914be: skipped this check
+                        # previously when per-node stall was unset.
+                        resolved_stall = None
+                        if self._settings.dag_stall_detection_enabled:
+                            inherited = self._settings.dag_node_default_stall_timeout
+                            if inherited > 0 and inherited > resolved_timeout:
+                                raise ValueError(
+                                    f"Node '{spec.name}': inherited global "
+                                    f"stall_timeout={inherited} exceeds this node's "
+                                    f"effective wall-clock timeout {resolved_timeout} — "
+                                    "stall would never fire (silent dead config). Set "
+                                    "stall_timeout_seconds=0 on this node to opt out, "
+                                    "or raise timeout_seconds."
+                                )
+                    else:
+                        resolved_stall = min(
+                            spec.stall_timeout_seconds,
+                            self._settings.dag_node_max_stall_timeout,
                         )
+                        if resolved_stall > resolved_timeout:
+                            raise ValueError(
+                                f"Node '{spec.name}': stall_timeout_seconds="
+                                f"{spec.stall_timeout_seconds} exceeds effective "
+                                f"wall-clock timeout {resolved_timeout} — stall "
+                                "would never fire (silent dead config). Reduce "
+                                "stall_timeout_seconds or raise timeout_seconds."
+                            )
                 # F066.1: fix nodes stay in 'pending' regardless of wave —
                 # they only activate when their parent transitions to 'failed'
                 # via _try_fix_failed_nodes. Without this guard, a wave-0
@@ -159,6 +166,18 @@ class DAGStore:
                     initial_status = "ready"
                 else:
                     initial_status = "pending"
+                approval_spec = None
+                if spec.type == DAGNodeType.approval:
+                    approval_spec = {
+                        "options": [o.model_dump() for o in spec.options or []],
+                        "default_option": spec.default_option,
+                        "recommended_option": spec.recommended_option,
+                        "answer_timeout_seconds": min(
+                            spec.answer_timeout_seconds
+                            or self._settings.dag_approval_default_wait_seconds,
+                            self._settings.dag_approval_max_wait_seconds,
+                        ),
+                    }
                 node = DAGNode(
                     dag_id=dag.id,
                     name=spec.name,
@@ -181,6 +200,7 @@ class DAGStore:
                     fix_actions=spec.fix_actions,
                     max_fix_attempts=spec.max_fix_attempts,
                     expected_modes=list(spec.expected_modes),
+                    approval_spec=approval_spec,
                 )
                 session.add(node)
                 node_map[spec.name] = node

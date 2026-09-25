@@ -1744,6 +1744,29 @@ class Settings(BaseSettings):
     # from the Phase-2 signals block.
     dag_callback_execution_enabled: bool = False
 
+    # Harness Phase 3: approval nodes (park-and-resume). Gates CREATION only —
+    # a node already waiting still answers and defaults when this is off.
+    dag_approval_nodes_enabled: bool = False
+    dag_approval_default_wait_seconds: int = Field(
+        86400, ge=900,
+        description="Time an approval node waits for an answer when its spec sets none.",
+    )
+    dag_approval_max_wait_seconds: int = Field(
+        604800, ge=900,
+        description="Ceiling on an approval node's wait; clamped at insert.",
+    )
+    dag_approval_card_grace_seconds: int = Field(
+        3600, ge=60,
+        description=(
+            "Backstop added to an approval card's expiry past the node's deadline. "
+            ">= 60: a zero expiry is falsy and push_built would store expires_at NULL."
+        ),
+    )
+    dag_max_parked_dags: int = Field(
+        20, ge=1,
+        description="Max DAGs waiting on answers before a DAG with an approval node is refused.",
+    )
+
     # F087: act on tokens_consumed, which only becomes non-zero once the
     # accounting wiring lands. Dark by default because the budget branch has
     # never executed in prod — flipping it silently would start cancelling
@@ -2861,6 +2884,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"dag_node_default_timeout ({self.dag_node_default_timeout}) must be <= "
                 f"dag_node_max_timeout ({self.dag_node_max_timeout})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_dag_approval_waits(self) -> "Settings":
+        if self.dag_approval_default_wait_seconds > self.dag_approval_max_wait_seconds:
+            raise ValueError(
+                f"dag_approval_default_wait_seconds ({self.dag_approval_default_wait_seconds}) "
+                f"must be <= dag_approval_max_wait_seconds ({self.dag_approval_max_wait_seconds})"
             )
         return self
 
