@@ -935,22 +935,23 @@ async def test_an_earlier_answer_is_passed_on_as_an_answer_not_approved_input(
     assert "[Earlier answer at 'approve']: Answered in the companion: 'Send it' (send)" in task
 
 
-def _declinable_with_fix() -> DAGCreateRequest:
-    return DAGCreateRequest(
-        name="mail",
-        nodes=[
-            _approve(),
-            DAGNodeSpec(name="send", type=DAGNodeType.subtask, instructions="send"),
-            DAGNodeSpec(
-                name="fix_send", type=DAGNodeType.fix, instructions="retry the send",
-                parent_node="send", fix_actions=["retry_as_is"],
-            ),
-        ],
-        edges=[
-            DAGEdgeSpec(from_node="approve", to_node="send", edge_type="context_flow"),
-            DAGEdgeSpec(from_node="send", to_node="fix_send", edge_type="on_failure"),
-        ],
-    )
+def _declinable_with_fix(*, fix_successor: bool = False) -> DAGCreateRequest:
+    nodes = [
+        _approve(),
+        DAGNodeSpec(name="send", type=DAGNodeType.subtask, instructions="send"),
+        DAGNodeSpec(
+            name="fix_send", type=DAGNodeType.fix, instructions="retry the send",
+            parent_node="send", fix_actions=["retry_as_is"],
+        ),
+    ]
+    edges = [
+        DAGEdgeSpec(from_node="approve", to_node="send", edge_type="context_flow"),
+        DAGEdgeSpec(from_node="send", to_node="fix_send", edge_type="on_failure"),
+    ]
+    if fix_successor:
+        nodes.append(DAGNodeSpec(name="report", type=DAGNodeType.subtask, instructions="report"))
+        edges.append(DAGEdgeSpec(from_node="fix_send", to_node="report"))
+    return DAGCreateRequest(name="mail", nodes=nodes, edges=edges)
 
 
 async def test_a_declined_approval_with_a_fix_below_it_still_ends(store, subtask_mgr, surfaces):
@@ -967,8 +968,30 @@ async def test_a_declined_approval_with_a_fix_below_it_still_ends(store, subtask
 
     after = await store.get_dag(dag.id)
     assert after.status == "failed"
-    assert after.result_summary == "Stopped at approval 'approve': 'Don't send'; 1 step not run"
-    assert {n.name: n.status for n in after.nodes}["fix_send"] == "completed"
+    assert after.result_summary == "Stopped at approval 'approve': 'Don't send'; 2 steps not run"
+    # Blocked, never 'completed': a completed fix would resolve its own edges.
+    assert {n.name: n.status for n in after.nodes}["fix_send"] == "blocked"
+
+
+async def test_nothing_below_an_unfired_fix_runs_after_a_decline(store, subtask_mgr, surfaces):
+    """codex P1 on #649: completing the unfired fix resolved its outgoing edge,
+    so work below it ran although the approval above was declined."""
+    orch = _orch(store, subtask_mgr, surfaces)
+    dag = await store.create(_declinable_with_fix(fix_successor=True))
+    await orch.start_dag(dag.id)
+    node = await _node(store, dag.id, "approve")
+    await orch.answer_node(node.id, "hold", source="companion", actor=None, surface_id=node.surface_id)
+    subtask_mgr.create.reset_mock()
+
+    await orch.tick()
+    await orch.tick()
+
+    after = await store.get_dag(dag.id)
+    assert {n.name: n.status for n in after.nodes} == {
+        "approve": "failed", "send": "blocked", "fix_send": "blocked", "report": "blocked",
+    }
+    subtask_mgr.create.assert_not_called()
+    assert after.status == "failed"
 
 
 async def test_the_fix_still_fires_after_the_declined_approval_is_retried(store, subtask_mgr, surfaces):
@@ -977,8 +1000,9 @@ async def test_the_fix_still_fires_after_the_declined_approval_is_retried(store,
     await orch.start_dag(dag.id)
     node = await _node(store, dag.id, "approve")
     await orch.answer_node(node.id, "hold", source="companion", actor=None, surface_id=node.surface_id)
-    await orch.tick()  # the DAG ends; fix_send is retired unfired
+    await orch.tick()  # the DAG ends; fix_send is blocked with its parent
     await orch.retry_node(dag.id, "approve", allow_declined=True)
+    assert (await _node(store, dag.id, "fix_send")).status == "pending"  # unblocked with send
     await orch.tick()  # re-asked
     node = await _node(store, dag.id, "approve")
     await orch.answer_node(node.id, "send", source="companion", actor=None, surface_id=node.surface_id)

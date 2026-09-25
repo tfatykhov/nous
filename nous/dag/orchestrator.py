@@ -906,10 +906,14 @@ class DAGOrchestrator:
             if edge.edge_type in PREDECESSOR_EDGE_TYPES or edge.edge_type == "cancel_cascade":
                 dep_map[str(edge.to_node_id)].add(str(edge.from_node_id))
 
-        # Forward reachability from retried node
+        # Forward reachability from retried node. on_failure too: a fix node
+        # blocked with its parent (_propagate_failures) is unblocked with it,
+        # and so is anything below the fix.
         adj: dict[str, list[str]] = {str(n.id): [] for n in dag.nodes}
         for edge in dag.edges:
-            if edge.edge_type in PREDECESSOR_EDGE_TYPES or edge.edge_type == "cancel_cascade":
+            if edge.edge_type in PREDECESSOR_EDGE_TYPES or edge.edge_type in (
+                "cancel_cascade", "on_failure",
+            ):
                 adj[str(edge.from_node_id)].append(str(edge.to_node_id))
 
         reachable: set[str] = set()
@@ -2251,6 +2255,18 @@ class DAGOrchestrator:
         # Transitively find nodes to block (predecessor edges).
         # Treat both failed and cancel_cascade-cancelled nodes as "poison".
         poison = failed_ids | cancelled
+        # A fix node whose parent is blocked can never fire — its parent never
+        # runs, so never fails. It is blocked with its parent, never retired
+        # 'completed': that would resolve its own outgoing edges and run work
+        # below a declined approval (codex P1 on #649). Left pending it kept
+        # the DAG 'running' forever. retry_node unblocks it with its parent.
+        id_by_name = {n.name: str(n.id) for n in dag.nodes}
+        fix_parent = {
+            str(n.id): id_by_name[n.parent_node]
+            for n in dag.nodes
+            if n.node_type == "fix" and n.parent_node in id_by_name
+        }
+        already_blocked = {str(n.id) for n in dag.nodes if n.status == "blocked"}
         to_block: set[str] = set()
         changed = True
         while changed:
@@ -2259,7 +2275,10 @@ class DAGOrchestrator:
                 node = node_by_id[node_id]
                 if node.status in _TERMINAL or node_id in to_block or node_id in to_cancel:
                     continue
-                if predecessors & (poison | to_block):
+                parent = fix_parent.get(node_id)
+                if predecessors & (poison | to_block) or (
+                    parent is not None and parent in (to_block | already_blocked)
+                ):
                     to_block.add(node_id)
                     changed = True
 
@@ -3359,7 +3378,7 @@ class DAGOrchestrator:
             parent = node_by_name.get(n.parent_node or "")
             if parent is None:
                 continue
-            if parent.status in ("completed", "skipped", "cancelled", "blocked"):
+            if parent.status in ("completed", "skipped", "cancelled"):
                 n.status = "completed"
                 n.result = (
                     f"Fix-stage not fired — parent '{parent.name}' "
