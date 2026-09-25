@@ -30,6 +30,8 @@ from __future__ import annotations
 import re
 from contextvars import ContextVar
 
+from nous.api.tool_classes import code_reaches_network  # a leaf module: no cycle
+
 # Commands that only read, unless a mode checked in _READ_COMMAND_RULES says
 # otherwise.
 READ_COMMANDS: frozenset[str] = frozenset(
@@ -861,6 +863,9 @@ def _program(word: str) -> str:
     return name[:-4].lower() if name.lower().endswith(".exe") else name
 
 
+_PYTHON = re.compile(r"python(?:\d+(?:\.\d+)*)?")  # python, python3, python3.12
+
+
 def _classify_program(cmd: str, args: list[str]) -> str:
     if cmd == "git":
         return _classify_git(args)
@@ -873,6 +878,12 @@ def _classify_program(cmd: str, args: list[str]) -> str:
                      for a in args)
         positional = [a for a in args if not a.startswith("-")]
         return "external" if remote or positional[:1] in (["push"], ["pull"], ["login"]) else "write"
+    if _PYTHON.fullmatch(cmd) and "-c" in args:
+        # harness Phase 2a: the code is right there -- a script that reaches
+        # the network is external, not a local write
+        i = args.index("-c")
+        code = args[i + 1] if i + 1 < len(args) else ""
+        return "external" if code_reaches_network(code) else "write"
     if cmd in _EXTERNAL_COMMANDS:
         return "external"
     if cmd not in READ_COMMANDS:

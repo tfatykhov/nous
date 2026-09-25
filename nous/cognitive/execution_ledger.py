@@ -14,54 +14,31 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from nous.api.tool_classes import TOOL_CLASSES, code_reaches_network
 from nous.cognitive.bash_side_effect import classify_bash_command as _classify_bash_command
 from nous.cognitive.bash_side_effect import command_runs as _command_runs
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Tool classification constants (REVIEWED — matches actual registered tools)
+# Tool classification sets -- derived from nous/api/tool_classes.py (harness
+# Phase 2a): one definition. Kept as module-level sets so tests can
+# monkeypatch them.
 # ---------------------------------------------------------------------------
 
+
+def _names(level: str) -> set[str]:
+    return {name for name, cls in TOOL_CLASSES.items() if cls.side_effect == level}
+
+
 # No side effects — pure reads
-READ_TOOLS: set[str] = {
-    "recall_deep",
-    "recall_recent",
-    "read_file",
-    "get_procedure",
-    "web_search",
-    "web_fetch",
-    "list_tasks",
-    "cache_retrieve",
-    "recall_hubs",
-    "list_decisions",
-}
-
-# Local writes — reversible
-WRITE_TOOLS: set[str] = {
-    "write_file",
-    "learn_fact",
-    "record_decision",
-    "create_censor",
-    "store_identity",
-    "learn_skill",
-    "complete_initiation",
-    "spawn_task",
-    "schedule_task",
-    "cancel_task",
-    "run_python",  # Can call learn_fact() and modify state
-    "heartbeat_check_manage",
-    "heartbeat_check_create",
-}
-
+READ_TOOLS: set[str] = _names("none")
+# Local writes — reversible (bash and run_python are the floor: classified per call)
+WRITE_TOOLS: set[str] = _names("write")
 # External side effects — leave the host (message delivery, remote pushes)
-EXTERNAL_TOOLS: set[str] = {
-    "send_file",   # Sends files to Telegram
-    "send_email",  # Guarded SMTP send (email_tools.py), registered after F026
-}
-
+EXTERNAL_TOOLS: set[str] = _names("external")
 # Irreversible — extend when irreversible tools are registered
-IRREVERSIBLE_TOOLS: set[str] = set()
+IRREVERSIBLE_TOOLS: set[str] = _names("irreversible")
 
 # Key argument names per tool — used by _summarize_args
 _KEY_ARGS: dict[str, list[str]] = {
@@ -356,20 +333,9 @@ class ExecutionLedger:
         tool_name: str,
         tool_input: dict[str, Any] | None = None,
     ) -> str:
-        """Return 'none' | 'write' | 'external' | 'irreversible'."""
-        if tool_name in IRREVERSIBLE_TOOLS:
-            return "irreversible"
-        if tool_name in EXTERNAL_TOOLS:
-            return "external"
-        if tool_name in READ_TOOLS:
-            return "none"
-        if tool_name in WRITE_TOOLS:
-            return "write"
-        if tool_name == "bash":
-            command = _extract_bash_command(tool_input or {})
-            return self._classify_bash(command)
-        # Unknown tool — conservative default
-        return "write"
+        """Return 'none' | 'write' | 'external' | 'irreversible' (one definition:
+        the module-level ``classify_side_effect``)."""
+        return classify_side_effect(tool_name, tool_input)
 
     def _classify_bash(self, command: str) -> str:
         """Classify a bash command. Delegates to module-level function."""
@@ -412,18 +378,24 @@ def summarize_args(tool_name: str, args: dict[str, Any]) -> dict[str, str]:
 
 
 def classify_side_effect(tool_name: str, tool_input: dict[str, Any] | None = None) -> str:
-    """Module-level classifier for use by ActionGate and other modules."""
+    """Module-level classifier for ActionGate, the ledgers and the context policy.
+
+    The two content-classified tools come first: bash by its command, and
+    run_python by whether its code reaches the network (harness Phase 2a --
+    a script that mails is not a local write). Then the declared sets.
+    """
+    tool_input = tool_input or {}
+    if tool_name == "bash":
+        return _classify_bash_command(_extract_bash_command(tool_input))
+    if tool_name == "run_python" and code_reaches_network(str(tool_input.get("code") or "")):
+        return "external"
     if tool_name in IRREVERSIBLE_TOOLS:
         return "irreversible"
     if tool_name in EXTERNAL_TOOLS:
         return "external"
     if tool_name in READ_TOOLS:
         return "none"
-    if tool_name in WRITE_TOOLS:
-        return "write"
-    if tool_name == "bash":
-        return _classify_bash_command(_extract_bash_command(tool_input or {}))
-    return "write"
+    return "write"  # WRITE_TOOLS and anything unclassified
 
 
 _REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
