@@ -1337,3 +1337,33 @@ class TestSubstitutionMasking:
         from nous.cognitive.bash_side_effect import command_runs
 
         assert sorted(command_runs(cmd, 0)) == sorted(expected)
+
+
+class TestQuotedSubstitutions:
+    def test_nested_commands_come_first_so_the_last_is_the_outer_one(self):
+        from nous.cognitive.bash_side_effect import command_runs
+
+        assert command_runs("git push origin $(git branch --show-current)", 1) == [
+            ("git", ["branch", "--show-current"], False), ("git", ["push", "origin", "$"], False)]
+
+    def test_a_substitution_inside_a_quoted_word_is_read_uncertain(self):
+        from nous.cognitive.bash_side_effect import command_runs
+
+        assert command_runs('out="$(git push)"', 0) == [("git", ["push"], False)]
+        assert command_runs('echo "$(a) and $(b)"', 0) == [
+            ("a", [], False), ("b", [], False), ("echo", ["$(a) and $(b)"], True)]
+
+    def test_backticks_and_unbalanced_substitutions_are_opaque(self):
+        from nous.cognitive.bash_side_effect import command_runs
+
+        assert command_runs("x=`git push`", 0)[0][0] == "$"
+        assert command_runs('x="$(git push"', 0)[0][0] == "$"
+
+    def test_git_terminal_global_options_run_no_subcommand(self):
+        from nous.cognitive.bash_side_effect import git_subcommand
+
+        assert git_subcommand(["--version", "push"]) is None
+        assert git_subcommand(["-v", "push"]) is None
+        assert git_subcommand(["--help", "commit"]) is None
+        assert git_subcommand(["-C", "r", "push"]) == ("push", [])
+        assert _classify_bash_command("git --version push") == "none"

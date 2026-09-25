@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/plans/2026-09-24-harness-autonomy-roadmap.md` §2 row P2.7 and §3 row 2c. Anchors from `main` `240c795`.
 
+**v2.10 (codex round 6):** substitution contents are emitted *before* the outer commands, so the last invocation is always the outer command a non-zero exit belongs to (`git push origin $(git branch --show-current)` exiting 1 is a failed push, not a failed branch lookup); a `$(…)` folded inside a quoted word is read (uncertain), a backtick or unbalanced one is opaque; git's terminal global options (`--version`, `-v`, `--help`, `--exec-path` …) run no subcommand, for the ledger classifier too.
+
 **v2.9 (codex round 5):** a command inside `$(…)` / `<(…)` has its status masked by the outer command (`echo $(git push)` exits 0 because `echo` did) and is never certain; a plain subshell `(…)` keeps its own. Python evidence matches the write's *destination* (`open('/tmp/x.bak','w')` is not a save to `/tmp/x`; a computed path is plausible) and the *recipients* written out (`sendmail(from, TO, …)`, `msg['To']`, `to_addrs=`), never a sender, body or comment.
 
 **v2.8 (codex round 4):** a negated pipeline (`! git push`) and a backgrounded list (`git push &`) are never certain — the shell's 0 means the command failed, or merely started.

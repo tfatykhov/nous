@@ -1010,3 +1010,25 @@ def test_python_file_claims_match_the_write_destination(code, level):
 ])
 def test_python_email_claims_match_the_recipient(code, verified):
     assert _verify("Email sent to alice@x.io.", Evidence("run_python", {"code": code})).verified is verified
+
+
+# --- codex round 6 -------------------------------------------------------------
+
+
+def test_a_failed_push_with_a_substitution_argument_is_not_a_push():
+    cmd = "git push origin $(git branch --show-current)"
+    assert not _verify("I pushed the fix.", _real_bash(cmd, exit_code=1)).verified
+    assert _push_level(cmd) == "exact"
+
+
+def test_a_substitution_inside_quotes_is_read():
+    assert _push_level('out="$(git push origin main)"') == "plausible"
+    assert _push_level('echo "pushed: $(git push origin main 2>&1)"') == "plausible"
+    assert _push_level('out="`git push origin main`"') == "plausible"  # backticks: unreadable, opaque
+    assert not _verify("I pushed the fix.", _real_bash('echo "$(git log -1)"')).verified
+
+
+def test_git_version_or_help_runs_no_subcommand():
+    assert not _verify("I pushed the fix.", _real_bash("git --version push")).verified
+    assert not _verify("I pushed the fix.", _real_bash("git -v push")).verified
+    assert not _verify("I committed the fix.", _real_bash("git --help commit")).verified

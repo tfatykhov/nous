@@ -359,8 +359,26 @@ def _invocations(
     end_list()
 
     found: list[tuple[str, list[str], bool]] = []
+    # substitutions inside a word (`"$(git push)"`, backticks) never reach the
+    # `(` handling: read what can be read, mark the rest opaque. They come
+    # FIRST in the result, so the last invocation is always the outer command
+    # a non-zero exit belongs to.
+    found_nested: list[tuple[str, list[str], bool]] = []
 
     def emit(cmd_words: list[str], certain: bool, sub_exit: int | None) -> None:
+        for w in cmd_words:
+            if w.startswith(("\n", "\t")):
+                continue
+            inner_commands, readable = _word_substitutions(w)
+            if not readable:
+                found_nested.append(("$", [w], False))
+                continue
+            for inner in inner_commands:
+                sub = _invocations(inner, depth + 1, None) if depth < _MAX_STRING_DEPTH else None
+                if sub is None:
+                    found_nested.append(("$", [w], False))
+                else:
+                    found_nested.extend((p, a, False) for p, a, _ in sub)
         start = _command_start(cmd_words)
         if start is None or cmd_words[start].startswith("\n"):
             return  # nothing runs, or a heredoc body left where a program should be
@@ -402,9 +420,35 @@ def _invocations(
                 else:
                     sub_exit = None
                 emit(cmd_words, stage_certain, sub_exit)
+    outer = found
+    found = found_nested
     for cmd_words in nested:  # inside `$(...)` / `<(...)`: status masked by the outer command
         emit(cmd_words, False, None)
-    return found
+    return found + outer
+
+
+def _word_substitutions(word: str) -> tuple[list[str], bool]:
+    """The balanced `$(...)` contents inside one word, and whether the word
+    is readable: a backtick or an unbalanced `$(` makes it opaque."""
+    if "`" in word:
+        return [], False
+    contents: list[str] = []
+    i = word.find("$(")
+    while i != -1:
+        depth, j = 0, i + 1
+        while j < len(word):
+            if word[j] == "(":
+                depth += 1
+            elif word[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        if j >= len(word):
+            return contents, False  # unbalanced
+        contents.append(word[i + 2:j])
+        i = word.find("$(", j + 1)
+    return contents, True
 
 
 _SSH_VALUE_OPTIONS = frozenset("bBcDEeFIiJLlmOopQRSWw")
@@ -951,6 +995,11 @@ _GIT_LISTING_VALUE_OPTIONS = frozenset({
 })
 
 
+_GIT_TERMINAL_OPTIONS = frozenset({
+    "--version", "-v", "--help", "-h", "--html-path", "--man-path", "--info-path", "--exec-path",
+})
+
+
 def _git_global_options(args: list[str]) -> tuple[str, int]:
     """Skip git's global options: ``(floor, index of the subcommand)``.
 
@@ -961,6 +1010,8 @@ def _git_global_options(args: list[str]) -> tuple[str, int]:
     i = 0
     while i < len(args) and args[i].startswith("-"):
         a = args[i]
+        if a in _GIT_TERMINAL_OPTIONS:
+            return floor, len(args)  # prints and exits: `git --version push` runs no push
         if a in ("-c", "--config-env"):
             floor, i = "write", i + 2
         elif a.startswith(("-c", "--config-env=", "--exec-path=")):
