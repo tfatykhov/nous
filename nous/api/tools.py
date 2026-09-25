@@ -4823,9 +4823,19 @@ def register_dag_tools(
     dispatcher: ToolDispatcher,
     store: "Any",
     orchestrator: "Any",
+    settings: Any = None,
 ) -> None:
     """F038: Register DAG orchestration tools."""
+    from nous.dag.approval import approval_line, card_link
     from nous.dag.schemas import DAGCreateRequest, DAGEdgeSpec, DAGNodeSpec, DAGNodeType
+
+    # Harness Phase 3 §3.13: the wired Settings, not a fresh Settings() —
+    # the flag is read at call time; the schema advertises the approval type
+    # only when the flag and the companion are both on.
+    cfg = settings if settings is not None else getattr(orchestrator, "_settings", None)
+    approvals_advertised = bool(
+        getattr(cfg, "dag_approval_nodes_enabled", False) and getattr(cfg, "a2ui_enabled", False)
+    )
 
     async def dag_create(**kwargs: Any) -> dict:
         """Create a DAG with dependency-tracked nodes."""
@@ -4839,6 +4849,19 @@ def register_dag_tools(
                 "active, so a created DAG would never advance past its first "
                 "wave. Set NOUS_HEARTBEAT_ENABLED=true and restart."
             )
+        wants_approval = any(n.get("type") == "approval" for n in kwargs.get("nodes", []))
+        if wants_approval:
+            if not getattr(cfg, "dag_approval_nodes_enabled", False):
+                return _tool_error(
+                    "Error: approval nodes are disabled — set "
+                    "NOUS_DAG_APPROVAL_NODES_ENABLED=true to create them."
+                )
+            if not getattr(orchestrator, "approvals_wired", False):
+                return _tool_error(
+                    "Error: approval nodes need the companion app "
+                    "(NOUS_A2UI_ENABLED=true), which is not running in this "
+                    "process — the question could never be shown."
+                )
         try:
             # Parse nodes
             node_specs: list[DAGNodeSpec] = []
@@ -4880,6 +4903,11 @@ def register_dag_tools(
                 # default (1) applies otherwise.
                 if "max_fix_attempts" in n:
                     node_data["max_fix_attempts"] = n["max_fix_attempts"]
+                # Harness Phase 3: approval-node fields — threaded explicitly
+                # (the F066.1 silent-drop lesson above).
+                for key in ("options", "default_option", "recommended_option", "answer_timeout_seconds"):
+                    if key in n:
+                        node_data[key] = n[key]
                 node_specs.append(DAGNodeSpec(**node_data))
 
             # Parse edges
@@ -4919,6 +4947,12 @@ def register_dag_tools(
                 lines.append(f"  Wave {w}: {', '.join(wave_groups[w])}")
             lines.append(f"Status: {actual_status}")
 
+            if wants_approval and not getattr(cfg, "a2ui_public_base_url", ""):
+                lines.append(
+                    "Note: NOUS_A2UI_PUBLIC_BASE_URL is unset, so the Telegram "
+                    "ping's link is not tappable — tell the person to open the "
+                    "companion to answer."
+                )
             return {"content": [{"type": "text", "text": "\n".join(lines)}]}
         except Exception as e:
             logger.exception("dag_create failed")
@@ -4949,7 +4983,11 @@ def register_dag_tools(
                 for d in dags:
                     completed = sum(1 for n in d.nodes if n.status == "completed")
                     total = len(d.nodes)
-                    lines.append(f"  {str(d.id)[:8]} | {d.name} | {d.status} | {completed}/{total} nodes done")
+                    line = f"  {str(d.id)[:8]} | {d.name} | {d.status} | {completed}/{total} nodes done"
+                    waiting = [n.name for n in d.nodes if n.status == "awaiting_input"]
+                    if waiting:
+                        line += f" | waiting on you: {', '.join(waiting)}"
+                    lines.append(line)
                 return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
             if action == "recent":
@@ -5001,12 +5039,16 @@ def register_dag_tools(
                     "completed": "+", "failed": "X", "running": ">",
                     "ready": "~", "pending": ".", "blocked": "!", "cancelled": "-",
                     "awaiting_check": "*",
+                    "awaiting_input": "?",
                 }
                 lines = [
                     f"DAG: {dag.name} ({str(dag.id)[:8]})",
                     f"Status: {dag.status}",
                     f"Nodes ({len(dag.nodes)}):",
                 ]
+                held = getattr(orchestrator, "held_reason", lambda _dag_id: None)(dag.id)
+                if held and dag.status in ("pending", "running"):
+                    lines.insert(2, f"Held: {held}")
                 for node in sorted(dag.nodes, key=lambda n: (n.wave or 0, n.name)):
                     icon = status_icons.get(node.status, "?")
                     wave_str = f"w{node.wave}" if node.wave is not None else "w?"
@@ -5038,6 +5080,11 @@ def register_dag_tools(
                             )
                         else:
                             line += f" | result: {result}"
+                    if node.node_type == "approval":
+                        line += f" | {approval_line(node)}"
+                        if node.status == "awaiting_input" and node.surface_id:
+                            base = getattr(cfg, "a2ui_public_base_url", "")
+                            line += f" | card: {card_link(node.surface_id, base)}"
                     lines.append(line)
                 return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
@@ -5082,6 +5129,52 @@ def register_dag_tools(
             logger.exception("dag_manage failed")
             return _tool_error(f"Error: {e}")
 
+    node_type_enum = ["subtask", "check", "gate", "callback", "fix"]
+    approval_help = ""
+    approval_properties: dict[str, Any] = {}
+    if approvals_advertised:
+        node_type_enum.append("approval")
+        approval_help = (
+            " 'approval' asks the person a question on a companion card and waits for "
+            "the answer (up to answer_timeout_seconds, default 24 h). Put the question "
+            "in instructions and give 2-4 options, each 'proceed' or 'stop'; "
+            "default_option (applied if nobody answers) MUST be a 'stop' option. Wire it "
+            "with two context_flow edges: draft → approval (the card shows the draft) and "
+            "approval → the acting node (it runs only after a 'proceed' answer and "
+            "receives the answer). The acting node must be a 'subtask' — a 'callback' "
+            "executes nothing while NOUS_DAG_CALLBACK_EXECUTION_ENABLED is off. You cannot "
+            "answer the card yourself: tell the person to open the companion. You cannot "
+            "re-ask a question the person declined."
+        )
+        approval_properties = {
+            "options": {
+                "type": "array", "minItems": 2, "maxItems": 4,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "pattern": "^[a-z0-9_-]{1,40}$"},
+                        "label": {"type": "string", "maxLength": 80},
+                        "outcome": {"type": "string", "enum": ["proceed", "stop"]},
+                    },
+                    "required": ["id", "label", "outcome"],
+                },
+                "description": "(type='approval' only) the answers; at least one 'proceed' and one 'stop'.",
+            },
+            "default_option": {
+                "type": "string",
+                "description": "(type='approval' only) option id applied at the deadline. Must be a 'stop' option.",
+            },
+            "recommended_option": {
+                "type": "string",
+                "description": "(type='approval' only) option id to highlight. Default: none.",
+            },
+            "answer_timeout_seconds": {
+                "type": "integer",
+                "minimum": 900,
+                "description": "(type='approval' only) seconds to wait for an answer.",
+            },
+        }
+
     dispatcher.register("dag_create", dag_create, {
         "type": "object",
         "description": (
@@ -5107,7 +5200,7 @@ def register_dag_tools(
                         # DISPATCH_ENABLED) routes to Haiku tool-use.
                         "type": {
                             "type": "string",
-                            "enum": ["subtask", "check", "gate", "callback", "fix"],
+                            "enum": node_type_enum,
                             "description": (
                                 "'callback' runs AFTER its predecessors and receives "
                                 "their results as context — use it to interpret or act "
@@ -5120,7 +5213,7 @@ def register_dag_tools(
                                 "enforced quality check. Note: 'tools' below is honored "
                                 "ONLY for 'check' nodes — on every other node type "
                                 "(subtask, callback, gate, fix) it is silently ignored."
-                            ),
+                            ) + approval_help,
                         },
                         "instructions": {"type": "string"},
                         "tools": {"type": "array", "items": {"type": "string"}},
@@ -5144,6 +5237,7 @@ def register_dag_tools(
                         },
                         "max_fix_attempts": {"type": "integer", "minimum": 1, "maximum": 3, "description": "F066.1 (type='fix' only): max fix attempts per parent failure. Default 1."},
                         "expected_modes": {"type": "array", "items": {"type": "string"}, "description": "F066.1 (type='fix' only): declared failure modes for typed dispatch (Phase 2). Phase 1 ignores this field."},
+                        **approval_properties,
                     },
                     "required": ["name", "type", "instructions"],
                 },
