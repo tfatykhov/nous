@@ -8,10 +8,11 @@ InFailedSQLTransactionError mid-query.
 Tests use mocks rather than a live DB so they run deterministically on
 any environment.
 """
+
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -142,3 +143,79 @@ async def test_preflight_raises_when_table_missing_entirely():
     assert "heart.episodes" in msg
     # A representative column the ORM definitely models on Episode.
     assert "summary" in msg
+
+
+async def test_preflight_raises_for_migration_073_columns():
+    """Preflight must detect the two new brain.decisions columns added by
+    migration 073 (calibration_factor, calibration_applied_at) when they
+    are absent from a baked eval-DB image.
+
+    This is the exact scenario the Codex finding on PR #640 describes:
+    the nous-eval-db:v2026-Q2 image pre-dates migration 073, so evaluating
+    against a live volume without first running migrations would raise
+    EvalDBSchemaDriftError and abort all retrieval experiments.
+    """
+    from nous.storage.models import Censor, Decision, Episode, Fact, Procedure
+
+    decision_cols_pre_073 = _orm_column_names(Decision) - {"calibration_factor", "calibration_applied_at"}
+    by_table = {
+        ("heart", "episodes"): _orm_column_names(Episode),
+        ("heart", "facts"): _orm_column_names(Fact),
+        ("heart", "procedures"): _orm_column_names(Procedure),
+        ("heart", "censors"): _orm_column_names(Censor),
+        ("brain", "decisions"): decision_cols_pre_073,
+    }
+    db = _make_db_with_columns(by_table)
+
+    with pytest.raises(EvalDBSchemaDriftError) as excinfo:
+        await assert_eval_db_schema_matches_orm(db)
+
+    msg = str(excinfo.value)
+    assert "brain.decisions" in msg
+    assert "calibration_factor" in msg or "calibration_applied_at" in msg
+
+
+async def test_eval_harness_runs_migrations_before_preflight():
+    """_build_heart_for_eval must call run_migrations before the schema
+    preflight so the baked eval-DB image never fails on new ORM columns.
+
+    Verifies call ORDER: run_migrations first, assert_eval_db_schema second.
+    The preflight is an assertion gate — if migrations haven't run it raises
+    EvalDBSchemaDriftError and aborts the eval run.  By making the preflight
+    raise after recording its call we can confirm both calls happened (in the
+    right order) without needing a live database or a fully initialised Heart.
+    """
+    call_order: list[str] = []
+
+    async def _fake_run_migrations(_engine):
+        call_order.append("migrate")
+        return []
+
+    async def _fake_preflight(_db):
+        call_order.append("preflight")
+        # Raise so _build_heart_for_eval aborts before Heart construction;
+        # this is the realistic failure mode when the image is stale.
+        raise EvalDBSchemaDriftError("test: missing column")
+
+    with (
+        patch(
+            "nous.storage.migrator.run_migrations",
+            side_effect=_fake_run_migrations,
+        ),
+        patch(
+            "nous_eval.schema_preflight.assert_eval_db_schema_matches_orm",
+            side_effect=_fake_preflight,
+        ),
+    ):
+        from nous_eval.retrieval_runner import _build_heart_for_eval
+
+        db = MagicMock()
+        db.engine = MagicMock()
+        settings = MagicMock()
+        settings.query_expansion_enabled = False
+
+        with pytest.raises(EvalDBSchemaDriftError):
+            async with _build_heart_for_eval(db, settings):
+                pass  # pragma: no cover
+
+    assert call_order == ["migrate", "preflight"], f"Expected ['migrate', 'preflight'], got {call_order}"
