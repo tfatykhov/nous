@@ -110,8 +110,7 @@ _COMPOSE_SURFACE_SCHEMA = {
         "intent": {
             "type": "string",
             "description": (
-                "What the app is FOR, in one or two sentences — the composer "
-                "designs the whole app from this."
+                "What the app is FOR, in one or two sentences — the composer designs the whole app from this."
             ),
         },
         "archetype": {
@@ -146,21 +145,21 @@ _COMPOSE_SURFACE_SCHEMA = {
                         "type": "object",
                         "description": (
                             "Fetcher params (e.g. {q}, {dag_id}, {days}). For "
-                            "`agent_script`: {\"code\": \"<python>\", \"shape\": "
-                            "\"records\"|\"series\", \"series_keys\": [...]} — the "
+                            '`agent_script`: {"code": "<python>", "shape": '
+                            '"records"|"series", "series_keys": [...]} — the '
                             "script assigns its data "
                             "to a variable named `result`, and `shape` declares "
                             "what it produces so a later failure returns a "
                             "value the app's existing bindings still accept "
-                            "(refresh does not re-validate). Use \"series\" ONLY "
+                            '(refresh does not re-validate). Use "series" ONLY '
                             "when the TOP-LEVEL `result` is one series, and set "
-                            "`series_keys` to the keys your chart binds (`[\"v\"]` "
+                            '`series_keys` to the keys your chart binds (`["v"]` '
                             "for a Sparkline/BarChart, the LineChart's series keys "
                             "otherwise) so a later refresh cannot silently drop one "
-                            "and leave the chart empty. Use \"records\" for a LIST "
+                            'and leave the chart empty. Use "records" for a LIST '
                             "— including a metric-grid list whose records each "
                             "embed a `trend` series (to_series per record); "
-                            "declaring that list \"series\" turns the whole grid "
+                            'declaring that list "series" turns the whole grid '
                             "into one empty series. It may "
                             "import and fetch anything, so an external API or "
                             "link needs no new code and no new env var. It is "
@@ -272,15 +271,12 @@ def _compose_schema_for(composer: Any) -> dict:
     )
     if "agent_script" in names:
         props["source"]["description"] += (
-            " Use `agent_script` to supply the data YOURSELF for any domain "
-            "that has no fetcher."
+            " Use `agent_script` to supply the data YOURSELF for any domain that has no fetcher."
         )
     else:
         # Drop the agent_script contract from params too: describing how to
         # write a script the server will reject is worse than silence.
-        props["params"]["description"] = (
-            "Fetcher params (e.g. {q}, {dag_id}, {days})."
-        )
+        props["params"]["description"] = "Fetcher params (e.g. {q}, {dag_id}, {days})."
     return schema
 
 
@@ -311,23 +307,14 @@ def _normalize_agent_actions(raw: Any) -> list[dict] | str:
         label = str(item.get("label") or "").strip()
         instruction = str(item.get("instruction") or "").strip()
         if not _AGENT_ACTION_ID_RE.match(action_id):
-            return (
-                f"agent_actions[{i}].id must be a slug "
-                "([a-z0-9][a-z0-9_-]{0,39})"
-            )
+            return f"agent_actions[{i}].id must be a slug ([a-z0-9][a-z0-9_-]{{0,39}})"
         if action_id in seen:
             return f"agent_actions: duplicate id {action_id!r}"
         seen.add(action_id)
         if not label or len(label) > _AGENT_ACTION_LABEL_MAX:
-            return (
-                f"agent_actions[{i}].label required, "
-                f"max {_AGENT_ACTION_LABEL_MAX} chars"
-            )
+            return f"agent_actions[{i}].label required, max {_AGENT_ACTION_LABEL_MAX} chars"
         if not instruction or len(instruction) > _AGENT_ACTION_INSTRUCTION_MAX:
-            return (
-                f"agent_actions[{i}].instruction required, "
-                f"max {_AGENT_ACTION_INSTRUCTION_MAX} chars"
-            )
+            return f"agent_actions[{i}].instruction required, max {_AGENT_ACTION_INSTRUCTION_MAX} chars"
         out.append({"id": action_id, "label": label, "instruction": instruction})
     return out
 
@@ -358,8 +345,14 @@ class FindingsChangedDuringPush(RuntimeError):
 
 
 _FINDING_URGENCIES = ("high", "normal", "low")
-_URGENCY_ALIASES = {"medium": "normal", "moderate": "normal", "critical": "high",
-                    "urgent": "high", "info": "low", "informational": "low"}
+_URGENCY_ALIASES = {
+    "medium": "normal",
+    "moderate": "normal",
+    "critical": "high",
+    "urgent": "high",
+    "info": "low",
+    "informational": "low",
+}
 
 
 def register_a2ui_tools(
@@ -369,6 +362,8 @@ def register_a2ui_tools(
     dag_store: Any = None,
     composer: Any = None,
     heartbeat_runner: Any = None,
+    snapshot_store: Any = None,
+    compensation_registry: Any = None,
 ) -> None:
     """Register the push_surface tool against a live SurfaceService.
 
@@ -378,6 +373,9 @@ def register_a2ui_tools(
     SurfaceComposer) additionally registers compose_surface — the F092.1
     ephemeral micro-app path; None (component missing or
     NOUS_A2UI_COMPOSE_ENABLED=false) leaves it unregistered.
+    ``snapshot_store`` and ``compensation_registry`` gate the Revert button
+    on ``action_review`` surfaces: eligibility is derived server-side from
+    whether a real snapshot exists and a compensator is registered.
     """
 
     async def push_surface(**kwargs) -> dict:
@@ -422,9 +420,7 @@ def register_a2ui_tools(
         if template == "heartbeat_findings":
             findings = params.get("findings") or []
             if not findings:
-                return _tool_error(
-                    "heartbeat_findings needs a non-empty findings list."
-                )
+                return _tool_error("heartbeat_findings needs a non-empty findings list.")
             store = getattr(heartbeat_runner, "finding_store", None) if heartbeat_runner else None
             if store is None:
                 return _tool_error(
@@ -643,14 +639,41 @@ def register_a2ui_tools(
                     "dag_id": str(dag.id),
                     "name": dag.name,
                     "status": dag.status,
-                    "nodes": [
-                        {"name": n.name, "status": n.status, "node_type": n.node_type}
-                        for n in dag.nodes
-                    ],
+                    "nodes": [{"name": n.name, "status": n.status, "node_type": n.node_type} for n in dag.nodes],
                     "edges": edges,
                 }
             )
             dedup_key = dedup_key or f"dag:{dag.id}"
+        # Phase 2.8: for action_review, derive the Revert eligibility from
+        # the server-owned snapshot store and compensation registry rather
+        # than trusting the caller-supplied `compensation.revertible` field.
+        # Any model-authored push_surface can set revertible=True with an
+        # arbitrary handler string; the builder never queries the DB, so
+        # without this gate a spurious Revert button appears on irreversible
+        # or untracked actions and fails at click time.
+        if template == "action_review":
+            compensation = dict(params.get("compensation") or {})
+            revertible = False
+            trace_id_str = params.get("trace_id")
+            if trace_id_str and snapshot_store is not None and compensation_registry is not None:
+                from uuid import UUID as _UUID
+
+                try:
+                    ledger_entry_id = _UUID(str(trace_id_str))
+                    snap = await snapshot_store.get_by_ledger_entry(ledger_entry_id)
+                    if snap is not None and snap.reverted_at is None:
+                        revertible = compensation_registry.is_registered(snap.tool_name)
+                        if revertible:
+                            # Populate handler so the builder's truthy check passes.
+                            # The review.revert handler uses the snapshot, not this
+                            # field, so the value is informational only.
+                            compensation.setdefault("handler", snap.tool_name)
+                except Exception:
+                    pass  # fail-closed: no revert button rather than a false one
+            compensation["revertible"] = revertible
+            if not revertible:
+                compensation["handler"] = None
+            params["compensation"] = compensation
         try:
             built = builder(params)
         except SurfaceValidationError as exc:
@@ -693,11 +716,7 @@ def register_a2ui_tools(
             # open over a record the store considers handled, so the push
             # fails instead (rollback, conditional restore, the agent re-pushes
             # and the next probe drops it) (codex round 6).
-            changed = sorted(
-                fp
-                for fp in fps
-                if (t := store_.get_tracked(fp)) is None or t.state != _State.NEW
-            )
+            changed = sorted(fp for fp in fps if (t := store_.get_tracked(fp)) is None or t.state != _State.NEW)
             if changed:
                 raise FindingsChangedDuringPush(changed)
 
@@ -775,9 +794,7 @@ def register_a2ui_tools(
             settings = getattr(composer, "_settings", None)
             if not getattr(settings, "a2ui_agent_actions_enabled", False):
                 return _tool_error(
-                    "agent_actions are disabled "
-                    "(NOUS_A2UI_AGENT_ACTIONS_ENABLED=false) — compose "
-                    "without them"
+                    "agent_actions are disabled (NOUS_A2UI_AGENT_ACTIONS_ENABLED=false) — compose without them"
                 )
             normalized = _normalize_agent_actions(kwargs["agent_actions"])
             if isinstance(normalized, str):
@@ -836,6 +853,4 @@ def register_a2ui_tools(
             ],
         }
 
-    dispatcher.register(
-        "compose_surface", compose_surface, _compose_schema_for(composer)
-    )
+    dispatcher.register("compose_surface", compose_surface, _compose_schema_for(composer))

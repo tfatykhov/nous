@@ -190,9 +190,10 @@ def test_builders_refuse_a_non_uuid_trace_id(builder: Any) -> None:
 @pytest.mark.parametrize("empty", [None, ""])
 def test_builders_treat_an_absent_trace_id_as_none(empty: Any) -> None:
     assert approval_gate({**APPROVAL_PARAMS, "trace_id": empty}).trace_id is None
-    assert "traceId" not in _by_id(
-        approval_gate({**APPROVAL_PARAMS, "trace_id": empty}), "opt_0"
-    )["action"]["event"]["context"]
+    assert (
+        "traceId"
+        not in _by_id(approval_gate({**APPROVAL_PARAMS, "trace_id": empty}), "opt_0")["action"]["event"]["context"]
+    )
 
 
 def test_approval_gate_rejects_missing_required_params() -> None:
@@ -357,3 +358,128 @@ def test_approval_gate_defaults_are_unchanged():
     assert built.data_model["recommendation"] == "a"
     assert built.data_model["options"] == [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]
     assert "Ask me later" in json.dumps(built.components)
+
+
+# ---------------------------------------------------------------------------
+# push_surface derives revert eligibility from server state (Finding #2 fix)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_push_surface_ignores_caller_revertible_without_server_snapshot() -> None:
+    """A model-authored push_surface with revertible=True and a handler must NOT
+    offer Revert when the server has no matching snapshot.
+
+    Before the fix the builder trusted caller-provided fields; any agent could
+    force a Revert button for an irreversible or untracked action.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nous.a2ui.tools import register_a2ui_tools
+    from nous.api.compensation import CompensationRegistry
+
+    # snapshot_store reports no snapshot for any ledger entry
+    snap_store = MagicMock()
+    snap_store.get_by_ledger_entry = AsyncMock(return_value=None)
+
+    registry = CompensationRegistry()
+
+    captured: dict = {}
+
+    class _CapturingDispatcher:
+        def register(self, name, fn, schema):
+            captured[name] = fn
+
+    class _FakeService:
+        async def push_built(self, built, **kwargs):
+            captured["_last_built"] = built
+            return "surf-1"
+
+    _disp = _CapturingDispatcher()
+    register_a2ui_tools(
+        _disp,
+        _FakeService(),
+        snapshot_store=snap_store,
+        compensation_registry=registry,
+    )
+    push_surface = captured["push_surface"]
+
+    TRACE_ID = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8"
+    result = await push_surface(
+        template="action_review",
+        params={
+            "title": "Deleted logs",
+            "did": "Ran rm -rf /var/log/stale",
+            "compensation": {"revertible": True, "handler": "restore_logs", "note": "malicious"},
+            "trace_id": TRACE_ID,
+        },
+    )
+
+    built = captured.get("_last_built")
+    assert built is not None, f"push failed: {result}"
+    assert "review.revert" not in built.allowed_actions, "Revert must not be offered when server has no snapshot"
+
+
+@pytest.mark.asyncio
+async def test_push_surface_offers_revert_when_snapshot_and_compensator_exist() -> None:
+    """Revert IS offered when snapshot_store has a live snapshot AND the
+    compensation_registry has a compensator for its tool.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+    from uuid import uuid4
+
+    from nous.a2ui.tools import register_a2ui_tools
+    from nous.api.compensation import CompensationRegistry, CompensationResult
+
+    registry = CompensationRegistry()
+
+    async def _ok(eid, snap_data, deps):
+        return CompensationResult(success=True, message="done")
+
+    registry.register("write_file", _ok)
+
+    TRACE_ID = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8"
+    fake_snap = SimpleNamespace(
+        id=uuid4(),
+        tool_name="write_file",
+        snapshot_data={},
+        reverted_at=None,
+    )
+
+    snap_store = MagicMock()
+    snap_store.get_by_ledger_entry = AsyncMock(return_value=fake_snap)
+
+    captured: dict = {}
+
+    class _CapturingDispatcher:
+        def register(self, name, fn, schema):
+            captured[name] = fn
+
+    class _FakeService:
+        async def push_built(self, built, **kwargs):
+            captured["_last_built"] = built
+            return "surf-1"
+
+    _disp = _CapturingDispatcher()
+    register_a2ui_tools(
+        _disp,
+        _FakeService(),
+        snapshot_store=snap_store,
+        compensation_registry=registry,
+    )
+    push_surface = captured["push_surface"]
+
+    result = await push_surface(
+        template="action_review",
+        params={
+            "title": "Wrote config",
+            "did": "Updated /etc/app.conf",
+            "compensation": {"revertible": False},
+            "trace_id": TRACE_ID,
+        },
+    )
+
+    built = captured.get("_last_built")
+    assert built is not None, f"push failed: {result}"
+    assert "review.revert" in built.allowed_actions, "Revert must be offered when snapshot and compensator both exist"

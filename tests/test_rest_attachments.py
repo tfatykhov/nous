@@ -15,7 +15,7 @@ from httpx import ASGITransport, AsyncClient
 from nous.config import Settings
 
 # Reuse the DB-backed fixtures + canned TurnContext from the existing harness.
-from tests.test_rest import (  # noqa: F401  (brain/cognitive are fixtures)
+from test_rest import (  # noqa: F401  (brain/cognitive are fixtures)
     MockAgentRunner,
     brain,
     cognitive,
@@ -31,8 +31,7 @@ class CapturingRunner(MockAgentRunner):
 
     async def run_turn(self, session_id, user_message, agent_id=None, **kwargs):
         self.last_attachments = kwargs.get("attachments")
-        return self.preset_response, self.preset_context, {
-            "input_tokens": 100, "output_tokens": 50}
+        return self.preset_response, self.preset_context, {"input_tokens": 100, "output_tokens": 50}
 
     async def stream_chat(self, session_id, user_message, **kwargs):
         from nous.api.runner import StreamEvent
@@ -70,18 +69,21 @@ async def test_chat_with_attachment_no_message(brain, heart, cognitive, db):
     runner = CapturingRunner()
     settings = _settings()
     app = _make_app(runner, brain, heart, cognitive, db, settings)
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as c:
-        resp = await c.post("/chat", json={
-            "message": "",
-            "attachments": [{
-                "filename": "hello.png",
-                "media_type": "image/png",
-                "data_base64": _DATA_B64,
-                "size_bytes": 999999,  # client-declared lie; must be ignored
-            }],
-        })
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post(
+            "/chat",
+            json={
+                "message": "",
+                "attachments": [
+                    {
+                        "filename": "hello.png",
+                        "media_type": "image/png",
+                        "data_base64": _DATA_B64,
+                        "size_bytes": 999999,  # client-declared lie; must be ignored
+                    }
+                ],
+            },
+        )
 
     assert resp.status_code == 200, resp.text
     atts = runner.last_attachments
@@ -100,9 +102,7 @@ async def test_chat_neither_message_nor_attachments(brain, heart, cognitive, db)
     runner = CapturingRunner()
     settings = _settings()
     app = _make_app(runner, brain, heart, cognitive, db, settings)
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as c:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         resp = await c.post("/chat", json={"message": ""})
 
     assert resp.status_code == 400
@@ -123,9 +123,7 @@ async def test_chat_body_too_large(brain, heart, cognitive, db):
     settings = _settings(attachments_max_per_message=0)  # cap == 1_000_000
     app = _make_app(runner, brain, heart, cognitive, db, settings)
     big = "x" * (1_100_000)
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as c:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         resp = await c.post("/chat", json={"message": big})
 
     assert resp.status_code == 413
@@ -141,21 +139,22 @@ async def test_chat_non_dict_attachment_entries_skipped(brain, heart, cognitive,
     runner = CapturingRunner()
     settings = _settings()
     app = _make_app(runner, brain, heart, cognitive, db, settings)
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as c:
-        resp = await c.post("/chat", json={
-            "message": "hi",
-            "attachments": [
-                "oops",
-                None,
-                {
-                    "filename": "a.png",
-                    "media_type": "image/png",
-                    "data_base64": _DATA_B64,
-                },
-            ],
-        })
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post(
+            "/chat",
+            json={
+                "message": "hi",
+                "attachments": [
+                    "oops",
+                    None,
+                    {
+                        "filename": "a.png",
+                        "media_type": "image/png",
+                        "data_base64": _DATA_B64,
+                    },
+                ],
+            },
+        )
 
     assert resp.status_code == 200, resp.text
     atts = runner.last_attachments
@@ -171,17 +170,20 @@ async def test_chat_stream_with_attachment(brain, heart, cognitive, db):
     runner = CapturingRunner()
     settings = _settings()
     app = _make_app(runner, brain, heart, cognitive, db, settings)
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as c:
-        resp = await c.post("/chat/stream", json={
-            "message": "",
-            "attachments": [{
-                "filename": "hello.png",
-                "media_type": "image/png",
-                "data_base64": _DATA_B64,
-            }],
-        })
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post(
+            "/chat/stream",
+            json={
+                "message": "",
+                "attachments": [
+                    {
+                        "filename": "hello.png",
+                        "media_type": "image/png",
+                        "data_base64": _DATA_B64,
+                    }
+                ],
+            },
+        )
 
     assert resp.status_code == 200, resp.text
     atts = runner.last_attachments
@@ -196,17 +198,20 @@ async def test_chat_stream_attachments_disabled_ignored(brain, heart, cognitive,
     runner = CapturingRunner()
     settings = _settings(attachments_enabled=False)
     app = _make_app(runner, brain, heart, cognitive, db, settings)
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as c:
-        resp = await c.post("/chat/stream", json={
-            "message": "hi",
-            "attachments": [{
-                "filename": "hello.png",
-                "media_type": "image/png",
-                "data_base64": _DATA_B64,
-            }],
-        })
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post(
+            "/chat/stream",
+            json={
+                "message": "hi",
+                "attachments": [
+                    {
+                        "filename": "hello.png",
+                        "media_type": "image/png",
+                        "data_base64": _DATA_B64,
+                    }
+                ],
+            },
+        )
 
     assert resp.status_code == 200, resp.text
     assert runner.last_attachments is None
@@ -218,17 +223,20 @@ async def test_chat_attachments_disabled_ignored(brain, heart, cognitive, db):
     runner = CapturingRunner()
     settings = _settings(attachments_enabled=False)
     app = _make_app(runner, brain, heart, cognitive, db, settings)
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as c:
-        resp = await c.post("/chat", json={
-            "message": "hi",
-            "attachments": [{
-                "filename": "hello.png",
-                "media_type": "image/png",
-                "data_base64": _DATA_B64,
-            }],
-        })
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post(
+            "/chat",
+            json={
+                "message": "hi",
+                "attachments": [
+                    {
+                        "filename": "hello.png",
+                        "media_type": "image/png",
+                        "data_base64": _DATA_B64,
+                    }
+                ],
+            },
+        )
 
     assert resp.status_code == 200, resp.text
     assert runner.last_attachments is None

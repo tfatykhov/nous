@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import pytest
+from test_runner_background import _MockBrain, _MockCognitive, _MockHeart
 
 from nous.api.execution_context import ExecutionContext
 from nous.api.models import ApiResponse
 from nous.api.runner import AgentRunner, Conversation, Message
 from nous.config import Settings
-from tests.test_runner_background import _MockBrain, _MockCognitive, _MockHeart
 
 
 def _settings(**overrides) -> Settings:
@@ -333,8 +333,9 @@ async def test_stream_chat_enforce_refuses_an_unoffered_tool():
     """/chat/stream offers web_search only; the model emits bash."""
     from unittest.mock import MagicMock
 
+    from test_streaming import _make_mock_cognitive, _make_mock_settings, _make_runner
+
     from nous.api.anthropic_client import StreamEvent
-    from tests.test_streaming import _make_mock_cognitive, _make_mock_settings, _make_runner
 
     cognitive, _ = _make_mock_cognitive()
     settings = _make_mock_settings()
@@ -438,7 +439,7 @@ async def test_policy_warn_runs_an_offered_call_and_records_it():
 
 @pytest.mark.asyncio
 async def test_policy_enforce_refuses_and_records_a_blocked_row():
-    from tests.test_runner_ledger import _FakeStore
+    from test_runner_ledger import _FakeStore
 
     store = _FakeStore()
     r, d = _runner(["spawn_task"], tool_context_policy_mode="enforce")
@@ -494,8 +495,9 @@ async def test_stream_chat_hands_the_call_input_to_the_choke_point():
     non-streaming loop sees."""
     from unittest.mock import MagicMock
 
+    from test_streaming import _make_mock_cognitive, _make_mock_settings, _make_runner
+
     from nous.api.anthropic_client import StreamEvent
-    from tests.test_streaming import _make_mock_cognitive, _make_mock_settings, _make_runner
 
     cognitive, _ = _make_mock_cognitive()
     settings = _make_mock_settings()
@@ -564,13 +566,31 @@ def test_regular_policy_violation_still_passes_in_warn_mode():
     assert refusal is None, "A non-not_compensable violation should not block in warn mode"
 
 
+def test_undoable_spawning_tool_returns_not_compensable_not_spawn():
+    """dag_create spawns AND is not compensable; evaluate() must return
+    'not_compensable' — not 'spawn' — for an undoable dag_node context.
+
+    Before the fix, the spawn gate fired first and returned 'spawn', masking
+    the undoability constraint and preventing force_block from activating in
+    warn mode.
+    """
+    from nous.api.tool_policy import evaluate
+
+    ctx = ExecutionContext(kind="dag_node", undoable=True, session_id="s1")
+    violation = evaluate(ctx, "dag_create", {})
+    assert violation == "not_compensable", (
+        f"expected 'not_compensable', got {violation!r}; spawn check must not shadow the undoability constraint"
+    )
+
+
 @pytest.mark.asyncio
 async def test_stream_chat_refuse_strips_the_denylist():
     """The streaming path strips exactly refuse_denylist(); reads survive."""
     from unittest.mock import MagicMock
 
+    from test_streaming import _make_mock_cognitive, _make_mock_settings, _make_runner
+
     from nous.api.anthropic_client import StreamEvent
-    from tests.test_streaming import _make_mock_cognitive, _make_mock_settings, _make_runner
 
     cognitive, turn_context = _make_mock_cognitive()
     turn_context.refuse_active = True

@@ -1309,6 +1309,8 @@ async def create_components(settings: Settings) -> dict:
             dag_store=dag_store,
             composer=composer,
             heartbeat_runner=heartbeat_runner,
+            snapshot_store=_snap_store,
+            compensation_registry=_comp_registry,
         )
 
         async def _a2ui_sweep_loop():
