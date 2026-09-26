@@ -1673,11 +1673,14 @@ def create_app(
             # Merge in-memory state from heartbeat_runner
             budget_used = heartbeat_runner.tokens_used_today
             budget_limit = settings.heartbeat_daily_token_budget
+            _last_dag_tick = getattr(heartbeat_runner, "last_dag_tick", None)
             data["status"] = {
                 "enabled": settings.heartbeat_enabled,
                 "is_running": heartbeat_runner.is_running,
                 "last_tick": heartbeat_runner.last_tick.isoformat() if heartbeat_runner.last_tick else None,
+                "last_dag_tick": _last_dag_tick.isoformat() if _last_dag_tick else None,
                 "tick_interval": settings.heartbeat_tick_interval,
+                "dag_tick_interval": settings.dag_tick_interval,
             }
             checks_dict = heartbeat_runner.registry.get_status()
             data["checks"] = [{"name": k, **v} for k, v in checks_dict.items()]
@@ -2376,11 +2379,13 @@ def create_app(
         except (RuntimeError, AttributeError):
             return JSONResponse({"error": "Heartbeat not enabled"}, status_code=503)
 
+        last_dag_tick = getattr(heartbeat_runner, "last_dag_tick", None)
         return JSONResponse({
             "checks": heartbeat_runner.registry.get_status(),
             "tokens_used_today": heartbeat_runner.tokens_used_today,
             "daily_budget": settings.heartbeat_daily_token_budget,
             "last_tick": heartbeat_runner.last_tick.isoformat() if heartbeat_runner.last_tick else None,
+            "last_dag_tick": last_dag_tick.isoformat() if last_dag_tick else None,
         })
 
     async def heartbeat_trigger(request: Request) -> JSONResponse:

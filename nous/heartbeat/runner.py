@@ -73,11 +73,14 @@ class HeartbeatRunner:
         self.dag_orchestrator: object | None = None  # F038: injected by main.py
 
         self._task: asyncio.Task | None = None
+        self._dag_task: asyncio.Task | None = None  # fix/dag-tick-own-loop
+        self._dag_tick_lock: asyncio.Lock = asyncio.Lock()
         self._running = False
         self._tick_count: int = 0
         self._tokens_used_today: int = 0
         self._budget_date: date = date.today()
         self._last_tick: datetime | None = None
+        self._last_dag_tick: datetime | None = None  # fix/dag-tick-own-loop
         self._last_digest_date: date | None = None
         self._last_prune: datetime | None = None
         self._tuner: HeartbeatTuner = HeartbeatTuner(
@@ -110,6 +113,7 @@ class HeartbeatRunner:
 
         await self._detect_missed_checks()
         self._task = asyncio.create_task(self._loop(), name="heartbeat-runner")
+        self._dag_task = asyncio.create_task(self._dag_loop(), name="dag-tick-loop")
         logger.info(
             "F034: Heartbeat started (tick=%ds, quiet=%d-%d, budget=%d tokens/day)",
             self._settings.heartbeat_tick_interval,
@@ -117,10 +121,22 @@ class HeartbeatRunner:
             self._settings.heartbeat_quiet_end,
             self._settings.heartbeat_daily_token_budget,
         )
+        logger.info(
+            "F038: DAG tick loop started (interval=%ds, timeout=%ds)",
+            self._settings.dag_tick_interval,
+            self._settings.dag_tick_timeout,
+        )
 
     async def stop(self) -> None:
-        """Stop the heartbeat loop."""
+        """Stop the heartbeat loop and DAG tick loop."""
         self._running = False
+        if self._dag_task:
+            self._dag_task.cancel()
+            try:
+                await self._dag_task
+            except asyncio.CancelledError:
+                pass
+            self._dag_task = None
         if self._task:
             self._task.cancel()
             try:
@@ -164,13 +180,6 @@ class HeartbeatRunner:
                 else:
                     await self._tick()
 
-                # F038: Advance DAG orchestrator
-                if self.dag_orchestrator is not None:
-                    try:
-                        await self.dag_orchestrator.tick()
-                    except Exception:
-                        logger.exception("F038: DAG orchestrator tick failed")
-
                 # F034.5: Periodic dynamic check sync
                 if (
                     self._dynamic_loader is not None
@@ -195,6 +204,57 @@ class HeartbeatRunner:
                 break
             except Exception:
                 logger.exception("Heartbeat tick failed")
+
+    async def _dag_loop(self) -> None:
+        """Independent DAG orchestrator tick loop — runs until cancelled.
+
+        Decoupled from the heartbeat check loop (fix/dag-tick-own-loop) so
+        slow or hung heartbeat checks cannot block DAG progress (completion
+        polling, wave launching, result delivery). Runs during quiet hours
+        because DAG work is not subject to the heartbeat token budget.
+
+        Single-flight: if the previous tick is still running when the next
+        interval fires, the new tick is SKIPPED with a WARNING. A per-tick
+        timeout bounds a hung DAG tick so it cannot block the loop forever.
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(self._settings.dag_tick_interval)
+                if self.dag_orchestrator is None:
+                    continue
+
+                if self._dag_tick_lock.locked():
+                    logger.warning(
+                        "F038: DAG tick skipped — previous tick still running "
+                        "(interval=%ds, timeout=%ds)",
+                        self._settings.dag_tick_interval,
+                        self._settings.dag_tick_timeout,
+                    )
+                    continue
+
+                async with self._dag_tick_lock:
+                    try:
+                        await asyncio.wait_for(
+                            self.dag_orchestrator.tick(),
+                            timeout=self._settings.dag_tick_timeout,
+                        )
+                        self._last_dag_tick = datetime.now(UTC)
+                    except asyncio.TimeoutError:
+                        # Do NOT advance _last_dag_tick: it is exposed as the last
+                        # *successful* tick, and refreshing it on a cancelled tick
+                        # would make a stalled orchestrator look healthy.
+                        logger.error(
+                            "F038: DAG orchestrator tick timed out after %ds — "
+                            "continuing loop",
+                            self._settings.dag_tick_timeout,
+                        )
+                    except Exception:
+                        logger.exception("F038: DAG orchestrator tick failed")
+
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("F038: DAG tick loop iteration failed")
 
     async def _record_run_stats(
         self, check: BaseCheck, *, success: bool, error_msg: str | None = None,
@@ -931,6 +991,10 @@ class HeartbeatRunner:
     @property
     def last_tick(self) -> datetime | None:
         return self._last_tick
+
+    @property
+    def last_dag_tick(self) -> datetime | None:
+        return self._last_dag_tick
 
     def get_stats(self) -> dict:
         """F035.1: Return heartbeat runner statistics."""
