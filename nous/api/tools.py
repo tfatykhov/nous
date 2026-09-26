@@ -3971,47 +3971,58 @@ def _deadline_tracer(deadline: float, timeout: float):  # noqa: ANN202 - CPython
     """
     owned: dict[Any, bool] = {}  # verdict per code object; dies with the run
     message = f"execution timed out ({timeout}s)"
-    # [caller frame, caller f_lasti, consecutive entries from that call site].
-    # Frames are compared by IDENTITY: CPython reuses frame memory, so id()
-    # would merge distinct short-lived callers into one "site".
-    site: list[Any] = [None, -1, 0]
 
-    def _tracer(frame, event, arg):  # noqa: ANN001, ANN202 - CPython trace signature
-        # Global hook: called with 'call' for every new frame.
-        code = frame.f_code
-        is_owned = owned.get(code)
-        if is_owned is None:
-            is_owned = owned[code] = not os.path.normcase(code.co_filename).startswith(
-                _PROTECTED_PREFIXES
-            )
-        if not is_owned or code.co_name in _RELEASE_METHODS:
-            return None
-        caller = frame.f_back
-        lasti = caller.f_lasti if caller is not None else -1
-        if caller is site[0] and lasti == site[1]:
-            site[2] += 1
-            if (
-                site[2] >= 2
-                and caller.f_code.co_name not in _RELEASE_METHODS
-                and time.monotonic() >= deadline
-            ):
-                raise ScriptDeadlineExceeded(message)
-        else:
-            site[0], site[1], site[2] = caller, lasti, 1
-        last = [-1]
+    def _new_local():  # noqa: ANN202 - CPython trace fn
+        # Per-frame history, kept on the frame's own local hook so a nested
+        # call can never overwrite a caller's: [last line offset, offset of the
+        # call site last entered from here, consecutive entries from it].
+        state = [-1, -1, 0]
 
         def _local(frame, event, arg):  # noqa: ANN001, ANN202 - CPython trace signature
             if event == "line":
-                if frame is site[0]:
-                    site[2] = 0  # the caller moved: its next call is a new site visit
+                state[2] = 0  # this frame advanced: its next call is a new visit
                 lasti = frame.f_lasti
-                back_edge = lasti <= last[0]
-                last[0] = lasti
+                back_edge = lasti <= state[0]
+                state[0] = lasti
                 if back_edge and time.monotonic() >= deadline:
                     raise ScriptDeadlineExceeded(message)
             return _local
 
+        _local.owner = _tracer
+        _local.state = state
         return _local
+
+    def _tracer(frame, event, arg):  # noqa: ANN001, ANN202 - CPython trace signature
+        # Global hook: 'call' for every new frame, and again each time a
+        # generator resumes — which keeps its own hook, so its history spans
+        # resumes and a loop inside it shows its back-edges.
+        local = frame.f_trace
+        if getattr(local, "owner", None) is not _tracer:
+            code = frame.f_code
+            is_owned = owned.get(code)
+            if is_owned is None:
+                is_owned = owned[code] = not os.path.normcase(
+                    code.co_filename
+                ).startswith(_PROTECTED_PREFIXES)
+            if not is_owned or code.co_name in _RELEASE_METHODS:
+                return None
+            local = _new_local()
+        # Repeated entry from one call site of an owned caller that has not
+        # advanced a line since: a C-driven loop. An untraced caller —
+        # `__exit__`/`__aexit__`, stdlib, nous — has no hook here, so callbacks
+        # it drives are never a raise point.
+        caller = frame.f_back
+        caller_hook = caller.f_trace if caller is not None else None
+        if getattr(caller_hook, "owner", None) is _tracer:
+            site = caller_hook.state
+            lasti = caller.f_lasti
+            if site[2] and site[1] == lasti:
+                site[2] += 1
+                if time.monotonic() >= deadline:
+                    raise ScriptDeadlineExceeded(message)
+            else:
+                site[1], site[2] = lasti, 1
+        return local
 
     return _tracer
 

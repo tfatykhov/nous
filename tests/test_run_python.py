@@ -1756,10 +1756,23 @@ class TestDeadlineTracerSafety:
                         leaked.append((body, pad, offset))
         assert leaked == []
 
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "result = sum(1 for _ in itertools.count())\n",
+            # Codex P1 on dcde231: a nested call inside each resume must not
+            # erase the outer call site's repetition history.
+            "def h():\n    return 1\nresult = sum(h() for _ in itertools.count())\n",
+            "functools.reduce(lambda a, b: a, itertools.count())\n",
+            "def h():\n    return 1\nfunctools.reduce(lambda a, b: h(), itertools.count())\n",
+        ],
+        ids=["sum-genexpr", "sum-genexpr-nested", "reduce", "reduce-nested"],
+    )
     @pytest.mark.asyncio
-    async def test_generator_driven_loop_times_out(self):
-        """`sum` resumes the genexpr from one C call site; each resume is a
-        `call` event with no back-edge visible in the generator frame."""
+    async def test_c_driven_loop_times_out(self, code):
+        """A C function driving a script callback or generator shows no
+        back-edge in the script frame that called it; repeated entry from that
+        one call site is the boundary that stops it."""
         from nous.api.tools import create_programmatic_tools
 
         assert await _wait_for_idle() == 0, "test started with a run in flight"
@@ -1768,9 +1781,7 @@ class TestDeadlineTracerSafety:
             Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=1),
         )
         started = time.monotonic()
-        result = await tools["run_python"](
-            code="import itertools\nresult = sum(1 for _ in itertools.count())\n"
-        )
+        result = await tools["run_python"](code="import functools, itertools\n" + code)
         elapsed = time.monotonic() - started
         assert result["is_error"] is True
         assert "timed out" in result["content"][0]["text"].lower()
@@ -1797,28 +1808,6 @@ class TestDeadlineTracerSafety:
         assert "timed out" in result["content"][0]["text"].lower()
         assert elapsed < 1 + 2.0, f"run outlived its deadline ({elapsed:.1f}s)"
         # The worker itself stopped — not just the await.
-        assert await _wait_for_idle() == 0
-
-    @pytest.mark.asyncio
-    async def test_callback_driven_loop_times_out(self):
-        """A C-driven loop over a script lambda has no back-edge in any script
-        frame; function entry is the safe point that stops it."""
-        from nous.api.tools import create_programmatic_tools
-
-        assert await _wait_for_idle() == 0, "test started with a run in flight"
-        tools = create_programmatic_tools(
-            AsyncMock(), AsyncMock(),
-            Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=1),
-        )
-        started = time.monotonic()
-        result = await tools["run_python"](
-            code="import functools, itertools\n"
-            "functools.reduce(lambda a, b: a, itertools.count())\n"
-        )
-        elapsed = time.monotonic() - started
-        assert result["is_error"] is True
-        assert "timed out" in result["content"][0]["text"].lower()
-        assert elapsed < 1 + 2.0, f"run outlived its deadline ({elapsed:.1f}s)"
         assert await _wait_for_idle() == 0
 
     @pytest.mark.asyncio
