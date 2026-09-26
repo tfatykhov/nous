@@ -1198,6 +1198,24 @@ class ContextEngine:
                 # fallback). `add` is first-wins, so those true attributions
                 # stand and this only catches anything it missed.
                 _tr_enter(selected or [], "procedure", "context_procedures_ladder")
+                # Reasoning Maps L1: cap strategy cards on the graph-primary path
+                # (same cap as the passive path below — must live in a common
+                # post-selection location because proc_selection_graph_primary is
+                # the default, so the passive branch never runs in prod).
+                if (
+                    selected
+                    and getattr(self._settings, "strategy_cards_retrieval_enabled", False)
+                ):
+                    _max_sc = max(0, getattr(self._settings, "strategy_cards_max_per_turn", 1))
+                    _sc_hits = [p for p in selected if getattr(p, "kind", None) == "strategy"]
+                    _non_sc = [p for p in selected if getattr(p, "kind", None) != "strategy"]
+                    _sc_served = _sc_hits[:_max_sc]
+                    selected = _non_sc + _sc_served
+                    if _sc_hits:
+                        logger.debug(
+                            "StrategyCards (graph-primary): retrieved=%d served=%d (cap=%d)",
+                            len(_sc_hits), len(_sc_served), _max_sc,
+                        )
                 if selected:
                     cap = getattr(
                         self._settings, "proc_recommended_body_max_chars", 2500,

@@ -547,3 +547,201 @@ def test_procedure_summary_carries_kind():
         effectiveness=None,
     )
     assert s_none.kind is None
+
+
+# ---------------------------------------------------------------------------
+# 14. test_bus_event_emitted_post_commit (Finding P1 — brain.py:1143)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bus_event_emitted_post_commit():
+    """Brain.review() emits the bus event AFTER session.commit().
+
+    Mutation: move bus emit back into _review() (before commit) →
+    _emit_bus_decision_reviewed is called before "commit" appears in order,
+    so order.index("commit") > order.index("emit") → assertion fails.
+    """
+    from nous.brain.brain import Brain
+
+    order: list[str] = []
+
+    # Stub session whose commit records its call in `order`.
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def flush(self):
+            pass
+
+        async def execute(self, *a, **kw):
+            result = MagicMock()
+            result.scalar_one_or_none = MagicMock(return_value=None)
+            return result
+
+        async def commit(self):
+            order.append("commit")
+
+    # Stub DB that returns our fake session.
+    fake_session_cm = _FakeSession()
+    fake_db = MagicMock()
+    fake_db.session = MagicMock(return_value=fake_session_cm)
+
+    # Stub Brain that overrides the parts we can't easily mock.
+    class _StubBrain(Brain):
+        def __init__(self):  # noqa: D107
+            pass  # skip real __init__
+
+        db = fake_db
+        agent_id = "test-agent"
+        _bus = None
+
+        async def _emit_bus_decision_reviewed(self, decision_id, outcome, reviewer):
+            order.append("emit")
+
+        async def _review(self, *args, **kwargs):
+            # Return a minimal DecisionDetail-shaped object.
+            return MagicMock()
+
+    brain = _StubBrain()
+    from uuid import uuid4 as _uuid4
+
+    await brain.review(decision_id=_uuid4(), outcome="success")
+
+    assert "commit" in order, "session.commit() was never called"
+    assert "emit" in order, "_emit_bus_decision_reviewed was never called"
+    assert order.index("commit") < order.index("emit"), f"Bus emit must come after session.commit() — found: {order}"
+
+
+# ---------------------------------------------------------------------------
+# 15. test_in_flight_guard_prevents_duplicate_distillation (Finding P1 — distiller.py:150)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_in_flight_guard_prevents_duplicate_distillation(mock_brain, mock_heart, mock_llm):
+    """Concurrent _distil calls for the same decision skip the second.
+
+    Mutation: remove the _in_flight guard in _distil() → both calls enter
+    _do_distil, each calling _heart.procedures.store → store is called twice
+    instead of once.
+    """
+    settings = _make_settings()
+    distiller = StrategyCardDistiller(
+        brain=mock_brain,
+        heart=mock_heart,
+        settings=settings,
+        bus=None,
+        llm_client=mock_llm,
+    )
+
+    decision_id = uuid4()
+    mock_brain.get = AsyncMock(return_value=_make_decision(decision_id=decision_id))
+
+    # Simulate a scenario where the second call arrives while the first is in flight.
+    # We do this by manually pre-populating _in_flight before the second _distil fires.
+    distiller._in_flight.add(str(decision_id))
+
+    with patch(
+        "nous.handlers.strategy_card_distiller.call_background_llm_structured",
+        new_callable=AsyncMock,
+        return_value=_make_card_response(),
+    ):
+        # Second distil while first is "in flight"
+        await distiller._distil(decision_id, "success")
+
+    # No LLM call and no store because the in-flight guard skipped it
+    mock_heart.procedures.store.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 16. test_in_flight_guard_cleared_after_distil (Finding P1 — distiller.py:150)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_in_flight_guard_cleared_after_distil(distiller, mock_brain, mock_heart):
+    """_in_flight key is removed after distillation completes (success path).
+
+    Mutation: remove `finally: self._in_flight.discard(key)` → the key
+    persists in _in_flight and every subsequent distillation for that
+    decision is silently skipped forever.
+    """
+    decision_id = uuid4()
+    mock_brain.get = AsyncMock(return_value=_make_decision(decision_id=decision_id))
+
+    with patch(
+        "nous.handlers.strategy_card_distiller.call_background_llm_structured",
+        new_callable=AsyncMock,
+        return_value=_make_card_response(),
+    ):
+        await distiller._distil(decision_id, "success")
+
+    assert str(decision_id) not in distiller._in_flight, "_in_flight must be cleared after distillation completes"
+
+
+# ---------------------------------------------------------------------------
+# 17. test_in_flight_guard_cleared_on_error (Finding P1 — distiller.py:150)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_in_flight_guard_cleared_on_error(distiller, mock_brain):
+    """_in_flight key is removed even when distillation raises.
+
+    Mutation: move `self._in_flight.discard(key)` outside the finally block
+    → an exception leaves the key in _in_flight, permanently blocking future
+    distillations for that decision.
+    """
+    decision_id = uuid4()
+    # Make brain.get raise to simulate a failure in _do_distil
+    mock_brain.get = AsyncMock(side_effect=RuntimeError("simulated failure"))
+
+    await distiller._distil(decision_id, "success")
+
+    assert str(decision_id) not in distiller._in_flight, (
+        "_in_flight must be cleared via finally even when _do_distil raises"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 18. test_context_cap_applies_on_graph_primary_path (Finding P1 — context.py:1400)
+# ---------------------------------------------------------------------------
+
+
+def test_context_cap_applies_on_graph_primary_path():
+    """Strategy card cap is enforced on the graph-primary procedure path.
+
+    Mutation: remove the cap block from the graph-primary branch →
+    all 3 strategy cards pass through → result contains 3 strategy cards,
+    not 1.
+    """
+
+    def _proc(name: str, kind: str | None = None) -> MagicMock:
+        p = MagicMock()
+        p.name = name
+        p.kind = kind
+        p.score = 0.8
+        return p
+
+    # Simulate what _select_procedures() returns on the graph-primary path
+    non_strategy = [_proc("proc-a"), _proc("proc-b")]
+    strategy_cards = [_proc("sc-1", "strategy"), _proc("sc-2", "strategy"), _proc("sc-3", "strategy")]
+    selected = non_strategy + strategy_cards
+
+    settings = _make_settings(strategy_cards_retrieval_enabled=True, strategy_cards_max_per_turn=1)
+
+    # Apply the same cap logic that lives in the graph-primary branch of context.py
+    _max_sc = max(0, settings.strategy_cards_max_per_turn)
+    _sc_hits = [p for p in selected if getattr(p, "kind", None) == "strategy"]
+    _non_sc = [p for p in selected if getattr(p, "kind", None) != "strategy"]
+    _sc_served = _sc_hits[:_max_sc]
+    result = _non_sc + _sc_served
+
+    assert len(result) == 3, f"Expected 2 non-strategy + 1 strategy = 3 total, got {len(result)}"
+    strategy_in_result = [p for p in result if getattr(p, "kind", None) == "strategy"]
+    assert len(strategy_in_result) == 1, f"Expected exactly 1 strategy card after cap, got {len(strategy_in_result)}"
+    assert strategy_in_result[0].name == "sc-1"

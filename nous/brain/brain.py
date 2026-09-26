@@ -1002,7 +1002,9 @@ class Brain:
                     preserve_graded,
                 )
                 await session.commit()
-                return detail
+            # Emit AFTER commit so bus subscribers see the persisted row.
+            await self._emit_bus_decision_reviewed(str(decision_id), outcome, reviewer)
+            return detail
         return await self._review(
             decision_id, outcome, result, reviewer, superseded_by, session,
             preserve_graded,
@@ -1028,7 +1030,16 @@ class Brain:
             async with self.db.session() as session:
                 results = await self._review_many(items, reviewer, session, preserve_graded)
                 await session.commit()
-                return results
+            # Emit AFTER commit — one event per successfully reviewed item.
+            for item, result in zip(items, results):
+                if result.get("ok"):
+                    item_reviewer = item.get("reviewer", reviewer)
+                    await self._emit_bus_decision_reviewed(
+                        str(item.get("decision_id", "")),
+                        item.get("outcome", ""),
+                        item_reviewer,
+                    )
+            return results
         return await self._review_many(items, reviewer, session, preserve_graded)
 
     async def _review_many(
@@ -1061,6 +1072,26 @@ class Brain:
             except Exception as e:  # noqa: BLE001 — surface per-item, keep batch alive
                 results.append({"decision_id": str(raw_id), "ok": False, "error": str(e)})
         return results
+
+    async def _emit_bus_decision_reviewed(
+        self,
+        decision_id: str,
+        outcome: str,
+        reviewer: str | None,
+    ) -> None:
+        """Emit a decision_reviewed event on the in-process bus (post-commit)."""
+        if self._bus is None:
+            return
+        from nous.events import Event as BusEvent
+        await self._bus.emit(BusEvent(
+            type="decision_reviewed",
+            agent_id=self.agent_id,
+            data={
+                "decision_id": decision_id,
+                "outcome": outcome,
+                "reviewer": reviewer,
+            },
+        ))
 
     async def _review(
         self,
@@ -1134,20 +1165,6 @@ class Brain:
                 "reviewer": validated.reviewer,
             },
         )
-
-        # Emit on in-process EventBus so StrategyCardDistiller and other bus
-        # subscribers receive the review (same pattern as decision_recorded).
-        if self._bus is not None:
-            from nous.events import Event as BusEvent
-            await self._bus.emit(BusEvent(
-                type="decision_reviewed",
-                agent_id=self.agent_id,
-                data={
-                    "decision_id": str(decision_id),
-                    "outcome": validated.outcome,
-                    "reviewer": validated.reviewer,
-                },
-            ))
 
         return self._decision_to_detail(decision)
 

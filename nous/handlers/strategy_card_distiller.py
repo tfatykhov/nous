@@ -84,6 +84,9 @@ class StrategyCardDistiller:
         self._settings = settings
         self._llm = llm_client
         self._graph_linker = graph_linker
+        # In-flight set: prevents two concurrent distillations for the same
+        # decision from racing to insert duplicate strategy cards.
+        self._in_flight: set[str] = set()
         if bus is not None:
             bus.on("decision_reviewed", self._on_decision_reviewed)
 
@@ -126,7 +129,19 @@ class StrategyCardDistiller:
     # ------------------------------------------------------------------
 
     async def _distil(self, decision_id: UUID, outcome: str) -> None:
-        """Outer wrapper — all errors logged, never propagated."""
+        """Outer wrapper — all errors logged, never propagated.
+
+        Uses an in-flight set to prevent two concurrent distillations for the
+        same decision from racing to insert duplicate strategy cards.
+        """
+        key = str(decision_id)
+        if key in self._in_flight:
+            logger.debug(
+                "StrategyCardDistiller: %s already in flight, skipping duplicate",
+                decision_id,
+            )
+            return
+        self._in_flight.add(key)
         try:
             await self._do_distil(decision_id, outcome)
         except Exception:
@@ -135,6 +150,8 @@ class StrategyCardDistiller:
                 decision_id,
                 exc_info=True,
             )
+        finally:
+            self._in_flight.discard(key)
 
     async def _do_distil(self, decision_id: UUID, outcome: str) -> None:
         if not self._llm:
@@ -145,9 +162,6 @@ class StrategyCardDistiller:
         if decision is None:
             logger.warning("StrategyCardDistiller: decision %s not found, skipping", decision_id)
             return
-
-        # Idempotency: find existing active strategy card for this decision
-        existing_id = await self._find_existing_card(decision_id)
 
         user_msg = (
             f"Decision: {decision.description}\n"
@@ -204,7 +218,12 @@ class StrategyCardDistiller:
 
         # Deactivate old card and create new one in a single transaction so a
         # failure on insertion or edge creation preserves the previous card.
+        # The idempotency lookup is done INSIDE the transaction so the check
+        # and the deactivate/insert are atomic — preventing a concurrent task
+        # that also passed the _in_flight guard from racing to insert a second
+        # active card for the same decision.
         async with self._heart.db.session() as session:
+            existing_id = await self._find_existing_card_in_session(decision_id, session)
             if existing_id is not None:
                 from sqlalchemy import update as sa_update
 
@@ -249,7 +268,11 @@ class StrategyCardDistiller:
     # ------------------------------------------------------------------
 
     async def _find_existing_card(self, decision_id: UUID) -> UUID | None:
-        """Return the id of an existing active strategy card for this decision."""
+        """Return the id of an existing active strategy card for this decision.
+
+        Opens its own session — use only outside a transaction. For transactional
+        callers use _find_existing_card_in_session instead.
+        """
         from sqlalchemy import select
 
         from nous.storage.models import Procedure
@@ -264,6 +287,26 @@ class StrategyCardDistiller:
                 .limit(1)
             )
             return result.scalar_one_or_none()
+
+    async def _find_existing_card_in_session(self, decision_id: UUID, session: Any) -> UUID | None:
+        """Return the id of an existing active strategy card within a session.
+
+        Runs inside the caller's transaction so the lookup is atomic with any
+        subsequent deactivation and insertion.
+        """
+        from sqlalchemy import select
+
+        from nous.storage.models import Procedure
+
+        result = await session.execute(
+            select(Procedure.id)
+            .where(Procedure.agent_id == self._brain.agent_id)
+            .where(Procedure.kind == "strategy")
+            .where(Procedure.active.is_(True))
+            .where(Procedure.runtime_metadata["source_decision_id"].astext == str(decision_id))
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
     async def _deactivate_procedure(self, procedure_id: UUID) -> None:
         """Soft-delete an existing strategy card."""
