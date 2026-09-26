@@ -104,9 +104,7 @@ class Settings(BaseSettings):
 
     @field_validator("decision_outcome_score_factors", mode="after")
     @classmethod
-    def _validate_decision_outcome_score_factors(
-        cls, v: dict[str, float]
-    ) -> dict[str, float]:
+    def _validate_decision_outcome_score_factors(cls, v: dict[str, float]) -> dict[str, float]:
         """Every factor must be in (0, 1] — a demotion, never a promotion.
 
         A typo of `3` for `0.3` would PROMOTE exactly the rows this feature
@@ -255,11 +253,13 @@ class Settings(BaseSettings):
     # inside _format_facts, so raising it also affects the User Profile
     # section (shared formatter) — intended.
     fact_format_max_chars: int = Field(
-        default=200, ge=50,
+        default=200,
+        ge=50,
         description="Per-fact char cap in pre-turn context rendering (_format_facts). Was hardcoded 200.",
     )
     fact_format_full_top_n: int = Field(
-        default=0, ge=0,
+        default=0,
+        ge=0,
         description="Render the top-N facts in the Relevant Facts section untruncated (0 = all capped).",
     )
     # User Profile identity dedup scope (2026-07-23 plan). "line" = directional
@@ -274,7 +274,8 @@ class Settings(BaseSettings):
         description="User Profile vs identity dedup: 'line' (per-line coverage, default) or 'blob' (legacy whole-blob overlap).",
     )
     profile_fact_limit: int = Field(
-        default=20, ge=1,
+        default=20,
+        ge=1,
         description="Max preference/person/rule facts fetched for the Tier-1 User Profile section. Was hardcoded 20.",
     )
     # Dark flag (2026-07-23 plan): prod runs NOUS_RECENCY_RESOLVER_ENABLED=true,
@@ -307,11 +308,13 @@ class Settings(BaseSettings):
         description="Render the User Profile section as curated core (PROFILE_CORE_TAG) + probation window instead of legacy top-N. Land dark.",
     )
     profile_core_limit: int = Field(
-        default=12, ge=1,
+        default=12,
+        ge=1,
         description="Max facts in the curated User Profile core (tagged + probation, tagged first).",
     )
     profile_core_probation_days: int = Field(
-        default=14, ge=0,
+        default=14,
+        ge=0,
         description="Untagged tier-1 facts learned within this many days join the core as probation (0 disables probation).",
     )
     # Session Profile intent leg (Task 2, land dark). A per-turn hybrid-search
@@ -325,15 +328,19 @@ class Settings(BaseSettings):
         description="Enable the Session Profile intent leg (tier-1 domain facts selected by turn intent). Land dark.",
     )
     profile_intent_leg_limit: int = Field(
-        default=5, ge=1,
+        default=5,
+        ge=1,
         description="Max facts fetched by the Session Profile intent leg.",
     )
     profile_intent_leg_budget: int = Field(
-        default=300, ge=0,
+        default=300,
+        ge=0,
         description="Token budget for the Session Profile intent leg section (line-aware truncation).",
     )
     profile_intent_leg_min_score: float = Field(
-        default=0.7, ge=0.0, le=1.0,
+        default=0.7,
+        ge=0.0,
+        le=1.0,
         description=(
             "Absolute RRF-score floor for the Session Profile leg (applied "
             "before the adaptive relevance filter, which pads to a >=3 "
@@ -343,7 +350,8 @@ class Settings(BaseSettings):
         ),
     )
     fact_pin_top_k: int = Field(
-        default=0, ge=0,
+        default=0,
+        ge=0,
         description=(
             "Pin the top-K post-recency-resolve fact search hits into pre-turn "
             "context, bypassing diversity/dedup/relevance demotion (0 = off). "
@@ -390,19 +398,24 @@ class Settings(BaseSettings):
         ),
     )
     enumerative_density_threshold: float = Field(
-        default=0.6, ge=0.0, le=1.0,
+        default=0.6,
+        ge=0.0,
+        le=1.0,
         description="Statement-per-line density above which a transcript is enumerable (conservative default).",
     )
     enumerative_max_facts_per_episode: int = Field(
-        default=1000, ge=0,
+        default=1000,
+        ge=0,
         description="R1.3 cap on enumerative facts per episode; 0 = unlimited. Truncation logs WARNING (never silent).",
     )
     enumerative_max_chunks_per_episode: int = Field(
-        default=200, ge=0,
+        default=200,
+        ge=0,
         description="Hard bound on extraction LLM calls per episode (one per chunk); 0 = unlimited. Truncation logs WARNING.",
     )
     enumerative_extraction_max_per_hour: int = Field(
-        default=1000, ge=0,
+        default=1000,
+        ge=0,
         description="Hourly in-process cap on enumerative extraction LLM calls (mirrors *_max_per_hour pattern); 0 disables.",
     )
     enumerative_classifier: Literal["heuristic", "off"] = Field(
@@ -410,7 +423,8 @@ class Settings(BaseSettings):
         description="Density mode selection: 'heuristic' (no LLM) or 'off' (never enumerable). 'llm' reserved for v2.",
     )
     enumerative_min_content_chars: int = Field(
-        default=15, ge=0,
+        default=15,
+        ge=0,
         description="Min-content floor for source='enumerative_extractor' facts (atomic statements are often <30 chars).",
     )
 
@@ -424,15 +438,18 @@ class Settings(BaseSettings):
         description="R2.2 winner rule: 'ordinal' (higher source_ordinal wins, same-episode only; falls back to recency) or 'recency' (later learned_at wins). 'authority' reserved.",
     )
     supersession_key_candidates_cap: int = Field(
-        default=8, ge=1,
+        default=8,
+        ge=1,
         description="RC-3: max same-key active candidates examined per insert (newest first).",
     )
     supersession_classifier_max_per_hour: int = Field(
-        default=500, ge=0,
+        default=500,
+        ge=0,
         description="RC-5: hourly in-process cap on key-conflict classifier (Haiku) calls; 0 disables the cap.",
     )
     supersession_sweep_max_pairs: int = Field(
-        default=25, ge=0,
+        default=25,
+        ge=0,
         description="R2.1 sleep sweep: max same-key conflict pairs processed per cycle (resumable by construction).",
     )
     same_slot_conflict_routing_enabled: bool = Field(
@@ -440,11 +457,13 @@ class Settings(BaseSettings):
         description="Gate-1 D2 kill-switch: same-(subject_key, attribute_key) pairs with differing values route to conflict resolution instead of dedup-drop. Default ON (correctness fix).",
     )
     entity_keys_max_per_fact: int = Field(
-        default=8, ge=1,
+        default=8,
+        ge=1,
         description="R3.1 (F085): max entity-key index rows per fact (subject key always included).",
     )
     entity_key_min_chars: int = Field(
-        default=3, ge=1,
+        default=3,
+        ge=1,
         description="R3.1 (F085): stop-policy floor - normalized entity keys shorter than this are not indexed (applies to subject keys too).",
     )
     keyed_fact_leg_enabled: bool = Field(
@@ -452,11 +471,14 @@ class Settings(BaseSettings):
         description="R3.3 (F085) master switch: exact entity-key retrieval leg in run_recall_pipeline. Land-dark.",
     )
     keyed_fact_leg_k: int = Field(
-        default=8, ge=1,
+        default=8,
+        ge=1,
         description="R3.3: bounded allotment - max keyed facts merged per query.",
     )
     keyed_fact_leg_score: float = Field(
-        default=0.55, ge=0.0, le=1.0,
+        default=0.55,
+        ge=0.0,
+        le=1.0,
         description=(
             "R3.3: score band ceiling for keyed hits (RRF [0,1] scale, below "
             "the direct-hit head). CALIBRATION NOTE (N8, 2026-08-02): 0.55 is "
@@ -473,19 +495,24 @@ class Settings(BaseSettings):
         ),
     )
     keyed_fact_leg_rounds: int = Field(
-        default=1, ge=1, le=2,
+        default=1,
+        ge=1,
+        le=2,
         description="R3v2: keyed-leg retrieval rounds. 1 = v1 behavior (byte-identical); 2 enables the bounded iterative round (multi-hop composition). Land-dark.",
     )
     keyed_fact_leg_k2: int = Field(
-        default=8, ge=1,
+        default=8,
+        ge=1,
         description="R3v2: round-2 allotment - max round-2 keyed facts merged per query.",
     )
     keyed_fact_leg_r2_max_keys: int = Field(
-        default=32, ge=1,
+        default=32,
+        ge=1,
         description="R3v2 fan-out guard: max round-2 keys examined (truncation is counted, never silent).",
     )
     keyed_fact_leg_r2_max_candidates: int = Field(
-        default=256, ge=1,
+        default=256,
+        ge=1,
         description="R3v2 fan-out guard: hard cap on round-2 candidates fetched before ranking (the p90-587 lesson).",
     )
 
@@ -495,15 +522,19 @@ class Settings(BaseSettings):
         description="F086 write-path master switch: parse-only exemplar extraction of `utterance\\nlabel: N` streams into individually-embedded facts (source='exemplar_extractor'). Zero LLM.",
     )
     exemplar_density_threshold: float = Field(
-        default=0.8, ge=0.0, le=1.0,
+        default=0.8,
+        ge=0.0,
+        le=1.0,
         description="F086 exemplar_density score at/above which a transcript routes to exemplar extraction (checked before R1).",
     )
     exemplar_max_per_episode: int = Field(
-        default=5000, ge=1,
+        default=5000,
+        ge=1,
         description="F086 cap on exemplar facts stored per episode; truncation logs WARNING (never silent).",
     )
     exemplar_min_content_chars: int = Field(
-        default=5, ge=0,
+        default=5,
+        ge=0,
         description="F086 source-aware min-content floor for exemplar facts (labels/utterances are short; global 30-char floor would reject them).",
     )
     exemplar_mode_enabled: bool = Field(
@@ -511,11 +542,14 @@ class Settings(BaseSettings):
         description="F086 read-path master switch: exemplar retrieval leg in run_recall_pipeline (land-dark).",
     )
     exemplar_top_k: int = Field(
-        default=25, ge=1,
+        default=25,
+        ge=1,
         description="F086 max exemplars fetched/injected per query.",
     )
     exemplar_leg_score: float = Field(
-        default=0.55, ge=0.0, le=1.0,
+        default=0.55,
+        ge=0.0,
+        le=1.0,
         description=(
             "F086 score-band ceiling for exemplar hits (below the RRF "
             "direct-hit head; per-rank decay 0.005). CALIBRATION NOTE (N8, "
@@ -528,11 +562,14 @@ class Settings(BaseSettings):
         ),
     )
     exemplar_min_similarity: float = Field(
-        default=0.30, ge=0.0, le=1.0,
+        default=0.30,
+        ge=0.0,
+        le=1.0,
         description="F086 cosine floor -- exemplars below this similarity are not merged (bounds false-trigger displacement, gate 2).",
     )
     exemplar_max_query_words: int = Field(
-        default=64, ge=1,
+        default=64,
+        ge=1,
         description="F086 trigger gate: queries longer than this many words are not classification-shaped.",
     )
 
@@ -547,9 +584,7 @@ class Settings(BaseSettings):
     # with no host .env; pydantic-settings' default complex-field decoder calls
     # json.loads("") and raises SettingsError, crash-looping the container at
     # boot. NoDecode hands the raw string to our validator instead so "" -> {}.
-    context_budget_overrides: Annotated[dict[str, int], NoDecode] = Field(
-        default_factory=dict
-    )
+    context_budget_overrides: Annotated[dict[str, int], NoDecode] = Field(default_factory=dict)
 
     @field_validator("context_budget_overrides", mode="before")
     @classmethod
@@ -565,16 +600,12 @@ class Settings(BaseSettings):
 
     @field_validator("context_budget_overrides", mode="after")
     @classmethod
-    def _reject_negative_budget_overrides(
-        cls, v: dict[str, int]
-    ) -> dict[str, int]:
+    def _reject_negative_budget_overrides(cls, v: dict[str, int]) -> dict[str, int]:
         """AS-7: reject negative budget values — they silently underflow the
         context budget rather than failing loudly."""
         for key, val in v.items():
             if val < 0:
-                raise ValueError(
-                    f"context_budget_overrides[{key!r}]={val} must be >= 0"
-                )
+                raise ValueError(f"context_budget_overrides[{key!r}]={val} must be >= 0")
         return v
 
     @field_validator("effort", mode="before")
@@ -603,9 +634,7 @@ class Settings(BaseSettings):
     # Categories excluded from stale_scan. `rule` represents explicit user
     # directives that may be infrequently exercised but still in force —
     # deactivating them on recall stats alone is unsafe.
-    stale_scan_excluded_categories: list[str] = Field(
-        default_factory=lambda: ["rule"]
-    )
+    stale_scan_excluded_categories: list[str] = Field(default_factory=lambda: ["rule"])
 
     # Sleep-cycle cluster_consolidation phase (F027): merge near-duplicate
     # facts under the same subject into one. Prior code picked top-5 clusters
@@ -679,75 +708,95 @@ class Settings(BaseSettings):
     # episode_chunk_max_per_episode (F067 embedding volume). Destructive and
     # admission gates keep their prior literals.
     transcript_message_max_chars: int = Field(
-        default=8000, ge=50,
+        default=8000,
+        ge=50,
         description="SANITY per-message bound when capturing User:/Assistant: lines into the episode transcript (layer.py capture seam — sole source for stored transcript, summary, facts, F067 chunks). Was hardcoded 500. Tune cost via episode_summary_max_chunks / episode_chunk_max_per_episode, not this.",
     )
     episode_lessons_max_chars: int = Field(
-        default=8000, ge=50,
+        default=8000,
+        ge=50,
         description="SANITY bound on the end-of-session reflection stored as episodes.lessons_learned. Was hardcoded 500.",
     )
     episode_summary_max_chunks: int = Field(
-        default=4, ge=0,
+        default=4,
+        ge=0,
         description="Max transcript chunks (each <= transcript_max_chars) summarized per episode — bounds summarizer LLM call count. Selection is head+tail (first N-1 + final chunk); dropped chunks are logged and remain raw in episodes.transcript. 0 = unlimited (pre-2026-07-02 behavior).",
     )
     episode_chunk_max_per_episode: int = Field(
-        default=100, ge=0,
+        default=100,
+        ge=0,
         description="F067: max chunks embedded into heart.episode_chunks per episode — bounds embedding volume. Tail beyond the cap stays raw in episodes.transcript. 0 = unlimited (pre-2026-07-02 behavior).",
     )
     episode_seed_summary_chars: int = Field(
-        default=500, ge=50,
+        default=500,
+        ge=50,
         description="Chars of the first user message used as the episode's seed summary AND its dedup embedding probe. Was hardcoded 200.",
     )
     episode_dedup_threshold: float = Field(
-        default=0.85, ge=0.0, le=1.0,
+        default=0.85,
+        ge=0.0,
+        le=1.0,
         description="Cosine threshold above which a new episode is treated as a duplicate and not created.",
     )
     episode_dedup_window_hours: int = Field(
-        default=48, ge=1,
+        default=48,
+        ge=1,
         description="Lookback window for episode-duplicate detection.",
     )
     episode_min_content_length: int = Field(
-        default=200, ge=0,
+        default=200,
+        ge=0,
         description="Min combined user+assistant chars for a single-turn no-tool session to keep its episode (below = soft-deleted as trivial).",
     )
     correction_input_max_chars: int = Field(
-        default=2000, ge=100,
+        default=2000,
+        ge=100,
         description="F039: chars of the user message and AI response shown to the correction-extraction LLM. Was hardcoded 1000.",
     )
     correction_max_tokens: int = Field(
-        default=1024, ge=256,
+        default=1024,
+        ge=256,
         description="F039: output budget for correction extraction. Raised from hardcoded 512 (F031 bug class: truncated JSON silently drops the correction).",
     )
     correction_min_principle_chars: int = Field(
-        default=20, ge=0,
+        default=20,
+        ge=0,
         description="F039: min length of an extracted principle before it is stored as a fact (below = silently dropped). Was hardcoded 30, which dropped terse corrections like 'Always use uv, not pip.' (24 chars).",
     )
     episode_summary_max_tokens: int = Field(
-        default=0, ge=0,
+        default=0,
+        ge=0,
         description="Override for the episode-summarization LLM max_tokens. 0 = auto (3000 when coverage/open-threads prompts are on, else 1500).",
     )
     knowledge_extractor_max_chars: int = Field(
-        default=24000, ge=1000,
+        default=24000,
+        ge=1000,
         description="Pre-compaction fact extraction: total chars of the doomed-message snapshot shown to the LLM (head-truncated). Was hardcoded 12000; fires once per compaction, under-capture is permanent loss.",
     )
     sleep_reflection_summary_chars: int = Field(
-        default=500, ge=50,
+        default=500,
+        ge=50,
         description="Per-episode summary chars fed to the sleep reflection LLM. Was hardcoded 200 (~28% of a typical summary).",
     )
     sleep_contradiction_fact_chars: int = Field(
-        default=1000, ge=100,
+        default=1000,
+        ge=100,
         description="Per-fact chars shown to the contradiction-resolution LLM (verdicts are destructive: SUPERSEDE/REMOVE/MERGE). Was hardcoded 500; 1000 matches the call's max_tokens.",
     )
     fact_min_content_chars: int = Field(
-        default=30, ge=0,
+        default=30,
+        ge=0,
         description="F038-1.2 hard floor: facts shorter than this are rejected before dedup/admission on every write path.",
     )
     fact_supersession_threshold: float = Field(
-        default=0.80, ge=0.0, le=1.0,
+        default=0.80,
+        ge=0.0,
+        le=1.0,
         description="Same-subject supersession cosine gate in _supersede_same_subject (deactivates the old fact). Sibling of fact_native_cosine_threshold.",
     )
     graph_link_candidate_window_days: int = Field(
-        default=60, ge=0,
+        default=60,
+        ge=0,
         description="Recency window for graph-link candidates (fact→decision evidence_for at learn time; decision→fact/episode at record time). Was hardcoded 30; 60 doubles coverage with bounded candidate growth (evidence_for precision 0.70, 2026-06-13 audit). 0 = no time cutoff.",
     )
 
@@ -802,7 +851,9 @@ class Settings(BaseSettings):
     fact_extraction_enabled: bool = True
     sleep_enabled: bool = True
     decision_review_enabled: bool = True
-    decision_sweep_interval: int = Field(default=3600, description="Seconds between periodic decision review sweeps (default: 1 hour)")
+    decision_sweep_interval: int = Field(
+        default=3600, description="Seconds between periodic decision review sweeps (default: 1 hour)"
+    )
     decision_session_id_enabled: bool = Field(
         default=False,
         description=(
@@ -856,9 +907,7 @@ class Settings(BaseSettings):
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
 
     # Context window override (0 = auto-detect from model name)
-    context_window: int = Field(
-        default=0, validation_alias="NOUS_CONTEXT_WINDOW"
-    )
+    context_window: int = Field(default=0, validation_alias="NOUS_CONTEXT_WINDOW")
 
     # API backend: "sdk" (official anthropic SDK) or "httpx" (direct httpx calls)
     api_backend: str = "sdk"
@@ -936,18 +985,10 @@ class Settings(BaseSettings):
     )
 
     # SmartCompress (F020 Phase 1)
-    smart_compress_enabled: bool = Field(
-        default=True, description="Enable ingestion-time tool output compression"
-    )
-    smart_compress_min_chars: int = Field(
-        default=500, description="Below this, never compress"
-    )
-    smart_compress_max_k: int = Field(
-        default=50, description="Max items to keep per compressed result"
-    )
-    smart_compress_elbow_threshold: float = Field(
-        default=0.3, description="Score cliff threshold for adaptive K"
-    )
+    smart_compress_enabled: bool = Field(default=True, description="Enable ingestion-time tool output compression")
+    smart_compress_min_chars: int = Field(default=500, description="Below this, never compress")
+    smart_compress_max_k: int = Field(default=50, description="Max items to keep per compressed result")
+    smart_compress_elbow_threshold: float = Field(default=0.3, description="Score cliff threshold for adaptive K")
     smart_compress_exempt_tools: list[str] = Field(
         default=["recall_deep", "recall_recent"],
         description=(
@@ -974,21 +1015,11 @@ class Settings(BaseSettings):
     )
 
     # F036: Prompt Cache Optimization
-    cache_break_detection_enabled: bool = Field(
-        default=True, validation_alias="NOUS_CACHE_BREAK_DETECTION_ENABLED"
-    )
-    cache_split_system_prompt: bool = Field(
-        default=True, validation_alias="NOUS_CACHE_SPLIT_SYSTEM_PROMPT"
-    )
-    cache_single_breakpoint: bool = Field(
-        default=True, validation_alias="NOUS_CACHE_SINGLE_BREAKPOINT"
-    )
-    tool_schema_cache_enabled: bool = Field(
-        default=True, validation_alias="NOUS_TOOL_SCHEMA_CACHE_ENABLED"
-    )
-    stable_tool_set_enabled: bool = Field(
-        default=True, validation_alias="NOUS_STABLE_TOOL_SET_ENABLED"
-    )
+    cache_break_detection_enabled: bool = Field(default=True, validation_alias="NOUS_CACHE_BREAK_DETECTION_ENABLED")
+    cache_split_system_prompt: bool = Field(default=True, validation_alias="NOUS_CACHE_SPLIT_SYSTEM_PROMPT")
+    cache_single_breakpoint: bool = Field(default=True, validation_alias="NOUS_CACHE_SINGLE_BREAKPOINT")
+    tool_schema_cache_enabled: bool = Field(default=True, validation_alias="NOUS_TOOL_SCHEMA_CACHE_ENABLED")
+    stable_tool_set_enabled: bool = Field(default=True, validation_alias="NOUS_STABLE_TOOL_SET_ENABLED")
     # Harness Phase 1a: what happens when the model calls a tool it was NOT
     # offered this iteration. Every per-context restriction (subtask
     # exclusions, tool_filter, F078 refuse) edits only the schema list; the
@@ -1008,55 +1039,29 @@ class Settings(BaseSettings):
     tool_context_policy_mode: Literal["off", "warn", "enforce"] = "warn"
     # Salvage tool args the model leaked as XML <parameter> tags inside a
     # string arg (dispatch-level repair; see ToolDispatcher.dispatch).
-    tool_arg_salvage_enabled: bool = Field(
-        default=True, validation_alias="NOUS_TOOL_ARG_SALVAGE_ENABLED"
-    )
+    tool_arg_salvage_enabled: bool = Field(default=True, validation_alias="NOUS_TOOL_ARG_SALVAGE_ENABLED")
     # Kill-switch for the agent-facing decision-resolution tools
     # (resolve_decision / resolve_decisions / list_decisions). Set False to
     # un-register them; the migration + calibration filter are unconditional.
-    decision_resolution_enabled: bool = Field(
-        default=True, validation_alias="NOUS_DECISION_RESOLUTION_ENABLED"
-    )
+    decision_resolution_enabled: bool = Field(default=True, validation_alias="NOUS_DECISION_RESOLUTION_ENABLED")
 
     # Compaction: Layer 1 (Tool Pruning)
-    tool_pruning_enabled: bool = Field(
-        default=True, validation_alias="NOUS_TOOL_PRUNING_ENABLED"
-    )
-    tool_soft_trim_chars: int = Field(
-        default=4000, validation_alias="NOUS_TOOL_SOFT_TRIM_CHARS"
-    )
-    tool_soft_trim_head: int = Field(
-        default=1500, validation_alias="NOUS_TOOL_SOFT_TRIM_HEAD"
-    )
-    tool_soft_trim_tail: int = Field(
-        default=1500, validation_alias="NOUS_TOOL_SOFT_TRIM_TAIL"
-    )
-    tool_hard_clear_after: int = Field(
-        default=12, validation_alias="NOUS_TOOL_HARD_CLEAR_AFTER"
-    )
+    tool_pruning_enabled: bool = Field(default=True, validation_alias="NOUS_TOOL_PRUNING_ENABLED")
+    tool_soft_trim_chars: int = Field(default=4000, validation_alias="NOUS_TOOL_SOFT_TRIM_CHARS")
+    tool_soft_trim_head: int = Field(default=1500, validation_alias="NOUS_TOOL_SOFT_TRIM_HEAD")
+    tool_soft_trim_tail: int = Field(default=1500, validation_alias="NOUS_TOOL_SOFT_TRIM_TAIL")
+    tool_hard_clear_after: int = Field(default=12, validation_alias="NOUS_TOOL_HARD_CLEAR_AFTER")
     # #179: results at/above this size (original size, pre-trim) are treated
     # as bulk operations — escalated to the aggressive 'bulk' decay profile
     # with anti-replay stub text. 0 disables bulk detection.
-    tool_bulk_result_chars: int = Field(
-        default=50_000, validation_alias="NOUS_TOOL_BULK_RESULT_CHARS"
-    )
-    keep_last_tool_results: int = Field(
-        default=2, validation_alias="NOUS_KEEP_LAST_TOOL_RESULTS"
-    )
-    tool_metadata_degrade_after: int = Field(
-        default=8, validation_alias="NOUS_TOOL_METADATA_DEGRADE_AFTER"
-    )
+    tool_bulk_result_chars: int = Field(default=50_000, validation_alias="NOUS_TOOL_BULK_RESULT_CHARS")
+    keep_last_tool_results: int = Field(default=2, validation_alias="NOUS_KEEP_LAST_TOOL_RESULTS")
+    tool_metadata_degrade_after: int = Field(default=8, validation_alias="NOUS_TOOL_METADATA_DEGRADE_AFTER")
 
     # Compaction: Layer 2 (History Compaction) — Phase 2
-    compaction_enabled: bool = Field(
-        default=True, validation_alias="NOUS_COMPACTION_ENABLED"
-    )
-    compaction_threshold: int = Field(
-        default=100_000, validation_alias="NOUS_COMPACTION_THRESHOLD"
-    )
-    keep_recent_tokens: int = Field(
-        default=20_000, validation_alias="NOUS_KEEP_RECENT_TOKENS"
-    )
+    compaction_enabled: bool = Field(default=True, validation_alias="NOUS_COMPACTION_ENABLED")
+    compaction_threshold: int = Field(default=100_000, validation_alias="NOUS_COMPACTION_THRESHOLD")
+    keep_recent_tokens: int = Field(default=20_000, validation_alias="NOUS_KEEP_RECENT_TOKENS")
 
     # 011.1: Subtasks & Scheduling
     subtask_enabled: bool = True
@@ -1264,7 +1269,9 @@ class Settings(BaseSettings):
     # that the CTE's MAX aggregation relies on to keep spreading rows on the
     # candidates' score scale (see spreading_activation_search's docstring).
     spreading_activation_decay: float = Field(
-        default=0.5, gt=0.0, le=1.0,
+        default=0.5,
+        gt=0.0,
+        le=1.0,
         description=(
             "F022: per-hop activation multiplier. Must be in (0, 1] — a value "
             "above 1.0 amplifies activation per hop and breaks the bounded-path "
@@ -1272,7 +1279,9 @@ class Settings(BaseSettings):
         ),
     )
     spreading_activation_max_depth: int = Field(
-        default=2, ge=1, le=3,
+        default=2,
+        ge=1,
+        le=3,
         description=(
             "F022: max traversal hops. Bounded at 3 because the recursive CTE "
             "fans out multiplicatively with node degree (prod p99 degree 55, "
@@ -1327,7 +1336,9 @@ class Settings(BaseSettings):
     # so the floor becomes a config arm rather than a code change. Default is
     # the prior constant, so this is an exact no-op.
     spreading_activation_floor: float = Field(
-        default=0.1, ge=0.0, le=1.0,
+        default=0.1,
+        ge=0.0,
+        le=1.0,
         description=(
             "F022: minimum activation for a spreading result to survive. "
             "Default 0.1 reproduces the previously-hardcoded literal exactly."
@@ -1339,23 +1350,17 @@ class Settings(BaseSettings):
     # Master switch (default OFF): gates both the reinforcement hooks and the
     # _phase_stc_consolidation sleep phase. When False, sleep + edge inserts
     # behave bit-identically to pre-F044 main.
-    tinyhippo_lite_enabled: bool = Field(
-        default=False, validation_alias="NOUS_TINYHIPPO_LITE_ENABLED"
-    )
+    tinyhippo_lite_enabled: bool = Field(default=False, validation_alias="NOUS_TINYHIPPO_LITE_ENABLED")
     # PRP analog: a tagged edge consolidates once ltp_count >= this threshold.
     # ge=1: a threshold of 0/negative would promote every edge on the first
     # sleep (migration 061 inits ltp_count=0), collapsing the experiment and
     # exempting the whole graph from downscale.
-    tinyhippo_prp_threshold: int = Field(
-        default=3, ge=1, validation_alias="NOUS_TINYHIPPO_PRP_THRESHOLD"
-    )
+    tinyhippo_prp_threshold: int = Field(default=3, ge=1, validation_alias="NOUS_TINYHIPPO_PRP_THRESHOLD")
     # v1.1: reinforce edges among co-retrieved results on recall (retrieval ==
     # reactivation). Buffered (write-free read path), flushed at sleep. Only
     # active when tinyhippo_lite_enabled. Reaches the densifier-built bulk the
     # write-linker never re-derives.
-    tinyhippo_recall_touch_enabled: bool = Field(
-        default=True, validation_alias="NOUS_TINYHIPPO_RECALL_TOUCH_ENABLED"
-    )
+    tinyhippo_recall_touch_enabled: bool = Field(default=True, validation_alias="NOUS_TINYHIPPO_RECALL_TOUCH_ENABLED")
     # v1.1: weight consolidated edges higher in the graph adjacency boost so
     # consolidation actually influences retrieval ranking (multiplier applied to
     # a consolidated edge's contribution to a candidate's adjacency degree).
@@ -1377,25 +1382,19 @@ class Settings(BaseSettings):
     # (0.0, 1.0] decay-factor bound so a typo (e.g. 75) or negative value fails
     # config init instead of silently corrupting every tagged edge weight when
     # tinyhippo_downscale_enabled is on.
-    tinyhippo_alpha: float = Field(
-        default=0.75, validation_alias="NOUS_TINYHIPPO_ALPHA"
-    )
+    tinyhippo_alpha: float = Field(default=0.75, validation_alias="NOUS_TINYHIPPO_ALPHA")
 
     @field_validator("tinyhippo_alpha")
     @classmethod
     def _validate_tinyhippo_alpha(cls, v: float) -> float:
         if not (0.0 < v <= 1.0):
-            raise ValueError(
-                f"tinyhippo_alpha must be in (0.0, 1.0] (a multiplicative decay "
-                f"factor); got {v}"
-            )
+            raise ValueError(f"tinyhippo_alpha must be in (0.0, 1.0] (a multiplicative decay factor); got {v}")
         return v
+
     # Master switch for the Phase 8d weight downscale (the actual retrieval
     # mechanism). Default OFF: tinyhippo_lite_enabled alone stays telemetry-only
     # (promotion + counts, no weight change). Set true to apply the downscale.
-    tinyhippo_downscale_enabled: bool = Field(
-        default=False, validation_alias="NOUS_TINYHIPPO_DOWNSCALE_ENABLED"
-    )
+    tinyhippo_downscale_enabled: bool = Field(default=False, validation_alias="NOUS_TINYHIPPO_DOWNSCALE_ENABLED")
 
     graph_backfill_enabled: bool = True
     graph_backfill_max_facts: int = 50
@@ -1526,7 +1525,9 @@ class Settings(BaseSettings):
     # F030: MMR Diversity Re-Ranking
     mmr_enabled: bool = False
     mmr_diversity_weight: float = Field(
-        default=0.7, ge=0.0, le=1.0,
+        default=0.7,
+        ge=0.0,
+        le=1.0,
         description="MMR relevance vs diversity weight (1.0=pure relevance, 0.0=pure diversity)",
     )
     # F030.1: Skip MMR when cross-encoder rerank just reordered the head.
@@ -1763,22 +1764,26 @@ class Settings(BaseSettings):
     # a node already waiting still answers and defaults when this is off.
     dag_approval_nodes_enabled: bool = False
     dag_approval_default_wait_seconds: int = Field(
-        86400, ge=900,
+        86400,
+        ge=900,
         description="Time an approval node waits for an answer when its spec sets none.",
     )
     dag_approval_max_wait_seconds: int = Field(
-        604800, ge=900,
+        604800,
+        ge=900,
         description="Ceiling on an approval node's wait; clamped at insert.",
     )
     dag_approval_card_grace_seconds: int = Field(
-        3600, ge=60,
+        3600,
+        ge=60,
         description=(
             "Backstop added to an approval card's expiry past the node's deadline. "
             ">= 60: a zero expiry is falsy and push_built would store expires_at NULL."
         ),
     )
     dag_max_parked_dags: int = Field(
-        20, ge=1,
+        20,
+        ge=1,
         description="Max live DAGs with an unanswered approval node (parked, or still running "
         "the steps before their question) before a DAG with an approval node is refused.",
     )
@@ -1891,8 +1896,7 @@ class Settings(BaseSettings):
         for frame, cap in v.items():
             if cap < 1:
                 raise ValueError(
-                    f"NOUS_DAG_GLOBAL_MAX_CONCURRENT_BY_FRAME['{frame}']={cap} is invalid; "
-                    "values must be >= 1"
+                    f"NOUS_DAG_GLOBAL_MAX_CONCURRENT_BY_FRAME['{frame}']={cap} is invalid; values must be >= 1"
                 )
         return v
 
@@ -1929,31 +1933,43 @@ class Settings(BaseSettings):
         description="F055 — decay function: geometric (decay^t) or power_law (ACT-R style).",
     )
     residual_decay_per_turn: float = Field(
-        default=0.5, ge=0.0, le=1.0,
+        default=0.5,
+        ge=0.0,
+        le=1.0,
         description="F055 — geometric decay base; activation drops by this factor per turn.",
     )
     residual_power_law_alpha: float = Field(
-        default=0.5, ge=0.0, le=2.0,
+        default=0.5,
+        ge=0.0,
+        le=2.0,
         description="F055 — power-law decay exponent (ACT-R default 0.5).",
     )
     residual_activation_floor: float = Field(
-        default=0.05, ge=0.0, le=1.0,
+        default=0.05,
+        ge=0.0,
+        le=1.0,
         description="F055 — drop activations below this floor (prunes long tail).",
     )
     residual_top_k_carried: int = Field(
-        default=20, ge=1,
+        default=20,
+        ge=1,
         description="F055 — max activations carried forward per session.",
     )
     residual_top_n_seeds: int = Field(
-        default=5, ge=0,
+        default=5,
+        ge=0,
         description="F055 — max residually-activated nodes added to F022 spreading seeds.",
     )
     residual_seed_weight: float = Field(
-        default=0.3, ge=0.0, le=1.0,
+        default=0.3,
+        ge=0.0,
+        le=1.0,
         description="F055 — multiplier on activation when injecting into F022 seeds.",
     )
     residual_boost_weight: float = Field(
-        default=0.15, ge=0.0, le=1.0,
+        default=0.15,
+        ge=0.0,
+        le=1.0,
         description="F055 — additive boost on RRF score (applied before F042 CE rerank).",
     )
 
@@ -2006,17 +2022,11 @@ class Settings(BaseSettings):
     )
     epistemic_gate_timeout_seconds: float = Field(
         default=2.0,
-        description=(
-            "§2 — per-call Haiku timeout. Blown timeout fails open to "
-            "softened prose."
-        ),
+        description=("§2 — per-call Haiku timeout. Blown timeout fails open to softened prose."),
     )
     epistemic_gate_max_per_hour: int = Field(
         default=500,
-        description=(
-            "§2 — in-process sliding-window budget cap on Haiku calls. "
-            "Breach => fail open + WARN-once."
-        ),
+        description=("§2 — in-process sliding-window budget cap on Haiku calls. Breach => fail open + WARN-once."),
     )
 
     # §1: event_date-only recency conflict resolver. Default OFF; inert until
@@ -2033,7 +2043,9 @@ class Settings(BaseSettings):
         ),
     )
     recency_resolver_similarity_floor: float = Field(
-        default=0.55, ge=0.0, le=1.0,
+        default=0.55,
+        ge=0.0,
+        le=1.0,
         description=(
             "§1: difflib SequenceMatcher ratio above which two same-subject "
             "facts are treated as the SAME attribute restated/changed (so a "
@@ -2342,7 +2354,9 @@ class Settings(BaseSettings):
         description="F075: default Haiku token cap for backfill script when --token-budget is not supplied.",
     )
     happened_before_relatedness_threshold: float = Field(
-        default=0.45, ge=0.0, le=1.0,
+        default=0.45,
+        ge=0.0,
+        le=1.0,
         description=(
             "F075: minimum cosine similarity between two same-episode dated facts "
             "before a happened_before edge links them. Date-order alone chained "
@@ -2361,7 +2375,9 @@ class Settings(BaseSettings):
         ),
     )
     date_aware_boost_factor: float = Field(
-        default=1.20, ge=1.0, le=2.0,
+        default=1.20,
+        ge=1.0,
+        le=2.0,
         description="F075 Layer 3: multiplier applied to in-window facts. 1.0 = no boost.",
     )
     date_aware_boost_window_pad_days: int = Field(
@@ -2379,19 +2395,24 @@ class Settings(BaseSettings):
         description="F075 L3: Haiku model for parsing the query's date window.",
     )
     date_leg_k: int = Field(
-        default=15, description="F075 L3: date-leg retrieval depth (validated).",
+        default=15,
+        description="F075 L3: date-leg retrieval depth (validated).",
     )
     date_leg_pad_days: int = Field(
-        default=2, description="F075 L3: +/- days padding on the parsed window (validated).",
+        default=2,
+        description="F075 L3: +/- days padding on the parsed window (validated).",
     )
     date_leg_timeout_seconds: float = Field(
-        default=2.0, description="F075 L3: parser timeout; breach fails open to no-date.",
+        default=2.0,
+        description="F075 L3: parser timeout; breach fails open to no-date.",
     )
     date_leg_max_per_hour: int = Field(
-        default=500, description="F075 L3: per-hour Haiku budget cap on the parser.",
+        default=500,
+        description="F075 L3: per-hour Haiku budget cap on the parser.",
     )
     date_leg_cache_ttl_days: int = Field(
-        default=30, description="F075 L3: parsed-window in-process cache retention.",
+        default=30,
+        description="F075 L3: parsed-window in-process cache retention.",
     )
     heart_graph_all_types_enabled: bool = Field(
         default=False,
@@ -2447,15 +2468,19 @@ class Settings(BaseSettings):
         ),
     )
     comention_max_degree: int = Field(
-        default=10, ge=2,
+        default=10,
+        ge=2,
         description="F076: skip hub entities mentioned in > N facts (noise bound).",
     )
     comention_max_edges_per_node: int = Field(
-        default=20, ge=1,
+        default=20,
+        ge=1,
         description="F076: per-fact co-mention edge fan-out cap.",
     )
     comention_weight: float = Field(
-        default=0.90, ge=0.0, le=1.0,
+        default=0.90,
+        ge=0.0,
+        le=1.0,
         description=(
             "F076: stored weight of a co-mention edge (raw INSERT, no relation multiplier). "
             "Default 0.90 (was 0.80): Path-A's seed-score composition scores a recovered "
@@ -2467,11 +2492,13 @@ class Settings(BaseSettings):
         ),
     )
     comention_min_entity_chars: int = Field(
-        default=6, ge=1,
+        default=6,
+        ge=1,
         description="F076: minimum normalized entity-phrase length to link on.",
     )
     comention_max_facts_per_cycle: int = Field(
-        default=5000, ge=1,
+        default=5000,
+        ge=1,
         description="F076: max active facts scanned per sleep cycle (most-recent first); safety bound on the O(corpus) pass.",
     )
     # =========================================================================
@@ -2492,7 +2519,9 @@ class Settings(BaseSettings):
         ),
     )
     cooccurrence_weight: float = Field(
-        default=0.90, ge=0.0, le=1.0,
+        default=0.90,
+        ge=0.0,
+        le=1.0,
         description=(
             "Stored weight of a co_occurred edge (raw INSERT). Default 0.90 mirrors "
             "comention_weight — the weight-sweep showed a single co-occurrence needs ~0.8+ "
@@ -2502,7 +2531,8 @@ class Settings(BaseSettings):
         ),
     )
     cooccurrence_max_episode_facts: int = Field(
-        default=6, ge=2,
+        default=6,
+        ge=2,
         description=(
             "Noise gate: skip episodes that produced more than N facts. A focused "
             "conversation co-mentions a few related things; a rambling one touches many "
@@ -2510,7 +2540,8 @@ class Settings(BaseSettings):
         ),
     )
     cooccurrence_max_episodes_per_cycle: int = Field(
-        default=2000, ge=1,
+        default=2000,
+        ge=1,
         description="Safety bound: max episodes scanned per sleep cycle (most-recent first).",
     )
     # =========================================================================
@@ -2665,10 +2696,7 @@ class Settings(BaseSettings):
     )
     a2ui_compose_model: str = Field(
         default="",
-        description=(
-            "F092.1: model for the compose_surface LLM call. Empty = fall "
-            "back to NOUS_BACKGROUND_MODEL."
-        ),
+        description=("F092.1: model for the compose_surface LLM call. Empty = fall back to NOUS_BACKGROUND_MODEL."),
     )
     a2ui_compose_timeout_seconds: int = Field(
         default=60,
@@ -2784,18 +2812,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":
-        object.__setattr__(self, '_compaction_threshold_explicit',
-                          'compaction_threshold' in self.model_fields_set)
-        object.__setattr__(self, '_keep_recent_explicit',
-                          'keep_recent_tokens' in self.model_fields_set)
+        object.__setattr__(self, "_compaction_threshold_explicit", "compaction_threshold" in self.model_fields_set)
+        object.__setattr__(self, "_keep_recent_explicit", "keep_recent_tokens" in self.model_fields_set)
         return self
 
     @model_validator(mode="after")
     def _validate_keepalive(self) -> "Settings":
         if self.keepalive_interval >= self.tool_timeout:
             raise ValueError(
-                f"keepalive_interval ({self.keepalive_interval}) must be < "
-                f"tool_timeout ({self.tool_timeout})"
+                f"keepalive_interval ({self.keepalive_interval}) must be < tool_timeout ({self.tool_timeout})"
             )
         return self
 
@@ -2868,7 +2893,9 @@ class Settings(BaseSettings):
             "clamping to %d so the dispatcher cannot cancel run_python before "
             "its own deadline. Set NOUS_PROGRAMMATIC_TOOLS_TIMEOUT explicitly "
             "to silence this, or raise NOUS_TOOL_TIMEOUT.",
-            self.programmatic_tools_timeout, self.tool_timeout, clamped,
+            self.programmatic_tools_timeout,
+            self.tool_timeout,
+            clamped,
         )
         object.__setattr__(self, "programmatic_tools_timeout", clamped)
         return self
@@ -2923,6 +2950,23 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _validate_compensation_dependencies(self) -> "Settings":
+        """Phase 2.8: proceed-default and auto-review require compensation to be wired.
+
+        An unanswered approval silently proceeding is only safe when every
+        downstream side effect can be reverted — which requires compensation_enabled.
+        Refusing here prevents shipping a flag that claims undo safety it doesn't have.
+        """
+        if self.dag_approval_proceed_default_enabled and not self.compensation_enabled:
+            raise ValueError(
+                "dag_approval_proceed_default_enabled=True requires compensation_enabled=True "
+                "(an unanswered approval may only proceed when side effects are revertible)"
+            )
+        if self.compensation_auto_review_enabled and not self.compensation_enabled:
+            raise ValueError("compensation_auto_review_enabled=True requires compensation_enabled=True")
+        return self
+
+    @model_validator(mode="after")
     def _validate_dag_stall_timeouts(self) -> "Settings":
         """F064.1: stall ≤ wall-clock invariant.
 
@@ -2948,6 +2992,7 @@ class Settings(BaseSettings):
     def attachments_root(self) -> str:
         """Resolved attachments directory (defaults under workspace_dir)."""
         import os
+
         return self.attachments_dir or os.path.join(self.workspace_dir, "attachments")
 
     @property
@@ -2958,6 +3003,7 @@ class Settings(BaseSettings):
         if self.context_window > 0:
             return self.context_window
         from nous.cognitive.schemas import MODEL_CONTEXT_WINDOWS
+
         for key in sorted(MODEL_CONTEXT_WINDOWS, key=len, reverse=True):
             if key in model:
                 return MODEL_CONTEXT_WINDOWS[key]
@@ -2965,14 +3011,16 @@ class Settings(BaseSettings):
 
     @property
     def effective_compaction_threshold(self) -> int:
-        if getattr(self, '_compaction_threshold_explicit', False):
+        if getattr(self, "_compaction_threshold_explicit", False):
             return self.compaction_threshold
         from nous.cognitive.schemas import COMPACTION_THRESHOLD_RATIO
+
         return int(self._get_context_window(self.model) * COMPACTION_THRESHOLD_RATIO)
 
     @property
     def effective_keep_recent(self) -> int:
-        if getattr(self, '_keep_recent_explicit', False):
+        if getattr(self, "_keep_recent_explicit", False):
             return self.keep_recent_tokens
         from nous.cognitive.schemas import KEEP_RECENT_RATIO
+
         return int(self._get_context_window(self.model) * KEEP_RECENT_RATIO)

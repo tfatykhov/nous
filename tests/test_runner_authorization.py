@@ -30,8 +30,9 @@ class _RecordingDispatcher:
     def available_tools(self, frame_id):
         return [{"name": n, "description": n, "input_schema": {"type": "object"}} for n in self.offered]
 
-    async def dispatch(self, name, inp, session_id=None, is_background=False,
-                       turn_number=None, context=None, outcome=None):
+    async def dispatch(
+        self, name, inp, session_id=None, is_background=False, turn_number=None, context=None, outcome=None
+    ):
         if self.store is not None:
             self.store.events.append(("dispatch", name))
         self.calls.append((name, context, is_background))
@@ -41,8 +42,9 @@ class _RecordingDispatcher:
 def _one_tool_call_then_done(tool_name: str):
     calls = {"n": 0}
 
-    async def fake_call_api(system_prompt, messages, tools=None, skip_thinking=False,
-                            model_override=None, is_background=False):
+    async def fake_call_api(
+        system_prompt, messages, tools=None, skip_thinking=False, model_override=None, is_background=False
+    ):
         calls["n"] += 1
         if calls["n"] == 1:
             return ApiResponse(
@@ -65,13 +67,13 @@ def _two_tool_calls_then_done_with(tool_name: str, tool_input: dict):
 def _tool_calls_then_done_with(tool_name: str, tool_input: dict, *, times: int):
     calls = {"n": 0}
 
-    async def fake_call_api(system_prompt, messages, tools=None, skip_thinking=False,
-                            model_override=None, is_background=False):
+    async def fake_call_api(
+        system_prompt, messages, tools=None, skip_thinking=False, model_override=None, is_background=False
+    ):
         calls["n"] += 1
         if calls["n"] <= times:
             return ApiResponse(
-                content=[{"type": "tool_use", "id": f"t{calls['n']}", "name": tool_name,
-                          "input": dict(tool_input)}],
+                content=[{"type": "tool_use", "id": f"t{calls['n']}", "name": tool_name, "input": dict(tool_input)}],
                 stop_reason="tool_use",
             )
         return ApiResponse(content=[{"type": "text", "text": "done"}], stop_reason="end_turn")
@@ -84,8 +86,11 @@ async def _run_loop(runner: AgentRunner, **kwargs):
     conv.messages.append(Message(role="user", content="go"))
     try:
         return await runner._tool_loop(
-            system_prompt="sys", conversation=conv, frame_id="conversation",
-            session_id="s1", **kwargs,
+            system_prompt="sys",
+            conversation=conv,
+            frame_id="conversation",
+            session_id="s1",
+            **kwargs,
         )
     finally:
         runner._api_shared = True
@@ -164,7 +169,9 @@ async def test_run_turn_background_context_makes_the_turn_background():
     r._tool_loop = fake_tool_loop  # type: ignore[method-assign]
     try:
         await r.run_turn(
-            "h-1", "go", skip_episode=True,
+            "h-1",
+            "go",
+            skip_episode=True,
             context=ExecutionContext(kind="heartbeat_check", session_id="h-1"),
         )
     finally:
@@ -240,7 +247,9 @@ async def test_enforce_mode_refuses_and_never_dispatches():
     r._brain.emit_event = AsyncMock()
     r._call_api = _one_tool_call_then_done("bash")
     _text, results, _usage, _thinking = await _run_loop(
-        r, is_background=True, tool_filter=["recall_deep"],
+        r,
+        is_background=True,
+        tool_filter=["recall_deep"],
     )
     assert d.calls == []
     (res,) = results
@@ -351,8 +360,11 @@ async def test_stream_chat_enforce_refuses_an_unoffered_tool():
     assert any(e.type == "tool_end" and e.tool_name == "bash" for e in events)
     second_call_messages = runner._call_api_stream.call_args_list[1][0][1]
     results = [
-        b for m in second_call_messages if isinstance(m.get("content"), list)
-        for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_result"
+        b
+        for m in second_call_messages
+        if isinstance(m.get("content"), list)
+        for b in m["content"]
+        if isinstance(b, dict) and b.get("type") == "tool_result"
     ]
     assert len(results) == 1 and results[0]["is_error"] is True
     assert "not available in this turn" in results[0]["content"]
@@ -394,8 +406,9 @@ async def test_refuse_active_strips_previously_unclassified_tools():
     r, _ = _runner(["recall_deep", "dag_create"])
     sent: list[set[str]] = []
 
-    async def capture(system_prompt, messages, tools=None, skip_thinking=False,
-                      model_override=None, is_background=False):
+    async def capture(
+        system_prompt, messages, tools=None, skip_thinking=False, model_override=None, is_background=False
+    ):
         sent.append({t["name"] for t in tools or []})
         return ApiResponse(content=[{"type": "text", "text": "done"}], stop_reason="end_turn")
 
@@ -417,9 +430,10 @@ async def test_policy_warn_runs_an_offered_call_and_records_it():
     r._call_api = _one_tool_call_then_done("send_email")
     await _run_loop(r, is_background=True, context=ExecutionContext(kind="heartbeat_triage"))
     assert [c[0] for c in d.calls] == ["send_email"]
-    assert ("harness_context_policy_violation",
-            {"tool_name": "send_email", "context_kind": "heartbeat_triage",
-             "violation": "level:external", "mode": "warn"}) in events
+    assert (
+        "harness_context_policy_violation",
+        {"tool_name": "send_email", "context_kind": "heartbeat_triage", "violation": "level:external", "mode": "warn"},
+    ) in events
 
 
 @pytest.mark.asyncio
@@ -431,7 +445,9 @@ async def test_policy_enforce_refuses_and_records_a_blocked_row():
     r.set_ledger_store(store)
     r._call_api = _one_tool_call_then_done("spawn_task")
     _text, results, _usage, _thinking = await _run_loop(
-        r, is_background=True, context=ExecutionContext(kind="dag_node"),
+        r,
+        is_background=True,
+        context=ExecutionContext(kind="dag_node"),
     )
     assert d.calls == []
     assert store.events == [("blocked", "spawn_task", "context_policy")]
@@ -451,13 +467,13 @@ async def test_policy_off_is_silent():
 
 @pytest.mark.asyncio
 async def test_an_unoffered_call_is_checked_by_both_rules():
-    r, d = _runner(["recall_deep", "spawn_task"],
-                   tool_offered_set_enforcement_mode="warn", tool_context_policy_mode="warn")
+    r, d = _runner(
+        ["recall_deep", "spawn_task"], tool_offered_set_enforcement_mode="warn", tool_context_policy_mode="warn"
+    )
     events = []
     r._log_f026_decision = lambda kind, data, session_id: events.append(kind)
     r._call_api = _one_tool_call_then_done("spawn_task")
-    await _run_loop(r, is_background=True, tool_filter=["recall_deep"],
-                    context=ExecutionContext(kind="dag_node"))
+    await _run_loop(r, is_background=True, tool_filter=["recall_deep"], context=ExecutionContext(kind="dag_node"))
     assert events == ["harness_unoffered_tool_call", "harness_context_policy_violation"]
 
 
@@ -518,6 +534,36 @@ def test_policy_setting_defaults_to_warn():
     assert _settings().tool_context_policy_mode == "warn"
 
 
+# ---------------------------------------------------------------------------
+# Finding #2 regression — not_compensable must block in warn mode
+# ---------------------------------------------------------------------------
+
+
+def test_not_compensable_blocks_in_warn_mode():
+    """not_compensable is a safety invariant: blocks even when mode='warn'.
+
+    Before the fix, warn mode let every policy violation through (returning
+    None). The fix adds a force_block on 'not_compensable' so an undoable
+    dag_node cannot call a non-compensable tool even in the default mode.
+    """
+    from nous.api.runner import Refusal
+
+    r, _d = _runner(["learn_fact"], tool_context_policy_mode="warn")
+    ctx = ExecutionContext(kind="dag_node", undoable=True, session_id="s1")
+    refusal = r._authorize_tool_call(ctx, "learn_fact", {"learn_fact"}, "s1", {})
+    assert isinstance(refusal, Refusal), "not_compensable must produce a Refusal even in warn mode"
+    assert "not_compensable" in refusal.text
+
+
+def test_regular_policy_violation_still_passes_in_warn_mode():
+    """Only not_compensable force-blocks; other violations still warn-through."""
+    r, _d = _runner(["send_email"], tool_context_policy_mode="warn")
+    ctx = ExecutionContext(kind="heartbeat_triage", session_id="s1")
+    # send_email is external → violation "level:external", NOT not_compensable
+    refusal = r._authorize_tool_call(ctx, "send_email", {"send_email"}, "s1", {})
+    assert refusal is None, "A non-not_compensable violation should not block in warn mode"
+
+
 @pytest.mark.asyncio
 async def test_stream_chat_refuse_strips_the_denylist():
     """The streaming path strips exactly refuse_denylist(); reads survive."""
@@ -536,8 +582,9 @@ async def test_stream_chat_refuse_strips_the_denylist():
     offered: list[set[str]] = []
 
     async def fake_stream(*args, **kwargs):
-        tools = kwargs.get("tools") or next((a for a in args if isinstance(a, list)
-                                             and a and isinstance(a[0], dict) and "name" in a[0]), [])
+        tools = kwargs.get("tools") or next(
+            (a for a in args if isinstance(a, list) and a and isinstance(a[0], dict) and "name" in a[0]), []
+        )
         offered.append({t["name"] for t in tools})
         yield StreamEvent(type="text_delta", text="ok")
         yield StreamEvent(type="done", stop_reason="end_turn")

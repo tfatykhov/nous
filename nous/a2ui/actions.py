@@ -58,6 +58,7 @@ Handler = Callable[[ActionContext], Awaitable[ActionResult]]
 @dataclass
 class _CompensationDeps:
     """Lightweight dependency bag passed to compensator functions."""
+
     heart: Any = None
     brain: Any = None
     heartbeat_loader: Any = None
@@ -148,9 +149,7 @@ class ActionRouter:
 
     # ------------------------------------------------------------- functions
 
-    async def handle_call(
-        self, body: dict, *, content_type: str, actor: str = "unattributed"
-    ) -> tuple[int, dict]:
+    async def handle_call(self, body: dict, *, content_type: str, actor: str = "unattributed") -> tuple[int, dict]:
         """POST /a2ui/call — renderer-initiated agent function (spec pattern 1).
 
         Returns (status, agentFunctionResponse envelope). Most functions
@@ -212,9 +211,7 @@ class ActionRouter:
         audit_id = None
         if meta.mutating:
             audit_id = await self._audit(surface, name, args, None, "dispatched", None, actor)
-        ctx = ActionContext(
-            surface=surface, name=name, context=args, data_model=None, services=self, actor=actor
-        )
+        ctx = ActionContext(surface=surface, name=name, context=args, data_model=None, services=self, actor=actor)
         try:
             value = await meta.fn(ctx)
         except ValueError as exc:
@@ -369,8 +366,12 @@ class ActionRouter:
         )
 
         ctx = ActionContext(
-            surface=surface, name=name, context=context, data_model=data_model,
-            services=self, actor=actor,
+            surface=surface,
+            name=name,
+            context=context,
+            data_model=data_model,
+            services=self,
+            actor=actor,
         )
         try:
             result = await meta.fn(ctx)
@@ -530,7 +531,10 @@ def _register_default_handlers(router: ActionRouter) -> None:
                 message="DAG orchestration is not running; the answer cannot be recorded now",
             )
         result = await orchestrator.answer_node(
-            node_id, option, source="companion", actor=ctx.actor,
+            node_id,
+            option,
+            source="companion",
+            actor=ctx.actor,
             surface_id=ctx.surface.surface_id,
         )
         if result.outcome == "recorded":
@@ -658,6 +662,7 @@ def _register_default_handlers(router: ActionRouter) -> None:
 
     router.register("approval.choose", approval_choose, mutating=True, irreversible=True)
     router.register("approval.defer", approval_defer, mutating=False)
+
     async def review_revert(ctx: ActionContext) -> ActionResult:
         registry = router._compensation_registry
         snap_store = router._snapshot_store
@@ -669,6 +674,7 @@ def _register_default_handlers(router: ActionRouter) -> None:
             return ActionResult(ok=False, message="no ledger entry linked to this review")
 
         from uuid import UUID as _UUID
+
         try:
             ledger_entry_id = _UUID(str(trace_id))
         except (ValueError, TypeError):
@@ -689,22 +695,23 @@ def _register_default_handlers(router: ActionRouter) -> None:
         if compensator is None:
             return ActionResult(ok=False, message=f"no compensator for {snapshot.tool_name}")
 
-        deps = _CompensationDeps(heart=router._heart, brain=router._brain,
-                                 heartbeat_loader=getattr(router._heartbeat, "_loader", None))
+        deps = _CompensationDeps(
+            heart=router._heart, brain=router._brain, heartbeat_loader=getattr(router._heartbeat, "_loader", None)
+        )
         try:
             result = await compensator(ledger_entry_id, snapshot.snapshot_data, deps)
         except Exception as exc:
             logger.warning("review.revert compensator failed", exc_info=True)
             return ActionResult(ok=False, message=f"revert failed: {exc}")
 
-        await snap_store.mark_reverted(snapshot.id, result_message=result.message)
-
         if result.success:
+            await snap_store.mark_reverted(snapshot.id, result_message=result.message)
             return ActionResult(
                 message=f"reverted: {result.message}",
                 resolve_surface=True,
                 data_patches=[("/compensation/revertible", False)],
             )
+        # Do NOT mark reverted on failure: allows retry without "already reverted" block.
         return ActionResult(ok=False, message=f"revert failed: {result.message}")
 
     router.register("review.acknowledge", review_acknowledge, mutating=False)
@@ -738,9 +745,7 @@ def _register_phase2_handlers(router: ActionRouter) -> None:
         if decision_id not in offered:
             return ActionResult(ok=False, message=f"decision {decision_id!r} is not on this surface")
         if outcome not in _DECISION_OUTCOMES:
-            return ActionResult(
-                ok=False, message=f"outcome must be one of {sorted(_DECISION_OUTCOMES)}"
-            )
+            return ActionResult(ok=False, message=f"outcome must be one of {sorted(_DECISION_OUTCOMES)}")
         note = str(ctx.context.get("note") or "").strip()
         try:
             await router._brain.review(
@@ -848,9 +853,7 @@ def _register_default_functions(router: ActionRouter) -> None:
             "stakes": detail.stakes,
             "category": detail.category,
             "outcome": detail.outcome,
-            "reasons": [
-                {"type": r.type, "text": r.text} for r in (detail.reasons or [])
-            ][:10],
+            "reasons": [{"type": r.type, "text": r.text} for r in (detail.reasons or [])][:10],
         }
 
     router.register_function("expandGraphNode", expand_graph_node)
@@ -876,9 +879,7 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
         #      a mid-flight worker is not preempted (SubtaskManager.cancel
         #      contract), and this is what stops ITS late compose_surface
         #      without touching legitimate re-creates from chat.
-        pending = ((ctx.surface.data_model or {}).get(_ACT_META_KEY) or {}).get(
-            "pendingAction"
-        )
+        pending = ((ctx.surface.data_model or {}).get(_ACT_META_KEY) or {}).get("pendingAction")
         if isinstance(pending, dict):
             await _retire_action_subtask(router, pending)
         return ActionResult(message="app closed", resolve_surface=True)
@@ -915,21 +916,14 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
             return ActionResult(
                 ok=False,
                 message=(
-                    "app updates are unavailable (composer disabled) — "
-                    "the action cannot finish, so it was not started"
+                    "app updates are unavailable (composer disabled) — the action cannot finish, so it was not started"
                 ),
             )
         spec = ctx.surface.app_spec or {}
-        offered = {
-            str(a.get("id")): a
-            for a in spec.get("agent_actions") or []
-            if isinstance(a, dict)
-        }
+        offered = {str(a.get("id")): a for a in spec.get("agent_actions") or [] if isinstance(a, dict)}
         action_id = str(ctx.context.get("actionId") or "")
         if action_id not in offered:
-            return ActionResult(
-                ok=False, message=f"action {action_id!r} is not offered by this app"
-            )
+            return ActionResult(ok=False, message=f"action {action_id!r} is not offered by this app")
         action = offered[action_id]
         timeout = int(getattr(settings, "a2ui_agent_action_timeout_seconds", 300))
 
@@ -940,10 +934,7 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
             if _stamp_is_fresh(pending, settings):
                 return ActionResult(
                     ok=False,
-                    message=(
-                        f"already working on {str(pending.get('id'))!r} — "
-                        "wait for the app to update"
-                    ),
+                    message=(f"already working on {str(pending.get('id'))!r} — wait for the app to update"),
                 )
             # STALE stamp (codex P1): the wall-clock window can expire while
             # the old subtask is still pending — its execution timeout only
@@ -957,10 +948,7 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
             if not await _retire_action_subtask(router, pending):
                 return ActionResult(
                     ok=False,
-                    message=(
-                        "the previous action is still finishing — "
-                        "try again in a moment"
-                    ),
+                    message=("the previous action is still finishing — try again in a moment"),
                 )
 
         # The dispatch censor pass saw only {title, name, context} — never
@@ -1003,12 +991,8 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
             "subtask_id": str(sub_id),
         }
         try:
-            await router._service.update_data(
-                surface_id, f"/{_ACT_META_KEY}/actionError", None
-            )
-            await router._service.update_data(
-                surface_id, f"/{_ACT_META_KEY}/pendingAction", stamp
-            )
+            await router._service.update_data(surface_id, f"/{_ACT_META_KEY}/actionError", None)
+            await router._service.update_data(surface_id, f"/{_ACT_META_KEY}/pendingAction", stamp)
         except Exception:
             logger.exception("F092.2 pending stamp write failed — refusing action")
             await _clear_pending_stamp(router, surface_id)
@@ -1054,25 +1038,18 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
             await _retire_action_subtask(router, {"subtask_id": str(sub_id)})
             if not row_exists:
                 await _clear_pending_stamp(router, surface_id)
-                return ActionResult(
-                    ok=False, message=f"could not queue the action: {exc}"
-                )
-            watcher = asyncio.create_task(
-                _watch_agent_action(router, surface_id, sub_id, stamp, timeout)
-            )
+                return ActionResult(ok=False, message=f"could not queue the action: {exc}")
+            watcher = asyncio.create_task(_watch_agent_action(router, surface_id, sub_id, stamp, timeout))
             router._action_watchers.add(watcher)
             watcher.add_done_callback(router._action_watchers.discard)
             return ActionResult(
                 ok=False,
                 message=(
-                    "the action may have started despite an error — the app "
-                    "will update, or the controls unlock shortly"
+                    "the action may have started despite an error — the app will update, or the controls unlock shortly"
                 ),
             )
 
-        watcher = asyncio.create_task(
-            _watch_agent_action(router, surface_id, sub_id, stamp, timeout)
-        )
+        watcher = asyncio.create_task(_watch_agent_action(router, surface_id, sub_id, stamp, timeout))
         router._action_watchers.add(watcher)
         watcher.add_done_callback(router._action_watchers.discard)
         return ActionResult(message=f"working on: {stamp['label']}")
@@ -1114,9 +1091,7 @@ async def _clear_pending_stamp(router: Any, surface_id: str) -> None:
     fresh stamp with no watcher freezes the footer for the whole window
     and makes the server answer 'already working' about nothing."""
     try:
-        await router._service.update_data(
-            surface_id, f"/{_ACT_META_KEY}/pendingAction", None
-        )
+        await router._service.update_data(surface_id, f"/{_ACT_META_KEY}/pendingAction", None)
     except Exception:
         logger.warning("F092.2 failed to clear pending stamp", exc_info=True)
 
@@ -1165,9 +1140,7 @@ async def _retire_action_subtask(router: Any, pending: dict) -> bool:
         except Exception:
             logger.warning("F092.2 action-subtask cancel failed", exc_info=True)
             stopped = False
-    router._service.block_push_session(
-        f"subtask-{sub_uuid.hex[:8]}", ttl_seconds=timeout + 60
-    )
+    router._service.block_push_session(f"subtask-{sub_uuid.hex[:8]}", ttl_seconds=timeout + 60)
     return stopped
 
 
@@ -1262,9 +1235,7 @@ def _agent_action_prompt(surface: Any, action: dict, timeout: int) -> str:
     # an app declares its own update path in app_spec["update_hint"], and
     # the wrapper — not the 500-char action instruction — is what carries
     # it, because an instruction that has to argue with this prompt loses.
-    hint = _defang_delimiters(str(spec.get("update_hint") or "").strip())[
-        :_UPDATE_HINT_MAX
-    ]
+    hint = _defang_delimiters(str(spec.get("update_hint") or "").strip())[:_UPDATE_HINT_MAX]
     if hint:
         update_clause = (
             "Do what the instruction asks using your tools, then UPDATE THE "
@@ -1291,8 +1262,7 @@ def _agent_action_prompt(surface: Any, action: dict, timeout: int) -> str:
         "section saying what happened and why — the app must never be left "
         "silently stale."
         if hint
-        else
-        "If you cannot complete the action, still recompose the app with a "
+        else "If you cannot complete the action, still recompose the app with a "
         "section saying what happened and why — the app must never be left "
         "silently stale."
     )
@@ -1356,10 +1326,7 @@ async def _watch_agent_action(
             # same-second retap of the same action produces a NEW stamp
             # that an (id, at) predicate mistakes for its own — clearing
             # the new action's pending state.
-            if not (
-                isinstance(pending, dict)
-                and pending.get("subtask_id") == stamp.get("subtask_id")
-            ):
+            if not (isinstance(pending, dict) and pending.get("subtask_id") == stamp.get("subtask_id")):
                 return
 
             if status == "completed":
@@ -1377,8 +1344,7 @@ async def _watch_agent_action(
                         await router._service.update_data(
                             surface_id,
                             f"/{_ACT_META_KEY}/actionError",
-                            f"{stamp.get('label') or stamp['id']}: still finishing — "
-                            "controls unlock when it stops",
+                            f"{stamp.get('label') or stamp['id']}: still finishing — controls unlock when it stops",
                         )
                         return
                 note = f"the action {status}"
@@ -1399,13 +1365,10 @@ async def _watch_agent_action(
                     await router._service.update_data(
                         surface_id,
                         f"/{_ACT_META_KEY}/actionError",
-                        f"{stamp.get('label') or stamp['id']}: still finishing — "
-                        "controls unlock when it stops",
+                        f"{stamp.get('label') or stamp['id']}: still finishing — controls unlock when it stops",
                     )
                     return
-            await router._service.update_data(
-                surface_id, f"/{_ACT_META_KEY}/pendingAction", None
-            )
+            await router._service.update_data(surface_id, f"/{_ACT_META_KEY}/pendingAction", None)
             await router._service.update_data(
                 surface_id,
                 f"/{_ACT_META_KEY}/actionError",
@@ -1470,10 +1433,7 @@ def _register_micro_app_functions(router: ActionRouter) -> None:
                 "is running on this app — wait for it to finish or close the app"
             )
         if not await _retire_action_subtask(router, pending):
-            raise ValueError(
-                "the previous agent action is still finishing — "
-                "try again in a moment"
-            )
+            raise ValueError("the previous agent action is still finishing — try again in a moment")
 
     async def app_refresh(ctx: ActionContext) -> Any:
         if router._composer is None:
@@ -1488,9 +1448,7 @@ def _register_micro_app_functions(router: ActionRouter) -> None:
         # refreshed source data is bulk memory content — facts, findings,
         # episode summaries — exactly the class the push gate was written
         # for, and update_data has no gate of its own).
-        reason = await router._service.censor_prose(
-            json.dumps(patches, default=str), where="refresh"
-        )
+        reason = await router._service.censor_prose(json.dumps(patches, default=str), where="refresh")
         if reason is not None:
             raise ValueError(f"refresh blocked by censor: {reason}")
         # handle_call is lockless because most functions are read-only —
@@ -1505,9 +1463,7 @@ def _register_micro_app_functions(router: ActionRouter) -> None:
         async with router._service.surface_lock(ctx.surface.surface_id):
             await _assert_same_epoch(ctx.surface.surface_id, ctx.surface)
             for key, value in patches.items():
-                seq = await router._service.update_data(
-                    ctx.surface.surface_id, f"/{key}", value
-                )
+                seq = await router._service.update_data(ctx.surface.surface_id, f"/{key}", value)
         return {"refreshed": sorted(patches), "seq": seq}
 
     async def app_refine(ctx: ActionContext) -> Any:
@@ -1515,26 +1471,21 @@ def _register_micro_app_functions(router: ActionRouter) -> None:
             raise ValueError("micro-app composer unavailable")
         await _gate_pending_action(ctx)
         spec = ctx.surface.app_spec or {}
-        options = {
-            str(o.get("id")): o for o in spec.get("refine_options") or [] if isinstance(o, dict)
-        }
+        options = {str(o.get("id")): o for o in spec.get("refine_options") or [] if isinstance(o, dict)}
         option_id = str(ctx.context.get("id") or "")
         if option_id not in options:
             raise ValueError(f"refine option {option_id!r} is not offered by this surface")
         option = options[option_id]
         intent = str(spec.get("intent") or ctx.surface.title)
-        refined_intent = (
-            f"{intent}\n\nRefine request: {option.get('label')}"
-            + (f"\nRefine params: {json.dumps(option.get('params'))}" if option.get("params") else "")
+        refined_intent = f"{intent}\n\nRefine request: {option.get('label')}" + (
+            f"\nRefine params: {json.dumps(option.get('params'))}" if option.get("params") else ""
         )
         # F092.2: declared actions survive refine exactly like theme — the
         # footer is re-stamped from the SURVIVING app_spec, never from the
         # refine call's args. Gated on the flag so the kill switch also
         # sheds the buttons on the next refine.
         surviving_actions = (
-            spec.get("agent_actions") or []
-            if getattr(router._settings, "a2ui_agent_actions_enabled", False)
-            else []
+            spec.get("agent_actions") or [] if getattr(router._settings, "a2ui_agent_actions_enabled", False) else []
         )
         composed = await router._composer.compose(
             refined_intent,
@@ -1582,9 +1533,7 @@ def _register_micro_app_functions(router: ActionRouter) -> None:
             # F092.4: the whole-model update is the last envelope — its seq
             # is the completion revision the client holds for (see
             # app_refresh).
-            seq = await router._service.update_data(
-                ctx.surface.surface_id, None, composed.built.data_model
-            )
+            seq = await router._service.update_data(ctx.surface.surface_id, None, composed.built.data_model)
         return {
             "refined": option_id,
             "fallback": composed.fallback,

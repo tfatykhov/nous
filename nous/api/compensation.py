@@ -51,8 +51,7 @@ class CompensationRegistry:
         tc = TOOL_CLASSES.get(tool_name)
         if tc is None or not tc.compensable:
             raise ValueError(
-                f"cannot register a compensator for {tool_name!r}: "
-                "it must be declared compensable in TOOL_CLASSES"
+                f"cannot register a compensator for {tool_name!r}: it must be declared compensable in TOOL_CLASSES"
             )
         self._compensators[tool_name] = fn
 
@@ -72,7 +71,11 @@ class SnapshotStore:
         self._timeout = timeout
 
     async def capture(
-        self, *, ledger_entry_id: UUID, tool_name: str, snapshot_data: dict[str, Any],
+        self,
+        *,
+        ledger_entry_id: UUID,
+        tool_name: str,
+        snapshot_data: dict[str, Any],
     ) -> UUID:
         snapshot_id = uuid4()
         row = CompensationSnapshot(
@@ -102,7 +105,10 @@ class SnapshotStore:
             return result.scalar_one_or_none()
 
     async def mark_reverted(
-        self, snapshot_id: UUID, *, result_message: str,
+        self,
+        snapshot_id: UUID,
+        *,
+        result_message: str,
     ) -> bool:
         """Mark a snapshot as reverted. Returns False if already reverted (idempotent)."""
         async with self._db.session() as s:
@@ -118,10 +124,12 @@ class SnapshotStore:
 
 
 async def snapshot_for_write_file(
-    path: str, workspace_dir: str,
+    path: str,
+    workspace_dir: str,
 ) -> dict[str, Any]:
     """Capture the prior state of a file before write_file overwrites it."""
     import os
+
     full_path = os.path.join(workspace_dir, path) if not os.path.isabs(path) else path
     existed = os.path.exists(full_path)
     prior_content: str | None = None
@@ -140,10 +148,13 @@ async def snapshot_for_write_file(
 
 
 async def compensate_write_file(
-    entry_id: UUID, snapshot_data: dict[str, Any], deps: Any,
+    entry_id: UUID,
+    snapshot_data: dict[str, Any],
+    deps: Any,
 ) -> CompensationResult:
     """Restore prior file content or delete if file was new."""
     import os
+
     full_path = snapshot_data.get("full_path", "")
     existed = snapshot_data.get("existed", False)
     prior_content = snapshot_data.get("prior_content")
@@ -151,7 +162,19 @@ async def compensate_write_file(
     if not full_path:
         return CompensationResult(False, "no path in snapshot")
     if not os.path.exists(full_path):
-        return CompensationResult(True, "file already absent")
+        # File is absent. If it was new (existed=False), absence IS the reverted state.
+        # If it existed before, we must recreate it — otherwise the original content is lost.
+        if not existed:
+            return CompensationResult(True, "file already absent")
+        if prior_content is not None:
+            try:
+                os.makedirs(os.path.dirname(full_path) or ".", exist_ok=True)
+                with open(full_path, "w", encoding="utf-8") as f:
+                    f.write(prior_content)
+                return CompensationResult(True, f"recreated prior content of {full_path}")
+            except Exception as exc:
+                return CompensationResult(False, f"revert failed: {exc}")
+        return CompensationResult(False, "file existed but prior content not captured; cannot recreate")
 
     try:
         if existed and prior_content is not None:
@@ -168,7 +191,9 @@ async def compensate_write_file(
 
 
 async def compensate_schedule_task(
-    entry_id: UUID, snapshot_data: dict[str, Any], deps: Any,
+    entry_id: UUID,
+    snapshot_data: dict[str, Any],
+    deps: Any,
 ) -> CompensationResult:
     """Cancel a schedule that was created."""
     schedule_id = snapshot_data.get("schedule_id")
@@ -179,6 +204,7 @@ async def compensate_schedule_task(
         return CompensationResult(False, "heart not available")
     try:
         from nous.heart.schedules import deactivate_schedule
+
         async with heart._db.session() as s:
             ok = await deactivate_schedule(s, UUID(schedule_id), heart._agent_id)
             await s.commit()
@@ -190,7 +216,9 @@ async def compensate_schedule_task(
 
 
 async def compensate_heartbeat_check_create(
-    entry_id: UUID, snapshot_data: dict[str, Any], deps: Any,
+    entry_id: UUID,
+    snapshot_data: dict[str, Any],
+    deps: Any,
 ) -> CompensationResult:
     """Disable a heartbeat check that was created."""
     check_name = snapshot_data.get("check_name")
@@ -207,7 +235,9 @@ async def compensate_heartbeat_check_create(
 
 
 async def compensate_heartbeat_check_manage(
-    entry_id: UUID, snapshot_data: dict[str, Any], deps: Any,
+    entry_id: UUID,
+    snapshot_data: dict[str, Any],
+    deps: Any,
 ) -> CompensationResult:
     """Reverse an enable/disable action on a heartbeat check."""
     check_name = snapshot_data.get("check_name")
@@ -227,7 +257,9 @@ async def compensate_heartbeat_check_manage(
 
 
 async def compensate_resolve_decision(
-    entry_id: UUID, snapshot_data: dict[str, Any], deps: Any,
+    entry_id: UUID,
+    snapshot_data: dict[str, Any],
+    deps: Any,
 ) -> CompensationResult:
     """Restore a decision's prior outcome."""
     decision_id = snapshot_data.get("decision_id")
@@ -240,6 +272,7 @@ async def compensate_resolve_decision(
     try:
         async with brain._db.session() as s:
             from nous.storage.models import Decision
+
             result = await s.execute(
                 update(Decision)
                 .where(Decision.id == UUID(decision_id))
