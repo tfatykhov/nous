@@ -159,6 +159,8 @@ class ProcedureManager:
             # when the manifest didn't declare any of the new fields, but
             # we don't gate on a flag at write time (silent-drop fix).
             runtime_metadata=input.runtime_metadata,
+            # Reasoning Maps L1 (migration 077)
+            kind=input.kind,
         )
         session.add(procedure)
         await session.flush()
@@ -1035,4 +1037,5 @@ class ProcedureManager:
             tags=procedure.tags or [],
             active=procedure.active if procedure.active is not None else True,
             created_at=procedure.created_at,
+            kind=procedure.kind,
         )

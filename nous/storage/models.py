@@ -636,6 +636,8 @@ class Procedure(Base):
     censor_ids = mapped_column(ARRAY(UUID(as_uuid=True)), nullable=True)
     embedding = mapped_column(Vector(1536), nullable=True)
     tags = mapped_column(ARRAY(Text), nullable=True)
+    # Reasoning Maps L1 (migration 077): 'strategy' marks distilled strategy cards.
+    kind: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # F064.4: skill runtime hints (concurrency_cap, timeout_override_seconds,
     # hooks, requires_human_review, schema_version). Always persisted when
     # the SkillManifest declares any of the new fields; consumer wiring is
