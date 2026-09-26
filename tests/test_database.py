@@ -61,6 +61,8 @@ async def test_all_tables_exist(db):
         ("nous_system", "a2ui_actions"),
         # Harness Phase 1b: durable execution ledger (migration 074)
         ("nous_system", "execution_ledger"),
+        # Fault detector: per-phase process heartbeat (migration 077)
+        ("nous_system", "process_run_log"),
         # brain (8)
         ("brain", "decisions"),
         ("brain", "decision_tags"),
