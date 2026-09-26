@@ -368,6 +368,10 @@ class SleepHandler:
         # don't starve later conflicts. Reset to None when the fetch returns
         # fewer rows than the limit (table wrapped — restart next cycle).
         self._key_sweep_cursor: tuple | None = None
+        # Fault detector (decision 28f021a0): per-phase run recorder.
+        # Set externally from main.py when fault_detector_enabled=True.
+        # None = no recording (no behavior change, no import).
+        self._recorder = None  # ProcessRecorder | None
 
         bus.on("sleep_started", self.handle)
         bus.on("message_received", self._on_wake)
@@ -454,6 +458,30 @@ class SleepHandler:
                 self._auditor.record(label, op, after={"counts": delta}, rationale=f"{label} phase summary")
         return success
 
+    async def _run_phase(
+        self,
+        phase_short_name: str,
+        coro_factory,
+    ) -> bool:
+        """Wrap a phase call with process_run_log recording (fault detector).
+
+        When ``self._recorder`` is None (fault_detector_enabled=False), this is
+        a transparent pass-through — no import, no DB round-trip.
+        ``phase_short_name`` is the label appended to 'sleep/' in the log.
+        """
+        if self._recorder is None:
+            return await coro_factory()
+
+        process_name = f"sleep/{phase_short_name}"
+        run_id = await self._recorder.start(process_name)
+        try:
+            result = await coro_factory()
+            await self._recorder.finish(run_id)
+            return result
+        except Exception as exc:
+            await self._recorder.error(run_id, str(exc))
+            raise
+
     def get_stats(self) -> dict:
         """F035.1: Return sleep handler statistics."""
         return {
@@ -499,42 +527,67 @@ class SleepHandler:
 
             # Phase ordering: free first, LLM last
             if not self._interrupted:
-                success = await self._phase_review_decisions()
+                success = await self._run_phase("review", lambda: self._phase_review_decisions())
                 if success:
                     phases_completed.append("review")
 
             if not self._interrupted:
-                success = await self._phase_prune()
+                success = await self._run_phase("prune", lambda: self._phase_prune())
                 if success:
                     phases_completed.append("prune")
 
             if not self._interrupted:
-                success = await self._phase_compress()
+                success = await self._run_phase("compress", lambda: self._phase_compress())
                 if success:
                     phases_completed.append("compress")
 
             if not self._interrupted:
-                success = await self._phase_reflect(sleep_stats)
+                success = await self._run_phase("reflect", lambda: self._phase_reflect(sleep_stats))
                 if success:
                     phases_completed.append("reflect")
 
             if not self._interrupted:
-                success = await self._phase_resolve_contradictions(sleep_stats)
+                success = await self._run_phase(
+                    "resolve_contradictions",
+                    lambda: self._phase_resolve_contradictions(sleep_stats),
+                )
                 if success:
                     phases_completed.append("resolve_contradictions")
 
             if not self._interrupted:
-                success = await self._phase_sweep_key_conflicts(sleep_stats)
+                success = await self._run_phase(
+                    "sweep_key_conflicts",
+                    lambda: self._phase_sweep_key_conflicts(sleep_stats),
+                )
                 if success:
                     phases_completed.append("sweep_key_conflicts")
 
             if not self._interrupted:
-                success = await self._phase_stale_scan(sleep_stats)
+                # stale_scan: record items_examined + items_changed when recorder is active.
+                _stale_examined_before = sleep_stats.get("stale_examined")
+                _stale_changed_before = sleep_stats.get("stale_deactivated", 0)
+                if self._recorder is not None:
+                    _ss_run_id = await self._recorder.start("sleep/stale_scan")
+                    try:
+                        success = await self._phase_stale_scan(sleep_stats)
+                        await self._recorder.finish(
+                            _ss_run_id,
+                            items_examined=sleep_stats.get("stale_examined"),
+                            items_changed=sleep_stats.get("stale_deactivated", 0) - _stale_changed_before,
+                        )
+                    except Exception as _exc:
+                        await self._recorder.error(_ss_run_id, str(_exc))
+                        raise
+                else:
+                    success = await self._phase_stale_scan(sleep_stats)
                 if success:
                     phases_completed.append("stale_scan")
 
             if not self._interrupted:
-                success = await self._phase_cluster_consolidation(sleep_stats)
+                success = await self._run_phase(
+                    "cluster_consolidation",
+                    lambda: self._phase_cluster_consolidation(sleep_stats),
+                )
                 if success:
                     phases_completed.append("cluster_consolidation")
 
@@ -543,18 +596,24 @@ class SleepHandler:
             # F040 picks up the freshly-populated structured_summary instead
             # of falling through F058's plain-summary fallback.
             if not self._interrupted:
-                success = await self._run_audited_phase(
-                    "recover_episode", "recover",
-                    lambda: self._phase_recover_abandoned_episodes(sleep_stats), sleep_stats,
-                    ("episodes_recovered", "episodes_marked_abandoned"))
+                success = await self._run_phase(
+                    "recover_abandoned_episodes",
+                    lambda: self._run_audited_phase(
+                        "recover_episode", "recover",
+                        lambda: self._phase_recover_abandoned_episodes(sleep_stats), sleep_stats,
+                        ("episodes_recovered", "episodes_marked_abandoned")),
+                )
                 if success:
                     phases_completed.append("recover_abandoned_episodes")
 
             if not self._interrupted:
-                success = await self._run_audited_phase(
-                    "graph_densify", "edge_add",
-                    lambda: self._phase_graph_densification(sleep_stats), sleep_stats,
-                    ("orphan_edges_created", "temporal_chain_edges", "comention_edges", "bridge_edges_created"))
+                success = await self._run_phase(
+                    "graph_densification",
+                    lambda: self._run_audited_phase(
+                        "graph_densify", "edge_add",
+                        lambda: self._phase_graph_densification(sleep_stats), sleep_stats,
+                        ("orphan_edges_created", "temporal_chain_edges", "comention_edges", "bridge_edges_created")),
+                )
                 if success:
                     phases_completed.append("graph_densification")
 
@@ -564,10 +623,13 @@ class SleepHandler:
             # so the new edges (active→active endpoints) won't be touched
             # by F053 on this cycle.
             if not self._interrupted:
-                success = await self._run_audited_phase(
-                    "relink_episode", "relink",
-                    lambda: self._phase_relink_open_episodes(sleep_stats), sleep_stats,
-                    ("episodes_relinked", "episode_relink_edges"))
+                success = await self._run_phase(
+                    "relink_open_episodes",
+                    lambda: self._run_audited_phase(
+                        "relink_episode", "relink",
+                        lambda: self._phase_relink_open_episodes(sleep_stats), sleep_stats,
+                        ("episodes_relinked", "episode_relink_edges")),
+                )
                 if success:
                     phases_completed.append("relink_open_episodes")
 
@@ -575,23 +637,29 @@ class SleepHandler:
             # after densification/relink (count this cycle's re-derivations)
             # and before dead-edge prune. No-op unless tinyhippo_lite_enabled.
             if not self._interrupted:
-                success = await self._run_audited_phase(
-                    "stc_consolidate", "consolidate",
-                    lambda: self._phase_stc_consolidation(sleep_stats), sleep_stats,
-                    # F044 per-cycle MUTATION counters only (UPDATE rowcounts):
-                    # promotions (consolidation_state), recall-buffer ltp writes,
-                    # and weight downscale. The f044_n_*/ltp_ge*/reinforced_24h
-                    # keys are STATE/WINDOW snapshots, not this-cycle mutations —
-                    # excluding them avoids recording a bogus 15k-edge "delta".
-                    ("f044_promoted", "f044_recall_touches_flushed", "f044_downscaled"))
+                success = await self._run_phase(
+                    "stc_consolidation",
+                    lambda: self._run_audited_phase(
+                        "stc_consolidate", "consolidate",
+                        lambda: self._phase_stc_consolidation(sleep_stats), sleep_stats,
+                        # F044 per-cycle MUTATION counters only (UPDATE rowcounts):
+                        # promotions (consolidation_state), recall-buffer ltp writes,
+                        # and weight downscale. The f044_n_*/ltp_ge*/reinforced_24h
+                        # keys are STATE/WINDOW snapshots, not this-cycle mutations —
+                        # excluding them avoids recording a bogus 15k-edge "delta".
+                        ("f044_promoted", "f044_recall_touches_flushed", "f044_downscaled")),
+                )
                 if success:
                     phases_completed.append("stc_consolidation")
 
             if not self._interrupted:
-                success = await self._run_audited_phase(
-                    "prune_dead_edges", "edge_prune",
-                    lambda: self._phase_prune_dead_edges(sleep_stats), sleep_stats,
-                    ("dead_edges_pruned",))
+                success = await self._run_phase(
+                    "prune_dead_edges",
+                    lambda: self._run_audited_phase(
+                        "prune_dead_edges", "edge_prune",
+                        lambda: self._phase_prune_dead_edges(sleep_stats), sleep_stats,
+                        ("dead_edges_pruned",)),
+                )
                 if success:
                     phases_completed.append("prune_dead_edges")
 
@@ -599,23 +667,32 @@ class SleepHandler:
             # brain.graph_hub_snapshots table doesn't grow monotonically.
             # Disabled when retention_days == 0.
             if not self._interrupted:
-                success = await self._phase_prune_hub_snapshots(sleep_stats)
+                success = await self._run_phase(
+                    "prune_hub_snapshots",
+                    lambda: self._phase_prune_hub_snapshots(sleep_stats),
+                )
                 if success:
                     phases_completed.append("prune_hub_snapshots")
 
             if not self._interrupted:
-                success = await self._run_audited_phase(
-                    "generalize", "create_proc",
-                    lambda: self._phase_generalize(sleep_stats), sleep_stats,
-                    ("procedures_created",))
+                success = await self._run_phase(
+                    "generalize",
+                    lambda: self._run_audited_phase(
+                        "generalize", "create_proc",
+                        lambda: self._phase_generalize(sleep_stats), sleep_stats,
+                        ("procedures_created",)),
+                )
                 if success:
                     phases_completed.append("generalize")
 
             if not self._interrupted:
-                success = await self._run_audited_phase(
-                    "evolve_rubric", "evolve",
-                    lambda: self._phase_evolve_rubric(sleep_stats), sleep_stats,
-                    ("rubric_evolved",))
+                success = await self._run_phase(
+                    "evolve_rubric",
+                    lambda: self._run_audited_phase(
+                        "evolve_rubric", "evolve",
+                        lambda: self._phase_evolve_rubric(sleep_stats), sleep_stats,
+                        ("rubric_evolved",)),
+                )
                 if success:
                     phases_completed.append("evolve_rubric")
 
@@ -654,6 +731,15 @@ class SleepHandler:
                     logger.warning("F035.6: audit finalize failed (suppressed)", exc_info=True)
                 finally:
                     self._auditor = None
+            # Fault detector: prune old process_run_log rows (fail-open).
+            if self._recorder is not None:
+                retention = getattr(
+                    self._settings, "fault_detector_process_log_retention_days", 90
+                )
+                try:
+                    await self._recorder.prune_old_rows(retention)
+                except Exception:
+                    logger.debug("process_run_log prune failed (suppressed)", exc_info=True)
             self._sleeping = False
             self._currently_sleeping = False
             self._sleep_task = None
@@ -1469,6 +1555,10 @@ class SleepHandler:
                             rationale=f"stale: aged > {settings.stale_scan_age_days}d, no recall in window",
                         )
 
+                # Fault detector: record how many facts were examined so
+                # ProcessFaultCheck can detect zero-change collapse even when
+                # no facts were actually deactivated.
+                sleep_stats["stale_examined"] = len(stale_facts)
                 sleep_stats["stale_deactivated"] = count
                 logger.info(
                     "Stale scan: deactivated %d facts older than %d days "

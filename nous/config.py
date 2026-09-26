@@ -1616,6 +1616,73 @@ class Settings(BaseSettings):
     drift_detection_enabled: bool = True
     drift_detection_interval: int = 3600
 
+    # Fault detector (decision 28f021a0): detect silent failures in periodic
+    # memory processes.  Master flag defaults OFF — land-dark.
+    fault_detector_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable ProcessFaultCheck + RetrievalCanaryCheck heartbeat checks. "
+            "Default OFF (land-dark). Flip to true after deploying migration 077."
+        ),
+    )
+    fault_detector_check_interval: int = Field(
+        default=3600, ge=60,
+        description="Seconds between ProcessFaultCheck runs.",
+    )
+    fault_detector_sleep_max_gap_hours: int = Field(
+        default=48, ge=1,
+        description=(
+            "Flag if a sleep phase has not completed in this many hours. "
+            "The motivating incident (stale_scan silent for 14 cycles) would "
+            "have been caught at 48h with typical 3-sleeps/day cadence."
+        ),
+    )
+    fault_detector_consecutive_error_threshold: int = Field(
+        default=3, ge=2,
+        description="N consecutive error rows for a phase → finding.",
+    )
+    fault_detector_zero_change_threshold: int = Field(
+        default=5, ge=2,
+        description=(
+            "M consecutive finished-with-zero-changes rows for stale_scan, "
+            "when the eligible-fact population is non-zero → finding."
+        ),
+    )
+    fault_detector_ratio_collapse_threshold: float = Field(
+        default=0.30, gt=0.0, le=1.0,
+        description=(
+            "Output/input ratio < this fraction of the 20-run trailing "
+            "baseline → finding."
+        ),
+    )
+    fault_detector_ratio_baseline_window: int = Field(
+        default=20, ge=5,
+        description="Number of runs used to compute the trailing ratio baseline.",
+    )
+    fault_detector_canary_path: str = Field(
+        default="",
+        description=(
+            "Path to JSONL canary file for RetrievalCanaryCheck. "
+            "Empty → canary check is a no-op. "
+            "Format: one JSON per line with fields: query, gold_ids, min_recall_at_k."
+        ),
+    )
+    fault_detector_canary_top_k: int = Field(
+        default=10, ge=1,
+        description="Top-K results checked in the retrieval canary.",
+    )
+    fault_detector_canary_interval: int = Field(
+        default=3600, ge=60,
+        description="Seconds between RetrievalCanaryCheck runs.",
+    )
+    fault_detector_process_log_retention_days: int = Field(
+        default=90, ge=0,
+        description=(
+            "Days to retain process_run_log rows. "
+            "0 disables pruning."
+        ),
+    )
+
     # F035.4: Context visibility
     context_log_enabled: bool = True
     context_log_full_payload: bool = False
