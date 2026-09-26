@@ -228,14 +228,8 @@ def test_action_review_omits_revert_when_not_revertible() -> None:
     assert all(c["id"] != "revert" for c in built.components)
 
 
-def test_action_review_withholds_revert_even_when_revertible() -> None:
-    """Revert is withheld until a revert executor exists.
-
-    No handler is registered for ``review.revert`` in this phase, so offering
-    the button would 501 on click — the exact silent failure the builder's
-    rationale forbids. The card still STATES revertibility through the
-    compensation block; the verb ships with compensation.handler execution.
-    """
+def test_action_review_offers_revert_when_revertible_and_handler() -> None:
+    """Phase 2.8: Revert is offered when the action is compensable and a handler is set."""
     built = action_review(
         {
             **REVIEW_PARAMS,
@@ -247,9 +241,8 @@ def test_action_review_withholds_revert_even_when_revertible() -> None:
         }
     )
 
-    assert "review.revert" not in built.allowed_actions
-    assert "review.revert" not in _action_names(built)
-    assert all(c["id"] != "revert" for c in built.components)
+    assert "review.revert" in built.allowed_actions
+    assert any(c["id"] == "revert" for c in built.components)
     assert built.data_model["compensation"]["revertible"] is True
 
 

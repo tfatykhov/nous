@@ -56,6 +56,14 @@ Handler = Callable[[ActionContext], Awaitable[ActionResult]]
 
 
 @dataclass
+class _CompensationDeps:
+    """Lightweight dependency bag passed to compensator functions."""
+    heart: Any = None
+    brain: Any = None
+    heartbeat_loader: Any = None
+
+
+@dataclass
 class _HandlerMeta:
     fn: Handler
     mutating: bool
@@ -82,6 +90,8 @@ class ActionRouter:
         heartbeat_runner: Any = None,
         dag_orchestrator: Any = None,
         composer: Any = None,
+        compensation_registry: Any = None,
+        snapshot_store: Any = None,
     ):
         self._db = database
         self._settings = settings
@@ -93,6 +103,9 @@ class ActionRouter:
         # F092.1: SurfaceComposer for app.refine (recompose) and app.refresh
         # (source re-read). None => the micro-app functions report unavailable.
         self._composer = composer
+        # Harness Phase 2.8: compensation registry + snapshot store.
+        self._compensation_registry = compensation_registry
+        self._snapshot_store = snapshot_store
         self._handlers: dict[str, _HandlerMeta] = {}
         # Phase 2: agent-side functions callable by the renderer over
         # POST /a2ui/call (spec's HTTP request-response pattern — the
@@ -645,9 +658,59 @@ def _register_default_handlers(router: ActionRouter) -> None:
 
     router.register("approval.choose", approval_choose, mutating=True, irreversible=True)
     router.register("approval.defer", approval_defer, mutating=False)
+    async def review_revert(ctx: ActionContext) -> ActionResult:
+        registry = router._compensation_registry
+        snap_store = router._snapshot_store
+        if registry is None or snap_store is None:
+            return ActionResult(ok=False, message="compensation not available")
+
+        trace_id = ctx.surface.trace_id
+        if not trace_id:
+            return ActionResult(ok=False, message="no ledger entry linked to this review")
+
+        from uuid import UUID as _UUID
+        try:
+            ledger_entry_id = _UUID(str(trace_id))
+        except (ValueError, TypeError):
+            return ActionResult(ok=False, message="invalid ledger entry reference")
+
+        snapshot = await snap_store.get_by_ledger_entry(ledger_entry_id)
+        if snapshot is None:
+            return ActionResult(ok=False, message="no compensation snapshot for this action")
+
+        if snapshot.reverted_at is not None:
+            return ActionResult(
+                message="already reverted",
+                resolve_surface=True,
+                data_patches=[("/compensation/revertible", False)],
+            )
+
+        compensator = registry.get(snapshot.tool_name)
+        if compensator is None:
+            return ActionResult(ok=False, message=f"no compensator for {snapshot.tool_name}")
+
+        deps = _CompensationDeps(heart=router._heart, brain=router._brain,
+                                 heartbeat_loader=getattr(router._heartbeat, "_loader", None))
+        try:
+            result = await compensator(ledger_entry_id, snapshot.snapshot_data, deps)
+        except Exception as exc:
+            logger.warning("review.revert compensator failed", exc_info=True)
+            return ActionResult(ok=False, message=f"revert failed: {exc}")
+
+        await snap_store.mark_reverted(snapshot.id, result_message=result.message)
+
+        if result.success:
+            return ActionResult(
+                message=f"reverted: {result.message}",
+                resolve_surface=True,
+                data_patches=[("/compensation/revertible", False)],
+            )
+        return ActionResult(ok=False, message=f"revert failed: {result.message}")
+
     router.register("review.acknowledge", review_acknowledge, mutating=False)
     router.register("review.course_correct", review_course_correct, mutating=True)
     router.register("review.make_rule", review_make_rule, mutating=True)
+    router.register("review.revert", review_revert, mutating=True, irreversible=True)
     router.register("heartbeat.acknowledge", hb_ack, mutating=True)
     router.register("heartbeat.resolve", hb_resolve, mutating=True)
     router.register("heartbeat.dismiss", hb_dismiss, mutating=True)

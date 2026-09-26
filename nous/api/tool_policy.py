@@ -76,4 +76,7 @@ def evaluate(ctx: ExecutionContext, tool_name: str, tool_input: Mapping[str, Any
         if named and ((tool_name == "heartbeat_check_manage" and action == "enable")
                       or tool_name == "heartbeat_check_create"):
             return "reenable"
+    # Phase 2.8: an undoable node may only call compensable tools
+    if ctx.undoable and cls and level != "none" and not cls.compensable:
+        return "not_compensable"
     return None

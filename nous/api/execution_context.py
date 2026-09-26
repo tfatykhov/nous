@@ -64,6 +64,9 @@ class ExecutionContext:
     # One logical run across its retries (a heartbeat callback's attempts):
     # the Phase 2b idempotency scope, so a retry cannot re-send.
     run_id: str | None = None
+    # Phase 2.8: the DAG node is declared undoable — every tool call from
+    # this turn must use a compensable tool.
+    undoable: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in CONTEXT_KINDS:
@@ -107,6 +110,7 @@ class ExecutionContext:
             dag_node_name=meta.get("node_name") or None,
             schedule_id=meta.get("schedule_id") or None,
             surface_id=meta.get("a2ui_surface_id") or None,
+            undoable=bool(meta.get("undoable")),
         )
 
 

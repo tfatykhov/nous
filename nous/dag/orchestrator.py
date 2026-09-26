@@ -3112,7 +3112,8 @@ class DAGOrchestrator:
                 frame_type=node.frame_type,
                 model=node.model,
                 timeout=self._effective_timeout(node),
-                metadata={"dag_id": str(dag.id), "node_name": node.name},
+                metadata={"dag_id": str(dag.id), "node_name": node.name,
+                          **({"undoable": True} if getattr(node, "undoable", False) else {})},
                 dag_node_id=node.id,
             )
             now = datetime.now(UTC)

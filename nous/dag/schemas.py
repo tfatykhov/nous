@@ -194,12 +194,20 @@ class DAGNodeSpec(BaseModel):
         ),
     )
 
+    # Harness Phase 2.8 — undoable declaration. When true, the harness
+    # enforces at runtime that every tool call from this node is compensable.
+    undoable: bool = Field(
+        False,
+        description="Declare that this node's effects can be undone. Runtime-enforced: "
+        "non-compensable tool calls are refused.",
+    )
+
     # Harness Phase 3 — approval nodes (type='approval' only).
     options: list[ApprovalOption] | None = Field(
         None, description="2-4 answers, each 'proceed' or 'stop'; at least one of each."
     )
     default_option: str | None = Field(
-        None, description="Option id applied when nobody answers by the deadline. Must STOP."
+        None, description="Option id applied when nobody answers by the deadline.",
     )
     recommended_option: str | None = Field(
         None, description="Option id highlighted on the card. Default: none."
@@ -266,11 +274,10 @@ class DAGNodeSpec(BaseModel):
             raise ValueError(
                 f"Approval node '{self.name}': default_option must name one of {ids}"
             )
-        if by_id[self.default_option].outcome != "stop":
-            raise ValueError(
-                f"Approval node '{self.name}': default_option must be a 'stop' option — "
-                "an unanswered card must never approve the action it guards"
-            )
+        # A 'proceed' default is allowed ONLY when the graph validator
+        # confirms all downstream nodes are undoable AND the flag is on.
+        # The per-node validator stores the outcome for the graph check.
+        # (see validate_dag's _validate_proceed_defaults)
         if self.recommended_option is not None and self.recommended_option not in by_id:
             raise ValueError(
                 f"Approval node '{self.name}': recommended_option must name one of {ids}"
@@ -502,7 +509,53 @@ class DAGCreateRequest(BaseModel):
                     f"Wave {w} has {count} parallel nodes, max is {MAX_PARALLEL_PER_WAVE}"
                 )
 
+        # --- Harness Phase 2.8: proceed-default requires all downstream undoable ---
+        self._validate_proceed_defaults(nodes_by_name)
+
         return self
+
+    def _validate_proceed_defaults(self, nodes_by_name: dict[str, DAGNodeSpec]) -> None:
+        """A 'proceed' default on an approval node is allowed ONLY when
+        ``NOUS_DAG_APPROVAL_PROCEED_DEFAULT_ENABLED`` is true and every
+        downstream acting node is declared ``undoable``."""
+        approvals_with_proceed_default: list[DAGNodeSpec] = []
+        for n in self.nodes:
+            if n.type != DAGNodeType.approval or not n.options or not n.default_option:
+                continue
+            by_id = {o.id: o for o in n.options}
+            opt = by_id.get(n.default_option)
+            if opt and opt.outcome == "proceed":
+                approvals_with_proceed_default.append(n)
+
+        if not approvals_with_proceed_default:
+            return
+
+        try:
+            from nous.config import Settings as _Settings
+            enabled = _Settings().dag_approval_proceed_default_enabled
+        except ImportError:  # pragma: no cover
+            enabled = False
+
+        for appr in approvals_with_proceed_default:
+            if not enabled:
+                raise ValueError(
+                    f"Approval node '{appr.name}': default_option must be a 'stop' option — "
+                    "an unanswered card must never approve the action it guards "
+                    "(set NOUS_DAG_APPROVAL_PROCEED_DEFAULT_ENABLED=true to allow "
+                    "proceed-defaults when downstream nodes are undoable)"
+                )
+            downstream = self._downstream_of({appr.name})
+            acting = [
+                nodes_by_name[name] for name in downstream
+                if name in nodes_by_name
+                and nodes_by_name[name].type in (DAGNodeType.subtask, DAGNodeType.callback)
+            ]
+            non_undoable = [n.name for n in acting if not n.undoable]
+            if non_undoable:
+                raise ValueError(
+                    f"Approval node '{appr.name}': default_option is a 'proceed' option, "
+                    f"but downstream acting nodes {non_undoable} are not declared undoable"
+                )
 
     def _downstream_of(self, roots: set[str]) -> set[str]:
         """Every node reachable from ``roots`` along PREDECESSOR_EDGE_TYPES."""
