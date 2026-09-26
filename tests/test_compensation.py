@@ -39,8 +39,7 @@ from nous.dag.schemas import DAGCreateRequest, DAGEdgeSpec, DAGNodeSpec
 
 def test_compensable_tools_are_marked() -> None:
     """The five clearly-reversible tools are marked compensable."""
-    expected = {"write_file", "schedule_task", "heartbeat_check_create",
-                "heartbeat_check_manage", "resolve_decision"}
+    expected = {"write_file", "schedule_task", "heartbeat_check_create", "heartbeat_check_manage", "resolve_decision"}
     actual = {name for name, cls in TOOL_CLASSES.items() if cls.compensable}
     assert actual == expected
 
@@ -89,8 +88,7 @@ def test_registry_rejects_non_compensable_tool() -> None:
 def test_register_compensators_registers_all_five() -> None:
     registry = CompensationRegistry()
     register_compensators(registry)
-    expected = {"write_file", "schedule_task", "heartbeat_check_create",
-                "heartbeat_check_manage", "resolve_decision"}
+    expected = {"write_file", "schedule_task", "heartbeat_check_create", "heartbeat_check_manage", "resolve_decision"}
     for name in expected:
         assert registry.is_registered(name), f"{name} not registered"
 
@@ -203,6 +201,7 @@ def test_undoable_allows_reads() -> None:
 # 6. DAG schema: proceed-default rules
 # ---------------------------------------------------------------------------
 
+
 def _approval_node(
     name: str = "ask",
     default_outcome: str = "stop",
@@ -211,11 +210,15 @@ def _approval_node(
     """Build a minimal approval + acting node graph."""
     nodes = [
         DAGNodeSpec(
-            name="draft", type="subtask", instructions="Draft something",
+            name="draft",
+            type="subtask",
+            instructions="Draft something",
             undoable=undoable_successor,
         ),
         DAGNodeSpec(
-            name=name, type="approval", instructions="Do you approve?",
+            name=name,
+            type="approval",
+            instructions="Do you approve?",
             options=[
                 {"id": "yes", "label": "Yes", "outcome": "proceed"},
                 {"id": "no", "label": "No", "outcome": "stop"},
@@ -223,7 +226,9 @@ def _approval_node(
             default_option="yes" if default_outcome == "proceed" else "no",
         ),
         DAGNodeSpec(
-            name="act", type="subtask", instructions="Do the thing",
+            name="act",
+            type="subtask",
+            instructions="Do the thing",
             undoable=undoable_successor,
         ),
     ]
@@ -284,11 +289,13 @@ def test_stop_default_still_works() -> None:
 def test_action_review_shows_revert_when_revertible_and_handler() -> None:
     from nous.a2ui.builders.action_review import action_review
 
-    built = action_review({
-        "title": "Wrote config file",
-        "did": "Created /workspace/config.yaml",
-        "compensation": {"revertible": True, "handler": "compensate_write_file", "note": ""},
-    })
+    built = action_review(
+        {
+            "title": "Wrote config file",
+            "did": "Created /workspace/config.yaml",
+            "compensation": {"revertible": True, "handler": "compensate_write_file", "note": ""},
+        }
+    )
     assert "review.revert" in built.allowed_actions
     component_ids = [c["id"] for c in built.components]
     assert "revert" in component_ids
@@ -297,11 +304,13 @@ def test_action_review_shows_revert_when_revertible_and_handler() -> None:
 def test_action_review_no_revert_when_not_revertible() -> None:
     from nous.a2ui.builders.action_review import action_review
 
-    built = action_review({
-        "title": "Sent email",
-        "did": "Sent report to user",
-        "compensation": {"revertible": False, "handler": None, "note": "Cannot unsend"},
-    })
+    built = action_review(
+        {
+            "title": "Sent email",
+            "did": "Sent report to user",
+            "compensation": {"revertible": False, "handler": None, "note": "Cannot unsend"},
+        }
+    )
     assert "review.revert" not in built.allowed_actions
     component_ids = [c["id"] for c in built.components]
     assert "revert" not in component_ids
@@ -311,11 +320,13 @@ def test_action_review_no_revert_when_revertible_but_no_handler() -> None:
     """revertible=True but handler=None: no Revert button (nothing to call)."""
     from nous.a2ui.builders.action_review import action_review
 
-    built = action_review({
-        "title": "Some action",
-        "did": "Did something",
-        "compensation": {"revertible": True, "handler": None, "note": ""},
-    })
+    built = action_review(
+        {
+            "title": "Some action",
+            "did": "Did something",
+            "compensation": {"revertible": True, "handler": None, "note": ""},
+        }
+    )
     assert "review.revert" not in built.allowed_actions
 
 
@@ -352,3 +363,200 @@ def test_execution_context_for_subtask_defaults_undoable_false() -> None:
     )
     ctx = ExecutionContext.for_subtask(subtask, "session-1")
     assert ctx.undoable is False
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for Codex findings (must FAIL before the fix)
+# ---------------------------------------------------------------------------
+
+
+# Finding #1 — config.py: _validate_compensation_dependencies
+# dag_approval_proceed_default_enabled=True requires compensation_enabled=True.
+# Before the fix there was no cross-field validator so this combination was
+# silently accepted.
+
+
+def test_proceed_default_enabled_requires_compensation_enabled() -> None:
+    """Setting proceed_default=True without compensation_enabled=True must fail."""
+    from pydantic import ValidationError
+
+    from nous.config import Settings
+
+    with pytest.raises(ValidationError, match="compensation_enabled"):
+        Settings(
+            _env_file=None,
+            ANTHROPIC_API_KEY="test-key",
+            dag_approval_nodes_enabled=True,
+            dag_approval_proceed_default_enabled=True,
+            compensation_enabled=False,
+        )
+
+
+def test_proceed_default_enabled_with_compensation_enabled_is_ok() -> None:
+    """When compensation is also on, the combination is valid."""
+    from nous.config import Settings
+
+    s = Settings(
+        _env_file=None,
+        ANTHROPIC_API_KEY="test-key",
+        dag_approval_nodes_enabled=True,
+        dag_approval_proceed_default_enabled=True,
+        compensation_enabled=True,
+    )
+    assert s.dag_approval_proceed_default_enabled is True
+
+
+# Finding #3 — a2ui/actions.py: review.revert must NOT call mark_reverted on failure
+# Before the fix mark_reverted was called unconditionally, permanently locking
+# out retries even when the compensator returned success=False.
+
+
+@pytest.mark.asyncio
+async def test_review_revert_does_not_mark_reverted_on_failure() -> None:
+    """A failed compensation must not set reverted_at (so retry is possible)."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+    from uuid import uuid4 as _uuid4
+
+    from nous.a2ui.actions import ActionContext, ActionRouter
+    from nous.api.compensation import CompensationRegistry, CompensationResult
+
+    # Build a minimal ActionRouter with compensation wired.
+    registry = CompensationRegistry()
+
+    async def failing_compensator(eid, snap_data, deps):
+        return CompensationResult(success=False, message="disk full")
+
+    # Temporarily allow registering write_file (it IS compensable).
+    registry.register("write_file", failing_compensator)
+
+    entry_id = _uuid4()
+    snap_id = _uuid4()
+    fake_snapshot = SimpleNamespace(
+        id=snap_id,
+        tool_name="write_file",
+        snapshot_data={"path": "/tmp/x", "full_path": "/tmp/x", "existed": False, "prior_content": None},
+        reverted_at=None,
+    )
+
+    snap_store = MagicMock()
+    snap_store.get_by_ledger_entry = AsyncMock(return_value=fake_snapshot)
+    snap_store.mark_reverted = AsyncMock()
+
+    settings = SimpleNamespace(a2ui_action_rate_per_minute=100, a2ui_trust_forwarded_identity=False)
+    router = ActionRouter(
+        database=None,
+        settings=settings,
+        surface_service=None,
+        compensation_registry=registry,
+        snapshot_store=snap_store,
+    )
+
+    handler_meta = router._handlers["review.revert"]
+    surface = SimpleNamespace(trace_id=str(entry_id), surface_id="surf-1", data_model={})
+    ctx = ActionContext(surface=surface, name="review.revert", context={}, data_model={}, services=router)
+
+    result = await handler_meta.fn(ctx)
+
+    # The compensator returned failure → mark_reverted must NOT be called.
+    snap_store.mark_reverted.assert_not_called()
+    assert result.ok is False
+    assert "disk full" in result.message
+
+
+@pytest.mark.asyncio
+async def test_review_revert_marks_reverted_on_success() -> None:
+    """A successful compensation must set reverted_at exactly once."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+    from uuid import uuid4 as _uuid4
+
+    from nous.a2ui.actions import ActionContext, ActionRouter
+    from nous.api.compensation import CompensationRegistry, CompensationResult
+
+    registry = CompensationRegistry()
+
+    async def ok_compensator(eid, snap_data, deps):
+        return CompensationResult(success=True, message="restored")
+
+    registry.register("write_file", ok_compensator)
+
+    entry_id = _uuid4()
+    snap_id = _uuid4()
+    fake_snapshot = SimpleNamespace(
+        id=snap_id,
+        tool_name="write_file",
+        snapshot_data={"path": "/tmp/x", "full_path": "/tmp/x", "existed": False, "prior_content": None},
+        reverted_at=None,
+    )
+
+    snap_store = MagicMock()
+    snap_store.get_by_ledger_entry = AsyncMock(return_value=fake_snapshot)
+    snap_store.mark_reverted = AsyncMock()
+
+    settings = SimpleNamespace(a2ui_action_rate_per_minute=100, a2ui_trust_forwarded_identity=False)
+    router = ActionRouter(
+        database=None,
+        settings=settings,
+        surface_service=None,
+        compensation_registry=registry,
+        snapshot_store=snap_store,
+    )
+
+    handler_meta = router._handlers["review.revert"]
+    surface = SimpleNamespace(trace_id=str(entry_id), surface_id="surf-1", data_model={})
+    ctx = ActionContext(surface=surface, name="review.revert", context={}, data_model={}, services=router)
+
+    result = await handler_meta.fn(ctx)
+
+    snap_store.mark_reverted.assert_called_once_with(snap_id, result_message="restored")
+    assert result.ok is True
+
+
+# Finding #4 — compensation.py: recreate file when existed=True but now absent
+# Before the fix the compensator returned success ("already absent") even when the
+# file had existed, silently dropping the prior content instead of restoring it.
+
+
+@pytest.mark.asyncio
+async def test_compensate_write_file_recreates_when_existed_and_now_absent() -> None:
+    """File existed + was deleted → compensator must recreate from prior_content."""
+    import tempfile
+
+    path = os.path.join(tempfile.gettempdir(), f"test_comp_recreate_{uuid4().hex[:8]}.txt")
+    assert not os.path.exists(path)
+
+    snapshot_data = {
+        "path": path,
+        "full_path": path,
+        "existed": True,
+        "prior_content": "the original content",
+    }
+    result = await compensate_write_file(uuid4(), snapshot_data, None)
+    try:
+        assert result.success, f"Expected success but got: {result.message}"
+        assert os.path.exists(path), "Compensator should have recreated the file"
+        with open(path) as f:
+            assert f.read() == "the original content"
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+@pytest.mark.asyncio
+async def test_compensate_write_file_fails_when_existed_no_prior_content() -> None:
+    """File existed but prior_content not captured → compensator must fail (not silently succeed)."""
+    import tempfile
+
+    path = os.path.join(tempfile.gettempdir(), f"test_comp_noprior_{uuid4().hex[:8]}.txt")
+    assert not os.path.exists(path)
+
+    snapshot_data = {
+        "path": path,
+        "full_path": path,
+        "existed": True,
+        "prior_content": None,  # capture was not possible
+    }
+    result = await compensate_write_file(uuid4(), snapshot_data, None)
+    assert result.success is False
+    assert "prior content not captured" in result.message
