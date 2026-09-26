@@ -240,7 +240,9 @@ class HeartbeatRunner:
                         )
                         self._last_dag_tick = datetime.now(UTC)
                     except asyncio.TimeoutError:
-                        self._last_dag_tick = datetime.now(UTC)
+                        # Do NOT advance _last_dag_tick: it is exposed as the last
+                        # *successful* tick, and refreshing it on a cancelled tick
+                        # would make a stalled orchestrator look healthy.
                         logger.error(
                             "F038: DAG orchestrator tick timed out after %ds — "
                             "continuing loop",

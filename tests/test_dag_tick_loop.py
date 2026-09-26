@@ -180,6 +180,38 @@ async def test_dag_tick_timeout_continues_loop():
             await runner.stop()
 
 
+@pytest.mark.asyncio
+async def test_timed_out_tick_does_not_advance_last_dag_tick():
+    """A tick cancelled by the timeout must not be reported as a successful tick."""
+    settings = _make_settings(dag_tick_interval=1, dag_tick_timeout=1)
+
+    call_count = 0
+    second_call = asyncio.Event()
+
+    async def always_hang():
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 2:
+            second_call.set()
+        await asyncio.sleep(10)  # every tick times out
+
+    dag_orchestrator = MagicMock()
+    dag_orchestrator.tick = AsyncMock(side_effect=always_hang)
+
+    runner = _make_runner(settings, dag_orchestrator)
+
+    with patch.object(runner, "_detect_missed_checks", AsyncMock()):
+        await runner.start()
+        try:
+            # Wait until the first tick has timed out and a second one started.
+            await asyncio.wait_for(second_call.wait(), timeout=6.0)
+            assert runner.last_dag_tick is None, (
+                "timed-out tick advanced last_dag_tick — stalled orchestrator would look healthy"
+            )
+        finally:
+            await runner.stop()
+
+
 # ---------------------------------------------------------------------------
 # Test d: stop() cancels the DAG loop cleanly
 # ---------------------------------------------------------------------------
