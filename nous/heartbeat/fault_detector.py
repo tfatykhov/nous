@@ -200,10 +200,10 @@ class ProcessFaultCheck(BaseCheck):
                 and r["items_examined"] > 0
                 and r.get("items_changed") is not None
             ]
-            if len(ratio_runs) >= baseline_window:
+            if len(ratio_runs) >= baseline_window + 5:
                 baseline_ratios = [
                     r["items_changed"] / r["items_examined"]
-                    for r in ratio_runs[5:]  # skip the 5 most recent for baseline
+                    for r in ratio_runs[5 : baseline_window + 5]  # exactly baseline_window historical runs
                 ]
                 recent_ratios = [r["items_changed"] / r["items_examined"] for r in ratio_runs[:5]]
                 if baseline_ratios and recent_ratios:

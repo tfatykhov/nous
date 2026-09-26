@@ -63,6 +63,7 @@ def _run(now: datetime, offset_hours: float, status: str = "finished", **extra) 
 # ProcessRecorder tests
 # ---------------------------------------------------------------------------
 
+
 class TestProcessRecorder:
     """ProcessRecorder writes to and reads from process_run_log."""
 
@@ -120,6 +121,7 @@ class TestProcessRecorder:
     async def test_noop_id_skip(self):
         """_NOOP_ID returned by start on DB error; finish/error should be no-ops."""
         from nous.observability.process_recorder import _NOOP_ID
+
         recorder, mock_session = self._make_recorder()
         # Simulate a DB failure on start
         mock_session.execute.side_effect = Exception("db down")
@@ -136,9 +138,13 @@ class TestProcessRecorder:
         from nous.observability.process_recorder import ProcessRecorder
 
         row = {
-            "id": 1, "status": "finished", "started_at": datetime.now(UTC),
-            "finished_at": datetime.now(UTC), "items_examined": 5,
-            "items_changed": 2, "error_message": None,
+            "id": 1,
+            "status": "finished",
+            "started_at": datetime.now(UTC),
+            "finished_at": datetime.now(UTC),
+            "items_examined": 5,
+            "items_changed": 2,
+            "error_message": None,
         }
         mock_session = AsyncMock()
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
@@ -160,6 +166,7 @@ class TestProcessRecorder:
 # ProcessFaultCheck tests
 # ---------------------------------------------------------------------------
 
+
 class TestProcessFaultCheckMissedRun:
     """Detect 'process has not run in N hours'."""
 
@@ -167,6 +174,7 @@ class TestProcessFaultCheckMissedRun:
         settings = _mock_settings()
         db = MagicMock()
         check = ProcessFaultCheck(db=db, settings=settings, agent_id="test-agent")
+
         # Patch the recorder's get_recent_runs to return our fake data
         async def _fake_get_recent_runs(process_name, limit=20):
             return runs_by_process.get(process_name, [])
@@ -186,9 +194,16 @@ class TestProcessFaultCheckMissedRun:
         runs = {
             f"sleep/{phase}": [_run(now, 1.0)]  # 1 hour ago
             for phase in [
-                "review", "prune", "reflect", "resolve_contradictions",
-                "stale_scan", "cluster_consolidation", "graph_densification",
-                "relink_open_episodes", "prune_dead_edges", "generalize",
+                "review",
+                "prune",
+                "reflect",
+                "resolve_contradictions",
+                "stale_scan",
+                "cluster_consolidation",
+                "graph_densification",
+                "relink_open_episodes",
+                "prune_dead_edges",
+                "generalize",
             ]
         }
         check, _ = self._make_check(runs)
@@ -333,8 +348,7 @@ class TestProcessFaultCheckZeroChangeCollapse:
         now = datetime.now(UTC)
         runs = {
             "sleep/stale_scan": [
-                _run(now, h, status="finished", items_examined=50, items_changed=0)
-                for h in [1, 2, 3, 4, 5]
+                _run(now, h, status="finished", items_examined=50, items_changed=0) for h in [1, 2, 3, 4, 5]
             ]
         }
         settings = _mock_settings(fault_detector_zero_change_threshold=5)
@@ -362,8 +376,7 @@ class TestProcessFaultCheckZeroChangeCollapse:
         now = datetime.now(UTC)
         runs = {
             "sleep/stale_scan": [
-                _run(now, h, status="finished", items_examined=0, items_changed=0)
-                for h in [1, 2, 3, 4, 5]
+                _run(now, h, status="finished", items_examined=0, items_changed=0) for h in [1, 2, 3, 4, 5]
             ]
         }
         settings = _mock_settings(fault_detector_zero_change_threshold=5)
@@ -399,10 +412,7 @@ class TestProcessFaultCheckRatioCollapse:
             for h in range(6, 26)  # 20 old runs
         ]
         # Recent (last 5 runs): ratio ~0.02 (collapsed)
-        recent = [
-            _run(now, h, status="finished", items_examined=100, items_changed=2)
-            for h in range(1, 6)
-        ]
+        recent = [_run(now, h, status="finished", items_examined=100, items_changed=2) for h in range(1, 6)]
         runs = {"sleep/stale_scan": recent + baseline}
         settings = _mock_settings(
             fault_detector_ratio_collapse_threshold=0.30,
@@ -428,13 +438,53 @@ class TestProcessFaultCheckRatioCollapse:
         assert ratio_findings, "Expected a ratio-collapse finding"
 
     @pytest.mark.asyncio
+    async def test_no_finding_with_insufficient_baseline_runs(self):
+        """Fewer than baseline_window+5 eligible runs must not trigger a finding.
+
+        Mutation evidence: with the old guard ``len(ratio_runs) >= baseline_window``,
+        exactly baseline_window+1 = 6 eligible runs (baseline_window=5) is enough
+        to fire — comparing 5 recent ratios against a single historical run.  The
+        new guard requires baseline_window+5 = 10 runs so the baseline is never
+        a single data point.
+        """
+        now = datetime.now(UTC)
+        # 1 old run with a healthy ratio + 5 recent runs with a collapsed ratio.
+        # Total = 6, which satisfies the old guard (>= 5) but NOT the new one (>= 10).
+        old_run = _run(now, 6.0, status="finished", items_examined=100, items_changed=50)
+        recent = [_run(now, h, status="finished", items_examined=100, items_changed=2) for h in range(1, 6)]
+        all_runs = recent + [old_run]  # newest-first
+
+        async def _fake_get(process_name, limit=20):
+            return all_runs[:limit]
+
+        settings = _mock_settings(
+            fault_detector_ratio_baseline_window=5,
+            fault_detector_ratio_collapse_threshold=0.30,
+        )
+        db = MagicMock()
+        check = ProcessFaultCheck(db=db, settings=settings, agent_id="test-agent")
+
+        async def _fake_count(*a, **kw):
+            return 0
+
+        recorder_mock = AsyncMock()
+        recorder_mock.get_recent_runs = _fake_get
+        with patch("nous.heartbeat.fault_detector.ProcessRecorder", return_value=recorder_mock):
+            with patch.object(check, "_count_stale_eligible", _fake_count):
+                result = await check.run()
+
+        ratio_findings = [f for f in result.findings if "ratio" in f.summary]
+        assert not ratio_findings, (
+            "Ratio collapse must not fire with only 1 baseline run (baseline_window+5 eligible runs are required)"
+        )
+
+    @pytest.mark.asyncio
     async def test_no_finding_when_ratio_stable(self):
         now = datetime.now(UTC)
         # Consistent ~0.5 ratio across all runs
         runs = {
             "sleep/stale_scan": [
-                _run(now, h, status="finished", items_examined=100, items_changed=50)
-                for h in range(1, 26)
+                _run(now, h, status="finished", items_examined=100, items_changed=50) for h in range(1, 26)
             ]
         }
         settings = _mock_settings(
@@ -464,6 +514,7 @@ class TestProcessFaultCheckRatioCollapse:
 # RetrievalCanaryCheck tests
 # ---------------------------------------------------------------------------
 
+
 class TestRetrievalCanaryCheck:
     """Test retrieval canary check."""
 
@@ -486,9 +537,7 @@ class TestRetrievalCanaryCheck:
     async def test_no_finding_on_hit(self, tmp_path):
         """No finding when gold_id IS in top-K results."""
         gold_id = "11111111-1111-1111-1111-111111111111"
-        canary = [
-            {"query": "what is the model?", "gold_ids": [gold_id], "min_recall_at_k": 0.5}
-        ]
+        canary = [{"query": "what is the model?", "gold_ids": [gold_id], "min_recall_at_k": 0.5}]
         canary_file = tmp_path / "canary.jsonl"
         canary_file.write_text(json.dumps(canary[0]) + "\n")
 
@@ -508,9 +557,7 @@ class TestRetrievalCanaryCheck:
         """Mutation evidence: remove the recall < min_recall check → no finding."""
         gold_id = "22222222-2222-2222-2222-222222222222"
         other_id = "33333333-3333-3333-3333-333333333333"
-        canary = [
-            {"query": "what is the model?", "gold_ids": [gold_id], "min_recall_at_k": 0.5}
-        ]
+        canary = [{"query": "what is the model?", "gold_ids": [gold_id], "min_recall_at_k": 0.5}]
         canary_file = tmp_path / "canary.jsonl"
         canary_file.write_text(json.dumps(canary[0]) + "\n")
 
@@ -532,9 +579,7 @@ class TestRetrievalCanaryCheck:
     @pytest.mark.asyncio
     async def test_noop_when_canary_file_missing(self, tmp_path):
         """Missing canary file → no-op, no crash."""
-        settings = _mock_settings(
-            fault_detector_canary_path=str(tmp_path / "nonexistent.jsonl")
-        )
+        settings = _mock_settings(fault_detector_canary_path=str(tmp_path / "nonexistent.jsonl"))
         heart = AsyncMock()
         check = RetrievalCanaryCheck(heart=heart, settings=settings)
         result = await check.run()
@@ -652,10 +697,7 @@ class TestCountStaleEligibleExcludesCategories:
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
         mock_session.execute = AsyncMock(
-            side_effect=lambda sql, params: (
-                executed_sqls.append((str(sql), params))
-                or mock_result
-            )
+            side_effect=lambda sql, params: executed_sqls.append((str(sql), params)) or mock_result
         )
 
         db = MagicMock()
@@ -668,9 +710,7 @@ class TestCountStaleEligibleExcludesCategories:
         assert executed_sqls, "Expected a DB query to be executed"
         sql_text, params = executed_sqls[0]
         # Exclusion clause must appear in the query
-        assert "NOT IN" in sql_text or "category" in sql_text.lower(), (
-            "Expected category exclusion predicate in query"
-        )
+        assert "NOT IN" in sql_text or "category" in sql_text.lower(), "Expected category exclusion predicate in query"
         # Both excluded categories must be in the parameters
         assert "rule" in params.values()
         assert "preference" in params.values()
@@ -691,14 +731,8 @@ class TestRatioCollapseBaselineFetch:
         now = datetime.now(UTC)
 
         # 25 old runs with a high ratio + 5 recent with collapsed ratio
-        old_runs = [
-            _run(now, h, status="finished", items_examined=100, items_changed=50)
-            for h in range(6, 31)
-        ]
-        recent_runs = [
-            _run(now, h, status="finished", items_examined=100, items_changed=2)
-            for h in range(1, 6)
-        ]
+        old_runs = [_run(now, h, status="finished", items_examined=100, items_changed=50) for h in range(6, 31)]
+        recent_runs = [_run(now, h, status="finished", items_examined=100, items_changed=2) for h in range(1, 6)]
         all_runs = recent_runs + old_runs  # newest first
 
         async def _fake_get(process_name, limit=20):
@@ -722,9 +756,7 @@ class TestRatioCollapseBaselineFetch:
                 result = await check.run()
 
         # All phase fetch calls should request at least baseline_window + 5 = 25 rows
-        assert all(limit >= 25 for limit in fetch_limits), (
-            f"Expected fetch limit >= 25, got: {fetch_limits}"
-        )
+        assert all(limit >= 25 for limit in fetch_limits), f"Expected fetch limit >= 25, got: {fetch_limits}"
         # With enough data, ratio collapse should be detected
         ratio_findings = [f for f in result.findings if "ratio" in f.summary]
         assert ratio_findings, "Expected a ratio-collapse finding with sufficient baseline data"
@@ -742,10 +774,7 @@ class TestRatioCollapseBaselineFetch:
             _run(now, h, status="finished", items_examined=100, items_changed=50)
             for h in range(6, 16)  # 10 old runs
         ]
-        recent_runs = [
-            _run(now, h, status="finished", items_examined=100, items_changed=2)
-            for h in range(1, 6)
-        ]
+        recent_runs = [_run(now, h, status="finished", items_examined=100, items_changed=2) for h in range(1, 6)]
         all_runs = recent_runs + old_runs
 
         async def _fake_get(process_name, limit=20):
