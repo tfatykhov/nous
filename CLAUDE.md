@@ -36,6 +36,7 @@ nous/
 │   ├── telegram_bot.py         # Telegram interface (streaming + usage)
 │   ├── events.py               # Event bus (async pub/sub)
 │   ├── utils.py                # Shared utilities
+│   ├── loop_watchdog.py        # Event-loop stall watchdog (stack dump + exit)
 │   ├── storage/                # Database layer (async SQLAlchemy)
 │   │   ├── database.py         # Connection pool, session management
 │   │   ├── models.py           # ORM models for all 28 tables
@@ -460,6 +461,8 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_TOOL_TIMEOUT` | `120` | Max seconds for any single tool execution |
 | `NOUS_KEEPALIVE_INTERVAL` | `10` | Seconds between keepalive events during tool execution |
 | `NOUS_SSE_PING_INTERVAL` | `15` | Seconds between SSE comment-line pings on `/chat/stream`. Keeps the socket warm during stalls in pre_turn, compaction, or any non-streaming phase. Comment lines are ignored by SSE clients but reset their read timer. |
+| `NOUS_EVENT_LOOP_WATCHDOG_ENABLED` | `true` | In-process event-loop watchdog (`nous/loop_watchdog.py`). An asyncio task re-arms `faulthandler.dump_traceback_later(timeout, exit=True)` every 10 s. If the loop stops turning, faulthandler's own C thread (which needs neither the loop, the GIL nor any Python lock) writes every thread's stack to stderr and exits with status 1, so `restart: unless-stopped` recovers the container with the evidence already in `docker logs`. On 2026-09-26 the loop sat blocked for 2.5 h on a lock leaked by a dead thread: the container was `unhealthy` with `RestartCount=0`, because plain compose never acts on `unhealthy`, and diagnosis needed py-spy from a second container. It ships ON because it only fires in an already-broken state; it is armed after startup and disarmed before shutdown, so neither can trip it. It is the only `faulthandler` timer in the process. Kill switch only. |
+| `NOUS_EVENT_LOOP_WATCHDOG_TIMEOUT_SECONDS` | `120` | Seconds the event loop may go without turning before the watchdog dumps and exits (`ge=30`, so a legitimately slow tick cannot kill a healthy process). The timer runs from the last 10 s re-arm and is set to this value + 10 s, so a stall is killed after between this value and this value + 10 s, never sooner. Both variables are passed through `docker-compose.yml`. Anything that blocks the loop this long, such as a synchronous call on the loop thread, will restart Nous. |
 | `NOUS_GRAPH_RECALL_ENABLED` | `true` | Enable graph expansion in recall_deep |
 | `NOUS_GRAPH_RECALL_MAX_EXPAND` | `5` | Max seed results to expand |
 | `NOUS_GRAPH_RECALL_DECAY` | `0.7` | Score decay per graph hop |
