@@ -21,7 +21,6 @@ blocking the event bus dispatch loop.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -40,7 +39,8 @@ from nous.storage.models import Fact
 
 logger = logging.getLogger(__name__)
 
-_REFLECTION_PROMPT = """You are an AI agent reviewing your recent activity. Analyze the following
+_REFLECTION_PROMPT = (
+    """You are an AI agent reviewing your recent activity. Analyze the following
 episode summaries from the past 24 hours and identify:
 
 1. Patterns — recurring topics, user needs, or behaviors
@@ -54,7 +54,9 @@ Episodes:
 Use the store_reflection tool to return your analysis.
 
 Categories for facts:
-""" + TIER1_CATEGORY_GUIDANCE + """
+"""
+    + TIER1_CATEGORY_GUIDANCE
+    + """
 - "technical" — Architecture, implementation, project-specific knowledge
 - "concept" — General knowledge, research findings, theoretical insights
 - "tool" — Tool/library behavior, gotchas, configuration
@@ -62,6 +64,7 @@ Categories for facts:
 For facts: Extract concrete, reusable knowledge from the reflection. Include the reflection
 summary and any lessons as structured facts with meaningful subjects (not generic labels).
 Max 5 facts."""
+)
 
 _GENERALIZE_PROMPT = """These facts are about the same topic. Create one generalized fact
 that captures the essential knowledge from all of them.
@@ -390,9 +393,7 @@ class SleepHandler:
         """
         if self._sleeping:
             return  # Already sleeping
-        self._sleep_task = asyncio.create_task(
-            self._run_sleep(event), name="sleep-work"
-        )
+        self._sleep_task = asyncio.create_task(self._run_sleep(event), name="sleep-work")
 
     @property
     def is_sleeping(self) -> bool:
@@ -413,14 +414,11 @@ class SleepHandler:
         standard idiom for this pattern.
         """
         try:
-            task = asyncio.create_task(
-                self._brain.emit_event(event_type, data)
-            )
+            task = asyncio.create_task(self._brain.emit_event(event_type, data))
             self._pending_emits.add(task)
             task.add_done_callback(self._pending_emits.discard)
         except Exception:
-            logger.debug("%s persistence failed (suppressed)",
-                         event_type, exc_info=True)
+            logger.debug("%s persistence failed (suppressed)", event_type, exc_info=True)
 
     async def _run_audited_phase(self, label, op, coro_factory, sleep_stats, count_keys):
         """F035.6: run a phase and record ONE summary action from its mutation delta.
@@ -476,7 +474,10 @@ class SleepHandler:
         run_id = await self._recorder.start(process_name)
         try:
             result = await coro_factory()
-            await self._recorder.finish(run_id)
+            if result:
+                await self._recorder.finish(run_id)
+            else:
+                await self._recorder.error(run_id, "phase returned False")
             return result
         except Exception as exc:
             await self._recorder.error(run_id, str(exc))
@@ -570,11 +571,14 @@ class SleepHandler:
                     _ss_run_id = await self._recorder.start("sleep/stale_scan")
                     try:
                         success = await self._phase_stale_scan(sleep_stats)
-                        await self._recorder.finish(
-                            _ss_run_id,
-                            items_examined=sleep_stats.get("stale_examined"),
-                            items_changed=sleep_stats.get("stale_deactivated", 0) - _stale_changed_before,
-                        )
+                        if success:
+                            await self._recorder.finish(
+                                _ss_run_id,
+                                items_examined=sleep_stats.get("stale_examined"),
+                                items_changed=sleep_stats.get("stale_deactivated", 0) - _stale_changed_before,
+                            )
+                        else:
+                            await self._recorder.error(_ss_run_id, "stale_scan phase returned False")
                     except Exception as _exc:
                         await self._recorder.error(_ss_run_id, str(_exc))
                         raise
@@ -599,9 +603,12 @@ class SleepHandler:
                 success = await self._run_phase(
                     "recover_abandoned_episodes",
                     lambda: self._run_audited_phase(
-                        "recover_episode", "recover",
-                        lambda: self._phase_recover_abandoned_episodes(sleep_stats), sleep_stats,
-                        ("episodes_recovered", "episodes_marked_abandoned")),
+                        "recover_episode",
+                        "recover",
+                        lambda: self._phase_recover_abandoned_episodes(sleep_stats),
+                        sleep_stats,
+                        ("episodes_recovered", "episodes_marked_abandoned"),
+                    ),
                 )
                 if success:
                     phases_completed.append("recover_abandoned_episodes")
@@ -610,9 +617,12 @@ class SleepHandler:
                 success = await self._run_phase(
                     "graph_densification",
                     lambda: self._run_audited_phase(
-                        "graph_densify", "edge_add",
-                        lambda: self._phase_graph_densification(sleep_stats), sleep_stats,
-                        ("orphan_edges_created", "temporal_chain_edges", "comention_edges", "bridge_edges_created")),
+                        "graph_densify",
+                        "edge_add",
+                        lambda: self._phase_graph_densification(sleep_stats),
+                        sleep_stats,
+                        ("orphan_edges_created", "temporal_chain_edges", "comention_edges", "bridge_edges_created"),
+                    ),
                 )
                 if success:
                     phases_completed.append("graph_densification")
@@ -626,9 +636,12 @@ class SleepHandler:
                 success = await self._run_phase(
                     "relink_open_episodes",
                     lambda: self._run_audited_phase(
-                        "relink_episode", "relink",
-                        lambda: self._phase_relink_open_episodes(sleep_stats), sleep_stats,
-                        ("episodes_relinked", "episode_relink_edges")),
+                        "relink_episode",
+                        "relink",
+                        lambda: self._phase_relink_open_episodes(sleep_stats),
+                        sleep_stats,
+                        ("episodes_relinked", "episode_relink_edges"),
+                    ),
                 )
                 if success:
                     phases_completed.append("relink_open_episodes")
@@ -640,14 +653,17 @@ class SleepHandler:
                 success = await self._run_phase(
                     "stc_consolidation",
                     lambda: self._run_audited_phase(
-                        "stc_consolidate", "consolidate",
-                        lambda: self._phase_stc_consolidation(sleep_stats), sleep_stats,
+                        "stc_consolidate",
+                        "consolidate",
+                        lambda: self._phase_stc_consolidation(sleep_stats),
+                        sleep_stats,
                         # F044 per-cycle MUTATION counters only (UPDATE rowcounts):
                         # promotions (consolidation_state), recall-buffer ltp writes,
                         # and weight downscale. The f044_n_*/ltp_ge*/reinforced_24h
                         # keys are STATE/WINDOW snapshots, not this-cycle mutations —
                         # excluding them avoids recording a bogus 15k-edge "delta".
-                        ("f044_promoted", "f044_recall_touches_flushed", "f044_downscaled")),
+                        ("f044_promoted", "f044_recall_touches_flushed", "f044_downscaled"),
+                    ),
                 )
                 if success:
                     phases_completed.append("stc_consolidation")
@@ -656,9 +672,12 @@ class SleepHandler:
                 success = await self._run_phase(
                     "prune_dead_edges",
                     lambda: self._run_audited_phase(
-                        "prune_dead_edges", "edge_prune",
-                        lambda: self._phase_prune_dead_edges(sleep_stats), sleep_stats,
-                        ("dead_edges_pruned",)),
+                        "prune_dead_edges",
+                        "edge_prune",
+                        lambda: self._phase_prune_dead_edges(sleep_stats),
+                        sleep_stats,
+                        ("dead_edges_pruned",),
+                    ),
                 )
                 if success:
                     phases_completed.append("prune_dead_edges")
@@ -678,9 +697,12 @@ class SleepHandler:
                 success = await self._run_phase(
                     "generalize",
                     lambda: self._run_audited_phase(
-                        "generalize", "create_proc",
-                        lambda: self._phase_generalize(sleep_stats), sleep_stats,
-                        ("procedures_created",)),
+                        "generalize",
+                        "create_proc",
+                        lambda: self._phase_generalize(sleep_stats),
+                        sleep_stats,
+                        ("procedures_created",),
+                    ),
                 )
                 if success:
                     phases_completed.append("generalize")
@@ -689,25 +711,30 @@ class SleepHandler:
                 success = await self._run_phase(
                     "evolve_rubric",
                     lambda: self._run_audited_phase(
-                        "evolve_rubric", "evolve",
-                        lambda: self._phase_evolve_rubric(sleep_stats), sleep_stats,
-                        ("rubric_evolved",)),
+                        "evolve_rubric",
+                        "evolve",
+                        lambda: self._phase_evolve_rubric(sleep_stats),
+                        sleep_stats,
+                        ("rubric_evolved",),
+                    ),
                 )
                 if success:
                     phases_completed.append("evolve_rubric")
 
-            await self._bus.emit(Event(
-                type="sleep_completed",
-                agent_id=event.agent_id,
-                data={
-                    "phases_completed": phases_completed,
-                    "interrupted": self._interrupted,
-                    "modifies": "memory",
-                    **sleep_stats,
-                },
-                trace_id=event.trace_id,       # F035.2: inherit from parent
-                caused_by=event.event_id,      # F035.2: point to parent
-            ))
+            await self._bus.emit(
+                Event(
+                    type="sleep_completed",
+                    agent_id=event.agent_id,
+                    data={
+                        "phases_completed": phases_completed,
+                        "interrupted": self._interrupted,
+                        "modifies": "memory",
+                        **sleep_stats,
+                    },
+                    trace_id=event.trace_id,  # F035.2: inherit from parent
+                    caused_by=event.event_id,  # F035.2: point to parent
+                )
+            )
             logger.info(
                 "Sleep completed: %s (interrupted=%s)",
                 phases_completed,
@@ -733,9 +760,7 @@ class SleepHandler:
                     self._auditor = None
             # Fault detector: prune old process_run_log rows (fail-open).
             if self._recorder is not None:
-                retention = getattr(
-                    self._settings, "fault_detector_process_log_retention_days", 90
-                )
+                retention = getattr(self._settings, "fault_detector_process_log_retention_days", 90)
                 try:
                     await self._recorder.prune_old_rows(retention)
                 except Exception:
@@ -851,20 +876,20 @@ class SleepHandler:
 
                     # F031: UPDATES prefix — supersede existing fact (case-insensitive)
                     if isinstance(subject, str) and subject.upper().startswith("UPDATES:"):
-                        updated = await self._handle_updates_prefix(
-                            subject, fact, sleep_stats
-                        )
+                        updated = await self._handle_updates_prefix(subject, fact, sleep_stats)
                         if updated:
                             stored += 1
                         continue
 
-                    result = await self._heart.learn(FactInput(
-                        subject=subject,
-                        content=fact["content"],
-                        source="sleep_reflection",
-                        confidence=0.8,
-                        category=fact.get("category", "concept"),
-                    ))
+                    result = await self._heart.learn(
+                        FactInput(
+                            subject=subject,
+                            content=fact["content"],
+                            source="sleep_reflection",
+                            confidence=0.8,
+                            category=fact.get("category", "concept"),
+                        )
+                    )
                     if isinstance(result, FactRejected):
                         logger.debug("Admission rejected sleep-reflected fact: %s", fact["content"][:50])
                         continue
@@ -873,7 +898,8 @@ class SleepHandler:
                     if self._auditor is not None:
                         _fid = getattr(result, "id", None)
                         self._auditor.record(
-                            "reflect", "learn",
+                            "reflect",
+                            "learn",
                             target_ids=[_fid] if _fid else None,
                             after={"subject": subject, "content_preview": preview(fact["content"])},
                             rationale="sleep_reflection fact",
@@ -882,13 +908,15 @@ class SleepHandler:
             # Fallback: if LLM didn't return structured facts, store summary + lessons
             if not structured_facts:
                 if reflection.get("summary"):
-                    result = await self._heart.learn(FactInput(
-                        subject="daily_reflection",
-                        content=reflection["summary"],
-                        source="sleep_reflection",
-                        confidence=0.8,
-                        category="concept",
-                    ))
+                    result = await self._heart.learn(
+                        FactInput(
+                            subject="daily_reflection",
+                            content=reflection["summary"],
+                            source="sleep_reflection",
+                            confidence=0.8,
+                            category="concept",
+                        )
+                    )
                     if isinstance(result, FactRejected):
                         logger.debug("Admission rejected sleep-reflected fact: %s", reflection["summary"][:50])
                     else:
@@ -897,24 +925,30 @@ class SleepHandler:
                         if self._auditor is not None:
                             _fid = getattr(result, "id", None)
                             self._auditor.record(
-                                "reflect", "learn",
+                                "reflect",
+                                "learn",
                                 target_ids=[_fid] if _fid else None,
-                                after={"subject": "daily_reflection", "content_preview": preview(reflection["summary"])},
+                                after={
+                                    "subject": "daily_reflection",
+                                    "content_preview": preview(reflection["summary"]),
+                                },
                                 rationale="sleep_reflection summary",
                             )
 
                 for lesson in reflection.get("lessons", [])[:3]:
                     if self._interrupted:
                         break
-                    result = await self._heart.learn(FactInput(
-                        subject="lesson_learned",
-                        content=lesson,
-                        source="sleep_reflection",
-                        confidence=0.7,
-                        # Was "rule" — lessons are not user directives
-                        # (Tier-1 pollution fix, 2026-07-24).
-                        category="technical",
-                    ))
+                    result = await self._heart.learn(
+                        FactInput(
+                            subject="lesson_learned",
+                            content=lesson,
+                            source="sleep_reflection",
+                            confidence=0.7,
+                            # Was "rule" — lessons are not user directives
+                            # (Tier-1 pollution fix, 2026-07-24).
+                            category="technical",
+                        )
+                    )
                     if isinstance(result, FactRejected):
                         logger.debug("Admission rejected sleep-reflected fact: %s", lesson[:50])
                         continue
@@ -923,7 +957,8 @@ class SleepHandler:
                     if self._auditor is not None:
                         _fid = getattr(result, "id", None)
                         self._auditor.record(
-                            "reflect", "learn",
+                            "reflect",
+                            "learn",
                             target_ids=[_fid] if _fid else None,
                             after={"subject": "lesson_learned", "content_preview": preview(lesson)},
                             rationale="sleep_reflection lesson",
@@ -978,9 +1013,7 @@ class SleepHandler:
         # Format as orient context (max 20 facts)
         facts_list = list(existing_facts.values())[:20]
         logger.info("F031 orient: injecting %d existing facts from %d queries", len(facts_list), len(queries))
-        facts_text = "\n".join(
-            f"- [{f.category or 'unknown'}] {f.content}" for f in facts_list
-        )
+        facts_text = "\n".join(f"- [{f.category or 'unknown'}] {f.content}" for f in facts_list)
         return (
             f"\nEXISTING KNOWLEDGE (do NOT re-extract these — only extract genuinely NEW information):\n"
             f"{facts_text}\n\n"
@@ -994,21 +1027,20 @@ class SleepHandler:
             return
         _fid = getattr(result, "id", None)
         self._auditor.record(
-            "reflect", "learn",
+            "reflect",
+            "learn",
             target_ids=[_fid] if _fid else None,
             after={"subject": subject, "content_preview": preview(content)},
             rationale=rationale,
         )
 
-    async def _handle_updates_prefix(
-        self, subject: str, fact: dict, sleep_stats: dict
-    ) -> bool:
+    async def _handle_updates_prefix(self, subject: str, fact: dict, sleep_stats: dict) -> bool:
         """F031: Handle UPDATES: prefix — find and supersede the referenced fact.
 
         Case-insensitive prefix detection. Requires similarity >0.80 to prevent
         wrong-fact supersession (review fix from devil's advocate P0-1).
         """
-        referenced_content = subject[len("UPDATES:"):].strip()
+        referenced_content = subject[len("UPDATES:") :].strip()
         if not referenced_content:
             return False
 
@@ -1022,13 +1054,15 @@ class SleepHandler:
             if not results:
                 logger.debug("UPDATES: no matching fact found for '%s'", referenced_content[:50])
                 # Fall back to learning as new fact
-                result = await self._heart.learn(FactInput(
-                    subject=referenced_content,
-                    content=fact["content"],
-                    source="sleep_reflection",
-                    confidence=0.8,
-                    category=fact.get("category", "concept"),
-                ))
+                result = await self._heart.learn(
+                    FactInput(
+                        subject=referenced_content,
+                        content=fact["content"],
+                        source="sleep_reflection",
+                        confidence=0.8,
+                        category=fact.get("category", "concept"),
+                    )
+                )
                 if not isinstance(result, FactRejected):
                     sleep_stats["facts_created"] += 1
                     self._record_reflect_learn(result, referenced_content, fact["content"], "UPDATES: no match")
@@ -1037,18 +1071,20 @@ class SleepHandler:
 
             # Check similarity threshold before superseding (review fix P0-1)
             best_match = results[0]
-            if hasattr(best_match, 'score') and best_match.score is not None and best_match.score < 0.80:
+            if hasattr(best_match, "score") and best_match.score is not None and best_match.score < 0.80:
                 logger.debug(
                     "UPDATES: best match score %.2f below threshold 0.80, learning as new fact",
                     best_match.score,
                 )
-                result = await self._heart.learn(FactInput(
-                    subject=referenced_content,
-                    content=fact["content"],
-                    source="sleep_reflection",
-                    confidence=0.8,
-                    category=fact.get("category", "concept"),
-                ))
+                result = await self._heart.learn(
+                    FactInput(
+                        subject=referenced_content,
+                        content=fact["content"],
+                        source="sleep_reflection",
+                        confidence=0.8,
+                        category=fact.get("category", "concept"),
+                    )
+                )
                 if not isinstance(result, FactRejected):
                     sleep_stats["facts_created"] += 1
                     self._record_reflect_learn(result, referenced_content, fact["content"], "UPDATES: low score")
@@ -1069,7 +1105,8 @@ class SleepHandler:
             logger.info("F031 orient: superseded fact %s with updated content", best_match.id)
             if self._auditor is not None:
                 self._auditor.record(
-                    "reflect", "supersede",
+                    "reflect",
+                    "supersede",
                     target_ids=[best_match.id],
                     before={"content_preview": preview(getattr(best_match, "content", ""))},
                     after={"content_preview": preview(fact["content"])},
@@ -1170,21 +1207,19 @@ class SleepHandler:
                 # AFTER the floor mutation had already reset action to
                 # KEEP_BOTH, so missing-content downgrades on
                 # low-confidence verdicts were silently undercounted.
-                downgraded_by_floor = (
-                    confidence < 0.7 and raw_action != "KEEP_BOTH"
-                )
-                downgraded_due_to_missing_content = (
-                    raw_action == "MERGE" and not merged_content
-                )
+                downgraded_by_floor = confidence < 0.7 and raw_action != "KEEP_BOTH"
+                downgraded_due_to_missing_content = raw_action == "MERGE" and not merged_content
                 if downgraded_by_floor:
                     logger.info(
                         "F031 resolve: confidence %.2f below 0.7 for %s, downgrading to KEEP_BOTH",
-                        confidence, raw_action,
+                        confidence,
+                        raw_action,
                     )
                 if downgraded_due_to_missing_content:
                     logger.warning(
                         "F031 resolve: MERGE returned without merged_content for %s/%s — downgrading to KEEP_BOTH",
-                        fact1_id, fact2_id,
+                        fact1_id,
+                        fact2_id,
                     )
                 if downgraded_by_floor or downgraded_due_to_missing_content:
                     action = "KEEP_BOTH"
@@ -1230,7 +1265,10 @@ class SleepHandler:
                             sleep_stats["contradictions_resolved"] += 1
                             logger.info(
                                 "F031 resolve: %s — superseded %s by %s (%.2f confidence)",
-                                action, fact1_id, fact2_id, confidence,
+                                action,
+                                fact1_id,
+                                fact2_id,
+                                confidence,
                             )
                     elif action == "SUPERSEDE_B":
                         # loser=fact2, winner=fact1 (inverted from SUPERSEDE_A).
@@ -1238,7 +1276,10 @@ class SleepHandler:
                             sleep_stats["contradictions_resolved"] += 1
                             logger.info(
                                 "F031 resolve: %s — superseded %s by %s (%.2f confidence)",
-                                action, fact2_id, fact1_id, confidence,
+                                action,
+                                fact2_id,
+                                fact1_id,
+                                confidence,
                             )
                     elif action == "MERGE":
                         # merged_content is guaranteed non-empty here (the
@@ -1277,8 +1318,7 @@ class SleepHandler:
                                     # bypass_sources so this should not
                                     # happen, but defend in depth.
                                     logger.warning(
-                                        "F031 MERGE: heart.learn rejected "
-                                        "the merged fact unexpectedly: %s",
+                                        "F031 MERGE: heart.learn rejected the merged fact unexpectedly: %s",
                                         merged_detail.explanation,
                                     )
                                 else:
@@ -1293,7 +1333,9 @@ class SleepHandler:
                                         # same conflict slot as, before
                                         # those sources are deactivated below.
                                         await self._heart.facts.inherit_conflict_slot_keys(
-                                            merged_detail.id, [fact1_id, fact2_id], session,
+                                            merged_detail.id,
+                                            [fact1_id, fact2_id],
+                                            session,
                                         )
                                         for orig_id in (fact1_id, fact2_id):
                                             # Defensive: never set
@@ -1305,9 +1347,7 @@ class SleepHandler:
                                             # learn ever changes" bugs.
                                             if orig_id == merged_detail.id:
                                                 continue
-                                            orm_fact = await session.get(
-                                                Fact, orig_id
-                                            )
+                                            orm_fact = await session.get(Fact, orig_id)
                                             if orm_fact is None:
                                                 continue
                                             # Codex P1 on PR #412: do not
@@ -1323,15 +1363,12 @@ class SleepHandler:
                                             # are already inactive.
                                             if orm_fact.superseded_by is not None:
                                                 logger.debug(
-                                                    "F031 MERGE: skip supersede "
-                                                    "of %s — already linked to %s",
+                                                    "F031 MERGE: skip supersede of %s — already linked to %s",
                                                     orig_id,
                                                     orm_fact.superseded_by,
                                                 )
                                                 continue
-                                            orm_fact.superseded_by = (
-                                                merged_detail.id
-                                            )
+                                            orm_fact.superseded_by = merged_detail.id
                                             orm_fact.active = False
                                             # A: persist the supersedes graph
                                             # edge alongside the column so the
@@ -1340,8 +1377,11 @@ class SleepHandler:
                                             # writes left 259 supersessions
                                             # invisible to densifier/dashboards).
                                             await self._heart.link_facts(
-                                                merged_detail.id, orig_id,
-                                                "supersedes", 1.0, session,
+                                                merged_detail.id,
+                                                orig_id,
+                                                "supersedes",
+                                                1.0,
+                                                session,
                                             )
                                         await session.commit()
                                         # codex P2 round 13: inherit_conflict_slot_keys
@@ -1353,15 +1393,18 @@ class SleepHandler:
                                     sleep_stats["contradictions_resolved"] += 1
                                     sleep_stats["facts_created"] += 1
                                     logger.info(
-                                        "F031 resolve: MERGE — combined %s + %s "
-                                        "into %s (%.2f confidence)",
-                                        fact1_id, fact2_id,
-                                        merged_detail.id, confidence,
+                                        "F031 resolve: MERGE — combined %s + %s into %s (%.2f confidence)",
+                                        fact1_id,
+                                        fact2_id,
+                                        merged_detail.id,
+                                        confidence,
                                     )
                             except Exception:
                                 logger.warning(
                                     "MERGE partially failed for %s/%s",
-                                    fact1_id, fact2_id, exc_info=True,
+                                    fact1_id,
+                                    fact2_id,
+                                    exc_info=True,
                                 )
                     elif action == "REMOVE_A":
                         await self._heart.deactivate_fact(fact1_id)
@@ -1386,14 +1429,19 @@ class SleepHandler:
                         # together with detection-broadening.
                         logger.info(
                             "F031 resolve: KEEP_BOTH — %s and %s: %s",
-                            fact1_id, fact2_id, resolution.get("reason", ""),
+                            fact1_id,
+                            fact2_id,
+                            resolution.get("reason", ""),
                         )
                     else:
                         logger.warning("Unknown resolution action: %s", action)
                 except Exception:
                     logger.warning(
                         "Failed to execute resolution %s for %s/%s",
-                        action, fact1_id, fact2_id, exc_info=True,
+                        action,
+                        fact1_id,
+                        fact2_id,
+                        exc_info=True,
                     )
 
                 # F035.6: emit the unified action only if the verdict actually
@@ -1404,14 +1452,23 @@ class SleepHandler:
                     and sleep_stats.get("contradictions_resolved", 0) > _resolved_before
                     and action in ("SUPERSEDE_A", "SUPERSEDE_B", "MERGE", "REMOVE_A", "REMOVE_B")
                 ):
-                    _op = {"SUPERSEDE_A": "supersede", "SUPERSEDE_B": "supersede",
-                           "MERGE": "merge", "REMOVE_A": "deactivate",
-                           "REMOVE_B": "deactivate"}[action]
+                    _op = {
+                        "SUPERSEDE_A": "supersede",
+                        "SUPERSEDE_B": "supersede",
+                        "MERGE": "merge",
+                        "REMOVE_A": "deactivate",
+                        "REMOVE_B": "deactivate",
+                    }[action]
                     self._auditor.record(
-                        "f031_contradiction", _op,
+                        "f031_contradiction",
+                        _op,
                         target_ids=[fact1_id, fact2_id],
                         before=[{"id": str(fact1_id)}, {"id": str(fact2_id)}],
-                        after=({"content_preview": preview(merged_content)} if action == "MERGE" and merged_content else None),
+                        after=(
+                            {"content_preview": preview(merged_content)}
+                            if action == "MERGE" and merged_content
+                            else None
+                        ),
                         rationale=f"{action} (conf {confidence:.2f}): {str(resolution.get('reason', ''))[:160]}",
                     )
 
@@ -1435,9 +1492,7 @@ class SleepHandler:
             return True
         try:
             max_pairs = self._settings.supersession_sweep_max_pairs
-            pairs = await self._heart.facts.find_key_conflict_pairs(
-                limit=max_pairs, after=self._key_sweep_cursor
-            )
+            pairs = await self._heart.facts.find_key_conflict_pairs(limit=max_pairs, after=self._key_sweep_cursor)
             sleep_stats["key_conflicts_found"] = len(pairs)
             sleep_stats["key_supersessions_written"] = 0
             last_processed: tuple | None = None
@@ -1448,14 +1503,11 @@ class SleepHandler:
                     break
                 if self._heart.facts.key_budget_exhausted():
                     logger.info(
-                        "Key-conflict sweep: classifier budget exhausted — "
-                        "deferring remaining pairs to next cycle"
+                        "Key-conflict sweep: classifier budget exhausted — deferring remaining pairs to next cycle"
                     )
                     interrupted_early = True
                     break
-                if await self._heart.facts.resolve_key_conflict_pair(
-                    pair["id1"], pair["id2"], pair["c1"], pair["c2"]
-                ):
+                if await self._heart.facts.resolve_key_conflict_pair(pair["id1"], pair["id2"], pair["c1"], pair["c2"]):
                     sleep_stats["key_supersessions_written"] += 1
                 last_processed = (pair["ts1"], pair["id1"], pair["ts2"], pair["id2"])
             # Advance the cursor only past pairs that were ACTUALLY processed.
@@ -1501,9 +1553,7 @@ class SleepHandler:
         """
         try:
             settings = self._heart.settings
-            cutoff = datetime.now(UTC) - timedelta(
-                days=settings.stale_scan_age_days
-            )
+            cutoff = datetime.now(UTC) - timedelta(days=settings.stale_scan_age_days)
             excluded = list(settings.stale_scan_excluded_categories or [])
             async with self._heart.db.session() as session:
                 stmt = (
@@ -1513,10 +1563,7 @@ class SleepHandler:
                         Fact.active == True,  # noqa: E712
                         Fact.created_at < cutoff,
                     )
-                    .where(
-                        (Fact.last_recalled_at.is_(None))
-                        | (Fact.last_recalled_at < cutoff)
-                    )
+                    .where((Fact.last_recalled_at.is_(None)) | (Fact.last_recalled_at < cutoff))
                 )
                 if excluded:
                     # NULL NOT IN (...) evaluates to UNKNOWN in SQL,
@@ -1524,10 +1571,7 @@ class SleepHandler:
                     # uncategorized fact from deactivation. Add the
                     # NULL branch explicitly so the exclusion only
                     # skips the NAMED categories. Codex P2 on PR #405.
-                    stmt = stmt.where(
-                        Fact.category.is_(None)
-                        | Fact.category.notin_(excluded)
-                    )
+                    stmt = stmt.where(Fact.category.is_(None) | Fact.category.notin_(excluded))
                 result = await session.execute(stmt)
                 stale_facts = result.scalars().all()
 
@@ -1549,7 +1593,8 @@ class SleepHandler:
                 if self._auditor is not None:
                     for _fid, _subj, _content in _deactivated:
                         self._auditor.record(
-                            "stale_scan", "deactivate",
+                            "stale_scan",
+                            "deactivate",
                             target_ids=[_fid],
                             before={"subject": _subj, "content_preview": preview(_content)},
                             rationale=f"stale: aged > {settings.stale_scan_age_days}d, no recall in window",
@@ -1564,7 +1609,9 @@ class SleepHandler:
                     "Stale scan: deactivated %d facts older than %d days "
                     "with no recall in the same window "
                     "(excluded categories: %s)",
-                    count, settings.stale_scan_age_days, excluded,
+                    count,
+                    settings.stale_scan_age_days,
+                    excluded,
                 )
             return True
         except Exception:
@@ -1639,9 +1686,7 @@ class SleepHandler:
                 if len(facts) < 3:
                     continue
 
-                facts_text = "\n".join(
-                    f"- [{f.category or 'unknown'}] {f.content}" for f in facts
-                )
+                facts_text = "\n".join(f"- [{f.category or 'unknown'}] {f.content}" for f in facts)
 
                 merge_result = await call_background_llm_structured(
                     client=self._llm,
@@ -1709,13 +1754,9 @@ class SleepHandler:
                             "source_count": len(facts),
                             "merged_content": None,
                             "merged_fact_id": None,
-                            "confidence": (
-                                float(merge_result.get("confidence", 0.0))
-                                if merge_result else None
-                            ),
+                            "confidence": (float(merge_result.get("confidence", 0.0)) if merge_result else None),
                             "refuse_reason": (
-                                str(merge_result.get("refuse_reason", ""))[:300]
-                                if merge_result else None
+                                str(merge_result.get("refuse_reason", ""))[:300] if merge_result else None
                             ),
                             "outcome": merge_outcome,
                         },
@@ -1744,13 +1785,9 @@ class SleepHandler:
                             "subject": str(subject)[:200],
                             "source_fact_ids": [str(f.id) for f in facts],
                             "source_count": len(facts),
-                            "merged_content": str(
-                                merge_result.get("merged_content", "")
-                            )[:500],
+                            "merged_content": str(merge_result.get("merged_content", ""))[:500],
                             "merged_fact_id": None,
-                            "confidence": float(
-                                merge_result.get("confidence", 0.8)
-                            ),
+                            "confidence": float(merge_result.get("confidence", 0.8)),
                             "refuse_reason": None,
                             "outcome": merge_outcome,
                         },
@@ -1765,7 +1802,9 @@ class SleepHandler:
                     # replacement before those members are deactivated
                     # below (see inherit_conflict_slot_keys's docstring).
                     await self._heart.facts.inherit_conflict_slot_keys(
-                        merged_detail.id, [f.id for f in facts], session,
+                        merged_detail.id,
+                        [f.id for f in facts],
+                        session,
                     )
                     for fact in facts:
                         # Defensive (mirrors F031 fix on PR #412): never
@@ -1782,8 +1821,7 @@ class SleepHandler:
                         # between candidate selection and now.
                         if orm_fact.superseded_by is not None:
                             logger.debug(
-                                "F027 cluster_merge: skip supersede of %s "
-                                "— already linked to %s",
+                                "F027 cluster_merge: skip supersede of %s — already linked to %s",
                                 fact.id,
                                 orm_fact.superseded_by,
                             )
@@ -1794,7 +1832,11 @@ class SleepHandler:
                         # MERGE path) so cluster merges don't recreate the
                         # column/graph mismatch the backfill repairs.
                         await self._heart.link_facts(
-                            merged_detail.id, fact.id, "supersedes", 1.0, session,
+                            merged_detail.id,
+                            fact.id,
+                            "supersedes",
+                            1.0,
+                            session,
                         )
                     await session.commit()
                     # codex P2 round 13: mirrors the F031 fix — inherit_conflict_slot_keys
@@ -1811,13 +1853,9 @@ class SleepHandler:
                         "subject": str(subject)[:200],
                         "source_fact_ids": [str(f.id) for f in facts],
                         "source_count": len(facts),
-                        "merged_content": str(
-                            merge_result.get("merged_content", "")
-                        )[:500],
+                        "merged_content": str(merge_result.get("merged_content", ""))[:500],
                         "merged_fact_id": merged_fact_id,
-                        "confidence": float(
-                            merge_result.get("confidence", 0.8)
-                        ),
+                        "confidence": float(merge_result.get("confidence", 0.8)),
                         "refuse_reason": None,
                         "outcome": merge_outcome,
                     },
@@ -1825,10 +1863,14 @@ class SleepHandler:
 
                 if self._auditor is not None:
                     self._auditor.record(
-                        "f027_consolidate", "merge",
+                        "f027_consolidate",
+                        "merge",
                         target_ids=[f.id for f in facts] + [merged_detail.id],
                         before=[{"id": str(f.id), "content_preview": preview(f.content)} for f in facts],
-                        after={"id": merged_fact_id, "content_preview": preview(merge_result.get("merged_content", ""))},
+                        after={
+                            "id": merged_fact_id,
+                            "content_preview": preview(merge_result.get("merged_content", "")),
+                        },
                         rationale=f"cluster merge of {len(facts)} facts on '{str(subject)[:80]}'",
                     )
 
@@ -1898,6 +1940,7 @@ class SleepHandler:
             return True
         try:
             from nous.brain.tinyhippo_lite import run_stc_consolidation
+
             stats = await run_stc_consolidation(
                 self._heart.db,
                 self._settings.agent_id,
@@ -1917,22 +1960,24 @@ class SleepHandler:
             # (default off) — the telemetry-only v1 leaves weights untouched.
             if getattr(self._settings, "tinyhippo_downscale_enabled", False):
                 from nous.brain.tinyhippo_lite import homeostatic_downscale
+
                 async with self._heart.db.session() as sess:
-                    n_down = await homeostatic_downscale(
-                        sess, self._settings.agent_id, self._settings.tinyhippo_alpha
-                    )
+                    n_down = await homeostatic_downscale(sess, self._settings.agent_id, self._settings.tinyhippo_alpha)
                     await sess.commit()
                 sleep_stats["f044_downscaled"] = n_down
                 logger.info(
                     "F044 Phase 8d: downscaled %d tagged edges by α=%.2f",
-                    n_down, self._settings.tinyhippo_alpha,
+                    n_down,
+                    self._settings.tinyhippo_alpha,
                 )
             logger.info(
-                "F044 STC: promoted=%d tagged=%d consolidated=%d "
-                "ltp>=1/2/3=%d/%d/%d reinforced_24h=%d",
-                stats["f044_promoted"], stats["f044_n_tagged"],
-                stats["f044_n_consolidated"], stats["f044_ltp_ge1"],
-                stats["f044_ltp_ge2"], stats["f044_ltp_ge3"],
+                "F044 STC: promoted=%d tagged=%d consolidated=%d ltp>=1/2/3=%d/%d/%d reinforced_24h=%d",
+                stats["f044_promoted"],
+                stats["f044_n_tagged"],
+                stats["f044_n_consolidated"],
+                stats["f044_ltp_ge1"],
+                stats["f044_ltp_ge2"],
+                stats["f044_ltp_ge3"],
                 stats["f044_reinforced_24h"],
             )
             return True
@@ -1974,6 +2019,7 @@ class SleepHandler:
             from sqlalchemy import text
 
             from nous.brain.graph_constants import episode_dead_sql
+
             async with self._heart.db.session() as session:
                 # `brain.decisions` has no `active` column today — decisions
                 # are append-only and reviewed-not-deleted. If/when a soft-
@@ -2037,7 +2083,8 @@ class SleepHandler:
             sleep_stats["dead_edges_pruned"] = deleted
             logger.info(
                 "F053 dead-edge prune: deleted %d edges (cap=%d)",
-                deleted, max_per_cycle,
+                deleted,
+                max_per_cycle,
             )
             return True
         except Exception as exc:
@@ -2076,7 +2123,8 @@ class SleepHandler:
             if deleted:
                 logger.info(
                     "F065: pruned %d hub-snapshot rows older than %d days",
-                    deleted, retention_days,
+                    deleted,
+                    retention_days,
                 )
             return True
         except Exception as exc:
@@ -2103,7 +2151,8 @@ class SleepHandler:
                 sleep_stats["consolidation_actions_pruned"] = deleted
                 logger.info(
                     "F035.6: pruned %d consolidation_action rows older than %d days",
-                    deleted, days,
+                    deleted,
+                    days,
                 )
             return True
         except Exception:
@@ -2142,39 +2191,48 @@ class SleepHandler:
         try:
             min_age = int(self._settings.abandoned_recovery_min_age_hours)
             max_per_cycle = int(self._settings.abandoned_recovery_max_per_cycle)
-            min_transcript = int(
-                self._settings.abandoned_recovery_min_transcript_chars
+            min_transcript = int(self._settings.abandoned_recovery_min_transcript_chars)
+            fallback_enabled = bool(
+                getattr(
+                    self._settings,
+                    "abandoned_recovery_summary_fallback_enabled",
+                    True,
+                )
             )
-            fallback_enabled = bool(getattr(
-                self._settings,
-                "abandoned_recovery_summary_fallback_enabled",
-                True,
-            ))
-            min_summary = int(getattr(
-                self._settings,
-                "abandoned_recovery_min_summary_chars",
-                20,
-            ))
-            mark_enabled = bool(getattr(
-                self._settings,
-                "abandoned_recovery_mark_abandoned_enabled",
-                True,
-            ))
-            mark_age_days = int(getattr(
-                self._settings,
-                "abandoned_recovery_mark_age_days",
-                7,
-            ))
-            mark_max = int(getattr(
-                self._settings,
-                "abandoned_recovery_mark_max_per_cycle",
-                200,
-            ))
+            min_summary = int(
+                getattr(
+                    self._settings,
+                    "abandoned_recovery_min_summary_chars",
+                    20,
+                )
+            )
+            mark_enabled = bool(
+                getattr(
+                    self._settings,
+                    "abandoned_recovery_mark_abandoned_enabled",
+                    True,
+                )
+            )
+            mark_age_days = int(
+                getattr(
+                    self._settings,
+                    "abandoned_recovery_mark_age_days",
+                    7,
+                )
+            )
+            mark_max = int(
+                getattr(
+                    self._settings,
+                    "abandoned_recovery_mark_max_per_cycle",
+                    200,
+                )
+            )
             if max_per_cycle <= 0:
                 return True
             agent_id = self._settings.agent_id
 
             from sqlalchemy import text as sql_text
+
             recovered_full = 0
             recovered_summary_only = 0
             skipped_no_data = 0
@@ -2184,7 +2242,8 @@ class SleepHandler:
             # Loop A — recovery (F060 base + F060.1 fallback). Bounded by
             # max_per_cycle because each row costs an LLM call.
             async with self._heart.db.session() as session:
-                rows = await session.execute(sql_text("""
+                rows = await session.execute(
+                    sql_text("""
                     SELECT e.id, e.transcript, e.summary
                     FROM heart.episodes e
                     WHERE e.agent_id = :agent_id
@@ -2193,11 +2252,13 @@ class SleepHandler:
                       AND e.started_at < now() - make_interval(hours => :hours)
                     ORDER BY e.started_at ASC
                     LIMIT :lim
-                """), {
-                    "agent_id": agent_id,
-                    "hours": min_age,
-                    "lim": max_per_cycle,
-                })
+                """),
+                    {
+                        "agent_id": agent_id,
+                        "hours": min_age,
+                        "lim": max_per_cycle,
+                    },
+                )
                 candidates = rows.all()
 
             for ep_id, transcript, plain_summary in candidates:
@@ -2211,11 +2272,7 @@ class SleepHandler:
                 if transcript and len(transcript) >= min_transcript:
                     source = transcript
                     source_kind = "transcript"
-                elif (
-                    fallback_enabled
-                    and plain_summary
-                    and len(plain_summary) >= min_summary
-                ):
+                elif fallback_enabled and plain_summary and len(plain_summary) >= min_summary:
                     source = plain_summary
                     source_kind = "summary"
                 else:
@@ -2237,7 +2294,8 @@ class SleepHandler:
                     errors += 1
                     logger.warning(
                         "F060 summarize failed for episode %s",
-                        ep_id, exc_info=True,
+                        ep_id,
+                        exc_info=True,
                     )
 
             # Loop B — F060.2 mark abandoned. Targets rows with no usable
@@ -2245,7 +2303,8 @@ class SleepHandler:
             # a large legacy backlog quickly.
             if mark_enabled and not self._interrupted:
                 async with self._heart.db.session() as session:
-                    result = await session.execute(sql_text("""
+                    result = await session.execute(
+                        sql_text("""
                         UPDATE heart.episodes
                         SET active = false,
                             outcome = 'abandoned',
@@ -2261,25 +2320,23 @@ class SleepHandler:
                           ORDER BY started_at ASC
                           LIMIT :lim
                         )
-                    """), {
-                        "agent_id": agent_id,
-                        "days": mark_age_days,
-                        "min_t": min_transcript,
-                        "min_s": min_summary,
-                        "lim": mark_max,
-                    })
+                    """),
+                        {
+                            "agent_id": agent_id,
+                            "days": mark_age_days,
+                            "min_t": min_transcript,
+                            "min_s": min_summary,
+                            "lim": mark_max,
+                        },
+                    )
                     marked_abandoned = result.rowcount or 0
                     await session.commit()
 
-            sleep_stats["episodes_recovered"] = (
-                recovered_full + recovered_summary_only
-            )
+            sleep_stats["episodes_recovered"] = recovered_full + recovered_summary_only
             if recovered_full:
                 sleep_stats["episodes_recovered_full_transcript"] = recovered_full
             if recovered_summary_only:
-                sleep_stats["episodes_recovered_summary_only"] = (
-                    recovered_summary_only
-                )
+                sleep_stats["episodes_recovered_summary_only"] = recovered_summary_only
             if marked_abandoned:
                 sleep_stats["episodes_marked_abandoned"] = marked_abandoned
             if skipped_no_data:
@@ -2287,8 +2344,7 @@ class SleepHandler:
             if errors:
                 sleep_stats["abandoned_recovery_errors"] = errors
             logger.info(
-                "F060 recovery: %d full + %d summary-only recovered, "
-                "%d marked abandoned, %d skipped (%d errors)",
+                "F060 recovery: %d full + %d summary-only recovered, %d marked abandoned, %d skipped (%d errors)",
                 recovered_full,
                 recovered_summary_only,
                 marked_abandoned,
@@ -2342,6 +2398,7 @@ class SleepHandler:
             graph_linker = getattr(self, "_graph_linker", None)
             if graph_linker is None:
                 from nous.brain.graph_linker import GraphLinker
+
                 graph_linker = GraphLinker(
                     self._heart.db,
                     self._heart._embeddings,
@@ -2356,6 +2413,7 @@ class SleepHandler:
                 episode_decision_join_sql,
                 episode_decisions_query,
             )
+
             relinked = 0
             edges_created = 0
             errors = 0
@@ -2380,12 +2438,11 @@ class SleepHandler:
                           JOIN brain.decisions d
                             ON {episode_decision_join_sql("eb.")}
                         )"""
-                    if getattr(
-                        self._settings, "decision_session_id_enabled", False
-                    )
+                    if getattr(self._settings, "decision_session_id_enabled", False)
                     else ""
                 )
-                rows = await session.execute(sql_text(f"""
+                rows = await session.execute(
+                    sql_text(f"""
                     SELECT e.id
                     FROM heart.episodes e
                     WHERE e.agent_id = :agent_id
@@ -2413,21 +2470,25 @@ class SleepHandler:
                       )
                     ORDER BY e.started_at ASC
                     LIMIT :lim
-                """), {
-                    "agent_id": agent_id,
-                    "hours": min_age,
-                    "lim": max_per_cycle,
-                })
+                """),
+                    {
+                        "agent_id": agent_id,
+                        "hours": min_age,
+                        "lim": max_per_cycle,
+                    },
+                )
                 ep_ids = [r[0] for r in rows.all()]
 
                 for ep_id in ep_ids:
                     if self._interrupted:
                         break
                     # Anchors: facts referencing this episode + decisions linked
-                    f_rows = await session.execute(sql_text(
-                        "SELECT id FROM heart.facts "
-                        "WHERE agent_id=:aid AND source_episode_id=:eid AND active=true"
-                    ), {"aid": agent_id, "eid": ep_id})
+                    f_rows = await session.execute(
+                        sql_text(
+                            "SELECT id FROM heart.facts WHERE agent_id=:aid AND source_episode_id=:eid AND active=true"
+                        ),
+                        {"aid": agent_id, "eid": ep_id},
+                    )
                     fact_ids = [r[0] for r in f_rows.all()]
                     # Codex r5: gating the candidate-selection clause above was
                     # not enough. An orphan episode still enters this loop via
@@ -2439,9 +2500,7 @@ class SleepHandler:
                     # episode. Both the candidate query and this lookup have to
                     # be gated for the flag to mean anything here.
                     decision_ids = []
-                    if getattr(
-                        self._settings, "decision_session_id_enabled", False
-                    ):
+                    if getattr(self._settings, "decision_session_id_enabled", False):
                         d_rows = await session.execute(
                             sql_text(episode_decisions_query("d.id")),
                             {"agent_id": agent_id, "episode_id": ep_id},
@@ -2462,7 +2521,8 @@ class SleepHandler:
                     except Exception:
                         errors += 1
                         logger.warning(
-                            "F057 relink failed for episode %s", ep_id,
+                            "F057 relink failed for episode %s",
+                            ep_id,
                             exc_info=True,
                         )
                 await session.commit()
@@ -2473,7 +2533,9 @@ class SleepHandler:
                 sleep_stats["episode_relink_errors"] = errors
             logger.info(
                 "F057 episode relink: %d episodes, %d edges (%d errors)",
-                relinked, edges_created, errors,
+                relinked,
+                edges_created,
+                errors,
             )
             return True
         except Exception as exc:
@@ -2486,7 +2548,9 @@ class SleepHandler:
         if self._procedure_learner:
             try:
                 stats = await self._procedure_learner.run_sleep_learning()
-                sleep_stats["procedures_created"] += stats.get("decisions_learned", 0) + stats.get("episodes_learned", 0)
+                sleep_stats["procedures_created"] += stats.get("decisions_learned", 0) + stats.get(
+                    "episodes_learned", 0
+                )
                 logger.info(
                     "Sleep generalize: %d decisions, %d episodes, %d reviewed",
                     stats.get("decisions_learned", 0),

@@ -87,31 +87,30 @@ class ProcessFaultCheck(BaseCheck):
     async def run(self) -> CheckResult:
         findings: list[Finding] = []
 
-        max_gap_hours: int = getattr(
-            self._settings, "fault_detector_sleep_max_gap_hours", 48
-        )
-        consec_err_threshold: int = getattr(
-            self._settings, "fault_detector_consecutive_error_threshold", 3
-        )
-        zero_change_threshold: int = getattr(
-            self._settings, "fault_detector_zero_change_threshold", 5
-        )
-        ratio_collapse_threshold: float = getattr(
-            self._settings, "fault_detector_ratio_collapse_threshold", 0.30
-        )
-        baseline_window: int = getattr(
-            self._settings, "fault_detector_ratio_baseline_window", 20
-        )
-        stale_scan_age_days: int = getattr(
-            self._settings, "stale_scan_age_days", 60
-        )
+        max_gap_hours: int = getattr(self._settings, "fault_detector_sleep_max_gap_hours", 48)
+        consec_err_threshold: int = getattr(self._settings, "fault_detector_consecutive_error_threshold", 3)
+        zero_change_threshold: int = getattr(self._settings, "fault_detector_zero_change_threshold", 5)
+        ratio_collapse_threshold: float = getattr(self._settings, "fault_detector_ratio_collapse_threshold", 0.30)
+        baseline_window: int = getattr(self._settings, "fault_detector_ratio_baseline_window", 20)
+        stale_scan_age_days: int = getattr(self._settings, "stale_scan_age_days", 60)
 
         recorder = ProcessRecorder(self._db, self._agent_id)
 
+        # Fetch enough rows to populate both the 5-run recent window AND the
+        # full baseline_window for ratio-collapse detection.  The ratio check
+        # skips the 5 newest rows when building the baseline, so we need at
+        # least baseline_window + 5 valid runs; fetching that many raw rows
+        # ensures the baseline is never empty when the minimum setting of 5 is
+        # used.
+        # Fetch enough rows to populate both the 5-run recent window AND the
+        # full baseline_window for ratio-collapse detection.  The ratio check
+        # skips the 5 newest rows when building the baseline, so we need at
+        # least baseline_window + 5 valid runs; fetching that many raw rows
+        # ensures the baseline is never empty when the minimum setting of 5 is
+        # used.
+        fetch_limit = max(baseline_window + 5, consec_err_threshold + 1)
         for process_name in _SLEEP_PHASES:
-            runs = await recorder.get_recent_runs(
-                process_name, limit=max(baseline_window, consec_err_threshold + 1)
-            )
+            runs = await recorder.get_recent_runs(process_name, limit=fetch_limit)
             if not runs:
                 # Phase has never run (or ran before migration 077).
                 # Skip — not a finding until we have a baseline.
@@ -123,9 +122,7 @@ class ProcessFaultCheck(BaseCheck):
             # 1. Missed run: no finished row in the last N hours
             # ----------------------------------------------------------------
             now = datetime.now(UTC)
-            last_finished = next(
-                (r for r in runs if r["status"] == "finished"), None
-            )
+            last_finished = next((r for r in runs if r["status"] == "finished"), None)
             if last_finished is None:
                 gap_hours = max_gap_hours + 1  # trigger the check
             else:
@@ -153,16 +150,12 @@ class ProcessFaultCheck(BaseCheck):
             # 2. Consecutive errors
             # ----------------------------------------------------------------
             recent = runs[:consec_err_threshold]
-            if (
-                len(recent) >= consec_err_threshold
-                and all(r["status"] == "error" for r in recent)
-            ):
+            if len(recent) >= consec_err_threshold and all(r["status"] == "error" for r in recent):
                 findings.append(
                     Finding(
                         source="fault_detector",
                         summary=(
-                            f"Process {process_name!r} failed with errors "
-                            f"in {consec_err_threshold} consecutive runs"
+                            f"Process {process_name!r} failed with errors in {consec_err_threshold} consecutive runs"
                         ),
                         urgency="high",
                         needs_action=True,
@@ -177,12 +170,9 @@ class ProcessFaultCheck(BaseCheck):
                 recent_finished = finished_runs[:zero_change_threshold]
                 if len(recent_finished) >= zero_change_threshold:
                     all_zero_changed = all(
-                        r.get("items_changed") == 0 for r in recent_finished
-                        if r.get("items_changed") is not None
+                        r.get("items_changed") == 0 for r in recent_finished if r.get("items_changed") is not None
                     )
-                    has_changed_data = any(
-                        r.get("items_changed") is not None for r in recent_finished
-                    )
+                    has_changed_data = any(r.get("items_changed") is not None for r in recent_finished)
                     if all_zero_changed and has_changed_data:
                         pop_count = await self._count_stale_eligible(stale_scan_age_days)
                         if pop_count > 10:
@@ -204,7 +194,8 @@ class ProcessFaultCheck(BaseCheck):
             # 4. Output/input ratio collapse vs trailing baseline
             # ----------------------------------------------------------------
             ratio_runs = [
-                r for r in finished_runs
+                r
+                for r in finished_runs
                 if r.get("items_examined") is not None
                 and r["items_examined"] > 0
                 and r.get("items_changed") is not None
@@ -214,17 +205,11 @@ class ProcessFaultCheck(BaseCheck):
                     r["items_changed"] / r["items_examined"]
                     for r in ratio_runs[5:]  # skip the 5 most recent for baseline
                 ]
-                recent_ratios = [
-                    r["items_changed"] / r["items_examined"]
-                    for r in ratio_runs[:5]
-                ]
+                recent_ratios = [r["items_changed"] / r["items_examined"] for r in ratio_runs[:5]]
                 if baseline_ratios and recent_ratios:
                     baseline_mean = mean(baseline_ratios)
                     recent_mean = mean(recent_ratios)
-                    if (
-                        baseline_mean > 0.01
-                        and recent_mean < baseline_mean * ratio_collapse_threshold
-                    ):
+                    if baseline_mean > 0.01 and recent_mean < baseline_mean * ratio_collapse_threshold:
                         findings.append(
                             Finding(
                                 source="fault_detector",
@@ -245,9 +230,26 @@ class ProcessFaultCheck(BaseCheck):
         )
 
     async def _count_stale_eligible(self, age_days: int) -> int:
-        """Count facts eligible for stale_scan (age > threshold, low recall)."""
+        """Count facts eligible for stale_scan (age > threshold, low recall).
+
+        Mirrors _phase_stale_scan's category exclusion so the population
+        count and the scan agree on which facts are eligible.
+        """
+        excluded: list[str] = list(getattr(self._settings, "stale_scan_excluded_categories", None) or ["rule"])
         try:
             from sqlalchemy import text
+
+            # Build the exclusion clause mirroring _phase_stale_scan's logic:
+            # NULL NOT IN (...) is UNKNOWN in SQL, so keep NULL-category facts
+            # and only skip the named categories (same NULL-safe guard as the phase).
+            if excluded:
+                placeholders = ", ".join(f":exc_{i}" for i in range(len(excluded)))
+                exc_clause = f"  AND (category IS NULL OR category NOT IN ({placeholders}))"
+                exc_params: dict = {f"exc_{i}": cat for i, cat in enumerate(excluded)}
+            else:
+                exc_clause = ""
+                exc_params = {}
+
             async with self._db.session() as session:
                 result = await session.execute(
                     text(
@@ -256,9 +258,9 @@ class ProcessFaultCheck(BaseCheck):
                         "  AND active = TRUE "
                         "  AND created_at < now() - make_interval(days => :days) "
                         "  AND (last_recalled_at IS NULL "
-                        "       OR last_recalled_at < now() - make_interval(days => :days))"
+                        "       OR last_recalled_at < now() - make_interval(days => :days))" + exc_clause
                     ),
-                    {"agent_id": self._agent_id, "days": age_days},
+                    {"agent_id": self._agent_id, "days": age_days, **exc_params},
                 )
                 count: int = result.scalar_one()
                 return count
@@ -324,9 +326,18 @@ class RetrievalCanaryCheck(BaseCheck):
                 continue
 
             try:
-                results = await self._heart.search_facts(query, limit=top_k)
+                results = await self._heart.search_facts(query, limit=top_k, track_access=False)
             except Exception:
                 logger.warning("Canary search failed for %r", query[:60], exc_info=True)
+                findings.append(
+                    Finding(
+                        source="retrieval_canary",
+                        summary=(f"Canary search raised an exception for {query[:60]!r}: retrieval may be unavailable"),
+                        urgency="high",
+                        needs_action=True,
+                        check_name=self.name,
+                    )
+                )
                 continue
 
             returned_ids = {str(r.id) for r in results}
@@ -339,9 +350,7 @@ class RetrievalCanaryCheck(BaseCheck):
                     Finding(
                         source="retrieval_canary",
                         summary=(
-                            f"Canary query {query[:60]!r}: "
-                            f"recall@{top_k} = {recall:.0%} "
-                            f"(expected >= {min_recall:.0%})"
+                            f"Canary query {query[:60]!r}: recall@{top_k} = {recall:.0%} (expected >= {min_recall:.0%})"
                         ),
                         urgency="normal",
                         needs_action=True,

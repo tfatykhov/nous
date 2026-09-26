@@ -568,3 +568,207 @@ class TestRetrievalCanaryCheck:
         result = await check.run()
 
         assert result.findings, "Expected finding for partial recall below threshold"
+
+    @pytest.mark.asyncio
+    async def test_canary_search_passes_track_access_false(self, tmp_path):
+        """Canary search must not update recall state (track_access=False).
+
+        Mutation evidence: remove the track_access=False kwarg and the assertion
+        fails because heart.search_facts would be called without it.
+        """
+        gold_id = "44444444-4444-4444-4444-444444444444"
+        canary = [{"query": "deployment model", "gold_ids": [gold_id], "min_recall_at_k": 0.5}]
+        canary_file = tmp_path / "canary.jsonl"
+        canary_file.write_text(json.dumps(canary[0]) + "\n")
+
+        settings = _mock_settings(
+            fault_detector_canary_path=str(canary_file),
+            fault_detector_canary_top_k=10,
+        )
+        heart = AsyncMock()
+        heart.search_facts = AsyncMock(return_value=[self._make_fact_result(gold_id)])
+
+        check = RetrievalCanaryCheck(heart=heart, settings=settings)
+        await check.run()
+
+        # Verify track_access=False was passed to prevent production side effects
+        heart.search_facts.assert_called_once()
+        call_kwargs = heart.search_facts.call_args
+        assert call_kwargs.kwargs.get("track_access") is False, (
+            "Canary search must pass track_access=False to avoid inflating recall counts"
+        )
+
+    @pytest.mark.asyncio
+    async def test_canary_search_failure_emits_finding(self, tmp_path):
+        """A DB exception during canary search must produce a finding (not silence).
+
+        Mutation evidence: if the except branch only logs and continues, no
+        finding is emitted and a complete retrieval outage looks healthy.
+        """
+        gold_id = "55555555-5555-5555-5555-555555555555"
+        canary = [{"query": "some query", "gold_ids": [gold_id], "min_recall_at_k": 0.5}]
+        canary_file = tmp_path / "canary.jsonl"
+        canary_file.write_text(json.dumps(canary[0]) + "\n")
+
+        settings = _mock_settings(
+            fault_detector_canary_path=str(canary_file),
+            fault_detector_canary_top_k=10,
+        )
+        heart = AsyncMock()
+        heart.search_facts = AsyncMock(side_effect=Exception("DB connection lost"))
+
+        check = RetrievalCanaryCheck(heart=heart, settings=settings)
+        result = await check.run()
+
+        assert result.findings, "Search failure must produce a finding"
+        assert result.has_updates
+        # Should be high urgency since retrieval may be unavailable
+        assert any(f.urgency == "high" for f in result.findings)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for Codex findings
+# ---------------------------------------------------------------------------
+
+
+class TestCountStaleEligibleExcludesCategories:
+    """_count_stale_eligible must mirror _phase_stale_scan's category exclusion.
+
+    Mutation evidence: remove the category exclusion from _count_stale_eligible
+    and the population count will include excluded-category facts, causing a
+    false-positive collapse finding even when the stale_scan correctly skips
+    those facts.
+    """
+
+    @pytest.mark.asyncio
+    async def test_excluded_categories_are_passed_to_query(self):
+        """The SQL sent to the DB must contain the exclusion predicate."""
+        executed_sqls = []
+
+        mock_result = MagicMock()
+        mock_result.scalar_one.return_value = 0
+
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_session.execute = AsyncMock(
+            side_effect=lambda sql, params: (
+                executed_sqls.append((str(sql), params))
+                or mock_result
+            )
+        )
+
+        db = MagicMock()
+        db.session = MagicMock(return_value=mock_session)
+
+        settings = _mock_settings(stale_scan_excluded_categories=["rule", "preference"])
+        check = ProcessFaultCheck(db=db, settings=settings, agent_id="test-agent")
+        await check._count_stale_eligible(60)
+
+        assert executed_sqls, "Expected a DB query to be executed"
+        sql_text, params = executed_sqls[0]
+        # Exclusion clause must appear in the query
+        assert "NOT IN" in sql_text or "category" in sql_text.lower(), (
+            "Expected category exclusion predicate in query"
+        )
+        # Both excluded categories must be in the parameters
+        assert "rule" in params.values()
+        assert "preference" in params.values()
+
+
+class TestRatioCollapseBaselineFetch:
+    """get_recent_runs must fetch baseline_window + 5 rows.
+
+    Mutation evidence: if limit=max(baseline_window, ...) is used instead of
+    max(baseline_window + 5, ...), a minimum baseline_window=5 setting always
+    leaves an empty baseline and collapse detection is permanently disabled.
+    """
+
+    @pytest.mark.asyncio
+    async def test_fetch_limit_includes_recent_window(self):
+        """ProcessFaultCheck must fetch at least baseline_window+5 rows."""
+        fetch_limits: list[int] = []
+        now = datetime.now(UTC)
+
+        # 25 old runs with a high ratio + 5 recent with collapsed ratio
+        old_runs = [
+            _run(now, h, status="finished", items_examined=100, items_changed=50)
+            for h in range(6, 31)
+        ]
+        recent_runs = [
+            _run(now, h, status="finished", items_examined=100, items_changed=2)
+            for h in range(1, 6)
+        ]
+        all_runs = recent_runs + old_runs  # newest first
+
+        async def _fake_get(process_name, limit=20):
+            fetch_limits.append(limit)
+            return all_runs[:limit]
+
+        settings = _mock_settings(
+            fault_detector_ratio_baseline_window=20,
+            fault_detector_ratio_collapse_threshold=0.30,
+        )
+        db = MagicMock()
+        check = ProcessFaultCheck(db=db, settings=settings, agent_id="test-agent")
+
+        async def _fake_count(*a, **kw):
+            return 0
+
+        recorder_mock = AsyncMock()
+        recorder_mock.get_recent_runs = _fake_get
+        with patch("nous.heartbeat.fault_detector.ProcessRecorder", return_value=recorder_mock):
+            with patch.object(check, "_count_stale_eligible", _fake_count):
+                result = await check.run()
+
+        # All phase fetch calls should request at least baseline_window + 5 = 25 rows
+        assert all(limit >= 25 for limit in fetch_limits), (
+            f"Expected fetch limit >= 25, got: {fetch_limits}"
+        )
+        # With enough data, ratio collapse should be detected
+        ratio_findings = [f for f in result.findings if "ratio" in f.summary]
+        assert ratio_findings, "Expected a ratio-collapse finding with sufficient baseline data"
+
+    @pytest.mark.asyncio
+    async def test_minimum_baseline_window_still_detects_collapse(self):
+        """With baseline_window=5, collapse detection still works after the fix.
+
+        Before the fix, baseline_window=5 fetched only 5 rows, leaving
+        ratio_runs[5:] empty and permanently disabling detection.
+        """
+        now = datetime.now(UTC)
+        # 10 old runs with high ratio + 5 recent with collapsed ratio = 15 total
+        old_runs = [
+            _run(now, h, status="finished", items_examined=100, items_changed=50)
+            for h in range(6, 16)  # 10 old runs
+        ]
+        recent_runs = [
+            _run(now, h, status="finished", items_examined=100, items_changed=2)
+            for h in range(1, 6)
+        ]
+        all_runs = recent_runs + old_runs
+
+        async def _fake_get(process_name, limit=20):
+            return all_runs[:limit]
+
+        settings = _mock_settings(
+            fault_detector_ratio_baseline_window=5,
+            fault_detector_ratio_collapse_threshold=0.30,
+        )
+        db = MagicMock()
+        check = ProcessFaultCheck(db=db, settings=settings, agent_id="test-agent")
+
+        async def _fake_count(*a, **kw):
+            return 0
+
+        recorder_mock = AsyncMock()
+        recorder_mock.get_recent_runs = _fake_get
+        with patch("nous.heartbeat.fault_detector.ProcessRecorder", return_value=recorder_mock):
+            with patch.object(check, "_count_stale_eligible", _fake_count):
+                result = await check.run()
+
+        ratio_findings = [f for f in result.findings if "ratio" in f.summary]
+        assert ratio_findings, (
+            "Expected ratio-collapse finding with minimum baseline_window=5; "
+            "empty baseline means detection is permanently disabled"
+        )
