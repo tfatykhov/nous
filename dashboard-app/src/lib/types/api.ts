@@ -225,6 +225,14 @@ export interface ObsAnomaly {
   direction: string;
   mean: number;
   stddev: number;
+  /** Null when the baseline had zero variance (series was previously constant). */
+  z_score?: number | null;
+  /** When fact_count_delta is residualized: the raw observed value before
+   *  the prune adjustment. Null for non-residualized metrics. */
+  raw_current?: number | null;
+  /** Name of the metric whose value was subtracted (e.g. "facts_pruned").
+   *  Null for non-residualized metrics. */
+  residualized_by?: string | null;
 }
 
 export interface ObsDriftMetrics {

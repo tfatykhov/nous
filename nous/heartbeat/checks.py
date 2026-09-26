@@ -23,6 +23,7 @@ from nous.config import Settings
 from nous.heart import Heart
 from nous.heartbeat.registry import BaseCheck
 from nous.heartbeat.schemas import CheckResult, Finding, TunableParam
+from nous.observability.snapshots import SNAPSHOT_METRICS_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -987,6 +988,7 @@ class BehaviorDriftCheck(BaseCheck):
         self._detector = DriftDetector()
         self._last_snapshot: Any = None  # BehaviorSnapshot
         self._last_anomalies: list[dict] = []  # Serialized anomalies for DB persistence
+        self._last_counts_ok: bool = False  # True only when the count query succeeded
         self.interval = getattr(settings, 'drift_detection_interval', 3600)
 
     async def run(self) -> CheckResult:
@@ -994,25 +996,51 @@ class BehaviorDriftCheck(BaseCheck):
         findings: list[Finding] = []
         try:
             snapshot = await self._capture_snapshot()
+            if snapshot is None:
+                # Counts were unavailable with no previous snapshot to carry
+                # forward. Skip the tick entirely: do not detect against a
+                # fabricated snapshot and do not persist one into the baseline.
+                return CheckResult(has_updates=False, findings=[])
             baseline = await self._load_baseline(hours=168)
             self._last_anomalies = []
             if baseline:
                 anomalies = self._detector.detect(snapshot, baseline)
+                # NOTE: residualized_by/raw_current MUST be carried here too,
+                # not only on the live Finding. This list is what gets persisted
+                # (see _store_snapshot) and replayed by GET /behavior/anomalies
+                # and /behavior/drift-report, so dropping them there would make
+                # those endpoints print the residual as if it were the raw metric.
                 self._last_anomalies = [
                     {"metric": a.metric, "current": a.current, "mean": a.mean,
                      "stddev": a.stddev, "z_score": a.z_score, "direction": a.direction,
-                     "severity": a.severity}
+                     "severity": a.severity, "residualized_by": a.residualized_by,
+                     "raw_current": a.raw_current}
                     for a in anomalies
                 ]
                 for a in anomalies:
+                    # z_score is None when the baseline had zero variance, so
+                    # "+/- 0.0" would read as a suspiciously precise sigma
+                    # rather than "this series had never moved before".
+                    spread = (f"+/- {a.stddev}" if a.z_score is not None
+                              else "previously constant")
+                    if a.residualized_by:
+                        summary = (
+                            f"{a.metric}: {a.raw_current} raw -> {a.current} unexplained "
+                            f"after {a.residualized_by} ({a.direction} from {a.mean} {spread})"
+                        )
+                    else:
+                        summary = f"{a.metric}: {a.current} ({a.direction} from {a.mean} {spread})"
                     findings.append(Finding(
                         source="drift",
-                        summary=f"{a.metric}: {a.current} ({a.direction} from {a.mean} +/- {a.stddev})",
+                        summary=summary,
                         urgency="high" if a.severity == "alert" else "normal",
                         needs_action=a.severity == "alert",
-                        raw_data={"metric": a.metric, "current": a.current, "mean": a.mean, "stddev": a.stddev, "z_score": a.z_score},
+                        raw_data={"metric": a.metric, "current": a.current, "mean": a.mean,
+                                  "stddev": a.stddev, "z_score": a.z_score,
+                                  "residualized_by": a.residualized_by, "raw_current": a.raw_current},
                     ))
-            await self._store_snapshot(snapshot)
+            if self._last_counts_ok:
+                await self._store_snapshot(snapshot)
             self._last_snapshot = snapshot
         except Exception:
             logger.exception("BehaviorDriftCheck failed")
@@ -1021,23 +1049,91 @@ class BehaviorDriftCheck(BaseCheck):
     async def _capture_snapshot(self):
         from nous.observability.snapshots import BehaviorSnapshot
         now = datetime.now(UTC)
+        prev = self._last_snapshot
         fact_count = episode_count = censor_count = procedure_count = 0
+        inactive_fact_count = 0
+        counts_ok = False
         if self._db:
             try:
                 async with self._db.session() as session:
                     from sqlalchemy import text
+                    # Both fact counts are read in ONE statement so they share a
+                    # single MVCC snapshot. That is what makes facts_pruned and
+                    # fact_count_delta below consistent with each other.
+                    #
+                    # Every count is scoped to this agent, because the snapshot
+                    # these feed is stored and read back under agent_id (see
+                    # _store_snapshot / _load_baseline). On a shared database an
+                    # unscoped count would let another agent's writes move this
+                    # agent's deltas -- and for the residualized pair, let agent
+                    # A's prune explain away agent B's unexplained fact drop.
                     result = await session.execute(text(
                         "SELECT "
-                        "(SELECT COUNT(*) FROM heart.facts WHERE active = true) AS facts, "
-                        "(SELECT COUNT(*) FROM heart.episodes) AS episodes, "
-                        "(SELECT COUNT(*) FROM heart.censors WHERE active = true) AS censors, "
-                        "(SELECT COUNT(*) FROM heart.procedures WHERE active = true) AS procedures"
-                    ))
+                        "(SELECT COUNT(*) FROM heart.facts "
+                        " WHERE agent_id = :aid AND active = true) AS facts, "
+                        "(SELECT COUNT(*) FROM heart.episodes "
+                        " WHERE agent_id = :aid) AS episodes, "
+                        "(SELECT COUNT(*) FROM heart.censors "
+                        " WHERE agent_id = :aid AND active = true) AS censors, "
+                        "(SELECT COUNT(*) FROM heart.procedures "
+                        " WHERE agent_id = :aid AND active = true) AS procedures, "
+                        "(SELECT COUNT(*) FROM heart.facts "
+                        " WHERE agent_id = :aid AND active = false) AS inactive_facts"
+                    ), {"aid": self._settings.agent_id})
                     row = result.fetchone()
                     if row:
                         fact_count, episode_count, censor_count, procedure_count = row.facts, row.episodes, row.censors, row.procedures
+                        inactive_fact_count = row.inactive_facts
+                        counts_ok = True
             except Exception:
                 logger.debug("Snapshot: DB query failed", exc_info=True)
+
+        if not counts_ok:
+            # The count query failed (or returned nothing) and the exception
+            # was swallowed above. Publishing zeros would be actively harmful,
+            # not merely lossy: every delta becomes -prev.count, the residual
+            # adds two large negatives instead of cancelling, the zeroed
+            # snapshot enters the baseline, and recovery produces the
+            # mirror-image anomaly on the next tick.
+            if prev is None:
+                # Nothing to carry forward -- this is the first tick after a
+                # restart. Abort rather than seeding an all-zero snapshot:
+                # _last_snapshot would become that zero, and the next
+                # successful tick would report the ENTIRE corpus as a fresh
+                # delta (and the whole inactive corpus as newly pruned).
+                logger.debug("Snapshot: counts unavailable at startup, skipping tick")
+                return None
+            logger.debug("Snapshot: counts unavailable, carrying previous forward")
+            fact_count = prev.fact_count
+            inactive_fact_count = prev.inactive_fact_count
+            episode_count = prev.episode_count
+            censor_count = prev.active_censor_count
+            procedure_count = prev.procedure_count
+
+        # Deactivations since the previous tick, by DIFFERENCING the inactive
+        # count -- deliberately not by an `updated_at` window.
+        #
+        # A window needs a cutoff, and no cutoff can be made to agree with the
+        # counts. Taking it from the application clock loses any fact
+        # deactivated while we waited for a pooled connection, and adds
+        # app/database clock skew on top. Taking it from the database in the
+        # same statement (statement_timestamp()) removes the skew but still
+        # leaks, because heart.facts.updated_at is stamped by a BEFORE UPDATE
+        # trigger with clock_timestamp() -- write time, not commit time. A
+        # batch prune that writes rows early and commits after our snapshot is
+        # invisible to these counts yet already carries updated_at < cutoff, so
+        # the next tick's window (> cutoff) would skip it permanently.
+        #
+        # Differencing has no cutoff to get wrong: the deactivation is observed
+        # on whichever tick first sees it committed, which is exactly the tick
+        # whose fact_count_delta it explains. The two numbers cannot disagree
+        # because they are read from the same snapshot.
+        #
+        # On the first tick after a restart prev is None, so this is 0 -- and
+        # fact_count_delta is 0 on that tick too, so the pair still agrees.
+        facts_pruned = (
+            inactive_fact_count - prev.inactive_fact_count if prev else 0
+        )
 
         bus_data = self._bus_stats.to_dict() if self._bus_stats else {}
         handlers = bus_data.get("handlers", {})
@@ -1045,10 +1141,11 @@ class BehaviorDriftCheck(BaseCheck):
         total_invocations = sum(h.get("invocations", 0) for h in handlers.values())
         error_rate = total_errors / total_invocations if total_invocations else 0.0
 
-        prev = self._last_snapshot
+        self._last_counts_ok = counts_ok
         return BehaviorSnapshot(
             timestamp=now,
             fact_count=fact_count, fact_count_delta=fact_count - (prev.fact_count if prev else fact_count),
+            inactive_fact_count=inactive_fact_count, facts_pruned=facts_pruned,
             episode_count=episode_count, episode_count_delta=episode_count - (prev.episode_count if prev else episode_count),
             active_censor_count=censor_count, active_censor_delta=censor_count - (prev.active_censor_count if prev else censor_count),
             procedure_count=procedure_count, decision_count=0,
@@ -1069,7 +1166,10 @@ class BehaviorDriftCheck(BaseCheck):
                     "INSERT INTO nous_system.behavior_snapshots (agent_id, timestamp, metrics, anomalies) "
                     "VALUES (:aid, :ts, :metrics, :anomalies)"
                 ), {"aid": self._settings.agent_id, "ts": snapshot.timestamp,
-                    "metrics": json.dumps(snapshot.to_metrics_dict()),
+                    "metrics": json.dumps({
+                        **snapshot.to_metrics_dict(),
+                        "metrics_version": SNAPSHOT_METRICS_VERSION,
+                    }),
                     "anomalies": json.dumps(self._last_anomalies)})
                 await session.commit()
         except Exception:
@@ -1093,12 +1193,34 @@ class BehaviorDriftCheck(BaseCheck):
             snapshots = []
             for row in rows:
                 metrics = row.metrics if isinstance(row.metrics, dict) else _json.loads(row.metrics)
+                # Skip snapshots written under an older metric definition.
+                #
+                # Version 1 snapshots are not comparable with version 2 ones:
+                # facts_pruned was never populated (so their residual is just
+                # the raw delta) and the corpus counts were global rather than
+                # agent-scoped. Mixing the two lets stale prune gaps and other
+                # agents' spikes set the mean and stddev for today's residual,
+                # which both masks real unexplained drops and invents
+                # transition-only alerts.
+                #
+                # The baseline simply starts smaller after rollout; min_samples
+                # holds detection off until enough v2 samples exist, which is
+                # the conservative direction (quiet, not wrong).
+                # Equality, not `<`: a snapshot from a NEWER writer is just as
+                # incomparable as an older one. During a rolling upgrade or a
+                # rollback this process can share the database with a v3
+                # writer, and accepting those rows would reintroduce exactly
+                # the mixed-definition contamination this guard exists to
+                # prevent.
+                if metrics.get("metrics_version", 1) != SNAPSHOT_METRICS_VERSION:
+                    continue
                 # Build snapshot from stored metrics, defaulting missing keys to 0
                 kwargs: dict[str, Any] = {"timestamp": row.timestamp}
                 for k in BehaviorSnapshot.__dataclass_fields__:
                     if k == "timestamp" or k == "interval_changes":
                         continue
                     kwargs[k] = metrics.get(k, 0)
+                kwargs.pop("metrics_version", None)
                 snapshots.append(BehaviorSnapshot(**kwargs))
             return snapshots
         except Exception:

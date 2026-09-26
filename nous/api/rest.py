@@ -62,6 +62,10 @@ from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
 from nous.observability.retrieval_logger import RETRIEVAL_PATHS as _RETRIEVAL_PATHS
+from nous.observability.snapshots import (
+    CURRENT_METRICS_VERSION_SQL,
+    SNAPSHOT_METRICS_VERSION,
+)
 from nous.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -1827,9 +1831,13 @@ def create_app(
             async with database.session() as session:
                 from sqlalchemy import text
                 cutoff = datetime.now(UTC) - timedelta(days=7)
+                # Same version filter as /behavior/trends: fact_count_delta
+                # changed scope in v2, so charting both definitions on one
+                # line would show a step change that is purely an artifact.
                 tr2 = await session.execute(text(
                     "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
-                    "WHERE agent_id = :aid AND timestamp > :cutoff ORDER BY timestamp"
+                    "WHERE agent_id = :aid AND timestamp > :cutoff "
+                    f"AND {CURRENT_METRICS_VERSION_SQL} ORDER BY timestamp"
                 ), {"aid": settings.agent_id, "cutoff": cutoff})
                 rows = tr2.fetchall()
             trend_metrics = ["fact_count_delta", "handler_error_rate"]
@@ -2936,9 +2944,15 @@ def create_app(
         async with database.session() as session:
             from sqlalchemy import text
             cutoff = datetime.now(UTC) - timedelta(hours=hours)
+            # Version filter is mandatory here, not cosmetic: this endpoint
+            # returns a mean and stddev over the window, and v1 fact metrics
+            # are global where v2 are agent-scoped. Mixing them blends another
+            # agent's corpus into these statistics for as long as v1 rows
+            # remain in the window.
             result = await session.execute(text(
                 "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
-                "WHERE agent_id = :aid AND timestamp > :cutoff ORDER BY timestamp"
+                "WHERE agent_id = :aid AND timestamp > :cutoff "
+                f"AND {CURRENT_METRICS_VERSION_SQL} ORDER BY timestamp"
             ), {"aid": settings.agent_id, "cutoff": cutoff})
             rows = result.fetchall()
         points = []
@@ -2953,7 +2967,12 @@ def create_app(
             stats = {"mean": round(st.mean(values), 2), "min": min(values), "max": max(values)}
             if len(values) > 1:
                 stats["stddev"] = round(st.stdev(values), 2)
-        return JSONResponse({"metric": metric, "hours": hours, "points": points, "stats": stats})
+        # Surfaced so a caller can tell "quiet week" from "the window is
+        # short because older snapshots use an incompatible definition".
+        return JSONResponse({
+            "metric": metric, "hours": hours, "points": points,
+            "stats": stats, "metrics_version": SNAPSHOT_METRICS_VERSION,
+        })
 
     async def behavior_anomalies(request: Request) -> JSONResponse:
         from datetime import UTC, datetime, timedelta
@@ -2991,7 +3010,20 @@ def create_app(
         else:
             lines = [f"Drift detected at {row.timestamp.isoformat()}:"]
             for a in anomalies:
-                lines.append(f"  - {a.get('metric', '?')}: {a.get('current', '?')} ({a.get('direction', '?')} from baseline)")
+                # A residualized metric's "current" is the UNEXPLAINED remainder,
+                # not the raw metric value, so it must never be printed bare as
+                # though it were the raw number. Snapshots written before
+                # residualization shipped carry no residualized_by and render
+                # with the original one-line form.
+                explained_by = a.get("residualized_by")
+                if explained_by:
+                    lines.append(
+                        f"  - {a.get('metric', '?')}: {a.get('raw_current', '?')} raw "
+                        f"-> {a.get('current', '?')} unexplained after {explained_by} "
+                        f"({a.get('direction', '?')} from baseline)"
+                    )
+                else:
+                    lines.append(f"  - {a.get('metric', '?')}: {a.get('current', '?')} ({a.get('direction', '?')} from baseline)")
             report = "\n".join(lines)
         return JSONResponse({"report": report, "anomalies": anomalies, "snapshot_time": row.timestamp.isoformat()})
 
