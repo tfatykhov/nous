@@ -1393,6 +1393,28 @@ class ContextEngine:
                     _tr_filtered(_before, embedding_procedures, "procedure",
                                  FILTER_DROPPED, "identity_overlap")
 
+                # Reasoning Maps L1: cap strategy cards per turn
+                if (
+                    embedding_procedures
+                    and getattr(self._settings, "strategy_cards_retrieval_enabled", False)
+                ):
+                    max_sc = max(0, getattr(self._settings, "strategy_cards_max_per_turn", 1))
+                    strategy_hits = [
+                        p for p in embedding_procedures
+                        if getattr(p, "kind", None) == "strategy"
+                    ]
+                    non_strategy = [
+                        p for p in embedding_procedures
+                        if getattr(p, "kind", None) != "strategy"
+                    ]
+                    strategy_served = strategy_hits[:max_sc]
+                    embedding_procedures = non_strategy + strategy_served
+                    if strategy_hits:
+                        logger.debug(
+                            "StrategyCards: retrieved=%d served=%d (cap=%d)",
+                            len(strategy_hits), len(strategy_served), max_sc,
+                        )
+
                 # --- Combine tracks ---
                 # Track A (Critic) is registered HERE, not at the embedding
                 # registration above: a critic pick that the embedding search

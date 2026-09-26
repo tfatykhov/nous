@@ -694,6 +694,9 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_EXEMPLAR_LEG_SCORE` | `0.55` | F086 score-band ceiling for exemplar hits (below the RRF direct-hit head; per-rank decay 0.005). |
 | `NOUS_EXEMPLAR_MIN_SIMILARITY` | `0.30` | F086 cosine floor — exemplars below this similarity are not merged (bounds false-trigger displacement, gate 2). |
 | `NOUS_EXEMPLAR_MAX_QUERY_WORDS` | `64` | F086 trigger gate: queries longer than this many words are not classification-shaped. |
+| `NOUS_STRATEGY_CARDS_ENABLED` | `false` | Reasoning Maps L1: distil a strategy card (kind='strategy' procedure) from each graded decision outcome (success/partial/failure) via background LLM. Cards store context-free lessons ("when X, Y worked because Z" / "avoid Y because Z") linked back to their source decision via an extracted_from graph edge. |
+| `NOUS_STRATEGY_CARDS_RETRIEVAL_ENABLED` | `false` | Reasoning Maps L1: apply a per-turn cap on how many strategy cards are injected via the procedure context path. When false, no cap is enforced (strategy cards flow through unrestricted). |
+| `NOUS_STRATEGY_CARDS_MAX_PER_TURN` | `1` | Reasoning Maps L1: max strategy cards injected per turn (cap applied only when NOUS_STRATEGY_CARDS_RETRIEVAL_ENABLED=true). Default 1 follows the ReasoningBank finding that more retrieved items hurt. |
 
 ### Dashboard (Svelte v2)
 

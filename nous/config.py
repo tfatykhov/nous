@@ -199,6 +199,13 @@ class Settings(BaseSettings):
     # F038-2.1: Procedure score floor (embedding mode only)
     procedure_score_floor: float = 0.40
 
+    # Reasoning Maps L1: strategy card distillation (off by default)
+    strategy_cards_enabled: bool = False
+    # Reasoning Maps L1: cap strategy cards injected per turn (requires retrieval enabled)
+    strategy_cards_retrieval_enabled: bool = False
+    # Reasoning Maps L1: max strategy cards injected per turn (1 = ReasoningBank default)
+    strategy_cards_max_per_turn: int = 1
+
     # F079 catalog-first procedure delivery (progressive disclosure, à la Claude Code):
     #   BREADTH — a static `## Procedure Catalog` listing active procedure names+descs
     #     (proc_catalog_enabled). Renders stable fields only (no activation/effectiveness),

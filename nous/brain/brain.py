@@ -1135,6 +1135,20 @@ class Brain:
             },
         )
 
+        # Emit on in-process EventBus so StrategyCardDistiller and other bus
+        # subscribers receive the review (same pattern as decision_recorded).
+        if self._bus is not None:
+            from nous.events import Event as BusEvent
+            await self._bus.emit(BusEvent(
+                type="decision_reviewed",
+                agent_id=self.agent_id,
+                data={
+                    "decision_id": str(decision_id),
+                    "outcome": validated.outcome,
+                    "reviewer": validated.reviewer,
+                },
+            ))
+
         return self._decision_to_detail(decision)
 
     # ------------------------------------------------------------------

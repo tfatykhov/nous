@@ -441,6 +441,22 @@ async def create_components(settings: Settings) -> dict:
             decision_reviewer = None
             logger.debug("DecisionReviewer not available yet")
 
+        # Reasoning Maps L1: strategy card distillation
+        try:
+            from nous.handlers.strategy_card_distiller import StrategyCardDistiller
+
+            strategy_card_distiller = StrategyCardDistiller(
+                brain=brain,
+                heart=heart,
+                settings=settings,
+                bus=bus,
+                llm_client=api_client,
+                graph_linker=graph_linker,
+            )
+        except ImportError:
+            strategy_card_distiller = None
+            logger.debug("StrategyCardDistiller not available yet")
+
         # F020: Clean up tool cache on session end
         from nous.api.tool_cache import cleanup_session_cache
 
@@ -1184,6 +1200,7 @@ async def create_components(settings: Settings) -> dict:
         "subtask_pool": subtask_pool,
         "task_scheduler": task_scheduler,
         "decision_reviewer": decision_reviewer,
+        "strategy_card_distiller": strategy_card_distiller,
         "api_client": api_client,
         "sleep_handler": sleep_handler,
         "rubric_manager": rubric_manager,
