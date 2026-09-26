@@ -3134,6 +3134,17 @@ class Settings(BaseSettings):
                 "dag_approval_proceed_default_enabled=True requires compensation_enabled=True "
                 "(an unanswered approval may only proceed when side effects are revertible)"
             )
+        if (
+            self.dag_approval_proceed_default_enabled
+            and self.compensation_enabled
+            and not self.execution_ledger_persist_enabled
+        ):
+            raise ValueError(
+                "dag_approval_proceed_default_enabled=True with compensation_enabled=True "
+                "requires execution_ledger_persist_enabled=True "
+                "(compensation snapshots are linked to ledger entry IDs; "
+                "without persistent ledger storage, revert is impossible)"
+            )
         if self.compensation_auto_review_enabled and not self.compensation_enabled:
             raise ValueError("compensation_auto_review_enabled=True requires compensation_enabled=True")
         return self

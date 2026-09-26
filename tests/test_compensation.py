@@ -560,3 +560,242 @@ async def test_compensate_write_file_fails_when_existed_no_prior_content() -> No
     result = await compensate_write_file(uuid4(), snapshot_data, None)
     assert result.success is False
     assert "prior content not captured" in result.message
+
+
+# ---------------------------------------------------------------------------
+# Codex findings — new regression tests (must FAIL before the fix)
+# ---------------------------------------------------------------------------
+
+
+# Finding #1 — dag/schemas.py: check nodes must be included in proceed-default
+# validation. Before the fix, check nodes were silently ignored and a graph
+# with approval → check (no undoable) was accepted.
+
+
+def _check_node(name: str = "check_step", **overrides):  # type: ignore[return]
+    from nous.dag.schemas import DAGNodeSpec, DAGNodeType
+
+    base = dict(name=name, type=DAGNodeType.check, instructions="Run a check")
+    base.update(overrides)
+    return DAGNodeSpec(**base)
+
+
+def test_check_node_downstream_of_proceed_default_requires_undoable() -> None:
+    """A check node downstream of a proceed-default approval must be undoable."""
+    from nous.dag.schemas import DAGCreateRequest, DAGEdgeSpec, DAGNodeSpec, DAGNodeType
+
+    nodes = [
+        DAGNodeSpec(
+            name="approve",
+            type=DAGNodeType.approval,
+            instructions="Do you want to run the check?",
+            options=[
+                {"id": "yes", "label": "Yes", "outcome": "proceed"},
+                {"id": "no", "label": "No", "outcome": "stop"},
+            ],
+            default_option="yes",
+        ),
+        _check_node(undoable=False),  # NOT declared undoable
+    ]
+    edges = [DAGEdgeSpec(from_node="approve", to_node="check_step", edge_type="context_flow")]
+    with _mock_settings(dag_approval_proceed_default_enabled=True):
+        with pytest.raises(ValueError, match="not declared undoable"):
+            DAGCreateRequest(name="check_test", nodes=nodes, edges=edges)
+
+
+def test_check_node_downstream_of_proceed_default_accepted_when_undoable() -> None:
+    """A check node declared undoable satisfies the proceed-default requirement."""
+    from nous.dag.schemas import DAGCreateRequest, DAGEdgeSpec, DAGNodeSpec, DAGNodeType
+
+    nodes = [
+        DAGNodeSpec(
+            name="approve",
+            type=DAGNodeType.approval,
+            instructions="Do you want to run the check?",
+            options=[
+                {"id": "yes", "label": "Yes", "outcome": "proceed"},
+                {"id": "no", "label": "No", "outcome": "stop"},
+            ],
+            default_option="yes",
+        ),
+        _check_node(undoable=True),  # properly declared
+    ]
+    edges = [DAGEdgeSpec(from_node="approve", to_node="check_step", edge_type="context_flow")]
+    with _mock_settings(dag_approval_proceed_default_enabled=True):
+        dag = DAGCreateRequest(name="check_test", nodes=nodes, edges=edges)
+        assert len(dag.nodes) == 2
+
+
+# Finding #2 — config.py: persist ledger required for compensation.
+# Before the fix there was no check for execution_ledger_persist_enabled.
+
+
+def test_proceed_default_requires_ledger_persist_enabled() -> None:
+    """proceed_default + compensation + no ledger persistence must fail at Settings."""
+    from pydantic import ValidationError
+
+    from nous.config import Settings
+
+    with pytest.raises(ValidationError, match="execution_ledger_persist_enabled"):
+        Settings(
+            _env_file=None,
+            ANTHROPIC_API_KEY="test-key",
+            dag_approval_nodes_enabled=True,
+            dag_approval_proceed_default_enabled=True,
+            compensation_enabled=True,
+            execution_ledger_persist_enabled=False,
+        )
+
+
+def test_proceed_default_with_ledger_persist_and_compensation_is_ok() -> None:
+    """All three flags on together should succeed."""
+    from nous.config import Settings
+
+    s = Settings(
+        _env_file=None,
+        ANTHROPIC_API_KEY="test-key",
+        dag_approval_nodes_enabled=True,
+        dag_approval_proceed_default_enabled=True,
+        compensation_enabled=True,
+        execution_ledger_persist_enabled=True,
+    )
+    assert s.dag_approval_proceed_default_enabled is True
+
+
+# Finding #3 — compensation.py: stale-revert guard.
+# Before the fix, compensate_write_file would overwrite newer contents without checking.
+
+
+@pytest.mark.asyncio
+async def test_compensate_write_file_refuses_stale_revert() -> None:
+    """If the file was modified after the original write, revert must be refused."""
+    import hashlib
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write("content written by a LATER edit — not by write_file")
+        path = f.name
+
+    try:
+        # Simulate: write_file wrote "write_file content"; hash is recorded.
+        written_content = "content written by write_file"
+        written_hash = hashlib.sha256(written_content.encode("utf-8")).hexdigest()
+
+        snapshot_data = {
+            "path": path,
+            "full_path": path,
+            "existed": True,
+            "prior_content": "original content",
+            "written_content_hash": written_hash,
+        }
+        result = await compensate_write_file(uuid4(), snapshot_data, None)
+        assert result.success is False
+        assert "modified after" in result.message or "newer content" in result.message
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+@pytest.mark.asyncio
+async def test_compensate_write_file_proceeds_when_hash_matches() -> None:
+    """When the file still matches what write_file wrote, the revert should succeed."""
+    import hashlib
+
+    written_content = "content written by write_file"
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write(written_content)
+        path = f.name
+
+    try:
+        written_hash = hashlib.sha256(written_content.encode("utf-8")).hexdigest()
+        snapshot_data = {
+            "path": path,
+            "full_path": path,
+            "existed": True,
+            "prior_content": "original content",
+            "written_content_hash": written_hash,
+        }
+        result = await compensate_write_file(uuid4(), snapshot_data, None)
+        assert result.success
+        with open(path) as f2:
+            assert f2.read() == "original content"
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+# Finding #4 — compensation.py: oversized file snapshot.
+# Before the fix, snapshot_for_write_file ran a synchronous f.read() and had no size cap.
+
+
+@pytest.mark.asyncio
+async def test_snapshot_for_write_file_flags_oversized() -> None:
+    """Files larger than _FILE_SNAPSHOT_MAX_BYTES must return oversized=True."""
+    from nous.api.compensation import _FILE_SNAPSHOT_MAX_BYTES, snapshot_for_write_file
+
+    with tempfile.NamedTemporaryFile(mode="wb", suffix=".bin", delete=False) as f:
+        # Write a file one byte over the limit.
+        f.write(b"x" * (_FILE_SNAPSHOT_MAX_BYTES + 1))
+        path = f.name
+
+    try:
+        snap = await snapshot_for_write_file(path, "/")
+        assert snap["oversized"] is True
+        assert snap["prior_content"] is None
+        assert snap["existed"] is True
+    finally:
+        os.unlink(path)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_for_write_file_reads_small_file() -> None:
+    """Files within the size cap must be read normally and not flagged oversized."""
+    from nous.api.compensation import snapshot_for_write_file
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write("small content")
+        path = f.name
+
+    try:
+        snap = await snapshot_for_write_file(path, "/")
+        assert snap["oversized"] is False
+        assert snap["prior_content"] == "small content"
+    finally:
+        os.unlink(path)
+
+
+@pytest.mark.asyncio
+async def test_capture_compensation_snapshot_raises_for_oversized_undoable() -> None:
+    """_capture_compensation_snapshot raises SnapshotBlocksDispatch for oversized+undoable."""
+    from unittest.mock import AsyncMock, patch
+
+    from nous.api.compensation import SnapshotBlocksDispatch
+    from nous.api.execution_context import ExecutionContext
+    from nous.api.runner import AgentRunner
+
+    # Bypass __init__ — we only need the few attributes the method reads.
+    runner = object.__new__(AgentRunner)
+    runner._snap_store = AsyncMock()
+    runner._workspace_dir = "/"
+
+    ctx = ExecutionContext(kind="dag_node", undoable=True)
+
+    oversized_snap = {
+        "path": "big.bin",
+        "full_path": "/big.bin",
+        "existed": True,
+        "prior_content": None,
+        "oversized": True,
+    }
+
+    with patch(
+        "nous.api.compensation.snapshot_for_write_file",
+        new=AsyncMock(return_value=oversized_snap),
+    ):
+        with pytest.raises(SnapshotBlocksDispatch):
+            await runner._capture_compensation_snapshot(
+                ctx,
+                "write_file",
+                {"path": "big.bin", "content": "new content"},
+                uuid4(),
+            )

@@ -29,6 +29,17 @@ from nous.storage.models import CompensationSnapshot
 
 logger = logging.getLogger(__name__)
 
+# Cap for file snapshots: matches the read_file tool's 1 MiB limit.
+_FILE_SNAPSHOT_MAX_BYTES = 1 * 1024 * 1024
+
+
+class SnapshotBlocksDispatch(Exception):
+    """Raised when a required snapshot cannot be captured, preventing the dispatch.
+
+    Only raised in undoable contexts where a missing snapshot would silently
+    allow a non-revertible side effect past the undoable guarantee.
+    """
+
 
 @dataclass(frozen=True)
 class CompensationResult:
@@ -127,16 +138,31 @@ async def snapshot_for_write_file(
     path: str,
     workspace_dir: str,
 ) -> dict[str, Any]:
-    """Capture the prior state of a file before write_file overwrites it."""
+    """Capture the prior state of a file before write_file overwrites it.
+
+    I/O is offloaded to a worker thread so the event loop is never stalled.
+    Files larger than ``_FILE_SNAPSHOT_MAX_BYTES`` are flagged ``oversized=True``
+    and will not have ``prior_content`` captured; callers in undoable contexts
+    should raise ``SnapshotBlocksDispatch`` rather than proceed without a snapshot.
+    """
     import os
 
     full_path = os.path.join(workspace_dir, path) if not os.path.isabs(path) else path
     existed = os.path.exists(full_path)
     prior_content: str | None = None
+    oversized = False
     if existed:
         try:
-            with open(full_path, encoding="utf-8", errors="replace") as f:
-                prior_content = f.read()
+            file_size = os.path.getsize(full_path)
+            if file_size > _FILE_SNAPSHOT_MAX_BYTES:
+                oversized = True
+            else:
+
+                def _read() -> str:
+                    with open(full_path, encoding="utf-8", errors="replace") as f:
+                        return f.read()
+
+                prior_content = await asyncio.to_thread(_read)
         except Exception:
             prior_content = None
     return {
@@ -144,6 +170,7 @@ async def snapshot_for_write_file(
         "full_path": full_path,
         "existed": existed,
         "prior_content": prior_content,
+        "oversized": oversized,
     }
 
 
@@ -152,12 +179,21 @@ async def compensate_write_file(
     snapshot_data: dict[str, Any],
     deps: Any,
 ) -> CompensationResult:
-    """Restore prior file content or delete if file was new."""
+    """Restore prior file content or delete if file was new.
+
+    Stale-revert guard: when a ``written_content_hash`` was recorded at
+    snapshot time, the current file content is hashed and compared before
+    any write.  A mismatch means the file was modified after our
+    ``write_file`` ran; the revert is refused to avoid silently discarding
+    those newer changes.
+    """
+    import hashlib
     import os
 
     full_path = snapshot_data.get("full_path", "")
     existed = snapshot_data.get("existed", False)
     prior_content = snapshot_data.get("prior_content")
+    written_content_hash: str | None = snapshot_data.get("written_content_hash")
 
     if not full_path:
         return CompensationResult(False, "no path in snapshot")
@@ -175,6 +211,21 @@ async def compensate_write_file(
             except Exception as exc:
                 return CompensationResult(False, f"revert failed: {exc}")
         return CompensationResult(False, "file existed but prior content not captured; cannot recreate")
+
+    # Stale-revert guard: refuse if the file was modified after our write.
+    if written_content_hash is not None:
+        try:
+            with open(full_path, encoding="utf-8", errors="replace") as f:
+                current_bytes = f.read().encode("utf-8")
+            current_hash = hashlib.sha256(current_bytes).hexdigest()
+            if current_hash != written_content_hash:
+                return CompensationResult(
+                    False,
+                    f"revert refused: {full_path!r} was modified after the original write; "
+                    "revert would overwrite newer content",
+                )
+        except Exception as exc:
+            return CompensationResult(False, f"stale-check read failed: {exc}")
 
     try:
         if existed and prior_content is not None:

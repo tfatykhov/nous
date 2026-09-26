@@ -497,10 +497,21 @@ class AgentRunner:
         try:
             snap_data: dict = {}
             if tool_name == "write_file":
-                from nous.api.compensation import snapshot_for_write_file
+                import hashlib
+
+                from nous.api.compensation import SnapshotBlocksDispatch, snapshot_for_write_file
 
                 path = tool_input.get("path", "")
                 snap_data = await snapshot_for_write_file(path, self._workspace_dir)
+                if snap_data.get("oversized"):
+                    raise SnapshotBlocksDispatch(
+                        f"write_file refused: {path!r} is too large to snapshot for undoable revert "
+                        f"(exceeds {1}MiB limit)"
+                    )
+                # Record what's about to be written so compensate_write_file can
+                # detect if the file was modified between the write and the revert.
+                content = tool_input.get("content", "") or ""
+                snap_data["written_content_hash"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
             elif tool_name == "heartbeat_check_create":
                 snap_data = {"check_name": tool_input.get("name", "")}
             elif tool_name == "heartbeat_check_manage":
@@ -528,7 +539,11 @@ class AgentRunner:
                 tool_name=tool_name,
                 snapshot_data=snap_data,
             )
-        except Exception:
+        except Exception as _snap_exc:
+            from nous.api.compensation import SnapshotBlocksDispatch
+
+            if isinstance(_snap_exc, SnapshotBlocksDispatch):
+                raise
             logger.warning(
                 "Harness Phase 2.8: snapshot capture failed for %s (compensation may not be available for revert)",
                 tool_name,
@@ -2110,14 +2125,39 @@ class AgentRunner:
                                 keys_this_turn,
                             )
                             # Phase 2.8: capture pre-dispatch snapshot for compensable
-                            # tools in undoable contexts (fail-open).
-                            await self._capture_compensation_snapshot(
-                                _ctx,
-                                tc["name"],
-                                dispatch_input,
-                                entry_id,
-                            )
-                            if suppressed is not None:
+                            # tools in undoable contexts. Fail-open except for
+                            # oversized files, which refuse rather than silently
+                            # proceeding without a snapshot.
+                            _snap_blocked: str | None = None
+                            try:
+                                await self._capture_compensation_snapshot(
+                                    _ctx,
+                                    tc["name"],
+                                    dispatch_input,
+                                    entry_id,
+                                )
+                            except Exception as _sbd:
+                                from nous.api.compensation import SnapshotBlocksDispatch
+
+                                if isinstance(_sbd, SnapshotBlocksDispatch):
+                                    _snap_blocked = str(_sbd)
+                                    await self._ledger_close(
+                                        entry_id,
+                                        "blocked",
+                                        _snap_blocked,
+                                        keyed=send_key is not None,
+                                    )
+                                    if ledger:
+                                        ledger.record(
+                                            tc["name"],
+                                            dispatch_input,
+                                            _snap_blocked,
+                                            "blocked",
+                                        )
+                            if _snap_blocked is not None:
+                                result_text, is_error = _snap_blocked, True
+                                duration_ms = int((time.monotonic() - start_time) * 1000)
+                            elif suppressed is not None:
                                 result_text, is_error = suppressed.text, suppressed.is_error
                                 if ledger:
                                     ledger.record(
@@ -2693,14 +2733,38 @@ class AgentRunner:
                                 keys_this_turn,
                             )
                             # Phase 2.8: capture pre-dispatch snapshot for compensable
-                            # tools in undoable contexts (fail-open).
-                            await self._capture_compensation_snapshot(
-                                ctx,
-                                tool_name,
-                                tool_input,
-                                entry_id,
-                            )
-                            if suppressed is not None:
+                            # tools in undoable contexts. Fail-open except for
+                            # oversized files, which refuse rather than silently
+                            # proceeding without a snapshot.
+                            _snap_blocked2: str | None = None
+                            try:
+                                await self._capture_compensation_snapshot(
+                                    ctx,
+                                    tool_name,
+                                    tool_input,
+                                    entry_id,
+                                )
+                            except Exception as _sbd2:
+                                from nous.api.compensation import SnapshotBlocksDispatch
+
+                                if isinstance(_sbd2, SnapshotBlocksDispatch):
+                                    _snap_blocked2 = str(_sbd2)
+                                    await self._ledger_close(
+                                        entry_id,
+                                        "blocked",
+                                        _snap_blocked2,
+                                        keyed=send_key is not None,
+                                    )
+                                    if ledger:
+                                        ledger.record(
+                                            tool_name,
+                                            tool_input,
+                                            _snap_blocked2,
+                                            "blocked",
+                                        )
+                            if _snap_blocked2 is not None:
+                                result_text, is_error = _snap_blocked2, True
+                            elif suppressed is not None:
                                 result_text, is_error = suppressed.text, suppressed.is_error
                             else:
                                 outcome = CallOutcome()
