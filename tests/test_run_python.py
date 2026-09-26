@@ -7,8 +7,11 @@ memory operations, filter results, and return shaped data — reducing
 token consumption compared to separate tool calls.
 """
 
+import io
 import json
 import asyncio
+import logging
+import sys
 import threading
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1602,6 +1605,291 @@ class TestRunPythonTimeout:
         assert result["is_error"] is True
         assert "timed out" in result["content"][0]["text"].lower()
         assert await _wait_for_idle() == 0
+
+
+# Scripts that hold `lk` (and `lk2`) across a candidate raise point and release
+# them in cleanup. Each is (prelude, loop body with a `{body}` slot).
+_RELEASE_SCRIPTS = {
+    "with-lock": ("", "    with lk:\n{body}"),
+    "script-cm": (
+        "class CM:\n"
+        "    def __enter__(self):\n"
+        "        lk.acquire()\n"
+        "        return self\n"
+        "    def __exit__(self, *exc):\n"
+        "        lk.release()\n",
+        "    with CM():\n{body}",
+    ),
+    "exit-cleanup-loop": (
+        "def rel(lock):\n"
+        "    lock.release()\n"
+        "class CM:\n"
+        "    def __enter__(self):\n"
+        "        lk.acquire()\n"
+        "        lk2.acquire()\n"
+        "        return self\n"
+        "    def __exit__(self, *exc):\n"
+        "        for lock in (lk2, lk):\n"
+        "            rel(lock)\n",
+        "    with CM():\n{body}",
+    ),
+    "acquire-call-try": (
+        "def helper():\n"
+        "    y = 1\n",
+        "    lk.acquire()\n"
+        "    helper()\n"
+        "    try:\n"
+        "{body}"
+        "    finally:\n"
+        "        lk.release()\n",
+    ),
+}
+
+
+def _run_traced(code, env, tracer, T) -> None:  # noqa: ANN001, N803
+    """Run a compiled script on this thread under `tracer` until it times out."""
+    sys.settrace(tracer)
+    try:
+        exec(code, env)
+    except T.ScriptDeadlineExceeded:
+        pass
+    finally:
+        sys.settrace(None)
+
+
+class TestDeadlineTracerSafety:
+    """2026-09-26 prod wedge: the event loop blocked forever in `Thread.start`
+    on `threading._active_limbo_lock`, held by an executor thread that an
+    expired deadline tracer had killed inside `threading._delete`.
+
+    Two defects: overlapping runs left `sys.settrace` bound to one run's
+    guard, so later runs (and their executor threads after `_run` returned)
+    carried an expired tracer; and the tracer raised in whatever frame its
+    countdown landed on, including stdlib code between a lock's acquire and
+    its release.
+    """
+
+    def test_deadline_is_never_raised_inside_stdlib_frames(self):
+        from nous.api import tools as T
+
+        # Already expired: the very first deadline check is due.
+        tracer = T._deadline_tracer(time.monotonic() - 1.0, 0.0)
+        # Each iteration spends well over one old-style check interval of trace
+        # events inside threading.py, so an unfiltered check lands in stdlib.
+        code = compile(
+            "import threading\n"
+            "while True:\n"
+            "    t = threading.Thread(target=int)\n"
+            "    t.start()\n"
+            "    t.join()\n",
+            "<nous_script>",
+            "exec",
+        )
+        raised_in: list[str] = []
+
+        def worker() -> None:
+            sys.settrace(tracer)
+            try:
+                exec(code, {})
+            except T.ScriptDeadlineExceeded as exc:
+                sys.settrace(None)
+                # The innermost entries are the tracer's own frames; the frame
+                # it interrupted is the last one outside tools.py.
+                tb = exc.__traceback__
+                files = []
+                while tb is not None:
+                    files.append(tb.tb_frame.f_code.co_filename)
+                    tb = tb.tb_next
+                while files and files[-1] == T.__file__:
+                    files.pop()
+                raised_in.append(files[-1])
+            finally:
+                sys.settrace(None)
+
+        th = threading.Thread(target=worker)
+        th.start()
+        th.join(10)
+        assert raised_in == ["<nous_script>"]
+        assert threading._active_limbo_lock.acquire(timeout=2)
+        threading._active_limbo_lock.release()
+
+    @pytest.mark.parametrize("variant", sorted(_RELEASE_SCRIPTS))
+    def test_deadline_never_skips_a_release(self, monkeypatch, variant):
+        """Codex P1s on #654. (1) The implicit `__exit__` of a script's OWN
+        `with` gets a line event, so a raise there skips the release even in a
+        script-owned frame. (2) A single `helper()` call between `acquire()`
+        and `try:` fires a `call` event in that gap. The deadline must fire
+        only at a loop-iteration boundary.
+
+        A fake clock advances one tick per read, so the deadline offset picks
+        WHICH check crosses it; padding shifts where a fixed-interval check
+        lands. Sweeping both reaches every candidate raise point.
+        """
+        from types import SimpleNamespace
+
+        from nous.api import tools as T
+
+        ticks = iter(range(10**9))
+        monkeypatch.setattr(T, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+
+        prelude, loop = _RELEASE_SCRIPTS[variant]
+        leaked = []
+        for body in (1, 2):
+            for pad in range(16):
+                for offset in range(3, 7):
+                    src = (
+                        prelude
+                        + "pad = 0\n" * pad
+                        + "while True:\n"
+                        + loop.format(body="        x = 1\n" * body)
+                    )
+                    locks = {"lk": threading.Lock(), "lk2": threading.Lock()}
+                    th = threading.Thread(
+                        target=_run_traced,
+                        args=(compile(src, "<nous_script>", "exec"), dict(locks),
+                              T._deadline_tracer(next(ticks) + offset, 0.0), T),
+                    )
+                    th.start()
+                    th.join(10)
+                    assert not th.is_alive()
+                    if any(lk.locked() for lk in locks.values()):
+                        leaked.append((body, pad, offset))
+        assert leaked == []
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "result = sum(1 for _ in itertools.count())\n",
+            # Codex P1 on dcde231: a nested call inside each resume must not
+            # erase the outer call site's repetition history.
+            "def h():\n    return 1\nresult = sum(h() for _ in itertools.count())\n",
+            "functools.reduce(lambda a, b: a, itertools.count())\n",
+            "def h():\n    return 1\nfunctools.reduce(lambda a, b: h(), itertools.count())\n",
+        ],
+        ids=["sum-genexpr", "sum-genexpr-nested", "reduce", "reduce-nested"],
+    )
+    @pytest.mark.asyncio
+    async def test_c_driven_loop_times_out(self, code):
+        """A C function driving a script callback or generator shows no
+        back-edge in the script frame that called it; repeated entry from that
+        one call site is the boundary that stops it."""
+        from nous.api.tools import create_programmatic_tools
+
+        assert await _wait_for_idle() == 0, "test started with a run in flight"
+        tools = create_programmatic_tools(
+            AsyncMock(), AsyncMock(),
+            Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=1),
+        )
+        started = time.monotonic()
+        result = await tools["run_python"](code="import functools, itertools\n" + code)
+        elapsed = time.monotonic() - started
+        assert result["is_error"] is True
+        assert "timed out" in result["content"][0]["text"].lower()
+        assert elapsed < 1 + 2.0, f"run outlived its deadline ({elapsed:.1f}s)"
+        assert await _wait_for_idle() == 0
+
+    @pytest.mark.asyncio
+    async def test_sleep_loop_times_out_on_time(self):
+        """Safe points are rarer than trace events, so the clock is read at
+        every one — a sleep loop must not overrun by a check interval."""
+        from nous.api.tools import create_programmatic_tools
+
+        assert await _wait_for_idle() == 0, "test started with a run in flight"
+        tools = create_programmatic_tools(
+            AsyncMock(), AsyncMock(),
+            Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=1),
+        )
+        started = time.monotonic()
+        result = await tools["run_python"](
+            code="import time\nwhile True:\n    time.sleep(0.2)\n"
+        )
+        elapsed = time.monotonic() - started
+        assert result["is_error"] is True
+        assert "timed out" in result["content"][0]["text"].lower()
+        assert elapsed < 1 + 2.0, f"run outlived its deadline ({elapsed:.1f}s)"
+        # The worker itself stopped — not just the await.
+        assert await _wait_for_idle() == 0
+
+    @pytest.mark.asyncio
+    async def test_overlapping_runs_leave_no_stale_trace_hook(self):
+        from nous.api.tools import create_programmatic_tools
+
+        assert await _wait_for_idle() == 0, "test started with a run in flight"
+        short = create_programmatic_tools(
+            AsyncMock(), AsyncMock(),
+            Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=2),
+        )
+        long = create_programmatic_tools(
+            AsyncMock(), AsyncMock(),
+            Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=10),
+        )
+        # A starts first and finishes first; B starts while A runs and outlives
+        # it — the interleaving that left A's guard installed process-wide.
+        a = asyncio.create_task(
+            short["run_python"](code="import time\ntime.sleep(0.3)\nresult = 'A'")
+        )
+        await asyncio.sleep(0.1)
+        b = asyncio.create_task(
+            long["run_python"](code="import time\ntime.sleep(0.6)\nresult = 'B'")
+        )
+        assert (await a)["content"][0]["text"] == "A"
+        assert (await b)["content"][0]["text"] == "B"
+
+        # A thread that is not running a script gets exactly the hook it asks for.
+        seen: list[object] = []
+
+        def probe() -> None:
+            sys.settrace(None)
+            seen.append(sys.gettrace())
+
+        th = threading.Thread(target=probe)
+        th.start()
+        th.join(5)
+        assert seen == [None]
+
+        # Past A's deadline, an unrelated trivial script still runs.
+        await asyncio.sleep(2.2)
+        out = await long["run_python"](code="result = 'ok'")
+        assert out["content"][0]["text"] == "ok"
+        assert await _wait_for_idle() == 0
+
+    @pytest.mark.asyncio
+    async def test_timeout_in_stdlib_heavy_loop_leaks_no_lock_or_slot(self):
+        from nous.api.tools import create_programmatic_tools
+
+        assert await _wait_for_idle() == 0, "test started with a run in flight"
+        probe = logging.getLogger("nous.test.deadline_probe")
+        handler = logging.StreamHandler(io.StringIO())
+        probe.addHandler(handler)
+        probe.propagate = False
+        tools = create_programmatic_tools(
+            AsyncMock(), AsyncMock(),
+            Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=1),
+        )
+        code = (
+            "import logging, threading\n"
+            "log = logging.getLogger('nous.test.deadline_probe')\n"
+            "while True:\n"
+            "    log.warning('tick')\n"
+            "    t = threading.Thread(target=int)\n"
+            "    t.start()\n"
+            "    t.join()\n"
+        )
+        try:
+            started = time.monotonic()
+            result = await tools["run_python"](code=code)
+            elapsed = time.monotonic() - started
+        finally:
+            probe.removeHandler(handler)
+
+        assert result["is_error"] is True
+        assert "timed out" in result["content"][0]["text"].lower()
+        # The trace hook, not the outer wait_for, ended the run.
+        assert elapsed < 1 + 2.0, f"run outlived its deadline ({elapsed:.1f}s)"
+        assert await _wait_for_idle() == 0
+        for lock in (threading._active_limbo_lock, handler.lock, logging._lock):
+            assert lock.acquire(timeout=2), f"{lock!r} left held"
+            lock.release()
 
 
 # ---------------------------------------------------------------------------
