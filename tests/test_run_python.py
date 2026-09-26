@@ -1607,6 +1607,45 @@ class TestRunPythonTimeout:
         assert await _wait_for_idle() == 0
 
 
+# Scripts that hold `lk` (and `lk2`) across a candidate raise point and release
+# them in cleanup. Each is (prelude, loop body with a `{body}` slot).
+_RELEASE_SCRIPTS = {
+    "with-lock": ("", "    with lk:\n{body}"),
+    "script-cm": (
+        "class CM:\n"
+        "    def __enter__(self):\n"
+        "        lk.acquire()\n"
+        "        return self\n"
+        "    def __exit__(self, *exc):\n"
+        "        lk.release()\n",
+        "    with CM():\n{body}",
+    ),
+    "exit-cleanup-loop": (
+        "def rel(lock):\n"
+        "    lock.release()\n"
+        "class CM:\n"
+        "    def __enter__(self):\n"
+        "        lk.acquire()\n"
+        "        lk2.acquire()\n"
+        "        return self\n"
+        "    def __exit__(self, *exc):\n"
+        "        for lock in (lk2, lk):\n"
+        "            rel(lock)\n",
+        "    with CM():\n{body}",
+    ),
+    "acquire-call-try": (
+        "def helper():\n"
+        "    y = 1\n",
+        "    lk.acquire()\n"
+        "    helper()\n"
+        "    try:\n"
+        "{body}"
+        "    finally:\n"
+        "        lk.release()\n",
+    ),
+}
+
+
 def _run_traced(code, env, tracer, T) -> None:  # noqa: ANN001, N803
     """Run a compiled script on this thread under `tracer` until it times out."""
     sys.settrace(tracer)
@@ -1674,52 +1713,69 @@ class TestDeadlineTracerSafety:
         assert threading._active_limbo_lock.acquire(timeout=2)
         threading._active_limbo_lock.release()
 
-    @pytest.mark.parametrize("script_cm", [False, True], ids=["lock", "script-cm"])
-    def test_deadline_never_skips_a_with_block_release(self, monkeypatch, script_cm):
-        """Codex P1 on #654: the implicit `__exit__` of a script's OWN `with`
-        gets a line event too, so a raise there skips the release even in a
-        script-owned frame. Sweeping the padding before the loop moves where a
-        fixed-interval check lands, so every position in the iteration —
-        including the with-exit and a script `__exit__` body — gets hit.
+    @pytest.mark.parametrize("variant", sorted(_RELEASE_SCRIPTS))
+    def test_deadline_never_skips_a_release(self, monkeypatch, variant):
+        """Codex P1s on #654. (1) The implicit `__exit__` of a script's OWN
+        `with` gets a line event, so a raise there skips the release even in a
+        script-owned frame. (2) A single `helper()` call between `acquire()`
+        and `try:` fires a `call` event in that gap. The deadline must fire
+        only at a loop-iteration boundary.
+
+        A fake clock advances one tick per read, so the deadline offset picks
+        WHICH check crosses it; padding shifts where a fixed-interval check
+        lands. Sweeping both reaches every candidate raise point.
         """
         from types import SimpleNamespace
 
         from nous.api import tools as T
 
-        # A clock that advances one tick per read: the deadline passes after a
-        # fixed number of checks, independent of wall time.
         ticks = iter(range(10**9))
         monkeypatch.setattr(T, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
 
-        cm = (
-            "class CM:\n"
-            "    def __enter__(self):\n"
-            "        lk.acquire()\n"
-            "        return self\n"
-            "    def __exit__(self, *exc):\n"
-            "        lk.release()\n"
-        )
+        prelude, loop = _RELEASE_SCRIPTS[variant]
         leaked = []
         for body in (1, 2):
-            for pad in range(24):
-                src = (
-                    (cm if script_cm else "")
-                    + "pad = 0\n" * pad
-                    + f"while True:\n    with {'CM()' if script_cm else 'lk'}:\n"
-                    + "        x = 1\n" * body
-                )
-                lk = threading.Lock()
-                th = threading.Thread(
-                    target=_run_traced,
-                    args=(compile(src, "<nous_script>", "exec"), {"lk": lk},
-                          T._deadline_tracer(next(ticks) + 5, 0.0), T),
-                )
-                th.start()
-                th.join(10)
-                assert not th.is_alive()
-                if lk.locked():
-                    leaked.append((body, pad))
+            for pad in range(16):
+                for offset in range(3, 7):
+                    src = (
+                        prelude
+                        + "pad = 0\n" * pad
+                        + "while True:\n"
+                        + loop.format(body="        x = 1\n" * body)
+                    )
+                    locks = {"lk": threading.Lock(), "lk2": threading.Lock()}
+                    th = threading.Thread(
+                        target=_run_traced,
+                        args=(compile(src, "<nous_script>", "exec"), dict(locks),
+                              T._deadline_tracer(next(ticks) + offset, 0.0), T),
+                    )
+                    th.start()
+                    th.join(10)
+                    assert not th.is_alive()
+                    if any(lk.locked() for lk in locks.values()):
+                        leaked.append((body, pad, offset))
         assert leaked == []
+
+    @pytest.mark.asyncio
+    async def test_generator_driven_loop_times_out(self):
+        """`sum` resumes the genexpr from one C call site; each resume is a
+        `call` event with no back-edge visible in the generator frame."""
+        from nous.api.tools import create_programmatic_tools
+
+        assert await _wait_for_idle() == 0, "test started with a run in flight"
+        tools = create_programmatic_tools(
+            AsyncMock(), AsyncMock(),
+            Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=1),
+        )
+        started = time.monotonic()
+        result = await tools["run_python"](
+            code="import itertools\nresult = sum(1 for _ in itertools.count())\n"
+        )
+        elapsed = time.monotonic() - started
+        assert result["is_error"] is True
+        assert "timed out" in result["content"][0]["text"].lower()
+        assert elapsed < 1 + 2.0, f"run outlived its deadline ({elapsed:.1f}s)"
+        assert await _wait_for_idle() == 0
 
     @pytest.mark.asyncio
     async def test_sleep_loop_times_out_on_time(self):

@@ -3940,30 +3940,41 @@ def _protected_prefixes() -> tuple[str, ...]:
 # `_active_limbo_lock`, after which every `Thread.start` blocked.
 _PROTECTED_PREFIXES = _protected_prefixes()
 
-# Methods whose entry IS a release: raising on it would skip the release.
+# Methods whose body IS a release: never traced, and callbacks they drive are
+# never a raise point.
 _RELEASE_METHODS = frozenset({"__exit__", "__aexit__"})
 
 
 def _deadline_tracer(deadline: float, timeout: float):  # noqa: ANN202 - CPython trace fn
     """Build the per-run trace hook that raises once `deadline` has passed.
 
-    It raises only at SAFE POINTS in script-owned frames: entry of a script
-    function (except `__exit__`/`__aexit__`) and a loop back-edge — a line
-    event whose bytecode offset did not advance. It never raises on a forward
-    edge, so the implicit `__exit__` of a `with` block (a line event back on
-    the `with` line, but FORWARD in bytecode), the gap between `acquire()` and
-    `try:`, and straight-line cleanup cannot be cut short. Non-terminating
-    Python must loop or call, so every runaway still reaches a safe point, and
-    the clock is read at each one because they are rarer than trace events.
+    It raises only at a LOOP-ITERATION BOUNDARY in script-owned code:
+    - the back-edge of a Python loop: a line event whose bytecode offset did
+      not advance in that frame. The implicit `__exit__` of a `with` block
+      gets a line event back on the `with` LINE, but it moves FORWARD in
+      bytecode, so it is never one;
+    - the second-or-later entry of a script function re-entered from one call
+      site without that caller advancing a line: a C-driven loop such as
+      `map`, `reduce`, `sorted(key=)`, or `sum` resuming a genexpr.
+    Never inside stdlib, packages, frozen importlib or nous (not traced at
+    all), never on a forward edge — so a single call between `acquire()` and
+    `try:` is not a raise point — and never inside `__exit__`/`__aexit__` or
+    callbacks they drive. Non-terminating Python must loop, so every runaway
+    reaches a boundary; the clock is read at each one since they are rarer
+    than trace events.
 
-    Residual, accepted: a cleanup LOOP or a script-defined cleanup FUNCTION
-    inside a script's own `finally` can still be interrupted — the semantics
-    of KeyboardInterrupt; only process isolation closes that. A script stuck
-    forever inside library code is not interruptible — the same documented
-    limit as a blocking C call.
+    Residual, accepted (KeyboardInterrupt semantics): a resource a script
+    acquired by hand, outside `with`/`try`, and holds across a loop can leak,
+    and cleanup code that itself loops can be cut short; only process
+    isolation closes that. A runaway living entirely inside library code is
+    not interruptible — the same documented limit as a blocking C call.
     """
     owned: dict[Any, bool] = {}  # verdict per code object; dies with the run
     message = f"execution timed out ({timeout}s)"
+    # [caller frame, caller f_lasti, consecutive entries from that call site].
+    # Frames are compared by IDENTITY: CPython reuses frame memory, so id()
+    # would merge distinct short-lived callers into one "site".
+    site: list[Any] = [None, -1, 0]
 
     def _tracer(frame, event, arg):  # noqa: ANN001, ANN202 - CPython trace signature
         # Global hook: called with 'call' for every new frame.
@@ -3973,14 +3984,26 @@ def _deadline_tracer(deadline: float, timeout: float):  # noqa: ANN202 - CPython
             is_owned = owned[code] = not os.path.normcase(code.co_filename).startswith(
                 _PROTECTED_PREFIXES
             )
-        if not is_owned:
+        if not is_owned or code.co_name in _RELEASE_METHODS:
             return None
-        if code.co_name not in _RELEASE_METHODS and time.monotonic() >= deadline:
-            raise ScriptDeadlineExceeded(message)
+        caller = frame.f_back
+        lasti = caller.f_lasti if caller is not None else -1
+        if caller is site[0] and lasti == site[1]:
+            site[2] += 1
+            if (
+                site[2] >= 2
+                and caller.f_code.co_name not in _RELEASE_METHODS
+                and time.monotonic() >= deadline
+            ):
+                raise ScriptDeadlineExceeded(message)
+        else:
+            site[0], site[1], site[2] = caller, lasti, 1
         last = [-1]
 
         def _local(frame, event, arg):  # noqa: ANN001, ANN202 - CPython trace signature
             if event == "line":
+                if frame is site[0]:
+                    site[2] = 0  # the caller moved: its next call is a new site visit
                 lasti = frame.f_lasti
                 back_edge = lasti <= last[0]
                 last[0] = lasti
