@@ -14,7 +14,6 @@ import logging
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
 from typing import Any
 
 from nous.brain import Brain
@@ -54,18 +53,18 @@ class HealthCheck(BaseCheck):
             # increases_findings: raising stale_decision_days WIDENS the
             # created_at >= cutoff window in Brain.get_unreviewed → more
             # findings. stale_fact_days is the opposite (older_than filter).
-            "stale_decision_days": TunableParam(
-                "stale_decision_days", 7, 3, 30, 1, increases_findings=True
-            ),
+            "stale_decision_days": TunableParam("stale_decision_days", 7, 3, 30, 1, increases_findings=True),
             "stale_fact_days": TunableParam("stale_fact_days", 30, 7, 90, 5),
             # Raising the threshold flags MORE procedures (effectiveness < t).
             "low_effectiveness_threshold": TunableParam(
-                "low_effectiveness_threshold", 0.5, 0.3, 0.8, 0.05,
+                "low_effectiveness_threshold",
+                0.5,
+                0.3,
+                0.8,
+                0.05,
                 increases_findings=True,
             ),
-            "max_findings_per_run": TunableParam(
-                "max_findings_per_run", 10, 3, 25, 1, increases_findings=True
-            ),
+            "max_findings_per_run": TunableParam("max_findings_per_run", 10, 3, 25, 1, increases_findings=True),
         }
 
     async def run(self) -> CheckResult:
@@ -77,13 +76,15 @@ class HealthCheck(BaseCheck):
             stale_days = int(self.get_param_value("stale_decision_days"))
             unreviewed = await self._brain.get_unreviewed(max_age_days=stale_days)
             if unreviewed and len(findings) < max_findings:
-                findings.append(Finding(
-                    source="brain",
-                    summary=f"{len(unreviewed)} decisions pending review (oldest {stale_days} days)",
-                    urgency="normal",
-                    needs_action=True,
-                    raw_data={"count": len(unreviewed)},
-                ))
+                findings.append(
+                    Finding(
+                        source="brain",
+                        summary=f"{len(unreviewed)} decisions pending review (oldest {stale_days} days)",
+                        urgency="normal",
+                        needs_action=True,
+                        raw_data={"count": len(unreviewed)},
+                    )
+                )
         except Exception:
             logger.debug("HealthCheck: get_unreviewed failed", exc_info=True)
 
@@ -92,13 +93,15 @@ class HealthCheck(BaseCheck):
             censors = await self._heart.censors.list_active()
             high_fp = [c for c in censors if (c.false_positive_count or 0) > 5]
             if high_fp and len(findings) < max_findings:
-                findings.append(Finding(
-                    source="censors",
-                    summary=f"{len(high_fp)} censors with high false-positive counts",
-                    urgency="normal",
-                    needs_action=True,
-                    raw_data={"censor_ids": [str(c.id) for c in high_fp]},
-                ))
+                findings.append(
+                    Finding(
+                        source="censors",
+                        summary=f"{len(high_fp)} censors with high false-positive counts",
+                        urgency="normal",
+                        needs_action=True,
+                        raw_data={"censor_ids": [str(c.id) for c in high_fp]},
+                    )
+                )
         except Exception:
             logger.debug("HealthCheck: list_active censors failed", exc_info=True)
 
@@ -107,13 +110,15 @@ class HealthCheck(BaseCheck):
             stale_fact_days = int(self.get_param_value("stale_fact_days"))
             stale_count = await self._heart.facts.count_stale(older_than_days=stale_fact_days)
             if stale_count > 10 and len(findings) < max_findings:
-                findings.append(Finding(
-                    source="facts",
-                    summary=f"{stale_count} facts not accessed in {stale_fact_days}+ days",
-                    urgency="low",
-                    needs_action=False,
-                    raw_data={"count": stale_count},
-                ))
+                findings.append(
+                    Finding(
+                        source="facts",
+                        summary=f"{stale_count} facts not accessed in {stale_fact_days}+ days",
+                        urgency="low",
+                        needs_action=False,
+                        raw_data={"count": stale_count},
+                    )
+                )
         except Exception:
             logger.debug("HealthCheck: count_stale failed", exc_info=True)
 
@@ -122,13 +127,15 @@ class HealthCheck(BaseCheck):
             threshold = self.get_param_value("low_effectiveness_threshold")
             low_procs = await self._heart.procedures.get_low_effectiveness(threshold=threshold)
             if low_procs and len(findings) < max_findings:
-                findings.append(Finding(
-                    source="procedures",
-                    summary=f"{len(low_procs)} procedures below {threshold:.0%} effectiveness",
-                    urgency="normal",
-                    needs_action=True,
-                    raw_data={"procedure_ids": [str(p.id) for p in low_procs]},
-                ))
+                findings.append(
+                    Finding(
+                        source="procedures",
+                        summary=f"{len(low_procs)} procedures below {threshold:.0%} effectiveness",
+                        urgency="normal",
+                        needs_action=True,
+                        raw_data={"procedure_ids": [str(p.id) for p in low_procs]},
+                    )
+                )
         except Exception:
             logger.debug("HealthCheck: get_low_effectiveness failed", exc_info=True)
 
@@ -165,9 +172,7 @@ PENDING_PROTOTYPES = [
 # then treat as a question only on an interrogative wh-start or a trailing
 # question mark. Modal/aux starts alone do NOT suppress.
 _FILLER_PREFIX = re.compile(r"^\s*(?:(?:hey|ok|okay)[\s,!.:-]+)+", re.IGNORECASE)
-_INTERROGATIVE_PREFIX = re.compile(
-    r"^\s*(what|how|where|when|why|who|whom|whose|which)\b", re.IGNORECASE
-)
+_INTERROGATIVE_PREFIX = re.compile(r"^\s*(what|how|where|when|why|who|whom|whose|which)\b", re.IGNORECASE)
 
 
 def _is_question_form(text: str) -> bool:
@@ -209,19 +214,19 @@ class SelfInitiatedCheck(BaseCheck):
             # Volume params: raising them produces MORE findings (wider
             # windows / higher caps), so the tuner must move them with
             # inverted sign — increases_findings=True.
-            "lookback_days": TunableParam(
-                "lookback_days", 14, 3, 30, 1, increases_findings=True
-            ),
-            "max_pending_items": TunableParam(
-                "max_pending_items", 5, 2, 15, 1, increases_findings=True
-            ),
+            "lookback_days": TunableParam("lookback_days", 14, 3, 30, 1, increases_findings=True),
+            "max_pending_items": TunableParam("max_pending_items", 5, 2, 15, 1, increases_findings=True),
             # #369: upper bound on the age-based promise heuristic (hours).
             # Episodes older than this are too old to be actionable.
             # Was pinned=True until TunableParam grew direction metadata
             # (the codex-P2 inversion concern); now tunable with the
             # correct sign.
             "max_stale_age_hours": TunableParam(
-                "max_stale_age_hours", 336, 72, 720, 24,
+                "max_stale_age_hours",
+                336,
+                72,
+                720,
+                24,
                 increases_findings=True,
             ),
         }
@@ -250,7 +255,6 @@ class SelfInitiatedCheck(BaseCheck):
 
         findings: list[Finding] = []
         threshold = self.get_param_value("similarity_threshold")
-        lookback_days = int(self.get_param_value("lookback_days"))
         max_items = int(self.get_param_value("max_pending_items"))
 
         # Search facts using each prototype query
@@ -298,13 +302,15 @@ class SelfInitiatedCheck(BaseCheck):
                             is_pending = score >= threshold
 
                     if is_pending:
-                        findings.append(Finding(
-                            source="facts",
-                            summary=f"Pending action: {fact.content[:100]}",
-                            urgency="normal",
-                            needs_action=True,
-                            raw_data={"fact_id": fid, "detection": "embedding"},
-                        ))
+                        findings.append(
+                            Finding(
+                                source="facts",
+                                summary=f"Pending action: {fact.content[:100]}",
+                                urgency="normal",
+                                needs_action=True,
+                                raw_data={"fact_id": fid, "detection": "embedding"},
+                            )
+                        )
                         if len(findings) >= max_items:
                             break
             except Exception:
@@ -355,17 +361,19 @@ class SelfInitiatedCheck(BaseCheck):
                         # commitments — skip before flagging.
                         if _is_question_form(summary_text):
                             continue
-                        findings.append(Finding(
-                            source="episodes",
-                            summary=f"Unresolved commitment: {summary_text[:100]}",
-                            urgency="normal",
-                            needs_action=True,
-                            raw_data={
-                                "episode_id": eid,
-                                "detection": "promise_scan",
-                                "outcome": getattr(ep, "outcome", None),
-                            },
-                        ))
+                        findings.append(
+                            Finding(
+                                source="episodes",
+                                summary=f"Unresolved commitment: {summary_text[:100]}",
+                                urgency="normal",
+                                needs_action=True,
+                                raw_data={
+                                    "episode_id": eid,
+                                    "detection": "promise_scan",
+                                    "outcome": getattr(ep, "outcome", None),
+                                },
+                            )
+                        )
                         if len(findings) >= max_items:
                             break
             except Exception:
@@ -384,7 +392,6 @@ class SelfInitiatedCheck(BaseCheck):
             return findings
 
         max_items = int(self.get_param_value("max_pending_items"))
-        lookback_days = int(self.get_param_value("lookback_days"))
 
         # Search for facts with temporal language
         temporal_queries = ["by Friday", "next week", "deadline", "due date", "end of week", "before Monday"]
@@ -408,17 +415,19 @@ class SelfInitiatedCheck(BaseCheck):
                     if parsed_date is not None:
                         delta = parsed_date - now
                         if timedelta(0) <= delta <= upcoming_window:
-                            findings.append(Finding(
-                                source="facts",
-                                summary=f"Approaching deadline: {fact.content[:100]}",
-                                urgency="high" if delta.days <= 1 else "normal",
-                                needs_action=True,
-                                raw_data={
-                                    "fact_id": fid,
-                                    "detection": "temporal",
-                                    "parsed_date": parsed_date.isoformat(),
-                                },
-                            ))
+                            findings.append(
+                                Finding(
+                                    source="facts",
+                                    summary=f"Approaching deadline: {fact.content[:100]}",
+                                    urgency="high" if delta.days <= 1 else "normal",
+                                    needs_action=True,
+                                    raw_data={
+                                        "fact_id": fid,
+                                        "detection": "temporal",
+                                        "parsed_date": parsed_date.isoformat(),
+                                    },
+                                )
+                            )
                             if len(findings) >= max_items:
                                 break
             except Exception:
@@ -475,13 +484,15 @@ class SelfInitiatedCheck(BaseCheck):
                     if actionable == False:  # noqa: E712 — SQLite 0/1
                         continue
                     if actionable == True or self._looks_like_pending(fact.content):  # noqa: E712
-                        findings.append(Finding(
-                            source="facts",
-                            summary=f"Pending action: {fact.content[:100]}",
-                            urgency="normal",
-                            needs_action=True,
-                            raw_data={"fact_id": fid, "detection": "keyword"},
-                        ))
+                        findings.append(
+                            Finding(
+                                source="facts",
+                                summary=f"Pending action: {fact.content[:100]}",
+                                urgency="normal",
+                                needs_action=True,
+                                raw_data={"fact_id": fid, "detection": "keyword"},
+                            )
+                        )
             except Exception:
                 logger.debug("SelfInitiatedCheck: keyword fact search failed", exc_info=True)
 
@@ -509,13 +520,15 @@ class SelfInitiatedCheck(BaseCheck):
                 now = datetime.now(UTC)
                 due_schedules = await self._heart.schedules.get_due(now)
                 if due_schedules:
-                    findings.append(Finding(
-                        source="schedules",
-                        summary=f"{len(due_schedules)} schedule(s) past due",
-                        urgency="normal",
-                        needs_action=True,
-                        raw_data={"count": len(due_schedules)},
-                    ))
+                    findings.append(
+                        Finding(
+                            source="schedules",
+                            summary=f"{len(due_schedules)} schedule(s) past due",
+                            urgency="normal",
+                            needs_action=True,
+                            raw_data={"count": len(due_schedules)},
+                        )
+                    )
             except Exception:
                 logger.debug("SelfInitiatedCheck: get_due failed", exc_info=True)
 
@@ -636,7 +649,9 @@ class EmailCheck(BaseCheck):
         new_count = sum(1 for mid, _, _ in messages if mid not in self._seen_ids)
         logger.info(
             "EmailCheck: fetched %d unseen, %d new (seen cache: %d)",
-            len(messages), new_count, len(self._seen_ids),
+            len(messages),
+            new_count,
+            len(self._seen_ids),
         )
 
         findings: list[Finding] = []
@@ -647,13 +662,15 @@ class EmailCheck(BaseCheck):
 
             urgency = await self._classify_email(subject, sender)
             logger.info("EmailCheck: new email [%s] from %s — %s", urgency, sender, subject[:60])
-            findings.append(Finding(
-                source="email",
-                summary=f"New email from {sender}: {subject[:80]}",
-                urgency=urgency,
-                needs_action=True,
-                raw_data={"message_id": msg_id, "subject": subject, "sender": sender},
-            ))
+            findings.append(
+                Finding(
+                    source="email",
+                    summary=f"New email from {sender}: {subject[:80]}",
+                    urgency=urgency,
+                    needs_action=True,
+                    raw_data={"message_id": msg_id, "subject": subject, "sender": sender},
+                )
+            )
 
         return CheckResult(
             has_updates=bool(findings),
@@ -798,10 +815,7 @@ class EmailCheck(BaseCheck):
     def _prune_seen(self) -> None:
         """Remove seen IDs older than 24 hours."""
         now = datetime.now(UTC)
-        self._seen_ids = {
-            k: v for k, v in self._seen_ids.items()
-            if (now - v).total_seconds() < 86400
-        }
+        self._seen_ids = {k: v for k, v in self._seen_ids.items() if (now - v).total_seconds() < 86400}
 
 
 # ------------------------------------------------------------------
@@ -839,7 +853,11 @@ class DriveCheck(BaseCheck):
             "significance_threshold": TunableParam("significance_threshold", 1.0, 0.0, 2.0, 0.5),
             # Wider lookback → more cross-reference matches → more findings.
             "cross_reference_lookback_hours": TunableParam(
-                "cross_reference_lookback_hours", 48, 6, 168, 6,
+                "cross_reference_lookback_hours",
+                48,
+                6,
+                168,
+                6,
                 increases_findings=True,
             ),
         }
@@ -847,6 +865,7 @@ class DriveCheck(BaseCheck):
     def _ensure_gdrive(self) -> None:
         if self._gdrive is None:
             from nous.integrations.gdrive import GDrive
+
             self._gdrive = GDrive()
 
     async def run(self) -> CheckResult:
@@ -864,9 +883,7 @@ class DriveCheck(BaseCheck):
         query = f"modifiedTime > '{cutoff_str}' and trashed = false"
 
         try:
-            files = await asyncio.to_thread(
-                self._gdrive.list_files, query=query
-            )
+            files = await asyncio.to_thread(self._gdrive.list_files, query=query)
         except Exception:
             logger.warning("DriveCheck: list_files failed", exc_info=True)
             raise
@@ -900,13 +917,15 @@ class DriveCheck(BaseCheck):
             elif significance == "normal":
                 urgency = "low"
 
-            findings.append(Finding(
-                source="drive",
-                summary=summary,
-                urgency=urgency,
-                needs_action=significance == "high",
-                raw_data={**f, "significance": significance},
-            ))
+            findings.append(
+                Finding(
+                    source="drive",
+                    summary=summary,
+                    urgency=urgency,
+                    needs_action=significance == "high",
+                    raw_data={**f, "significance": significance},
+                )
+            )
 
         return CheckResult(
             has_updates=bool(findings),
@@ -985,14 +1004,14 @@ class BehaviorDriftCheck(BaseCheck):
         self._bus_stats = bus_stats
         self._db = db
         from nous.observability.drift import DriftDetector
+
         self._detector = DriftDetector()
         self._last_snapshot: Any = None  # BehaviorSnapshot
         self._last_anomalies: list[dict] = []  # Serialized anomalies for DB persistence
         self._last_counts_ok: bool = False  # True only when the count query succeeded
-        self.interval = getattr(settings, 'drift_detection_interval', 3600)
+        self.interval = getattr(settings, "drift_detection_interval", 3600)
 
     async def run(self) -> CheckResult:
-        from nous.observability.snapshots import BehaviorSnapshot
         findings: list[Finding] = []
         try:
             snapshot = await self._capture_snapshot()
@@ -1003,7 +1022,12 @@ class BehaviorDriftCheck(BaseCheck):
                 return CheckResult(has_updates=False, findings=[])
             baseline = await self._load_baseline(hours=168)
             self._last_anomalies = []
-            if baseline:
+            if baseline and self._last_counts_ok:
+                # Skip detection when counts were unavailable this tick.
+                # _capture_snapshot() carried the previous values forward,
+                # producing zero deltas.  A baseline that reflects sustained
+                # growth flags those zeros as a high-urgency downward anomaly
+                # even though no real data was observed.
                 anomalies = self._detector.detect(snapshot, baseline)
                 # NOTE: residualized_by/raw_current MUST be carried here too,
                 # not only on the live Finding. This list is what gets persisted
@@ -1011,18 +1035,24 @@ class BehaviorDriftCheck(BaseCheck):
                 # and /behavior/drift-report, so dropping them there would make
                 # those endpoints print the residual as if it were the raw metric.
                 self._last_anomalies = [
-                    {"metric": a.metric, "current": a.current, "mean": a.mean,
-                     "stddev": a.stddev, "z_score": a.z_score, "direction": a.direction,
-                     "severity": a.severity, "residualized_by": a.residualized_by,
-                     "raw_current": a.raw_current}
+                    {
+                        "metric": a.metric,
+                        "current": a.current,
+                        "mean": a.mean,
+                        "stddev": a.stddev,
+                        "z_score": a.z_score,
+                        "direction": a.direction,
+                        "severity": a.severity,
+                        "residualized_by": a.residualized_by,
+                        "raw_current": a.raw_current,
+                    }
                     for a in anomalies
                 ]
                 for a in anomalies:
                     # z_score is None when the baseline had zero variance, so
                     # "+/- 0.0" would read as a suspiciously precise sigma
                     # rather than "this series had never moved before".
-                    spread = (f"+/- {a.stddev}" if a.z_score is not None
-                              else "previously constant")
+                    spread = f"+/- {a.stddev}" if a.z_score is not None else "previously constant"
                     if a.residualized_by:
                         summary = (
                             f"{a.metric}: {a.raw_current} raw -> {a.current} unexplained "
@@ -1030,15 +1060,23 @@ class BehaviorDriftCheck(BaseCheck):
                         )
                     else:
                         summary = f"{a.metric}: {a.current} ({a.direction} from {a.mean} {spread})"
-                    findings.append(Finding(
-                        source="drift",
-                        summary=summary,
-                        urgency="high" if a.severity == "alert" else "normal",
-                        needs_action=a.severity == "alert",
-                        raw_data={"metric": a.metric, "current": a.current, "mean": a.mean,
-                                  "stddev": a.stddev, "z_score": a.z_score,
-                                  "residualized_by": a.residualized_by, "raw_current": a.raw_current},
-                    ))
+                    findings.append(
+                        Finding(
+                            source="drift",
+                            summary=summary,
+                            urgency="high" if a.severity == "alert" else "normal",
+                            needs_action=a.severity == "alert",
+                            raw_data={
+                                "metric": a.metric,
+                                "current": a.current,
+                                "mean": a.mean,
+                                "stddev": a.stddev,
+                                "z_score": a.z_score,
+                                "residualized_by": a.residualized_by,
+                                "raw_current": a.raw_current,
+                            },
+                        )
+                    )
             if self._last_counts_ok:
                 await self._store_snapshot(snapshot)
             self._last_snapshot = snapshot
@@ -1048,6 +1086,7 @@ class BehaviorDriftCheck(BaseCheck):
 
     async def _capture_snapshot(self):
         from nous.observability.snapshots import BehaviorSnapshot
+
         now = datetime.now(UTC)
         prev = self._last_snapshot
         fact_count = episode_count = censor_count = procedure_count = 0
@@ -1057,6 +1096,7 @@ class BehaviorDriftCheck(BaseCheck):
             try:
                 async with self._db.session() as session:
                     from sqlalchemy import text
+
                     # Both fact counts are read in ONE statement so they share a
                     # single MVCC snapshot. That is what makes facts_pruned and
                     # fact_count_delta below consistent with each other.
@@ -1067,22 +1107,30 @@ class BehaviorDriftCheck(BaseCheck):
                     # unscoped count would let another agent's writes move this
                     # agent's deltas -- and for the residualized pair, let agent
                     # A's prune explain away agent B's unexplained fact drop.
-                    result = await session.execute(text(
-                        "SELECT "
-                        "(SELECT COUNT(*) FROM heart.facts "
-                        " WHERE agent_id = :aid AND active = true) AS facts, "
-                        "(SELECT COUNT(*) FROM heart.episodes "
-                        " WHERE agent_id = :aid) AS episodes, "
-                        "(SELECT COUNT(*) FROM heart.censors "
-                        " WHERE agent_id = :aid AND active = true) AS censors, "
-                        "(SELECT COUNT(*) FROM heart.procedures "
-                        " WHERE agent_id = :aid AND active = true) AS procedures, "
-                        "(SELECT COUNT(*) FROM heart.facts "
-                        " WHERE agent_id = :aid AND active = false) AS inactive_facts"
-                    ), {"aid": self._settings.agent_id})
+                    result = await session.execute(
+                        text(
+                            "SELECT "
+                            "(SELECT COUNT(*) FROM heart.facts "
+                            " WHERE agent_id = :aid AND active = true) AS facts, "
+                            "(SELECT COUNT(*) FROM heart.episodes "
+                            " WHERE agent_id = :aid) AS episodes, "
+                            "(SELECT COUNT(*) FROM heart.censors "
+                            " WHERE agent_id = :aid AND active = true) AS censors, "
+                            "(SELECT COUNT(*) FROM heart.procedures "
+                            " WHERE agent_id = :aid AND active = true) AS procedures, "
+                            "(SELECT COUNT(*) FROM heart.facts "
+                            " WHERE agent_id = :aid AND active = false) AS inactive_facts"
+                        ),
+                        {"aid": self._settings.agent_id},
+                    )
                     row = result.fetchone()
                     if row:
-                        fact_count, episode_count, censor_count, procedure_count = row.facts, row.episodes, row.censors, row.procedures
+                        fact_count, episode_count, censor_count, procedure_count = (
+                            row.facts,
+                            row.episodes,
+                            row.censors,
+                            row.procedures,
+                        )
                         inactive_fact_count = row.inactive_facts
                         counts_ok = True
             except Exception:
@@ -1131,9 +1179,7 @@ class BehaviorDriftCheck(BaseCheck):
         #
         # On the first tick after a restart prev is None, so this is 0 -- and
         # fact_count_delta is 0 on that tick too, so the pair still agrees.
-        facts_pruned = (
-            inactive_fact_count - prev.inactive_fact_count if prev else 0
-        )
+        facts_pruned = inactive_fact_count - prev.inactive_fact_count if prev else 0
 
         bus_data = self._bus_stats.to_dict() if self._bus_stats else {}
         handlers = bus_data.get("handlers", {})
@@ -1144,14 +1190,20 @@ class BehaviorDriftCheck(BaseCheck):
         self._last_counts_ok = counts_ok
         return BehaviorSnapshot(
             timestamp=now,
-            fact_count=fact_count, fact_count_delta=fact_count - (prev.fact_count if prev else fact_count),
-            inactive_fact_count=inactive_fact_count, facts_pruned=facts_pruned,
-            episode_count=episode_count, episode_count_delta=episode_count - (prev.episode_count if prev else episode_count),
-            active_censor_count=censor_count, active_censor_delta=censor_count - (prev.active_censor_count if prev else censor_count),
-            procedure_count=procedure_count, decision_count=0,
+            fact_count=fact_count,
+            fact_count_delta=fact_count - (prev.fact_count if prev else fact_count),
+            inactive_fact_count=inactive_fact_count,
+            facts_pruned=facts_pruned,
+            episode_count=episode_count,
+            episode_count_delta=episode_count - (prev.episode_count if prev else episode_count),
+            active_censor_count=censor_count,
+            active_censor_delta=censor_count - (prev.active_censor_count if prev else censor_count),
+            procedure_count=procedure_count,
+            decision_count=0,
             events_processed=bus_data.get("total_processed", 0),
             events_dropped=bus_data.get("total_dropped", 0),
-            handler_error_count=total_errors, handler_error_rate=round(error_rate, 4),
+            handler_error_count=total_errors,
+            handler_error_rate=round(error_rate, 4),
             turns_processed=bus_data.get("event_counts", {}).get("turn_completed", 0),
         )
 
@@ -1160,17 +1212,27 @@ class BehaviorDriftCheck(BaseCheck):
             return
         try:
             import json
+
             async with self._db.session() as session:
                 from sqlalchemy import text
-                await session.execute(text(
-                    "INSERT INTO nous_system.behavior_snapshots (agent_id, timestamp, metrics, anomalies) "
-                    "VALUES (:aid, :ts, :metrics, :anomalies)"
-                ), {"aid": self._settings.agent_id, "ts": snapshot.timestamp,
-                    "metrics": json.dumps({
-                        **snapshot.to_metrics_dict(),
-                        "metrics_version": SNAPSHOT_METRICS_VERSION,
-                    }),
-                    "anomalies": json.dumps(self._last_anomalies)})
+
+                await session.execute(
+                    text(
+                        "INSERT INTO nous_system.behavior_snapshots (agent_id, timestamp, metrics, anomalies) "
+                        "VALUES (:aid, :ts, :metrics, :anomalies)"
+                    ),
+                    {
+                        "aid": self._settings.agent_id,
+                        "ts": snapshot.timestamp,
+                        "metrics": json.dumps(
+                            {
+                                **snapshot.to_metrics_dict(),
+                                "metrics_version": SNAPSHOT_METRICS_VERSION,
+                            }
+                        ),
+                        "anomalies": json.dumps(self._last_anomalies),
+                    },
+                )
                 await session.commit()
         except Exception:
             logger.debug("Snapshot store failed", exc_info=True)
@@ -1180,15 +1242,21 @@ class BehaviorDriftCheck(BaseCheck):
             return []
         try:
             import json as _json
+
             from nous.observability.snapshots import BehaviorSnapshot
+
             async with self._db.session() as session:
                 from sqlalchemy import text
+
                 now = datetime.now(UTC)
                 cutoff = now - timedelta(hours=hours)
-                result = await session.execute(text(
-                    "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
-                    "WHERE agent_id = :aid AND timestamp > :cutoff ORDER BY timestamp"
-                ), {"aid": self._settings.agent_id, "cutoff": cutoff})
+                result = await session.execute(
+                    text(
+                        "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
+                        "WHERE agent_id = :aid AND timestamp > :cutoff ORDER BY timestamp"
+                    ),
+                    {"aid": self._settings.agent_id, "cutoff": cutoff},
+                )
                 rows = result.fetchall()
             snapshots = []
             for row in rows:
