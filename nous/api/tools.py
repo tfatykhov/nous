@@ -3882,10 +3882,6 @@ _LEGACY_FACT_KEYS: dict[str, Any] = {
     if _name not in ("id", "content", "score")
 }
 
-# Trace-hook check interval — number of traced events between deadline checks.
-# Keeps the per-line overhead down without letting an overrun go unnoticed.
-_DEADLINE_CHECK_EVERY = 64
-
 _active_runs = 0
 _active_runs_lock = threading.Lock()
 
@@ -3936,37 +3932,63 @@ def _protected_prefixes() -> tuple[str, ...]:
     return ("<frozen",) + tuple(os.path.normcase(os.path.join(r, "")) for r in roots)
 
 
-# Stdlib, installed packages, frozen importlib and nous itself. Raising from a
-# trace hook is an asynchronous exception: inside such code it can land between
-# a lock's acquire and its release — the implicit `__exit__` of a `with` block
-# gets its own line event — and the dying thread keeps the lock forever. That
-# is how an expired tracer killed a thread inside `threading._delete` holding
-# `_active_limbo_lock`, after which every `Thread.start` blocked. Script-owned
-# code is safe to interrupt because stdlib is already exception-safe wherever
-# it calls back into user code, which can raise anyway.
+# Stdlib, installed packages, frozen importlib and nous itself: never traced,
+# so the deadline cannot fire inside them. Raising from a trace hook is an
+# asynchronous exception; inside such code it can land between a lock's
+# acquire and its release, and the dying thread keeps the lock forever. That is
+# how an expired tracer killed a thread inside `threading._delete` holding
+# `_active_limbo_lock`, after which every `Thread.start` blocked.
 _PROTECTED_PREFIXES = _protected_prefixes()
+
+# Methods whose entry IS a release: raising on it would skip the release.
+_RELEASE_METHODS = frozenset({"__exit__", "__aexit__"})
 
 
 def _deadline_tracer(deadline: float, timeout: float):  # noqa: ANN202 - CPython trace fn
     """Build the per-run trace hook that raises once `deadline` has passed.
 
-    It raises only in frames the script owns; past the deadline inside
-    protected code it re-checks on every event, so it fires as soon as control
-    is back in the script. A script stuck forever inside library code is not
-    interruptible — the same documented limit as a blocking C call.
+    It raises only at SAFE POINTS in script-owned frames: entry of a script
+    function (except `__exit__`/`__aexit__`) and a loop back-edge — a line
+    event whose bytecode offset did not advance. It never raises on a forward
+    edge, so the implicit `__exit__` of a `with` block (a line event back on
+    the `with` line, but FORWARD in bytecode), the gap between `acquire()` and
+    `try:`, and straight-line cleanup cannot be cut short. Non-terminating
+    Python must loop or call, so every runaway still reaches a safe point, and
+    the clock is read at each one because they are rarer than trace events.
+
+    Residual, accepted: a cleanup LOOP or a script-defined cleanup FUNCTION
+    inside a script's own `finally` can still be interrupted — the semantics
+    of KeyboardInterrupt; only process isolation closes that. A script stuck
+    forever inside library code is not interruptible — the same documented
+    limit as a blocking C call.
     """
-    countdown = [_DEADLINE_CHECK_EVERY]
+    owned: dict[Any, bool] = {}  # verdict per code object; dies with the run
+    message = f"execution timed out ({timeout}s)"
 
     def _tracer(frame, event, arg):  # noqa: ANN001, ANN202 - CPython trace signature
-        countdown[0] -= 1
-        if countdown[0] <= 0:
-            countdown[0] = _DEADLINE_CHECK_EVERY
-            if time.monotonic() >= deadline:
-                if os.path.normcase(frame.f_code.co_filename).startswith(_PROTECTED_PREFIXES):
-                    countdown[0] = 1
-                else:
-                    raise ScriptDeadlineExceeded(f"execution timed out ({timeout}s)")
-        return _tracer
+        # Global hook: called with 'call' for every new frame.
+        code = frame.f_code
+        is_owned = owned.get(code)
+        if is_owned is None:
+            is_owned = owned[code] = not os.path.normcase(code.co_filename).startswith(
+                _PROTECTED_PREFIXES
+            )
+        if not is_owned:
+            return None
+        if code.co_name not in _RELEASE_METHODS and time.monotonic() >= deadline:
+            raise ScriptDeadlineExceeded(message)
+        last = [-1]
+
+        def _local(frame, event, arg):  # noqa: ANN001, ANN202 - CPython trace signature
+            if event == "line":
+                lasti = frame.f_lasti
+                back_edge = lasti <= last[0]
+                last[0] = lasti
+                if back_edge and time.monotonic() >= deadline:
+                    raise ScriptDeadlineExceeded(message)
+            return _local
+
+        return _local
 
     return _tracer
 
@@ -4234,10 +4256,11 @@ def create_programmatic_tools(
                 """Commit the PARTIAL trace: a crashed retrieval must not look
                 like one that never happened. Mirrors the tool's error path.
 
-                Runs with the deadline tracer OFF. `undeliver_all`/`finalize`
-                walk every captured candidate; the tracer no longer raises in
-                nous frames, but a timed-out run would still pay a trace event
-                per line of that walk for nothing.
+                Runs with the deadline tracer OFF. nous frames are never traced
+                (`_PROTECTED_PREFIXES`), so the walk in `undeliver_all`/
+                `finalize` cannot be interrupted either way; turning it off
+                keeps that true should anything here call back into script
+                code.
 
                 Uses `_REAL_SETTRACE`, NOT `sys.settrace`: on a script thread
                 the guard discards its argument and reinstalls `_tracer`, so

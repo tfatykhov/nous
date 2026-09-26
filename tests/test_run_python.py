@@ -1607,6 +1607,17 @@ class TestRunPythonTimeout:
         assert await _wait_for_idle() == 0
 
 
+def _run_traced(code, env, tracer, T) -> None:  # noqa: ANN001, N803
+    """Run a compiled script on this thread under `tracer` until it times out."""
+    sys.settrace(tracer)
+    try:
+        exec(code, env)
+    except T.ScriptDeadlineExceeded:
+        pass
+    finally:
+        sys.settrace(None)
+
+
 class TestDeadlineTracerSafety:
     """2026-09-26 prod wedge: the event loop blocked forever in `Thread.start`
     on `threading._active_limbo_lock`, held by an executor thread that an
@@ -1624,13 +1635,14 @@ class TestDeadlineTracerSafety:
 
         # Already expired: the very first deadline check is due.
         tracer = T._deadline_tracer(time.monotonic() - 1.0, 0.0)
-        # The first script call spends well over one check interval of trace
-        # events inside threading.py, so the first check lands in stdlib.
+        # Each iteration spends well over one old-style check interval of trace
+        # events inside threading.py, so an unfiltered check lands in stdlib.
         code = compile(
             "import threading\n"
-            "t = threading.Thread(target=int)\n"
-            "t.start()\n"
-            "t.join()\n",
+            "while True:\n"
+            "    t = threading.Thread(target=int)\n"
+            "    t.start()\n"
+            "    t.join()\n",
             "<nous_script>",
             "exec",
         )
@@ -1642,16 +1654,16 @@ class TestDeadlineTracerSafety:
                 exec(code, {})
             except T.ScriptDeadlineExceeded as exc:
                 sys.settrace(None)
-                # Innermost entry is the tracer itself; the frame it
-                # interrupted is the one just outside it.
-                frames = []
+                # The innermost entries are the tracer's own frames; the frame
+                # it interrupted is the last one outside tools.py.
                 tb = exc.__traceback__
+                files = []
                 while tb is not None:
-                    frames.append(tb.tb_frame.f_code)
+                    files.append(tb.tb_frame.f_code.co_filename)
                     tb = tb.tb_next
-                if frames[-1].co_name == "_tracer":
-                    frames.pop()
-                raised_in.append(frames[-1].co_filename)
+                while files and files[-1] == T.__file__:
+                    files.pop()
+                raised_in.append(files[-1])
             finally:
                 sys.settrace(None)
 
@@ -1661,6 +1673,97 @@ class TestDeadlineTracerSafety:
         assert raised_in == ["<nous_script>"]
         assert threading._active_limbo_lock.acquire(timeout=2)
         threading._active_limbo_lock.release()
+
+    @pytest.mark.parametrize("script_cm", [False, True], ids=["lock", "script-cm"])
+    def test_deadline_never_skips_a_with_block_release(self, monkeypatch, script_cm):
+        """Codex P1 on #654: the implicit `__exit__` of a script's OWN `with`
+        gets a line event too, so a raise there skips the release even in a
+        script-owned frame. Sweeping the padding before the loop moves where a
+        fixed-interval check lands, so every position in the iteration —
+        including the with-exit and a script `__exit__` body — gets hit.
+        """
+        from types import SimpleNamespace
+
+        from nous.api import tools as T
+
+        # A clock that advances one tick per read: the deadline passes after a
+        # fixed number of checks, independent of wall time.
+        ticks = iter(range(10**9))
+        monkeypatch.setattr(T, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+
+        cm = (
+            "class CM:\n"
+            "    def __enter__(self):\n"
+            "        lk.acquire()\n"
+            "        return self\n"
+            "    def __exit__(self, *exc):\n"
+            "        lk.release()\n"
+        )
+        leaked = []
+        for body in (1, 2):
+            for pad in range(24):
+                src = (
+                    (cm if script_cm else "")
+                    + "pad = 0\n" * pad
+                    + f"while True:\n    with {'CM()' if script_cm else 'lk'}:\n"
+                    + "        x = 1\n" * body
+                )
+                lk = threading.Lock()
+                th = threading.Thread(
+                    target=_run_traced,
+                    args=(compile(src, "<nous_script>", "exec"), {"lk": lk},
+                          T._deadline_tracer(next(ticks) + 5, 0.0), T),
+                )
+                th.start()
+                th.join(10)
+                assert not th.is_alive()
+                if lk.locked():
+                    leaked.append((body, pad))
+        assert leaked == []
+
+    @pytest.mark.asyncio
+    async def test_sleep_loop_times_out_on_time(self):
+        """Safe points are rarer than trace events, so the clock is read at
+        every one — a sleep loop must not overrun by a check interval."""
+        from nous.api.tools import create_programmatic_tools
+
+        assert await _wait_for_idle() == 0, "test started with a run in flight"
+        tools = create_programmatic_tools(
+            AsyncMock(), AsyncMock(),
+            Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=1),
+        )
+        started = time.monotonic()
+        result = await tools["run_python"](
+            code="import time\nwhile True:\n    time.sleep(0.2)\n"
+        )
+        elapsed = time.monotonic() - started
+        assert result["is_error"] is True
+        assert "timed out" in result["content"][0]["text"].lower()
+        assert elapsed < 1 + 2.0, f"run outlived its deadline ({elapsed:.1f}s)"
+        # The worker itself stopped — not just the await.
+        assert await _wait_for_idle() == 0
+
+    @pytest.mark.asyncio
+    async def test_callback_driven_loop_times_out(self):
+        """A C-driven loop over a script lambda has no back-edge in any script
+        frame; function entry is the safe point that stops it."""
+        from nous.api.tools import create_programmatic_tools
+
+        assert await _wait_for_idle() == 0, "test started with a run in flight"
+        tools = create_programmatic_tools(
+            AsyncMock(), AsyncMock(),
+            Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=1),
+        )
+        started = time.monotonic()
+        result = await tools["run_python"](
+            code="import functools, itertools\n"
+            "functools.reduce(lambda a, b: a, itertools.count())\n"
+        )
+        elapsed = time.monotonic() - started
+        assert result["is_error"] is True
+        assert "timed out" in result["content"][0]["text"].lower()
+        assert elapsed < 1 + 2.0, f"run outlived its deadline ({elapsed:.1f}s)"
+        assert await _wait_for_idle() == 0
 
     @pytest.mark.asyncio
     async def test_overlapping_runs_leave_no_stale_trace_hook(self):
