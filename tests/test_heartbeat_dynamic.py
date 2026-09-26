@@ -399,6 +399,49 @@ class TestDynamicCheckRun:
         # end_conversation still called in finally
         runner.end_conversation.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_run_skips_when_self_disabled(self):
+        """run() returns empty CheckResult without LLM call when _self_disabled.
+
+        Closes the TOCTOU between _tick's synchronous pre-check and the first
+        await inside run(): a DAG task can set _self_disabled after the
+        pre-check but before this coroutine's first await.
+        """
+        runner = AsyncMock()
+        runner.run_turn = AsyncMock(return_value=(
+            '{"has_findings": false, "findings": []}', MagicMock(), {},
+        ))
+        runner.end_conversation = AsyncMock()
+
+        check = _make_dynamic_check(runner=runner)
+        check._self_disabled = True
+
+        result = await check.run()
+
+        assert result.has_updates is False
+        runner.run_turn.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_skips_when_inactive(self):
+        """run() returns empty CheckResult without LLM call when active=False.
+
+        Same TOCTOU closure as test_run_skips_when_self_disabled, but for the
+        active flag unregistered between pre-check and coroutine start.
+        """
+        runner = AsyncMock()
+        runner.run_turn = AsyncMock(return_value=(
+            '{"has_findings": false, "findings": []}', MagicMock(), {},
+        ))
+        runner.end_conversation = AsyncMock()
+
+        check = _make_dynamic_check(runner=runner)
+        check.active = False
+
+        result = await check.run()
+
+        assert result.has_updates is False
+        runner.run_turn.assert_not_called()
+
 
 # ===========================================================================
 # TestDynamicCheckParsing — 6 tests
@@ -1364,17 +1407,24 @@ class TestSelfDisabledFlag:
 
     @pytest.mark.asyncio
     async def test_self_disabled_in_check_result(self):
-        """57. When _self_disabled is True, run() sets result.self_disabled=True."""
+        """57. run() reports self_disabled=True when the check disables itself
+        DURING execution (the manage_check(disable) path) — not when it was
+        already disabled before run() was called (that hits the early-return
+        guard added by the P1 TOCTOU fix)."""
+        check = _make_dynamic_check()  # runner set below
+
         runner = AsyncMock()
-        runner.run_turn = AsyncMock(return_value=(
-            '{"has_findings": false, "findings": []}',
-            MagicMock(),
-            {"input_tokens": 50, "output_tokens": 20},
-        ))
+        check._runner = runner
+
+        async def _run_turn_that_disables(*args, **kwargs):
+            # Simulates the check calling manage_check(action='disable') during
+            # its LLM turn, which sets _self_disabled on the live check object.
+            check._self_disabled = True
+            return ('{"has_findings": false, "findings": []}', MagicMock(), {"input_tokens": 50, "output_tokens": 20})
+
+        runner.run_turn = AsyncMock(side_effect=_run_turn_that_disables)
         runner.end_conversation = AsyncMock()
 
-        check = _make_dynamic_check(runner=runner)
-        check._self_disabled = True
         result = await check.run()
 
         assert result.self_disabled is True

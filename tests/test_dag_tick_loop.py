@@ -410,6 +410,47 @@ async def test_dag_tick_records_timestamp_on_cancel_after_completion():
     assert runner.last_dag_tick is not None
 
 
+@pytest.mark.asyncio
+async def test_stop_drains_in_flight_tick():
+    """stop() must not return while a shielded DAG tick is still running.
+
+    Before the fix, asyncio.shield(coro) raised CancelledError on the outer
+    task immediately without waiting for the inner task, so stop() could return
+    while dag_orchestrator.tick() was still advancing nodes in the background
+    — racing with DB shutdown and subtask pool teardown.
+
+    After the fix, the _dag_loop CancelledError handler drains inner_task via
+    a second asyncio.shield() before releasing the lock and propagating, so
+    stop() cannot return until the tick is done.
+    """
+    settings = _make_settings(dag_tick_interval=0, dag_tick_timeout=10)
+
+    tick_started = asyncio.Event()
+    tick_completed = asyncio.Event()
+
+    async def long_tick():
+        tick_started.set()
+        await asyncio.sleep(0.3)
+        tick_completed.set()
+
+    dag_orchestrator = MagicMock()
+    dag_orchestrator.tick = AsyncMock(side_effect=long_tick)
+
+    runner = _make_runner(settings, dag_orchestrator)
+
+    with patch.object(runner, "_detect_missed_checks", AsyncMock()):
+        await runner.start()
+        # Ensure the tick has actually started before stopping
+        await asyncio.wait_for(tick_started.wait(), timeout=3.0)
+        # stop() mid-tick — must drain inner_task before returning
+        await runner.stop()
+
+    assert tick_completed.is_set(), (
+        "stop() returned while dag_orchestrator.tick() was still running; "
+        "the inner task was left untracked and could race with DB shutdown"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Test i (P1 #2): A check cancelled/unregistered after snapshot does not
 # execute — the heartbeat loop re-verifies dynamic checks before running.

@@ -237,12 +237,27 @@ class HeartbeatRunner:
 
                 async with self._dag_tick_lock:
                     tick_start = asyncio.get_event_loop().time()
+                    # Keep an explicit reference so we can drain the inner
+                    # task in the CancelledError handler. asyncio.shield()
+                    # raises CancelledError on the outer task immediately,
+                    # but the inner task keeps running untracked — draining
+                    # it before releasing the lock ensures shutdown cannot
+                    # race with in-flight DB writes or subtask creation.
+                    inner_task: asyncio.Task = asyncio.create_task(
+                        self.dag_orchestrator.tick()
+                    )
                     try:
-                        await asyncio.shield(self.dag_orchestrator.tick())
+                        await asyncio.shield(inner_task)
                     except asyncio.CancelledError:
-                        # shield() re-raises CancelledError on the outer
-                        # task when the loop is stopping — the inner tick
-                        # ran to completion, so treat it as successful.
+                        # Outer task was cancelled. inner_task is STILL
+                        # RUNNING — await it (shielded) so it completes
+                        # before we release the lock and propagate.
+                        try:
+                            await asyncio.shield(inner_task)
+                        except Exception:
+                            logger.exception(
+                                "F038: DAG orchestrator tick failed during shutdown drain"
+                            )
                         self._last_dag_tick = datetime.now(UTC)
                         raise
                     except Exception:

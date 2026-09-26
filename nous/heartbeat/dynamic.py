@@ -103,6 +103,12 @@ class DynamicCheck(BaseCheck):
         """Execute the check by running the prompt through the agent."""
         if self._runner is None:
             return CheckResult()
+        # Re-verify state at the actual execution boundary. _tick has a
+        # synchronous pre-check, but a concurrent DAG task can disable this
+        # check between that check and the first await inside this coroutine.
+        # Rechecking here is race-free within the coroutine (no awaits yet).
+        if not self.active or self._self_disabled:
+            return CheckResult()
 
         session_id = f"dynamic-check-{self.name}-{uuid4().hex[:8]}"
         has_pipeline_tools = bool(
