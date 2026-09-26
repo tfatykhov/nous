@@ -53,6 +53,20 @@ def _extract_seconds(text):
     return time.perf_counter() - start
 
 
+def _best_of(text, n=5):
+    """Return the minimum extraction time over n runs (warm-up before first timed run)."""
+    import time
+
+    verifier = ClaimVerifier()
+    verifier._extract_claims(text[:200])  # compile patterns once
+    best = float("inf")
+    for _ in range(n):
+        start = time.perf_counter()
+        verifier._extract_claims(text)
+        best = min(best, time.perf_counter() - start)
+    return best
+
+
 def test_a_failed_match_never_backtracks_exponentially():
     """The overlapping-branch form took 4.5 s at n=20 and would take hours at
     n=32; a generous bound still separates that from a slow CI runner."""
@@ -491,10 +505,20 @@ def test_completion_statements_without_an_actor_stay_claims(text):
 def test_extraction_is_linear(make):
     """Pinned as SCALING, not wall-clock: a shared CI runner is several times
     slower than a laptop. Four times the input costs about 4x when linear
-    and about 16x when quadratic (the pre-fix rescans were quadratic)."""
-    small, big = _extract_seconds(make(600)), _extract_seconds(make(2400))
-    assert big < 6 * small + 0.05, (small, big)
-    assert big < 3.0
+    and about 16x when quadratic (the pre-fix rescans were quadratic).
+
+    Uses best-of-5 (minimum over 5 runs) per input size so a single scheduler
+    hiccup cannot flip the result.  The ratio min(big)/min(small) must stay
+    under 10x — cleanly between linear (~4x) and quadratic (~16x).
+    """
+    small = _best_of(make(600))
+    big = _best_of(make(2400))
+    ratio = big / max(small, 1e-9)
+    assert ratio < 10.0, (
+        f"ratio {ratio:.1f}x suggests super-linear scaling "
+        f"(small={small:.4f}s, big={big:.4f}s)"
+    )
+    assert big < 3.0, f"absolute bound exceeded ({big:.3f}s)"
 
 
 # --- review round 2 ------------------------------------------------------------
