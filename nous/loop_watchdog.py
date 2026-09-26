@@ -34,11 +34,16 @@ REARM_SECONDS = 10.0
 async def run_event_loop_watchdog(
     timeout: float, *, rearm: float = REARM_SECONDS, file: TextIO | None = None
 ) -> None:
-    """Re-arm the stall timer every `rearm` seconds until cancelled."""
+    """Re-arm the stall timer every `rearm` seconds until cancelled.
+
+    The timer runs from the last re-arm, not from when a stall begins, so it
+    covers `timeout + rearm`: a stall is killed after between `timeout` and
+    `timeout + rearm` seconds, never sooner.
+    """
     out = file if file is not None else sys.stderr
     try:
         while True:
-            faulthandler.dump_traceback_later(timeout, exit=True, file=out)
+            faulthandler.dump_traceback_later(timeout + rearm, exit=True, file=out)
             await asyncio.sleep(rearm)
     finally:
         faulthandler.cancel_dump_traceback_later()

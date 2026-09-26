@@ -47,7 +47,7 @@ def test_wedged_loop_dumps_every_stack_and_exits():
         timeout=60,
     )
     assert proc.returncode == 1, proc.stderr
-    assert "Timeout (0:00:01)!" in proc.stderr
+    assert "Timeout (0:00:01" in proc.stderr  # 1 s + the 0.1 s re-arm slack
     # The frame the loop is stuck in is in the dump — the evidence py-spy had
     # to be brought in for during the incident.
     assert "in main" in proc.stderr
@@ -72,7 +72,10 @@ async def test_rearms_while_the_loop_turns_and_disarms_when_stopped(monkeypatch)
 
     arms = [c for c in calls if c[0] == "arm"]
     assert len(arms) >= 2, "the timer must be re-armed while the loop turns"
-    assert all(c[1] == 45 and c[2]["exit"] is True for c in arms)
+    # Codex P2 on #655: the timer runs from the last re-arm, not from when the
+    # stall began, so it must cover `timeout + rearm` — otherwise a stall that
+    # starts just before a re-arm is killed after only `timeout - rearm`.
+    assert all(c[1] == 45 + 0.01 and c[2]["exit"] is True for c in arms)
     assert calls[-1] == ("cancel",), "stopping must disarm, or shutdown gets killed"
 
 
