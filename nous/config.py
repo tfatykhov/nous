@@ -1592,6 +1592,10 @@ class Settings(BaseSettings):
     emerson_hook_token: str = ""  # Emerson presence hook token
     google_service_account_json: str = Field("", validation_alias="GOOGLE_SERVICE_ACCOUNT_JSON")
 
+    # DAG tick loop — decoupled from heartbeat (fix/dag-tick-own-loop)
+    dag_tick_interval: int = 30  # seconds between DAG orchestrator ticks
+    dag_tick_timeout: int = 300  # max seconds for a single DAG tick before log+continue
+
     # F034: Heartbeat
     heartbeat_enabled: bool = True
     heartbeat_tick_interval: int = 30
