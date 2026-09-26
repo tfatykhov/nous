@@ -61,6 +61,8 @@ async def test_all_tables_exist(db):
         ("nous_system", "a2ui_actions"),
         # Harness Phase 1b: durable execution ledger (migration 074)
         ("nous_system", "execution_ledger"),
+        # Harness Phase 2.8: compensation snapshots (migration 077)
+        ("nous_system", "compensation_snapshots"),
         # brain (8)
         ("brain", "decisions"),
         ("brain", "decision_tags"),
