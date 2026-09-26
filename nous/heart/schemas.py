@@ -342,6 +342,7 @@ class ProcedureSummary(BaseModel):
     activation_count: int
     effectiveness: float | None
     score: float | None = None
+    kind: str | None = None
     # F079 P1: optional body fields, populated only on the recall search path so the
     # pull (recall_deep) can return usable steps. Default empty -> other construction
     # sites (list_all etc.) are unaffected.

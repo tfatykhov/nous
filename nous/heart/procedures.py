@@ -481,6 +481,7 @@ class ProcedureManager:
                     activation_count=p.activation_count or 0,
                     effectiveness=effectiveness,
                     score=final_score,
+                    kind=p.kind,
                     # F079 P1: carry body fields for the pull path (recall_deep).
                     # `p` is the full ORM row already in scope — no extra query.
                     core_patterns=list(p.core_patterns or []),
@@ -568,6 +569,7 @@ class ProcedureManager:
                 activation_count=p.activation_count or 0,
                 effectiveness=self._compute_effectiveness(p),
                 score=sims.get(p.id),
+                kind=p.kind,
                 core_patterns=list(p.core_patterns or []),
                 implementation_notes=list(p.implementation_notes or []),
             )
@@ -720,6 +722,7 @@ class ProcedureManager:
                 description=p.description,
                 activation_count=p.activation_count or 0,
                 effectiveness=self._compute_effectiveness(p),
+                kind=p.kind,
             )
             for p in procs
         ]

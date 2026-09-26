@@ -17,7 +17,6 @@ from nous.brain.schemas import GRADED_OUTCOMES
 from nous.handlers.strategy_card_distiller import StrategyCardDistiller
 from nous.heart.schemas import ProcedureDetail, ProcedureInput
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -140,6 +139,7 @@ def distiller(mock_brain, mock_heart, mock_llm):
 # 1. test_skip_noise_outcome
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_skip_noise_outcome(distiller, mock_brain):
     """Handler skips 'noise' outcome — no LLM call, no procedure stored.
@@ -154,7 +154,7 @@ async def test_skip_noise_outcome(distiller, mock_brain):
         "nous.handlers.strategy_card_distiller.call_background_llm_structured",
         new_callable=AsyncMock,
     ) as mock_call:
-        distiller._on_decision_reviewed(event)
+        await distiller._on_decision_reviewed(event)
         await asyncio.sleep(0)  # flush event loop
         mock_call.assert_not_called()
     mock_brain.get.assert_not_called()
@@ -163,6 +163,7 @@ async def test_skip_noise_outcome(distiller, mock_brain):
 # ---------------------------------------------------------------------------
 # 2. test_skip_superseded_outcome
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_skip_superseded_outcome(distiller, mock_brain):
@@ -176,7 +177,7 @@ async def test_skip_superseded_outcome(distiller, mock_brain):
         "nous.handlers.strategy_card_distiller.call_background_llm_structured",
         new_callable=AsyncMock,
     ) as mock_call:
-        distiller._on_decision_reviewed(event)
+        await distiller._on_decision_reviewed(event)
         await asyncio.sleep(0)
         mock_call.assert_not_called()
     mock_brain.get.assert_not_called()
@@ -185,6 +186,7 @@ async def test_skip_superseded_outcome(distiller, mock_brain):
 # ---------------------------------------------------------------------------
 # 3. test_no_llm_client_skips
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_no_llm_client_skips(mock_brain, mock_heart):
@@ -210,6 +212,7 @@ async def test_no_llm_client_skips(mock_brain, mock_heart):
 # ---------------------------------------------------------------------------
 # 4. test_distil_success_outcome
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_distil_success_outcome(distiller, mock_brain, mock_heart):
@@ -241,6 +244,7 @@ async def test_distil_success_outcome(distiller, mock_brain, mock_heart):
 # 5. test_distil_failure_outcome
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_distil_failure_outcome(distiller, mock_brain, mock_heart):
     """Failure outcome → card stored with outcome='failure' in runtime_metadata.
@@ -265,19 +269,17 @@ async def test_distil_failure_outcome(distiller, mock_brain, mock_heart):
 # 6. test_idempotency_deactivates_old_card
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_idempotency_deactivates_old_card(distiller, mock_brain, mock_heart):
-    """When an existing card is found, _deactivate_procedure is called before creating new one.
+    """When an existing card is found, deactivation and insertion share ONE transaction.
 
-    Mutation: remove existing_id != None branch → deactivation never called →
-    old card still active (duplicate created).
+    Mutation: remove existing_id != None branch → session.execute (UPDATE) is
+    never called and the old card remains active alongside the new one.
     """
     decision_id = uuid4()
     existing_id = uuid4()
     mock_brain.get = AsyncMock(return_value=_make_decision(decision_id=decision_id))
-
-    deactivate_spy = AsyncMock()
-    distiller._deactivate_procedure = deactivate_spy
 
     # Patch _find_existing_card to return an existing ID
     async def _fake_find(did: UUID) -> UUID:
@@ -292,7 +294,10 @@ async def test_idempotency_deactivates_old_card(distiller, mock_brain, mock_hear
     ):
         await distiller._do_distil(decision_id, "success")
 
-    deactivate_spy.assert_called_once_with(existing_id)
+    # Deactivation runs inside the same session as the store —
+    # session.execute is called at least once (for the UPDATE).
+    session_mock = mock_heart.db.session.return_value.__aenter__.return_value
+    assert session_mock.execute.call_count >= 1, "Expected session.execute to be called for the deactivation UPDATE"
     mock_heart.procedures.store.assert_called_once()
 
 
@@ -300,13 +305,13 @@ async def test_idempotency_deactivates_old_card(distiller, mock_brain, mock_hear
 # 7. test_context_cap_strategy_cards
 # ---------------------------------------------------------------------------
 
+
 def test_context_cap_strategy_cards():
     """Cap of 1 keeps exactly 1 strategy card; excess are dropped.
 
     Mutation: change `strategy_hits[:max_sc]` to `strategy_hits` →
     all 3 strategy cards pass → len(embedding_procedures) == 5 (not 3).
     """
-    import datetime as dt
 
     def _proc(name: str, kind: str | None = None) -> MagicMock:
         p = MagicMock()
@@ -337,6 +342,7 @@ def test_context_cap_strategy_cards():
 # 8. test_kind_field_stored_on_procedure
 # ---------------------------------------------------------------------------
 
+
 def test_kind_field_round_trips():
     """ProcedureInput(kind='strategy') populates ProcedureDetail.kind.
 
@@ -359,6 +365,7 @@ def test_kind_field_round_trips():
 # 9. test_skip_when_flag_disabled
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_skip_when_flag_disabled(mock_brain, mock_heart, mock_llm):
     """When strategy_cards_enabled=False, no task is scheduled.
@@ -380,7 +387,7 @@ async def test_skip_when_flag_disabled(mock_brain, mock_heart, mock_llm):
         "nous.handlers.strategy_card_distiller.call_background_llm_structured",
         new_callable=AsyncMock,
     ) as mock_call:
-        distiller._on_decision_reviewed(event)
+        await distiller._on_decision_reviewed(event)
         await asyncio.sleep(0)
         mock_call.assert_not_called()
     mock_brain.get.assert_not_called()
@@ -390,9 +397,153 @@ async def test_skip_when_flag_disabled(mock_brain, mock_heart, mock_llm):
 # 10. test_graded_outcomes_constant_matches_spec
 # ---------------------------------------------------------------------------
 
+
 def test_graded_outcomes_constant():
     """GRADED_OUTCOMES must contain exactly success/partial/failure.
 
     Defensive check so a schema change doesn't silently break the distiller.
     """
     assert set(GRADED_OUTCOMES) == {"success", "partial", "failure"}
+
+
+# ---------------------------------------------------------------------------
+# 11. test_handler_reads_event_data_not_top_level_attrs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handler_reads_event_data_not_top_level_attrs(distiller, mock_brain):
+    """When the bus passes a nous.events.Event, outcome is read from event.data.
+
+    P1 regression guard: the old code used getattr(event, "outcome", None) which
+    is always None for a real Event — the handler must read event.data["outcome"].
+
+    Mutation: change `data.get("outcome")` back to `getattr(event, "outcome", None)`
+    → outcome is None → handler returns at the graded-outcome guard →
+    mock_brain.get is never called, but we set up a real card_response so it
+    WOULD be called if the event is parsed correctly.
+    """
+    from nous.events import Event as BusEvent
+
+    decision_id = uuid4()
+    mock_brain.get = AsyncMock(return_value=_make_decision(decision_id=decision_id))
+
+    event = BusEvent(
+        type="decision_reviewed",
+        agent_id="test-agent",
+        data={"decision_id": str(decision_id), "outcome": "success", "reviewer": "auto"},
+    )
+
+    with patch(
+        "nous.handlers.strategy_card_distiller.call_background_llm_structured",
+        new_callable=AsyncMock,
+        return_value=_make_card_response(),
+    ):
+        await distiller._on_decision_reviewed(event)
+        # Let the created task run
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    # The handler parsed the Event correctly and scheduled distillation
+    mock_brain.get.assert_called_once_with(decision_id)
+
+
+# ---------------------------------------------------------------------------
+# 12. test_bus_wiring_decision_reviewed_triggers_distillation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bus_wiring_decision_reviewed_triggers_distillation(mock_brain, mock_heart, mock_llm):
+    """Brain.review() -> EventBus -> StrategyCardDistiller -> card stored.
+
+    Integration-style test verifying the full wiring:
+      EventBus.on("decision_reviewed", handler) + EventBus.emit(BusEvent(...))
+      → handler is awaited → distil task fires → procedure stored.
+
+    P1 regression guard: if the handler is sync (not async), _safe_handle raises
+    TypeError and records a failure; if event.data is not read, outcome is None
+    and the handler returns early without storing anything.
+
+    Mutation A: make _on_decision_reviewed sync → TypeError in _safe_handle →
+    procedures.store never called.
+    Mutation B: change data.get("outcome") to getattr(event, "outcome", None) →
+    outcome is None → early return → procedures.store never called.
+    """
+    from nous.events import Event as BusEvent
+    from nous.events import EventBus
+
+    decision_id = uuid4()
+    mock_brain.get = AsyncMock(return_value=_make_decision(decision_id=decision_id))
+
+    settings = _make_settings()
+    bus = EventBus()
+    await bus.start()
+
+    # Construction registers _on_decision_reviewed with the bus; the variable
+    # is intentionally not used after this — the bus holds the reference.
+    StrategyCardDistiller(  # noqa: F841
+        brain=mock_brain,
+        heart=mock_heart,
+        settings=settings,
+        bus=bus,
+        llm_client=mock_llm,
+    )
+
+    with patch(
+        "nous.handlers.strategy_card_distiller.call_background_llm_structured",
+        new_callable=AsyncMock,
+        return_value=_make_card_response(),
+    ):
+        await bus.emit(
+            BusEvent(
+                type="decision_reviewed",
+                agent_id="test-agent",
+                data={"decision_id": str(decision_id), "outcome": "success", "reviewer": "auto"},
+            )
+        )
+        # Let the bus drain its queue and the distil task run
+        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
+
+    await bus.stop()
+
+    mock_brain.get.assert_called_once_with(decision_id)
+    mock_heart.procedures.store.assert_called_once()
+    stored_inp: ProcedureInput = mock_heart.procedures.store.call_args[0][0]
+    assert stored_inp.kind == "strategy"
+    assert stored_inp.runtime_metadata["outcome"] == "success"
+
+
+# ---------------------------------------------------------------------------
+# 13. test_procedure_summary_carries_kind
+# ---------------------------------------------------------------------------
+
+
+def test_procedure_summary_carries_kind():
+    """ProcedureSummary now has a kind field that is populated by search paths.
+
+    P2 regression guard: if kind is missing from ProcedureSummary, getattr on
+    the returned objects always yields None and every strategy card lands in
+    non_strategy, making strategy_cards_retrieval_enabled a no-op.
+    """
+    from nous.heart.schemas import ProcedureSummary
+
+    s = ProcedureSummary(
+        id=uuid4(),
+        name="Use blue-green",
+        domain="strategy",
+        activation_count=0,
+        effectiveness=None,
+        kind="strategy",
+    )
+    assert s.kind == "strategy"
+
+    s_none = ProcedureSummary(
+        id=uuid4(),
+        name="Some skill",
+        domain="ops",
+        activation_count=0,
+        effectiveness=None,
+    )
+    assert s_none.kind is None

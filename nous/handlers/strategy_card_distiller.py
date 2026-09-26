@@ -41,10 +41,7 @@ _CARD_SCHEMA: dict[str, Any] = {
         },
         "lesson": {
             "type": "string",
-            "description": (
-                "The full strategy or guardrail in 2-4 sentences: "
-                "when X, do/avoid Y, because Z"
-            ),
+            "description": ("The full strategy or guardrail in 2-4 sentences: when X, do/avoid Y, because Z"),
         },
         "tags": {
             "type": "array",
@@ -91,23 +88,24 @@ class StrategyCardDistiller:
             bus.on("decision_reviewed", self._on_decision_reviewed)
 
     # ------------------------------------------------------------------
-    # Event entry-point (sync — called by the event bus)
+    # Event entry-point (async — called by the event bus via await handler(event))
     # ------------------------------------------------------------------
 
-    def _on_decision_reviewed(self, event: Any) -> None:
-        """Sync shim: schedule async distillation as a fire-and-forget task."""
+    async def _on_decision_reviewed(self, event: Any) -> None:
+        """Async handler: schedule distillation as a fire-and-forget task."""
         if not getattr(self._settings, "strategy_cards_enabled", False):
             return
-        outcome = (
-            event.get("outcome") if isinstance(event, dict)
-            else getattr(event, "outcome", None)
-        )
+        # Extract payload from either a nous.events.Event or a plain dict.
+        # Event objects carry payload in .data; dicts are passed directly.
+        if isinstance(event, dict):
+            outcome = event.get("outcome")
+            decision_id_raw = event.get("decision_id")
+        else:
+            data: dict = getattr(event, "data", {}) or {}
+            outcome = data.get("outcome")
+            decision_id_raw = data.get("decision_id")
         if outcome not in GRADED_OUTCOMES:
             return
-        decision_id_raw = (
-            event.get("decision_id") if isinstance(event, dict)
-            else getattr(event, "decision_id", None)
-        )
         if not decision_id_raw:
             return
         try:
@@ -140,16 +138,12 @@ class StrategyCardDistiller:
 
     async def _do_distil(self, decision_id: UUID, outcome: str) -> None:
         if not self._llm:
-            logger.debug(
-                "StrategyCardDistiller: no LLM client wired, skipping %s", decision_id
-            )
+            logger.debug("StrategyCardDistiller: no LLM client wired, skipping %s", decision_id)
             return
 
         decision = await self._brain.get(decision_id)
         if decision is None:
-            logger.warning(
-                "StrategyCardDistiller: decision %s not found, skipping", decision_id
-            )
+            logger.warning("StrategyCardDistiller: decision %s not found, skipping", decision_id)
             return
 
         # Idempotency: find existing active strategy card for this decision
@@ -163,9 +157,7 @@ class StrategyCardDistiller:
             f"Extract a strategy card for this {outcome} outcome."
         )
 
-        background_model = getattr(
-            self._settings, "background_model", "claude-haiku-4-5-20251001"
-        )
+        background_model = getattr(self._settings, "background_model", "claude-haiku-4-5-20251001")
         card = await call_background_llm_structured(
             client=self._llm,
             model=background_model,
@@ -187,21 +179,15 @@ class StrategyCardDistiller:
         description = (card.get("description") or "")[:1000].strip()
         lesson = (card.get("lesson") or "")[:2000].strip()
         raw_tags = card.get("tags") or []
-        tags = (
-            [str(t)[:100] for t in raw_tags[:6]]
-            if isinstance(raw_tags, list) else []
-        )
+        tags = [str(t)[:100] for t in raw_tags[:6]] if isinstance(raw_tags, list) else []
 
         if not name or not lesson:
             logger.warning(
                 "StrategyCardDistiller: incomplete card for decision %s (name=%r), skipping",
-                decision_id, name,
+                decision_id,
+                name,
             )
             return
-
-        # Deactivate old card before creating the new one (update semantics)
-        if existing_id is not None:
-            await self._deactivate_procedure(existing_id)
 
         inp = ProcedureInput(
             name=name,
@@ -216,7 +202,20 @@ class StrategyCardDistiller:
             },
         )
 
+        # Deactivate old card and create new one in a single transaction so a
+        # failure on insertion or edge creation preserves the previous card.
         async with self._heart.db.session() as session:
+            if existing_id is not None:
+                from sqlalchemy import update as sa_update
+
+                from nous.storage.models import Procedure
+
+                await session.execute(
+                    sa_update(Procedure)
+                    .where(Procedure.id == existing_id)
+                    .where(Procedure.agent_id == self._brain.agent_id)
+                    .values(active=False)
+                )
             detail = await self._heart.procedures.store(inp, session=session)
             if self._graph_linker is not None:
                 try:
@@ -240,7 +239,9 @@ class StrategyCardDistiller:
 
         logger.info(
             "StrategyCardDistiller: distilled %s card for decision %s → procedure %s",
-            outcome, decision_id, detail.id,
+            outcome,
+            decision_id,
+            detail.id,
         )
 
     # ------------------------------------------------------------------
@@ -259,10 +260,7 @@ class StrategyCardDistiller:
                 .where(Procedure.agent_id == self._brain.agent_id)
                 .where(Procedure.kind == "strategy")
                 .where(Procedure.active.is_(True))
-                .where(
-                    Procedure.runtime_metadata["source_decision_id"].astext
-                    == str(decision_id)
-                )
+                .where(Procedure.runtime_metadata["source_decision_id"].astext == str(decision_id))
                 .limit(1)
             )
             return result.scalar_one_or_none()
