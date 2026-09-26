@@ -300,6 +300,7 @@ class DAGStore:
                     max_fix_attempts=spec.max_fix_attempts,
                     expected_modes=list(spec.expected_modes),
                     approval_spec=approval_spec,
+                    undoable=spec.undoable,
                 )
                 session.add(node)
                 node_map[spec.name] = node

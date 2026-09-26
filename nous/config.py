@@ -1768,6 +1768,16 @@ class Settings(BaseSettings):
         "the steps before their question) before a DAG with an approval node is refused.",
     )
 
+    # Harness Phase 2.8: compensation registry. Master switch for snapshot
+    # capture, compensator registration, and the review.revert handler.
+    compensation_enabled: bool = False
+    # Push an action_review surface automatically after a compensable
+    # background mutation. Requires compensation_enabled.
+    compensation_auto_review_enabled: bool = False
+    # Allow approval nodes to default to 'proceed' when all downstream
+    # nodes are declared undoable. Requires compensation_enabled.
+    dag_approval_proceed_default_enabled: bool = False
+
     # F087: act on tokens_consumed, which only becomes non-zero once the
     # accounting wiring lands. Dark by default because the budget branch has
     # never executed in prod — flipping it silently would start cancelling

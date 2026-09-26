@@ -1197,6 +1197,12 @@ class DAGNode(Base):
         JSONB, nullable=False, default=list, server_default="'[]'::jsonb"
     )
 
+    # Harness Phase 2.8 (migration 077): the node is declared undoable —
+    # the harness enforces that every tool call from it uses a compensable tool.
+    undoable: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+
     # Harness Phase 3 (migration 076): an approval node owns its question,
     # deadline and answer. approval_spec is authored and immutable; the rest
     # is written by the conditional transitions in nous/dag (spec §3.2).
@@ -1475,3 +1481,33 @@ class ExecutionLedgerEntry(Base):
     dispatched_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class CompensationSnapshot(Base):
+    """Harness Phase 2.8: prior state before a compensable tool call.
+
+    See migration 077. Linked to an execution ledger row; the compensator
+    reads ``snapshot_data`` to undo the call on ``review.revert``.
+    ``reverted_at IS NOT NULL`` makes double revert a no-op.
+    """
+
+    __tablename__ = "compensation_snapshots"
+    __table_args__ = ({"schema": "nous_system"},)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+        server_default=func.gen_random_uuid(),
+    )
+    ledger_entry_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False,
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    snapshot_data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    reverted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revert_result: Mapped[str | None] = mapped_column(Text, nullable=True)

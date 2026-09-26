@@ -4903,6 +4903,9 @@ def register_dag_tools(
                 # default (1) applies otherwise.
                 if "max_fix_attempts" in n:
                     node_data["max_fix_attempts"] = n["max_fix_attempts"]
+                # Harness Phase 2.8: undoable declaration.
+                if "undoable" in n:
+                    node_data["undoable"] = n["undoable"]
                 # Harness Phase 3: approval-node fields — threaded explicitly
                 # (the F066.1 silent-drop lesson above).
                 for key in ("options", "default_option", "recommended_option", "answer_timeout_seconds"):
@@ -5134,11 +5137,20 @@ def register_dag_tools(
     approval_properties: dict[str, Any] = {}
     if approvals_advertised:
         node_type_enum.append("approval")
+        proceed_note = (
+            "default_option (applied if nobody answers) MUST be a 'stop' option"
+        )
+        if getattr(cfg, "dag_approval_proceed_default_enabled", False):
+            proceed_note = (
+                "default_option (applied if nobody answers) must be a 'stop' option "
+                "UNLESS every acting node downstream is declared undoable=true — in that "
+                "case a 'proceed' default is allowed (the actions can be reversed)"
+            )
         approval_help = (
             " 'approval' asks the person a question on a companion card and waits for "
             "the answer (up to answer_timeout_seconds, default 24 h). Put the question "
             "in instructions and give 2-4 options, each 'proceed' or 'stop'; "
-            "default_option (applied if nobody answers) MUST be a 'stop' option. Wire it "
+            f"{proceed_note}. Wire it "
             "with two context_flow edges: draft → approval (the card shows the draft) and "
             "approval → the acting node (it runs only after a 'proceed' answer and "
             "receives the answer). The acting node must be a 'subtask' — a 'callback' "
@@ -5237,6 +5249,7 @@ def register_dag_tools(
                         },
                         "max_fix_attempts": {"type": "integer", "minimum": 1, "maximum": 3, "description": "F066.1 (type='fix' only): max fix attempts per parent failure. Default 1."},
                         "expected_modes": {"type": "array", "items": {"type": "string"}, "description": "F066.1 (type='fix' only): declared failure modes for typed dispatch (Phase 2). Phase 1 ignores this field."},
+                        "undoable": {"type": "boolean", "description": "Harness Phase 2.8: declare that this node's effects can be undone. When true, the harness enforces at runtime that every tool call from this node uses a compensable tool. Required for all acting nodes downstream of a proceed-default approval."},
                         **approval_properties,
                     },
                     "required": ["name", "type", "instructions"],
