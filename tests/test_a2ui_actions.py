@@ -568,20 +568,17 @@ async def test_handler_exception_is_a_500_not_a_silent_success(
 async def test_review_revert_is_not_offered_and_forging_it_is_rejected(
     db, a2ui_settings, service: SurfaceService, a2ui_agent_id: str
 ) -> None:
-    """Revert is withheld until a revert executor exists (product decision on
-
-    the impl-review finding: offering a verb with no handler 501s on click,
-    inverting the builder's own "no silently failing Revert" rationale). The
-    builder no longer puts ``review.revert`` in allowed_actions, so a forged
-    POST for it must die at the ALLOWLIST — before any handler lookup.
+    """review.revert is only offered when compensation declares revertible=True
+    and a handler name. A surface without that must reject a forged revert at
+    the ALLOWLIST — before any handler lookup — returning 403 ACTION_NOT_ALLOWED.
     """
     router = ActionRouter(db, a2ui_settings, service)
+    # Create a surface WITHOUT revert offered (no compensation handler set).
     surface_id = await service.push_built(
         action_review(
             {
                 "title": "Deleted 3 stale branches",
                 "did": "Removed branches merged more than 90 days ago.",
-                "compensation": {"revertible": True, "handler": "restore_branches"},
             }
         )
     )

@@ -93,6 +93,7 @@ class Suppressed:
     text: str
     is_error: bool
 
+
 MAX_CONVERSATIONS = 100
 MAX_HISTORY_MESSAGES = 20
 
@@ -109,7 +110,8 @@ _OPTIONAL_DECISION_FRAMES = frozenset({"task", "debug"})
 # `finally`. ContextVar guarantees per-asyncio-Task isolation so concurrent
 # turns never share state.
 CURRENT_TURN_EXCLUDE_IDS: ContextVar[dict[str, set[str]] | None] = ContextVar(
-    "CURRENT_TURN_EXCLUDE_IDS", default=None,
+    "CURRENT_TURN_EXCLUDE_IDS",
+    default=None,
 )
 
 # F091 NOTE: turn correlation is threaded EXPLICITLY through
@@ -139,20 +141,133 @@ def _build_exclude_ids(
     if turn_context is None:
         return None
     return {
-        "fact":      set(turn_context.recalled_fact_ids or []),
-        "decision":  set(turn_context.recalled_decision_ids or []),
-        "episode":   set(turn_context.recalled_episode_ids or []),
+        "fact": set(turn_context.recalled_fact_ids or []),
+        "decision": set(turn_context.recalled_decision_ids or []),
+        "episode": set(turn_context.recalled_episode_ids or []),
         "procedure": set(turn_context.recalled_procedure_ids or []),
     }
 
+
 # Frame-gated tool access (D5)
 FRAME_TOOLS: dict[str, list[str]] = {
-    "conversation": ["record_decision", "resolve_decision", "resolve_decisions", "list_decisions", "learn_fact", "learn_skill", "recall_deep", "recall_recent", "recall_hubs", "get_procedure", "create_censor", "bash", "read_file", "write_file", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "spawn_sync", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file", "send_email", "heartbeat_check_create", "heartbeat_check_manage", "dag_create", "dag_manage", "ingest_document", "push_surface", "compose_surface"],
-    "question": ["recall_deep", "recall_recent", "recall_hubs", "get_procedure", "bash", "read_file", "write_file", "record_decision", "resolve_decision", "resolve_decisions", "list_decisions", "learn_fact", "learn_skill", "create_censor", "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task", "run_python", "dag_manage", "ingest_document"],
-    "decision": ["record_decision", "resolve_decision", "resolve_decisions", "list_decisions", "recall_deep", "recall_recent", "recall_hubs", "get_procedure", "create_censor", "bash", "read_file", "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task", "dag_manage", "push_surface", "compose_surface"],
-    "creative": ["learn_fact", "recall_deep", "recall_recent", "recall_hubs", "get_procedure", "write_file", "web_search", "cache_retrieve"],
+    "conversation": [
+        "record_decision",
+        "resolve_decision",
+        "resolve_decisions",
+        "list_decisions",
+        "learn_fact",
+        "learn_skill",
+        "recall_deep",
+        "recall_recent",
+        "recall_hubs",
+        "get_procedure",
+        "create_censor",
+        "bash",
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch",
+        "cache_retrieve",
+        "spawn_task",
+        "spawn_sync",
+        "schedule_task",
+        "list_tasks",
+        "cancel_task",
+        "run_python",
+        "send_file",
+        "send_email",
+        "heartbeat_check_create",
+        "heartbeat_check_manage",
+        "dag_create",
+        "dag_manage",
+        "ingest_document",
+        "push_surface",
+        "compose_surface",
+    ],
+    "question": [
+        "recall_deep",
+        "recall_recent",
+        "recall_hubs",
+        "get_procedure",
+        "bash",
+        "read_file",
+        "write_file",
+        "record_decision",
+        "resolve_decision",
+        "resolve_decisions",
+        "list_decisions",
+        "learn_fact",
+        "learn_skill",
+        "create_censor",
+        "web_search",
+        "web_fetch",
+        "cache_retrieve",
+        "list_tasks",
+        "cancel_task",
+        "run_python",
+        "dag_manage",
+        "ingest_document",
+    ],
+    "decision": [
+        "record_decision",
+        "resolve_decision",
+        "resolve_decisions",
+        "list_decisions",
+        "recall_deep",
+        "recall_recent",
+        "recall_hubs",
+        "get_procedure",
+        "create_censor",
+        "bash",
+        "read_file",
+        "web_search",
+        "web_fetch",
+        "cache_retrieve",
+        "list_tasks",
+        "cancel_task",
+        "dag_manage",
+        "push_surface",
+        "compose_surface",
+    ],
+    "creative": [
+        "learn_fact",
+        "recall_deep",
+        "recall_recent",
+        "recall_hubs",
+        "get_procedure",
+        "write_file",
+        "web_search",
+        "cache_retrieve",
+    ],
     "task": ["*"],  # All tools
-    "debug": ["record_decision", "recall_deep", "recall_recent", "recall_hubs", "get_procedure", "bash", "read_file", "learn_fact", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "spawn_sync", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file", "send_email", "heartbeat_check_create", "heartbeat_check_manage", "dag_create", "dag_manage", "ingest_document", "push_surface", "compose_surface"],
+    "debug": [
+        "record_decision",
+        "recall_deep",
+        "recall_recent",
+        "recall_hubs",
+        "get_procedure",
+        "bash",
+        "read_file",
+        "learn_fact",
+        "web_search",
+        "web_fetch",
+        "cache_retrieve",
+        "spawn_task",
+        "spawn_sync",
+        "schedule_task",
+        "list_tasks",
+        "cancel_task",
+        "run_python",
+        "send_file",
+        "send_email",
+        "heartbeat_check_create",
+        "heartbeat_check_manage",
+        "dag_create",
+        "dag_manage",
+        "ingest_document",
+        "push_surface",
+        "compose_surface",
+    ],
     "initiation": ["store_identity", "complete_initiation"],
 }
 
@@ -238,16 +353,14 @@ class AgentRunner:
         # to tasks - the F091 _pending_tasks lesson).
         self._ledger_store: LedgerStore | None = None
         self._ledger_pending_tasks: set[asyncio.Task] = set()
+        # Phase 2.8: compensation snapshot store (wired when compensation_enabled).
+        self._snap_store: Any | None = None
+        self._workspace_dir: str = settings.workspace_dir
         self._pending_corrections: dict[str, list[str]] = {}
-        self._claim_verifier: ClaimVerifier | None = (
-            ClaimVerifier() if settings.claim_verification_enabled else None
-        )
-        self._intent_tracker: IntentTracker | None = (
-            IntentTracker() if settings.claim_verification_enabled else None
-        )
+        self._claim_verifier: ClaimVerifier | None = ClaimVerifier() if settings.claim_verification_enabled else None
+        self._intent_tracker: IntentTracker | None = IntentTracker() if settings.claim_verification_enabled else None
         self._action_gate: ActionGate | None = (
-            ActionGate(settings, call_gate_model=self._call_gate_model)
-            if settings.action_gating_enabled else None
+            ActionGate(settings, call_gate_model=self._call_gate_model) if settings.action_gating_enabled else None
         )
 
         # F036: Prompt cache optimization
@@ -261,9 +374,7 @@ class AgentRunner:
         # in unit tests that don't wire the monitor).
         self._session_monitor: Any | None = None
 
-    def _log_f026_decision(
-        self, event_type: str, data: dict, session_id: str
-    ) -> None:
+    def _log_f026_decision(self, event_type: str, data: dict, session_id: str) -> None:
         """Fire-and-forget persistence of an F026 verdict to nous_system.events.
 
         Enables retrospective accuracy eval against real prod data
@@ -273,16 +384,18 @@ class AgentRunner:
         if not self._settings.f026_persistence_enabled:
             return
         try:
-            asyncio.create_task(
-                self._brain.emit_event(event_type, data, session_id=session_id)
-            )
+            asyncio.create_task(self._brain.emit_event(event_type, data, session_id=session_id))
         except Exception:  # noqa: BLE001
             # Persistence is best-effort — never let it break a turn.
             logger.debug("F026 persistence failed (suppressed)", exc_info=True)
 
     def _authorize_tool_call(
-        self, ctx: ExecutionContext, tool_name: str,
-        offered_names: frozenset[str], session_id: str | None, tool_input: dict,
+        self,
+        ctx: ExecutionContext,
+        tool_name: str,
+        offered_names: frozenset[str],
+        session_id: str | None,
+        tool_input: dict,
     ) -> Refusal | None:
         """Return a refusal for a call the harness must not execute, else None.
 
@@ -296,7 +409,9 @@ class AgentRunner:
             logger.warning(
                 "Harness: %s unoffered tool call %r (context=%s, session=%s)",
                 "refused" if offered_mode == "enforce" else "allowed (warn mode)",
-                tool_name, ctx.kind, session_id,
+                tool_name,
+                ctx.kind,
+                session_id,
             )
             self._log_f026_decision(
                 "harness_unoffered_tool_call",
@@ -310,8 +425,7 @@ class AgentRunner:
             )
             if offered_mode == "enforce":
                 return Refusal(
-                    f"Tool error: '{tool_name}' is not available in this turn. "
-                    "Use only the tools offered to you.",
+                    f"Tool error: '{tool_name}' is not available in this turn. Use only the tools offered to you.",
                     "offered_set",
                 )
 
@@ -321,10 +435,15 @@ class AgentRunner:
         violation = tool_policy.evaluate(ctx, tool_name, tool_input)
         if violation is None:
             return None
+        # not_compensable is a safety invariant, not a policy preference: block
+        # unconditionally regardless of mode (undoability claim requires undo).
+        force_block = violation == "not_compensable"
         logger.warning(
             "Harness: %s %r in a %s turn breaks the context policy (%s)",
-            "refused" if policy_mode == "enforce" else "allowed (warn mode)",
-            tool_name, ctx.kind, violation,
+            "refused" if (policy_mode == "enforce" or force_block) else "allowed (warn mode)",
+            tool_name,
+            ctx.kind,
+            violation,
         )
         self._log_f026_decision(
             "harness_context_policy_violation",
@@ -336,7 +455,7 @@ class AgentRunner:
             },
             session_id=session_id,
         )
-        if policy_mode != "enforce":
+        if policy_mode != "enforce" and not force_block:
             return None
         return Refusal(
             f"Tool error: '{tool_name}' is not allowed in a {ctx.kind} turn ({violation}).",
@@ -347,8 +466,81 @@ class AgentRunner:
         """Harness Phase 1b: durable ledger for side-effecting tool calls."""
         self._ledger_store = store
 
+    def set_snapshot_store(self, store: Any, workspace_dir: str) -> None:
+        """Phase 2.8: compensation snapshots for compensable tools in undoable contexts."""
+        self._snap_store = store
+        self._workspace_dir = workspace_dir
+
+    async def _capture_compensation_snapshot(
+        self,
+        ctx: ExecutionContext,
+        tool_name: str,
+        tool_input: dict,
+        entry_id: Any,
+    ) -> None:
+        """Capture a pre-dispatch snapshot for compensable tools in undoable contexts.
+
+        Fail-open: a capture failure logs a warning but never blocks the call.
+        Only fires when the context is undoable, the tool is compensable, and the
+        snapshot store is wired. Called between _open_for_call and actual dispatch
+        so the ledger entry_id is available to link the snapshot.
+        """
+        if not getattr(ctx, "undoable", False):
+            return
+        if self._snap_store is None or entry_id is None:
+            return
+        from nous.api.tool_classes import tool_class as _tool_class
+
+        cls = _tool_class(tool_name)
+        if cls is None or not cls.compensable:
+            return
+        try:
+            snap_data: dict = {}
+            if tool_name == "write_file":
+                from nous.api.compensation import snapshot_for_write_file
+
+                path = tool_input.get("path", "")
+                snap_data = await snapshot_for_write_file(path, self._workspace_dir)
+            elif tool_name == "heartbeat_check_create":
+                snap_data = {"check_name": tool_input.get("name", "")}
+            elif tool_name == "heartbeat_check_manage":
+                snap_data = {
+                    "check_name": tool_input.get("name", ""),
+                    "action": tool_input.get("action", ""),
+                    # prior_enabled requires a DB lookup; captured as None here and
+                    # the compensator will fail gracefully when it's missing.
+                    "prior_enabled": None,
+                }
+            elif tool_name == "schedule_task":
+                # schedule_id only exists post-dispatch; compensator reads it from
+                # snapshot_data and fails gracefully when absent.
+                snap_data = {}
+            elif tool_name == "resolve_decision":
+                snap_data = {
+                    "decision_id": str(tool_input.get("decision_id") or tool_input.get("id", "")),
+                    # prior_outcome requires a DB lookup; captured as None here.
+                    "prior_outcome": None,
+                }
+            else:
+                return
+            await self._snap_store.capture(
+                ledger_entry_id=entry_id,
+                tool_name=tool_name,
+                snapshot_data=snap_data,
+            )
+        except Exception:
+            logger.warning(
+                "Harness Phase 2.8: snapshot capture failed for %s (compensation may not be available for revert)",
+                tool_name,
+                exc_info=True,
+            )
+
     async def _ledger_open(
-        self, ctx: ExecutionContext, tool_name: str, tool_input: dict, turn: int | None,
+        self,
+        ctx: ExecutionContext,
+        tool_name: str,
+        tool_input: dict,
+        turn: int | None,
     ) -> Any:
         """Open a durable row before dispatch. Phase 1b policy: FAIL OPEN.
 
@@ -365,18 +557,29 @@ class AgentRunner:
             return None
         try:
             return await self._ledger_store.open_entry(
-                context=ctx, tool_name=tool_name, tool_input=tool_input, turn=turn,
+                context=ctx,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                turn=turn,
             )
         except LedgerWriteError as exc:
             logger.warning(
                 "Harness: execution ledger open failed for %s (%s) — call proceeds: %s",
-                tool_name, ctx.kind, exc,
+                tool_name,
+                ctx.kind,
+                exc,
             )
             return exc.entry_id
 
     async def _ledger_close(
-        self, entry_id: Any, status: str, result_summary: str | None, output_of: str | None = None,
-        *, external_ref: str | None = None, keyed: bool = False,
+        self,
+        entry_id: Any,
+        status: str,
+        result_summary: str | None,
+        output_of: str | None = None,
+        *,
+        external_ref: str | None = None,
+        keyed: bool = False,
     ) -> None:
         """Close a durable row, shielded: a cancellation arriving now must not
         leave the row 'pending'. The task is strongly referenced until done.
@@ -392,22 +595,38 @@ class AgentRunner:
         await asyncio.shield(task)
 
     async def _ledger_close_now(
-        self, entry_id: Any, status: str, result_summary: str | None, output_of: str | None,
-        external_ref: str | None = None, keyed: bool = False,
+        self,
+        entry_id: Any,
+        status: str,
+        result_summary: str | None,
+        output_of: str | None,
+        external_ref: str | None = None,
+        keyed: bool = False,
     ) -> None:
         try:
             await self._ledger_store.close_entry(
-                entry_id, status=status, result_summary=result_summary, output_of=output_of,
-                external_ref=external_ref, keyed=keyed,
+                entry_id,
+                status=status,
+                result_summary=result_summary,
+                output_of=output_of,
+                external_ref=external_ref,
+                keyed=keyed,
             )
         except LedgerWriteError as exc:
             logger.warning(
-                "Harness: execution ledger close failed (row stays pending until the sweep): %s", exc,
+                "Harness: execution ledger close failed (row stays pending until the sweep): %s",
+                exc,
             )
 
     async def _ledger_blocked(
-        self, ctx: ExecutionContext, tool_name: str, tool_input: dict,
-        turn: int | None, refused_by: str, *, idempotency_key: str | None = None,
+        self,
+        ctx: ExecutionContext,
+        tool_name: str,
+        tool_input: dict,
+        turn: int | None,
+        refused_by: str,
+        *,
+        idempotency_key: str | None = None,
     ) -> None:
         """A side-effecting call the harness refused. ``refused_by`` is a code
         (``offered_set`` / ``action_gate`` / ``context_policy`` / ``duplicate``
@@ -416,14 +635,22 @@ class AgentRunner:
             return  # an unregistered name could not have run (see _ledger_open)
         try:
             await self._ledger_store.record_blocked(
-                context=ctx, tool_name=tool_name, tool_input=tool_input, turn=turn,
-                refused_by=refused_by, idempotency_key=idempotency_key,
+                context=ctx,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                turn=turn,
+                refused_by=refused_by,
+                idempotency_key=idempotency_key,
             )
         except LedgerWriteError as exc:
             logger.warning("Harness: execution ledger blocked-row write failed: %s", exc)
 
     async def _open_for_call(
-        self, ctx: ExecutionContext, tool_name: str, tool_input: dict, turn: int | None,
+        self,
+        ctx: ExecutionContext,
+        tool_name: str,
+        tool_input: dict,
+        turn: int | None,
         keys_this_turn: set[str],
     ) -> tuple[Any, str | None, Suppressed | None]:
         """Open the durable row: ``(entry id, idempotency key, suppression)``.
@@ -437,14 +664,19 @@ class AgentRunner:
         if self._ledger_store is None or not self._dispatcher.is_registered(tool_name):
             return None, None, None
         key = idempotency_key(
-            ctx, tool_name, self._handler_args(tool_name, tool_input),
+            ctx,
+            tool_name,
+            self._handler_args(tool_name, tool_input),
             default_chat_id=self._settings.telegram_chat_id,
         )
         if key is None:
             return await self._ledger_open(ctx, tool_name, tool_input, turn), None, None
         try:
             entry_id = await self._ledger_store.open_entry(
-                context=ctx, tool_name=tool_name, tool_input=tool_input, turn=turn,
+                context=ctx,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                turn=turn,
                 idempotency_key=key,
             )
             if not await self._ledger_store.claim_dispatch(entry_id):
@@ -455,10 +687,14 @@ class AgentRunner:
         except LedgerWriteError as exc:
             logger.error("Harness: keyed %s refused, execution ledger could not record it: %s", tool_name, exc)
             await self._ledger_close(exc.entry_id, "error", "ledger write failed; send refused", keyed=True)
-            return None, key, Suppressed(
-                "Send refused: the execution ledger could not record this send, so a duplicate "
-                "cannot be ruled out. Retry later.",
-                True,
+            return (
+                None,
+                key,
+                Suppressed(
+                    "Send refused: the execution ledger could not record this send, so a duplicate "
+                    "cannot be ruled out. Retry later.",
+                    True,
+                ),
             )
         keys_this_turn.add(key)
         return entry_id, key, None
@@ -500,18 +736,14 @@ class AgentRunner:
             True,
         )
 
-    def _log_compaction_guard(
-        self, event_type: str, data: dict, session_id: str
-    ) -> None:
+    def _log_compaction_guard(self, event_type: str, data: dict, session_id: str) -> None:
         """Fire-and-forget persistence of an F059 guard verdict.
 
         Same fire-and-forget shape as `_log_f026_decision` — never
         blocks the compaction path on DB I/O.
         """
         try:
-            asyncio.create_task(
-                self._brain.emit_event(event_type, data, session_id=session_id)
-            )
+            asyncio.create_task(self._brain.emit_event(event_type, data, session_id=session_id))
         except Exception:  # noqa: BLE001
             logger.debug("F059 guard persistence failed (suppressed)", exc_info=True)
 
@@ -685,7 +917,8 @@ class AgentRunner:
             # str content) so dedup/cognitive layer never sees block dicts.
             recent_messages = [
                 (m.text_content or (m.content if isinstance(m.content, str) else ""))
-                for m in conversation.messages if m.role == "user"
+                for m in conversation.messages
+                if m.role == "user"
             ][-8:]
             turn_context = await self._cognitive.pre_turn(
                 _agent_id,
@@ -704,8 +937,7 @@ class AgentRunner:
             )
 
             # 3. Append user message (text-only; upgraded to multimodal after censor check)
-            conversation.messages.append(
-                Message(role="user", content=user_message, text_content=user_message))
+            conversation.messages.append(Message(role="user", content=user_message, text_content=user_message))
             usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
 
             # 3b. Censor block check — skip LLM if input was blocked
@@ -714,7 +946,10 @@ class AgentRunner:
                 conversation.messages.append(Message(role="assistant", content=response_text))
                 turn_result = TurnResult(response_text=response_text)
                 await self._cognitive.post_turn(
-                    _agent_id, session_id, turn_result, turn_context,
+                    _agent_id,
+                    session_id,
+                    turn_result,
+                    turn_context,
                     is_background=is_background,
                 )
                 return response_text, turn_context, usage
@@ -736,8 +971,9 @@ class AgentRunner:
                     if att.content_type == "text_file":
                         if _total_text_bytes + att.size_bytes > MAX_TOTAL_TEXT_FILE_SIZE:
                             warnings.append(
-                                f"\U0001F4CE {att.filename} skipped — total text-file size "
-                                f"exceeds {MAX_TOTAL_TEXT_FILE_SIZE // (1024 * 1024)} MB.")
+                                f"\U0001f4ce {att.filename} skipped — total text-file size "
+                                f"exceeds {MAX_TOTAL_TEXT_FILE_SIZE // (1024 * 1024)} MB."
+                            )
                             continue
                         _total_text_bytes += att.size_bytes
                     valid_attachments.append(att)
@@ -745,28 +981,35 @@ class AgentRunner:
                 # links into the graph. pre_turn already created the episode.
                 episode_id = self._cognitive.get_active_episode_id(session_id)
                 for att in valid_attachments:
-                    await attachment_store.persist_attachment(
-                        att, session_id=session_id, settings=self._settings)
+                    await attachment_store.persist_attachment(att, session_id=session_id, settings=self._settings)
                     # F024: ingest text/code file bodies here, while data_base64 is
                     # still populated — the compaction finally clears it before the
                     # success branch runs, so this must precede the tool loop.
                     await attachment_store.maybe_ingest_text_file(
-                        self._heart, self._settings, att,
-                        session_id=session_id, episode_id=episode_id)
+                        self._heart, self._settings, att, session_id=session_id, episode_id=episode_id
+                    )
                     await attachment_store.maybe_ingest_pdf(
-                        self._heart, self._settings, att,
-                        session_id=session_id, episode_id=episode_id,
-                        llm_client=self._api)
-                msg_text = ("\n".join(warnings) + ("\n\n" + user_message if user_message else "")).strip() \
-                    if warnings else user_message
+                        self._heart,
+                        self._settings,
+                        att,
+                        session_id=session_id,
+                        episode_id=episode_id,
+                        llm_client=self._api,
+                    )
+                msg_text = (
+                    ("\n".join(warnings) + ("\n\n" + user_message if user_message else "")).strip()
+                    if warnings
+                    else user_message
+                )
                 if valid_attachments:
                     conversation.messages[-1] = Message(
                         role="user",
                         content=build_content_blocks(msg_text, valid_attachments),
-                        attachments=valid_attachments, text_content=user_message)
+                        attachments=valid_attachments,
+                        text_content=user_message,
+                    )
                 elif warnings:
-                    conversation.messages[-1] = Message(
-                        role="user", content=msg_text, text_content=msg_text)
+                    conversation.messages[-1] = Message(role="user", content=msg_text, text_content=msg_text)
 
             # F026: Get/create execution ledger and set turn
             ledger = self._get_or_create_ledger(session_id)
@@ -791,8 +1034,10 @@ class AgentRunner:
             try:
                 corrections = self._pending_corrections.pop(session_id, None)
                 system_prompt = self._build_system_prompt(
-                    turn_context, platform=platform,
-                    ledger=ledger, corrections=corrections,
+                    turn_context,
+                    platform=platform,
+                    ledger=ledger,
+                    corrections=corrections,
                 )
                 # F036: Handle system_prompt_prefix for both str and dict paths
                 if system_prompt_prefix:
@@ -800,8 +1045,7 @@ class AgentRunner:
                         # Prefix is stable across session — prepend to static tier
                         existing = system_prompt.get("static", "")
                         system_prompt["static"] = (
-                            system_prompt_prefix + "\n\n" + existing if existing
-                            else system_prompt_prefix
+                            system_prompt_prefix + "\n\n" + existing if existing else system_prompt_prefix
                         )
                     else:
                         system_prompt = system_prompt_prefix + "\n\n" + system_prompt
@@ -811,7 +1055,8 @@ class AgentRunner:
                 # F036: Compactor needs flat string for token estimation
                 _flat_prompt = (
                     "\n\n".join(v for v in system_prompt.values() if v)
-                    if isinstance(system_prompt, dict) else system_prompt
+                    if isinstance(system_prompt, dict)
+                    else system_prompt
                 )
                 if self._compactor and self._settings.compaction_enabled:
                     system_tokens = self._compactor.estimator.estimate(_flat_prompt)
@@ -833,23 +1078,21 @@ class AgentRunner:
                                         message_snapshot=snapshot,
                                     )
                                     await self._compactor.compact(
-                                        conversation, messages,
+                                        conversation,
+                                        messages,
                                         call_api=self._call_api,
                                         cut_point=cut_point,
                                     )
-                                    await self._save_conversation(
-                                        _agent_id, session_id, conversation
-                                    )
+                                    await self._save_conversation(_agent_id, session_id, conversation)
                 else:
                     system_tokens = len(_flat_prompt) // 4
-                    history_tokens = sum(
-                        len(m.get("content", "")) // 4 for m in messages
-                    )
+                    history_tokens = sum(len(m.get("content", "")) // 4 for m in messages)
 
                 logger.info(
-                    "Context health: messages=%d, system_tokens~=%d, "
-                    "history_tokens~=%d, frame=%s",
-                    len(messages), system_tokens, history_tokens,
+                    "Context health: messages=%d, system_tokens~=%d, history_tokens~=%d, frame=%s",
+                    len(messages),
+                    system_tokens,
+                    history_tokens,
                     turn_context.frame.frame_id if turn_context else "unknown",
                 )
 
@@ -858,9 +1101,7 @@ class AgentRunner:
                 # entry, reset in `finally` so the contextvar restores even on
                 # raise. Concurrent turns each get an isolated copy (ContextVar
                 # is per-asyncio-Task).
-                _f071_token = CURRENT_TURN_EXCLUDE_IDS.set(
-                    _build_exclude_ids(self._settings, turn_context)
-                )
+                _f071_token = CURRENT_TURN_EXCLUDE_IDS.set(_build_exclude_ids(self._settings, turn_context))
                 # F024 F2/F3: compact the live user message (strip base64) on BOTH
                 # success and exception. Outer try wraps the F071 try/finally so
                 # this runs after the contextvar reset on every path.
@@ -891,8 +1132,7 @@ class AgentRunner:
                     if valid_attachments:
                         for i in range(len(conversation.messages) - 1, -1, -1):
                             if conversation.messages[i].role == "user":
-                                conversation.messages[i] = compact_message_for_history(
-                                    conversation.messages[i])
+                                conversation.messages[i] = compact_message_for_history(conversation.messages[i])
                                 break
                 conversation.messages.append(Message(role="assistant", content=response_text))
             except Exception as e:
@@ -913,8 +1153,8 @@ class AgentRunner:
                     _episode_id = self._cognitive.get_active_episode_id(session_id)
                     for att in valid_attachments:
                         await attachment_store.record_attachment_fact(
-                            self._heart, att, agent_id=_agent_id,
-                            source_episode_id=_episode_id, analysis=response_text)
+                            self._heart, att, agent_id=_agent_id, source_episode_id=_episode_id, analysis=response_text
+                        )
 
             # F026: Post-response claim verification + ghost planning detection
             if _caught_exc is None:
@@ -928,7 +1168,10 @@ class AgentRunner:
                 thinking_blocks=thinking_blocks,
             )
             await self._cognitive.post_turn(
-                _agent_id, session_id, turn_result, turn_context,
+                _agent_id,
+                session_id,
+                turn_result,
+                turn_context,
                 is_background=is_background,
             )
 
@@ -975,10 +1218,7 @@ class AgentRunner:
             try:
                 # Build a reflection prompt with conversation history
                 history_text = self._format_history_text(conversation)
-                reflection_prompt = (
-                    f"Here is a conversation to review:\n\n{history_text}\n\n"
-                    f"{self.REFLECTION_PROMPT}"
-                )
+                reflection_prompt = f"Here is a conversation to review:\n\n{history_text}\n\n{self.REFLECTION_PROMPT}"
                 # P1-9: Call _call_api directly, no tool loop needed for reflection.
                 # skip_thinking=True: reflection is a simple summary, no need for
                 # extended thinking budget.
@@ -1028,7 +1268,9 @@ class AgentRunner:
                 blocked = sum(1 for a in ledger.actions if a.status == "blocked")
                 logger.info(
                     "F026: Session %s ended — %d actions recorded, %d blocked",
-                    session_id, len(ledger.actions), blocked,
+                    session_id,
+                    len(ledger.actions),
+                    blocked,
                 )
             self._pending_corrections.pop(session_id, None)  # F026
             if self._cache_break_detector:  # F036
@@ -1096,26 +1338,28 @@ class AgentRunner:
             static_text = system_prompt.get("static", "")
             semi_stable_text = system_prompt.get("semi_stable", "")
             dynamic_text = system_prompt.get("dynamic", "")
-            flat_system_prompt = "\n\n".join(
-                t for t in [static_text, semi_stable_text, dynamic_text] if t
-            )
+            flat_system_prompt = "\n\n".join(t for t in [static_text, semi_stable_text, dynamic_text] if t)
 
             system_blocks: list[dict[str, Any]] = []
 
             # Block 0: Claude Code preamble — required for claude-code beta rate limits
-            system_blocks.append({
-                "type": "text",
-                "text": "You are Claude Code, Anthropic's official CLI for Claude.",
-                "cache_control": {"type": "ephemeral"},
-            })
+            system_blocks.append(
+                {
+                    "type": "text",
+                    "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                    "cache_control": {"type": "ephemeral"},
+                }
+            )
 
             # Block 1: Static identity — always cached
             if static_text:
-                system_blocks.append({
-                    "type": "text",
-                    "text": static_text,
-                    "cache_control": {"type": "ephemeral"},
-                })
+                system_blocks.append(
+                    {
+                        "type": "text",
+                        "text": static_text,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                )
 
             # Block 1: Semi-stable context — cached with single breakpoint strategy
             if semi_stable_text:
@@ -1124,8 +1368,7 @@ class AgentRunner:
                     # Only add cache_control if semi-stable hasn't changed
                     # (cache break detector will report if it did)
                     prev_hash = (
-                        self._cache_break_detector.last_semi_stable_hash()
-                        if self._cache_break_detector else None
+                        self._cache_break_detector.last_semi_stable_hash() if self._cache_break_detector else None
                     )
                     if prev_hash is not None:
                         if cache_hash(semi_stable_text) == prev_hash:
@@ -1204,10 +1447,7 @@ class AgentRunner:
 
         # Effort parameter ("high" is API default, so only send if different)
         # Supported by Sonnet 4.6 and Opus 4.6. Haiku 4.5 does NOT support it.
-        if (
-            self._settings.effort != "high"
-            and "haiku" not in effective_model
-        ):
+        if self._settings.effort != "high" and "haiku" not in effective_model:
             payload["output_config"] = {"effort": self._settings.effort}
 
         # F035.4: Log context metadata (entry_id stored locally, NOT in payload)
@@ -1260,8 +1500,11 @@ class AgentRunner:
             raise RuntimeError("API client not initialized -- call start() first")
 
         payload = self._build_api_payload(
-            system_prompt, messages, tools,
-            skip_thinking=skip_thinking, model_override=model_override,
+            system_prompt,
+            messages,
+            tools,
+            skip_thinking=skip_thinking,
+            model_override=model_override,
             tool_choice=tool_choice,
         )
         if is_background:
@@ -1338,7 +1581,8 @@ class AgentRunner:
             # F024 F6: content may be a multimodal list — use text_content.
             recent_messages = [
                 (m.text_content or (m.content if isinstance(m.content, str) else ""))
-                for m in conversation.messages if m.role == "user"
+                for m in conversation.messages
+                if m.role == "user"
             ][-8:]
             turn_context = await self._cognitive.pre_turn(
                 _agent_id,
@@ -1351,8 +1595,7 @@ class AgentRunner:
             )
 
             # Append user message (text-only; upgraded to multimodal after censor check)
-            conversation.messages.append(
-                Message(role="user", content=user_message, text_content=user_message))
+            conversation.messages.append(Message(role="user", content=user_message, text_content=user_message))
 
             # Censor block check — yield block message and return
             if turn_context.censor_blocked:
@@ -1379,8 +1622,9 @@ class AgentRunner:
                     if att.content_type == "text_file":
                         if _total_text_bytes + att.size_bytes > MAX_TOTAL_TEXT_FILE_SIZE:
                             warnings.append(
-                                f"\U0001F4CE {att.filename} skipped — total text-file size "
-                                f"exceeds {MAX_TOTAL_TEXT_FILE_SIZE // (1024 * 1024)} MB.")
+                                f"\U0001f4ce {att.filename} skipped — total text-file size "
+                                f"exceeds {MAX_TOTAL_TEXT_FILE_SIZE // (1024 * 1024)} MB."
+                            )
                             continue
                         _total_text_bytes += att.size_bytes
                     valid_attachments.append(att)
@@ -1388,28 +1632,35 @@ class AgentRunner:
                 # links into the graph. pre_turn already created the episode.
                 episode_id = self._cognitive.get_active_episode_id(session_id)
                 for att in valid_attachments:
-                    await attachment_store.persist_attachment(
-                        att, session_id=session_id, settings=self._settings)
+                    await attachment_store.persist_attachment(att, session_id=session_id, settings=self._settings)
                     # F024: ingest text/code file bodies here, while data_base64 is
                     # still populated — the compaction finally clears it before the
                     # success branch runs, so this must precede the tool loop.
                     await attachment_store.maybe_ingest_text_file(
-                        self._heart, self._settings, att,
-                        session_id=session_id, episode_id=episode_id)
+                        self._heart, self._settings, att, session_id=session_id, episode_id=episode_id
+                    )
                     await attachment_store.maybe_ingest_pdf(
-                        self._heart, self._settings, att,
-                        session_id=session_id, episode_id=episode_id,
-                        llm_client=self._api)
-                msg_text = ("\n".join(warnings) + ("\n\n" + user_message if user_message else "")).strip() \
-                    if warnings else user_message
+                        self._heart,
+                        self._settings,
+                        att,
+                        session_id=session_id,
+                        episode_id=episode_id,
+                        llm_client=self._api,
+                    )
+                msg_text = (
+                    ("\n".join(warnings) + ("\n\n" + user_message if user_message else "")).strip()
+                    if warnings
+                    else user_message
+                )
                 if valid_attachments:
                     conversation.messages[-1] = Message(
                         role="user",
                         content=build_content_blocks(msg_text, valid_attachments),
-                        attachments=valid_attachments, text_content=user_message)
+                        attachments=valid_attachments,
+                        text_content=user_message,
+                    )
                 elif warnings:
-                    conversation.messages[-1] = Message(
-                        role="user", content=msg_text, text_content=msg_text)
+                    conversation.messages[-1] = Message(role="user", content=msg_text, text_content=msg_text)
 
             # F026: Get/create execution ledger and set turn
             ledger = self._get_or_create_ledger(session_id)
@@ -1427,16 +1678,17 @@ class AgentRunner:
 
             corrections = self._pending_corrections.pop(session_id, None)
             system_prompt = self._build_system_prompt(
-                turn_context, platform=platform,
-                ledger=ledger, corrections=corrections,
+                turn_context,
+                platform=platform,
+                ledger=ledger,
+                corrections=corrections,
             )
             # F036: Handle system_prompt_prefix for both str and dict paths
             if system_prompt_prefix:
                 if isinstance(system_prompt, dict):
                     existing = system_prompt.get("static", "")
                     system_prompt["static"] = (
-                        system_prompt_prefix + "\n\n" + existing if existing
-                        else system_prompt_prefix
+                        system_prompt_prefix + "\n\n" + existing if existing else system_prompt_prefix
                     )
                 else:
                     system_prompt = system_prompt_prefix + "\n\n" + system_prompt
@@ -1458,7 +1710,8 @@ class AgentRunner:
             # F036: Compactor needs flat string for token estimation
             _flat_prompt = (
                 "\n\n".join(v for v in system_prompt.values() if v)
-                if isinstance(system_prompt, dict) else system_prompt
+                if isinstance(system_prompt, dict)
+                else system_prompt
             )
 
             # Layer 2: History compaction (Spec 008.1)
@@ -1472,9 +1725,7 @@ class AgentRunner:
                         messages = self._format_messages(conversation)
                         history_tokens = self._compactor.estimator.estimate_messages(messages)
                         if self._compactor.should_compact(system_tokens, history_tokens):
-                            cut_point = self._compactor.find_cut_point(
-                                messages, self._settings.effective_keep_recent
-                            )
+                            cut_point = self._compactor.find_cut_point(messages, self._settings.effective_keep_recent)
                             if cut_point > 0:
                                 # 008.1 Phase 3: Snapshot for event handlers (decoupled from mutation)
                                 snapshot = messages[:cut_point]
@@ -1484,25 +1735,23 @@ class AgentRunner:
                                     message_snapshot=snapshot,
                                 )
                                 await self._compactor.compact(
-                                    conversation, messages,
+                                    conversation,
+                                    messages,
                                     call_api=self._call_api,
                                     cut_point=cut_point,
                                 )
                                 # 008.1 Phase 3: Persist state after compaction
-                                await self._save_conversation(
-                                    _agent_id, session_id, conversation
-                                )
+                                await self._save_conversation(_agent_id, session_id, conversation)
                                 messages = self._format_messages(conversation)
             else:
                 system_tokens = len(_flat_prompt) // 4
-                history_tokens = sum(
-                    len(m.get("content", "")) // 4 for m in messages
-                )
+                history_tokens = sum(len(m.get("content", "")) // 4 for m in messages)
 
             logger.info(
-                "Context health: messages=%d, system_tokens~=%d, "
-                "history_tokens~=%d, frame=%s",
-                len(messages), system_tokens, history_tokens,
+                "Context health: messages=%d, system_tokens~=%d, history_tokens~=%d, frame=%s",
+                len(messages),
+                system_tokens,
+                history_tokens,
                 turn_context.frame.frame_id if turn_context else "unknown",
             )
 
@@ -1646,8 +1895,11 @@ class AgentRunner:
                                     logger.warning(
                                         "Tool input JSON decode failed for %s: "
                                         "%d bytes across %d streamed parts, error=%s at offset %d",
-                                        block["name"], len(input_json), len(block["input_parts"]),
-                                        e.msg, e.pos,
+                                        block["name"],
+                                        len(input_json),
+                                        len(block["input_parts"]),
+                                        e.msg,
+                                        e.pos,
                                     )
                                     block["input"] = {}
                                     block["input_error"] = (
@@ -1699,28 +1951,36 @@ class AgentRunner:
                     for idx in sorted(all_blocks):
                         block = all_blocks[idx]
                         if block["type"] == "thinking":
-                            content_blocks.append({
-                                "type": "thinking",
-                                "thinking": "".join(block["thinking_parts"]),
-                                "signature": block["signature"],
-                            })
+                            content_blocks.append(
+                                {
+                                    "type": "thinking",
+                                    "thinking": "".join(block["thinking_parts"]),
+                                    "signature": block["signature"],
+                                }
+                            )
                         elif block["type"] == "redacted_thinking":
-                            content_blocks.append({
-                                "type": "redacted_thinking",
-                                "data": block["data"],
-                            })
+                            content_blocks.append(
+                                {
+                                    "type": "redacted_thinking",
+                                    "data": block["data"],
+                                }
+                            )
                         elif block["type"] == "text":
-                            content_blocks.append({
-                                "type": "text",
-                                "text": "".join(block["text_parts"]),
-                            })
+                            content_blocks.append(
+                                {
+                                    "type": "text",
+                                    "text": "".join(block["text_parts"]),
+                                }
+                            )
                         elif block["type"] == "tool_use":
-                            content_blocks.append({
-                                "type": "tool_use",
-                                "id": block["id"],
-                                "name": block["name"],
-                                "input": block.get("input", {}),
-                            })
+                            content_blocks.append(
+                                {
+                                    "type": "tool_use",
+                                    "id": block["id"],
+                                    "name": block["name"],
+                                    "input": block.get("input", {}),
+                                }
+                            )
                     messages.append({"role": "assistant", "content": content_blocks})
 
                     # Execute tools (P1-2: all results in single user message)
@@ -1731,45 +1991,60 @@ class AgentRunner:
                         # TypeError). Still emit a tool_result so this tool_use
                         # block is paired -- required or the next API call 400s.
                         if tc.get("input_error"):
-                            tool_results_for_message.append({
-                                "type": "tool_result",
-                                "tool_use_id": tc["id"],
-                                "content": tc["input_error"],
-                                "is_error": True,
-                            })
-                            all_tool_results.append(ToolResult(
-                                tool_name=tc["name"],
-                                arguments=tc.get("input", {}),
-                                result=None,
-                                error=tc["input_error"],
-                                duration_ms=0,
-                            ))
+                            tool_results_for_message.append(
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": tc["id"],
+                                    "content": tc["input_error"],
+                                    "is_error": True,
+                                }
+                            )
+                            all_tool_results.append(
+                                ToolResult(
+                                    tool_name=tc["name"],
+                                    arguments=tc.get("input", {}),
+                                    result=None,
+                                    error=tc["input_error"],
+                                    duration_ms=0,
+                                )
+                            )
                             yield StreamEvent(type="tool_end", tool_name=tc["name"])
                             continue
 
                         # Harness: was this tool offered this turn, and may this context use it?
                         refusal = self._authorize_tool_call(
-                            _ctx, tc["name"], offered_names, session_id, tc.get("input", {}),
+                            _ctx,
+                            tc["name"],
+                            offered_names,
+                            session_id,
+                            tc.get("input", {}),
                         )
                         if refusal is not None:
-                            tool_results_for_message.append({
-                                "type": "tool_result",
-                                "tool_use_id": tc["id"],
-                                "content": refusal.text,
-                                "is_error": True,
-                            })
-                            all_tool_results.append(ToolResult(
-                                tool_name=tc["name"],
-                                arguments=tc.get("input", {}),
-                                result=None,
-                                error=refusal.text,
-                                duration_ms=0,
-                            ))
+                            tool_results_for_message.append(
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": tc["id"],
+                                    "content": refusal.text,
+                                    "is_error": True,
+                                }
+                            )
+                            all_tool_results.append(
+                                ToolResult(
+                                    tool_name=tc["name"],
+                                    arguments=tc.get("input", {}),
+                                    result=None,
+                                    error=refusal.text,
+                                    duration_ms=0,
+                                )
+                            )
                             if ledger:
                                 ledger.record(tc["name"], tc.get("input", {}), refusal.text, "blocked")
                             await self._ledger_blocked(
-                                _ctx, tc["name"], tc.get("input", {}),
-                                ledger.current_turn if ledger else None, refusal.code,
+                                _ctx,
+                                tc["name"],
+                                tc.get("input", {}),
+                                ledger.current_turn if ledger else None,
+                                refusal.code,
                             )
                             yield StreamEvent(type="tool_end", tool_name=tc["name"])
                             continue
@@ -1783,7 +2058,10 @@ class AgentRunner:
                         gated = False
                         if self._action_gate and ledger:
                             gate_result = await self._action_gate.check(
-                                tc["name"], dispatch_input, ledger, user_message=user_message,
+                                tc["name"],
+                                dispatch_input,
+                                ledger,
+                                user_message=user_message,
                             )
                             self._log_f026_decision(
                                 "f026_action_gate",
@@ -1807,7 +2085,11 @@ class AgentRunner:
                                     gated = True
                                     ledger.record(tc["name"], dispatch_input, result_text, "blocked")
                                     await self._ledger_blocked(
-                                        _ctx, tc["name"], dispatch_input, ledger.current_turn, "action_gate",
+                                        _ctx,
+                                        tc["name"],
+                                        dispatch_input,
+                                        ledger.current_turn,
+                                        "action_gate",
                                     )
                                     logger.info("F026 gate: %s BLOCKED (%s)", tc["name"], gate_result.reason)
                                 elif self._settings.action_gating_mode == "warn":
@@ -1821,14 +2103,27 @@ class AgentRunner:
                             # Harness Phase 1b: durable row before the side effect;
                             # Phase 2b: a keyed send is claimed first, or suppressed.
                             entry_id, send_key, suppressed = await self._open_for_call(
-                                _ctx, tc["name"], dispatch_input,
-                                ledger.current_turn if ledger else None, keys_this_turn,
+                                _ctx,
+                                tc["name"],
+                                dispatch_input,
+                                ledger.current_turn if ledger else None,
+                                keys_this_turn,
+                            )
+                            # Phase 2.8: capture pre-dispatch snapshot for compensable
+                            # tools in undoable contexts (fail-open).
+                            await self._capture_compensation_snapshot(
+                                _ctx,
+                                tc["name"],
+                                dispatch_input,
+                                entry_id,
                             )
                             if suppressed is not None:
                                 result_text, is_error = suppressed.text, suppressed.is_error
                                 if ledger:
                                     ledger.record(
-                                        tc["name"], dispatch_input, result_text,
+                                        tc["name"],
+                                        dispatch_input,
+                                        result_text,
                                         "blocked" if is_error else "success",
                                     )
                             else:
@@ -1836,7 +2131,9 @@ class AgentRunner:
                                 timed_out = False
                                 try:
                                     async for item in self._dispatch_with_keepalive(
-                                        tc["name"], dispatch_input, session_id=session_id,
+                                        tc["name"],
+                                        dispatch_input,
+                                        session_id=session_id,
                                         turn_number=_stream_turn_number,  # F091
                                         context=_ctx,  # harness Phase 1a
                                         outcome=outcome,  # harness Phase 2b
@@ -1849,8 +2146,11 @@ class AgentRunner:
                                     # Client disconnect / stream closed mid-call: the
                                     # side effect may or may not have happened.
                                     await self._ledger_close(
-                                        entry_id, "unknown", "stream closed mid-call — outcome unknown",
-                                        external_ref=outcome.external_ref, keyed=send_key is not None,
+                                        entry_id,
+                                        "unknown",
+                                        "stream closed mid-call — outcome unknown",
+                                        external_ref=outcome.external_ref,
+                                        keyed=send_key is not None,
                                     )
                                     raise
                                 await self._ledger_close(
@@ -1858,32 +2158,39 @@ class AgentRunner:
                                     _close_status(is_error, timed_out or outcome.uncertain),
                                     result_text,
                                     output_of=tc["name"],
-                                    external_ref=outcome.external_ref, keyed=send_key is not None,
+                                    external_ref=outcome.external_ref,
+                                    keyed=send_key is not None,
                                 )
                                 # F026: Record in execution ledger (post-dispatch)
                                 if ledger:
                                     ledger.record(
-                                        tc["name"], dispatch_input, result_text,
+                                        tc["name"],
+                                        dispatch_input,
+                                        result_text,
                                         "error" if is_error else "success",
                                     )
                             duration_ms = int((time.monotonic() - start_time) * 1000)
                         else:
                             duration_ms = 0
 
-                        tool_results_for_message.append({
-                            "type": "tool_result",
-                            "tool_use_id": tc["id"],
-                            "content": result_text,
-                            "is_error": is_error,
-                        })
+                        tool_results_for_message.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tc["id"],
+                                "content": result_text,
+                                "is_error": is_error,
+                            }
+                        )
 
-                        all_tool_results.append(ToolResult(
-                            tool_name=tc["name"],
-                            arguments=tc["input"],
-                            result=result_text if not is_error else None,
-                            error=result_text if is_error else None,
-                            duration_ms=duration_ms,
-                        ))
+                        all_tool_results.append(
+                            ToolResult(
+                                tool_name=tc["name"],
+                                arguments=tc["input"],
+                                result=result_text if not is_error else None,
+                                error=result_text if is_error else None,
+                                duration_ms=duration_ms,
+                            )
+                        )
 
                         yield StreamEvent(type="tool_end", tool_name=tc["name"])
 
@@ -1895,12 +2202,14 @@ class AgentRunner:
                         if extracted_facts:
                             for fact_text in extracted_facts:
                                 try:
-                                    await self._heart.learn(FactInput(
-                                        content=fact_text,
-                                        category="technical",
-                                        confidence=0.3,
-                                        source="pre_prune_extraction",
-                                    ))
+                                    await self._heart.learn(
+                                        FactInput(
+                                            content=fact_text,
+                                            category="technical",
+                                            confidence=0.3,
+                                            source="pre_prune_extraction",
+                                        )
+                                    )
                                 except Exception:
                                     logger.debug("Failed to store pre-prune fact: %s", fact_text[:50])
                 else:
@@ -1945,8 +2254,8 @@ class AgentRunner:
                     _episode_id = self._cognitive.get_active_episode_id(session_id)
                     for att in valid_attachments:
                         await attachment_store.record_attachment_fact(
-                            self._heart, att, agent_id=_agent_id,
-                            source_episode_id=_episode_id, analysis=response_text)
+                            self._heart, att, agent_id=_agent_id, source_episode_id=_episode_id, analysis=response_text
+                        )
             finally:
                 # F071: clear the per-turn exclusion set first — restoring the
                 # contextvar must not depend on post_turn's success. Value-based
@@ -1959,8 +2268,7 @@ class AgentRunner:
                 if valid_attachments:
                     for i in range(len(conversation.messages) - 1, -1, -1):
                         if conversation.messages[i].role == "user":
-                            conversation.messages[i] = compact_message_for_history(
-                                conversation.messages[i])
+                            conversation.messages[i] = compact_message_for_history(conversation.messages[i])
                             break
                 # ALWAYS call post_turn (review P1: guaranteed cleanup).
                 # Shield from cancellation to prevent DB connection pool leaks —
@@ -1973,9 +2281,7 @@ class AgentRunner:
                     thinking_blocks=all_thinking_blocks,
                 )
                 try:
-                    await asyncio.shield(
-                        self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
-                    )
+                    await asyncio.shield(self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context))
                 except (asyncio.CancelledError, Exception):
                     logger.warning("post_turn cleanup interrupted for session %s", session_id)
                 self._check_safety_net(turn_context, all_tool_results)
@@ -2081,7 +2387,9 @@ class AgentRunner:
         # F061: include tool_calls counter so the hardened executor's per-attempt
         # accumulator can populate heart.subtasks.tool_calls_made (was missing).
         total_usage: dict[str, int] = {
-            "input_tokens": 0, "output_tokens": 0, "tool_calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "tool_calls": 0,
         }
         turns = 0
         total_tool_calls = 0
@@ -2093,10 +2401,7 @@ class AgentRunner:
         # via global thinking_mode OR the haiku-family check the rest of the
         # runner uses.
         effective_model_for_force = (model_override or self._settings.model).lower()
-        thinking_off = (
-            self._settings.thinking_mode == "off"
-            or "haiku" in effective_model_for_force
-        )
+        thinking_off = self._settings.thinking_mode == "off" or "haiku" in effective_model_for_force
         force_enabled = bool(force_tool_on_penultimate) and thinking_off
         terminate_after_tool_results = False  # set when submit_final_report fires
         # F061 round 4 P2-I: cap the number of force_tool_on_penultimate
@@ -2152,21 +2457,18 @@ class AgentRunner:
             # before any work has run. Clamping to 1 means force fires no
             # earlier than the 2nd turn / 2nd tool call.
             _turn_threshold = max(1, max_turns - 2)
-            _tool_threshold = (
-                max(1, max_tool_calls - 2) if max_tool_calls is not None else None
-            )
+            _tool_threshold = max(1, max_tool_calls - 2) if max_tool_calls is not None else None
             is_penultimate = (
                 force_enabled
                 and force_tool_on_penultimate is not None
                 and turns > 0
                 and _force_fires_remaining > 0
-                and (turns >= _turn_threshold
-                     or (_tool_threshold is not None
-                         and total_tool_calls >= _tool_threshold))
+                and (turns >= _turn_threshold or (_tool_threshold is not None and total_tool_calls >= _tool_threshold))
             )
             if is_penultimate:
                 tool_choice_arg = {
-                    "type": "tool", "name": force_tool_on_penultimate,
+                    "type": "tool",
+                    "name": force_tool_on_penultimate,
                 }
                 _force_fires_remaining -= 1
 
@@ -2201,9 +2503,7 @@ class AgentRunner:
                 total_usage["output_tokens"] += api_response.usage.get("output_tokens", 0)
                 if self._compactor:
                     input_chars = sum(len(str(m.get("content", ""))) for m in messages)
-                    self._compactor.estimator.calibrate(
-                        input_chars, api_response.usage.get("input_tokens", 0)
-                    )
+                    self._compactor.estimator.calibrate(input_chars, api_response.usage.get("input_tokens", 0))
 
             # Extract thinking blocks from this iteration
             for block in api_response.content:
@@ -2224,15 +2524,20 @@ class AgentRunner:
                     "tool-loop terminal: stop=%s blocks=%s text_len=%d thinking=%d turns=%d toolcalls=%d",
                     api_response.stop_reason,
                     [b.get("type") for b in api_response.content],
-                    len(response_text), len(all_thinking_blocks), turns, total_tool_calls,
+                    len(response_text),
+                    len(all_thinking_blocks),
+                    turns,
+                    total_tool_calls,
                 )
                 return response_text, all_tool_results, total_usage, all_thinking_blocks
 
             # P0-3: Append FULL assistant response (all content blocks)
-            messages.append({
-                "role": "assistant",
-                "content": api_response.content,
-            })
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": api_response.content,
+                }
+            )
 
             # P1-2: Dispatch ALL tool_use blocks, collect results in SINGLE user message
             tool_results_for_message: list[dict[str, Any]] = []
@@ -2253,42 +2558,53 @@ class AgentRunner:
                     # and the ledger: nothing ran, so nothing is recorded.
                     input_error = (api_response.input_errors or {}).get(tool_use_id)
                     if input_error:
-                        tool_results_for_message.append({
-                            "type": "tool_result",
-                            "tool_use_id": tool_use_id,
-                            "content": input_error,
-                            "is_error": True,
-                        })
-                        all_tool_results.append(ToolResult(
-                            tool_name=tool_name,
-                            arguments=tool_input,
-                            result=None,
-                            error=input_error,
-                            duration_ms=0,
-                        ))
+                        tool_results_for_message.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_id,
+                                "content": input_error,
+                                "is_error": True,
+                            }
+                        )
+                        all_tool_results.append(
+                            ToolResult(
+                                tool_name=tool_name,
+                                arguments=tool_input,
+                                result=None,
+                                error=input_error,
+                                duration_ms=0,
+                            )
+                        )
                         continue
 
                     # Harness: was this tool offered this iteration, and may this context use it?
                     refusal = self._authorize_tool_call(ctx, tool_name, offered_names, session_id, tool_input)
                     if refusal is not None:
-                        tool_results_for_message.append({
-                            "type": "tool_result",
-                            "tool_use_id": tool_use_id,
-                            "content": refusal.text,
-                            "is_error": True,
-                        })
-                        all_tool_results.append(ToolResult(
-                            tool_name=tool_name,
-                            arguments=tool_input,
-                            result=None,
-                            error=refusal.text,
-                            duration_ms=0,
-                        ))
+                        tool_results_for_message.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_id,
+                                "content": refusal.text,
+                                "is_error": True,
+                            }
+                        )
+                        all_tool_results.append(
+                            ToolResult(
+                                tool_name=tool_name,
+                                arguments=tool_input,
+                                result=None,
+                                error=refusal.text,
+                                duration_ms=0,
+                            )
+                        )
                         if ledger:
                             ledger.record(tool_name, tool_input, refusal.text, "blocked")
                         await self._ledger_blocked(
-                            ctx, tool_name, tool_input,
-                            ledger.current_turn if ledger else None, refusal.code,
+                            ctx,
+                            tool_name,
+                            tool_input,
+                            ledger.current_turn if ledger else None,
+                            refusal.code,
                         )
                         continue
 
@@ -2299,7 +2615,10 @@ class AgentRunner:
                     gated = False
                     if self._action_gate and ledger:
                         gate_result = await self._action_gate.check(
-                            tool_name, tool_input, ledger, user_message=user_message,
+                            tool_name,
+                            tool_input,
+                            ledger,
+                            user_message=user_message,
                         )
                         self._log_f026_decision(
                             "f026_action_gate",
@@ -2323,7 +2642,11 @@ class AgentRunner:
                                 gated = True
                                 ledger.record(tool_name, tool_input, result_text, "blocked")
                                 await self._ledger_blocked(
-                                    ctx, tool_name, tool_input, ledger.current_turn, "action_gate",
+                                    ctx,
+                                    tool_name,
+                                    tool_input,
+                                    ledger.current_turn,
+                                    "action_gate",
                                 )
                                 logger.info("F026 gate: %s BLOCKED (%s)", tool_name, gate_result.reason)
                             elif self._settings.action_gating_mode == "warn":
@@ -2363,8 +2686,19 @@ class AgentRunner:
                             # insert cannot leave the heartbeat running.
                             # Phase 2b: a keyed send is claimed first, or suppressed.
                             entry_id, send_key, suppressed = await self._open_for_call(
-                                ctx, tool_name, tool_input,
-                                ledger.current_turn if ledger else None, keys_this_turn,
+                                ctx,
+                                tool_name,
+                                tool_input,
+                                ledger.current_turn if ledger else None,
+                                keys_this_turn,
+                            )
+                            # Phase 2.8: capture pre-dispatch snapshot for compensable
+                            # tools in undoable contexts (fail-open).
+                            await self._capture_compensation_snapshot(
+                                ctx,
+                                tool_name,
+                                tool_input,
+                                entry_id,
                             )
                             if suppressed is not None:
                                 result_text, is_error = suppressed.text, suppressed.is_error
@@ -2374,13 +2708,12 @@ class AgentRunner:
                                 # @codex P1 on e8841b2: in-flight heartbeat
                                 # for tool calls that may exceed stall_timeout.
                                 # Cancels in the finally regardless of success.
-                                _hb = (
-                                    self._start_activity_heartbeat(dag_node_id)
-                                    if dag_node_id is not None else None
-                                )
+                                _hb = self._start_activity_heartbeat(dag_node_id) if dag_node_id is not None else None
                                 try:
                                     result_text, is_error = await self._dispatcher.dispatch(
-                                        tool_name, tool_input, session_id=session_id,
+                                        tool_name,
+                                        tool_input,
+                                        session_id=session_id,
                                         is_background=is_background,
                                         turn_number=turn_number,  # F091 (caller-captured)
                                         context=ctx,  # harness Phase 1a
@@ -2392,24 +2725,32 @@ class AgentRunner:
                                     # thread can still deliver) — record exactly
                                     # that, then re-raise.
                                     await self._ledger_close(
-                                        entry_id, "unknown", "cancelled mid-call — outcome unknown",
-                                        external_ref=outcome.external_ref, keyed=keyed,
+                                        entry_id,
+                                        "unknown",
+                                        "cancelled mid-call — outcome unknown",
+                                        external_ref=outcome.external_ref,
+                                        keyed=keyed,
                                     )
                                     raise
                                 except Exception as exc:
                                     # The type only: an exception message can echo arguments.
                                     await self._ledger_close(
-                                        entry_id, _close_status(True, outcome.uncertain),
+                                        entry_id,
+                                        _close_status(True, outcome.uncertain),
                                         f"{type(exc).__name__} raised during dispatch",
-                                        external_ref=outcome.external_ref, keyed=keyed,
+                                        external_ref=outcome.external_ref,
+                                        keyed=keyed,
                                     )
                                     raise
                                 finally:
                                     await self._stop_activity_heartbeat(_hb)
                                 await self._ledger_close(
-                                    entry_id, _close_status(is_error, outcome.uncertain), result_text,
+                                    entry_id,
+                                    _close_status(is_error, outcome.uncertain),
+                                    result_text,
                                     output_of=tool_name,
-                                    external_ref=outcome.external_ref, keyed=keyed,
+                                    external_ref=outcome.external_ref,
+                                    keyed=keyed,
                                 )
                         duration_ms = int((time.monotonic() - start_time) * 1000)
 
@@ -2419,7 +2760,9 @@ class AgentRunner:
                         # refused one records blocked.
                         if ledger:
                             ledger.record(
-                                tool_name, tool_input, result_text,
+                                tool_name,
+                                tool_input,
+                                result_text,
                                 ("blocked" if suppressed is not None else "error") if is_error else "success",
                             )
                     else:
@@ -2427,7 +2770,10 @@ class AgentRunner:
 
                     # F020: SmartCompress — ingestion-time compression
                     compress_result = await smart_compress(
-                        tool_name, tool_input, result_text, self._settings,
+                        tool_name,
+                        tool_input,
+                        result_text,
+                        self._settings,
                         is_error=is_error,
                     )
 
@@ -2435,6 +2781,7 @@ class AgentRunner:
                     if compress_result.original_text and session_id:
                         try:
                             from nous.api.tool_cache import cache_compressed_result
+
                             async with self._heart.db.session() as db_sess:
                                 hash_key = await cache_compressed_result(
                                     db_sess,
@@ -2448,21 +2795,25 @@ class AgentRunner:
                         except Exception:
                             logger.warning("Failed to cache %s result", tool_name, exc_info=True)
 
-                    tool_results_for_message.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": compress_result.text,
-                        "is_error": is_error,
-                    })
+                    tool_results_for_message.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": compress_result.text,
+                            "is_error": is_error,
+                        }
+                    )
 
                     # Track for post_turn
-                    all_tool_results.append(ToolResult(
-                        tool_name=tool_name,
-                        arguments=tool_input,
-                        result=result_text if not is_error else None,
-                        error=result_text if is_error else None,
-                        duration_ms=duration_ms,
-                    ))
+                    all_tool_results.append(
+                        ToolResult(
+                            tool_name=tool_name,
+                            arguments=tool_input,
+                            result=result_text if not is_error else None,
+                            error=result_text if is_error else None,
+                            duration_ms=duration_ms,
+                        )
+                    )
 
                     # F061 PR-3 Codex review P2: stop dispatching remaining
                     # tool_use blocks once a successful submit_final_report
@@ -2473,10 +2824,12 @@ class AgentRunner:
                         break
 
             # Append all tool results as single user message
-            messages.append({
-                "role": "user",
-                "content": tool_results_for_message,
-            })
+            messages.append(
+                {
+                    "role": "user",
+                    "content": tool_results_for_message,
+                }
+            )
 
             total_tool_calls += len(tool_results_for_message)
             total_usage["tool_calls"] += len(tool_results_for_message)
@@ -2514,12 +2867,14 @@ class AgentRunner:
                 if extracted_facts:
                     for fact_text in extracted_facts:
                         try:
-                            await self._heart.learn(FactInput(
-                                content=fact_text,
-                                category="technical",
-                                confidence=0.3,
-                                source="pre_prune_extraction",
-                            ))
+                            await self._heart.learn(
+                                FactInput(
+                                    content=fact_text,
+                                    category="technical",
+                                    confidence=0.3,
+                                    source="pre_prune_extraction",
+                                )
+                            )
                         except Exception:
                             logger.debug("Failed to store pre-prune fact: %s", fact_text[:50])
 
@@ -2544,11 +2899,17 @@ class AgentRunner:
                 "tool-loop max_turns: stop=%s blocks=%s text_len=%d thinking=%d",
                 final_response.stop_reason,
                 [b.get("type") for b in final_response.content],
-                len(_rt), len(all_thinking_blocks),
+                len(_rt),
+                len(all_thinking_blocks),
             )
             return _rt, all_tool_results, total_usage, all_thinking_blocks
         except Exception:
-            return "I reached the maximum number of tool iterations. Please try again.", all_tool_results, total_usage, all_thinking_blocks
+            return (
+                "I reached the maximum number of tool iterations. Please try again.",
+                all_tool_results,
+                total_usage,
+                all_thinking_blocks,
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -2596,10 +2957,7 @@ Rules:
         go into the dynamic tier. Otherwise returns a flat string (legacy).
         """
         # F036: 3-tier split path
-        if (
-            self._settings.cache_split_system_prompt
-            and turn_context.sections_by_tier
-        ):
+        if self._settings.cache_split_system_prompt and turn_context.sections_by_tier:
             tiers = dict(turn_context.sections_by_tier)  # copy to avoid mutation
 
             # Collect runner-appended dynamic content
@@ -2610,9 +2968,7 @@ Rules:
             if turn_context.diagnostic_nudges:
                 dynamic_extras.append(turn_context.diagnostic_nudges)
             if ledger and self._settings.execution_ledger_enabled:
-                ledger_section = ledger.system_prompt_section(
-                    self._settings.execution_ledger_max_tokens
-                )
+                ledger_section = ledger.system_prompt_section(self._settings.execution_ledger_max_tokens)
                 if ledger_section:
                     dynamic_extras.append(ledger_section)
             if corrections:
@@ -2624,11 +2980,7 @@ Rules:
             if dynamic_extras:
                 existing_dynamic = tiers.get("dynamic", "")
                 extras_text = "\n\n".join(dynamic_extras)
-                tiers["dynamic"] = (
-                    existing_dynamic + "\n\n" + extras_text
-                    if existing_dynamic
-                    else extras_text
-                )
+                tiers["dynamic"] = existing_dynamic + "\n\n" + extras_text if existing_dynamic else extras_text
 
             return tiers
 
@@ -2641,9 +2993,7 @@ Rules:
         if turn_context.diagnostic_nudges:
             parts.append(turn_context.diagnostic_nudges)
         if ledger and self._settings.execution_ledger_enabled:
-            ledger_section = ledger.system_prompt_section(
-                self._settings.execution_ledger_max_tokens
-            )
+            ledger_section = ledger.system_prompt_section(self._settings.execution_ledger_max_tokens)
             if ledger_section:
                 parts.append(ledger_section)
         if corrections:
@@ -2737,9 +3087,7 @@ Rules:
                 text_parts.append(block["text"])
         return "\n".join(text_parts) if text_parts else ""
 
-    async def _activity_heartbeat_loop(
-        self, dag_node_id: UUID, interval_seconds: float
-    ) -> None:
+    async def _activity_heartbeat_loop(self, dag_node_id: UUID, interval_seconds: float) -> None:
         """F064.1: background heartbeat ping while a tool dispatch is in flight.
 
         @codex P1 on e8841b2: the single pre-dispatch ping isn't enough for
@@ -2763,9 +3111,7 @@ Rules:
                 except asyncio.CancelledError:
                     raise
                 except Exception:  # noqa: BLE001
-                    logger.debug(
-                        "F064.1 heartbeat ping failed (suppressed)", exc_info=True
-                    )
+                    logger.debug("F064.1 heartbeat ping failed (suppressed)", exc_info=True)
         except asyncio.CancelledError:
             raise
 
@@ -2816,9 +3162,7 @@ Rules:
             )
             return min(global_default, max_cap)
 
-    def _start_activity_heartbeat(
-        self, dag_node_id: UUID
-    ) -> asyncio.Task | None:
+    def _start_activity_heartbeat(self, dag_node_id: UUID) -> asyncio.Task | None:
         """Start the background heartbeat for a tool dispatch. Returns the
         task so the caller's try/finally can cancel it. Returns None when
         stall detection is disabled or no store wired."""
@@ -2940,8 +3284,7 @@ Rules:
             )
         elif frame_id in _OPTIONAL_DECISION_FRAMES:
             logger.debug(
-                "Safety net: frame=%s, record_decision not called during turn "
-                "(session decision_id=%s).",
+                "Safety net: frame=%s, record_decision not called during turn (session decision_id=%s).",
                 frame_id,
                 turn_context.decision_id,
             )
@@ -2987,7 +3330,10 @@ Rules:
                 for tr in turn_results
             ]
             verification = self._claim_verifier.verify(
-                response_text, turn_tool_names, ledger, turn_evidence=turn_evidence,
+                response_text,
+                turn_tool_names,
+                ledger,
+                turn_evidence=turn_evidence,
             )
             self._log_f026_decision(
                 "f026_claim_verification",
@@ -2995,8 +3341,7 @@ Rules:
                     "verified": verification.verified,
                     "claim_count": len(verification.claims),
                     "claims": [
-                        {"kind": c.kind, "evidence": c.evidence, "text": c.text[:120]}
-                        for c in verification.claims
+                        {"kind": c.kind, "evidence": c.evidence, "text": c.text[:120]} for c in verification.claims
                     ],
                     "turn": ledger.current_turn if ledger is not None else None,
                     "violation_count": len(verification.violations),
@@ -3020,9 +3365,7 @@ Rules:
                 mode = self._settings.claim_verification_mode
                 if mode == "enforce":
                     logger.warning("Claim verification failed: %s", verification.correction)
-                    self._pending_corrections.setdefault(session_id, []).append(
-                        verification.correction or ""
-                    )
+                    self._pending_corrections.setdefault(session_id, []).append(verification.correction or "")
                 elif mode == "warn":
                     logger.warning("Claim verification: %s", verification.correction)
                 else:
@@ -3089,9 +3432,7 @@ Rules:
                 if next_task is None:
                     next_task = asyncio.create_task(stream.__anext__())
                 try:
-                    event = await asyncio.wait_for(
-                        asyncio.shield(next_task), timeout=interval
-                    )
+                    event = await asyncio.wait_for(asyncio.shield(next_task), timeout=interval)
                     next_task = None  # consumed
                     yield event
                     break  # got first event, switch to direct passthrough
@@ -3150,7 +3491,10 @@ Rules:
         return {**tool_input, "source_episode_id": active_ep}
 
     async def _dispatch_with_keepalive(
-        self, name: str, args: dict[str, Any], session_id: str | None = None,
+        self,
+        name: str,
+        args: dict[str, Any],
+        session_id: str | None = None,
         turn_number: int | None = None,  # F091: caller-captured, see _tool_loop
         context: ExecutionContext | None = None,  # harness Phase 1a
         outcome: CallOutcome | None = None,  # harness Phase 2b
@@ -3169,7 +3513,9 @@ Rules:
         task = asyncio.create_task(
             asyncio.wait_for(
                 self._dispatcher.dispatch(
-                    name, args, session_id=session_id,
+                    name,
+                    args,
+                    session_id=session_id,
                     turn_number=turn_number,  # F091 (caller-captured)
                     context=context,  # harness Phase 1a
                     outcome=outcome,  # harness Phase 2b
@@ -3181,9 +3527,7 @@ Rules:
         try:
             while not task.done():
                 try:
-                    await asyncio.wait_for(
-                        asyncio.shield(task), timeout=interval
-                    )
+                    await asyncio.wait_for(asyncio.shield(task), timeout=interval)
                 except TimeoutError:
                     if task.done():
                         break
@@ -3196,9 +3540,7 @@ Rules:
             try:
                 result_text, is_error = task.result()
             except TimeoutError:
-                logger.warning(
-                    "Tool '%s' timed out after %ds", name, timeout
-                )
+                logger.warning("Tool '%s' timed out after %ds", name, timeout)
                 result_text = f"Tool '{name}' timed out after {timeout}s"
                 is_error = True
                 # Harness Phase 1b: the call's outcome is unknown, not a failure
@@ -3238,8 +3580,11 @@ Rules:
             role_label = "User" if msg.role == "user" else "Assistant"
             # F024 F6: content may be a multimodal list — prefer text_content,
             # else stringify str content, else a placeholder.
-            text = (msg.text_content if getattr(msg, "text_content", "") else
-                    (msg.content if isinstance(msg.content, str) else "[multimodal message]"))
+            text = (
+                msg.text_content
+                if getattr(msg, "text_content", "")
+                else (msg.content if isinstance(msg.content, str) else "[multimodal message]")
+            )
             lines.append(f"{role_label}: {text}")
         return "\n\n".join(lines)
 
@@ -3247,9 +3592,7 @@ Rules:
     # Conversation persistence (008.1 Phase 3)
     # ------------------------------------------------------------------
 
-    async def _save_conversation(
-        self, agent_id: str, session_id: str, conversation: Conversation
-    ) -> None:
+    async def _save_conversation(self, agent_id: str, session_id: str, conversation: Conversation) -> None:
         """Persist conversation state to Heart after compaction."""
         try:
             # F024 F1 (critical leak fix): route every message's content through
@@ -3257,8 +3600,7 @@ Rules:
             # heart.conversation_state — even if compaction hasn't compacted the
             # live message yet (this runs inside the start-of-turn gate).
             messages_json = [
-                {"role": m.role,
-                 "content": sanitize_blocks_for_storage(m.content, m.attachments)}
+                {"role": m.role, "content": sanitize_blocks_for_storage(m.content, m.attachments)}
                 for m in conversation.messages
             ]
             await self._heart.save_conversation_state(
