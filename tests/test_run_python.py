@@ -7,8 +7,11 @@ memory operations, filter results, and return shaped data — reducing
 token consumption compared to separate tool calls.
 """
 
+import io
 import json
 import asyncio
+import logging
+import sys
 import threading
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1602,6 +1605,143 @@ class TestRunPythonTimeout:
         assert result["is_error"] is True
         assert "timed out" in result["content"][0]["text"].lower()
         assert await _wait_for_idle() == 0
+
+
+class TestDeadlineTracerSafety:
+    """2026-09-26 prod wedge: the event loop blocked forever in `Thread.start`
+    on `threading._active_limbo_lock`, held by an executor thread that an
+    expired deadline tracer had killed inside `threading._delete`.
+
+    Two defects: overlapping runs left `sys.settrace` bound to one run's
+    guard, so later runs (and their executor threads after `_run` returned)
+    carried an expired tracer; and the tracer raised in whatever frame its
+    countdown landed on, including stdlib code between a lock's acquire and
+    its release.
+    """
+
+    def test_deadline_is_never_raised_inside_stdlib_frames(self):
+        from nous.api import tools as T
+
+        # Already expired: the very first deadline check is due.
+        tracer = T._deadline_tracer(time.monotonic() - 1.0, 0.0)
+        # The first script call spends well over one check interval of trace
+        # events inside threading.py, so the first check lands in stdlib.
+        code = compile(
+            "import threading\n"
+            "t = threading.Thread(target=int)\n"
+            "t.start()\n"
+            "t.join()\n",
+            "<nous_script>",
+            "exec",
+        )
+        raised_in: list[str] = []
+
+        def worker() -> None:
+            sys.settrace(tracer)
+            try:
+                exec(code, {})
+            except T.ScriptDeadlineExceeded as exc:
+                sys.settrace(None)
+                # Innermost entry is the tracer itself; the frame it
+                # interrupted is the one just outside it.
+                frames = []
+                tb = exc.__traceback__
+                while tb is not None:
+                    frames.append(tb.tb_frame.f_code)
+                    tb = tb.tb_next
+                if frames[-1].co_name == "_tracer":
+                    frames.pop()
+                raised_in.append(frames[-1].co_filename)
+            finally:
+                sys.settrace(None)
+
+        th = threading.Thread(target=worker)
+        th.start()
+        th.join(10)
+        assert raised_in == ["<nous_script>"]
+        assert threading._active_limbo_lock.acquire(timeout=2)
+        threading._active_limbo_lock.release()
+
+    @pytest.mark.asyncio
+    async def test_overlapping_runs_leave_no_stale_trace_hook(self):
+        from nous.api.tools import create_programmatic_tools
+
+        assert await _wait_for_idle() == 0, "test started with a run in flight"
+        short = create_programmatic_tools(
+            AsyncMock(), AsyncMock(),
+            Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=2),
+        )
+        long = create_programmatic_tools(
+            AsyncMock(), AsyncMock(),
+            Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=10),
+        )
+        # A starts first and finishes first; B starts while A runs and outlives
+        # it — the interleaving that left A's guard installed process-wide.
+        a = asyncio.create_task(
+            short["run_python"](code="import time\ntime.sleep(0.3)\nresult = 'A'")
+        )
+        await asyncio.sleep(0.1)
+        b = asyncio.create_task(
+            long["run_python"](code="import time\ntime.sleep(0.6)\nresult = 'B'")
+        )
+        assert (await a)["content"][0]["text"] == "A"
+        assert (await b)["content"][0]["text"] == "B"
+
+        # A thread that is not running a script gets exactly the hook it asks for.
+        seen: list[object] = []
+
+        def probe() -> None:
+            sys.settrace(None)
+            seen.append(sys.gettrace())
+
+        th = threading.Thread(target=probe)
+        th.start()
+        th.join(5)
+        assert seen == [None]
+
+        # Past A's deadline, an unrelated trivial script still runs.
+        await asyncio.sleep(2.2)
+        out = await long["run_python"](code="result = 'ok'")
+        assert out["content"][0]["text"] == "ok"
+        assert await _wait_for_idle() == 0
+
+    @pytest.mark.asyncio
+    async def test_timeout_in_stdlib_heavy_loop_leaks_no_lock_or_slot(self):
+        from nous.api.tools import create_programmatic_tools
+
+        assert await _wait_for_idle() == 0, "test started with a run in flight"
+        probe = logging.getLogger("nous.test.deadline_probe")
+        handler = logging.StreamHandler(io.StringIO())
+        probe.addHandler(handler)
+        probe.propagate = False
+        tools = create_programmatic_tools(
+            AsyncMock(), AsyncMock(),
+            Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=1),
+        )
+        code = (
+            "import logging, threading\n"
+            "log = logging.getLogger('nous.test.deadline_probe')\n"
+            "while True:\n"
+            "    log.warning('tick')\n"
+            "    t = threading.Thread(target=int)\n"
+            "    t.start()\n"
+            "    t.join()\n"
+        )
+        try:
+            started = time.monotonic()
+            result = await tools["run_python"](code=code)
+            elapsed = time.monotonic() - started
+        finally:
+            probe.removeHandler(handler)
+
+        assert result["is_error"] is True
+        assert "timed out" in result["content"][0]["text"].lower()
+        # The trace hook, not the outer wait_for, ended the run.
+        assert elapsed < 1 + 2.0, f"run outlived its deadline ({elapsed:.1f}s)"
+        assert await _wait_for_idle() == 0
+        for lock in (threading._active_limbo_lock, handler.lock, logging._lock):
+            assert lock.acquire(timeout=2), f"{lock!r} left held"
+            lock.release()
 
 
 # ---------------------------------------------------------------------------

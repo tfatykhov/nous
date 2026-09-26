@@ -18,8 +18,10 @@ import inspect
 import json
 import logging
 import math
+import os
 import re
 import sys
+import sysconfig
 import threading
 import time
 from collections.abc import Callable
@@ -3896,6 +3898,79 @@ class ScriptDeadlineExceeded(BaseException):
     """
 
 
+# The real hooks, bound ONCE at import, before any script exists. A run must
+# never look up "the original" through `sys.settrace` itself: that attribute is
+# process-global, so a run starting while another was in flight captured the
+# OTHER run's guard as its original and, on exit, restored it for the whole
+# process. Every later run then installed that run's long-expired tracer
+# (2026-09-26 prod wedge).
+_REAL_SETTRACE = sys.settrace
+_REAL_SETPROFILE = sys.setprofile
+
+# `.tracer`: the deadline tracer of the script running on THIS thread, or None.
+_run_state = threading.local()
+
+
+def _guarded_settrace(func):  # noqa: ANN001, ANN202 - mirrors sys.settrace
+    """`sys.settrace` once run_python has been used.
+
+    On a thread running a script it reinstalls that script's deadline tracer,
+    so a script cannot remove or replace it; on every other thread it is the
+    real function.
+    """
+    tracer = getattr(_run_state, "tracer", None)
+    _REAL_SETTRACE(func if tracer is None else tracer)
+
+
+def _guarded_setprofile(func):  # noqa: ANN001, ANN202 - mirrors sys.setprofile
+    """`sys.setprofile` counterpart: ignored on a script thread, real elsewhere."""
+    if getattr(_run_state, "tracer", None) is None:
+        _REAL_SETPROFILE(func)
+
+
+def _protected_prefixes() -> tuple[str, ...]:
+    """Filename prefixes of code the deadline must never interrupt."""
+    paths = sysconfig.get_paths()
+    roots = {paths[k] for k in ("stdlib", "platstdlib", "purelib", "platlib") if paths.get(k)}
+    roots.add(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # nous/
+    return ("<frozen",) + tuple(os.path.normcase(os.path.join(r, "")) for r in roots)
+
+
+# Stdlib, installed packages, frozen importlib and nous itself. Raising from a
+# trace hook is an asynchronous exception: inside such code it can land between
+# a lock's acquire and its release — the implicit `__exit__` of a `with` block
+# gets its own line event — and the dying thread keeps the lock forever. That
+# is how an expired tracer killed a thread inside `threading._delete` holding
+# `_active_limbo_lock`, after which every `Thread.start` blocked. Script-owned
+# code is safe to interrupt because stdlib is already exception-safe wherever
+# it calls back into user code, which can raise anyway.
+_PROTECTED_PREFIXES = _protected_prefixes()
+
+
+def _deadline_tracer(deadline: float, timeout: float):  # noqa: ANN202 - CPython trace fn
+    """Build the per-run trace hook that raises once `deadline` has passed.
+
+    It raises only in frames the script owns; past the deadline inside
+    protected code it re-checks on every event, so it fires as soon as control
+    is back in the script. A script stuck forever inside library code is not
+    interruptible — the same documented limit as a blocking C call.
+    """
+    countdown = [_DEADLINE_CHECK_EVERY]
+
+    def _tracer(frame, event, arg):  # noqa: ANN001, ANN202 - CPython trace signature
+        countdown[0] -= 1
+        if countdown[0] <= 0:
+            countdown[0] = _DEADLINE_CHECK_EVERY
+            if time.monotonic() >= deadline:
+                if os.path.normcase(frame.f_code.co_filename).startswith(_PROTECTED_PREFIXES):
+                    countdown[0] = 1
+                else:
+                    raise ScriptDeadlineExceeded(f"execution timed out ({timeout}s)")
+        return _tracer
+
+    return _tracer
+
+
 def run_python_active_runs() -> int:
     """Number of run_python executions currently occupying a worker thread."""
     with _active_runs_lock:
@@ -4159,19 +4234,17 @@ def create_programmatic_tools(
                 """Commit the PARTIAL trace: a crashed retrieval must not look
                 like one that never happened. Mirrors the tool's error path.
 
-                Runs with the deadline tracer OFF. The tracer fires per line and
-                re-arms after each raise, so on a genuine timeout it would raise
-                AGAIN partway through `undeliver_all`/`finalize` — which walk
-                every captured candidate — and the timeout row would be lost
-                despite this handler existing to save it.
+                Runs with the deadline tracer OFF. `undeliver_all`/`finalize`
+                walk every captured candidate; the tracer no longer raises in
+                nous frames, but a timed-out run would still pay a trace event
+                per line of that walk for nothing.
 
-                Uses `_original_settrace`, NOT `sys.settrace`: `_run` rebinds
-                `sys.settrace` to `_settrace_shim`, which discards its argument
-                and reinstalls `_tracer`. Calling `sys.settrace(None)` here
-                therefore RE-ARMS the deadline instead of clearing it, which is
-                what the first version of this fix did — inert, and looking
-                exactly like a fix. Per-thread, and `_run`'s finally restores
-                the real hook regardless, so this stays local.
+                Uses `_REAL_SETTRACE`, NOT `sys.settrace`: on a script thread
+                the guard discards its argument and reinstalls `_tracer`, so
+                `sys.settrace(None)` here RE-ARMS the deadline instead of
+                clearing it, which is what the first version of this fix did —
+                inert, and looking exactly like a fix. Per-thread, and `_run`'s
+                finally clears the hook regardless, so this stays local.
                 """
                 if _tr is None:
                     return
@@ -4185,7 +4258,7 @@ def create_programmatic_tools(
                 # Only ScriptDeadlineExceeded means the script cannot continue.
                 _is_deadline = isinstance(exc, ScriptDeadlineExceeded)
                 try:
-                    _original_settrace(None)
+                    _REAL_SETTRACE(None)
                 except Exception:  # pragma: no cover - defensive
                     pass
                 try:
@@ -4196,7 +4269,7 @@ def create_programmatic_tools(
                 finally:
                     if not _is_deadline:
                         try:
-                            _original_settrace(_tracer)
+                            _REAL_SETTRACE(_tracer)
                         except Exception:  # pragma: no cover - defensive
                             pass
 
@@ -4506,37 +4579,21 @@ def create_programmatic_tools(
         # spin loop (`while True: pass`) would otherwise hold a thread (and the
         # GIL) inside the API process forever. A trace hook fires on every line
         # of the executing script and raises once the deadline passes.
-        countdown = [_DEADLINE_CHECK_EVERY]
-
-        def _tracer(frame, event, arg):  # noqa: ANN001, ANN202 - CPython trace signature
-            countdown[0] -= 1
-            if countdown[0] <= 0:
-                countdown[0] = _DEADLINE_CHECK_EVERY
-                if time.monotonic() >= deadline:
-                    raise ScriptDeadlineExceeded(f"execution timed out ({timeout}s)")
-            return _tracer
-
-        # P1 Fix 1: Block sys.settrace bypass (slot leak). Monkey-patch
-        # sys.settrace and sys.setprofile to reinstall our tracer and
-        # then silently ignore the script's call.
-        _original_settrace = sys.settrace
-        _original_setprofile = sys.setprofile
-
-        def _settrace_shim(func):
-            # Reinstall our deadline tracer after the script's call
-            _original_settrace(_tracer)
-
-        def _setprofile_shim(func):
-            # No-op for setprofile, but keep tracer alive
-            pass
+        _tracer = _deadline_tracer(deadline, timeout)
 
         def _run() -> None:
             try:
-                # Install our tracer
-                sys.settrace(_tracer)
-                # Replace sys.settrace/setprofile with shims in this thread
-                sys.settrace = _settrace_shim
-                sys.setprofile = _setprofile_shim
+                # P1 Fix 1: a script must not remove its own deadline via
+                # sys.settrace/setprofile (slot leak). The guards are
+                # process-wide and thread-aware, so this is a write of the SAME
+                # constants on every run — nothing is captured, nothing is
+                # restored per run, and a concurrent run cannot inherit this
+                # run's tracer. Re-asserted here in case a script reassigned
+                # the attributes.
+                sys.settrace = _guarded_settrace
+                sys.setprofile = _guarded_setprofile
+                _run_state.tracer = _tracer
+                _REAL_SETTRACE(_tracer)
                 exec(compile(code, "<nous_script>", "exec"), namespace)
                 if _structured:
                     # Serialize INSIDE the worker, under the deadline tracer
@@ -4578,10 +4635,11 @@ def create_programmatic_tools(
                         # Decode HERE, in the worker, under the deadline tracer.
                         namespace["__nous_obj__"] = _dec_cls().decode(_encoded)
             finally:
-                # Restore original functions
-                sys.settrace = _original_settrace
-                sys.setprofile = _original_setprofile
-                sys.settrace(None)
+                # Clear the hook FIRST, with the real function: this executor
+                # thread goes on to run stdlib teardown after `_run` returns,
+                # and must not carry a tracer into it.
+                _REAL_SETTRACE(None)
+                _run_state.tracer = None
                 _release_run_slot()
 
         max_concurrent = settings.programmatic_tools_max_concurrent
