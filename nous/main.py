@@ -1365,8 +1365,12 @@ def build_app(settings: Settings) -> Starlette:
         )
         # Armed only once startup is done: a slow startup is not a stall.
         watchdog = start_event_loop_watchdog(settings)
-        yield
-        await stop_event_loop_watchdog(watchdog)
+        try:
+            yield
+        finally:
+            # Also on an exception thrown in at `yield`: the timer is
+            # process-global and must not outlive the app it guards.
+            await stop_event_loop_watchdog(watchdog)
 
         # Shutdown (reverse order)
         # MCP session manager cleanup (F25)

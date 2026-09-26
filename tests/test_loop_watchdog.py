@@ -121,6 +121,14 @@ async def test_lifespan_arms_after_startup_and_disarms_before_shutdown(monkeypat
         order.append("serving")
     assert order == ["startup", "arm", "serving", ("disarm", "wd"), "shutdown"]
 
+    # Codex P2 on #655: an exception thrown in at `yield` must still disarm,
+    # or the process-global timer outlives the app it was guarding.
+    order.clear()
+    with pytest.raises(RuntimeError):
+        async with app.router.lifespan_context(app):
+            raise RuntimeError("serving failed")
+    assert ("disarm", "wd") in order
+
 
 def test_defaults_and_bounds():
     s = Settings(_env_file=None)
