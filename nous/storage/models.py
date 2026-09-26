@@ -1475,3 +1475,44 @@ class ExecutionLedgerEntry(Base):
     dispatched_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class ProcessRunLog(Base):
+    """Migration 077: per-phase runtime heartbeat for fault detection.
+
+    One row per periodic memory-process execution (e.g. 'sleep/stale_scan').
+    Written by ``ProcessRecorder``; consumed by ``ProcessFaultCheck``.
+    Fail-open: recorder errors never block the owning process.
+    """
+
+    __tablename__ = "process_run_log"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('started', 'finished', 'error', 'skipped')",
+            name="ck_process_run_log_status",
+        ),
+        Index(
+            "process_run_log_agent_process_idx",
+            "agent_id", "process_name", "started_at",
+        ),
+        {"schema": "nous_system"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    process_name: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="started"
+    )
+    items_examined: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    items_changed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_: Mapped[dict | None] = mapped_column(
+        "metadata", JSONB, nullable=True
+    )
