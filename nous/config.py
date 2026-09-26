@@ -927,6 +927,21 @@ class Settings(BaseSettings):
     # other non-streaming phase of stream_chat. Comment lines (`:`) are
     # ignored by spec-compliant SSE clients but reset their read timer.
 
+    # Event-loop watchdog (2026-09-26 wedge: the loop sat blocked on a leaked
+    # lock for 2.5 h while the container reported `unhealthy` and nothing acted
+    # on it). If the loop stops turning for this long, every thread's stack is
+    # written to stderr and the process exits, so the restart policy recovers.
+    event_loop_watchdog_enabled: bool = True
+    event_loop_watchdog_timeout_seconds: int = Field(
+        default=120,
+        ge=30,
+        description=(
+            "Seconds the event loop may go without turning before the watchdog "
+            "dumps all thread stacks and exits. Floor 30 s so a legitimately "
+            "slow tick cannot kill a healthy process."
+        ),
+    )
+
     # SmartCompress (F020 Phase 1)
     smart_compress_enabled: bool = Field(
         default=True, description="Enable ingestion-time tool output compression"
