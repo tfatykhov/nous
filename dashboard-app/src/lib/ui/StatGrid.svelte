@@ -1,5 +1,11 @@
 <script lang="ts">
-  type Stat = { label: string; value: string | number };
+  /** tone colours the value (never alone: the label says what it is). */
+  type Stat = {
+    label: string;
+    value: string | number;
+    note?: string;
+    tone?: 'waiting' | 'unknown' | 'error' | 'warn' | 'ok';
+  };
 
   let { stats }: { stats: Stat[] } = $props();
 </script>
@@ -7,8 +13,11 @@
 <div class="stat-grid">
   {#each stats as stat}
     <div class="stat-card">
-      <div class="stat-value">{stat.value}</div>
+      <div class="stat-value" class:tone-waiting={stat.tone === 'waiting'} class:tone-unknown={stat.tone === 'unknown'}
+        class:tone-error={stat.tone === 'error'} class:tone-warn={stat.tone === 'warn'} class:tone-ok={stat.tone === 'ok'}
+      >{stat.value}</div>
       <div class="stat-label">{stat.label}</div>
+      {#if stat.note}<div class="stat-note">{stat.note}</div>{/if}
     </div>
   {/each}
 </div>
@@ -44,6 +53,17 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
+
+  .stat-note {
+    font-size: 0.75rem;
+    color: var(--muted);
+  }
+
+  .tone-waiting { color: var(--waiting); }
+  .tone-unknown { color: var(--unknown); }
+  .tone-error { color: var(--red); }
+  .tone-warn { color: #f59e0b; }
+  .tone-ok { color: #10b981; }
 
   @media (max-width: 640px) {
     .stat-grid {

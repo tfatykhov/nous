@@ -5,10 +5,16 @@
     options,
     value = $bindable(''),
     multiple = false,
+    label = 'Filter options',
+    required = false,
   }: {
     options: Option[];
     value?: string;
     multiple?: boolean;
+    /** The group's accessible name — each group on a page needs its own. */
+    label?: string;
+    /** A value is always selected: clicking the active option keeps it. */
+    required?: boolean;
   } = $props();
 
   function handleClick(opt: Option) {
@@ -22,6 +28,8 @@
         vals.push(opt.value);
       }
       value = vals.join(',');
+    } else if (required) {
+      value = opt.value;
     } else {
       value = value === opt.value ? '' : opt.value;
     }
@@ -35,7 +43,7 @@
   }
 </script>
 
-<div class="filter-bar" role="group" aria-label="Filter options">
+<div class="filter-bar" role="group" aria-label={label}>
   {#each options as opt}
     <button
       type="button"
@@ -82,11 +90,19 @@
   .filter-btn.active {
     background: var(--accent);
     border-color: var(--accent);
-    color: #fff;
+    /* #0a0a0f on the accent: 4.95:1 (white was 3.99:1) */
+    color: var(--bg);
+    font-weight: 600;
   }
 
   .filter-btn:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-text);
     outline-offset: 2px;
+  }
+
+  @media (max-width: 768px) {
+    .filter-btn {
+      min-height: 44px;
+    }
   }
 </style>

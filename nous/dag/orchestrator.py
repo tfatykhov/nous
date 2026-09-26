@@ -70,6 +70,7 @@ from nous.dag.approval import (
     build_card_summary,
     button_label,
     card_shown_chars,
+    context_results,
     declined_retry_refusal,
     history_entry,
     label_of,
@@ -3021,7 +3022,7 @@ class DAGOrchestrator:
             {
                 "title": title,
                 "summary": build_card_summary(
-                    node.instructions or "", self._context_results(node, dag)
+                    node.instructions or "", context_results(node, dag.nodes, dag.edges)
                 ),
                 "risk": risk_line(deadline, default_label),
                 "options": [
@@ -3045,33 +3046,6 @@ class DAGOrchestrator:
         )
         built.validate()
         return built, notify_text(title, node.instructions or "", deadline, default_label)
-
-    def _context_results(
-        self, node: DAGNode, dag: ExecutionDAG, _seen: set[str] | None = None
-    ) -> list[tuple[str, str]]:
-        """(name, result) of every context_flow input `node` sees — the card's
-        summary and, through an approval, the acting node's approved input.
-
-        Walks THROUGH approval predecessors: an approval's own result is only
-        the answer text, so a second approval chained after a first would
-        otherwise ask its question without the draft (§3.5). An approval's
-        inputs come before its answer; each node appears once (diamonds).
-        """
-        seen = _seen if _seen is not None else set()
-        by_id = {str(n.id): n for n in dag.nodes}
-        results: list[tuple[str, str]] = []
-        for edge in dag.edges:
-            if edge.edge_type != "context_flow" or str(edge.to_node_id) != str(node.id):
-                continue
-            pred = by_id.get(str(edge.from_node_id))
-            if pred is None or str(pred.id) in seen:
-                continue
-            seen.add(str(pred.id))
-            if pred.node_type == "approval":
-                results.extend(self._context_results(pred, dag, seen))
-            if pred.result:
-                results.append((pred.name, pred.result))
-        return results
 
     async def _fail_parked(self, node: DAGNode, error: str) -> None:
         if await self._store.transition_node(
@@ -3318,7 +3292,7 @@ class DAGOrchestrator:
                 # person saw) through, or the acting node writes its own text.
                 # Only what the card showed is "approved": a draft cut on the
                 # card says how much of it the person saw.
-                inputs = self._context_results(pred, dag)
+                inputs = context_results(pred, dag.nodes, dag.edges)
                 shown = card_shown_chars(pred.instructions or "", inputs)
                 for (inner_name, inner_result), n in zip(inputs, shown, strict=True):
                     inner = node_by_name.get(inner_name)

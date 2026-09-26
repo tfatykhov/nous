@@ -486,6 +486,62 @@ export interface DagActiveNode {
   tokens_used: number;
   started_at: string | null;
   completed_at: string | null;
+  /** Harness Phase 3: present only on approval nodes. */
+  approval?: DagApproval;
+}
+
+/** One option on an approval card. */
+export interface DagApprovalOption {
+  id: string;
+  label: string;
+  outcome: 'proceed' | 'stop';
+}
+
+/** A previous answer to the same approval (retried questions). */
+export interface DagApprovalAttempt {
+  answer: string;
+  label: string;
+  outcome: string;
+  answer_source: 'companion' | 'deadline';
+  /** A person's identity, or null (never the 'unattributed' placeholder). */
+  answered_by: string | null;
+  answered_at: string | null;
+}
+
+/** Everything an approval step shows (/dashboard/dag, spec §3.1). */
+export interface DagApproval {
+  question: string;
+  options: DagApprovalOption[];
+  default_option: string | null;
+  default_label: string;
+  asked_at: string | null;
+  deadline: string | null;
+  answer: string | null;
+  answer_label: string | null;
+  answer_source: 'companion' | 'deadline' | null;
+  answered_by: string | null;
+  answered_at: string | null;
+  card_url: string | null;
+  /** Why the card was not delivered (surface not linked). */
+  card_error: string | null;
+  /** Exactly the text the card shows: question + inputs under review. */
+  card_summary: string;
+  reviewing: string[];
+  attempts: DagApprovalAttempt[];
+}
+
+/** An approval step waiting on a person (/dashboard/dag waiting_on_you). */
+export interface DagWaiting {
+  dag_id: string;
+  dag_name: string;
+  node_id: string;
+  node_name: string;
+  question: string;
+  deadline: string | null;
+  default_label: string;
+  card_url: string | null;
+  card_error: string | null;
+  reviewing: string[];
 }
 
 /** An edge inside an active DAG (nested under DagActiveDag.edges). */
@@ -509,6 +565,10 @@ export interface DagActiveDag {
   tokens_consumed: number;
   nodes: DagActiveNode[];
   edges: DagActiveEdge[];
+  /** Approval steps in this DAG waiting on a person. */
+  waiting: number;
+  /** The orchestrator's per-process hint (last tick), or null. */
+  held_reason: string | null;
 }
 
 /** One recently completed/failed/cancelled DAG returned by /dashboard/dag. */
@@ -525,6 +585,10 @@ export interface DagRecentDag {
   postmortem: string | null;
   node_count: number;
   completed_count: number;
+  /** A failed DAG that stopped at an approval: who stopped it ("mixed" when
+   *  a decline and a deadline default both stopped it). */
+  stopped_by: 'companion' | 'deadline' | 'mixed' | null;
+  stops: { node_name: string; answer_source: 'companion' | 'deadline'; answer_label: string }[];
 }
 
 export interface DagStats {
@@ -532,12 +596,148 @@ export interface DagStats {
   nodes_completed_24h: number;
   success_rate: number;
   avg_completion_seconds: number;
+  waiting_count: number;
 }
 
 export interface DagDashboardData {
   active_dags: DagActiveDag[];
   recent_dags: DagRecentDag[];
+  waiting_on_you: DagWaiting[];
   stats: DagStats;
+}
+
+// ── /dashboard/execution (harness spec §3.2) ─────────────────────────────
+
+export interface ExecutionModes {
+  persist: boolean;
+  retention_days: number;
+  offered_set: string;
+  context_policy: string;
+  claim_verification: string;
+  action_gating: string;
+  events_persisted: boolean;
+}
+
+export interface ExecutionStats {
+  calls: number;
+  sends: number;
+  external: number;
+  repeat_sends_refused: number;
+  blocked: number;
+  unknown: number;
+  unknown_keyed: number;
+  errors: number;
+  pending: number;
+}
+
+export interface ExecutionHolder {
+  id: string;
+  status: string;
+  created_at: string | null;
+  external_ref: string | null;
+  session_id: string | null;
+  turn: number | null;
+}
+
+export interface ExecutionRow {
+  id: string;
+  created_at: string | null;
+  completed_at: string | null;
+  dispatched_at: string | null;
+  tool_name: string;
+  context_kind: string;
+  side_effect_type: string;
+  status: string;
+  refusal_code: string | null;
+  result_summary: string | null;
+  key_args: Record<string, unknown>;
+  idempotency_key: string | null;
+  external_ref: string | null;
+  session_id: string | null;
+  parent_session_id: string | null;
+  subtask_id: string | null;
+  dag_id: string | null;
+  dag_name: string | null;
+  dag_node_id: string | null;
+  node_name: string | null;
+  turn: number | null;
+  tombstone: boolean;
+  held_by: ExecutionHolder | null;
+}
+
+export interface ExecutionData {
+  modes: ExecutionModes;
+  stats: ExecutionStats;
+  attention: ExecutionRow[];
+  /** Every send in doubt — `attention` is only the newest page of them. */
+  attention_total: number;
+  rows: ExecutionRow[];
+  next_before: string | null;
+}
+
+// ── /dashboard/harness (harness spec §3.3) ───────────────────────────────
+
+export interface Ranked { key: string; count: number }
+
+export interface HarnessRule {
+  mode: string | null;
+  first_event_at: string | null;
+  by_mode: Record<string, number>;
+  by_context: Ranked[];
+}
+
+export interface HarnessData {
+  window: string;
+  events_persisted: boolean;
+  rules: {
+    offered_set: HarnessRule & { by_tool: Ranked[] };
+    context_policy: HarnessRule & { by_violation: Ranked[] };
+    claims: {
+      mode: string | null;
+      first_event_at: string | null;
+      evidence_since: string | null;
+      by_evidence: { exact: number; plausible: number; none: number };
+      by_mode: Record<string, number>;
+      /** No-evidence claims per the mode each was recorded under. */
+      none_by_mode: Record<string, number>;
+      turns_with_claims: number;
+      legacy: { events: number; violations: number };
+    };
+  };
+  /** null = not measured that day (before the series began, or persistence off). */
+  daily: { date: string; offered_set: number | null; context_policy: number | null; claims_none: number | null }[];
+  patterns: {
+    rule: 'offered_set' | 'context_policy' | 'claims';
+    mode: string;
+    context: string | null;
+    tool: string | null;
+    violation: string;
+    count: number;
+    last_seen: string | null;
+    latest_session: string | null;
+    snippet: string | null;
+  }[];
+}
+
+// ── /dashboard/attention (harness spec §3.4) ─────────────────────────────
+
+export interface AttentionData {
+  questions_waiting: number;
+  next: { dag_name: string; node_name: string; deadline: string | null; default_label: string } | null;
+  sends_in_doubt: number;
+  latest_in_doubt: {
+    tool_name: string;
+    recipients: string[];
+    created_at: string | null;
+    dag_name: string | null;
+    tombstone: boolean;
+  } | null;
+  ledger_persisted: boolean;
+  harness: {
+    events_persisted: boolean;
+    offered_set: { mode: string | null; warn_7d: number; refused_7d: number };
+    context_policy: { mode: string | null; warn_7d: number; refused_7d: number };
+  };
 }
 
 // ── Memory Browser endpoints (/facts /episodes /decisions /procedures /censors /chunks) ──

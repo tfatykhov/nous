@@ -64,6 +64,35 @@ def label_of(spec: dict[str, Any] | None, option_id: str | None) -> str:
     return option["label"] if option else (option_id or "?")
 
 
+def context_results(
+    node: Any, nodes: list[Any], edges: list[Any], _seen: set[str] | None = None
+) -> list[tuple[str, str]]:
+    """(name, result) of every context_flow input `node` sees — the card's
+    summary and, through an approval, the acting node's approved input.
+
+    Walks THROUGH approval predecessors: an approval's own result is only the
+    answer text, so a second approval chained after a first would otherwise
+    ask its question without the draft (§3.5). An approval's inputs come
+    before its answer; each node appears once (diamonds). Pure — the
+    orchestrator and the dashboard share this one walk.
+    """
+    seen = _seen if _seen is not None else set()
+    by_id = {str(n.id): n for n in nodes}
+    results: list[tuple[str, str]] = []
+    for edge in edges:
+        if edge.edge_type != "context_flow" or str(edge.to_node_id) != str(node.id):
+            continue
+        pred = by_id.get(str(edge.from_node_id))
+        if pred is None or str(pred.id) in seen:
+            continue
+        seen.add(str(pred.id))
+        if pred.node_type == "approval":
+            results.extend(context_results(pred, nodes, edges, seen))
+        if pred.result:
+            results.append((pred.name, pred.result))
+    return results
+
+
 def card_shown_chars(
     question: str, results: list[tuple[str, str]], max_chars: int = SUMMARY_MAX_CHARS
 ) -> list[int]:

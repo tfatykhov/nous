@@ -2,7 +2,10 @@
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
-  import type { DagDashboardData, DagActiveDag, DagRecentDag } from '../lib/types/api';
+  import type { DagDashboardData, DagActiveDag, DagRecentDag, DagActiveNode, DagWaiting } from '../lib/types/api';
+  import { statusColor, badgeStyle, WAITING } from '../lib/status';
+  import { fmtUtc, relUntil, isSoon } from '../lib/harness';
+  import { pushCounts } from '../lib/stores/attention';
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import DataTable from '../lib/ui/DataTable.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
@@ -19,18 +22,33 @@
 
   // ── Selected active DAG for graph view ───────────────────────────────────
   let selectedDagId = $state<string | null>(null);
-  let selectedNode = $state<DagNode | null>(null);
+  // The sheet keeps only the node's id and reads the node from each poll: a
+  // copy would go on saying awaiting_input after the step is answered.
+  let selectedNodeId = $state<string | null>(null);
+  let selectedNode = $derived.by(() => {
+    const n = selectedNodeId ? fullNode(selectedNodeId) : null;
+    return n ? asDagNode(n) : null;
+  });
   let sheetOpen = $state(false);
 
   function selectDag(dag: DagActiveDag) {
     selectedDagId = selectedDagId === dag.id ? null : dag.id;
-    selectedNode = null;
+    selectedNodeId = null;
   }
 
   function onNodeClick(node: DagNode) {
-    selectedNode = node;
+    selectedNodeId = node.id;
     sheetOpen = true;
   }
+
+  // The DAG finished (or the node is gone): close the sheet rather than show
+  // a node the dashboard no longer has.
+  $effect(() => {
+    if (selectedNodeId && $store.data && !fullNode(selectedNodeId)) {
+      selectedNodeId = null;
+      sheetOpen = false;
+    }
+  });
 
   // Close graph when data refreshes and the selected DAG disappears
   $effect(() => {
@@ -39,7 +57,6 @@
     const stillActive = d.active_dags.some((dag) => dag.id === selectedDagId);
     if (!stillActive) {
       selectedDagId = null;
-      selectedNode = null;
     }
   });
 
@@ -81,21 +98,60 @@
     return fmtDuration(secs);
   }
 
-  // ── Status badge ──────────────────────────────────────────────────────────
-  const STATUS_COLOR: Record<string, string> = {
-    pending: '#6b6b8a',
-    ready: '#22d3ee',
-    running: '#fbbf24',
-    awaiting_check: '#f59e0b',
-    completed: '#4ade80',
-    failed: '#f87171',
-    blocked: '#991b1b',
-    cancelled: '#4b4b5a',
-    partial: '#fb923c',
-  };
+  // ── Status colours: ONE map shared with the graph (lib/status.ts) ───────────
 
-  function statusColor(s: string): string {
-    return STATUS_COLOR[s] ?? '#6b6b8a';
+  // Keep the nav badge in step with this tab (harness dashboard §3.4).
+  $effect(() => {
+    const d = $store.data;
+    if (d) pushCounts({ questions: d.stats.waiting_count ?? 0 });
+  });
+
+  // ── Approval steps (harness dashboard §3.1 / §4) ─────────────────────────
+  function fullNode(nodeId: string): DagActiveNode | null {
+    for (const dag of $store.data?.active_dags ?? []) {
+      const n = dag.nodes.find((x) => x.id === nodeId);
+      if (n) return n;
+    }
+    return null;
+  }
+
+  function openWaiting(w: DagWaiting) {
+    if (!fullNode(w.node_id)) return;
+    selectedNodeId = w.node_id;
+    sheetOpen = true;
+  }
+
+  function answerLine(a: NonNullable<DagActiveNode['approval']>, status: string): string {
+    if (a.answer_source === 'companion') {
+      const opt = a.options.find((o) => o.id === a.answer);
+      const verdict = opt?.outcome === 'proceed' ? 'approved' : 'declined';
+      return `${verdict} — '${a.answer_label}' in the companion${a.answered_by ? ` by ${a.answered_by}` : ''} at ${fmtUtc(a.answered_at)}`;
+    }
+    if (a.answer_source === 'deadline') {
+      return `no answer by ${fmtUtc(a.deadline)}; default '${a.answer_label}' applied`;
+    }
+    // Every approval node carries its view, asked or not: say where it is.
+    if (status === 'awaiting_input') return 'not answered yet';
+    if (status === 'pending' || status === 'ready') return 'not asked yet';
+    return `not answered (${status})`;
+  }
+
+  function attemptLine(t: NonNullable<DagActiveNode['approval']>['attempts'][number]): string {
+    if (t.answer_source === 'deadline') return `no answer — default '${t.label}' applied at ${fmtUtc(t.answered_at)}`;
+    const verdict = t.outcome === 'proceed' ? 'approved' : 'declined';
+    return `${verdict} — '${t.label}' in the companion${t.answered_by ? ` by ${t.answered_by}` : ''} at ${fmtUtc(t.answered_at)}`;
+  }
+
+  /** Why an active DAG is not moving — the "Now" column. */
+  function nowOf(dag: DagActiveDag): { text: string; kind: 'waiting' | 'held' | 'plain' } {
+    if (dag.waiting > 0) {
+      const q = dag.nodes.find((n) => n.status === 'awaiting_input');
+      return { text: `Question · ${q?.name ?? ''}`.trim(), kind: 'waiting' };
+    }
+    if (dag.held_reason) return { text: dag.held_reason, kind: 'held' };
+    const running = dag.nodes.filter((n) => n.status === 'running').map((n) => n.name);
+    if (running.length) return { text: `Running · ${running.join(', ')}`, kind: 'plain' };
+    return { text: '—', kind: 'plain' };
   }
 
   // ── Stat grid ─────────────────────────────────────────────────────────────
@@ -105,6 +161,7 @@
     const successPct = s.success_rate != null ? Math.round(s.success_rate * 100) + '%' : '--';
     return [
       { label: 'Active DAGs', value: String(s.active_count) },
+      { label: 'Waiting on you', value: String(s.waiting_count ?? 0), tone: (s.waiting_count ? 'waiting' : undefined) as 'waiting' | undefined },
       { label: 'Nodes (24 h)', value: String(s.nodes_completed_24h) },
       { label: 'Success Rate', value: successPct },
       { label: 'Avg Duration', value: fmtDuration(s.avg_completion_seconds) },
@@ -120,7 +177,9 @@
       return {
         _dag: dag,
         name: dag.name,
-        status: dag.status,
+        status: dag.waiting > 0 ? 'waiting on you' : dag.status,
+        statusCol: dag.waiting > 0 ? WAITING : statusColor(dag.status),
+        now: nowOf(dag),
         source: dag.source,
         progress: `${completed}/${total}`,
         pct,
@@ -158,6 +217,7 @@
   const recentCols = [
     { key: 'name', label: 'Name' },
     { key: 'statusBadge', label: 'Status' },
+    { key: 'summary', label: 'Summary' },
     { key: 'nodes', label: 'Nodes' },
     { key: 'tokens', label: 'Tokens' },
     { key: 'completed', label: 'Completed' },
@@ -167,7 +227,8 @@
     ($store.data?.recent_dags ?? []).map((dag) => ({
       _dag: dag,
       name: dag.name,
-      statusBadge: dag.status,
+      statusBadge: dag.stopped_by ? 'stopped at approval' : dag.status,
+      summary: dag.result_summary ?? '',
       nodes: `${dag.completed_count}/${dag.node_count}`,
       tokens: fmtTokens(dag.tokens_consumed),
       completed: fmtAgo(dag.completed_at),
@@ -175,8 +236,8 @@
   );
 
   // ── Nodes cast to DagNode shape for the viz ───────────────────────────────
-  function toVizNodes(dag: DagActiveDag): DagNode[] {
-    return dag.nodes.map((n) => ({
+  function asDagNode(n: DagActiveNode): DagNode {
+    return {
       id: n.id,
       name: n.name,
       status: n.status,
@@ -188,7 +249,11 @@
       description: n.description,
       result: n.result,
       error: n.error,
-    }));
+    };
+  }
+
+  function toVizNodes(dag: DagActiveDag): DagNode[] {
+    return dag.nodes.map(asDagNode);
   }
 
   function toVizEdges(dag: DagActiveDag): DagEdge[] {
@@ -215,6 +280,50 @@
 {:else if $store.data}
   {@const data = $store.data}
 
+  {#if data.waiting_on_you.length > 0}
+    <section class="waiting" aria-labelledby="waiting-title">
+      <div class="waiting-head">
+        <h2 id="waiting-title" class="section-title">
+          <span class="dot" aria-hidden="true"></span>Waiting on you
+          <span class="count" aria-label="{data.waiting_on_you.length} questions">{data.waiting_on_you.length}</span>
+        </h2>
+        <p class="small muted">A DAG resumes when you answer its card — or takes its default at the deadline.</p>
+      </div>
+      {#each data.waiting_on_you as w (w.node_id)}
+        <div class="q-row">
+          <div class="q-main">
+            <div class="q-question">{w.question || w.node_name}</div>
+            <div class="small muted">
+              <span class="text">{w.dag_name}</span> · step <span class="mono">{w.node_name}</span>
+              {#if w.reviewing.length} · reviewing <span class="mono">{w.reviewing.join(', ')}</span>{/if}
+            </div>
+            {#if w.card_error}
+              <div class="q-error">{w.card_error}</div>
+            {:else if !w.card_url}
+              <div class="small muted">Card being delivered…</div>
+            {/if}
+          </div>
+          <div class="q-when">
+            <div class="label">Answer by</div>
+            <div>{fmtUtc(w.deadline)}</div>
+            <div class="small" class:soon={isSoon(w.deadline)} class:muted={!isSoon(w.deadline)}>{relUntil(w.deadline)}</div>
+          </div>
+          <div class="q-default">
+            <div class="label">If no answer</div>
+            <div>'{w.default_label}'</div>
+            <div class="small muted">the DAG stops here</div>
+          </div>
+          <div class="q-actions">
+            {#if w.card_url}
+              <a class="btn-primary" href={w.card_url} target="_blank" rel="noopener">Answer in companion</a>
+            {/if}
+            <button type="button" class="btn-sm btn-tall" onclick={() => openWaiting(w)}>Details</button>
+          </div>
+        </div>
+      {/each}
+    </section>
+  {/if}
+
   <!-- Stat cards -->
   <StatGrid stats={stats()} />
 
@@ -230,6 +339,7 @@
             <tr>
               <th>Name</th>
               <th>Status</th>
+              <th>Now</th>
               <th>Source</th>
               <th>Progress</th>
               <th>Created</th>
@@ -242,12 +352,10 @@
               <tr class:selected={isSelected}>
                 <td><strong>{row.name}</strong></td>
                 <td>
-                  <span
-                    class="status-badge"
-                    style:background="{statusColor(row.status)}20"
-                    style:color={statusColor(row.status)}
-                    style:border-color="{statusColor(row.status)}40"
-                  >{row.status}</span>
+                  <span class="status-badge" style={badgeStyle(row.statusCol)}>{row.status}</span>
+                </td>
+                <td class="now-cell">
+                  <span class="now now-{row.now.kind}">{row.now.text}</span>
                 </td>
                 <td class="muted small">{row.source}</td>
                 <td class="progress-cell">
@@ -277,7 +385,7 @@
         <div class="graph-panel">
           <div class="graph-header">
             <span class="graph-dag-name">{activeDag.name}</span>
-            <button class="btn-sm" onclick={() => { selectedDagId = null; selectedNode = null; }}>
+            <button class="btn-sm" onclick={() => { selectedDagId = null; selectedNodeId = null; }}>
               Close
             </button>
           </div>
@@ -286,7 +394,18 @@
             edges={toVizEdges(activeDag)}
             onNodeClick={onNodeClick}
           />
-          <p class="graph-hint">Tap a node for details</p>
+          <p class="graph-hint">Tap a node for details, or pick one below</p>
+          <ul class="node-list" aria-label="Nodes in {activeDag.name}">
+            {#each toVizNodes(activeDag) as n (n.id)}
+              <li>
+                <button type="button" class="node-btn" onclick={() => onNodeClick(n)}>
+                  <span class="mono">{n.name}</span>
+                  <span class="small muted">{n.node_type}</span>
+                  <span class="status-badge" style={badgeStyle(statusColor(n.status))}>{n.status}</span>
+                </button>
+              </li>
+            {/each}
+          </ul>
         </div>
       {/if}
     {/if}
@@ -319,8 +438,25 @@
           statusBadge: r.statusBadge,
         }))}
         rowKey={(r) => r._dag.id}
+        rowLabel={(r) => r.name}
         mode="scroll"
       >
+        {#snippet cell(row, c)}
+          {#if c.key === 'statusBadge'}
+            {@const col = row._dag.stopped_by ? WAITING : statusColor(row._dag.status)}
+            <span class="status-badge" style={badgeStyle(col)}>{row.statusBadge}</span>
+          {:else if c.key === 'summary'}
+            {#if row._dag.stops.length}
+              <span class="small muted">{row._dag.stops.map((s: { node_name: string; answer_source: string; answer_label: string }) =>
+                s.answer_source === 'companion' ? `${s.node_name}: declined '${s.answer_label}'` : `${s.node_name}: no answer, default '${s.answer_label}' applied`,
+              ).join(' · ')}</span>
+            {:else}
+              <span class="small muted">{row.summary}</span>
+            {/if}
+          {:else}
+            {row[c.key]}
+          {/if}
+        {/snippet}
         {#snippet detail(row)}
           {@const dag = (row as typeof recentRows[0])._dag}
           <div class="detail-grid">
@@ -354,13 +490,52 @@
     <div class="node-detail">
       <div class="node-detail-row">
         <span class="detail-label">Status</span>
-        <span
-          class="status-badge"
-          style:background="{statusColor(n.status)}20"
-          style:color={statusColor(n.status)}
-          style:border-color="{statusColor(n.status)}40"
-        >{n.status}</span>
+        <span class="status-badge" style={badgeStyle(statusColor(n.status))}>{n.status}</span>
       </div>
+      {#if fullNode(n.id)?.approval}
+        {@const live = fullNode(n.id)!}
+        {@const a = live.approval!}
+        {@const waiting = live.status === 'awaiting_input'}
+        <div class="detail-section">
+          <div class="detail-label">Question</div>
+          <div class="detail-text q-question">{a.question}</div>
+        </div>
+        <div class="detail-section">
+          <div class="detail-label">What the card shows</div>
+          <div class="detail-text card-summary">{a.card_summary}</div>
+          {#if a.reviewing.length}<div class="small muted">Reviewing the output of {a.reviewing.join(', ')}.</div>{/if}
+        </div>
+        <div class="detail-section">
+          <div class="detail-label">Options</div>
+          <div class="opts">
+            {#each a.options as o (o.id)}
+              <span class="opt opt-{o.outcome}">{o.label} — {o.outcome === 'proceed' ? 'continues' : 'stops here'}</span>
+            {/each}
+            <span class="opt opt-default">default: {a.default_label}</span>
+          </div>
+        </div>
+        <dl class="approval-dl">
+          <div><dt>Asked</dt><dd>{fmtUtc(a.asked_at)}</dd></div>
+          <div><dt>Answer by</dt><dd>{fmtUtc(a.deadline)}{#if waiting && !a.answer && a.deadline} ({relUntil(a.deadline)}){/if}</dd></div>
+          <div><dt>If no answer</dt><dd>'{a.default_label}' — the DAG stops here</dd></div>
+          <div><dt>Answer</dt><dd>{answerLine(a, live.status)}</dd></div>
+        </dl>
+        {#if a.card_url}
+          <a class="card-link" href={a.card_url} target="_blank" rel="noopener">Open card in companion</a>
+        {:else if a.card_error}
+          <p class="q-error">{a.card_error}</p>
+        {:else if waiting && !a.answer}
+          <p class="small muted">Card being delivered…</p>
+        {/if}
+        {#if a.attempts.length}
+          <div class="detail-section">
+            <div class="detail-label">Earlier attempts</div>
+            <ol class="attempts">
+              {#each a.attempts as t, i (i)}<li>{attemptLine(t)}</li>{/each}
+            </ol>
+          </div>
+        {/if}
+      {/if}
       {#if n.node_type}
         <div class="node-detail-row">
           <span class="detail-label">Type</span>
@@ -509,6 +684,64 @@
 
   .small {
     font-size: 0.75rem;
+  }
+
+  /* ── Waiting on you (harness dashboard §4) ── */
+  .waiting {
+    background: var(--surface);
+    border: 1px solid rgba(167, 139, 250, 0.35);
+    box-shadow: 0 0 0 4px rgba(167, 139, 250, 0.06);
+    border-radius: var(--radius-sm, 8px);
+    padding: 1.25rem;
+    margin-bottom: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.625rem;
+  }
+  .waiting-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+  .waiting .section-title { display: flex; align-items: center; gap: 0.5rem; margin: 0; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--waiting); }
+  .count { min-width: 1.25rem; height: 1.25rem; padding: 0 0.375rem; border-radius: 999px; background: var(--waiting);
+    color: var(--bg); font-size: 0.6875rem; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
+  .q-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 1.25rem; align-items: center;
+    padding: 0.875rem 1rem; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); }
+  .q-question { font-size: 0.9375rem; font-weight: 600; }
+  .q-error { font-size: 0.8125rem; color: #f59e0b; margin: 0.25rem 0 0; }
+  .q-when, .q-default { font-size: 0.875rem; min-width: 9rem; }
+  .label { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .soon { color: #fbbf24; font-weight: 600; }
+  .text { color: var(--text); }
+  .mono { font-family: var(--font-mono); font-size: 0.75rem; }
+  .q-actions { display: flex; gap: 0.5rem; justify-content: flex-end; flex-wrap: wrap; }
+  .btn-primary { display: inline-flex; align-items: center; min-height: 36px; padding: 0 0.875rem; border-radius: 8px;
+    background: var(--accent); color: var(--bg); font-size: 0.8125rem; font-weight: 700; text-decoration: none; white-space: nowrap; }
+  .btn-primary:focus-visible, .node-btn:focus-visible, .card-link:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
+  .btn-tall { min-height: 36px; }
+  .now { font-size: 0.75rem; }
+  .now-waiting { display: inline-block; padding: 3px 10px; border-radius: 999px; font-weight: 600; color: #c4b5fd; background: rgba(167, 139, 250, 0.14); }
+  .now-held { display: inline-block; padding: 3px 10px; border-radius: 999px; font-weight: 600; color: #fbbf24; background: rgba(251, 191, 36, 0.10); }
+  .now-plain { color: var(--muted); }
+  .node-list { list-style: none; margin: 0; padding: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem; border-top: 1px solid var(--border); }
+  .node-btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.375rem 0.625rem; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text); font-family: inherit; cursor: pointer; }
+  .card-summary { font-size: 0.8125rem; white-space: pre-wrap; padding: 0.625rem 0.75rem; border-radius: 8px;
+    background: var(--bg); border: 1px solid var(--border); }
+  .opts { display: flex; flex-wrap: wrap; gap: 0.375rem; margin-top: 0.25rem; }
+  .opt { padding: 3px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; border: 1px solid; }
+  .opt-proceed { color: #4ade80; border-color: rgba(74, 222, 128, 0.4); }
+  .opt-stop { color: var(--red); border-color: rgba(248, 113, 113, 0.4); }
+  .opt-default { color: var(--muted); border-color: var(--border); font-weight: 500; }
+  .approval-dl { display: grid; gap: 0.5rem; margin: 0.75rem 0 0; }
+  .approval-dl div { display: grid; grid-template-columns: 7rem minmax(0, 1fr); gap: 0.75rem; }
+  .approval-dl dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .approval-dl dd { margin: 0; font-size: 0.875rem; }
+  .card-link { display: inline-block; margin-top: 0.75rem; font-size: 0.8125rem; font-weight: 600; color: var(--accent-text); }
+  .attempts { margin: 0.25rem 0 0; padding-left: 1.25rem; font-size: 0.8125rem; display: grid; gap: 0.25rem; }
+
+  @media (max-width: 900px) {
+    .q-row { grid-template-columns: 1fr; gap: 0.625rem; }
+    .q-actions { justify-content: stretch; }
+    .q-actions > * { flex: 1; justify-content: center; min-height: 44px; }
   }
 
   /* ── Status badge ── */

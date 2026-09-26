@@ -1396,6 +1396,7 @@ def build_app(settings: Settings) -> Starlette:
         context_logger=_lazy_component(components, "context_logger"),
         surface_service=_lazy_component(components, "surface_service"),
         action_router=_lazy_component(components, "action_router"),
+        dag_orchestrator=_lazy_component(components, "dag_orchestrator"),
     )
 
     if settings.mcp_enabled:

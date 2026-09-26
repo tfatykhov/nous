@@ -20,9 +20,17 @@
   import Density from './views/Density.svelte';
   import Consolidation from './views/Consolidation.svelte';
   import Identity from './views/Identity.svelte';
+  import Harness from './views/Harness.svelte';
+  import { usePoll } from '$lib/poll';
+  import { attentionPoll, attentionCounts } from '$lib/stores/attention';
 
   // ── Router ────────────────────────────────────────────────────
   initRouter();
+
+  // Harness dashboard §4.6: one attention poll feeds every nav badge and the
+  // mobile menu dot (the badges sit inside a closed drawer on a phone).
+  usePoll(attentionPoll);
+  let needsYou = $derived($attentionCounts.questions + $attentionCounts.sends);
 
   // ── Mobile drawer state ───────────────────────────────────────
   let drawerOpen = $state(false);
@@ -104,7 +112,7 @@
   <button
     bind:this={hamburgerBtn}
     class="hamburger"
-    aria-label="Open navigation menu"
+    aria-label={needsYou > 0 ? `Open navigation menu, ${needsYou} item${needsYou === 1 ? '' : 's'} need you` : 'Open navigation menu'}
     aria-expanded={drawerOpen}
     aria-controls="mobile-drawer"
     onclick={openDrawer}
@@ -112,6 +120,7 @@
     <svg viewBox="0 0 20 20" fill="currentColor" width="20" height="20" aria-hidden="true">
       <path fill-rule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h6a1 1 0 110 2H4a1 1 0 01-1-1z" clip-rule="evenodd"/>
     </svg>
+    {#if needsYou > 0}<span class="hamburger-dot" aria-hidden="true"></span>{/if}
   </button>
   <span class="mobile-title">Nous</span>
 </header>
@@ -199,6 +208,8 @@
     <Subtasks />
   {:else if $currentRoute === 'identity'}
     <Identity />
+  {:else if $currentRoute === 'harness'}
+    <Harness />
   {/if}
 </main>
 
@@ -323,6 +334,17 @@
       color: var(--text);
       cursor: pointer;
       padding: 0;
+      position: relative;
+    }
+    .hamburger-dot {
+      position: absolute;
+      top: 0.25rem;
+      right: 0.25rem;
+      width: 0.5rem;
+      height: 0.5rem;
+      border-radius: 50%;
+      background: var(--waiting);
+      box-shadow: 0 0 0 2px var(--surface);
     }
     .hamburger:hover {
       background: var(--surface-hover);

@@ -2,7 +2,9 @@
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
-  import type { StatusData, StatusTimeseriesPoint } from '../lib/types/api';
+  import type { StatusData, StatusTimeseriesPoint, ExecutionData } from '../lib/types/api';
+  import { attentionPoll } from '../lib/stores/attention';
+  import { fmtUtc, relUntil } from '../lib/harness';
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import Chart from '../lib/viz/Chart.svelte';
@@ -15,6 +17,21 @@
       0, // fetch-once (manual refresh only)
     ),
   );
+
+  // Harness dashboard §4: the durable ledger's 24 h numbers (fetch-once, like
+  // the rest of the Overview). The attention strip reads the app-wide poll.
+  const exec = usePoll(
+    makePollStore<ExecutionData>(
+      (signal) => apiGet<ExecutionData>('/dashboard/execution?window=24h&limit=1', { signal }),
+      0,
+    ),
+  );
+
+  function refreshAll() {
+    void store.refresh();
+    void exec.refresh();
+    void attentionPoll.refresh();
+  }
 
   // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -75,7 +92,7 @@
     <p class="subtitle">At-a-glance memory health and trends</p>
   </div>
   <div class="head-right">
-    <button class="refresh-btn" onclick={() => void store.refresh()} disabled={$store.loading}>
+    <button class="refresh-btn" onclick={refreshAll} disabled={$store.loading}>
       {$store.loading ? 'Loading…' : 'Refresh'}
     </button>
     <StaleBadge state={$store} />
@@ -89,6 +106,64 @@
   {@const deltas = db.deltas}
   {@const dist = db.distributions}
   {@const ts = normalizeTimeseries(db.timeseries)}
+
+  <!-- ── Needs your attention (harness dashboard §4.6) ─────────────────── -->
+  {@const a = $attentionPoll.data}
+  {#if a}
+    <section class="attention" aria-labelledby="attn-title">
+      <h2 id="attn-title">Needs your attention</h2>
+      {#if a.questions_waiting === 0 && a.sends_in_doubt === 0 && !a.ledger_persisted}
+        <p class="all-clear">
+          No questions waiting. Ledger persistence is off (NOUS_EXECUTION_LEDGER_PERSIST_ENABLED), so a send whose delivery went unconfirmed is not recorded — none can be shown here.
+        </p>
+      {:else if a.questions_waiting === 0 && a.sends_in_doubt === 0}
+        <p class="all-clear">
+          <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="#10b981" stroke-width="2" aria-hidden="true"><path d="M4 10.5l4 4 8-9"/></svg>
+          Nothing needs you — no questions waiting and no sends in doubt.
+        </p>
+      {:else}
+        <div class="attn-cards">
+          {#if a.questions_waiting > 0}
+            <a class="attn-card attn-waiting" href="#/dag" aria-labelledby="attn-q">
+              <span class="attn-kicker">Questions</span>
+              <span id="attn-q" class="attn-title">{a.questions_waiting} question{a.questions_waiting === 1 ? '' : 's'} waiting on you</span>
+              {#if a.next}
+                <span class="attn-detail">Next deadline {fmtUtc(a.next.deadline)} ({relUntil(a.next.deadline)}) — {a.next.dag_name} · {a.next.node_name}. No answer by then applies ‘{a.next.default_label}’.</span>
+              {/if}
+              <span class="attn-cta">See questions ›</span>
+            </a>
+          {/if}
+          {#if a.sends_in_doubt > 0}
+            <a class="attn-card attn-unknown" href="#/execution" aria-labelledby="attn-s">
+              <span class="attn-kicker">Sends in doubt</span>
+              <span id="attn-s" class="attn-title">{a.sends_in_doubt} send{a.sends_in_doubt === 1 ? '' : 's'} ended without confirming delivery</span>
+              {#if a.latest_in_doubt}
+                <span class="attn-detail">
+                  {a.latest_in_doubt.tool_name}{a.latest_in_doubt.tombstone ? '' : a.latest_in_doubt.recipients.length ? ` to ${a.latest_in_doubt.recipients.join(', ')}` : ''}{a.latest_in_doubt.dag_name ? ` · ${a.latest_in_doubt.dag_name}` : ''} · {fmtUtc(a.latest_in_doubt.created_at)}. Retries of it are held until you check.
+                </span>
+              {/if}
+              <span class="attn-cta">Review in ledger ›</span>
+            </a>
+          {/if}
+        </div>
+      {/if}
+      <p class="harness-line">
+        {#if !a.harness.events_persisted}
+          Harness: not measured — event persistence is off.
+        {:else}
+          Harness, last 7 days:
+          {#each [['Offered-tool rule', a.harness.offered_set], ['Context policy', a.harness.context_policy]] as [name, r], i (name)}
+            {@const rule = r as { mode: string | null; warn_7d: number; refused_7d: number }}
+            {i ? ' · ' : ''}{name}
+            {#if rule.mode === 'enforce'} refused <strong>{rule.refused_7d}</strong>
+            {:else if rule.mode === 'off'} is off
+            {:else} flagged <strong>{rule.warn_7d}</strong> (warn — the calls still ran){/if}
+          {/each}.
+        {/if}
+        <a href="#/harness">Open Harness</a>
+      </p>
+    </section>
+  {/if}
 
   <!-- ── Stat cards ───────────────────────────────────────────────────── -->
   <StatGrid stats={[
@@ -119,22 +194,32 @@
     </div>
   </div>
 
-  <!-- ── Execution integrity summary ─────────────────────────────────── -->
-  {@const ei = d.execution_integrity}
-  {@const totalActions = Object.values(ei.sessions).reduce((s, v) => s + v.total_actions, 0)}
-  {@const totalBlocked = Object.values(ei.sessions).reduce((s, v) => s + v.blocked_actions, 0)}
+  <!-- ── Execution integrity: the durable ledger (harness dashboard §2) ── -->
+  {@const x = $exec.data}
   <section class="chart-card integrity-section">
     <div class="section-title-row">
       <h2>Execution integrity</h2>
-      <a class="detail-link" href="#/execution">View details &rsaquo;</a>
+      <a class="detail-link" href="#/execution">Open ledger &rsaquo;</a>
     </div>
-    <StatGrid stats={[
-      { label: 'Active ledgers',      value: ei.active_ledgers },
-      { label: 'Actions recorded',    value: totalActions },
-      { label: 'Blocked actions',     value: totalBlocked },
-      { label: 'Claim verification',  value: ei.enabled.claim_verification ? ei.modes.claim_verification : 'off' },
-      { label: 'Action gating',       value: ei.enabled.action_gating ? ei.modes.action_gating : 'off' },
-    ]} />
+    {#if x && !x.modes.persist}
+      <p class="muted">Ledger persistence is off (NOUS_EXECUTION_LEDGER_PERSIST_ENABLED) — no calls are recorded and sends are not de-duplicated, so there are no numbers to show.</p>
+      <StatGrid stats={[
+        { label: 'Claim checks',          value: x.modes.claim_verification },
+        { label: 'Context policy',        value: x.modes.context_policy },
+        { label: 'Offered-tool rule',     value: x.modes.offered_set },
+      ]} />
+    {:else if x}
+      <StatGrid stats={[
+        { label: 'Calls (24 h)',          value: x.stats.calls },
+        { label: 'Sends',                 value: x.stats.sends },
+        { label: 'Repeat sends refused',  value: x.stats.repeat_sends_refused },
+        { label: 'Claim checks',          value: x.modes.claim_verification },
+        { label: 'Context policy',        value: x.modes.context_policy },
+        { label: 'Offered-tool rule',     value: x.modes.offered_set },
+      ]} />
+    {:else if $exec.error}
+      <p class="muted">Ledger unavailable.</p>
+    {/if}
   </section>
 
   <!-- ── Charts ───────────────────────────────────────────────────────── -->
@@ -246,6 +331,27 @@
 {/if}
 
 <style>
+  /* ── Needs your attention (harness dashboard §4.6) ── */
+  .attention { display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.25rem; }
+  .attention h2 { margin: 0; font-size: 0.9375rem; font-weight: 600; }
+  .all-clear { display: flex; align-items: center; gap: 0.625rem; margin: 0; padding: 1rem 1.125rem; border-radius: 8px;
+    background: var(--surface); border: 1px solid var(--border); font-size: 0.875rem; }
+  .attn-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; }
+  .attn-card { display: flex; flex-direction: column; gap: 0.5rem; padding: 1.125rem; border-radius: 8px; background: var(--surface);
+    border: 1px solid; text-decoration: none; color: var(--text); }
+  .attn-card:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
+  .attn-waiting { border-color: rgba(167, 139, 250, 0.35); }
+  .attn-unknown { border-color: rgba(244, 114, 182, 0.35); }
+  .attn-kicker { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+  .attn-waiting .attn-kicker, .attn-waiting .attn-cta { color: var(--waiting); }
+  .attn-unknown .attn-kicker, .attn-unknown .attn-cta { color: var(--unknown); }
+  .attn-title { font-size: 1.125rem; font-weight: 700; line-height: 1.3; }
+  .attn-detail { font-size: 0.8125rem; color: var(--muted); }
+  .attn-cta { font-size: 0.8125rem; font-weight: 600; margin-top: auto; }
+  .harness-line { margin: 0; font-size: 0.8125rem; color: var(--muted); }
+  .harness-line strong { color: var(--text); }
+  .harness-line a { color: var(--accent-text); font-weight: 600; text-decoration: none; margin-left: 0.25rem; }
+
   .view-head {
     display: flex;
     align-items: flex-start;

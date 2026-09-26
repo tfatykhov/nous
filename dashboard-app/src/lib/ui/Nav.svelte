@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { RouteName } from '$lib/router';
+  import { attentionCounts } from '$lib/stores/attention';
 
   let {
     currentRoute,
@@ -75,6 +76,11 @@
       icon: '<path fill-rule="evenodd" d="M4 2a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2V4a2 2 0 00-2-2H4zm3 3a1 1 0 011-1h4a1 1 0 110 2H8a1 1 0 01-1-1zm0 4a1 1 0 011-1h8a1 1 0 110 2H8a1 1 0 01-1-1zm0 4a1 1 0 011-1h5a1 1 0 110 2H8a1 1 0 01-1-1zM5 6a1 1 0 100-2 1 1 0 000 2zm0 4a1 1 0 100-2 1 1 0 000 2zm0 4a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd"/>',
     },
     {
+      id: 'harness',
+      label: 'Harness',
+      icon: '<path d="M5 4a1 1 0 00-2 0v7.268a2 2 0 000 3.464V16a1 1 0 102 0v-1.268a2 2 0 000-3.464V4zM11 4a1 1 0 10-2 0v1.268a2 2 0 000 3.464V16a1 1 0 102 0V8.732a2 2 0 000-3.464V4zM16 3a1 1 0 011 1v7.268a2 2 0 010 3.464V16a1 1 0 11-2 0v-1.268a2 2 0 010-3.464V4a1 1 0 011-1z"/>',
+    },
+    {
       id: 'cache',
       label: 'Cache',
       icon: '<path d="M3 12v3c0 1.657 3.134 3 7 3s7-1.343 7-3v-3c0 1.657-3.134 3-7 3s-7-1.343-7-3z"/><path d="M3 7v3c0 1.657 3.134 3 7 3s7-1.343 7-3V7c0 1.657-3.134 3-7 3S3 8.657 3 7z"/><path d="M17 5c0 1.657-3.134 3-7 3S3 6.657 3 5s3.134-3 7-3 7 1.343 7 3z"/>',
@@ -106,15 +112,29 @@
       icon: '<path d="M10 2a4 4 0 100 8 4 4 0 000-8zM3 18a7 7 0 0114 0H3z"/>',
     },
   ];
+
+  // Harness dashboard §4.6: counts that need a person — and their number is
+  // part of the link's accessible name, not just a coloured pill.
+  function badge(id: RouteName): { count: number; text: string; kind: string } | null {
+    const c = $attentionCounts;
+    if (id === 'dag' && c.questions > 0) {
+      return { count: c.questions, text: `${c.questions} question${c.questions === 1 ? '' : 's'} waiting`, kind: 'waiting' };
+    }
+    if (id === 'execution' && c.sends > 0) {
+      return { count: c.sends, text: `${c.sends} send${c.sends === 1 ? '' : 's'} in doubt`, kind: 'unknown' };
+    }
+    return null;
+  }
 </script>
 
 <nav aria-label={navLabel}>
   {#each NAV_ITEMS as item (item.id)}
+    {@const b = badge(item.id)}
     <a
       href="#/{item.id}"
       class="nav-link"
       class:active={currentRoute === item.id}
-      aria-label={item.label}
+      aria-label={b ? `${item.label}, ${b.text}` : item.label}
       aria-current={currentRoute === item.id ? 'page' : undefined}
       onclick={onnavigate}
     >
@@ -131,7 +151,10 @@
           {@html item.icon}
         </svg>
       {/if}
-      <span>{item.label}</span>
+      <span class="nav-label">{item.label}</span>
+      {#if b}
+        <span class="nav-badge nav-badge--{b.kind}" aria-hidden="true">{b.count}</span>
+      {/if}
     </a>
   {/each}
 </nav>
@@ -166,8 +189,31 @@
 
   .nav-link.active {
     background: var(--accent-glow);
-    color: var(--accent);
+    /* #a99df9 on the glow: 6.69:1 (the raw accent was 3.96:1) */
+    color: var(--accent-text);
   }
+
+  .nav-label {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .nav-badge {
+    min-width: 1.25rem;
+    height: 1.25rem;
+    padding: 0 0.375rem;
+    border-radius: 999px;
+    font-size: 0.6875rem;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--bg);
+  }
+
+  .nav-badge--waiting { background: var(--waiting); }
+  .nav-badge--unknown { background: var(--unknown); }
 
   .nav-icon {
     width: 1.125rem;
