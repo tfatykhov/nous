@@ -131,6 +131,11 @@ CREATE TABLE brain.decisions (
     context TEXT,
     pattern TEXT,
     confidence FLOAT NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+    -- F058 (migration 039): agent's pre-calibration claim.
+    confidence_raw DOUBLE PRECISION,
+    -- F058 (migration 073): which factor produced `confidence`, and when.
+    calibration_factor DOUBLE PRECISION,
+    calibration_applied_at TIMESTAMPTZ,
     category VARCHAR(50) NOT NULL CHECK (category IN ('architecture', 'process', 'tooling', 'security', 'integration')),
     stakes VARCHAR(20) NOT NULL CHECK (stakes IN ('low', 'medium', 'high', 'critical')),
     quality_score FLOAT,

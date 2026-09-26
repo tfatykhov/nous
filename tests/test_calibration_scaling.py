@@ -56,3 +56,15 @@ def test_already_calibrated_high_confidence() -> None:
     # [0.9, 1.0) bin.
     result = calibrate_confidence(0.95, DEFAULT_CALIBRATION_FACTOR)
     assert 0.71 < result < 0.74
+
+
+def test_shipped_default_is_passthrough() -> None:
+    """Regression: the SHIPPED default must stay 1.0 (F058 factor retired 2026-09-20).
+
+    DEFAULT_CALIBRATION_FACTOR above is the historical F058 fit and is
+    deliberately NOT the shipped value. This pins the value prod actually
+    uses, so a future edit cannot silently re-enable scaling.
+    """
+    from nous.config import Settings
+
+    assert Settings.model_fields["confidence_calibration_factor"].default == 1.0

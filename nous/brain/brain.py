@@ -414,9 +414,8 @@ class Brain:
         # calibrated values. Raw agent claim is preserved in confidence_raw
         # for calibration eval.
         from nous.brain.calibration_scaling import calibrate_confidence
-        calibrated = calibrate_confidence(
-            input.confidence, self.settings.confidence_calibration_factor
-        )
+        _factor = self.settings.confidence_calibration_factor
+        calibrated = calibrate_confidence(input.confidence, _factor)
         decision = Decision(
             agent_id=self.agent_id,
             description=input.description,
@@ -424,6 +423,11 @@ class Brain:
             pattern=input.pattern,
             confidence=calibrated,
             confidence_raw=input.confidence,
+            # Record WHICH factor produced `confidence`. The ratio alone is
+            # ambiguous once the factor changes, and no timestamp column can
+            # disambiguate it (see migration 073).
+            calibration_factor=_factor,
+            calibration_applied_at=datetime.now(UTC),
             category=input.category,
             stakes=input.stakes,
             quality_score=quality_score,
@@ -536,10 +540,15 @@ class Brain:
             # F058: calibrate on update too — keeps the storage invariant
             # `confidence` = calibrated, `confidence_raw` = agent's claim.
             from nous.brain.calibration_scaling import calibrate_confidence
-            decision.confidence = calibrate_confidence(
-                confidence, self.settings.confidence_calibration_factor
-            )
+            _factor = self.settings.confidence_calibration_factor
+            decision.confidence = calibrate_confidence(confidence, _factor)
             decision.confidence_raw = confidence
+            # Stamped here and NOT on the other branches above: an edit that
+            # only changes the description must not claim its stale factor was
+            # re-applied today, which is precisely why updated_at cannot stand
+            # in for this.
+            decision.calibration_factor = _factor
+            decision.calibration_applied_at = datetime.now(UTC)
             changed = True
         if tags is not None:
             # Replace existing tags: delete old, insert new

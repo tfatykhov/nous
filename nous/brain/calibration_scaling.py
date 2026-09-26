@@ -1,5 +1,19 @@
 """F058: Post-hoc temperature scaling for decision confidence.
 
+RETIRED 2026-09-20: the shipped default moved from 0.7627 to 1.0
+(pass-through) in `Settings.confidence_calibration_factor`. A refit on
+n=802 resolved decisions found the overconfidence regime described below
+has ended and the static factor had inverted into the dominant source of
+calibration error (Brier 0.167 scaled vs 0.098 raw, against an actual
+outcome rate of 0.882). The machinery below is retained and still honored
+so a deployment that *is* overconfident can re-enable scaling via
+NOUS_CONFIDENCE_CALIBRATION_FACTOR. DEFAULT_CALIBRATION_FACTOR is kept at
+the historical F058 value purely to document that fit; it is not the
+shipped default. Historical rows remain scaled at 0.7627 -- use
+brain.decisions.confidence_raw for any cross-era analysis.
+
+Original F058 rationale follows.
+
 The agent's raw confidence numbers are systemically overconfident — Nous
 prod data measured a +19.8% gap between mean confidence (0.834) and mean
 strict accuracy (0.636) over 401 reviewed decisions, with Brier 0.252
@@ -33,7 +47,9 @@ Why not Platt/isotonic regression:
 from __future__ import annotations
 
 
-# Default factor matches the empirical eval: agent confidence is ~31%
+# Historical F058 fit (NOT the shipped default since 2026-09-20 -- see
+# module docstring). Retained to document the original calibration:
+# Default factor matched the empirical eval: agent confidence is ~31%
 # higher than warranted on average, so multiply by 0.7627 to align mean
 # claimed confidence with mean strict accuracy.
 DEFAULT_CALIBRATION_FACTOR = 0.7627

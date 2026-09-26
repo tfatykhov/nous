@@ -74,7 +74,21 @@ class Settings(BaseSettings):
     # systemically ~20% overconfident on Nous prod data (Brier 0.252,
     # gap +19.8% across 401 reviewed decisions). Default 0.7627 was
     # derived empirically; set 1.0 to disable scaling (legacy behavior).
-    confidence_calibration_factor: float = 0.7627
+    #
+    # RETIRED 2026-09-20 (factor 0.7627 -> 1.0). Refit on n=802 resolved
+    # decisions shows the overconfidence regime F058 corrected for has
+    # ended, and the static factor now *causes* the error it was built to
+    # remove:
+    #     raw mean confidence 0.787 | scaled 0.600 | actual outcome rate 0.882
+    #     Brier raw 0.098          | Brier scaled 0.167
+    # Grid search puts the Brier-optimal factor at 1.10-1.15, but we
+    # deliberately stop at 1.0 (pass-through): the 0.882 base rate is an
+    # upper bound because batch-sweep self-resolution is plausibly lenient,
+    # and a factor >1.0 would compound measurement leniency into genuine
+    # overconfidence. 1.0 captures ~90% of the available Brier gain at zero
+    # inflation risk. Do not raise above 1.0 without first auditing
+    # sweep-resolution leniency.
+    confidence_calibration_factor: float = 1.0
 
     # Outcome-based retrieval demotion (2026-07-27). Superseded and noise
     # decisions were outranking the current one in the "## Related Decisions"
