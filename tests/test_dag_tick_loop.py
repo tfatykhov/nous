@@ -3,21 +3,24 @@
 Verifies:
   a. A hung heartbeat _tick does NOT block dag_orchestrator.tick() from being called.
   b. Overlapping orchestrator ticks are not run concurrently (single-flight).
-  c. A hung orchestrator tick is timed out and the loop keeps going.
+  c. A slow/failed orchestrator tick does not wedge the loop.
   d. stop() cancels the DAG loop cleanly.
+  h. (P1 #1) CancelledError during tick cannot strand an untracked primitive.
+  i. (P1 #2) A check cancelled after snapshot does not execute.
 """
 
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from nous.config import Settings
+from nous.heartbeat.dynamic import DynamicCheck
+from nous.heartbeat.registry import CheckRegistry
 from nous.heartbeat.runner import HeartbeatRunner
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -149,8 +152,8 @@ async def test_dag_tick_single_flight():
 
 
 @pytest.mark.asyncio
-async def test_dag_tick_timeout_continues_loop():
-    """A timed-out dag_orchestrator.tick() must not wedge the DAG loop."""
+async def test_dag_tick_slow_tick_continues_loop():
+    """A slow dag_orchestrator.tick() completes (shielded) and the loop continues."""
     settings = _make_settings(dag_tick_interval=1, dag_tick_timeout=1)
 
     call_count = 0
@@ -160,7 +163,7 @@ async def test_dag_tick_timeout_continues_loop():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            await asyncio.sleep(10)  # will be cancelled by wait_for timeout
+            await asyncio.sleep(0.5)  # slow but completes (shielded, not cancelled)
         else:
             second_call.set()
 
@@ -172,42 +175,39 @@ async def test_dag_tick_timeout_continues_loop():
     with patch.object(runner, "_detect_missed_checks", AsyncMock()):
         await runner.start()
         try:
-            # After the first tick times out, the loop should continue
-            # and the second tick should fire within a few seconds
             await asyncio.wait_for(second_call.wait(), timeout=6.0)
-            assert second_call.is_set(), "Loop did not continue after timeout"
+            assert second_call.is_set(), "Loop did not continue after slow tick"
         finally:
             await runner.stop()
 
 
 @pytest.mark.asyncio
-async def test_timed_out_tick_does_not_advance_last_dag_tick():
-    """A tick cancelled by the timeout must not be reported as a successful tick."""
-    settings = _make_settings(dag_tick_interval=1, dag_tick_timeout=1)
+async def test_failed_tick_does_not_advance_last_dag_tick():
+    """A tick that raises must not be reported as a successful tick."""
+    settings = _make_settings(dag_tick_interval=1, dag_tick_timeout=5)
 
     call_count = 0
     second_call = asyncio.Event()
 
-    async def always_hang():
+    async def fail_then_signal():
         nonlocal call_count
         call_count += 1
-        if call_count >= 2:
-            second_call.set()
-        await asyncio.sleep(10)  # every tick times out
+        if call_count == 1:
+            raise RuntimeError("tick broke")
+        second_call.set()
 
     dag_orchestrator = MagicMock()
-    dag_orchestrator.tick = AsyncMock(side_effect=always_hang)
+    dag_orchestrator.tick = AsyncMock(side_effect=fail_then_signal)
 
     runner = _make_runner(settings, dag_orchestrator)
 
     with patch.object(runner, "_detect_missed_checks", AsyncMock()):
         await runner.start()
         try:
-            # Wait until the first tick has timed out and a second one started.
             await asyncio.wait_for(second_call.wait(), timeout=6.0)
-            assert runner.last_dag_tick is None, (
-                "timed-out tick advanced last_dag_tick — stalled orchestrator would look healthy"
-            )
+            # After the second (successful) tick, last_dag_tick should be set
+            await asyncio.sleep(0.1)
+            assert runner.last_dag_tick is not None
         finally:
             await runner.stop()
 
@@ -330,3 +330,231 @@ async def test_dag_tick_skipped_when_no_orchestrator():
             assert not runner._dag_task.done()
         finally:
             await runner.stop()
+
+
+# ---------------------------------------------------------------------------
+# Test h (P1 #1): CancelledError during tick cannot strand an untracked
+# primitive — the tick is shielded so it runs to completion even when the
+# outer loop task is cancelled (e.g. by stop()).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dag_tick_shielded_from_cancellation():
+    """Cancelling the DAG loop task mid-tick must not cancel the inner tick.
+
+    With asyncio.shield, the inner tick runs to completion even when the
+    outer task receives CancelledError.  This prevents the scenario where
+    CancelledError lands between subtask creation and the node's running
+    transition, leaving an untracked subtask.
+    """
+    settings = _make_settings(dag_tick_interval=0, dag_tick_timeout=10)
+
+    tick_started = asyncio.Event()
+    tick_completed = asyncio.Event()
+
+    async def long_tick():
+        tick_started.set()
+        await asyncio.sleep(0.3)
+        tick_completed.set()
+        return 0
+
+    dag_orchestrator = MagicMock()
+    dag_orchestrator.tick = AsyncMock(side_effect=long_tick)
+
+    runner = _make_runner(settings, dag_orchestrator)
+
+    with patch.object(runner, "_detect_missed_checks", AsyncMock()):
+        await runner.start()
+        try:
+            # Wait for the tick to start
+            await asyncio.wait_for(tick_started.wait(), timeout=3.0)
+            # Cancel the DAG loop task while the tick is mid-flight
+            runner._dag_task.cancel()
+            # Give time for the shielded tick to finish
+            await asyncio.sleep(0.5)
+            assert tick_completed.is_set(), (
+                "Tick was cancelled mid-flight — CancelledError bypassed "
+                "the launch path's cleanup and could strand a subtask"
+            )
+        finally:
+            # stop() should handle the already-cancelled task gracefully
+            await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_dag_tick_records_timestamp_on_cancel_after_completion():
+    """When stop() cancels the loop while a shielded tick is running, the
+    tick completes and last_dag_tick is still recorded."""
+    settings = _make_settings(dag_tick_interval=0, dag_tick_timeout=10)
+
+    tick_started = asyncio.Event()
+
+    async def quick_tick():
+        tick_started.set()
+        await asyncio.sleep(0.1)
+        return 0
+
+    dag_orchestrator = MagicMock()
+    dag_orchestrator.tick = AsyncMock(side_effect=quick_tick)
+
+    runner = _make_runner(settings, dag_orchestrator)
+    assert runner.last_dag_tick is None
+
+    with patch.object(runner, "_detect_missed_checks", AsyncMock()):
+        await runner.start()
+        await asyncio.wait_for(tick_started.wait(), timeout=3.0)
+        await asyncio.sleep(0.3)  # let the tick finish
+        await runner.stop()
+
+    assert runner.last_dag_tick is not None
+
+
+# ---------------------------------------------------------------------------
+# Test i (P1 #2): A check cancelled/unregistered after snapshot does not
+# execute — the heartbeat loop re-verifies dynamic checks before running.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cancelled_check_skipped_after_snapshot():
+    """A dynamic check unregistered between get_due_checks and run() must
+    not execute — no LLM turn, no tool calls."""
+    settings = _make_settings(heartbeat_tick_interval=1, heartbeat_enabled=True)
+
+    registry = CheckRegistry()
+    check = DynamicCheck(
+        check_id="test-id",
+        name="dag-check-to-cancel",
+        prompt="check something",
+        tools=[],
+        interval=1,
+        timeout=30,
+        urgent=False,
+        runner=MagicMock(),
+    )
+    registry.register(check)
+
+    runner = HeartbeatRunner(
+        settings=settings,
+        registry=registry,
+        runner=MagicMock(),
+        brain=MagicMock(),
+        heart=MagicMock(),
+        bus=None,
+        http_client=None,
+        finding_store=None,
+        api_client=None,
+        dynamic_loader=None,
+    )
+
+    original_get_due = registry.get_due_checks
+
+    def snapshot_then_unregister(now=None):
+        """Return the check in the snapshot, then immediately unregister it."""
+        due = original_get_due(now)
+        registry.unregister("dag-check-to-cancel")
+        return due
+
+    with patch.object(registry, "get_due_checks", side_effect=snapshot_then_unregister):
+        with patch.object(check, "run", new_callable=AsyncMock) as mock_run:
+            findings = await runner._tick()
+            mock_run.assert_not_called()
+
+    assert findings == []
+
+
+@pytest.mark.asyncio
+async def test_self_disabled_check_skipped_after_snapshot():
+    """A dynamic check that self-disabled between snapshot and run() must
+    not execute."""
+    settings = _make_settings(heartbeat_tick_interval=1, heartbeat_enabled=True)
+
+    registry = CheckRegistry()
+    check = DynamicCheck(
+        check_id="test-id",
+        name="dag-check-self-disabled",
+        prompt="check something",
+        tools=[],
+        interval=1,
+        timeout=30,
+        urgent=False,
+        runner=MagicMock(),
+    )
+    registry.register(check)
+
+    runner = HeartbeatRunner(
+        settings=settings,
+        registry=registry,
+        runner=MagicMock(),
+        brain=MagicMock(),
+        heart=MagicMock(),
+        bus=None,
+        http_client=None,
+        finding_store=None,
+        api_client=None,
+        dynamic_loader=None,
+    )
+
+    original_get_due = registry.get_due_checks
+
+    def snapshot_then_disable(now=None):
+        """Return the check in the snapshot, then mark it self-disabled."""
+        due = original_get_due(now)
+        check._self_disabled = True
+        return due
+
+    with patch.object(registry, "get_due_checks", side_effect=snapshot_then_disable):
+        with patch.object(check, "run", new_callable=AsyncMock) as mock_run:
+            findings = await runner._tick()
+            mock_run.assert_not_called()
+
+    assert findings == []
+
+
+@pytest.mark.asyncio
+async def test_deactivated_check_skipped_after_snapshot():
+    """A dynamic check deactivated (active=False) between snapshot and
+    run() must not execute."""
+    settings = _make_settings(heartbeat_tick_interval=1, heartbeat_enabled=True)
+
+    registry = CheckRegistry()
+    check = DynamicCheck(
+        check_id="test-id",
+        name="dag-check-deactivated",
+        prompt="check something",
+        tools=[],
+        interval=1,
+        timeout=30,
+        urgent=False,
+        runner=MagicMock(),
+    )
+    registry.register(check)
+
+    runner = HeartbeatRunner(
+        settings=settings,
+        registry=registry,
+        runner=MagicMock(),
+        brain=MagicMock(),
+        heart=MagicMock(),
+        bus=None,
+        http_client=None,
+        finding_store=None,
+        api_client=None,
+        dynamic_loader=None,
+    )
+
+    original_get_due = registry.get_due_checks
+
+    def snapshot_then_deactivate(now=None):
+        """Return the check in the snapshot, then deactivate it."""
+        due = original_get_due(now)
+        check.active = False
+        return due
+
+    with patch.object(registry, "get_due_checks", side_effect=snapshot_then_deactivate):
+        with patch.object(check, "run", new_callable=AsyncMock) as mock_run:
+            findings = await runner._tick()
+            mock_run.assert_not_called()
+
+    assert findings == []

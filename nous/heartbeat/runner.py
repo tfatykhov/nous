@@ -215,7 +215,10 @@ class HeartbeatRunner:
 
         Single-flight: if the previous tick is still running when the next
         interval fires, the new tick is SKIPPED with a WARNING. A per-tick
-        timeout bounds a hung DAG tick so it cannot block the loop forever.
+        soft deadline logs when a tick exceeds the budget; the tick itself
+        is shielded from cancellation so that CancelledError cannot land
+        between a primitive-creation commit and the node's running
+        transition (Codex P1: untracked subtask / duplicate launch).
         """
         while self._running:
             try:
@@ -233,23 +236,27 @@ class HeartbeatRunner:
                     continue
 
                 async with self._dag_tick_lock:
+                    tick_start = asyncio.get_event_loop().time()
                     try:
-                        await asyncio.wait_for(
-                            self.dag_orchestrator.tick(),
-                            timeout=self._settings.dag_tick_timeout,
-                        )
+                        await asyncio.shield(self.dag_orchestrator.tick())
+                    except asyncio.CancelledError:
+                        # shield() re-raises CancelledError on the outer
+                        # task when the loop is stopping — the inner tick
+                        # ran to completion, so treat it as successful.
                         self._last_dag_tick = datetime.now(UTC)
-                    except asyncio.TimeoutError:
-                        # Do NOT advance _last_dag_tick: it is exposed as the last
-                        # *successful* tick, and refreshing it on a cancelled tick
-                        # would make a stalled orchestrator look healthy.
-                        logger.error(
-                            "F038: DAG orchestrator tick timed out after %ds — "
-                            "continuing loop",
-                            self._settings.dag_tick_timeout,
-                        )
+                        raise
                     except Exception:
                         logger.exception("F038: DAG orchestrator tick failed")
+                    else:
+                        elapsed = asyncio.get_event_loop().time() - tick_start
+                        if elapsed > self._settings.dag_tick_timeout:
+                            logger.error(
+                                "F038: DAG orchestrator tick took %.1fs "
+                                "(limit %ds) — slow but completed",
+                                elapsed,
+                                self._settings.dag_tick_timeout,
+                            )
+                        self._last_dag_tick = datetime.now(UTC)
 
             except asyncio.CancelledError:
                 break
@@ -351,6 +358,21 @@ class HeartbeatRunner:
         callback_candidates: list[DynamicCheck] = []
 
         for check in due_checks:
+            # Codex P1: a DAG task can reap/cancel a DAG-managed dynamic
+            # check between the snapshot (get_due_checks) and here.  Re-
+            # verify the check is still registered and active before
+            # starting an LLM turn that would run its tools on a cancelled
+            # node.
+            if isinstance(check, DynamicCheck):
+                live = self._registry.get_check(check.name)
+                if live is None or not live.active or live._self_disabled:
+                    logger.info(
+                        "Heartbeat check '%s' was unregistered or disabled "
+                        "after snapshot — skipping",
+                        check.name,
+                    )
+                    continue
+
             try:
                 result: CheckResult = await asyncio.wait_for(
                     check.run(),
