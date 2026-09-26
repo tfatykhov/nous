@@ -37,7 +37,7 @@ def _migration_columns() -> list[str]:
 def _insert_columns_and_params() -> tuple[list[str], list[str]]:
     src = MAIN.read_text(encoding="utf-8")
     stmt = re.search(
-        r'"INSERT INTO nous_system\.retrieval_log "(.*?)\), \{', src, re.S,
+        r'"INSERT INTO nous_system\.retrieval_log "(.*?)\),\s*\{', src, re.S,
     ).group(1)
     joined = "".join(re.findall(r'"([^"]*)"', stmt))
     cols_blob = re.search(r"\((.*?)\)\s*VALUES", joined, re.S).group(1)

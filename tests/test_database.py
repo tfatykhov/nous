@@ -64,6 +64,8 @@ async def test_all_tables_exist(db):
         ("nous_system", "execution_ledger"),
         # Fault detector: per-phase process heartbeat (migration 077)
         ("nous_system", "process_run_log"),
+        # Harness Phase 2.8: compensation snapshots (migration 077)
+        ("nous_system", "compensation_snapshots"),
         # brain (8)
         ("brain", "decisions"),
         ("brain", "decision_tags"),
