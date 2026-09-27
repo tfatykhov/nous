@@ -60,12 +60,16 @@ sealed interface Route {
 fun CompanionApp(graph: AppGraph, route: Route, navigate: (Route) -> Unit) {
     val version by rememberStoreVersion(graph.store)
     val t = Themes.nousDefault
+    // `settings.configured` is a plain file-backed property, invisible to Compose: after a
+    // successful Connect the base URL was saved but nothing recomposed, so the Connect screen
+    // stayed (on-device report). This state is what flips the shell.
+    var configured by remember { mutableStateOf(graph.settings.configured) }
     NousThemed(t) {
         Box(Modifier.fillMaxSize().background(t.bg).safeDrawingPadding()) {
-            if (!graph.settings.configured) ConnectScreen(graph) { navigate(Route.Inbox) }
+            if (!configured) ConnectScreen(graph) { configured = true; navigate(Route.Inbox) }
             else when (route) {
                 Route.Inbox -> InboxScreen(graph, version, navigate)
-                Route.Settings -> SettingsScreen(graph) { navigate(Route.Inbox) }
+                Route.Settings -> SettingsScreen(graph, onDisconnect = { configured = false; navigate(Route.Inbox) }) { navigate(Route.Inbox) }
                 is Route.Surface -> SurfaceScreen(graph, version, route.id) { navigate(Route.Inbox) }
             }
         }
@@ -263,7 +267,7 @@ fun SurfaceScreen(graph: AppGraph, version: Int, id: String, onBack: () -> Unit)
 // ------------------------------------------------------------ Settings
 
 @Composable
-fun SettingsScreen(graph: AppGraph, onBack: () -> Unit) {
+fun SettingsScreen(graph: AppGraph, onDisconnect: () -> Unit = {}, onBack: () -> Unit) {
     BackHandler(onBack = onBack)
     val t = LocalNousTheme.current
     val scope = rememberCoroutineScope()
@@ -285,7 +289,7 @@ fun SettingsScreen(graph: AppGraph, onBack: () -> Unit) {
             KV("installation", graph.settings.installationId.take(8))
         }
         TextButton(onClick = { us.fatykhov.nous.companion.data.UrlOpener.open(graph.appContext, graph.settings.baseUrl + "/companion") }) { Text("Open web companion", color = t.accent) }
-        TextButton(onClick = { graph.engine.stop(); graph.settings.clear(); onBack() }) { Text("Disconnect this phone", color = t.crit) }
+        TextButton(onClick = { graph.engine.stop(); graph.settings.clear(); onDisconnect() }) { Text("Disconnect this phone", color = t.crit) }
         Text("Nous Companion " + runCatching { graph.appContext.packageManager.getPackageInfo(graph.appContext.packageName, 0).versionName }.getOrNull(), color = t.muted, fontSize = 12.sp)
     }
 }
