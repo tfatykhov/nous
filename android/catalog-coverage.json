@@ -1,52 +1,562 @@
 {
   "_doc": "F097 §8.3 prop-level coverage manifest. Every catalog component, every prop, every enum value and every basic function must appear here. tests/test_android_catalog_coverage.py (always-on CI) fails when the catalogs drift past this file; the JUnit test asserts the Kotlin registry agrees with it. Status: 'ported' | 'unsupported'. Props: 'handled' | 'ignored:<reason>'. PR 2 ships everything as unsupported — PR 3+ flip entries as renderers land.",
   "basic": {
-    "Text": {"status": "unsupported", "props": {"text": "ignored:pr3", "variant": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "Image": {"status": "unsupported", "props": {"url": "ignored:pr3", "description": "ignored:pr3", "fit": "ignored:pr3", "variant": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "Icon": {"status": "unsupported", "props": {"name": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "Video": {"status": "unsupported", "props": {"url": "ignored:web-unimplemented", "posterUrl": "ignored:web-unimplemented", "description": "ignored:web-unimplemented", "weight": "ignored:web-unimplemented", "accessibility": "ignored:web-unimplemented"}},
-    "AudioPlayer": {"status": "unsupported", "props": {"url": "ignored:web-unimplemented", "description": "ignored:web-unimplemented", "weight": "ignored:web-unimplemented", "accessibility": "ignored:web-unimplemented"}},
-    "Row": {"status": "unsupported", "props": {"children": "ignored:pr3", "justify": "ignored:pr3", "align": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "Column": {"status": "unsupported", "props": {"children": "ignored:pr3", "justify": "ignored:pr3", "align": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "List": {"status": "unsupported", "props": {"children": "ignored:pr3", "direction": "ignored:pr3", "align": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "Card": {"status": "unsupported", "props": {"child": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "Tabs": {"status": "unsupported", "props": {"tabs": "ignored:pr4", "weight": "ignored:pr4", "accessibility": "ignored:pr4"}},
-    "Modal": {"status": "unsupported", "props": {"trigger": "ignored:pr4", "content": "ignored:pr4", "weight": "ignored:pr4", "accessibility": "ignored:pr4"}},
-    "Divider": {"status": "unsupported", "props": {"axis": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "Button": {"status": "unsupported", "props": {"child": "ignored:pr3", "variant": "ignored:pr3", "action": "ignored:pr3", "checks": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "TextField": {"status": "unsupported", "props": {"label": "ignored:pr4", "value": "ignored:pr4", "placeholder": "ignored:pr4", "variant": "ignored:pr4", "checks": "ignored:pr4", "weight": "ignored:pr4", "accessibility": "ignored:pr4"}},
-    "CheckBox": {"status": "unsupported", "props": {"label": "ignored:pr4", "value": "ignored:pr4", "checks": "ignored:pr4", "weight": "ignored:pr4", "accessibility": "ignored:pr4"}},
-    "ChoicePicker": {"status": "unsupported", "props": {"label": "ignored:pr4", "variant": "ignored:pr4", "options": "ignored:pr4", "value": "ignored:pr4", "displayStyle": "ignored:pr4", "filterable": "ignored:pr4", "checks": "ignored:pr4", "weight": "ignored:pr4", "accessibility": "ignored:pr4"}},
-    "Slider": {"status": "unsupported", "props": {"label": "ignored:pr4", "min": "ignored:pr4", "max": "ignored:pr4", "value": "ignored:pr4", "steps": "ignored:pr4", "checks": "ignored:pr4", "weight": "ignored:pr4", "accessibility": "ignored:pr4"}},
-    "DateTimeInput": {"status": "unsupported", "props": {"value": "ignored:pr4", "enableDate": "ignored:pr4", "enableTime": "ignored:pr4", "min": "ignored:pr4", "max": "ignored:pr4", "label": "ignored:pr4", "checks": "ignored:pr4", "weight": "ignored:pr4", "accessibility": "ignored:pr4"}}
+    "Text": {
+      "status": "ported",
+      "props": {
+        "text": "handled",
+        "variant": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      },
+      "enums": {
+        "variant": [
+          "caption",
+          "body"
+        ]
+      }
+    },
+    "Image": {
+      "status": "ported",
+      "props": {
+        "url": "handled",
+        "description": "handled",
+        "fit": "ignored:no image loader in beta",
+        "variant": "ignored:no image loader in beta",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      }
+    },
+    "Icon": {
+      "status": "ported",
+      "props": {
+        "name": "handled:7 glyphs drawn (check close warning error info add star); other enum members render the unknown glyph like the web",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      },
+      "enums": {
+        "name": [
+          "accountCircle",
+          "add",
+          "arrowBack",
+          "arrowForward",
+          "attachFile",
+          "calendarToday",
+          "call",
+          "camera",
+          "check",
+          "close",
+          "delete",
+          "download",
+          "edit",
+          "event",
+          "error",
+          "fastForward",
+          "favorite",
+          "favoriteOff",
+          "folder",
+          "help",
+          "home",
+          "info",
+          "locationOn",
+          "lock",
+          "lockOpen",
+          "mail",
+          "menu",
+          "moreVert",
+          "moreHoriz",
+          "notificationsOff",
+          "notifications",
+          "pause",
+          "payment",
+          "person",
+          "phone",
+          "photo",
+          "play",
+          "print",
+          "refresh",
+          "rewind",
+          "search",
+          "send",
+          "settings",
+          "share",
+          "shoppingCart",
+          "skipNext",
+          "skipPrevious",
+          "star",
+          "starHalf",
+          "starOff",
+          "stop",
+          "upload",
+          "visibility",
+          "visibilityOff",
+          "volumeDown",
+          "volumeMute",
+          "volumeOff",
+          "volumeUp",
+          "warning"
+        ]
+      }
+    },
+    "Video": {
+      "status": "unsupported",
+      "props": {
+        "url": "ignored:web-unimplemented",
+        "posterUrl": "ignored:web-unimplemented",
+        "description": "ignored:web-unimplemented",
+        "weight": "ignored:web-unimplemented",
+        "accessibility": "ignored:web-unimplemented"
+      }
+    },
+    "AudioPlayer": {
+      "status": "unsupported",
+      "props": {
+        "url": "ignored:web-unimplemented",
+        "description": "ignored:web-unimplemented",
+        "weight": "ignored:web-unimplemented",
+        "accessibility": "ignored:web-unimplemented"
+      }
+    },
+    "Row": {
+      "status": "ported",
+      "props": {
+        "children": "handled",
+        "justify": "handled",
+        "align": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      },
+      "enums": {
+        "justify": [
+          "center",
+          "end",
+          "spaceAround",
+          "spaceBetween",
+          "spaceEvenly",
+          "start",
+          "stretch"
+        ],
+        "align": [
+          "start",
+          "center",
+          "end",
+          "stretch"
+        ]
+      }
+    },
+    "Column": {
+      "status": "ported",
+      "props": {
+        "children": "handled",
+        "justify": "handled",
+        "align": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      },
+      "enums": {
+        "justify": [
+          "start",
+          "center",
+          "end",
+          "spaceBetween",
+          "spaceAround",
+          "spaceEvenly",
+          "stretch"
+        ],
+        "align": [
+          "center",
+          "end",
+          "start",
+          "stretch"
+        ]
+      }
+    },
+    "List": {
+      "status": "ported",
+      "props": {
+        "children": "handled",
+        "direction": "handled",
+        "align": "ignored:pr4",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      },
+      "enums": {
+        "direction": [
+          "vertical",
+          "horizontal"
+        ]
+      }
+    },
+    "Card": {
+      "status": "ported",
+      "props": {
+        "child": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      }
+    },
+    "Tabs": {
+      "status": "unsupported",
+      "props": {
+        "tabs": "ignored:pr4",
+        "weight": "ignored:pr4",
+        "accessibility": "ignored:pr4"
+      }
+    },
+    "Modal": {
+      "status": "unsupported",
+      "props": {
+        "trigger": "ignored:pr4",
+        "content": "ignored:pr4",
+        "weight": "ignored:pr4",
+        "accessibility": "ignored:pr4"
+      }
+    },
+    "Divider": {
+      "status": "ported",
+      "props": {
+        "axis": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      },
+      "enums": {
+        "axis": [
+          "horizontal",
+          "vertical"
+        ]
+      }
+    },
+    "Button": {
+      "status": "ported",
+      "props": {
+        "child": "handled",
+        "variant": "handled",
+        "action": "handled",
+        "checks": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      },
+      "enums": {
+        "variant": [
+          "default",
+          "primary",
+          "borderless"
+        ]
+      }
+    },
+    "TextField": {
+      "status": "unsupported",
+      "props": {
+        "label": "ignored:pr4",
+        "value": "ignored:pr4",
+        "placeholder": "ignored:pr4",
+        "variant": "ignored:pr4",
+        "checks": "ignored:pr4",
+        "weight": "ignored:pr4",
+        "accessibility": "ignored:pr4"
+      }
+    },
+    "CheckBox": {
+      "status": "unsupported",
+      "props": {
+        "label": "ignored:pr4",
+        "value": "ignored:pr4",
+        "checks": "ignored:pr4",
+        "weight": "ignored:pr4",
+        "accessibility": "ignored:pr4"
+      }
+    },
+    "ChoicePicker": {
+      "status": "unsupported",
+      "props": {
+        "label": "ignored:pr4",
+        "variant": "ignored:pr4",
+        "options": "ignored:pr4",
+        "value": "ignored:pr4",
+        "displayStyle": "ignored:pr4",
+        "filterable": "ignored:pr4",
+        "checks": "ignored:pr4",
+        "weight": "ignored:pr4",
+        "accessibility": "ignored:pr4"
+      }
+    },
+    "Slider": {
+      "status": "unsupported",
+      "props": {
+        "label": "ignored:pr4",
+        "min": "ignored:pr4",
+        "max": "ignored:pr4",
+        "value": "ignored:pr4",
+        "steps": "ignored:pr4",
+        "checks": "ignored:pr4",
+        "weight": "ignored:pr4",
+        "accessibility": "ignored:pr4"
+      }
+    },
+    "DateTimeInput": {
+      "status": "unsupported",
+      "props": {
+        "value": "ignored:pr4",
+        "enableDate": "ignored:pr4",
+        "enableTime": "ignored:pr4",
+        "min": "ignored:pr4",
+        "max": "ignored:pr4",
+        "label": "ignored:pr4",
+        "checks": "ignored:pr4",
+        "weight": "ignored:pr4",
+        "accessibility": "ignored:pr4"
+      }
+    }
   },
   "nous_core": {
-    "ApprovalPanel": {"status": "unsupported", "props": {"title": "ignored:pr3", "summary": "ignored:pr3", "risk": "ignored:pr3", "recommendation": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "ActionReviewCard": {"status": "unsupported", "props": {"title": "ignored:pr3", "did": "ignored:pr3", "why": "ignored:pr3", "cost": "ignored:pr3", "compensation": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "StatTile": {"status": "unsupported", "props": {"label": "ignored:pr3", "value": "ignored:pr3", "delta": "ignored:pr3", "intent": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "KeyValueTable": {"status": "unsupported", "props": {"rows": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "DecisionCard": {"status": "unsupported", "props": {"decisionId": "ignored:pr3", "description": "ignored:pr3", "confidence": "ignored:pr3", "stakes": "ignored:pr3", "category": "ignored:pr3", "outcome": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "ConfidenceMeter": {"status": "unsupported", "props": {"value": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "MemoryGraph": {"status": "unsupported", "props": {"nodes": "ignored:pr3", "edges": "ignored:pr3", "focusNodeId": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "DagGraph": {"status": "unsupported", "props": {"nodes": "ignored:pr3", "edges": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "AppHeader": {"status": "unsupported", "props": {"title": "ignored:pr5", "subtitle": "ignored:pr5", "composedAt": "ignored:pr5", "staleAfterS": "ignored:pr5", "note": "ignored:pr5", "weight": "ignored:pr5", "accessibility": "ignored:pr5"}},
-    "AppFooter": {"status": "unsupported", "props": {"refineOptions": "ignored:pr5", "agentActions": "ignored:pr5", "showRefresh": "ignored:pr5", "weight": "ignored:pr5", "accessibility": "ignored:pr5"}},
-    "Section": {"status": "unsupported", "props": {"title": "ignored:pr5", "child": "ignored:pr5", "provenance": "ignored:pr5", "caption": "ignored:pr5", "layout": "ignored:pr5", "weight": "ignored:pr5", "accessibility": "ignored:pr5"}},
-    "StatRow": {"status": "unsupported", "props": {"children": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "Timeline": {"status": "unsupported", "props": {"items": "ignored:pr3", "weight": "ignored:pr3", "accessibility": "ignored:pr3"}},
-    "Sparkline": {"status": "unsupported", "props": {"path": "ignored:pr5", "label": "ignored:pr5", "tone": "ignored:pr5", "trendline": "ignored:pr5", "weight": "ignored:pr5", "accessibility": "ignored:pr5"}},
-    "LineChart": {"status": "unsupported", "props": {"path": "ignored:pr5", "label": "ignored:pr5", "series": "ignored:pr5", "xLabel": "ignored:pr5", "yLabel": "ignored:pr5", "weight": "ignored:pr5", "accessibility": "ignored:pr5"}},
-    "BarChart": {"status": "unsupported", "props": {"path": "ignored:pr5", "label": "ignored:pr5", "orientation": "ignored:pr5", "tone": "ignored:pr5", "weight": "ignored:pr5", "accessibility": "ignored:pr5"}},
-    "MetricCard": {"status": "unsupported", "props": {"label": "ignored:pr5", "value": "ignored:pr5", "unit": "ignored:pr5", "delta": "ignored:pr5", "tone": "ignored:pr5", "caption": "ignored:pr5", "trend": "ignored:pr5", "trendline": "ignored:pr5", "footnote": "ignored:pr5", "weight": "ignored:pr5", "accessibility": "ignored:pr5"}},
-    "ScoreCard": {"status": "unsupported", "props": {"title": "ignored:pr5", "status": "ignored:pr5", "tone": "ignored:pr5", "value": "ignored:pr5", "unit": "ignored:pr5", "caption": "ignored:pr5", "items": "ignored:pr5", "note": "ignored:pr5", "format": "ignored:pr5", "weight": "ignored:pr5", "accessibility": "ignored:pr5"}},
-    "DeltaList": {"status": "unsupported", "props": {"rows": "ignored:pr5", "emptyText": "ignored:pr5", "weight": "ignored:pr5", "accessibility": "ignored:pr5"}},
-    "DataTable": {"status": "unsupported", "props": {"columns": "ignored:pr5", "rows": "ignored:pr5", "emptyText": "ignored:pr5", "weight": "ignored:pr5", "accessibility": "ignored:pr5"}},
-    "ChipRow": {"status": "unsupported", "props": {"items": "ignored:pr5", "weight": "ignored:pr5", "accessibility": "ignored:pr5"}}
+    "ApprovalPanel": {
+      "status": "ported",
+      "props": {
+        "title": "handled",
+        "summary": "handled",
+        "risk": "handled",
+        "recommendation": "ignored:web renders no recommendation either",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      }
+    },
+    "ActionReviewCard": {
+      "status": "ported",
+      "props": {
+        "title": "handled",
+        "did": "handled",
+        "why": "handled",
+        "cost": "handled",
+        "compensation": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      }
+    },
+    "StatTile": {
+      "status": "ported",
+      "props": {
+        "label": "handled",
+        "value": "handled",
+        "delta": "handled",
+        "intent": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      },
+      "enums": {
+        "intent": [
+          "neutral",
+          "good",
+          "bad",
+          "warn"
+        ]
+      }
+    },
+    "KeyValueTable": {
+      "status": "ported",
+      "props": {
+        "rows": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      }
+    },
+    "DecisionCard": {
+      "status": "ported",
+      "props": {
+        "decisionId": "handled",
+        "description": "handled",
+        "confidence": "handled",
+        "stakes": "handled",
+        "category": "handled",
+        "outcome": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      }
+    },
+    "ConfidenceMeter": {
+      "status": "ported",
+      "props": {
+        "value": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      }
+    },
+    "MemoryGraph": {
+      "status": "ported",
+      "props": {
+        "nodes": "handled",
+        "edges": "handled",
+        "focusNodeId": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      }
+    },
+    "DagGraph": {
+      "status": "ported",
+      "props": {
+        "nodes": "handled",
+        "edges": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      }
+    },
+    "AppHeader": {
+      "status": "unsupported",
+      "props": {
+        "title": "ignored:pr5",
+        "subtitle": "ignored:pr5",
+        "composedAt": "ignored:pr5",
+        "staleAfterS": "ignored:pr5",
+        "note": "ignored:pr5",
+        "weight": "ignored:pr5",
+        "accessibility": "ignored:pr5"
+      }
+    },
+    "AppFooter": {
+      "status": "unsupported",
+      "props": {
+        "refineOptions": "ignored:pr5",
+        "agentActions": "ignored:pr5",
+        "showRefresh": "ignored:pr5",
+        "weight": "ignored:pr5",
+        "accessibility": "ignored:pr5"
+      }
+    },
+    "Section": {
+      "status": "unsupported",
+      "props": {
+        "title": "ignored:pr5",
+        "child": "ignored:pr5",
+        "provenance": "ignored:pr5",
+        "caption": "ignored:pr5",
+        "layout": "ignored:pr5",
+        "weight": "ignored:pr5",
+        "accessibility": "ignored:pr5"
+      }
+    },
+    "StatRow": {
+      "status": "ported",
+      "props": {
+        "children": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      }
+    },
+    "Timeline": {
+      "status": "ported",
+      "props": {
+        "items": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      }
+    },
+    "Sparkline": {
+      "status": "unsupported",
+      "props": {
+        "path": "ignored:pr5",
+        "label": "ignored:pr5",
+        "tone": "ignored:pr5",
+        "trendline": "ignored:pr5",
+        "weight": "ignored:pr5",
+        "accessibility": "ignored:pr5"
+      }
+    },
+    "LineChart": {
+      "status": "unsupported",
+      "props": {
+        "path": "ignored:pr5",
+        "label": "ignored:pr5",
+        "series": "ignored:pr5",
+        "xLabel": "ignored:pr5",
+        "yLabel": "ignored:pr5",
+        "weight": "ignored:pr5",
+        "accessibility": "ignored:pr5"
+      }
+    },
+    "BarChart": {
+      "status": "unsupported",
+      "props": {
+        "path": "ignored:pr5",
+        "label": "ignored:pr5",
+        "orientation": "ignored:pr5",
+        "tone": "ignored:pr5",
+        "weight": "ignored:pr5",
+        "accessibility": "ignored:pr5"
+      }
+    },
+    "MetricCard": {
+      "status": "unsupported",
+      "props": {
+        "label": "ignored:pr5",
+        "value": "ignored:pr5",
+        "unit": "ignored:pr5",
+        "delta": "ignored:pr5",
+        "tone": "ignored:pr5",
+        "caption": "ignored:pr5",
+        "trend": "ignored:pr5",
+        "trendline": "ignored:pr5",
+        "footnote": "ignored:pr5",
+        "weight": "ignored:pr5",
+        "accessibility": "ignored:pr5"
+      }
+    },
+    "ScoreCard": {
+      "status": "unsupported",
+      "props": {
+        "title": "ignored:pr5",
+        "status": "ignored:pr5",
+        "tone": "ignored:pr5",
+        "value": "ignored:pr5",
+        "unit": "ignored:pr5",
+        "caption": "ignored:pr5",
+        "items": "ignored:pr5",
+        "note": "ignored:pr5",
+        "format": "ignored:pr5",
+        "weight": "ignored:pr5",
+        "accessibility": "ignored:pr5"
+      }
+    },
+    "DeltaList": {
+      "status": "unsupported",
+      "props": {
+        "rows": "ignored:pr5",
+        "emptyText": "ignored:pr5",
+        "weight": "ignored:pr5",
+        "accessibility": "ignored:pr5"
+      }
+    },
+    "DataTable": {
+      "status": "unsupported",
+      "props": {
+        "columns": "ignored:pr5",
+        "rows": "ignored:pr5",
+        "emptyText": "ignored:pr5",
+        "weight": "ignored:pr5",
+        "accessibility": "ignored:pr5"
+      }
+    },
+    "ChipRow": {
+      "status": "unsupported",
+      "props": {
+        "items": "ignored:pr5",
+        "weight": "ignored:pr5",
+        "accessibility": "ignored:pr5"
+      }
+    }
   },
   "functions": {
-    "required": "handled", "regex": "handled:java.util.regex dialect", "length": "handled", "numeric": "handled",
-    "email": "handled", "formatString": "handled", "formatNumber": "handled:Formatter-injected", "formatCurrency": "handled:Formatter-injected",
-    "formatDate": "handled:month/weekday names Formatter-injected", "pluralize": "handled:Formatter-injected", "openUrl": "handled",
-    "and": "handled", "or": "handled", "not": "handled"
+    "required": "handled",
+    "regex": "handled:java.util.regex dialect",
+    "length": "handled",
+    "numeric": "handled",
+    "email": "handled",
+    "formatString": "handled",
+    "formatNumber": "handled:Formatter-injected",
+    "formatCurrency": "handled:Formatter-injected",
+    "formatDate": "handled:month/weekday names Formatter-injected",
+    "pluralize": "handled:Formatter-injected",
+    "openUrl": "handled",
+    "and": "handled",
+    "or": "handled",
+    "not": "handled"
   }
 }

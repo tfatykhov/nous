@@ -1,14 +1,18 @@
 package us.fatykhov.nous.companion.core
 
 /**
- * The components `:core` knows how to WALK. `:app` owns the renderers and
- * registers each one here as it lands; `catalog-coverage.json` is the
- * authority the JUnit manifest test checks this set against (spec §8.3).
+ * The components `:core` knows how to WALK. `:app`'s `ui.catalog.Registry`
+ * owns the renderers; `catalog-coverage.json` is the authority both the
+ * JUnit manifest test and the always-on Python ratchet check against
+ * (spec §8.3). Keep the three in step — the tests fail otherwise.
  *
- * PR 2 ships it empty: every catalog component is `unsupported`, so every
- * fixture renders the §8.2 fallback card and the sweep still proves the
- * walker, the store and the binding engine handle every real tree.
+ * PR 3: the vocabulary the six template builders emit, plus the basic
+ * layout/display components they use.
  */
 object Registry {
-    val ported: Set<String> = emptySet()
+    val ported: Set<String> = setOf(
+        "Text", "Image", "Icon", "Row", "Column", "List", "Card", "Divider", "Button",
+        "ApprovalPanel", "ActionReviewCard", "StatTile", "StatRow", "KeyValueTable",
+        "DecisionCard", "ConfidenceMeter", "Timeline", "DagGraph", "MemoryGraph",
+    )
 }

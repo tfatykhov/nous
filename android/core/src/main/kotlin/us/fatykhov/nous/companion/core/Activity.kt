@@ -104,5 +104,5 @@ object ActivityRules {
     }
 }
 
-internal val JsonElement.stringOrNull: String?
+val JsonElement.stringOrNull: String?
     get() = (this as? JsonPrimitive)?.takeIf { it.isString }?.content

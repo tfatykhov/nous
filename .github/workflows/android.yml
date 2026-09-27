@@ -33,23 +33,55 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
-
       - uses: gradle/actions/setup-gradle@v4
-
       - name: Unit tests
         working-directory: android
-        # No Android SDK is needed for :core; settings.gradle.kts excludes :app when none is found.
-        run: ./gradlew :core:test --console=plain
-
-      - name: Test report
+        # Force :app out even though the runner has an SDK: this job is the SDK-free proof.
+        run: ./gradlew :core:test -Pnous.includeApp=false --console=plain
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
           name: core-test-results
           path: android/core/build/test-results/test/*.xml
+          if-no-files-found: ignore
+
+  app:
+    name: ":app (APK + unit tests)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Robolectric jar cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-${{ hashFiles('android/gradle/libs.versions.toml') }}
+      - name: Build and test
+        working-directory: android
+        env:
+          ANDROID_BETA_KEYSTORE_B64: ${{ secrets.ANDROID_BETA_KEYSTORE_B64 }}
+          ANDROID_BETA_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_BETA_KEYSTORE_PASSWORD }}
+        run: ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --console=plain
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nous-companion-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: app-test-results
+          path: |
+            android/app/build/test-results/**/*.xml
+            android/app/build/reports/lint-results-debug.html
           if-no-files-found: ignore

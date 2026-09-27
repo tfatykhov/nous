@@ -48,8 +48,9 @@ class SurfaceStore(private val nowMs: () -> Long = System::currentTimeMillis) {
     private val surfaceUpto = HashMap<String, Long>()
     private var activitySeq = 0L
 
-    private val listeners = mutableListOf<() -> Unit>()
+    private val listeners = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
     fun onChange(l: () -> Unit) { listeners += l }
+    fun removeListener(l: () -> Unit) { listeners -= l }
     private fun changed() { listeners.forEach { it() } }
 
     private fun markSeen(seq: Long): Boolean {
