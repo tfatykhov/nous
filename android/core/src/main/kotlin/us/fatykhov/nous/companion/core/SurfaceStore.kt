@@ -135,6 +135,19 @@ class SurfaceStore(private val nowMs: () -> Long = System::currentTimeMillis) {
         }
     }
 
+    /**
+     * A LOCAL two-way-binding write (an input's keystroke): patches the model
+     * in place with no seq, no observe(), no network — exactly the web's
+     * `setPointer(surface.dataModel, …)` from an adapter. Returns false when
+     * the surface is not held.
+     */
+    fun patchLocal(surfaceId: String, path: String, value: JsonElement?): Boolean {
+        val s = _surfaces[surfaceId] ?: return false
+        _surfaces[surfaceId] = s.copy(dataModel = Pointer.set(s.dataModel, path, value) ?: JsonObject(emptyMap()))
+        changed()
+        return true
+    }
+
     private fun observe(surfaceId: String, seq: Long?) {
         val meta = (_surfaces[surfaceId]?.dataModel as? JsonObject)?.get("meta") as? JsonObject
         val record = activity[surfaceId]

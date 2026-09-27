@@ -6,12 +6,13 @@ package us.fatykhov.nous.companion.core
  * JUnit manifest test and the always-on Python ratchet check against
  * (spec §8.3). Keep the three in step — the tests fail otherwise.
  *
- * PR 3: the vocabulary the six template builders emit, plus the basic
- * layout/display components they use.
+ * PR 3: the six template builders' vocabulary + basic layout/display.
+ * PR 4: the basic-catalog inputs, Modal and Tabs (two-way binding).
  */
 object Registry {
     val ported: Set<String> = setOf(
         "Text", "Image", "Icon", "Row", "Column", "List", "Card", "Divider", "Button",
+        "TextField", "CheckBox", "ChoicePicker", "Slider", "DateTimeInput", "Modal", "Tabs",
         "ApprovalPanel", "ActionReviewCard", "StatTile", "StatRow", "KeyValueTable",
         "DecisionCard", "ConfidenceMeter", "Timeline", "DagGraph", "MemoryGraph",
     )

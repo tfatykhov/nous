@@ -19,6 +19,13 @@ object Registry {
         "Card" to { n -> CardView(n) },
         "Divider" to { n -> DividerView(n) },
         "Button" to { n -> ButtonView(n) },
+        "TextField" to { n -> TextFieldView(n) },
+        "CheckBox" to { n -> CheckBoxView(n) },
+        "ChoicePicker" to { n -> ChoicePickerView(n) },
+        "Slider" to { n -> SliderView(n) },
+        "DateTimeInput" to { n -> DateTimeInputView(n) },
+        "Modal" to { n -> ModalView(n) },
+        "Tabs" to { n -> TabsView(n) },
         // nous-core (the six builders' vocabulary)
         "ApprovalPanel" to { n -> ApprovalPanelView(n) },
         "ActionReviewCard" to { n -> ActionReviewCardView(n) },

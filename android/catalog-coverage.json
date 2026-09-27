@@ -196,20 +196,20 @@
       }
     },
     "Tabs": {
-      "status": "unsupported",
+      "status": "ported",
       "props": {
-        "tabs": "ignored:pr4",
-        "weight": "ignored:pr4",
-        "accessibility": "ignored:pr4"
+        "tabs": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
       }
     },
     "Modal": {
-      "status": "unsupported",
+      "status": "ported",
       "props": {
-        "trigger": "ignored:pr4",
-        "content": "ignored:pr4",
-        "weight": "ignored:pr4",
-        "accessibility": "ignored:pr4"
+        "trigger": "handled",
+        "content": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
       }
     },
     "Divider": {
@@ -245,66 +245,84 @@
       }
     },
     "TextField": {
-      "status": "unsupported",
+      "status": "ported",
       "props": {
-        "label": "ignored:pr4",
-        "value": "ignored:pr4",
-        "placeholder": "ignored:pr4",
-        "variant": "ignored:pr4",
-        "checks": "ignored:pr4",
-        "weight": "ignored:pr4",
-        "accessibility": "ignored:pr4"
+        "label": "handled",
+        "value": "handled",
+        "placeholder": "handled",
+        "variant": "handled",
+        "checks": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      },
+      "enums": {
+        "variant": [
+          "longText",
+          "number",
+          "shortText",
+          "obscured"
+        ]
       }
     },
     "CheckBox": {
-      "status": "unsupported",
+      "status": "ported",
       "props": {
-        "label": "ignored:pr4",
-        "value": "ignored:pr4",
-        "checks": "ignored:pr4",
-        "weight": "ignored:pr4",
-        "accessibility": "ignored:pr4"
+        "label": "handled",
+        "value": "handled",
+        "checks": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
       }
     },
     "ChoicePicker": {
-      "status": "unsupported",
+      "status": "ported",
       "props": {
-        "label": "ignored:pr4",
-        "variant": "ignored:pr4",
-        "options": "ignored:pr4",
-        "value": "ignored:pr4",
-        "displayStyle": "ignored:pr4",
-        "filterable": "ignored:pr4",
-        "checks": "ignored:pr4",
-        "weight": "ignored:pr4",
-        "accessibility": "ignored:pr4"
+        "label": "handled",
+        "variant": "handled",
+        "options": "handled",
+        "value": "handled",
+        "displayStyle": "handled",
+        "filterable": "handled",
+        "checks": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      },
+      "enums": {
+        "variant": [
+          "multipleSelection",
+          "mutuallyExclusive"
+        ],
+        "displayStyle": [
+          "checkbox",
+          "chips"
+        ]
       }
     },
     "Slider": {
-      "status": "unsupported",
+      "status": "ported",
       "props": {
-        "label": "ignored:pr4",
-        "min": "ignored:pr4",
-        "max": "ignored:pr4",
-        "value": "ignored:pr4",
-        "steps": "ignored:pr4",
-        "checks": "ignored:pr4",
-        "weight": "ignored:pr4",
-        "accessibility": "ignored:pr4"
+        "label": "handled",
+        "min": "handled",
+        "max": "handled",
+        "value": "handled",
+        "steps": "handled",
+        "checks": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
       }
     },
     "DateTimeInput": {
-      "status": "unsupported",
+      "status": "ported",
       "props": {
-        "value": "ignored:pr4",
-        "enableDate": "ignored:pr4",
-        "enableTime": "ignored:pr4",
-        "min": "ignored:pr4",
-        "max": "ignored:pr4",
-        "label": "ignored:pr4",
-        "checks": "ignored:pr4",
-        "weight": "ignored:pr4",
-        "accessibility": "ignored:pr4"
+        "value": "handled",
+        "enableDate": "handled",
+        "enableTime": "handled",
+        "min": "ignored:native pickers carry no bounds in the beta",
+        "max": "ignored:native pickers carry no bounds in the beta",
+        "label": "handled",
+        "checks": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
       }
     }
   },
