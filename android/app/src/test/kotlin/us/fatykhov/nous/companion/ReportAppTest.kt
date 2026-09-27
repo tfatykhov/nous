@@ -65,8 +65,7 @@ class ReportAppTest {
         assertEquals("bad series states", 0, nodesTagged("series-state").size)
         assertTrue("stamp rendered", nodesTagged("stamp").isNotEmpty())
         assertTrue("sparklines rendered", nodesTagged("sparkline").isNotEmpty())
-        // Every literal MetricCard/ScoreCard label in the fixture reaches the screen.
-        val labels = doc["components"]!!.jsonObject.let { emptyList<String>() }   // components is an array; iterate below
+        // Every literal Section title in the fixture reaches the screen.
         for (c in doc["components"]!!.let { it as kotlinx.serialization.json.JsonArray }) {
             val o = c.jsonObject
             val kind = (o["component"] as? JsonPrimitive)?.content
