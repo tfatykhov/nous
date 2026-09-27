@@ -975,10 +975,20 @@ async def create_components(settings: Settings) -> dict:
     # register_a2ui_tools and the sweep task need the DAG store and
     # orchestrator, so they stay in the A2UI block below.
     surface_service = None
+    push_service = None
     if settings.a2ui_enabled:
+        from nous.a2ui.push import PushService
         from nous.a2ui.service import SurfaceService
 
-        surface_service = SurfaceService(database, settings, heart=heart)
+        # F097 §6.1: built BEFORE the surface service, which is itself built
+        # before the first expiry sweep — that startup sweep can send
+        # dismisses, and a push service constructed after it would miss them.
+        # Construction never touches the network and never raises on a bad
+        # config: it records the reason and reports itself unconfigured.
+        push_service = PushService(database, settings)
+        surface_service = SurfaceService(
+            database, settings, heart=heart, push=push_service
+        )
 
     # F038: DAG Orchestration
     dag_orchestrator = None
@@ -1197,6 +1207,7 @@ async def create_components(settings: Settings) -> dict:
         "ledger_store": ledger_store,
         "execution_ledger_task": execution_ledger_task,
         "surface_service": surface_service,
+        "push_service": push_service,
         "action_router": action_router,
         "a2ui_sweep_task": a2ui_sweep_task,
     }
@@ -1403,6 +1414,7 @@ def build_app(settings: Settings) -> Starlette:
         session_monitor=_lazy_component(components, "session_monitor"),
         context_logger=_lazy_component(components, "context_logger"),
         surface_service=_lazy_component(components, "surface_service"),
+        push_service=_lazy_component(components, "push_service"),
         action_router=_lazy_component(components, "action_router"),
         dag_orchestrator=_lazy_component(components, "dag_orchestrator"),
     )

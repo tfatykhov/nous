@@ -89,9 +89,25 @@ services:
       - NOUS_CROSS_ENCODER_TEXT_LIMIT=${NOUS_CROSS_ENCODER_TEXT_LIMIT:-512}
       # HuggingFace cache dir — pinned so the volume mount below matches
       - HF_HOME=/root/.cache/huggingface
+      # F097: FCM push for the Android companion. Inert until BOTH files below
+      # are mounted — an unconfigured push service reports why at
+      # GET /a2ui/push/config and sends nothing, so leaving these empty is a
+      # supported state, not a broken one. Telegram keeps firing either way.
+      - NOUS_A2UI_PUSH_ENABLED=${NOUS_A2UI_PUSH_ENABLED:-true}
+      - NOUS_A2UI_FCM_SERVICE_ACCOUNT_FILE=${NOUS_A2UI_FCM_SERVICE_ACCOUNT_FILE:-}
+      - NOUS_A2UI_FCM_GOOGLE_SERVICES_FILE=${NOUS_A2UI_FCM_GOOGLE_SERVICES_FILE:-}
+      - NOUS_A2UI_ANDROID_PACKAGE=${NOUS_A2UI_ANDROID_PACKAGE:-us.fatykhov.nous.companion}
+      - NOUS_A2UI_PUSH_TIMEOUT_SECONDS=${NOUS_A2UI_PUSH_TIMEOUT_SECONDS:-10}
+      - NOUS_A2UI_PUSH_MAX_INSTALLATIONS=${NOUS_A2UI_PUSH_MAX_INSTALLATIONS:-10}
     volumes:
       # F042: persist downloaded cross-encoder models across container restarts
       - huggingface_cache:/root/.cache/huggingface
+      # F097: the two Firebase files, read-only. The host paths come from the
+      # env so a deployment without push simply mounts nothing — uncomment and
+      # point NOUS_A2UI_FCM_*_FILE at the container paths to enable:
+      #   - ${NOUS_A2UI_FCM_HOST_DIR:-./secrets}:/run/secrets/fcm:ro
+      # The service account is a CREDENTIAL and never leaves the server; the
+      # app is served only the four public client values.
     depends_on:
       postgres:
         condition: service_healthy

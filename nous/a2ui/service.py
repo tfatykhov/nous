@@ -116,10 +116,19 @@ class _LockEntry:
 
 
 class SurfaceService:
-    def __init__(self, database: Database, settings: Any, heart: Any = None):
+    def __init__(
+        self,
+        database: Database,
+        settings: Any,
+        heart: Any = None,
+        push: Any = None,
+    ):
         self._db = database
         self._settings = settings
         self._heart = heart
+        # F097: the FCM leg. None (or unconfigured) means the Telegram ping is
+        # the only notification, which is exactly the pre-F097 behaviour.
+        self._push = push
         self._subscribers: set[asyncio.Queue] = set()
         self._pending_tasks: set[asyncio.Task] = set()
         # Per-surface serialization shared by the ActionRouter AND the expiry
@@ -520,9 +529,19 @@ class SurfaceService:
             else:
                 surface_id = f"nous:{built.origin}:{built.kind}:{uuid.uuid4().hex[:6]}"
                 nonce = secrets.token_urlsafe(16)
+                # F097: the push INTENT flag is written HERE, in the surface's
+                # own INSERT, not after FCM accepts. Stamping on acceptance
+                # would leave a permanent notification on any card resolved
+                # during the send, and the DAG approval path closes cards
+                # within milliseconds. Written once and never updated, so
+                # `updated_at` — which drives epoch checks and cap eviction —
+                # is untouched, and there is no window in which a fast resolve
+                # reads NULL and skips the dismiss.
+                will_push = self._push_intended(built, notify)
                 session.add(
                     A2uiSurface(
                         surface_id=surface_id,
+                        push_notified_at=now if will_push else None,
                         agent_id=agent_id,
                         origin=built.origin,
                         kind=built.kind,
@@ -631,7 +650,46 @@ class SurfaceService:
         should_notify = built.priority >= 1 if notify is None else notify
         if created and should_notify:
             self._schedule_bg(self._notify_telegram(built.title, surface_id, text=notify_text))
+            # F097: the same condition that stamped push_notified_at above.
+            # `_push_intended` is the single definition both read, so the flag
+            # can never disagree with whether a push was actually attempted.
+            if self._push_intended(built, notify):
+                self._schedule_bg(
+                    self._push.notify_surface(
+                        surface_id,
+                        title=built.title,
+                        body=notify_text or "",
+                        priority=built.priority,
+                        kind=built.kind,
+                        expires_at=expires_at,
+                    )
+                )
         return surface_id
+
+    def _push_intended(self, built: BuiltSurface, notify: bool | None) -> bool:
+        """Would a newly created `built` be pushed to a phone?
+
+        ONE definition, read both by the INSERT that stamps `push_notified_at`
+        and by the post-commit send. If these two ever diverge, either a card
+        is stamped and never pushed (a dismiss for nothing — harmless) or
+        pushed and never stamped (a notification that can never be cancelled
+        — not harmless), so they are not allowed to diverge.
+        """
+        if self._push is None or not getattr(self._push, "configured", False):
+            return False
+        return built.priority >= 1 if notify is None else bool(notify)
+
+    def _schedule_dismiss(self, surface_ids: Iterable[str]) -> None:
+        """Cancel the phone notifications for surfaces that just went terminal.
+
+        Only for rows whose `push_notified_at` is set: a dismiss for a card
+        that was never pushed is harmless but pointless, and the flag is the
+        only record of which those were.
+        """
+        if self._push is None or not getattr(self._push, "configured", False):
+            return
+        for surface_id in surface_ids:
+            self._schedule_bg(self._push.notify_dismiss(surface_id))
 
     def _create_envelope(
         self,
@@ -904,11 +962,18 @@ class SurfaceService:
             cancel_sub = self._block_pending_action(surface)
             surface.status = status
             surface.resolved_at = datetime.now(UTC)
+            # F097 dismiss site 1 of 3. Read BEFORE the commit (the attribute
+            # is expired afterwards) and acted on AFTER it — a dismiss for a
+            # transition that then rolled back would cancel a live card's
+            # notification.
+            was_pushed = surface.push_notified_at is not None
             row = A2uiOutbox(agent_id=surface.agent_id, surface_id=surface_id, envelope=envelope)
             session.add(row)
             await session.commit()
             seq = row.seq
         self._broadcast(seq, envelope)
+        if was_pushed:
+            self._schedule_dismiss([surface_id])
         if cancel_sub is not None:
             subtasks = getattr(self._heart, "subtasks", None) if self._heart else None
             if subtasks is not None:
@@ -1084,13 +1149,21 @@ class SurfaceService:
                                     A2uiSurface.expires_at <= claim_now,
                                 )
                                 .values(status="expired", resolved_at=claim_now)
-                                .returning(A2uiSurface.surface_id, A2uiSurface.dedup_key)
+                                .returning(
+                                    A2uiSurface.surface_id,
+                                    A2uiSurface.dedup_key,
+                                    # F097 dismiss site 2 of 3: carried out of
+                                    # the claim itself, so only a surface this
+                                    # sweep actually won is dismissed.
+                                    A2uiSurface.push_notified_at,
+                                )
                             )
                         )
                         .all()
                     )
                     if not claimed:
                         continue
+                    was_pushed = claimed[0][2] is not None
                     # Harness Phase 3 §3.7: a DAG approval card's node is the
                     # record of what happened; after an outage longer than
                     # wait + grace this startup expiry would otherwise write
@@ -1113,6 +1186,8 @@ class SurfaceService:
                     await session.commit()
                     seq = row.seq
                 self._broadcast(seq, envelope)
+                if was_pushed:
+                    self._schedule_dismiss([surface_id])
                 expired += 1
 
         async with self._db.session() as session:
@@ -1169,14 +1244,17 @@ class SurfaceService:
                             A2uiSurface.origin == "heartbeat",
                         )
                         .values(status="expired", resolved_at=now)
-                        .returning(A2uiSurface.surface_id)
+                        # F097 dismiss site 3 of 3.
+                        .returning(
+                            A2uiSurface.surface_id, A2uiSurface.push_notified_at
+                        )
                     )
                 )
-                .scalars()
                 .all()
             )
+            pushed = [row[0] for row in claimed if row[1] is not None]
             teardowns = []
-            for surface_id in claimed:
+            for surface_id, _ in claimed:
                 session.add(
                     A2uiAction(
                         agent_id=agent_id,
@@ -1196,6 +1274,7 @@ class SurfaceService:
 
         for row, envelope in teardowns:
             self._broadcast(row.seq, envelope)
+        self._schedule_dismiss(pushed)
         return len(claimed)
 
     # ---------------------------------------------------------------- reads

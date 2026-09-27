@@ -1346,6 +1346,44 @@ class A2uiSurface(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # F097 (migration 077): push INTENT, written inside this row's INSERT
+    # transaction when the surface was created AND was worth notifying about.
+    # Never written by a later UPDATE — `updated_at` drives epoch checks and
+    # cap eviction, and a second write would open a window in which a fast
+    # resolve reads NULL and skips the dismiss.
+    push_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class A2uiPushInstallation(Base):
+    """F097: one Android install that can receive companion pushes.
+
+    `installation_id` is a UUID the app mints once per install and is an
+    identifier, not a credential. `fcm_token` is cleared (not deleted) when
+    FCM reports the token is dead, so the row survives as a record of the
+    install with its `last_error` intact.
+    """
+
+    __tablename__ = "a2ui_push_installations"
+    __table_args__ = ({"schema": "nous_system"},)
+
+    agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    installation_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    platform: Mapped[str] = mapped_column(Text, nullable=False, default="android")
+    fcm_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    app_version: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    notifications_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class A2uiOutbox(Base):
