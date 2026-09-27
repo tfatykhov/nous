@@ -1,319 +1,471 @@
 # F097 — Native Android Companion (beta)
 
-> **Status:** 📋 Spec — rev 1, 2026-09-27. Team review pending.
+> **Status:** 📋 Spec — rev 2, 2026-09-27. Rev 1 was reviewed by a three-person team (protocol/server, Android platform, devil's advocate); every confirmed finding is folded in (§15).
 > **Builds on:** [F092](F092-a2ui-companion.md), [F092.1](F092.1-ephemeral-micro-apps.md), [F092.2](F092.2-agent-actions.md), F092.4 (#637), [F093](F093-microapp-design-system.md), [F094](F094-visualization-vocabulary.md), [F096](F096-report-vocabulary.md).
 
 ## 1. Summary
 
-A native Android app (Kotlin, Jetpack Compose) that renders the same A2UI surfaces as the web companion at `/companion`, plus **push notifications** via Firebase Cloud Messaging (FCM). The web companion stays unchanged and remains the default. The native app is an **opt-in beta alternative** until it reaches rendering parity.
+A native Android app (Kotlin, Jetpack Compose) that renders the same A2UI surfaces as the web companion at `/companion`, plus **push notifications** via Firebase Cloud Messaging (FCM).
 
-**Not in scope:**
-- A chat client. The companion has no free-text input today.
-- Offline-first rendering.
-- iOS.
-- Any change to web-companion behaviour.
-
-**Access:** the app reaches Nous over the user's Tailscale tailnet (§5); the public web path is unchanged.
+- The web companion keeps its production behaviour and remains the default.
+- The native app is an **opt-in beta alternative** until it reaches rendering parity.
+- **Access:** the app reaches Nous over the user's Tailscale tailnet (§5). The public web path is unchanged.
+- **Not in scope:** a chat client (the companion has no free-text input today), offline-first rendering, iOS.
 
 ### 1.1 What changed since F092 Q2
 
-F092 resolved Q2 as "PWA only for v1" and kept Telegram as the only push channel, on the argument that a second channel splits notification state. The user has directed both reversals: a native app, and push inside it. The reasoning behind the old objection still holds, so the design answers it structurally:
+F092 resolved Q2 as "PWA only for v1" and kept Telegram as the only push channel, arguing that a second channel splits notification state. The user has directed both reversals. The design answers the underlying objection structurally:
 
-- **A push is a pointer to a surface, never a record.** When a surface leaves `live` by *any* path, the server sends a `dismiss` message and the phone removes the notification (§6.4). Paths include: an action in the web companion, the expiry sweep, heartbeat invalidation, and cap eviction.
-- **Duplicate alerts are a setting, not a design flaw.** `NOUS_A2UI_PUSH_TELEGRAM_POLICY=fallback` stops Telegram companion pings whenever a push was delivered (§6.5).
+- **A push is a pointer to a surface, never a record.** When a surface leaves `live` by any path, the server sends a `dismiss` and the phone removes the notification (§6.4).
+- **The phone reconciles against the server.** Every hydration cancels notifications for surfaces that are no longer live (§6.6), so a lost dismiss self-heals on the next open.
+- **Duplicate alerts are accepted during the beta.** Telegram and push both fire. A "Telegram only as fallback" mode was drafted and **removed** after review: FCM *accepting* a message says nothing about delivery, and a lost or reinstalled phone would silently suppress Telegram for priority-2 approval cards (§15, DA-1).
 - **The cost of a second renderer is accepted and bounded:**
-  - a JVM-testable `:core` that ports the web renderer's rules case-for-case (§10);
-  - a catalog-coverage ratchet in CI (§8.3);
-  - a visible "open in web" fallback for any component not yet ported (§8.2).
+  - golden vectors shared by the web and native test suites (§10.1);
+  - a hash lock on the web sources that have no vectors (§10.2);
+  - a prop-level coverage manifest enforced in the always-on CI (§8.3);
+  - a visible "open in web" fallback (§8.2).
 
 ## 2. Review of the current approach (2026-09-27)
 
-1. **A single notification choke point.** Every companion ping goes through `SurfaceService._notify_telegram` (`nous/a2ui/service.py:1395`). It is scheduled once, at `service.py:633`, when a surface is `created` with priority ≥ 1 or explicit `notify`.
-2. **Every end of life is a `live → resolved|expired` transition** that emits `deleteSurface`:
-   - resolve (`:881`)
-   - close (`:923`)
-   - expiry sweep (`:1033`)
-   - heartbeat invalidation (`:1150`)
-   - cap eviction (`:877`)
+1. **One notification choke point.** Every companion ping goes through `SurfaceService._notify_telegram` (`nous/a2ui/service.py:1395`), scheduled at `service.py:633` after commit, when `created && should_notify` (priority ≥ 1 or explicit `notify`).
+2. **Every end of life is a `live → resolved|expired` write, made by three writers:**
+   - `resolve()` (`:881`), which also covers `close` (`:923`), `close_by_dedup_key`, cap eviction (`:877`) and action-driven resolution;
+   - `expire_sweep`'s bulk `UPDATE … RETURNING` (`:1078-1087`);
+   - `invalidate_heartbeat_surfaces`'s bulk `UPDATE … RETURNING` (`:1165-1172`).
 
-   Dedup replacement also emits `deleteSurface`+`createSurface`, but it is **not** an end of life: the row stays `live`.
-3. **The hard parts are rules, not lines.** The web renderer is about 8,100 production lines: about 2,900 core, plus 5,200 across 37 adapters. The invariants a port must keep exactly are listed in §3.2.
-4. **Golden fixtures already exist:**
-   - `tests/fixtures/a2ui/examples/*.json` — 37 upstream conformance examples;
-   - `dashboard-app/src/companion/catalog/__fixtures__/f096-report-app.json` — a whole report app, CI-locked to the Python builder.
-5. **Documentation drift:**
-   - There are **six** themes, not five (`compose.py:47-57`).
-   - `/a2ui/message` from F092 §5.1 was never built.
-   - F092 §10.7's per-connection session check on the SSE stream is not implemented in `a2ui_stream` (`rest.py:3044-3072`).
-6. **Web push was deliberately absent** (`companion-sw.js:16-18`), so push is new server work, not a port.
+   Dedup replacement emits `deleteSurface`+`createSurface` (`:504-518`) but is **not** an end of life: the row stays `live`, and `created` is false.
+3. **The hard parts are rules, not lines.** The web renderer is 2,901 core lines plus 5,113 across 37 adapters. The invariants are listed in §3.2.
+4. **Golden inputs exist:**
+   - `tests/fixtures/a2ui/examples/*.json` holds **43** upstream conformance examples;
+   - `dashboard-app/src/companion/catalog/__fixtures__/f096-report-app.json` is a whole report app, CI-locked to its Python builder (`tests/test_a2ui_report.py:466-474`).
+5. **Graph layouts are not modules.** The MemoryGraph radial and DagGraph wave layouts live inline in `$derived` blocks inside `MemoryGraphView.svelte` and `DagGraphView.svelte`, and have no tests. Porting them is extraction, not translation (§8.5).
+6. **Drift from the docs:**
+   - there are six themes, not five (`compose.py:47-57`), and each declares **24** CSS custom properties;
+   - `/a2ui/message` (F092 §5.1) was never built;
+   - F092 §10.7's per-connection session check is not implemented in `a2ui_stream` (`rest.py:3044-3072`);
+   - web push was deliberately absent (`companion-sw.js:16-18`).
+7. **`updated_at` is load-bearing.** It has no ORM `onupdate` (`models.py:1340-1342`), and it drives both `_assert_same_epoch` (`actions.py:1389`) and cap-eviction order (`service.py:855-869`). Push code must never write it (§6.4).
 
 ## 3. Client contract
 
 ### 3.1 Endpoints
 
-| Method | Path | Use |
+| Method | Path | Shape |
 |---|---|---|
-| GET | `/a2ui/surfaces` | Index `{latest_seq, surfaces:[{surface_id, kind, origin, title, priority, created_at, updated_at}]}` — never carries nonces |
-| GET | `/a2ui/surfaces/{id}` | Snapshot as one `createSurface` envelope + header `X-A2UI-Upto-Seq` |
-| GET | `/a2ui/stream?since=N` | SSE: `event: a2ui` (`id:` = outbox seq), `event: control` `{"type":"resync"}` (no `id:`), `: keepalive` comments |
-| POST | `/a2ui/action` | `{version, action:{name, surfaceId, sourceComponentId, timestamp, context, metadata:{extensions:{com_nous_nonce}}}, a2uiRendererDataModel:{version, surfaces:{id: model}}}`; `Content-Type: application/json` required |
-| POST | `/a2ui/call` | `callAgentFunction` RPC (`app.refresh`, `app.refine`, `expandGraphNode`, `loadDecisionDetail`); the response body is the `agentFunctionResponse` |
+| GET | `/a2ui/surfaces` | Index `{latest_seq, surfaces:[{surface_id, kind, origin, title, priority, created_at, updated_at}]}`. Never carries nonces. |
+| GET | `/a2ui/surfaces/{id}` | One `createSurface` envelope + header `X-A2UI-Upto-Seq`. |
+| GET | `/a2ui/stream?since=N` | SSE: `event: a2ui` (`id:` = outbox seq), `event: control` `{"type":"resync"}` (no `id:`), `: keepalive` comments every 15 s of silence. |
+| POST | `/a2ui/action` | `{version:"v1.0", action:{name, surfaceId, sourceComponentId, timestamp, context, metadata:{extensions:{com_nous_nonce}}}, a2uiRendererDataModel:{version:"v1.0", surfaces:{<id>: model}}}`. The nonce sits **inside** `action`. |
+| POST | `/a2ui/call` | `{version:"v1.0", callAgentFunction:{surfaceId, functionCallId (non-empty), callFunction:{call, args}}, metadata:{extensions:{com_nous_nonce}}}`. The nonce sits at the **top level** (`actions.py:177`, `transport.ts:241-249`). The response body is `{version, agentFunctionResponse:{functionCallId, value \| error}}`. |
 
-Plus the push endpoints in §6.3.
+Both POSTs require `Content-Type: application/json` (415 otherwise). Push endpoints are in §6.3.
 
-### 3.2 Sync and render rules (ported exactly; each cites the web source)
+### 3.2 Sync, render and shell rules (ported exactly)
 
+**Sync**
 - **R1 — Hydration-first cycle** (`transport.ts:84-165`). In order:
   1. Fetch the index.
-  2. Prune surfaces the index no longer lists.
-  3. Apply every snapshot as `createSurface`, bypassing dedupe, and record `X-A2UI-Upto-Seq`.
+  2. Prune surfaces the index omits.
+  3. Apply every snapshot as `createSurface`, bypassing dedupe, and record its `X-A2UI-Upto-Seq`.
   4. Set the delivered floor to `latest_seq`.
-  5. Open the stream at that floor.
-- **R2 — Never auto-resume.** On any stream error or EOF, rerun R1 with exponential backoff capped at 30 s.
+  5. Open the stream with `?since=` that floor.
+
+  A snapshot 404 aborts the whole cycle into backoff (`transport.ts:107`).
+- **R2 — Never auto-resume.** The app uses its own SSE reader over OkHttp, never a library with automatic reconnect, and never sends `Last-Event-ID`: the server prefers that header over `since` (`rest.py:3052`), and a highest-seen id is not a contiguous floor. Any stream error, EOF or read timeout reruns R1 with exponential backoff capped at 30 s (`transport.ts:138-162`). A stream error rehydrates **without** resetting the dedupe cursors (`transport.ts:138-155` vs `167-173`).
 - **R3 — Membership dedupe** with a contiguous-prefix floor, never a max watermark (`store.svelte.ts:80-107`).
-- **R4 — Per-surface snapshot watermark.** An envelope at or below `upto` is not reapplied (`store.svelte.ts:109-143`).
-- **R5 — `control/resync`** discards local state and reruns R1.
-- **R6 — Nonce** comes only from `createSurface.metadata.extensions.com_nous_nonce`. It rotates on replacement, not on refine.
-- **R7 — `updateComponents` merges by id and never deletes.** For `updateDataModel`: a missing, empty or `/` path replaces the whole model; otherwise it is an RFC 6901 upsert, and `null` deletes. Unescape `~1` before `~0` (`pointer.ts:15`).
-- **R8 — Actions never throw.** Rejections `{error:{code,message}}` render inline.
-- **R9 — Activity holds (F092.4).**
-  - A 200 from refresh or refine holds until the **exact** returned outbox seq is applied, or a snapshot watermark covers it. The hold is bounded at 10 s (`activity.ts:72-124`).
-  - `app.act` staleness comes from the stamp's `timeout_s`.
-- **R10 — Freshness.** Read `AppHeader.staleAfterS` from the component; 3600 is only the fallback.
+- **R4 — Per-surface snapshot watermark.** An envelope at or below `upto` is not reapplied. It is still **marked seen** first, so it counts as delivered (`store.svelte.ts:135-143`).
+- **R5 — `control/resync`** drops surfaces and cursors and reruns R1. It **preserves** in-flight activity records (`activity`, `doneAt`, `tappedAt`, `stampSeen`; `store.svelte.ts:362-375`).
+- **R6 — Nonce** comes only from `createSurface.metadata.extensions.com_nous_nonce`. It rotates on dedup replacement, not on refine.
+- **R7 — Model updates.** `updateComponents` merges by id and never deletes. For `updateDataModel`:
+  - a missing, empty or `/` path replaces the whole model;
+  - otherwise it is an RFC 6901 upsert, and `null` deletes;
+  - unescape `~1` before `~0` (`pointer.ts:15`);
+  - missing intermediates become an array when the next token is numeric, otherwise an object. That is a local convention shared with `service.py::_pointer_set`, not RFC 6901.
+
+**Interaction**
+- **R8 — Actions never throw.** `{error:{code,message}}` renders inline.
+- **R9 — Two activity holds (F092.4).**
+  - *Model hold:* a 200 from `app.refresh` / `app.refine` holds until the **exact** returned outbox seq is applied, or a snapshot watermark covers it, bounded at 10 s (`activity.ts:72-124`).
+  - *Stamp hold:* `app.act` holds until `stampSeen` changes from its value when the record began, or the footer's own timeout expires (`store.svelte.ts:295-305`).
+  - `/meta/pendingAction` staleness comes from the stamp's `timeout_s`.
+- **R10 — Freshness.** Read `AppHeader.staleAfterS`; 3600 is only the fallback. Timestamps are parsed with `OffsetDateTime`, which accepts both `Z` and `+00:00`, because production emits `+00:00` (`compose.py:312`) and `Instant.parse` rejects offsets on older Android runtimes.
 - **R11 — Walker.** Cycle guard by ancestor list, depth cap 64. Unknown, dangling, cycle and depth nodes render inert placeholders and never throw (`Renderer.svelte`).
-- **R12 — Templates.** `ChildList {componentId, path}` expands once per array item with a scope; the server truncation marker `{_truncated, omitted}` becomes a footer note (`Children.svelte`, `functions.ts:41-70`).
+- **R12 — Templates.** `ChildList {componentId, path}` expands once per array item with a scope. The truncation marker `{_truncated, omitted}` becomes a footer note (`Children.svelte`, `functions.ts:41-70`).
 - **R13 — Buttons.**
-  - `event` actions go to `/a2ui/action`.
-  - `functionCall` resolves locally through the basic function table, never through the agent RPC.
+  - `event` goes to `/a2ui/action`;
+  - `functionCall` resolves locally through the basic function table, never the agent RPC;
   - `openUrl` is allowlisted to `https?:` and `mailto:`.
+- **R14 — Unknown enum values fall back** to the web default (for example, an unknown `Section.layout` renders as `stack`; `theme.test.ts:81`).
+
+**Shell**
+- **R15 — Titles and close-all.**
+  - Chip and list titles are never evaluated through effectful functions or `formatString` (`Companion.svelte:85-148`).
+  - Close-all is a two-tap arm with a 4 s auto-disarm, and closes only the set the user saw (`Companion.svelte:222-246`).
+- **R16 — Surface screen.**
+  - It never navigates away on `deleteSurface`, because replacement arrives as delete + create for the same id.
+  - A surface absent after hydration shows "Surface not found — it may have resolved or expired" (`Companion.svelte:313`).
+- **R17 — Warm resume.** On `ON_START` the store is marked *resyncing*, and actions are disabled until R1 completes. A process that survived in the background must not present old state as current.
+
+**Formatting parity** (JS semantics are the reference; checked by golden vectors, §10.1)
+- Figures use `Locale.ROOT`.
+- `toFixed(n)` is emulated with `BigDecimal(double)` and `HALF_UP`, the double's exact binary value, so `1.005 → "1.00"` as in V8.
+- Integral doubles print without `.0`.
+- A documented coercion helper reproduces `Number("") === 0` for the `numeric` check.
+- `Intl.PluralRules` / `NumberFormat` / `DateTimeFormat`-backed functions go through a `Formatter` interface: `:app` implements it with `android.icu`, and JVM tests use a documented stand-in.
+- Regex checks use `java.util.regex`. Dialect differences from JS are accepted and listed in the coverage manifest.
 
 ## 4. Architecture
 
 ```
-Nous: SurfaceService.push_built ─► _notify() ─┬─► Telegram leg (unchanged)
-                                              └─► PushService ─► FCM HTTP v1
-      terminal transition ─► PushService.dismiss(surface) when pushed_at set
-Android (android/):
-  :core  pure Kotlin/JVM — envelopes, SSE parser, SyncEngine (R1–R5), SurfaceStore
-         (R3/R4/R7), JSON Pointer, dynamic binding + function table, walker (R11/R12),
-         markdown-lite, chart + graph geometry, activity/freshness (R9/R10)
-  :app   Compose UI, catalog renderers, OkHttp transport, FCM service, settings
+Nous
+  push_built (INSERT txn sets push_notified_at when notifying) ─► after commit:
+      ├─► Telegram leg (unchanged)
+      └─► PushService.notify ─► FCM HTTP v1 (concurrent fan-out, one overall timeout)
+  resolve() │ expire_sweep │ invalidate_heartbeat_surfaces  (after commit, if push_notified_at)
+      └─► PushService.dismiss ─► FCM (NORMAL)
+Android (android/)
+  :core  pure Kotlin/JVM — envelopes, SSE parser, SyncEngine (R1–R5), SurfaceStore (R3/R4/R7),
+         JSON Pointer, binding + function table, walker (R11/R12/R14), markdown-lite,
+         chart/figure/graph geometry, activity/freshness (R9/R10)
+  :app   Compose UI, catalog renderers, OkHttp transport, FCM service, token Worker, settings
 ```
 
-**Split rule:** anything that decides *what* to show lives in `:core`, tested on the plain JVM. `:app` decides *how* it looks, plus the Android plumbing. This also matches the build environment: this machine has a JDK but no Android SDK, so `:app` is compiled and tested in CI (§11).
+**Split rule:** what to show lives in `:core`, tested on the plain JVM (this machine has a JDK but no Android SDK). How it looks, plus the Android plumbing, lives in `:app`, which CI builds and tests (§11).
 
 ## 5. Access — Tailscale (decided by the user, 2026-09-27)
 
-The web companion keeps its public path: Traefik + oauth2-proxy with Google sign-in, unchanged. The native app does **not** use the public endpoint. It reaches Nous over the user's **tailnet**:
+The web companion keeps its public path (Traefik + oauth2-proxy with Google sign-in, unchanged). The native app reaches Nous over the user's **tailnet**:
 
-- **Server side.** Tailscale runs on the Nous host, and `tailscale serve` publishes HTTPS on `https://<host>.<tailnet>.ts.net`, proxying to the local Nous port (`127.0.0.1:8383` on prod). The tailnet needs MagicDNS and HTTPS certificates enabled. There is no Traefik change, no public exposure for the app, and no Nous auth code.
-- **Who can connect** is decided by tailnet membership plus the tailnet ACL. For a single-user tailnet, that means the user's own devices.
-- **Phone side.** Tailscale's app-based split tunneling (v1.96.2+ supports *include* mode) can restrict the VPN to the Nous Companion app. Either way, only tailnet-addressed traffic uses the tunnel unless an exit node is selected.
-- **App side.** The app is configured with one base URL (the `ts.net` HTTPS URL) and sends no credentials. Because Serve provides a real certificate, the app needs no cleartext-traffic exception.
-- **Push is independent of the tunnel.** Nous calls FCM outbound over the internet, and the phone receives FCM through Google Play services.
-- **Development and CI** target a local Nous (`http://10.0.2.2:8000` from the emulator). Debug builds allow cleartext for that one host only.
-
-**Accepted limitation:** the app works only while the phone is connected to the tailnet. Push notifications still arrive when it isn't; tapping one opens the app, which shows "not connected" until Tailscale is up.
+- **Server.** Tailscale runs on the Nous host, and `tailscale serve` publishes HTTPS on `https://<host>.<tailnet>.ts.net`, proxying to the local Nous port (`127.0.0.1:8383` on prod). MagicDNS and HTTPS certificates must be enabled. There is no Traefik change, no public exposure for the app, and no Nous auth code.
+- **Who can connect** is set by tailnet membership plus the tailnet ACL.
+- **Phone.** Tailscale's app-based split tunneling (v1.96.2+ has *include* mode) can restrict the VPN to Nous Companion. Only tailnet-addressed traffic uses the tunnel unless an exit node is selected.
+- **App.** One base URL, no credentials.
+  - Release builds allow **HTTPS only**.
+  - Debug builds allow cleartext through a debug-only network security config, for `http://10.0.2.2:8000` (emulator → local Nous).
+  - The manifest declares `ACCESS_LOCAL_NETWORK` (enforced on Android 17+ at targetSdk 37). The Connect screen requests it before the first request when the base-URL host resolves to a private, link-local, CGNAT (`100.64/10`) or `.local` address. A connect timeout while it is denied is reported as "local network permission required", not as a network error. Whether Android classifies Tailscale's `100.x` addresses as local is on the device checklist (§10.6).
+- **Push is independent of the tunnel.** Nous calls FCM outbound; the phone receives through Google Play services.
+- **Limitation:** the app works only while the phone is on the tailnet. Pushes still arrive; tapping one shows "not connected" until Tailscale is up.
+- **Exposure note:** the `ts.net` address exposes the whole Nous API to tailnet devices. That is the same exposure the LAN port `:8383` already has.
 
 ## 6. Push notifications
 
-### 6.1 Channel
+### 6.1 Channel and token minting
 
-FCM HTTP v1 with **data-only** messages, so the app owns display and dismissal. The server mints OAuth tokens from a service-account file using `google-auth`, which is already a dependency.
+- FCM HTTP v1 with **data-only** messages, so the app owns display and dismissal.
+- OAuth access tokens come from the service-account file via `google-auth` (already a dependency). Minting uses the synchronous transport, so it runs in `asyncio.to_thread`, single-flight under an `asyncio.Lock`, and is cached until shortly before expiry. The loop-stall watchdog exists because of this class of blocking call.
+- `PushService` is constructed before the first expiry sweep in `main.py`, because the startup sweep can send dismisses.
 
-### 6.2 Runtime Firebase config (one generic APK)
+### 6.2 Runtime Firebase config (one generic APK; the repo is public)
 
-- The server reads the Firebase console's `google-services.json` and picks the client entry for `NOUS_A2UI_ANDROID_PACKAGE`.
-- It serves the public client identifiers from `GET /a2ui/push/config` as `{enabled, project_id, application_id, api_key, sender_id}`.
-- The app calls `FirebaseApp.initializeApp(context, options)` with them, and caches them so `Application.onCreate` can initialise Firebase before `FirebaseMessagingService` runs on a cold start.
-- The APK therefore carries no per-deployment Firebase file.
-- If the project changes, the app must be restarted.
+- **Server mapping.** The server reads the console's `google-services.json` and selects the client whose `android_client_info.package_name == NOUS_A2UI_ANDROID_PACKAGE`:
+  - `project_info.project_id` → `project_id`
+  - `client_info.mobilesdk_app_id` → `application_id`
+  - `api_key[0].current_key` → `api_key`
+  - `project_info.project_number` → `sender_id`
+- **Server validation.** Before serving `GET /a2ui/push/config`: non-empty project id, app id containing `:`, API key matching `^A[\w-]{38}$`, numeric sender id. On any failure the endpoint returns `{enabled:false, reason}`.
+- **The app re-validates** with the same checks before caching or initialising. Malformed options make Firebase Installations throw on FCM's sync thread at every process start.
+- **Cache.** A small file in `noBackupFilesDir`, read synchronously in `Application.onCreate` (never `runBlocking` over DataStore).
+- **Initialisation.** `FirebaseApp.initializeApp(ctx, options)`, guarded by `FirebaseApp.getApps(ctx).isEmpty()`.
+  - The manifest removes `FirebaseInitProvider` (`tools:node="remove"`) and sets `firebase_messaging_auto_init_enabled=false`.
+  - The only token fetch is the registration Worker, under try/catch.
+  - `Application.onCreate` runs before any service or receiver, so a cold start triggered by an FCM message finds the default app.
+- **Changing Firebase projects** takes effect on the next process start; no mismatch UI.
+- **No config before first open.** Until the app has been opened once after install it has no Firebase config, so no token and no pushes.
+- **API key restriction.** If the Firebase API key carries an Android-app restriction, register the SHA-1 of the beta signing key (§11).
 
-### 6.3 Endpoints
+### 6.3 Endpoints and storage
 
 | Method | Path | Body / result |
 |---|---|---|
-| GET | `/a2ui/push/config` | as above; `{enabled:false, reason}` when unconfigured |
-| PUT | `/a2ui/push/tokens` | `{installation_id, fcm_token, name, app_version}` → upsert; `fcm_token:null` deregisters |
-| DELETE | `/a2ui/push/tokens/{installation_id}` | deregister |
-| POST | `/a2ui/push/test` | `{installation_id}` → send a test push to that installation |
+| GET | `/a2ui/push/config` | §6.2 |
+| PUT | `/a2ui/push/tokens` | `{installation_id, fcm_token, name, app_version, notifications_enabled}`. Upserts; `fcm_token` is required. |
+| DELETE | `/a2ui/push/tokens/{installation_id}` | The only way to deregister. |
+| GET | `/a2ui/push/installations` | List for the operator: name, platform, app version, notifications flag, created/updated times, last error. Never the token. |
+| POST | `/a2ui/push/test` | `{installation_id}`. Sends a test push; rate-limited by the existing a2ui limiter. |
 
-- `installation_id` is a random UUID the app generates once. It identifies an install for token upsert; it is **not** a credential.
-- Storage: migration `077_a2ui_push.sql` creates `nous_system.a2ui_push_installations` with columns `installation_id` PK, `agent_id`, `name`, `platform`, `fcm_token`, `app_version`, `created_at`, `updated_at`, `last_error`. It also adds `pushed_at TIMESTAMPTZ NULL` to `nous_system.a2ui_surfaces`.
+- **`installation_id`** is a random UUID generated once per install, stored in `noBackupFilesDir`. It is not a credential.
+- **Migration `077_a2ui_push.sql`:**
+  - creates `nous_system.a2ui_push_installations` with PK `(agent_id, installation_id)` and columns `name`, `platform`, `fcm_token`, `app_version`, `notifications_enabled`, `created_at`, `updated_at`, `last_error`;
+  - adds `push_notified_at TIMESTAMPTZ NULL` to `nous_system.a2ui_surfaces`.
+- **Bounds (not access control):**
+  - at most `NOUS_A2UI_PUSH_MAX_INSTALLATIONS` (10) per agent; a new id beyond the cap gets 409;
+  - `name` is at most 40 characters and `app_version` at most 32, with control characters stripped;
+  - the first registration of a new `installation_id` sends a Telegram tripwire: "New companion push installation: <name>".
 
-### 6.4 Messages
+### 6.4 Messages and lifecycle
 
-All values are strings; the protocol version field is `v:"1"`.
+All data values are strings. `v:"1"`, and `android.restricted_package_name` = the package.
 
-| type | Fields | FCM android.priority | Sent when |
+| type | Fields | FCM priority / TTL | Sent when |
 |---|---|---|---|
-| `surface` | `surface_id, title, body, priority, kind` | HIGH, ttl 24 h | the same condition that sends the Telegram ping (`created && should_notify`) |
-| `dismiss` | `surface_id` | NORMAL | a `live → resolved/expired` transition of a surface whose `pushed_at` is set |
-| `test` | `title, body` | HIGH | `POST /a2ui/push/test` |
+| `surface` | `surface_id, title (≤100 chars), body (≤240 chars; notify_text or ""), priority, kind, expires_at?` | HIGH; TTL = `clamp(expires_at − now, 60 s, 24 h)`, else 24 h | the Telegram condition (`created && should_notify`) |
+| `dismiss` | `surface_id` | NORMAL; TTL 28 d | after commit of a terminal transition of a row whose `push_notified_at` is set |
+| `test` | `title, body` | HIGH; 1 h | `POST /a2ui/push/test` |
 
-- **Content** is the Telegram text: strings already on the card, which the push censor has already checked. The body is truncated to 240 characters to stay under FCM's 4 KB limit.
-- **`pushed_at`** is set only when at least one `surface` message is accepted by FCM. Dismisses therefore go only to surfaces that actually produced a notification.
-- **Dedup replacement never dismisses**, because the row stays `live`.
-- **Invalid tokens** (FCM `UNREGISTERED`, or `INVALID_ARGUMENT` naming the token) clear `fcm_token` and record `last_error`.
-- **Other failures** log a WARNING and are not retried, matching the best-effort contract of the Telegram leg. The surface itself is durable, so a lost push loses only the pointer.
+**Intent flag, not acceptance flag.**
+- `push_notified_at` is written **in the INSERT transaction** of `push_built` when `created && should_notify` and push is configured. It is never written by a later UPDATE, so `updated_at` is untouched and there is no window in which a fast resolve sees NULL.
+- A dismiss sent to a phone that never got the notification is a harmless cancel.
+- *Rejected:* stamping after FCM accepts. That leaves permanent notifications for cards resolved during the send; the DAG approval path closes cards within milliseconds (`orchestrator.py:3006-3008`).
+
+**Dismiss sites** (exactly three, each scheduled after commit):
+1. `resolve()`;
+2. `expire_sweep`'s claim loop (its `RETURNING` gains `push_notified_at`);
+3. `invalidate_heartbeat_surfaces` (its `RETURNING` gains `push_notified_at`).
+
+Dedup replacement never dismisses.
+
+**Recipients and errors:**
+- Installations with a token **and** `notifications_enabled`. FCM deprioritises apps whose notifications are denied.
+- Sends fan out concurrently (`asyncio.gather`) under one overall `NOUS_A2UI_PUSH_TIMEOUT_SECONDS`. "Sent" means **accepted by FCM**; the server cannot observe delivery.
+- The token is cleared and `last_error` recorded on `UNREGISTERED`, on `SENDER_ID_MISMATCH`, and on `INVALID_ARGUMENT` **only** when the structured `BadRequest.fieldViolations` names `message.token`. Any other error is a WARNING with no retry: best-effort, like the Telegram leg. The surface is durable, so a lost push loses only the pointer.
+- Title and body are truncated at code-point boundaries, and the payload is checked against FCM's 4,096-byte data limit.
 
 ### 6.5 Delivery policy
 
-| `NOUS_A2UI_PUSH_TELEGRAM_POLICY` | Behaviour |
-|---|---|
-| `always` (default while in beta) | Telegram and FCM both fire. |
-| `fallback` | FCM first; the Telegram companion ping fires only if FCM delivered to zero installations. |
+Telegram and FCM both fire, and there is no setting. Duplicate alerts are the accepted cost of the beta. A future "Telegram as fallback" would need a device **ack** (the app confirms it posted the notification, and a delayed Telegram ping fires on no ack). It must never suppress priority-2 cards. It is out of scope here.
 
 ### 6.6 Android handling
 
-- **`surface`:**
-  - Post a notification tagged with `surface_id` on a channel by priority: `approvals` (2, high), `updates` (1, default), `general` (0, low).
-  - Tapping opens the surface in the app.
-  - Skip the notification if that surface is already on screen.
-- **`dismiss`:** cancel the notification by tag. Opening a surface in the app also cancels its notification.
-- **Token lifecycle:** `onNewToken`, and every app start, re-registers through WorkManager (network constraint, exponential backoff).
-- **Permission:** Android 13+ asks for `POST_NOTIFICATIONS` at first run.
+- **App in the foreground** (`ProcessLifecycleOwner` STARTED): no system notification is posted, because the live UI already shows the surface.
+- **`surface`:** ignored if tombstoned. Otherwise `notify(tag = surface_id, id = 1)`:
+  - on versioned channels `approvals_v1` (priority 2, high), `updates_v1` (1, default), `general_v1` (0, low);
+  - with `setTimeoutAfter(expires_at − now)` when present;
+  - the tap is an **explicit** `PendingIntent` to `MainActivity` (`FLAG_IMMUTABLE`), whose data URI `nouscompanion://s/<id>` exists only to make each intent distinct. It is not an exported intent filter; there is no public scheme.
+  - `MainActivity` is `singleTop` and handles `onNewIntent`.
+- **`dismiss`:** `cancel(surface_id, 1)`, then add a tombstone (persisted, 48 h, at most 500 ids).
+- **Reconcile** on every R1 hydration: cancel every active notification whose tag is not in the live index. Also on the next foreground after `onDeletedMessages()`.
+- **Tapping a surface that is no longer live** shows R16's "not found" state and cancels the notification.
+- The SSE `deleteSurface` event **never** cancels a notification (replacement arrives as delete + create).
+- **Token Worker:** `enqueueUniqueWork("push-token", REPLACE)`.
+  - It reads `FirebaseMessaging.token` itself, is a no-op without valid cached options, and sends `notifications_enabled` (`areNotificationsEnabled()` and the target channel not `IMPORTANCE_NONE`).
+  - It runs on every app start, on resume, and from `onNewToken`. Failures show in Settings diagnostics.
+- **Permissions.** `POST_NOTIFICATIONS` is requested at first run; after two denials, Settings deep-links to `ACTION_APP_NOTIFICATION_SETTINGS`.
+- **No Google Play services** (`GoogleApiAvailability`): Settings shows push as unavailable, and the app works in the foreground.
 
 ### 6.7 Settings (server)
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NOUS_A2UI_PUSH_ENABLED` | `true` | Kill switch; inert until both files below are configured |
-| `NOUS_A2UI_FCM_SERVICE_ACCOUNT_FILE` | `""` | Service-account JSON path (mounted into the container) |
-| `NOUS_A2UI_FCM_GOOGLE_SERVICES_FILE` | `""` | Firebase `google-services.json` path |
-| `NOUS_A2UI_ANDROID_PACKAGE` | `us.fatykhov.nous.companion` | Selects the client entry and must equal the app's `applicationId` |
-| `NOUS_A2UI_PUSH_TELEGRAM_POLICY` | `always` | §6.5 |
-| `NOUS_A2UI_PUSH_TIMEOUT_SECONDS` | `10` | Per FCM request |
+| `NOUS_A2UI_PUSH_ENABLED` | `true` | Kill switch; inert until both files are configured |
+| `NOUS_A2UI_FCM_SERVICE_ACCOUNT_FILE` | `""` | Service-account JSON path inside the container |
+| `NOUS_A2UI_FCM_GOOGLE_SERVICES_FILE` | `""` | Firebase `google-services.json` path inside the container |
+| `NOUS_A2UI_ANDROID_PACKAGE` | `us.fatykhov.nous.companion` | Must equal the app's `applicationId` |
+| `NOUS_A2UI_PUSH_TIMEOUT_SECONDS` | `10` | Overall fan-out bound |
+| `NOUS_A2UI_PUSH_MAX_INSTALLATIONS` | `10` | Registration cap per agent |
 
-Each needs a `docker-compose.yml` line with a real default.
+Each gets a `docker-compose.yml` line with a real default, plus a read-only volume mount for the two files. Operator note: prod's compose file is separate and larger; add the lines there by hand and never copy the repo file over it.
 
 ## 7. Android app
 
-### 7.1 Modules
+### 7.1 Build
 
-| Module | Contents |
+| Item | Pin |
 |---|---|
-| `android/core` | Kotlin/JVM: kotlinx-serialization-json (`JsonElement` trees), kotlinx-coroutines |
-| `android/app` | `com.android.application`, Compose Material 3, OkHttp, Firebase Messaging, WorkManager, DataStore |
+| Gradle wrapper | 9.7.1 |
+| AGP | 9.3.3 (built-in Kotlin: do **not** apply `org.jetbrains.kotlin.android`) |
+| Kotlin (KGP, compose + serialization plugins) | 2.4.20, raised through the root `buildscript` classpath; all plugins declared at root with `apply false` |
+| compileSdk / targetSdk / minSdk | 37 / 37 / 26 |
+| Compose BOM / Firebase BoM | 2026.09.00 / 34.19.0 |
+| OkHttp / kotlinx-serialization / coroutines | 5.5.0 / 1.11.0 / 1.11.0 |
+| WorkManager / DataStore / lifecycle-process | 2.12.0 / 1.2.1 / 2.11.0 |
+| Robolectric / Roborazzi / JUnit | 4.17 / 1.75.0 / 4.13.2 |
+| JDK | CI Temurin 21 (Robolectric at SDK 37 needs 21); locally 25 (`:core` only); bytecode 17 |
 
-- `minSdk 26`; `targetSdk`/`compileSdk` = the current stable API level.
-- Versions are pinned in `gradle/libs.versions.toml`, and the Gradle wrapper is committed.
+- **`:core`** pins `sourceCompatibility`, `targetCompatibility` and `jvmTarget` to 17 with no toolchain, so JDK 25 compiles it.
+- **`settings.gradle.kts`** includes `:app` only when an SDK is found:
+  - `local.properties` `sdk.dir`, then `ANDROID_HOME`, then `ANDROID_SDK_ROOT`;
+  - the `-Pnous.includeApp` property overrides the check;
+  - otherwise it logs "No Android SDK: :app excluded".
+- **Test tasks** in both modules:
+  - set `nous.repoRoot=../..` (relative, so the build cache is machine-independent);
+  - declare the catalogs, `tests/fixtures/a2ui` and the F096 fixture as `inputs` with `PathSensitivity.RELATIVE`, so a catalog-only change can never leave a test UP-TO-DATE;
+  - `maxHeapSize = 2g`, `org.gradle.jvmargs=-Xmx4g`, `isIncludeAndroidResources = true`.
+- **`isMinifyEnabled = false`** for the beta.
 
 ### 7.2 Screens
 
-1. **Connect** — base URL (the tailnet `ts.net` URL, §5) and device name. Connects, then asks for the notification permission. If the connection fails, it says so and suggests checking Tailscale.
-2. **Inbox** — live surfaces grouped by priority, with kind chips and a connection-status line. "Close all micro-apps" sends `app.close` sequentially, as on the web.
-3. **Surface** — the renderer, with themes per surface.
-4. **Settings** — push status and "send test notification", "open in web companion", diagnostics (last seq, reconnect count, last error), and disconnect.
+1. **Connect** — base URL (the tailnet `ts.net` URL) and device name. The local-network permission is requested when needed (§5), then the notification permission. A failure says what failed and suggests checking Tailscale.
+2. **Inbox** — live surfaces grouped by priority, with kind chips, a connection/resync status line, and close-all per R15.
+3. **Surface** — the renderer, themed per surface, following R16.
+4. **Settings** — push status, "send test notification", "open in web companion", diagnostics (last seq, reconnect count, last error, Worker status), disconnect.
 
-### 7.3 Lifecycle
+### 7.3 Lifecycle and networking
 
-- The SSE stream runs only while the app is in the foreground (`ProcessLifecycleOwner`, disconnecting after a 10 s grace period).
-- Background freshness comes from push.
-- A cold start shows "connecting…" and never a stale cache presented as current.
+- The SSE stream runs only in the foreground. It disconnects on `ON_STOP` with no extra grace: `ProcessLifecycleOwner` already debounces by 700 ms, and a longer timer would race the Android 14+ cached-apps freezer.
+- On `ON_START`: R17, then R1.
+- **OkHttp clients:**
+  - *stream:* `readTimeout` 45 s (3× the 15 s keepalive, which doubles as the watchdog), `callTimeout` 0;
+  - *`/a2ui/call`:* `readTimeout` 200 s, since `app.refine` can run up to three 60 s compose rounds;
+  - *other REST:* 15 s.
+- A `ConnectivityManager.NetworkCallback` (`onLost` / `onAvailable`) cancels the stream call, so R2 reconnects immediately on a network switch.
 
-### 7.4 Deep links
+### 7.4 Manifest and storage
 
-- `nouscompanion://s/<surface_id>` comes from notifications.
-- HTTPS App Links are deferred: Telegram links keep opening the web companion, which is the default client.
+- **Permissions:** `INTERNET`, `POST_NOTIFICATIONS`, `ACCESS_LOCAL_NETWORK`.
+- **Messaging service:** `exported="false"` with the `MESSAGING_EVENT` filter. Plus the `FirebaseInitProvider` removal and auto-init meta-data from §6.2.
+- **Network security:** the release config has no cleartext; the debug config permits cleartext.
+- **Backup:** `allowBackup="false"` plus `dataExtractionRules` excluding both `<cloud-backup>` and `<device-transfer>`. All app state (DataStore file, options cache, `installation_id`, tombstones) lives in `noBackupFilesDir`. Otherwise a restore clones `installation_id` onto a second phone, and the two overwrite each other's token.
+- **UI:** edge-to-edge insets through `Scaffold` (enforced from targetSdk 35); predictive back.
 
 ## 8. Rendering parity
 
 ### 8.1 Coverage target
 
-Every component the web renders:
-- **Basic catalog (16 of 18):** Text, Image, Icon, Row, Column, List, Card, Tabs, Modal, Divider, Button, TextField, CheckBox, ChoicePicker, Slider, DateTimeInput.
-- **nous-core (21):** ApprovalPanel, ActionReviewCard, StatTile, KeyValueTable, DecisionCard, ConfidenceMeter, MemoryGraph, DagGraph, AppHeader, AppFooter, Section, StatRow, Timeline, Sparkline, LineChart, BarChart, MetricCard, ScoreCard, DeltaList, DataTable, ChipRow.
+Everything the web renders:
+- **basic, 16 of 18:** Text, Image, Icon, Row, Column, List, Card, Tabs, Modal, Divider, Button, TextField, CheckBox, ChoicePicker, Slider, DateTimeInput;
+- **nous-core, 21:** ApprovalPanel, ActionReviewCard, StatTile, KeyValueTable, DecisionCard, ConfidenceMeter, MemoryGraph, DagGraph, AppHeader, AppFooter, Section, StatRow, Timeline, Sparkline, LineChart, BarChart, MetricCard, ScoreCard, DeltaList, DataTable, ChipRow.
 
-Video and AudioPlayer are unimplemented on the web too and stay unsupported.
+Video and AudioPlayer are unimplemented on the web too.
 
 ### 8.2 Fallback
 
-An unported component renders a bordered card, "*⟨Name⟩* isn't supported in the Android beta yet", with an **Open in web** button linking to `<base>/companion/a/<surface_id>`. It is never blank and never throws.
+An unported component renders a bordered card, "*⟨Name⟩* isn't supported in the Android beta yet", with **Open in web** (`<base>/companion/a/<surface_id>`). It is never blank and never throws.
 
-### 8.3 Coverage ratchet
+### 8.3 Coverage manifest (prop-level ratchet)
 
-An `:app` unit test reads `nous/a2ui/catalogs/*/catalog.json` from the repository and asserts two things:
-- every catalog component is in the renderer registry ∪ `UNSUPPORTED`;
-- `UNSUPPORTED` ⊆ catalog.
+`android/catalog-coverage.json` declares:
+- every catalog component: `ported` or `unsupported`;
+- every prop: `handled`, or `ignored` with a reason;
+- the handled values of every enum prop;
+- every basic-catalog function, with its known dialect deviations.
 
-The Android workflow triggers on `nous/a2ui/catalogs/**` too, so a catalog addition fails CI until the native side registers the component or lists it as unsupported, which is a one-line change.
+Two checks enforce it:
+1. **A pytest in the always-on `ci.yml`** walks both `catalog.json` files (`properties` / `allOf` / `anyOf` / `oneOf`) and fails on any component, prop, enum value or function the manifest does not cover. A catalog change therefore turns required CI red until the native side acknowledges it; adding `"ignored": "not yet ported"` is the one-line minimum.
+2. **A JUnit test** asserts that each Kotlin renderer's declared `handledProps` equals the manifest.
+
+A name-only check would have missed F096, which added props to components that were already registered.
 
 ### 8.4 Themes
 
-The six themes become Compose token sets, and their values are copied from `companion.css`:
-- colour tokens: `bg`, `surface`, `text`, `muted`, `soft`, `accent`, `ok`, `warn`, `crit`, `locked`, `border`;
-- display and numeric font roles.
-
-Themes apply per surface through a `CompositionLocal`, mirroring `data-theme` on each surface root.
+All 24 custom properties of each of the six theme blocks in `companion.css` are ported to Compose token sets, applied per surface through a `CompositionLocal`. A JVM test parses `companion.css` and asserts every `(theme, token, value)` equals the Kotlin table, which inherits the web's contrast checks (`theme.test.ts:107-140`).
 
 ### 8.5 Charts and graphs
 
-Port `chart.ts` (DOM-free), `figure.ts`, and the MemoryGraph radial and DagGraph wave layouts into `:core` geometry; Compose `Canvas` draws the results. The F094/F096 normative rules carry over:
-- bars zero-based;
-- gaps break lines;
-- lone points drawn as dots;
-- the rolling mean computed per finite run;
-- no area fill;
-- tone applied to the judgement, never the value.
+- `chart.ts` and `figure.ts` are DOM-free and are ported against golden vectors (§10.1).
+- The MemoryGraph and DagGraph layouts are **extracted** from their Svelte views into `:core` geometry. That is its own task in PR 5; it is guarded by the parity lock (§10.2), since the web has no tests to derive vectors from.
+- F094/F096 rules carry over:
+  - bars zero-based;
+  - gaps break lines;
+  - lone points drawn as dots;
+  - rolling mean computed per finite run;
+  - no area fill;
+  - tone applied to the judgement, never the value.
 
 ## 9. Web companion changes
 
-None. The web companion is untouched.
+No production behaviour change. Test-only additions:
+- a vitest file that checks the TypeScript implementation against the shared golden vectors, and regenerates their `expected` values when `UPDATE_GOLDEN=1`;
+- builder fixtures (§10.3).
 
 ## 10. Testing
 
-1. **`:core` (JVM, runs locally):** port the test **cases** of `store.test.ts`, `pointer.test.ts`, `functions.test.ts`, `activity.test.ts`, `freshness.test.ts`, `chart.test.ts`, `figure.test.ts`, `markdown.test.ts` and the transport-cycle cases of `transport.test.ts`. The same inputs must produce the same outputs.
-2. **Fixture sweep:** every `tests/fixtures/a2ui/examples/*.json` and `f096-report-app.json`, read from the repo in place (no copies), must parse and walk with zero unknown components outside `UNSUPPORTED`.
-3. **`:app` (CI):**
-   - Robolectric + Compose UI smoke tests: every registered component renders its fixture without throwing, and the expected text is present in semantics;
-   - the coverage ratchet;
-   - Roborazzi screenshots of the fixture gallery, uploaded as CI artifacts for visual review against the web.
-4. **Server:** pytest for:
-   - config parsing (missing, unreadable, or package absent → `enabled:false` with a reason);
-   - token upsert and delete;
-   - FCM send through an httpx mock transport (the `UNREGISTERED` path clears the token);
-   - notify policy (`always` / `fallback`);
-   - `pushed_at` set only after delivery;
-   - dismiss on each terminal transition and **not** on dedup replacement;
-   - the migration on Postgres (CI).
+1. **Golden vectors.**
+   - Files: `tests/fixtures/a2ui/golden/{pointer,format,chart,figure,freshness,activity,store,markdown}.json`, each `[{name, input, expected}]`. Inputs come from the existing web test cases; `expected` is generated from the TypeScript.
+   - Both sides pin UTC and `en-US`. Floats compare with an epsilon.
+   - A parameterized JUnit test per `:core` module reads the files in place.
+   - Intl-backed vectors run on vitest and on the device checklist only.
+   - The chain: a web change turns vitest red → regenerate → the Android workflow fires → JUnit stays red until Kotlin matches.
+2. **Parity lock.** `android/parity-sources.lock` lists the sha256 of every non-test file under `dashboard-app/src/companion/` (`.ts`, `.svelte`, `.css`). A JUnit test fails on any mismatch and names the changed files. `android/scripts/update-parity-lock` re-stamps the lock after the port is reviewed. This covers logic no vector reaches: the walker, graph layouts and shell rules.
+3. **Fixture sweep.**
+   - Inputs: the 43 examples, the F096 app, and **builder fixtures** — new JSON generated from `nous/a2ui/builders/*` and locked by pytest, as `f096-report-app.json` is.
+   - Each must parse and walk with **no placeholder or fallback node** for any component the manifest marks `ported`.
+   - Expected text is derived mechanically from each fixture's literal strings, not written by the renderer's author.
+4. **`:app` (Robolectric, CI).**
+   - Renderers against those fixtures, with the same two assertions over the Compose semantics tree.
+   - The messaging handler with `ShadowNotificationManager`: post by tag, cancel by tag, channel mapping, tombstone suppression, foreground suppression, reconcile.
+   - A test `Application` keeps Firebase and WorkManager out of unit tests.
+   - Roborazzi images are **review artifacts** (record mode), not verification.
+5. **Server (pytest, Postgres in CI).**
+   - config mapping and validation;
+   - token upsert, delete, cap, tripwire;
+   - properties of the FCM v1 request (every data value a string, priority ∈ {HIGH, NORMAL}, TTL `^\d+s$`, `restricted_package_name`, ≤ 4,096 bytes), not a hand-written mock's say-so;
+   - error mapping: `UNREGISTERED`, `SENDER_ID_MISMATCH` and structured token `INVALID_ARGUMENT` clear the token; an unstructured `INVALID_ARGUMENT` does not;
+   - intent flag written in the create transaction;
+   - the race: block the fake FCM transport on an `asyncio.Event`, resolve, release, and assert a dismiss was sent;
+   - dismiss at all three sites and not on replacement; `updated_at` untouched;
+   - the migration.
+
+   `scripts/diag/f097_fcm_validate_only.py` does a `validate_only` dry run once real credentials exist.
+6. **On-device checklist** (user-run, recorded in the PR):
+   - real delivery with the screen off (Doze);
+   - the permission prompts;
+   - cold start from cached options;
+   - tap → surface;
+   - a web-side resolve dismisses the phone notification;
+   - Tailscale down → "not connected";
+   - on Android 17, whether the `ts.net` address needs the local-network permission;
+   - Intl-backed formatting.
 
 ## 11. Build, CI, distribution
 
-- **Workflow:** `.github/workflows/android.yml`, triggered on `android/**`, `nous/a2ui/catalogs/**`, `tests/fixtures/a2ui/**`, the F096 fixture, and itself. It runs `:core:test`, `:app:testDebugUnitTest`, `:app:lintDebug` and `:app:assembleDebug`, and uploads the APK plus screenshots.
-- **Release signing:** when the secrets `ANDROID_KEYSTORE_B64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD` exist, it also builds a signed `assembleRelease`. Without them, the debug APK's signature changes on every run, so an update requires an uninstall.
-- **Versions:** `versionCode` = run number; `versionName` = `0.1.<run>-beta`.
-- **Local:** only `:core` builds here. `:app` is included only when an Android SDK is found (`local.properties` `sdk.dir` or `ANDROID_HOME`).
+- **`.github/workflows/android.yml`.**
+  - Triggers on `android/**`, `nous/a2ui/catalogs/**`, `tests/fixtures/a2ui/**`, `dashboard-app/src/companion/**` and itself.
+  - Uses `actions/setup-java` (Temurin 21) and `gradle/actions/setup-gradle`, with `working-directory: android`.
+  - Runs `:core:test :app:testDebugUnitTest :app:recordRoborazziDebug :app:lintDebug :app:assembleDebug`.
+  - Uploads the APK and `app/build/outputs/roborazzi/**`, and caches Robolectric's android-all jars.
+  - The catalog ratchet lives in `ci.yml` (§8.3), so required CI enforces it; this workflow is path-filtered.
+- **Signing.**
+  - A beta keystore is generated once with `keytool` and stored as the secrets `ANDROID_BETA_KEYSTORE_B64` and `ANDROID_BETA_KEYSTORE_PASSWORD`. When present, it is the `debug` signingConfig, so each build installs as an update.
+  - Without the secrets (fork PRs), a random key is used.
+  - **No keystore is ever committed** (the repo is public), and none goes into `actions/cache` (evicted after 7 idle days, which rotates the key silently).
+  - No `applicationIdSuffix`, because the server selects the Firebase client by package.
+- **Versions.** `versionCode = 1000 + run_number`; `versionName = 0.1.<run>-beta`. A local build (versionCode 1) cannot install over a CI build.
+- **Repo hygiene.**
+  - `.gitattributes` gains `android/gradlew text eol=lf`, `*.bat text eol=crlf`, `*.jar binary`.
+  - `gradlew` is committed with `git add --chmod=+x`.
+  - `.gitignore` gains `android/local.properties`, `android/.gradle/`, `android/**/build/`, `*.jks`, `*.keystore`.
+- **Locally** only `:core` builds (no SDK here); CI is the gate for `:app`.
 
-## 12. Phasing and acceptance
+## 12. Delivery sequence and acceptance
 
-| Milestone | Scope | Acceptance |
+Rule: every notification a milestone can produce for a **template** surface opens onto a fully rendered surface. Micro-apps show fallback cards until PR 5.
+
+| PR | Scope | Acceptance |
 |---|---|---|
-| M0 server | migration 077, PushService, `/a2ui/push/*`, notify fan-out + policy, dismiss hooks, settings + compose lines | pytest green on CI Postgres; ruff clean on new code |
-| M1 skeleton | `:core` sync/store/binding/walker; app shell (Connect, Inbox, Surface, Settings); FCM receive/notify/dismiss; basic catalog + ApprovalPanel, ActionReviewCard, KeyValueTable, AppHeader, AppFooter, Section, StatTile, StatRow | `:core` tests pass locally; CI builds the APK; Robolectric renders the fixtures |
-| M2 parity | the remaining nous-core components incl. charts, graphs, report vocabulary; F092.4 activity parity | `UNSUPPORTED` = {Video, AudioPlayer}; screenshot gallery reviewed |
-| M3 promotion (future) | — | real use on device; out of scope here |
+| 1 — server push | this spec; migration 077; `PushService`; `/a2ui/push/*`; intent flag; three dismiss sites; settings + compose lines; `validate_only` diag script | pytest green on CI Postgres, including the race test; ruff clean on new code; inert until configured |
+| 2 — `:core` | Gradle project, sync engine, store, pointer, binding and function table, walker, markdown-lite, formatting; golden vectors + vitest file; coverage manifest + `ci.yml` pytest (everything `unsupported`); parity lock | `:core` tests pass locally (JDK 25) and in CI; vitest green |
+| 3 — app shell + push + templates | Connect, Inbox, Surface, Settings; transport; FCM handler + Worker; every component the six builders emit (ApprovalPanel, ActionReviewCard, DecisionCard, ConfidenceMeter, DagGraph, MemoryGraph, KeyValueTable, StatTile, StatRow, Timeline, plus the basic layout, display and Button components they use) | CI builds the APK; builder fixtures render with zero fallbacks; notification tests green |
+| 4 — inputs | TextField, CheckBox, ChoicePicker, Slider, DateTimeInput, Modal, Tabs, with two-way binding | the 43 examples render with zero fallbacks |
+| 5 — parity | AppHeader, AppFooter, Section, charts, report vocabulary, graph-layout extraction, F092.4 activity | manifest `unsupported` = {Video, AudioPlayer} |
 
-The final beta acceptance is an end-to-end run on the user's phone. This environment has no device or emulator, so it cannot be claimed here.
+The beta is accepted when the user completes the on-device checklist (§10.6). This environment has no device or emulator, so that step cannot be claimed here.
 
 ## 13. Risks
 
 | Risk | Mitigation |
 |---|---|
-| The native renderer drifts behind the web | §8.3 ratchet; §8.2 fallback |
-| Duplicate alerts (Telegram + push) | §6.5 `fallback` policy |
-| No Google Play services on the device | the app works in the foreground; Settings shows push as unavailable |
-| Push payload passes through Google | same strings the Telegram leg already sends to a third party |
-| Firebase project changes after first init | the app detects the options mismatch and asks for a restart |
-| Local builds cannot compile `:app` | CI is the gate for `:app` (standing practice) |
+| The native renderer drifts behind the web | golden vectors, parity lock, prop-level manifest in required CI, fallback card |
+| Duplicate alerts (Telegram + push) | accepted for the beta; §6.5 names the ack-based path |
+| Out-of-order or lost FCM messages | tombstones, reconcile on hydration and after `onDeletedMessages`, `setTimeoutAfter`, TTL clamp |
+| Anyone who can reach `/a2ui/*` can register an FCM token and receive every future notification's title and body | the same audience can already read full surfaces, so what is exposed doesn't grow; what changes is persistence and channel. Bounded by the installation cap, the Telegram tripwire on each new installation, the list + delete endpoints, `/push/test` rate limiting and field escaping |
+| Push payload passes through Google | the same strings the Telegram leg already sends to a third party |
+| Malformed Firebase options crash on every start | validated on both server and app before caching; auto-init disabled |
+| Backup or device transfer clones `installation_id` | `noBackupFilesDir` plus `dataExtractionRules` |
+| JS vs JVM formatting differences | formatting rules in §3.2; golden vectors; the device checklist for Intl |
+| No Google Play services | foreground-only use; Settings says so |
 
 ## 14. Decisions
 
 | # | Decision | Why |
 |---|---|---|
-| D1 | Kotlin + Compose, not Flutter or React Native | first-party Android stack; F092 §12.0's Flutter case rested on GenUI being turnkey, which it is not at A2UI v1.0 |
-| D2 | `:core` pure JVM module | rules are testable without an SDK; ports test cases 1:1 |
-| D3 | FCM data-only + runtime Firebase config | the app owns dismissal; one generic APK |
-| D4 | push = pointer, dismiss on terminal transition | answers F092's split-state objection |
-| D5 | web companion untouched | the user's directive: native is an alternative beta |
-| D6 | app access over Tailscale (`tailscale serve` HTTPS), chosen by the user | no public exposure, no Nous auth code, real TLS certificate; the web path is untouched |
+| D1 | Kotlin + Compose | first-party Android stack; GenUI is not turnkey at A2UI v1.0 (F092 §12.0) |
+| D2 | `:core` pure JVM | rules testable without an SDK; shares vectors with vitest |
+| D3 | FCM data-only + runtime Firebase config | the app owns dismissal; one generic APK for a public repo |
+| D4 | dismiss gated on an intent flag written at create | race-free by construction; answers F092's split-state objection |
+| D5 | no Telegram fallback mode | FCM acceptance ≠ delivery; priority-2 safety |
+| D6 | access over Tailscale (user decision) | no public exposure, no auth code, a real TLS certificate |
+| D7 | beta signing key in secrets, never committed | public repo: a committed key lets anyone ship an "update" |
+| D8 | golden vectors + parity lock + prop-level manifest | parity that turns red on the first divergent change |
+| D9 | five-PR sequence | each PR reviewable; notifications never open onto fallbacks for templates |
+
+## 15. Review log (rev 1 → rev 2)
+
+| Reviewer | Verdict | Folded |
+|---|---|---|
+| Protocol/server | Approve with revisions | 2 P1, 9 P2, 4 P3: pushed_at race, Last-Event-ID trap, `/a2ui/call` body, three dismiss sites + `RETURNING`, `updated_at`, replacement never cancels, stamp hold, R5 precision, graph extraction, `gradlew` eol, 43 fixtures, R4/R7 precision, foreground double-notify |
+| Android platform | Approve with revisions | 1 P1, 10 P2, 7 P3: local-network permission + cleartext, OkHttp timeouts, options validation + auto-init, `notifications_enabled`, reconcile + tombstones, backup/transfer, JDK 21 + Roborazzi record mode, declared test inputs, AGP 9 specifics, `gradlew` mode, signing via secrets, manifest checklist, freezer race, Worker details, versions |
+| Devil's advocate | Approve with revisions | 2 P1, 12 P2, P3s: fallback removed, intent flag, tombstones/reconcile/dead-surface state, prop-level manifest in `ci.yml`, golden vectors + lock, formatting parity, meaningful smoke tests, PR sequence, SSE timeouts, warm resume, risk row + bounds, off-loop token mint, acceptance honesty, FCM error precision, 24 theme tokens, close-all and title rules, no exported scheme, single deregistration path |
+
+**Overridden:**
+- *Commit a throwaway debug keystore* (DA-11): overridden by the platform reviewer's public-repo argument (D7).
+- *Extract the web graph layouts into a `.ts` module first:* rejected so the web stays untouched; guarded by the parity lock instead.
