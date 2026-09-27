@@ -392,15 +392,22 @@ async def _build_heart_for_eval(db: Database, settings: Settings) -> AsyncIterat
     baked eval-DB image (nous-eval-db:v2026-Q2) stays usable even after
     new columns are added by a migration that post-dates the image build
     (e.g. migration 073 adds calibration_factor / calibration_applied_at
-    to brain.decisions).  The schema preflight then verifies the apply
+    to brain.decisions).  The baked image records no migration history, so
+    ``seed_baked_migration_history`` first marks what it already contains —
+    otherwise run_migrations replays every migration and fails on the first
+    non-idempotent one.  The schema preflight then verifies the apply
     succeeded.  Without this, missing migrations cascade into asyncpg
     InFailedSQLTransactionError mid-query and the eval reports something
     like "0% sufficient" with no surface signal that the schema is the
     problem (see PR #398 for the cascade fix).
     """
     from nous.storage.migrator import run_migrations
-    from nous_eval.schema_preflight import assert_eval_db_schema_matches_orm
+    from nous_eval.schema_preflight import (
+        assert_eval_db_schema_matches_orm,
+        seed_baked_migration_history,
+    )
 
+    await seed_baked_migration_history(db.engine)
     await run_migrations(db.engine)
     await assert_eval_db_schema_matches_orm(db)
 

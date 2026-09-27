@@ -187,6 +187,10 @@ async def test_eval_harness_runs_migrations_before_preflight():
     """
     call_order: list[str] = []
 
+    async def _fake_seed(_engine):
+        call_order.append("seed")
+        return []
+
     async def _fake_run_migrations(_engine):
         call_order.append("migrate")
         return []
@@ -198,6 +202,10 @@ async def test_eval_harness_runs_migrations_before_preflight():
         raise EvalDBSchemaDriftError("test: missing column")
 
     with (
+        patch(
+            "nous_eval.schema_preflight.seed_baked_migration_history",
+            side_effect=_fake_seed,
+        ),
         patch(
             "nous.storage.migrator.run_migrations",
             side_effect=_fake_run_migrations,
@@ -218,4 +226,51 @@ async def test_eval_harness_runs_migrations_before_preflight():
             async with _build_heart_for_eval(db, settings):
                 pass  # pragma: no cover
 
-    assert call_order == ["migrate", "preflight"], f"Expected ['migrate', 'preflight'], got {call_order}"
+    # Seeding must precede migrate: on a baked image with no history,
+    # run_migrations would otherwise replay every migration and fail.
+    assert call_order == ["seed", "migrate", "preflight"], call_order
+
+
+async def test_lme_ingest_seeds_history_before_migrating():
+    """ingest_longmemeval hits the same baked scratch DB, so it must seed the
+    migration history before run_migrations, exactly like the harness."""
+    call_order: list[str] = []
+
+    async def _fake_seed(_engine):
+        call_order.append("seed")
+        return []
+
+    async def _fake_run_migrations(_engine):
+        call_order.append("migrate")
+        return []
+
+    async def _fake_preflight(_db):
+        call_order.append("preflight")
+        raise EvalDBSchemaDriftError("test: abort before ingest")
+
+    settings = MagicMock()
+    settings.openai_api_key = "sk-test"
+    settings.model_copy.return_value = settings
+    fake_db = MagicMock()
+    fake_db.connect = AsyncMock()
+    fake_db.disconnect = AsyncMock()
+
+    with (
+        patch("nous_eval.ingest._settings_for_ingest", return_value=settings),
+        patch("nous.storage.database.Database", return_value=fake_db),
+        patch(
+            "nous_eval.schema_preflight.seed_baked_migration_history",
+            side_effect=_fake_seed,
+        ),
+        patch("nous.storage.migrator.run_migrations", side_effect=_fake_run_migrations),
+        patch(
+            "nous_eval.schema_preflight.assert_eval_db_schema_matches_orm",
+            side_effect=_fake_preflight,
+        ),
+    ):
+        from nous_eval.ingest_longmemeval import _replay_sessions_into_scratch
+
+        with pytest.raises(EvalDBSchemaDriftError):
+            await _replay_sessions_into_scratch([], "postgresql+asyncpg://x/y")
+
+    assert call_order == ["seed", "migrate", "preflight"], call_order

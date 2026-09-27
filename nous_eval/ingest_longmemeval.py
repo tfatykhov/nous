@@ -291,12 +291,18 @@ async def _replay_sessions_into_scratch(
         # Running migrations before the preflight means the baked eval-DB
         # image stays usable after new columns are added by a later migration
         # (e.g. migration 073 adds calibration_factor / calibration_applied_at
-        # to brain.decisions).  Without the migrate step a stale-schema
+        # to brain.decisions).  A baked image records no migration history,
+        # so seed it first or run_migrations replays everything and fails.
+        # Without the migrate step a stale-schema
         # container would let inserts silently poison the asyncpg session and
         # the operator sees an empty corpus instead of a clear schema error.
         from nous.storage.migrator import run_migrations
-        from nous_eval.schema_preflight import assert_eval_db_schema_matches_orm
+        from nous_eval.schema_preflight import (
+            assert_eval_db_schema_matches_orm,
+            seed_baked_migration_history,
+        )
 
+        await seed_baked_migration_history(db.engine)
         await run_migrations(db.engine)
         await assert_eval_db_schema_matches_orm(db)
         embedder = EmbeddingProvider(
