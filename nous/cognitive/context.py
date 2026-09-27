@@ -1208,9 +1208,16 @@ class ContextEngine:
                 ):
                     _max_sc = max(0, getattr(self._settings, "strategy_cards_max_per_turn", 1))
                     _sc_hits = [p for p in selected if getattr(p, "kind", None) == "strategy"]
-                    _non_sc = [p for p in selected if getattr(p, "kind", None) != "strategy"]
                     _sc_served = _sc_hits[:_max_sc]
-                    selected = _non_sc + _sc_served
+                    if len(_sc_hits) > _max_sc:
+                        # Filter excess cards in-place to preserve the original
+                        # ranking so a high-ranked card is not moved to the tail
+                        # where the token-budget loop could cut it (finding #4).
+                        _excess_ids = {id(p) for p in _sc_hits[_max_sc:]}
+                        selected = [p for p in selected if id(p) not in _excess_ids]
+                        # Attribute the cap removals in the retrieval trace so
+                        # they do not appear as `unaccounted` (finding #5).
+                        _tr_filtered(_sc_hits, _sc_served, "procedure", SLICED_OFF, "strategy_card_cap")
                     if _sc_hits:
                         logger.debug(
                             "StrategyCards (graph-primary): retrieved=%d served=%d (cap=%d)",

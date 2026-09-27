@@ -77,6 +77,8 @@ async def create_components(settings: Settings) -> dict:
     bus = None
     handler_http = None
     session_monitor = None
+    decision_reviewer = None
+    strategy_card_distiller = None
     if settings.event_bus_enabled:
         bus = EventBus()
 
@@ -328,13 +330,16 @@ async def create_components(settings: Settings) -> dict:
         except ImportError:
             logger.debug("RubricEvolver not available yet")
 
+        # Wire bus into brain so review events fire whenever the bus is active,
+        # independently of whether cross-type linking is enabled (finding #2).
+        brain._bus = bus
+
         # F022 Phase 2: Wire fact->decision graph linking
         try:
             from nous.handlers.fact_graph_linker import FactGraphLinker
 
             if graph_linker is not None and settings.cross_type_linking_enabled:
                 heart._bus = bus  # Inject bus for fact_learned emission
-                brain._bus = bus  # F040: Inject bus for decision_recorded emission
                 FactGraphLinker(graph_linker, settings, bus)
                 logger.debug("F022: FactGraphLinker wired — fact->decision linking enabled")
         except ImportError:

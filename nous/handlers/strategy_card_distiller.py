@@ -87,6 +87,10 @@ class StrategyCardDistiller:
         # In-flight set: prevents two concurrent distillations for the same
         # decision from racing to insert duplicate strategy cards.
         self._in_flight: set[str] = set()
+        # Pending outcomes: when a re-review arrives while distillation is in
+        # flight, the latest outcome is stored here so it runs after the
+        # current distillation completes (finding #3).
+        self._pending: dict[str, str] = {}
         if bus is not None:
             bus.on("decision_reviewed", self._on_decision_reviewed)
 
@@ -133,13 +137,21 @@ class StrategyCardDistiller:
 
         Uses an in-flight set to prevent two concurrent distillations for the
         same decision from racing to insert duplicate strategy cards.
+
+        If a re-review arrives while this distillation is running, the latest
+        outcome is stored in _pending and re-run after the current run
+        completes (finding #3 — preserves a newer review outcome).
         """
         key = str(decision_id)
         if key in self._in_flight:
+            # Coalesce: record the latest outcome so it runs after the current
+            # distillation finishes, rather than being silently dropped.
             logger.debug(
-                "StrategyCardDistiller: %s already in flight, skipping duplicate",
+                "StrategyCardDistiller: %s already in flight, queuing outcome %r",
                 decision_id,
+                outcome,
             )
+            self._pending[key] = outcome
             return
         self._in_flight.add(key)
         try:
@@ -152,6 +164,14 @@ class StrategyCardDistiller:
             )
         finally:
             self._in_flight.discard(key)
+            # If a newer review arrived while we were running, kick off a
+            # fresh distillation for that outcome now.
+            pending_outcome = self._pending.pop(key, None)
+            if pending_outcome is not None:
+                asyncio.create_task(
+                    self._distil(decision_id, pending_outcome),
+                    name=f"strategy_card_distil_{decision_id}_followup",
+                )
 
     async def _do_distil(self, decision_id: UUID, outcome: str) -> None:
         if not self._llm:

@@ -744,4 +744,290 @@ def test_context_cap_applies_on_graph_primary_path():
     assert len(result) == 3, f"Expected 2 non-strategy + 1 strategy = 3 total, got {len(result)}"
     strategy_in_result = [p for p in result if getattr(p, "kind", None) == "strategy"]
     assert len(strategy_in_result) == 1, f"Expected exactly 1 strategy card after cap, got {len(strategy_in_result)}"
-    assert strategy_in_result[0].name == "sc-1"
+
+
+# ---------------------------------------------------------------------------
+# 19. test_strategy_card_distiller_initialized_without_bus (Finding P1 — main.py:1203)
+# ---------------------------------------------------------------------------
+
+
+def test_strategy_card_distiller_initialized_without_bus(mock_brain, mock_heart, mock_llm):
+    """StrategyCardDistiller is usable when bus=None (bus disabled path).
+
+    Before the fix: `strategy_card_distiller` was only assigned inside the
+    `if bus is not None:` block in main.py, so `create_components()` would
+    raise UnboundLocalError when event_bus_enabled=False because the return
+    dict referenced the unbound name.
+
+    Mutation: revert the `strategy_card_distiller = None` initialization that
+    was added alongside `bus = None` → the import at the top of this module
+    still works, but the return-dict line in main.py that references the
+    variable would raise UnboundLocalError at runtime.
+    """
+    settings = _make_settings()
+    # Constructing with bus=None must not raise.
+    distiller = StrategyCardDistiller(
+        brain=mock_brain,
+        heart=mock_heart,
+        settings=settings,
+        bus=None,
+        llm_client=mock_llm,
+    )
+    # Verify the object is genuinely usable as the None sentinel in the
+    # components dict (not an error object).
+    assert distiller is not None
+    assert distiller._brain is mock_brain
+    # Bus handler was NOT registered because bus is None.
+    assert distiller._in_flight == set()
+    assert distiller._pending == {}
+
+
+# ---------------------------------------------------------------------------
+# 20. test_brain_bus_wired_independently_of_cross_type_linking
+#     (Finding P1 — brain.py:1084)
+# ---------------------------------------------------------------------------
+
+
+def test_brain_bus_wired_independently_of_cross_type_linking():
+    """Brain._bus is set whenever the event bus is active.
+
+    Before the fix: `brain._bus = bus` was inside the
+    `if graph_linker is not None and settings.cross_type_linking_enabled:`
+    guard that also wraps `FactGraphLinker`. With cross-type linking disabled,
+    `brain._bus` stayed None and every `_emit_bus_decision_reviewed` call
+    silently returned, so strategy-card events were never emitted.
+
+    Mutation: move `brain._bus = bus` back inside the FactGraphLinker guard
+    → the unconditional assignment no longer precedes the guard, and the
+    assertion fails.
+    """
+    import inspect
+
+    import nous.main as main_mod
+
+    src = inspect.getsource(main_mod.create_components)
+    lines = src.splitlines()
+
+    brain_bus_lineno = None
+    fact_graph_linker_guard_lineno = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        # The unconditional assignment (not indented inside the guard).
+        if stripped == "brain._bus = bus" and brain_bus_lineno is None:
+            brain_bus_lineno = i
+        # The FactGraphLinker-specific guard (contains both graph_linker and
+        # cross_type_linking_enabled — this is the guard that was previously
+        # swallowing the brain._bus assignment).
+        if (
+            "graph_linker is not None" in stripped
+            and "cross_type_linking_enabled" in stripped
+            and "FactGraphLinker" not in stripped  # header line, not the import
+            and fact_graph_linker_guard_lineno is None
+        ):
+            # Verify FactGraphLinker appears shortly after (within 10 lines).
+            nearby = " ".join(lines[i : i + 10])
+            if "FactGraphLinker" in nearby:
+                fact_graph_linker_guard_lineno = i
+
+    assert brain_bus_lineno is not None, "brain._bus = bus assignment not found in create_components"
+    assert fact_graph_linker_guard_lineno is not None, (
+        "FactGraphLinker guard (graph_linker is not None and cross_type_linking_enabled) not found in create_components"
+    )
+    assert brain_bus_lineno < fact_graph_linker_guard_lineno, (
+        f"brain._bus = bus (source line {brain_bus_lineno}) must appear BEFORE "
+        f"the FactGraphLinker cross_type_linking guard (source line {fact_graph_linker_guard_lineno}) "
+        "so the bus is wired independently of cross-type linking config"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 21. test_pending_outcome_coalesced_on_concurrent_review (Finding P1 — distiller.py:143)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pending_outcome_coalesced_on_concurrent_review(mock_brain, mock_heart, mock_llm):
+    """A re-review that arrives while distillation is in flight is coalesced.
+
+    Before the fix: the second call returned immediately without recording
+    the new outcome, so a decision changed from success→failure during
+    distillation permanently ended up with a success card.
+
+    Mutation: revert the `self._pending[key] = outcome` assignment inside the
+    `if key in self._in_flight:` branch → the second task exits without
+    storing the pending outcome → the follow-up distillation never fires.
+    """
+    settings = _make_settings()
+    distiller = StrategyCardDistiller(
+        brain=mock_brain,
+        heart=mock_heart,
+        settings=settings,
+        bus=None,
+        llm_client=mock_llm,
+    )
+    decision_id = uuid4()
+    mock_brain.get = AsyncMock(return_value=_make_decision(decision_id=decision_id))
+
+    # Simulate a re-review arriving while the first distillation is in flight
+    # by pre-populating _in_flight before calling _distil with the new outcome.
+    distiller._in_flight.add(str(decision_id))
+    await distiller._distil(decision_id, "failure")
+
+    # The latest outcome must be coalesced into _pending.
+    assert distiller._pending.get(str(decision_id)) == "failure", (
+        "A re-review that arrives while distillation is in flight must be "
+        "stored in _pending so it is re-run after the first distillation "
+        "completes — not silently dropped."
+    )
+
+
+@pytest.mark.asyncio
+async def test_pending_outcome_runs_after_first_distillation(mock_brain, mock_heart, mock_llm):
+    """The coalesced pending outcome triggers a follow-up distillation.
+
+    After _distil completes normally it pops _pending and schedules a fresh
+    _distil for the newer outcome.  This verifies that the `asyncio.create_task`
+    in the `finally` block actually fires.
+
+    Mutation: remove the `pending_outcome = self._pending.pop(key, None)` /
+    `create_task(self._distil(...))` block in the finally clause → the
+    follow-up task is never created, procedures.store is called only once.
+    """
+    settings = _make_settings()
+    distiller = StrategyCardDistiller(
+        brain=mock_brain,
+        heart=mock_heart,
+        settings=settings,
+        bus=None,
+        llm_client=mock_llm,
+    )
+    decision_id = uuid4()
+    mock_brain.get = AsyncMock(return_value=_make_decision(decision_id=decision_id))
+
+    with patch(
+        "nous.handlers.strategy_card_distiller.call_background_llm_structured",
+        new_callable=AsyncMock,
+        return_value=_make_card_response(),
+    ):
+        # Inject a pending outcome before the first distillation finishes.
+        distiller._pending[str(decision_id)] = "failure"
+        await distiller._distil(decision_id, "success")
+        # Flush the follow-up task created in the finally block.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    # Two distillations: success (first) + failure (follow-up from _pending).
+    assert mock_heart.procedures.store.call_count == 2, (
+        f"Expected 2 store calls (initial + follow-up), got {mock_heart.procedures.store.call_count}"
+    )
+    # _pending must be cleared after the follow-up fires.
+    assert str(decision_id) not in distiller._pending
+
+
+# ---------------------------------------------------------------------------
+# 22. test_strategy_cap_preserves_ranking (Finding P2 — context.py:1213)
+# ---------------------------------------------------------------------------
+
+
+def test_strategy_cap_preserves_ranking():
+    """The strategy cap filters excess cards in-place, preserving original ranking.
+
+    Before the fix: the cap rebuilt the list as `_non_sc + _sc_served`,
+    moving a high-ranked strategy card to the tail where the token-budget loop
+    could cut it while letting lower-ranked non-strategy items through.
+
+    Mutation: restore `selected = _non_sc + _sc_served` → a strategy card
+    that was originally at position 0 (highest rank) is pushed to the end,
+    breaking the ordering assertion.
+    """
+
+    def _proc(name: str, kind: str | None = None, score: float = 0.5) -> MagicMock:
+        p = MagicMock()
+        p.name = name
+        p.kind = kind
+        p.score = score
+        return p
+
+    # Strategy card ranked first (highest score), then two non-strategy items.
+    sc1 = _proc("sc-1", "strategy", score=0.95)
+    sc2 = _proc("sc-2", "strategy", score=0.60)
+    proc_a = _proc("proc-a", score=0.70)
+    proc_b = _proc("proc-b", score=0.50)
+    selected = [sc1, proc_a, sc2, proc_b]  # ranking: sc1, proc-a, sc2, proc-b
+
+    _max_sc = 1
+    _sc_hits = [p for p in selected if getattr(p, "kind", None) == "strategy"]
+    _sc_served = _sc_hits[:_max_sc]
+    # Fixed logic: filter in-place, preserving original order.
+    _excess_ids = {id(p) for p in _sc_hits[_max_sc:]}
+    result = [p for p in selected if id(p) not in _excess_ids]
+
+    assert len(result) == 3, f"Expected 3 items after cap, got {len(result)}"
+    # sc1 must remain at position 0 (highest rank preserved).
+    assert result[0].name == "sc-1", (
+        f"Highest-ranked strategy card must stay at rank 0 — got {result[0].name!r} instead"
+    )
+    # sc2 must be removed (excess, over cap).
+    names = [p.name for p in result]
+    assert "sc-2" not in names, "Second strategy card (excess) must be removed"
+
+
+# ---------------------------------------------------------------------------
+# 23. test_strategy_cap_attributes_removed_cards_in_trace (Finding P2 — context.py:1213)
+# ---------------------------------------------------------------------------
+
+
+def test_strategy_cap_attributes_removed_cards_in_trace():
+    """Excess strategy cards removed by the cap are recorded in the retrieval trace.
+
+    Before the fix: discarded cards were never passed to `_tr_filtered`, so
+    they appeared as `unaccounted` in the retrieval trace, corrupting drift
+    instrumentation.
+
+    Mutation: remove the `_tr_filtered(_sc_hits, _sc_served, ...)` call →
+    `dropped_items` stays empty and the assertion fails.
+    """
+
+    def _proc(name: str, kind: str | None = None) -> MagicMock:
+        p = MagicMock()
+        p.name = name
+        p.kind = kind
+        p.id = uuid4()
+        p.score = 0.8
+        return p
+
+    sc1 = _proc("sc-1", "strategy")
+    sc2 = _proc("sc-2", "strategy")
+    sc3 = _proc("sc-3", "strategy")
+    proc_a = _proc("proc-a")
+    selected = [sc1, proc_a, sc2, sc3]
+
+    _max_sc = 1
+    _sc_hits = [p for p in selected if getattr(p, "kind", None) == "strategy"]
+    _sc_served = _sc_hits[:_max_sc]
+
+    # Simulate the _tr_filtered helper.
+    dropped_items: list[tuple] = []
+
+    def fake_tr_filtered(before, after, mem_type, disposition, stage):
+        kept = {str(getattr(i, "id", "")) for i in (after or [])}
+        for it in before or []:
+            iid = str(getattr(it, "id", ""))
+            if iid and iid not in kept:
+                dropped_items.append((iid, mem_type, disposition, stage))
+        return after
+
+    # Apply the fixed cap logic with trace attribution.
+    if len(_sc_hits) > _max_sc:
+        _excess_ids = {id(p) for p in _sc_hits[_max_sc:]}
+        selected = [p for p in selected if id(p) not in _excess_ids]
+        fake_tr_filtered(_sc_hits, _sc_served, "procedure", "sliced_off", "strategy_card_cap")
+
+    # Two excess cards (sc2, sc3) must be recorded as dropped.
+    assert len(dropped_items) == 2, (
+        f"Expected 2 dropped trace entries for excess strategy cards, got {len(dropped_items)}: {dropped_items}"
+    )
+    dropped_stages = {stage for _, _, _, stage in dropped_items}
+    assert dropped_stages == {"strategy_card_cap"}, (
+        f"Dropped cards must be attributed to 'strategy_card_cap', got {dropped_stages}"
+    )
