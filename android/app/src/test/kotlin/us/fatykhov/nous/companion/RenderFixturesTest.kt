@@ -72,8 +72,32 @@ class RenderFixturesTest {
             rule.runOnIdle { current.value = SurfaceHost(graph, id) }
             rule.waitForIdle()
             assertEquals("${f.name}: fallback/placeholder nodes", 0, fallbackNodes().fetchSemanticsNodes().size)
-            // Every literal Text `text` prop in the fixture must be visible (first line, markdown stripped of the heading marker).
-            for (c in store.surfaces[id]!!.components.values) {
+            // Every literal Text `text` prop REACHABLE FROM ROOT must be visible. updateComponents merges by
+            // id and never deletes (R7), so an incremental fixture (31) leaves replaced placeholders as
+            // orphans the web never renders either.
+            val surface = store.surfaces[id]!!
+            val reachable = HashSet<String>()
+            val walker = us.fatykhov.nous.companion.core.Walker(Registry.names)
+            fun visit(cid: String, scope: us.fatykhov.nous.companion.core.Scope?) {
+                if (!reachable.add(cid)) return
+                val comp = surface.components[cid] ?: return
+                for (key in walker.CHILD_KEYS) {
+                    val v = comp[key] ?: continue
+                    val kids = when (key) {
+                        "children" -> walker.children(surface, v, scope)
+                        "tabs" -> (v as? kotlinx.serialization.json.JsonArray)?.mapNotNull { (it as? kotlinx.serialization.json.JsonObject)?.get("child")?.let { c -> (c as? kotlinx.serialization.json.JsonPrimitive)?.content } }?.map { us.fatykhov.nous.companion.core.Child.Static(it) } ?: emptyList()
+                        else -> ((v as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content)?.let { listOf(us.fatykhov.nous.companion.core.Child.Static(it)) } ?: emptyList()
+                    }
+                    for (k in kids) when (k) {
+                        is us.fatykhov.nous.companion.core.Child.Static -> visit(k.componentId, scope)
+                        is us.fatykhov.nous.companion.core.Child.Template -> visit(k.componentId, k.scope)
+                        is us.fatykhov.nous.companion.core.Child.Omitted -> {}
+                    }
+                }
+            }
+            visit("root", null)
+            for ((cid, c) in surface.components) {
+                if (cid !in reachable) continue
                 if ((c["component"] as? kotlinx.serialization.json.JsonPrimitive)?.content != "Text") continue
                 val lit = (c["text"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content ?: continue
                 val probe = lit.lineSequence().first().removePrefix("#").trimStart('#').trim().takeIf { it.isNotEmpty() && !it.contains('$') && !it.contains('*') && !it.contains('`') && !it.contains('[') } ?: continue
