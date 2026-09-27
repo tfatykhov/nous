@@ -187,7 +187,7 @@ class _FakeConn:
         self.retired_at_arg = None
 
     async def fetch(self, query, *args):
-        if "calibration_factor" in query and "brain.decisions" in query:
+        if "calibration_applied_at" in query and "brain.decisions" in query:
             assert "NULLIF" not in query, (
                 "integrity must not be judged from the ratio: it breaks on "
                 "clipping and on raw 0.0"
@@ -214,9 +214,11 @@ class _FakeConn:
         return self._reviewed
 
 
-def _reviewed(conf_outcomes, post=False):
+def _reviewed(conf_outcomes, post=False, factor=None):
     return [
-        {"raw": c, "stored": c, "is_post_f058": post, "outcome": o}
+        {"raw": c,
+         "stored": calibrate_confidence(c, factor) if post and factor else c,
+         "is_post_f058": post, "applied_factor": factor, "outcome": o}
         for c, o in conf_outcomes
     ]
 
@@ -505,3 +507,88 @@ class TestCounterfactualRespectsProductionClipping:
         cf = (await run(conn, "a", 1.0, 0.7627))["counterfactual"]
         expected = statistics.mean([c * 0.7627 for c, _ in self._PRE])
         assert cf["calibrated"]["mean_conf"] == pytest.approx(expected, abs=5e-3)
+
+
+class TestDirectionCheckSeparatesCalibrationEras:
+    """Codex round-6 P2: legacy 0.7627 rows and pass-through 1.0 rows both
+    carry confidence_raw, so pooling them made step 3 a shifting blend of two
+    policies that could not show whether either one improved calibration.
+    """
+
+    _LEGACY = [(0.9, "failure"), (0.8, "success"), (0.95, "failure")]
+    _CURRENT = [(0.9, "success"), (0.6, "failure")]
+
+    async def _direction(self, reviewed):
+        conn = _FakeConn([(1.0, 1.0, _AFTER)], reviewed)
+        return (await run(conn, "a", 1.0))["post_f058_direction"]
+
+    @pytest.mark.asyncio
+    async def test_legacy_and_current_rows_are_never_pooled(self):
+        d = await self._direction(
+            _reviewed(self._LEGACY, post=True, factor=_HISTORICAL_F058_FACTOR)
+            + _reviewed(self._CURRENT, post=True, factor=1.0)
+        )
+        by_factor = {e["factor"]: e for e in d}
+        assert set(by_factor) == {1.0, _HISTORICAL_F058_FACTOR}
+        legacy = by_factor[_HISTORICAL_F058_FACTOR]
+        assert legacy["raw"]["n"] == legacy["calibrated"]["n"] == 3
+        assert legacy["calibrated"]["mean_conf"] == pytest.approx(
+            statistics.mean(c for c, _ in self._LEGACY) * _HISTORICAL_F058_FACTOR
+        )
+        current = by_factor[1.0]
+        assert current["raw"]["n"] == 2
+        # Pass-through: stored == raw, so this era's delta is exactly zero
+        # instead of being diluted into the legacy era's improvement.
+        assert current["calibrated"]["brier"] == current["raw"]["brier"]
+
+    @pytest.mark.asyncio
+    async def test_provenance_null_rows_join_the_legacy_era(self):
+        null_rows = [
+            {"raw": c, "stored": calibrate_confidence(c, _HISTORICAL_F058_FACTOR),
+             "is_post_f058": True, "applied_factor": None, "outcome": o}
+            for c, o in self._LEGACY
+        ]
+        d = await self._direction(
+            null_rows
+            + _reviewed(self._LEGACY, post=True, factor=_HISTORICAL_F058_FACTOR)
+            + _reviewed(self._CURRENT, post=True, factor=1.0)
+        )
+        by_factor = {e["factor"]: e for e in d}
+        assert set(by_factor) == {1.0, _HISTORICAL_F058_FACTOR}
+        assert by_factor[_HISTORICAL_F058_FACTOR]["raw"]["n"] == 6
+        assert by_factor[1.0]["raw"]["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_pre_f058_rows_stay_out_of_the_direction_check(self):
+        d = await self._direction(
+            _reviewed(self._LEGACY)
+            + _reviewed(self._CURRENT, post=True, factor=1.0)
+        )
+        assert [e["factor"] for e in d] == [1.0]
+        assert d[0]["raw"]["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_no_post_f058_reviews_yields_no_eras(self):
+        assert await self._direction(_reviewed(self._LEGACY)) == []
+
+    def test_markdown_renders_one_row_pair_per_era(self):
+        from nous_eval.probes.f058_calibration import _build_md
+
+        empty = summarize("x", [])
+        result = {
+            "agent_id": "a", "retired_at": None,
+            "sanity": {"ok": True, "n_post_f058": 0, "n_with_factor": 0,
+                       "n_current_era": 0, "n_bad": 0, "n_bad_integrity": 0},
+            "counterfactual": {"raw": empty, "calibrated": empty},
+            "post_f058_direction": [
+                {"factor": f,
+                 "raw": summarize(f"Post-F058 RAW @{f:.4f}", [(0.9, 0.0)]),
+                 "calibrated": summarize(f"Post-F058 stored @{f:.4f}",
+                                         [(0.9 * f, 0.0)])}
+                for f in (1.0, _HISTORICAL_F058_FACTOR)
+            ],
+        }
+        md = "\n".join(_build_md(result, 1.0))
+        assert "Post-F058 RAW @1.0000" in md
+        assert "Post-F058 RAW @0.7627" in md
+        assert "n=1 @ `0.7627`" in md

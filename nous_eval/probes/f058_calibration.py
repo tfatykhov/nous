@@ -38,7 +38,10 @@ checks instead of waiting:
   3. DIRECTION CHECK — measure raw vs calibrated calibration on the
      small post-F058 reviewed sample. Tiny n, but if the delta points
      the same way as the counterfactual, that's a weak-but-coherent
-     confirmation.
+     confirmation. Reported per applied ``calibration_factor`` and never
+     pooled: legacy 0.7627 rows and pass-through 1.0 rows are different
+     policies, and a blend of them measures neither. Rows without
+     provenance predate migration 073 and count as the legacy era.
 
 Connects to live PROD (default 192.168.1.141), READ-ONLY.
 
@@ -205,6 +208,7 @@ async def run(
             COALESCE(confidence_raw, confidence) AS raw,
             confidence AS stored,
             confidence_raw IS NOT NULL AS is_post_f058,
+            calibration_factor AS applied_factor,
             outcome
         FROM brain.decisions
         WHERE agent_id = $1
@@ -307,12 +311,33 @@ async def run(
                   _STRICT_OUTCOME[r["outcome"]])
                  for r in pre_f058]
 
-    # Step 3: direction check on post-F058 reviewed
+    # Step 3: direction check on post-F058 reviewed, one cohort per applied
+    # factor. Pooling legacy 0.7627 rows with pass-through 1.0 rows would
+    # report a blend whose weights shift as reviews accumulate, so it could
+    # not say whether either policy moved calibration. Rows predating
+    # migration 073 carry no provenance but were written under F058, so they
+    # belong to the historical factor's cohort.
     post_f058 = [r for r in rows if r["is_post_f058"]]
-    post_raw_pairs = [(float(r["raw"]), _STRICT_OUTCOME[r["outcome"]])
-                      for r in post_f058]
-    post_cal_pairs = [(float(r["stored"]), _STRICT_OUTCOME[r["outcome"]])
-                      for r in post_f058]
+    eras: dict[float, list] = {}
+    for r in post_f058:
+        applied = (counterfactual_factor if r["applied_factor"] is None
+                   else float(r["applied_factor"]))
+        key = next((k for k in eras if abs(k - applied) <= _FACTOR_TOLERANCE),
+                   applied)
+        eras.setdefault(key, []).append(r)
+    direction = [
+        {
+            "factor": f,
+            "raw": summarize(f"Post-F058 RAW @{f:.4f}",
+                             [(float(r["raw"]), _STRICT_OUTCOME[r["outcome"]])
+                              for r in members]),
+            "calibrated": summarize(
+                f"Post-F058 stored @{f:.4f}",
+                [(float(r["stored"]), _STRICT_OUTCOME[r["outcome"]])
+                 for r in members]),
+        }
+        for f, members in sorted(eras.items(), reverse=True)
+    ]
 
     return {
         "factor": factor,
@@ -332,10 +357,7 @@ async def run(
             "raw": summarize("Pre-F058 RAW", raw_pairs),
             "calibrated": summarize("Pre-F058 + counterfactual", cal_pairs),
         },
-        "post_f058_direction": {
-            "raw": summarize("Post-F058 RAW", post_raw_pairs),
-            "calibrated": summarize("Post-F058 calibrated", post_cal_pairs),
-        },
+        "post_f058_direction": direction,
     }
 
 
@@ -476,15 +498,16 @@ async def _async_main(argv: list[str] | None = None) -> int:
               f"({'better' if d_ece < 0 else 'worse'} per-bin calibration)")
     print()
     print("## Step 3 — Direction check (post-F058 reviewed)")
-    pd = result["post_f058_direction"]
-    _print_summary(pd["raw"])
-    _print_summary(pd["calibrated"])
-    if pd["raw"]["n"] > 0:
-        d_gap = abs(pd["calibrated"]["gap"]) - abs(pd["raw"]["gap"])
+    if not result["post_f058_direction"]:
+        print("  no post-F058 reviewed decisions yet")
+    for era in result["post_f058_direction"]:
+        print(f"  -- applied factor {era['factor']:.4f}")
+        _print_summary(era["raw"])
+        _print_summary(era["calibrated"])
+        d_gap = abs(era["calibrated"]["gap"]) - abs(era["raw"]["gap"])
         print(f"   \u0394 |gap|:  {d_gap:+.3f}  "
-              f"(consistent with F058 reducing overconfidence: "
-              f"{d_gap < 0})")
-        print(f"   Caveat: n={pd['raw']['n']} — directional only.")
+              f"(scaling reduced overconfidence: {d_gap < 0})")
+        print(f"   Caveat: n={era['raw']['n']} — directional only.")
     print()
     print("=" * 84)
 
@@ -568,18 +591,20 @@ def _build_md(result: dict, factor: float,
         "| variant | n | mean_conf | mean_outcome | gap | Brier | ECE |",
         "|---|---:|---:|---:|---:|---:|---:|",
     ]
-    for v in (pd["raw"], pd["calibrated"]):
-        if v["n"] == 0:
-            continue
-        md.append(
-            f"| {v['label']} | {v['n']} | {v['mean_conf']:.3f} | "
-            f"{v['mean_outcome']:.3f} | {v['gap']:+.3f} | "
-            f"{v['brier']:.4f} | {v['ece']:.4f} |"
-        )
-    if pd["raw"]["n"] > 0:
+    for era in pd:
+        for v in (era["raw"], era["calibrated"]):
+            md.append(
+                f"| {v['label']} | {v['n']} | {v['mean_conf']:.3f} | "
+                f"{v['mean_outcome']:.3f} | {v['gap']:+.3f} | "
+                f"{v['brier']:.4f} | {v['ece']:.4f} |"
+            )
+    if pd:
         md.append("")
         md.append(
-            f"- **Caveat**: post-F058 n={pd['raw']['n']} — directional only."
+            "- **Caveat**: one row pair per applied factor, never pooled; "
+            + ", ".join(f"n={era['raw']['n']} @ `{era['factor']:.4f}`"
+                        for era in pd)
+            + " — directional only."
         )
     return md
 
