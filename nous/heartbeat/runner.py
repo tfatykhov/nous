@@ -527,9 +527,12 @@ class HeartbeatRunner:
             # self-disable (manage_check unregisters the check before run()
             # returns) as node completion. end_run fires in the finally,
             # after the run's stats are recorded. No await separates this
-            # from the live re-check above.
+            # from the live re-check above. The outcome defaults to FAILED so
+            # an exit path that records nothing (a cancellation from stop(),
+            # any BaseException) can never read as success to the DAG loop;
+            # only a recorded success or an explicit skip overrides it.
             self._registry.begin_run(check.name)
-            run_succeeded: bool | None = None
+            run_succeeded: bool | None = False
             try:
                 result: CheckResult = await asyncio.wait_for(
                     check.run(),
@@ -544,9 +547,11 @@ class HeartbeatRunner:
                         "Heartbeat check '%s' skipped at execution boundary (disabled concurrently)",
                         check.name,
                     )
+                    run_succeeded = None
                     continue
                 check.mark_success()
                 successful_checks.add(check.name)
+                run_succeeded = True
 
                 # F034.5: Track token usage from dynamic checks
                 if result.tokens_used:
@@ -554,7 +559,6 @@ class HeartbeatRunner:
 
                 # F034.5: Update run stats in DB for dynamic checks
                 await self._record_run_stats(check, success=True)
-                run_succeeded = True
 
                 # #273: Collect self-disabled checks with callbacks
                 if isinstance(check, DynamicCheck) and result.self_disabled and check.on_complete_prompt:
@@ -1227,18 +1231,21 @@ class HeartbeatRunner:
         check = self._registry.get_check(name)
         if check is None:
             return None
-        # Same run bracket as _tick: see the comment there.
+        # Same run bracket as _tick (outcome defaults to failed): see the
+        # comment there.
         self._registry.begin_run(check.name)
-        run_succeeded: bool | None = None
+        run_succeeded: bool | None = False
         try:
             result = await asyncio.wait_for(check.run(), timeout=check.timeout)
             # A skipped result means run() returned early because the check
             # was disabled at the execution boundary — no LLM turn ran.
-            if not result.skipped:
+            if result.skipped:
+                run_succeeded = None
+            else:
                 check.mark_success()
+                run_succeeded = True
                 # F034.5: Update DB stats for dynamic checks
                 await self._record_run_stats(check, success=True)
-                run_succeeded = True
             if result.tokens_used:
                 self._tokens_used_today += result.tokens_used
             # #273: Fire callback if check self-disabled

@@ -182,9 +182,12 @@ class CheckRegistry:
     ) -> None:
         """Mark a run of ``name`` finished, after its stats are recorded.
 
-        ``succeeded`` is None for a run that was skipped (or cancelled)
-        without an outcome. The outcome is kept only for a run that disabled
-        its own check, since that run is the check's last.
+        ``succeeded`` is None only for a run that was skipped at the
+        execution boundary (no work ran). Callers pass False for any run that
+        did not finish successfully — including one cancelled or raising —
+        so an interrupted final run is never read as completion. The outcome
+        is kept only for a run that disabled its own check, since that run is
+        the check's last.
         """
         remaining = self._in_flight.get(name, 0) - 1
         if remaining > 0:

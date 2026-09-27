@@ -1382,3 +1382,98 @@ async def test_worker_evidence_deferred_while_self_disabling_run_in_flight():
     release.set()
     await asyncio.wait_for(tick, timeout=3.0)
     assert await orch._heartbeat_worker_has_run(node) is True
+
+
+# ---------------------------------------------------------------------------
+# codex P1 (PR #656 round 3): a run that ends without recording an outcome
+# (cancelled by stop(), or a forced run that raises) must read as FAILED to
+# the DAG loop when it disabled its own check, never as completion.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cancelled_self_disabled_run_fails_node():
+    hb, orch, store, node, disabled, release, stats_order = _self_disabling_setup()
+
+    tick = asyncio.create_task(hb._tick())
+    await asyncio.wait_for(disabled.wait(), timeout=3.0)
+    tick.cancel()  # stop() cancelling the heartbeat task mid-run
+    with pytest.raises(asyncio.CancelledError):
+        await tick
+
+    assert not hb._registry.is_in_flight(node.check_name)
+    await orch._sync_check_node(node)
+    assert node.status == "failed"
+    assert store.update_node.await_args.kwargs["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_forced_self_disabled_run_that_raises_fails_node():
+    hb, orch, store, node, disabled, release, stats_order = _self_disabling_setup(
+        fail_after_disable=True,
+    )
+
+    forced = asyncio.create_task(hb.trigger_check(node.check_name))
+    await asyncio.wait_for(disabled.wait(), timeout=3.0)
+    await orch._sync_check_node(node)
+    assert node.status == "running"
+
+    release.set()
+    with pytest.raises(RuntimeError):
+        await asyncio.wait_for(forced, timeout=3.0)
+    assert stats_order == ["failure"]
+
+    await orch._sync_check_node(node)
+    assert node.status == "failed"
+    assert store.update_node.await_args.kwargs["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_run_without_self_disable_records_no_outcome():
+    """Cancelling a run that did not disable its check propagates and leaves
+    no failed final-run record — the check will simply run again."""
+    registry = CheckRegistry()
+    started = asyncio.Event()
+    agent = MagicMock()
+    check = DynamicCheck(
+        check_id="plain-id",
+        name="plain-check",
+        prompt="p",
+        tools=[],
+        interval=1,
+        timeout=30,
+        runner=agent,
+    )
+
+    async def blocking_turn(*args, **kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    agent.run_turn = AsyncMock(side_effect=blocking_turn)
+    agent.end_conversation = AsyncMock()
+    registry.register(check)
+    loader = MagicMock()
+    loader._registry = registry
+    loader.update_run_stats = AsyncMock()
+    hb = HeartbeatRunner(
+        settings=_make_settings(heartbeat_enabled=True),
+        registry=registry,
+        runner=MagicMock(),
+        brain=MagicMock(),
+        heart=MagicMock(),
+        bus=None,
+        http_client=None,
+        finding_store=None,
+        api_client=None,
+        dynamic_loader=loader,
+    )
+
+    tick = asyncio.create_task(hb._tick())
+    await asyncio.wait_for(started.wait(), timeout=3.0)
+    tick.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tick
+
+    assert not registry.is_in_flight(check.name)
+    assert registry.self_disabled_run_failed(check.name) is False
+    loader.update_run_stats.assert_not_called()
