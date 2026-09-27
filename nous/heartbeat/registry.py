@@ -134,6 +134,11 @@ class BaseCheck(ABC):
         ...
 
 
+# Backstop bound on retained self-disabled run failures. Each is consumed when
+# its DAG node is marked failed; this only caps failures whose node never syncs.
+_MAX_RETAINED_DISABLED_RUN_FAILURES = 1024
+
+
 class CheckRegistry:
     """Registry of heartbeat checks with permanent/removable distinction."""
 
@@ -146,15 +151,20 @@ class CheckRegistry:
         # the RUN finishing, not on registry absence, so the runner brackets
         # every run with begin_run/end_run.
         self._in_flight: dict[str, int] = {}
-        # Outcome of the run during which a check disabled itself.
-        self._disabled_run_outcome: dict[str, bool] = {}
+        # Checks whose self-disabling final run failed, awaiting the DAG
+        # orchestrator to consume the failure (consume_self_disabled_run_failure).
+        # Only failures are kept — a successful final run is read as
+        # completion from registry absence alone — and insertion order bounds
+        # the set, so a failure nobody consumes (its DAG was cancelled first)
+        # cannot grow it without limit.
+        self._disabled_run_failures: dict[str, None] = {}
 
     def register(self, check: BaseCheck, permanent: bool = False) -> None:
         """Register a check. Permanent checks cannot be unregistered."""
         self._checks[check.name] = check
         # A fresh registration starts with no recorded outcome, so a stale
         # failure from an earlier check of the same name cannot leak into it.
-        self._disabled_run_outcome.pop(check.name, None)
+        self._disabled_run_failures.pop(check.name, None)
         if permanent:
             self._permanent.add(check.name)
         logger.info("Registered heartbeat check: %s (permanent=%s)", check.name, permanent)
@@ -185,17 +195,20 @@ class CheckRegistry:
         ``succeeded`` is None only for a run that was skipped at the
         execution boundary (no work ran). Callers pass False for any run that
         did not finish successfully — including one cancelled or raising —
-        so an interrupted final run is never read as completion. The outcome
-        is kept only for a run that disabled its own check, since that run is
-        the check's last.
+        so an interrupted final run is never read as completion. A failure is
+        kept only for a run that disabled its own check, since that run is the
+        check's last; it lives until the DAG consumes it.
         """
         remaining = self._in_flight.get(name, 0) - 1
         if remaining > 0:
             self._in_flight[name] = remaining
         else:
             self._in_flight.pop(name, None)
-        if self_disabled and succeeded is not None:
-            self._disabled_run_outcome[name] = succeeded
+        if self_disabled and succeeded is False:
+            self._disabled_run_failures.pop(name, None)
+            self._disabled_run_failures[name] = None
+            while len(self._disabled_run_failures) > _MAX_RETAINED_DISABLED_RUN_FAILURES:
+                del self._disabled_run_failures[next(iter(self._disabled_run_failures))]
 
     def is_in_flight(self, name: str) -> bool:
         """Whether a run of ``name`` has started and not yet finished."""
@@ -203,7 +216,11 @@ class CheckRegistry:
 
     def self_disabled_run_failed(self, name: str) -> bool:
         """Whether ``name`` disabled itself during a run that then failed."""
-        return self._disabled_run_outcome.get(name) is False
+        return name in self._disabled_run_failures
+
+    def consume_self_disabled_run_failure(self, name: str) -> None:
+        """Drop the retained failure for ``name`` once it has been recorded."""
+        self._disabled_run_failures.pop(name, None)
 
     def get_due_checks(self, now: datetime | None = None) -> list[BaseCheck]:
         """Get all checks that are due to run."""

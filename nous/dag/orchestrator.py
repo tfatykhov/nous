@@ -192,6 +192,13 @@ def _registry_disabled_run_failed(registry: object, name: str | None) -> bool:
     return bool(name) and callable(fn) and fn(name) is True
 
 
+def _registry_consume_disabled_run_failure(registry: object, name: str | None) -> None:
+    """Release the registry's retained failure for ``name`` once recorded."""
+    fn = getattr(registry, "consume_self_disabled_run_failure", None)
+    if name and callable(fn):
+        fn(name)
+
+
 # Completion check polling
 _CHECK_CMD_TIMEOUT = 10.0  # Hard timeout per check command invocation
 
@@ -1425,6 +1432,10 @@ class DAGOrchestrator:
                 completed_at=datetime.now(UTC),
             )
             node.status = "failed"
+            # Consumed only after the failure is persisted, so a failed write
+            # re-reads it next tick; consuming keeps the registry from
+            # retaining one entry per finished DAG check forever.
+            _registry_consume_disabled_run_failure(registry, node.check_name)
             return
         if check is None:
             # Check was unregistered — for DAG-managed checks this means

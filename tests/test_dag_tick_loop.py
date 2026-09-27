@@ -1477,3 +1477,83 @@ async def test_cancelled_run_without_self_disable_records_no_outcome():
     assert not registry.is_in_flight(check.name)
     assert registry.self_disabled_run_failed(check.name) is False
     loader.update_run_stats.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# codex P2 (PR #656 round 4): retained self-disabled run outcomes must not
+# accumulate — DAG checks use fresh names, so nothing re-registers to clear them.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_successful_self_disabled_run_retains_nothing():
+    hb, orch, store, node, disabled, release, stats_order = _self_disabling_setup()
+    registry = hb._registry
+
+    tick = asyncio.create_task(hb._tick())
+    await asyncio.wait_for(disabled.wait(), timeout=3.0)
+    release.set()
+    await asyncio.wait_for(tick, timeout=3.0)
+
+    assert registry._disabled_run_failures == {}
+    await orch._sync_check_node(node)
+    assert node.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_failed_self_disabled_run_consumed_when_node_fails():
+    hb, orch, store, node, disabled, release, stats_order = _self_disabling_setup(
+        fail_after_disable=True,
+    )
+    registry = hb._registry
+
+    tick = asyncio.create_task(hb._tick())
+    await asyncio.wait_for(disabled.wait(), timeout=3.0)
+    release.set()
+    await asyncio.wait_for(tick, timeout=3.0)
+    assert registry.self_disabled_run_failed(node.check_name) is True
+
+    await orch._sync_check_node(node)
+    assert node.status == "failed"
+    assert registry._disabled_run_failures == {}
+
+
+@pytest.mark.asyncio
+async def test_failed_self_disabled_run_kept_when_node_write_fails():
+    """The failure is consumed only after it is persisted, so a failed write
+    re-reads it on the next tick instead of completing the node."""
+    hb, orch, store, node, disabled, release, stats_order = _self_disabling_setup(
+        fail_after_disable=True,
+    )
+    registry = hb._registry
+
+    tick = asyncio.create_task(hb._tick())
+    await asyncio.wait_for(disabled.wait(), timeout=3.0)
+    release.set()
+    await asyncio.wait_for(tick, timeout=3.0)
+
+    store.update_node.side_effect = RuntimeError("db down")
+    with pytest.raises(RuntimeError):
+        await orch._sync_check_node(node)
+    assert registry.self_disabled_run_failed(node.check_name) is True
+
+    store.update_node.side_effect = None
+    await orch._sync_check_node(node)
+    assert node.status == "failed"
+    assert registry._disabled_run_failures == {}
+
+
+def test_retained_self_disabled_failures_are_bounded():
+    from nous.heartbeat.registry import _MAX_RETAINED_DISABLED_RUN_FAILURES
+
+    registry = CheckRegistry()
+    total = _MAX_RETAINED_DISABLED_RUN_FAILURES + 50
+    for i in range(total):
+        name = f"dag-{i}-node"
+        registry.begin_run(name)
+        registry.end_run(name, False, self_disabled=True)
+
+    assert len(registry._disabled_run_failures) == _MAX_RETAINED_DISABLED_RUN_FAILURES
+    assert not registry.self_disabled_run_failed("dag-0-node")
+    assert registry.self_disabled_run_failed(f"dag-{total - 1}-node")
+    assert registry._in_flight == {}
