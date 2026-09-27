@@ -226,6 +226,9 @@ class ProcedureManager:
         procedure.implementation_notes = input.implementation_notes or None
         procedure.tags = input.tags or None
         procedure.runtime_metadata = input.runtime_metadata
+        # Propagate kind so an in-place skill update does not silently inherit
+        # a prior 'strategy' kind (or vice-versa) from the existing row.
+        procedure.kind = input.kind
         if input.active is not None:
             procedure.active = input.active
         procedure.embedding = embedding

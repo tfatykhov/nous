@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from nous.events import EventBus
     from nous.heart.heart import Heart
 
+from sqlalchemy.exc import IntegrityError
+
 from nous.brain.schemas import GRADED_OUTCOMES
 from nous.handlers import LLMClient, call_background_llm_structured
 from nous.heart.schemas import ProcedureInput
@@ -263,47 +265,69 @@ class StrategyCardDistiller:
         # and the deactivate/insert are atomic — preventing a concurrent task
         # that also passed the _in_flight guard from racing to insert a second
         # active card for the same decision.
-        async with self._heart.db.session() as session:
-            existing_id = await self._find_existing_card_in_session(decision_id, session)
-            if existing_id is not None:
-                from sqlalchemy import update as sa_update
+        #
+        # Retry on IntegrityError: two *different* decisions whose LLM calls
+        # return the same generic name can both pass _make_unique_name before
+        # either commits, then race to insert the same name.  A fresh session
+        # on the retry will see the already-committed row and pick a different
+        # suffix, so the second decision gets its card rather than silently
+        # being left without one.
+        _MAX_NAME_RETRIES = 3
+        original_inp_name = inp.name
+        detail: Any = None
+        for _attempt in range(_MAX_NAME_RETRIES):
+            inp = inp.model_copy(update={"name": original_inp_name})
+            try:
+                async with self._heart.db.session() as session:
+                    existing_id = await self._find_existing_card_in_session(decision_id, session)
+                    if existing_id is not None:
+                        from sqlalchemy import update as sa_update
 
-                from nous.storage.models import Procedure
+                        from nous.storage.models import Procedure
 
-                await session.execute(
-                    sa_update(Procedure)
-                    .where(Procedure.id == existing_id)
-                    .where(Procedure.agent_id == self._brain.agent_id)
-                    .values(active=False)
+                        await session.execute(
+                            sa_update(Procedure)
+                            .where(Procedure.id == existing_id)
+                            .where(Procedure.agent_id == self._brain.agent_id)
+                            .values(active=False)
+                        )
+                    # Disambiguate name before insert: append a counter suffix when an
+                    # active procedure already has the same case-insensitive name, so a
+                    # generic title ('Validate Before Deploying') produced by two different
+                    # decisions does not cause a unique-constraint violation on the second
+                    # insert and silently leave that decision without a card.
+                    unique_name = await self._make_unique_name(inp.name, session)
+                    if unique_name != inp.name:
+                        inp = inp.model_copy(update={"name": unique_name})
+                    detail = await self._heart.procedures.store(inp, session=session)
+                    if self._graph_linker is not None:
+                        try:
+                            await self._graph_linker.create_edge(
+                                source_id=detail.id,
+                                source_type="procedure",
+                                target_id=decision_id,
+                                target_type="decision",
+                                relation="extracted_from",
+                                weight=1.0,
+                                session=session,
+                                provenance_source="strategy_card_distiller",
+                            )
+                        except Exception:
+                            logger.warning(
+                                "StrategyCardDistiller: edge creation failed for card %s",
+                                detail.id,
+                                exc_info=True,
+                            )
+                    await session.commit()
+                break  # committed successfully
+            except IntegrityError:
+                if _attempt == _MAX_NAME_RETRIES - 1:
+                    raise
+                logger.warning(
+                    "StrategyCardDistiller: name conflict on attempt %d for decision %s, retrying",
+                    _attempt + 1,
+                    decision_id,
                 )
-            # Disambiguate name before insert: append a counter suffix when an
-            # active procedure already has the same case-insensitive name, so a
-            # generic title ('Validate Before Deploying') produced by two different
-            # decisions does not cause a unique-constraint violation on the second
-            # insert and silently leave that decision without a card.
-            unique_name = await self._make_unique_name(inp.name, session)
-            if unique_name != inp.name:
-                inp = inp.model_copy(update={"name": unique_name})
-            detail = await self._heart.procedures.store(inp, session=session)
-            if self._graph_linker is not None:
-                try:
-                    await self._graph_linker.create_edge(
-                        source_id=detail.id,
-                        source_type="procedure",
-                        target_id=decision_id,
-                        target_type="decision",
-                        relation="extracted_from",
-                        weight=1.0,
-                        session=session,
-                        provenance_source="strategy_card_distiller",
-                    )
-                except Exception:
-                    logger.warning(
-                        "StrategyCardDistiller: edge creation failed for card %s",
-                        detail.id,
-                        exc_info=True,
-                    )
-            await session.commit()
 
         logger.info(
             "StrategyCardDistiller: distilled %s card for decision %s → procedure %s",
