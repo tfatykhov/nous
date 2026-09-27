@@ -13,7 +13,7 @@ A native Android app (Kotlin, Jetpack Compose) that renders the same A2UI surfac
 - iOS.
 - Any change to web-companion behaviour.
 
-**Open decision, owned by the user:** how the native client authenticates to a Nous deployment (§5). Nothing else in this spec depends on that choice.
+**Access:** the app reaches Nous over the user's Tailscale tailnet (§5); the public web path is unchanged.
 
 ### 1.1 What changed since F092 Q2
 
@@ -102,13 +102,18 @@ Android (android/):
 
 **Split rule:** anything that decides *what* to show lives in `:core`, tested on the plain JVM. `:app` decides *how* it looks, plus the Android plumbing. This also matches the build environment: this machine has a JDK but no Android SDK, so `:app` is compiled and tested in CI (§11).
 
-## 5. Authentication — OPEN (owner: user)
+## 5. Access — Tailscale (decided by the user, 2026-09-27)
 
-The web companion is protected by Traefik + oauth2-proxy with Google sign-in, which is a browser login. How the native app authenticates to a deployment is a decision the user makes; this spec does not prescribe it. Until it is decided:
+The web companion keeps its public path: Traefik + oauth2-proxy with Google sign-in, unchanged. The native app does **not** use the public endpoint. It reaches Nous over the user's **tailnet**:
 
-- The app connects to a configured base URL and sends a configurable set of request headers (empty by default). That is the only coupling point.
-- Development and CI target a local Nous that has no edge (`http://10.0.2.2:8000` from the emulator, or any LAN URL).
-- The push-registration endpoints (§6.3) sit under `/a2ui/` and are protected by exactly what protects the rest of `/a2ui/*`.
+- **Server side.** Tailscale runs on the Nous host, and `tailscale serve` publishes HTTPS on `https://<host>.<tailnet>.ts.net`, proxying to the local Nous port (`127.0.0.1:8383` on prod). The tailnet needs MagicDNS and HTTPS certificates enabled. There is no Traefik change, no public exposure for the app, and no Nous auth code.
+- **Who can connect** is decided by tailnet membership plus the tailnet ACL. For a single-user tailnet, that means the user's own devices.
+- **Phone side.** Tailscale's app-based split tunneling (v1.96.2+ supports *include* mode) can restrict the VPN to the Nous Companion app. Either way, only tailnet-addressed traffic uses the tunnel unless an exit node is selected.
+- **App side.** The app is configured with one base URL (the `ts.net` HTTPS URL) and sends no credentials. Because Serve provides a real certificate, the app needs no cleartext-traffic exception.
+- **Push is independent of the tunnel.** Nous calls FCM outbound over the internet, and the phone receives FCM through Google Play services.
+- **Development and CI** target a local Nous (`http://10.0.2.2:8000` from the emulator). Debug builds allow cleartext for that one host only.
+
+**Accepted limitation:** the app works only while the phone is connected to the tailnet. Push notifications still arrive when it isn't; tapping one opens the app, which shows "not connected" until Tailscale is up.
 
 ## 6. Push notifications
 
@@ -196,7 +201,7 @@ Each needs a `docker-compose.yml` line with a real default.
 
 ### 7.2 Screens
 
-1. **Connect** — base URL, optional headers (§5), device name. Connects, then asks for the notification permission.
+1. **Connect** — base URL (the tailnet `ts.net` URL, §5) and device name. Connects, then asks for the notification permission. If the connection fails, it says so and suggests checking Tailscale.
 2. **Inbox** — live surfaces grouped by priority, with kind chips and a connection-status line. "Close all micro-apps" sends `app.close` sequentially, as on the web.
 3. **Surface** — the renderer, with themes per surface.
 4. **Settings** — push status and "send test notification", "open in web companion", diagnostics (last seq, reconnect count, last error), and disconnect.
@@ -311,4 +316,4 @@ The final beta acceptance is an end-to-end run on the user's phone. This environ
 | D3 | FCM data-only + runtime Firebase config | the app owns dismissal; one generic APK |
 | D4 | push = pointer, dismiss on terminal transition | answers F092's split-state objection |
 | D5 | web companion untouched | the user's directive: native is an alternative beta |
-| D6 | authentication left to the user | §5 |
+| D6 | app access over Tailscale (`tailscale serve` HTTPS), chosen by the user | no public exposure, no Nous auth code, real TLS certificate; the web path is untouched |
