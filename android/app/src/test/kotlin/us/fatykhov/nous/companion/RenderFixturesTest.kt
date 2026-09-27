@@ -100,7 +100,11 @@ class RenderFixturesTest {
                 if (cid !in reachable) continue
                 if ((c["component"] as? kotlinx.serialization.json.JsonPrimitive)?.content != "Text") continue
                 val lit = (c["text"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content ?: continue
-                val probe = lit.lineSequence().first().removePrefix("#").trimStart('#').trim().takeIf { it.isNotEmpty() && !it.contains('$') && !it.contains('*') && !it.contains('`') && !it.contains('[') } ?: continue
+                // Markdown-lite markers are consumed by the renderer (heading `#`, list `-`/`*`/`+`/`1.`), so strip them
+                // like Markdown.parse does before probing; skip interpolations and inline markup entirely.
+                val probe = lit.lineSequence().first().trim()
+                    .replace(Regex("""^#{1,6}\s+"""), "").replace(Regex("""^([-*+]|\d+[.)])\s+"""), "").trim()
+                    .takeIf { it.isNotEmpty() && !it.contains('$') && !it.contains('*') && !it.contains('`') && !it.contains('[') } ?: continue
                 // At least one: a fixture may legitimately repeat a literal (00_incremental has four "Book now" buttons).
                 assertTrue("${f.name}: text '$probe' not rendered",
                     rule.onAllNodesWithText(probe, substring = true, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty())
