@@ -117,17 +117,35 @@ class Functions(
             return d.toString()
         }
 
+        private val JS_DECIMAL = Regex("""^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$""")
+        private val JS_HEX = Regex("""^0[xX]([0-9a-fA-F]+)$""")
+        private val JS_OCT = Regex("""^0[oO]([0-7]+)$""")
+        private val JS_BIN = Regex("""^0[bB]([01]+)$""")
+
+        /** JS `Number(str)`: "" → 0; decimal/exponent forms; 0x/0o/0b prefixes; Infinity; else NaN.
+         *  NOT Java's grammar: "12d", "12f" and hex-floats are NaN in JS. */
+        fun jsNumberOfString(raw: String): Double {
+            val s = raw.trim()
+            if (s.isEmpty()) return 0.0
+            if (s == "Infinity" || s == "+Infinity") return Double.POSITIVE_INFINITY
+            if (s == "-Infinity") return Double.NEGATIVE_INFINITY
+            JS_HEX.find(s)?.let { return it.groupValues[1].toBigInteger(16).toDouble() }
+            JS_OCT.find(s)?.let { return it.groupValues[1].toBigInteger(8).toDouble() }
+            JS_BIN.find(s)?.let { return it.groupValues[1].toBigInteger(2).toDouble() }
+            return if (JS_DECIMAL.matches(s)) s.toDouble() else Double.NaN
+        }
+
         /** JS `Number(x)`: "" → 0, non-numeric string → NaN, bool → 0/1, null → 0. */
         fun jsNumberOf(v: JsonElement?): Double = when {
             v == null || v is JsonNull -> 0.0
-            v is JsonPrimitive && v.isString -> { val s = v.content.trim(); if (s.isEmpty()) 0.0 else s.toDoubleOrNull() ?: Double.NaN }
+            v is JsonPrimitive && v.isString -> jsNumberOfString(v.content)
             v is JsonPrimitive -> v.booleanOrNull?.let { if (it) 1.0 else 0.0 } ?: v.doubleOrNull ?: Double.NaN
             else -> Double.NaN
         }
 
         /** JS `Number.prototype.toFixed` on the double's exact binary value. */
         fun toFixed(d: Double, digits: Int): String =
-            BigDecimal(d).setScale(digits, RoundingMode.HALF_UP).toPlainString()
+            if (!d.isFinite()) jsNumber(d) else BigDecimal(d).setScale(digits, RoundingMode.HALF_UP).toPlainString()
 
         fun toBool(v: JsonElement?): Boolean = when {
             v == null || v is JsonNull -> false

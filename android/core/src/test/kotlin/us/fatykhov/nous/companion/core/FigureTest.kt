@@ -46,6 +46,12 @@ class FigureTest {
         prose("↑ improving trend over last 30 days", "↑6 and ↓3")
     }
 
+    @Test fun isoDateKeepsAsciiDigitsLikeTheWebsUnflaggedRegex() {
+        // Web ISO_DATE/PLACEHOLDER compile WITHOUT `u`: JS \d is ASCII, so Arabic-Indic digits with an offset are prose.
+        prose("٢٠٢٦-٠٩-٠٤T١٥:٤٠:٤٣+٠٠:٠٠")
+        fig("2026-09-04T15:40:43+00:00")
+    }
+
     @Test fun tightUnit() {
         for (u in listOf("%", "％", "٪", "‰", "°C", "′")) assertTrue(Figure.isTightUnit(u), u)
         for (u in listOf("kg", "bpm", "€", "")) assertFalse(Figure.isTightUnit(u), u)

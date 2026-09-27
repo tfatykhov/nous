@@ -18,8 +18,8 @@ import kotlinx.serialization.json.JsonObject
 object Pointer {
     fun tokens(path: String): List<String> {
         if (path.isEmpty() || path == "/") return emptyList()
-        require(path.startsWith("/")) { "pointer must start with '/': $path" }
-        return path.substring(1).split("/").map { it.replace("~1", "/").replace("~0", "~") }
+        // Tolerant like pointer.ts (`replace(/^\//,'')`) and service._pointer_set (`lstrip('/')`): never throws.
+        return path.removePrefix("/").split("/").map { it.replace("~1", "/").replace("~0", "~") }
     }
 
     fun get(model: JsonElement?, path: String): JsonElement? {
@@ -57,7 +57,8 @@ object Pointer {
                     else { while (list.size <= idx) list.add(JsonNull); list[idx] = value }
                 } else {
                     while (list.size <= idx) list.add(JsonNull)
-                    val child = list[idx].let { if (it is JsonNull) null else it }
+                    // Any NON-container is replaced (TS `typeof !== 'object'`, server `not isinstance(dict|list)`).
+                    val child = list[idx].takeIf { it is JsonObject || it is JsonArray }
                     list[idx] = setIn(child ?: fresh(nextIsIndex), toks, i + 1, value) ?: JsonNull
                 }
                 JsonArray(list)
@@ -67,7 +68,7 @@ object Pointer {
                 if (last) {
                     if (value == null) map.remove(tok) else map[tok] = value
                 } else {
-                    val child = map[tok]?.let { if (it is JsonNull) null else it }
+                    val child = map[tok]?.takeIf { it is JsonObject || it is JsonArray }
                     map[tok] = setIn(child ?: fresh(nextIsIndex), toks, i + 1, value) ?: JsonNull
                 }
                 JsonObject(map)

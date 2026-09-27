@@ -162,5 +162,12 @@ class FunctionsTest {
         assertEquals("2.5", Functions.toFixed(2.5, 1)); assertEquals("3", Functions.jsNumber(3.0))
         assertEquals(0.0, Functions.jsNumberOf(JsonPrimitive(""))); assertTrue(Functions.jsNumberOf(JsonPrimitive("abc")).isNaN())
         assertEquals(1.0, Functions.jsNumberOf(JsonPrimitive(true)))
+        // JS Number() grammar, not Java's: suffixes and hex-floats are NaN; 0x/0o/0b prefixes parse.
+        assertTrue(Functions.jsNumberOfString("12d").isNaN()); assertTrue(Functions.jsNumberOfString("12f").isNaN())
+        assertTrue(Functions.jsNumberOfString("0x1.8p3").isNaN())
+        assertEquals(26.0, Functions.jsNumberOfString("0x1A")); assertEquals(8.0, Functions.jsNumberOfString("0o10")); assertEquals(5.0, Functions.jsNumberOfString("0b101"))
+        assertEquals(1.5e3, Functions.jsNumberOfString(" 1.5e3 ")); assertEquals(0.5, Functions.jsNumberOfString(".5"))
+        assertEquals(Double.POSITIVE_INFINITY, Functions.jsNumberOfString("Infinity"))
+        assertEquals("NaN", Functions.toFixed(Double.NaN, 2)); assertEquals("Infinity", Functions.toFixed(Double.POSITIVE_INFINITY, 1))
     }
 }

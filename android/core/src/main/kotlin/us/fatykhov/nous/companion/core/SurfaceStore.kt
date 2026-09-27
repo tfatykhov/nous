@@ -233,6 +233,7 @@ class SurfaceStore(private val nowMs: () -> Long = System::currentTimeMillis) {
     fun ordered(): List<SurfaceState> = _surfaces.values.sortedByDescending { it.priority }
 
     private fun jsToString(e: JsonElement): String = when (e) {
+        is JsonNull -> ""          // TS `?? ''` on an explicit null
         is JsonPrimitive -> e.content   // String(x) for a number gives its JS repr; nonce/theme/title are strings in practice
         else -> e.toString()
     }

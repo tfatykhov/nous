@@ -114,6 +114,11 @@ class SyncEngineTest {
         val rej = e.postAction("s1", "x", "b", JsonObject(emptyMap())); assertFalse(rej.ok); assertEquals("stale", rej.message)
     }
 
+    @Test fun surfaceIdIsEncodedLikeEncodeURIComponent() {
+        assertEquals("a%20b%2Fc'(d)~", encodeURIComponent("a b/c'(d)~"))
+        assertEquals("nous%3Aagent%3Amicro_app%3A1", encodeURIComponent("nous:agent:micro_app:1"))
+    }
+
     @Test fun callNonceAtTopLevel() = runTest {
         val store = SurfaceStore(); store.apply(null, Json.parseToJsonElement(envelope("s1", "n1")).jsonObject)
         val http = FakeHttp(emptyMap())

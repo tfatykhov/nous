@@ -43,6 +43,8 @@ class SurfaceStoreTest {
         assertEquals("report", s.surfaces["s1"]!!.theme); assertEquals("T", s.surfaces["s1"]!!.title)
         s.apply(2, create("s2"))
         assertEquals("", s.surfaces["s2"]!!.nonce); assertEquals(0, s.surfaces["s2"]!!.priority)
+        s.apply(3, create("s3", ""","metadata":{"extensions":{"com_nous_nonce":null,"com_nous_theme":null}}"""))
+        assertEquals("", s.surfaces["s3"]!!.nonce); assertEquals("", s.surfaces["s3"]!!.theme)   // explicit null == TS `?? ''`
     }
 
     @Test fun updateComponentsUpsertsById() {

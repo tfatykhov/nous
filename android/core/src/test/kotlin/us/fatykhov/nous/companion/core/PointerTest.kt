@@ -44,6 +44,17 @@ class PointerTest {
         assertNull(Pointer.get(j("""{"a":[1]}"""), "/b"))
     }
 
+    @Test fun primitiveIntermediateIsReplacedLikeTsAndServer() {
+        // pointer.ts:66 and service._pointer_set both replace any NON-container, not just null.
+        assertEquals(j("""{"a":["x"]}"""), Pointer.set(j("""{"a":"hello"}"""), "/a/0", JsonPrimitive("x")))
+        assertEquals(j("""{"a":{"b":1}}"""), Pointer.set(j("""{"a":5}"""), "/a/b", JsonPrimitive(1)))
+    }
+
+    @Test fun slashlessPathNeverThrows() {
+        assertEquals(listOf("a", "b"), Pointer.tokens("a/b"))
+        assertEquals(j("""{"a":1}"""), Pointer.set(j("{}"), "a", JsonPrimitive(1)))
+    }
+
     @Test fun absoluteResolution() {
         assertEquals("/x", Pointer.absolute("/x", "/items/2"))
         assertEquals("/items/2/label", Pointer.absolute("label", "/items/2"))

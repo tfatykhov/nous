@@ -10,11 +10,13 @@ object Figure {
     /** JS `u`-mode parity: `\s` must match NBSP/NNBSP and `\p{…}` classes are Unicode-aware. */
     private fun ure(pattern: String): Regex =
         java.util.regex.Pattern.compile(pattern, java.util.regex.Pattern.UNICODE_CHARACTER_CLASS).toRegex()
+    /** The two web patterns compiled WITHOUT the `u` flag: `\d` must stay ASCII there (a JS invariant). */
+    private fun ascii(pattern: String): Regex = java.util.regex.Pattern.compile(pattern).toRegex()
 
     private const val PLACEHOLDER = """^([—–−-]{1,3}|[Nn]/[Aa]|TBD)$"""
     private fun ranged(core: String) = """$core(?:\s?[–—-]\s?$core)?"""
     private const val ISO_DATE_CORE = """\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?([.,]\d+)?(Z|[+-]\d{2}:?\d{2})?)?"""
-    private val ISO_DATE = ure("^${ranged(ISO_DATE_CORE)}$")
+    private val ISO_DATE = ascii("^${ranged(ISO_DATE_CORE)}$")
     private const val PERIOD_WORD = """(?:[APap]\.?[Mm]\.?|\p{L}\p{M}*(?:\p{L}\p{M}*)?\.?)"""
     private const val DAY_PERIOD = """(?:\s?$PERIOD_WORD)?"""
     private const val CLOCK = """(?:$PERIOD_WORD\s?)?\p{Nd}{1,2}:\p{Nd}{2}(?::\p{Nd}{2})?$DAY_PERIOD"""
@@ -51,7 +53,7 @@ object Figure {
     private val CURRENCY_CODE = ure(shapes(CURRENCY_CODE_CORE))
     private val DIRECTIONAL = ure("""^[↑↓▲▼]\s?(?:${shaped(NUMBER_CORE)}|${shaped(CURRENCY_CODE_CORE)})$""")
     private val PATTERNS = listOf(
-        ure(PLACEHOLDER), ISO_DATE, NUMERIC_DATE, WORDY_DATE, COLLAPSED_DATE_RANGE,
+        ascii(PLACEHOLDER), ISO_DATE, NUMERIC_DATE, WORDY_DATE, COLLAPSED_DATE_RANGE,
         TIME_OF_DAY, RATIO, DURATION, NUMBER, CURRENCY_CODE, DIRECTIONAL,
     )
     // ALM, LRM/RLM, embedding/override controls, isolate controls (written as escapes: they are invisible).

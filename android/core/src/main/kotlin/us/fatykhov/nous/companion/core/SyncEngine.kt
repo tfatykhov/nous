@@ -17,6 +17,10 @@ import kotlinx.serialization.json.put
 import kotlin.math.min
 import kotlin.math.pow
 
+/** JS `encodeURIComponent`: everything but `A-Za-z0-9-_.!~*'()` is percent-encoded; a space is %20, never `+`. */
+fun encodeURIComponent(s: String): String = java.net.URLEncoder.encode(s, "UTF-8")
+    .replace("+", "%20").replace("%21", "!").replace("%27", "'").replace("%28", "(").replace("%29", ")").replace("%7E", "~")
+
 /** What the engine needs from HTTP; `:app` binds OkHttp, tests bind fakes. */
 interface Http {
     class Response(val status: Int, val body: String, val headers: Map<String, String>) {
@@ -82,7 +86,7 @@ class SyncEngine(
             val ids = surfaces.mapNotNull { (it as? JsonObject)?.get("surface_id")?.stringOrNull }
             store.pruneAbsent(ids.toSet())
             for (id in ids) {
-                val res = http.get("/a2ui/surfaces/" + java.net.URLEncoder.encode(id, "UTF-8"))
+                val res = http.get("/a2ui/surfaces/" + encodeURIComponent(id))
                 if (!res.ok) throw IllegalStateException("HTTP ${res.status} for surface $id")   // a 404 aborts the whole cycle
                 store.apply(null, Json.parseToJsonElement(res.body).jsonObject)
                 val upto = res.header("X-A2UI-Upto-Seq")?.toLongOrNull() ?: 0L
