@@ -777,6 +777,7 @@ async def test_capture_compensation_snapshot_raises_for_oversized_undoable() -> 
     runner = object.__new__(AgentRunner)
     runner._snap_store = AsyncMock()
     runner._workspace_dir = "/"
+    runner._dispatcher = SimpleNamespace()  # no repaired_args: input passes through
 
     ctx = ExecutionContext(kind="dag_node", undoable=True)
 
@@ -799,3 +800,91 @@ async def test_capture_compensation_snapshot_raises_for_oversized_undoable() -> 
                 {"path": "big.bin", "content": "new content"},
                 uuid4(),
             )
+
+
+@pytest.mark.asyncio
+async def test_capture_compensation_snapshot_uses_repaired_args() -> None:
+    """codex P1 on #652: a `path` salvaged from leaked XML at the end of
+    `content` is what dispatch writes to -- the snapshot must record THAT path
+    and the trimmed payload's hash, or the revert can never match the write."""
+    import hashlib
+    from unittest.mock import AsyncMock
+
+    from nous.api.runner import AgentRunner
+    from nous.api.tools import ToolDispatcher
+
+    dispatcher = ToolDispatcher()
+    dispatcher.register(
+        "write_file",
+        lambda **_: None,
+        {
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+            "required": ["path", "content"],
+        },
+    )
+    runner = object.__new__(AgentRunner)
+    runner._snap_store = AsyncMock()
+    runner._workspace_dir = "/ws"
+    runner._dispatcher = dispatcher
+
+    snap = AsyncMock(return_value={"path": "notes.txt", "existed": False, "prior_content": None, "oversized": False})
+    with patch("nous.api.compensation.snapshot_for_write_file", new=snap):
+        captured = await runner._capture_compensation_snapshot(
+            ExecutionContext(kind="dag_node", undoable=True),
+            "write_file",
+            {"content": 'hello world</content>\n<parameter name="path">notes.txt'},
+            uuid4(),
+        )
+    assert captured is True
+    snap.assert_awaited_once_with("notes.txt", "/ws")
+    data = runner._snap_store.capture.await_args.kwargs["snapshot_data"]
+    assert data["written_content_hash"] == hashlib.sha256(b"hello world").hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_action_review_pusher_publishes_a_revertible_card() -> None:
+    """codex P2 on #652: the auto-review callback publishes an action_review
+    card whose Revert eligibility is derived server-side from the snapshot."""
+    from unittest.mock import AsyncMock
+
+    from nous.a2ui.tools import make_action_review_pusher
+
+    entry_id = uuid4()
+    snap_store = SimpleNamespace(
+        get_by_ledger_entry=AsyncMock(return_value=SimpleNamespace(tool_name="write_file", reverted_at=None))
+    )
+    registry = CompensationRegistry()
+    register_compensators(registry)
+    service = SimpleNamespace(push_built=AsyncMock(return_value="surf-1"))
+
+    push = make_action_review_pusher(service, snap_store, registry)
+    assert await push("write_file", entry_id, "s1") == "surf-1"
+    built = service.push_built.await_args.args[0]
+    kwargs = service.push_built.await_args.kwargs
+    assert kwargs["dedup_key"] == f"review:{entry_id}" and kwargs["session_id"] == "s1"
+    assert "review.revert" in built.allowed_actions
+    assert built.trace_id == str(entry_id)
+
+    # A snapshot already reverted: the card is still published, without Revert.
+    snap_store.get_by_ledger_entry.return_value = SimpleNamespace(tool_name="write_file", reverted_at=object())
+    await push("write_file", entry_id, "s1")
+    assert "review.revert" not in service.push_built.await_args.args[0].allowed_actions
+
+
+@pytest.mark.parametrize("off", [{"a2ui_enabled": False}, {"execution_ledger_persist_enabled": False}])
+def test_auto_review_requires_a2ui_and_persisted_ledger(off) -> None:
+    """Without A2UI there is no card to push and without a persisted ledger no
+    snapshot exists, so the flag would be silently inert: refuse at startup."""
+    from pydantic import ValidationError
+
+    from nous.config import Settings
+
+    with pytest.raises(ValidationError, match="compensation_auto_review_enabled"):
+        Settings(
+            _env_file=None,
+            ANTHROPIC_API_KEY="test-key",
+            compensation_enabled=True,
+            compensation_auto_review_enabled=True,
+            **off,
+        )

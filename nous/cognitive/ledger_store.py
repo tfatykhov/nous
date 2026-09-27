@@ -28,12 +28,12 @@ from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from nous.api.execution_context import ExecutionContext
 from nous.cognitive.execution_ledger import bash_exit_code, classify_side_effect, redact_text
-from nous.storage.models import LEDGER_STATUSES, ExecutionLedgerEntry
+from nous.storage.models import LEDGER_STATUSES, CompensationSnapshot, ExecutionLedgerEntry
 
 logger = logging.getLogger(__name__)
 
@@ -417,6 +417,16 @@ class LedgerStore:
                 .where(ExecutionLedgerEntry.status != "pending")
                 .where(ExecutionLedgerEntry.created_at < cutoff)
                 .where(~holds_key)
+            )
+            # Phase 2.8: a compensation snapshot (up to 1 MiB of prior file
+            # contents) lives exactly as long as its ledger row -- once the row
+            # is gone nothing can resolve a revert to it. Past the same cutoff
+            # only, so a snapshot whose ledger insert is still landing is kept.
+            await s.execute(
+                delete(CompensationSnapshot)
+                .where(CompensationSnapshot.agent_id == self._agent_id)
+                .where(CompensationSnapshot.created_at < cutoff)
+                .where(~exists().where(ExecutionLedgerEntry.id == CompensationSnapshot.ledger_entry_id))
             )
             await s.commit()
             return result.rowcount or 0

@@ -356,6 +356,7 @@ class AgentRunner:
         # Phase 2.8: compensation snapshot store (wired when compensation_enabled).
         self._snap_store: Any | None = None
         self._workspace_dir: str = settings.workspace_dir
+        self._action_review_pusher: Any | None = None
         self._pending_corrections: dict[str, list[str]] = {}
         self._claim_verifier: ClaimVerifier | None = ClaimVerifier() if settings.claim_verification_enabled else None
         self._intent_tracker: IntentTracker | None = IntentTracker() if settings.claim_verification_enabled else None
@@ -471,29 +472,65 @@ class AgentRunner:
         self._snap_store = store
         self._workspace_dir = workspace_dir
 
+    def set_action_review_pusher(self, pusher: Any) -> None:
+        """Phase 2.8: ``async pusher(tool_name, ledger_entry_id, session_id)``
+        publishing an ``action_review`` card for a compensable background
+        mutation (NOUS_COMPENSATION_AUTO_REVIEW_ENABLED)."""
+        self._action_review_pusher = pusher
+
+    async def _maybe_push_action_review(
+        self,
+        ctx: ExecutionContext,
+        tool_name: str,
+        entry_id: Any,
+        session_id: str | None,
+        *,
+        snapshotted: bool,
+        status: str,
+    ) -> None:
+        """Push the review card after a SUCCESSFUL, snapshotted background
+        mutation -- the surface from which the user can invoke review.revert.
+        Fail-open: the mutation already happened; a card that cannot be
+        pushed is logged, never an error for the call."""
+        if not (snapshotted and status == "success" and ctx.is_background):
+            return
+        if not self._settings.compensation_auto_review_enabled or self._action_review_pusher is None:
+            return
+        try:
+            await self._action_review_pusher(tool_name, entry_id, session_id)
+        except Exception:
+            logger.warning("Harness Phase 2.8: auto action_review push failed for %s", tool_name, exc_info=True)
+
     async def _capture_compensation_snapshot(
         self,
         ctx: ExecutionContext,
         tool_name: str,
         tool_input: dict,
         entry_id: Any,
-    ) -> None:
+    ) -> bool:
         """Capture a pre-dispatch snapshot for compensable tools in undoable contexts.
 
         Fail-open: a capture failure logs a warning but never blocks the call.
         Only fires when the context is undoable, the tool is compensable, and the
         snapshot store is wired. Called between _open_for_call and actual dispatch
-        so the ledger entry_id is available to link the snapshot.
+        so the ledger entry_id is available to link the snapshot. Returns True
+        when a snapshot was stored.
+
+        Reads the arguments the handler will RECEIVE (``_handler_args``): a
+        required arg salvaged from leaked XML changes the target path and
+        trims the payload, so snapshotting the raw input would record a
+        different file and content hash than the one actually written.
         """
         if not getattr(ctx, "undoable", False):
-            return
+            return False
         if self._snap_store is None or entry_id is None:
-            return
+            return False
         from nous.api.tool_classes import tool_class as _tool_class
 
         cls = _tool_class(tool_name)
         if cls is None or not cls.compensable:
-            return
+            return False
+        tool_input = self._handler_args(tool_name, tool_input)
         try:
             snap_data: dict = {}
             if tool_name == "write_file":
@@ -533,12 +570,13 @@ class AgentRunner:
                     "prior_outcome": None,
                 }
             else:
-                return
+                return False
             await self._snap_store.capture(
                 ledger_entry_id=entry_id,
                 tool_name=tool_name,
                 snapshot_data=snap_data,
             )
+            return True
         except Exception as _snap_exc:
             from nous.api.compensation import SnapshotBlocksDispatch
 
@@ -549,6 +587,7 @@ class AgentRunner:
                 tool_name,
                 exc_info=True,
             )
+            return False
 
     async def _ledger_open(
         self,
@@ -2129,8 +2168,9 @@ class AgentRunner:
                             # oversized files, which refuse rather than silently
                             # proceeding without a snapshot.
                             _snap_blocked: str | None = None
+                            _snapshotted = False
                             try:
-                                await self._capture_compensation_snapshot(
+                                _snapshotted = await self._capture_compensation_snapshot(
                                     _ctx,
                                     tc["name"],
                                     dispatch_input,
@@ -2193,13 +2233,22 @@ class AgentRunner:
                                         keyed=send_key is not None,
                                     )
                                     raise
+                                _status = _close_status(is_error, timed_out or outcome.uncertain)
                                 await self._ledger_close(
                                     entry_id,
-                                    _close_status(is_error, timed_out or outcome.uncertain),
+                                    _status,
                                     result_text,
                                     output_of=tc["name"],
                                     external_ref=outcome.external_ref,
                                     keyed=send_key is not None,
+                                )
+                                await self._maybe_push_action_review(
+                                    _ctx,
+                                    tc["name"],
+                                    entry_id,
+                                    session_id,
+                                    snapshotted=_snapshotted,
+                                    status=_status,
                                 )
                                 # F026: Record in execution ledger (post-dispatch)
                                 if ledger:
@@ -2737,8 +2786,9 @@ class AgentRunner:
                             # oversized files, which refuse rather than silently
                             # proceeding without a snapshot.
                             _snap_blocked2: str | None = None
+                            _snapshotted2 = False
                             try:
-                                await self._capture_compensation_snapshot(
+                                _snapshotted2 = await self._capture_compensation_snapshot(
                                     ctx,
                                     tool_name,
                                     tool_input,
@@ -2808,13 +2858,22 @@ class AgentRunner:
                                     raise
                                 finally:
                                     await self._stop_activity_heartbeat(_hb)
+                                _status2 = _close_status(is_error, outcome.uncertain)
                                 await self._ledger_close(
                                     entry_id,
-                                    _close_status(is_error, outcome.uncertain),
+                                    _status2,
                                     result_text,
                                     output_of=tool_name,
                                     external_ref=outcome.external_ref,
                                     keyed=keyed,
+                                )
+                                await self._maybe_push_action_review(
+                                    ctx,
+                                    tool_name,
+                                    entry_id,
+                                    session_id,
+                                    snapshotted=_snapshotted2,
+                                    status=_status2,
                                 )
                         duration_ms = int((time.monotonic() - start_time) * 1000)
 

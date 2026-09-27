@@ -1312,6 +1312,10 @@ async def create_components(settings: Settings) -> dict:
             snapshot_store=_snap_store,
             compensation_registry=_comp_registry,
         )
+        if settings.compensation_auto_review_enabled and _snap_store is not None:
+            from nous.a2ui.tools import make_action_review_pusher
+
+            runner.set_action_review_pusher(make_action_review_pusher(surface_service, _snap_store, _comp_registry))
 
         async def _a2ui_sweep_loop():
             # Sweep once at startup, then periodically. The sweep must run

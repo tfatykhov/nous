@@ -3147,6 +3147,13 @@ class Settings(BaseSettings):
             )
         if self.compensation_auto_review_enabled and not self.compensation_enabled:
             raise ValueError("compensation_auto_review_enabled=True requires compensation_enabled=True")
+        if self.compensation_auto_review_enabled and not (self.a2ui_enabled and self.execution_ledger_persist_enabled):
+            # The card is an A2UI surface, and a snapshot exists only for a
+            # persisted ledger row: without either the flag would be a no-op.
+            raise ValueError(
+                "compensation_auto_review_enabled=True requires a2ui_enabled=True "
+                "and execution_ledger_persist_enabled=True"
+            )
         return self
 
     @model_validator(mode="after")

@@ -675,3 +675,54 @@ async def test_the_key_is_derived_from_the_arguments_the_handler_receives():
         r._call_api = _one_tool_call_then_done_with("send_email", tool_input)
         await _run_loop(r, is_background=True, context=ExecutionContext(subtask_id=uuid.uuid4(), **ctx_kwargs))
     assert store.keys[0] == store.keys[1] and store.keys[0].startswith("dag:")
+
+
+class _FakeSnapStore:
+    def __init__(self):
+        self.captured: list[tuple] = []
+
+    async def capture(self, *, ledger_entry_id, tool_name, snapshot_data):
+        self.captured.append((ledger_entry_id, tool_name, snapshot_data))
+        return uuid.uuid4()
+
+
+async def _undoable_write(tmp_path, *, auto_review: bool, dispatch_error: bool = False):
+    from test_runner_authorization import _one_tool_call_then_done_with
+
+    store = _FakeStore()
+    r, d = _runner(store, compensation_enabled=True, compensation_auto_review_enabled=auto_review)
+    snaps = _FakeSnapStore()
+    r.set_snapshot_store(snaps, str(tmp_path))
+    pushed: list[tuple] = []
+
+    async def pusher(tool_name, entry_id, session_id):
+        pushed.append((tool_name, entry_id, session_id))
+
+    r.set_action_review_pusher(pusher)
+    if dispatch_error:
+
+        async def failing(name, inp, **kw):
+            store.events.append(("dispatch", name))
+            return "boom", True
+
+        d.dispatch = failing
+    r._call_api = _one_tool_call_then_done_with("write_file", {"path": "x.txt", "content": "hi"})
+    await _run_loop(r, is_background=True, context=ExecutionContext(kind="dag_node", session_id="s1", undoable=True))
+    return snaps, pushed
+
+
+@pytest.mark.asyncio
+async def test_auto_review_pushes_a_card_after_a_snapshotted_background_mutation(tmp_path):
+    """codex P2 on #652: NOUS_COMPENSATION_AUTO_REVIEW_ENABLED was declared and
+    validated but read by nothing, so a revertible mutation never got a card."""
+    snaps, pushed = await _undoable_write(tmp_path, auto_review=True)
+    assert [c[1] for c in snaps.captured] == ["write_file"]
+    assert pushed == [("write_file", "id-write_file", "s1")]
+
+
+@pytest.mark.asyncio
+async def test_auto_review_off_or_failed_call_pushes_nothing(tmp_path):
+    _, pushed = await _undoable_write(tmp_path, auto_review=False)
+    assert pushed == []
+    _, pushed = await _undoable_write(tmp_path, auto_review=True, dispatch_error=True)
+    assert pushed == []

@@ -2,6 +2,9 @@
 --
 -- Stores the prior state before a compensable tool call, linked to its
 -- ledger row. The compensator reads this to undo the call on review.revert.
+-- Retention: LedgerStore.prune deletes a snapshot once its ledger row has
+-- been pruned (NOUS_EXECUTION_LEDGER_RETENTION_DAYS) -- no FK, because the
+-- ledger insert is fail-open and may commit after the snapshot.
 
 CREATE TABLE IF NOT EXISTS nous_system.compensation_snapshots (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

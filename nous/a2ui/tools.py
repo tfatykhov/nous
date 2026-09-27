@@ -355,6 +355,63 @@ _URGENCY_ALIASES = {
 }
 
 
+async def _server_compensation(
+    compensation: Any,
+    trace_id: Any,
+    snapshot_store: Any,
+    compensation_registry: Any,
+) -> dict:
+    """The ``compensation`` block of an action_review card with Revert
+    eligibility DERIVED server-side (harness Phase 2.8): revertible only when
+    an unreverted snapshot exists for the ledger row named by ``trace_id`` and
+    a compensator is registered for its tool. Fail-closed."""
+    compensation = dict(compensation or {})
+    revertible = False
+    if trace_id and snapshot_store is not None and compensation_registry is not None:
+        from uuid import UUID as _UUID
+
+        try:
+            snap = await snapshot_store.get_by_ledger_entry(_UUID(str(trace_id)))
+            if snap is not None and snap.reverted_at is None:
+                revertible = compensation_registry.is_registered(snap.tool_name)
+                if revertible:
+                    # Populate handler so the builder's truthy check passes.
+                    # The review.revert handler uses the snapshot, not this
+                    # field, so the value is informational only.
+                    compensation.setdefault("handler", snap.tool_name)
+        except Exception:
+            pass  # fail-closed: no revert button rather than a false one
+    compensation["revertible"] = revertible
+    if not revertible:
+        compensation["handler"] = None
+    return compensation
+
+
+def make_action_review_pusher(surface_service: Any, snapshot_store: Any, compensation_registry: Any) -> Any:
+    """Harness Phase 2.8 (NOUS_COMPENSATION_AUTO_REVIEW_ENABLED): the runner's
+    callback that publishes an action_review card after a compensable
+    background mutation, so the user has a surface to invoke review.revert
+    from. Revert eligibility goes through the same server-side derivation as
+    ``push_surface``; one card per ledger row (dedup on the row id)."""
+
+    async def push(tool_name: str, ledger_entry_id: Any, session_id: str | None) -> str:
+        trace_id = str(ledger_entry_id)
+        params = {
+            "title": f"Background change: {tool_name}",
+            "did": f"A background task ran {tool_name}. It can be undone from this card.",
+            "trace_id": trace_id,
+            "compensation": await _server_compensation(None, trace_id, snapshot_store, compensation_registry),
+        }
+        built = TEMPLATES["action_review"](params)
+        return await surface_service.push_built(
+            built,
+            dedup_key=f"review:{trace_id}",
+            session_id=session_id,
+        )
+
+    return push
+
+
 def register_a2ui_tools(
     dispatcher: ToolDispatcher,
     surface_service: Any,
@@ -652,28 +709,12 @@ def register_a2ui_tools(
         # without this gate a spurious Revert button appears on irreversible
         # or untracked actions and fails at click time.
         if template == "action_review":
-            compensation = dict(params.get("compensation") or {})
-            revertible = False
-            trace_id_str = params.get("trace_id")
-            if trace_id_str and snapshot_store is not None and compensation_registry is not None:
-                from uuid import UUID as _UUID
-
-                try:
-                    ledger_entry_id = _UUID(str(trace_id_str))
-                    snap = await snapshot_store.get_by_ledger_entry(ledger_entry_id)
-                    if snap is not None and snap.reverted_at is None:
-                        revertible = compensation_registry.is_registered(snap.tool_name)
-                        if revertible:
-                            # Populate handler so the builder's truthy check passes.
-                            # The review.revert handler uses the snapshot, not this
-                            # field, so the value is informational only.
-                            compensation.setdefault("handler", snap.tool_name)
-                except Exception:
-                    pass  # fail-closed: no revert button rather than a false one
-            compensation["revertible"] = revertible
-            if not revertible:
-                compensation["handler"] = None
-            params["compensation"] = compensation
+            params["compensation"] = await _server_compensation(
+                params.get("compensation"),
+                params.get("trace_id"),
+                snapshot_store,
+                compensation_registry,
+            )
         try:
             built = builder(params)
         except SurfaceValidationError as exc:

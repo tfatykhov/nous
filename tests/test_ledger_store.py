@@ -666,3 +666,36 @@ async def test_prune_keeps_every_key_holder_as_a_tombstone(store, db, agent):
     with pytest.raises(DuplicateSend):                             # and the key still holds
         await store.open_entry(context=ctx, tool_name="send_email", tool_input={}, turn=2,
                                idempotency_key="kp1")
+
+
+@pytest.mark.asyncio
+async def test_prune_removes_compensation_snapshots_with_their_ledger_rows(store, db, agent):
+    """codex P2 on #652: a snapshot (up to 1 MiB of prior file contents) must
+    not outlive its pruned ledger row. A snapshot whose row survives -- or a
+    fresh one whose ledger insert may still be landing -- is kept."""
+    from nous.api.compensation import SnapshotStore
+    from nous.storage.models import CompensationSnapshot
+
+    old = await store.open_entry(context=ExecutionContext(kind="dag_node"), tool_name="write_file",
+                                 tool_input={}, turn=1)
+    kept = await store.open_entry(context=ExecutionContext(kind="dag_node"), tool_name="write_file",
+                                  tool_input={}, turn=1)
+    for eid in (old, kept):
+        await store.close_entry(eid, status="success", result_summary=None)
+    snaps = SnapshotStore(db, agent)
+    old_snap = await snaps.capture(ledger_entry_id=old, tool_name="write_file", snapshot_data={"p": 1})
+    kept_snap = await snaps.capture(ledger_entry_id=kept, tool_name="write_file", snapshot_data={"p": 2})
+    fresh_orphan = await snaps.capture(ledger_entry_id=uuid.uuid4(), tool_name="write_file", snapshot_data={})
+    long_ago = datetime.now(UTC) - timedelta(days=200)
+    async with db.session() as s:
+        await s.execute(update(ExecutionLedgerEntry).where(ExecutionLedgerEntry.id == old)
+                        .values(created_at=long_ago))
+        await s.execute(update(CompensationSnapshot)
+                        .where(CompensationSnapshot.id.in_([old_snap, kept_snap]))
+                        .values(created_at=long_ago))
+        await s.commit()
+    assert await store.prune(retention_days=90) == 1
+    async with db.session() as s:
+        left = set((await s.execute(select(CompensationSnapshot.id).where(
+            CompensationSnapshot.id.in_([old_snap, kept_snap, fresh_orphan])))).scalars())
+    assert left == {kept_snap, fresh_orphan}
