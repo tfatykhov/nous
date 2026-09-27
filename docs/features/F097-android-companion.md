@@ -428,7 +428,33 @@ Rule: every notification a milestone can produce for a **template** surface open
 | 4 — inputs | TextField, CheckBox, ChoicePicker, Slider, DateTimeInput, Modal, Tabs, with two-way binding | the 43 examples render with zero fallbacks |
 | 5 — parity | AppHeader, AppFooter, Section, charts, report vocabulary, graph-layout extraction, F092.4 activity | manifest `unsupported` = {Video, AudioPlayer} |
 
-The beta is accepted when the user completes the on-device checklist (§10.6). This environment has no device or emulator, so that step cannot be claimed here.
+The beta is accepted when the user completes the on-device checklist (§10.6).
+
+### 12.1 What actually shipped (2026-09-27, PR #659)
+
+All five PRs landed on one branch, in the order 2→3→4→5→1. The plan assumed
+no device or emulator was available; one was set up mid-implementation, and
+running the app **changed the outcome** — the three defects below were all
+invisible to 116 green JVM tests, a CI `:app` job, the prop-level manifest
+ratchet and the 43-fixture render sweep, because each is a property of a
+runtime none of those load.
+
+| Found on device | Why the suites could not see it |
+|---|---|
+| `Pattern.UNICODE_CHARACTER_CLASS` crashes the process on Android (ICU rejects the flag) — every ScoreCard | the JVM accepts the flag, so the pure-JVM `:core` is the wrong place to look. The parity premise was also wrong at both ends: JS `\d`/`\w` are ASCII with or without `u`, `\s` is Unicode either way, and the two engines' defaults differ in opposite directions. `JsRegex` spells the classes out; a source-scan test ratchets it |
+| Response bodies read on the main thread — hydration never completed | `/health` is small enough to be already buffered, so the Connect probe passed and only the 44 KB snapshots threw |
+| `TokenWorker` POSTed to a PUT-only route and forgave the 405 as "no push" | each language's tests prove only that it is self-consistent; nothing compared them. `tests/test_android_push_contract.py` now reads the Kotlin source in the always-on CI and compares **(verb, path) pairs** — a path-only check passes this exact bug |
+
+Two lessons for the next port of this shape:
+
+1. **Stand the platform up before the first delivery, not after a bug report.** The `:core`/`:app` split that makes the rules testable without an SDK is exactly what hides platform-runtime defects; the emulator is not polish, it is the only place that class is observable.
+2. **A flag reached for to emulate another language is a smell.** Check what that language does *without* it.
+
+Verified against the live prod Nous over the LAN: all 9 production surfaces
+hydrate and render (3 heartbeat triage cards, 6 micro-apps including the F096
+health trend report), connection chip **Live**, no logcat crash. 130 Android
+tests; 45 push + 12 route + 5 contract tests green on real Postgres; the 245
+existing A2UI tests unchanged.
 
 ## 13. Risks
 
