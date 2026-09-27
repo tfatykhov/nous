@@ -141,6 +141,35 @@ class HeartbeatRunner:
             except asyncio.CancelledError:
                 pass
             self._dag_task = None
+        # Drain any tick that timed out and is still running in background.
+        # stop() must return only after this task is finished because
+        # shutdown_components() closes the DB and subtask pool immediately
+        # after — an in-flight tick would otherwise write to a closed pool.
+        # Always clear the reference so stop() never leaves it pointing at a
+        # finished (or live) task.
+        _pending = self._dag_pending_task
+        self._dag_pending_task = None
+        if _pending is not None and not _pending.done():
+            logger.warning(
+                "F038: Draining timed-out DAG tick during shutdown "
+                "(waiting up to %ds)",
+                self._settings.dag_tick_timeout,
+            )
+            try:
+                await asyncio.wait_for(
+                    _pending,
+                    timeout=self._settings.dag_tick_timeout,
+                )
+            except TimeoutError:
+                logger.error(
+                    "F038: Timed-out DAG tick did not complete within %ds "
+                    "during shutdown — cancelling it",
+                    self._settings.dag_tick_timeout,
+                )
+            except Exception:
+                logger.exception(
+                    "F038: Timed-out DAG tick raised during shutdown drain"
+                )
         if self._task:
             self._task.cancel()
             try:

@@ -80,6 +80,7 @@ async def test_dag_tick_independent_of_hung_heartbeat():
         return []
 
     dag_orchestrator = MagicMock()
+
     async def counting_dag_tick():
         dag_tick_event.set()
 
@@ -645,17 +646,14 @@ async def test_dag_tick_timeout_abandons_hung_tick():
 
             # The loop task must still be alive — not hung on the tick
             assert runner._dag_task is not None and not runner._dag_task.done(), (
-                "DAG loop task died — it was blocked on the hung tick instead "
-                "of abandoning it at the timeout"
+                "DAG loop task died — it was blocked on the hung tick instead of abandoning it at the timeout"
             )
 
             # Release the hanging first tick; the pending-task guard clears
             # and a second tick should run
             first_release.set()
             await asyncio.wait_for(second_started.wait(), timeout=3.0)
-            assert second_started.is_set(), (
-                "No second tick ran after releasing the hung first tick"
-            )
+            assert second_started.is_set(), "No second tick ran after releasing the hung first tick"
         finally:
             await runner.stop()
 
@@ -696,3 +694,64 @@ async def test_dag_tick_timeout_maintains_single_flight():
         finally:
             first_release.set()
             await runner.stop()
+
+
+# ---------------------------------------------------------------------------
+# Test k (Codex P1 round-2): stop() drains a timed-out pending tick
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_pending_task_after_timeout():
+    """stop() must await _dag_pending_task so shutdown_components() cannot
+    close the DB while the orchestrator tick is still mutating nodes.
+
+    Scenario:
+      1. A DAG tick starts and immediately hangs, causing dag_tick_timeout.
+      2. The loop detaches the task into _dag_pending_task and moves on.
+      3. stop() is called while the hanging task is still running.
+      4. stop() must NOT return before that task is done.
+    """
+    settings = _make_settings(dag_tick_interval=0, dag_tick_timeout=0.05)
+
+    tick_started = asyncio.Event()
+    tick_release = asyncio.Event()
+    tick_done = asyncio.Event()
+
+    async def hanging_tick():
+        tick_started.set()
+        await tick_release.wait()
+        tick_done.set()
+
+    dag_orchestrator = MagicMock()
+    dag_orchestrator.tick = AsyncMock(side_effect=hanging_tick)
+
+    runner = _make_runner(settings, dag_orchestrator)
+
+    with patch.object(runner, "_detect_missed_checks", AsyncMock()):
+        await runner.start()
+        try:
+            # Wait for the tick to start and time out
+            await asyncio.wait_for(tick_started.wait(), timeout=3.0)
+            # Let the timeout (0.05 s) fire
+            await asyncio.sleep(0.2)
+
+            # _dag_pending_task should be set and still running
+            assert runner._dag_pending_task is not None, "_dag_pending_task was not set after tick timeout"
+            assert not runner._dag_pending_task.done(), "_dag_pending_task already done before we released it"
+
+            # Release the hanging tick just before calling stop() so it can
+            # finish inside the drain window.
+            tick_release.set()
+
+            await runner.stop()
+
+            # After stop() returns the pending task must be done
+            assert tick_done.is_set(), (
+                "stop() returned before the timed-out pending tick completed — "
+                "shutdown_components() would close the DB under an in-flight tick"
+            )
+            assert runner._dag_pending_task is None, "_dag_pending_task was not cleared by stop()"
+        except Exception:
+            tick_release.set()
+            raise
