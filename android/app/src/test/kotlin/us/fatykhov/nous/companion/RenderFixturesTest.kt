@@ -52,6 +52,12 @@ class RenderFixturesTest {
     @Test fun portedOnlyExamplesRenderCleanly() {
         val files = File(root, "tests/fixtures/a2ui/examples").listFiles { f -> f.extension == "json" }!!.sortedBy { it.name }
         var checked = 0
+        // setContent may run once per rule: the host is a state slot the loop swaps, so every fixture recomposes into one tree.
+        val current = androidx.compose.runtime.mutableStateOf<SurfaceHost?>(null)
+        rule.setContent {
+            val h = current.value
+            if (h != null) NousThemed(Themes.nousDefault) { CompositionLocalProvider(LocalSurfaceHost provides h) { Render("root", null, 0, emptyList()) } }
+        }
         for (f in files) {
             val doc = json.parseToJsonElement(f.readText()).jsonObject
             val store = SurfaceStore()
@@ -63,8 +69,7 @@ class RenderFixturesTest {
             val graph = AppGraph(ApplicationProvider.getApplicationContext())
             graph.store.apply(null, json.parseToJsonElement(f.readText()).jsonObject["messages"]!!.jsonArray[0].jsonObject)
             doc["messages"]!!.jsonArray.forEachIndexed { i, m -> graph.store.apply((i + 1).toLong(), m.jsonObject) }
-            val host = SurfaceHost(graph, id)
-            rule.setContent { NousThemed(Themes.nousDefault) { CompositionLocalProvider(LocalSurfaceHost provides host) { Render("root", null, 0, emptyList()) } } }
+            rule.runOnIdle { current.value = SurfaceHost(graph, id) }
             rule.waitForIdle()
             assertEquals("${f.name}: fallback/placeholder nodes", 0, fallbackNodes().fetchSemanticsNodes().size)
             // Every literal Text `text` prop in the fixture must be visible (first line, markdown stripped of the heading marker).
