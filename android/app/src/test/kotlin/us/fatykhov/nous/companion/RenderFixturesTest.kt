@@ -3,9 +3,9 @@ package us.fatykhov.nous.companion
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onAllNodes
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
@@ -45,8 +45,9 @@ class RenderFixturesTest {
     private val json = Json { ignoreUnknownKeys = true }
 
     private fun fallbackNodes() = rule.onAllNodes(SemanticsMatcher("fallback/placeholder") { n ->
-        n.config.getOrNull(SemanticsProperties.ContentDescription)?.any { it.startsWith(Tags.FALLBACK) || it.startsWith(Tags.PLACEHOLDER) } == true
-    })
+        val descs = n.config.getOrNull(SemanticsProperties.ContentDescription) ?: emptyList()
+        descs.any { d -> d.startsWith(Tags.FALLBACK) || d.startsWith(Tags.PLACEHOLDER) }
+    }, useUnmergedTree = true)
 
     @Test fun portedOnlyExamplesRenderCleanly() {
         val files = File(root, "tests/fixtures/a2ui/examples").listFiles { f -> f.extension == "json" }!!.sortedBy { it.name }
