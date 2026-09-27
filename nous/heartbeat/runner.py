@@ -75,6 +75,10 @@ class HeartbeatRunner:
         self._task: asyncio.Task | None = None
         self._dag_task: asyncio.Task | None = None  # fix/dag-tick-own-loop
         self._dag_tick_lock: asyncio.Lock = asyncio.Lock()
+        # Tracks a tick that timed out but is still running in background.
+        # The next iteration checks this to maintain single-flight even after
+        # the lock has been released by the timeout path.
+        self._dag_pending_task: asyncio.Task | None = None
         self._running = False
         self._tick_count: int = 0
         self._tokens_used_today: int = 0
@@ -235,19 +239,48 @@ class HeartbeatRunner:
                     )
                     continue
 
+                # A timed-out tick keeps running in background after its
+                # wait_for deadline fires. Single-flight is maintained by
+                # checking the pending-task reference (the lock was released
+                # when the timeout path exited `async with`).
+                if (
+                    self._dag_pending_task is not None
+                    and not self._dag_pending_task.done()
+                ):
+                    logger.warning(
+                        "F038: DAG tick skipped — previous tick timed out "
+                        "and is still running in background",
+                    )
+                    continue
+                self._dag_pending_task = None  # clear any completed reference
+
                 async with self._dag_tick_lock:
-                    tick_start = asyncio.get_event_loop().time()
-                    # Keep an explicit reference so we can drain the inner
-                    # task in the CancelledError handler. asyncio.shield()
-                    # raises CancelledError on the outer task immediately,
-                    # but the inner task keeps running untracked — draining
-                    # it before releasing the lock ensures shutdown cannot
-                    # race with in-flight DB writes or subtask creation.
                     inner_task: asyncio.Task = asyncio.create_task(
                         self.dag_orchestrator.tick()
                     )
+                    # Track for post-timeout single-flight (see check above).
+                    self._dag_pending_task = inner_task
                     try:
-                        await asyncio.shield(inner_task)
+                        # Enforce the configured deadline. asyncio.wait_for
+                        # cancels only the shield wrapper on timeout — the
+                        # inner_task itself is NOT cancelled (shield protects
+                        # it), so in-flight DB writes and subtask launches
+                        # complete safely. The outer CancelledError path
+                        # (shutdown) drains inner_task before propagating.
+                        await asyncio.wait_for(
+                            asyncio.shield(inner_task),
+                            timeout=self._settings.dag_tick_timeout,
+                        )
+                    except TimeoutError:
+                        logger.error(
+                            "F038: DAG orchestrator tick timed out after %ds — "
+                            "tick is still running in background; "
+                            "subsequent ticks will skip until it completes",
+                            self._settings.dag_tick_timeout,
+                        )
+                        # inner_task continues; _dag_pending_task keeps the
+                        # reference so the single-flight check above prevents
+                        # a new tick from starting while it is still running.
                     except asyncio.CancelledError:
                         # Outer task was cancelled. inner_task is STILL
                         # RUNNING — await it (shielded) so it completes
@@ -258,20 +291,15 @@ class HeartbeatRunner:
                             logger.exception(
                                 "F038: DAG orchestrator tick failed during shutdown drain"
                             )
+                        self._dag_pending_task = None
                         self._last_dag_tick = datetime.now(UTC)
                         raise
                     except Exception:
                         logger.exception("F038: DAG orchestrator tick failed")
+                        self._dag_pending_task = None
                     else:
-                        elapsed = asyncio.get_event_loop().time() - tick_start
-                        if elapsed > self._settings.dag_tick_timeout:
-                            logger.error(
-                                "F038: DAG orchestrator tick took %.1fs "
-                                "(limit %ds) — slow but completed",
-                                elapsed,
-                                self._settings.dag_tick_timeout,
-                            )
                         self._last_dag_tick = datetime.now(UTC)
+                        self._dag_pending_task = None
 
             except asyncio.CancelledError:
                 break
@@ -393,6 +421,17 @@ class HeartbeatRunner:
                     check.run(),
                     timeout=check.timeout,
                 )
+                # A skipped result means run() returned early because the
+                # check was disabled at the execution boundary (race between
+                # _tick's snapshot and the first await in run()). Do not
+                # record stats or findings — no LLM turn ran.
+                if result.skipped:
+                    logger.debug(
+                        "Heartbeat check '%s' skipped at execution boundary "
+                        "(disabled concurrently)",
+                        check.name,
+                    )
+                    continue
                 check.mark_success()
                 successful_checks.add(check.name)
 
@@ -1055,9 +1094,12 @@ class HeartbeatRunner:
             return None
         try:
             result = await asyncio.wait_for(check.run(), timeout=check.timeout)
-            check.mark_success()
-            # F034.5: Update DB stats for dynamic checks
-            await self._record_run_stats(check, success=True)
+            # A skipped result means run() returned early because the check
+            # was disabled at the execution boundary — no LLM turn ran.
+            if not result.skipped:
+                check.mark_success()
+                # F034.5: Update DB stats for dynamic checks
+                await self._record_run_stats(check, success=True)
             if result.tokens_used:
                 self._tokens_used_today += result.tokens_used
             # #273: Fire callback if check self-disabled

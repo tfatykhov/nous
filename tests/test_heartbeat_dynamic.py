@@ -41,6 +41,7 @@ import pytest
 
 from nous.heartbeat.dynamic import ALLOWED_TOOLS, DynamicCheck, DynamicCheckLoader
 from nous.heartbeat.registry import CheckRegistry
+from nous.heartbeat.runner import HeartbeatRunner
 from nous.heartbeat.schemas import CheckResult, Finding
 
 
@@ -401,7 +402,7 @@ class TestDynamicCheckRun:
 
     @pytest.mark.asyncio
     async def test_run_skips_when_self_disabled(self):
-        """run() returns empty CheckResult without LLM call when _self_disabled.
+        """run() returns skipped CheckResult without LLM call when _self_disabled.
 
         Closes the TOCTOU between _tick's synchronous pre-check and the first
         await inside run(): a DAG task can set _self_disabled after the
@@ -419,11 +420,15 @@ class TestDynamicCheckRun:
         result = await check.run()
 
         assert result.has_updates is False
+        assert result.skipped is True, (
+            "Execution-boundary guard must return skipped=True so callers do "
+            "not record a spurious success"
+        )
         runner.run_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_run_skips_when_inactive(self):
-        """run() returns empty CheckResult without LLM call when active=False.
+        """run() returns skipped CheckResult without LLM call when active=False.
 
         Same TOCTOU closure as test_run_skips_when_self_disabled, but for the
         active flag unregistered between pre-check and coroutine start.
@@ -440,6 +445,10 @@ class TestDynamicCheckRun:
         result = await check.run()
 
         assert result.has_updates is False
+        assert result.skipped is True, (
+            "Execution-boundary guard must return skipped=True so callers do "
+            "not record a spurious success"
+        )
         runner.run_turn.assert_not_called()
 
 
@@ -2033,3 +2042,132 @@ class TestF048DynamicCheckBackgroundStreaming:
         # Harness Phase 1a: the callback names its execution context.
         assert call_kwargs["context"].kind == "heartbeat_callback"
         assert call_kwargs["context"].session_id.startswith("dynamic-callback-cb_bg-")
+
+
+# ===========================================================================
+# TestSkippedResultCallers (Codex P2) — callers must not record stats for a
+# skipped result returned by the execution-boundary guard in run().
+# ===========================================================================
+
+
+def _make_runner_for_skip_tests(registry=None) -> HeartbeatRunner:
+    """Build a HeartbeatRunner with minimal dependencies for skip tests."""
+    s = _mock_settings()
+    s.dag_tick_interval = 60
+    s.dag_tick_timeout = 5
+    s.heartbeat_dynamic_sync_ticks = 0
+    return HeartbeatRunner(
+        settings=s,
+        registry=registry or MagicMock(),
+        runner=MagicMock(),
+        brain=MagicMock(),
+        heart=MagicMock(),
+        bus=None,
+        http_client=None,
+        finding_store=None,
+        api_client=None,
+        dynamic_loader=None,
+    )
+
+
+class TestSkippedResultCallers:
+    """Verify that _tick() and trigger_check() do not record success stats when
+    run() returns a skipped result (execution-boundary guard fired)."""
+
+    @pytest.mark.asyncio
+    async def test_tick_does_not_mark_success_on_skipped(self):
+        """_tick() must not call mark_success() when run() returns skipped=True.
+
+        If it did, the check's success rate would be inflated even though no
+        LLM turn ran — breaking F034.3's self-tuner and the /heartbeat/status
+        run_count−error_count gate.
+        """
+        from nous.heartbeat.registry import CheckRegistry
+
+        registry = CheckRegistry()
+        check = _make_dynamic_check(
+            name="boundary_check",
+            interval=1,
+            timeout=30,
+            runner=MagicMock(),
+        )
+        registry.register(check)
+
+        runner_obj = _make_runner_for_skip_tests(registry)
+
+        # Patch run() to return a skipped result (simulates race condition)
+        with patch.object(
+            check, "run", new_callable=AsyncMock,
+            return_value=CheckResult(skipped=True),
+        ):
+            with patch.object(check, "mark_success") as mock_mark_success:
+                await runner_obj._tick()
+                mock_mark_success.assert_not_called(), (
+                    "mark_success() must not be called when run() returns skipped=True"
+                )
+
+    @pytest.mark.asyncio
+    async def test_tick_does_not_record_stats_on_skipped(self):
+        """_tick() must not call _record_run_stats(success=True) on a skipped result."""
+        from nous.heartbeat.registry import CheckRegistry
+
+        registry = CheckRegistry()
+        check = _make_dynamic_check(
+            name="boundary_check2",
+            interval=1,
+            timeout=30,
+            runner=MagicMock(),
+        )
+        registry.register(check)
+
+        runner_obj = _make_runner_for_skip_tests(registry)
+
+        with patch.object(
+            check, "run", new_callable=AsyncMock,
+            return_value=CheckResult(skipped=True),
+        ):
+            with patch.object(
+                runner_obj, "_record_run_stats", new_callable=AsyncMock,
+            ) as mock_stats:
+                await runner_obj._tick()
+                # _record_run_stats must NOT have been called with success=True
+                for call in mock_stats.call_args_list:
+                    assert call.kwargs.get("success") is not True, (
+                        "_record_run_stats(success=True) called for a skipped run"
+                    )
+
+    @pytest.mark.asyncio
+    async def test_trigger_check_does_not_mark_success_on_skipped(self):
+        """trigger_check() must not call mark_success() when run() returns skipped."""
+        from nous.heartbeat.registry import CheckRegistry
+
+        registry = CheckRegistry()
+        check = _make_dynamic_check(
+            name="trigger_boundary_check",
+            interval=1,
+            timeout=30,
+            runner=MagicMock(),
+        )
+        registry.register(check)
+
+        runner_obj = _make_runner_for_skip_tests(registry)
+
+        with patch.object(
+            check, "run", new_callable=AsyncMock,
+            return_value=CheckResult(skipped=True),
+        ):
+            with patch.object(check, "mark_success") as mock_mark_success:
+                with patch.object(
+                    runner_obj, "_record_run_stats", new_callable=AsyncMock,
+                ) as mock_stats:
+                    result = await runner_obj.trigger_check("trigger_boundary_check")
+
+                assert result is not None
+                assert result.skipped is True
+                mock_mark_success.assert_not_called(), (
+                    "trigger_check() must not call mark_success() for a skipped result"
+                )
+                for call in mock_stats.call_args_list:
+                    assert call.kwargs.get("success") is not True, (
+                        "trigger_check() must not record success stats for a skipped run"
+                    )

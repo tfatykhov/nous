@@ -599,3 +599,100 @@ async def test_deactivated_check_skipped_after_snapshot():
             mock_run.assert_not_called()
 
     assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# Test j (Codex P1): dag_tick_timeout is enforced — a hung tick is abandoned
+# at the deadline rather than blocking the loop forever.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dag_tick_timeout_abandons_hung_tick():
+    """A dag_orchestrator.tick() that never returns must be abandoned after
+    dag_tick_timeout, allowing the loop to continue running.
+
+    The inner task continues in background (shielded from cancellation), so
+    single-flight is maintained via _dag_pending_task: subsequent ticks skip
+    until the hung task completes, then proceed normally.
+    """
+    settings = _make_settings(dag_tick_interval=0, dag_tick_timeout=0.1)
+
+    first_started = asyncio.Event()
+    first_release = asyncio.Event()
+    second_started = asyncio.Event()
+
+    async def tick_side_effect():
+        if not first_started.is_set():
+            first_started.set()
+            await first_release.wait()  # hang indefinitely
+        else:
+            second_started.set()
+
+    dag_orchestrator = MagicMock()
+    dag_orchestrator.tick = AsyncMock(side_effect=tick_side_effect)
+
+    runner = _make_runner(settings, dag_orchestrator)
+
+    with patch.object(runner, "_detect_missed_checks", AsyncMock()):
+        await runner.start()
+        try:
+            # First tick starts and hangs
+            await asyncio.wait_for(first_started.wait(), timeout=3.0)
+
+            # Give the timeout (0.1 s) time to fire and the loop to continue
+            await asyncio.sleep(0.5)
+
+            # The loop task must still be alive — not hung on the tick
+            assert runner._dag_task is not None and not runner._dag_task.done(), (
+                "DAG loop task died — it was blocked on the hung tick instead "
+                "of abandoning it at the timeout"
+            )
+
+            # Release the hanging first tick; the pending-task guard clears
+            # and a second tick should run
+            first_release.set()
+            await asyncio.wait_for(second_started.wait(), timeout=3.0)
+            assert second_started.is_set(), (
+                "No second tick ran after releasing the hung first tick"
+            )
+        finally:
+            await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_dag_tick_timeout_maintains_single_flight():
+    """While a timed-out tick is still running in the background, subsequent
+    tick intervals must be skipped (single-flight via _dag_pending_task)."""
+    settings = _make_settings(dag_tick_interval=0, dag_tick_timeout=0.1)
+
+    first_started = asyncio.Event()
+    first_release = asyncio.Event()
+    call_count = 0
+
+    async def counting_tick():
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            first_started.set()
+            await first_release.wait()
+
+    dag_orchestrator = MagicMock()
+    dag_orchestrator.tick = AsyncMock(side_effect=counting_tick)
+
+    runner = _make_runner(settings, dag_orchestrator)
+
+    with patch.object(runner, "_detect_missed_checks", AsyncMock()):
+        await runner.start()
+        try:
+            await asyncio.wait_for(first_started.wait(), timeout=3.0)
+            # Let timeout fire and several more intervals pass while first tick hangs
+            await asyncio.sleep(0.6)
+            # Only ONE tick should have been attempted (the others skip)
+            assert call_count == 1, (
+                f"Expected 1 tick attempt while first was running, got {call_count}; "
+                "single-flight was not maintained after timeout"
+            )
+        finally:
+            first_release.set()
+            await runner.stop()

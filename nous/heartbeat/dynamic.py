@@ -107,8 +107,10 @@ class DynamicCheck(BaseCheck):
         # synchronous pre-check, but a concurrent DAG task can disable this
         # check between that check and the first await inside this coroutine.
         # Rechecking here is race-free within the coroutine (no awaits yet).
+        # Return skipped=True so callers can distinguish a no-op from a real
+        # successful run and avoid recording spurious success stats.
         if not self.active or self._self_disabled:
-            return CheckResult()
+            return CheckResult(skipped=True)
 
         session_id = f"dynamic-check-{self.name}-{uuid4().hex[:8]}"
         has_pipeline_tools = bool(
