@@ -108,7 +108,7 @@ class SyncEngineTest {
         val body = Json.parseToJsonElement(http.posts[0].second).jsonObject
         val action = body["action"]!!.jsonObject
         assertEquals("abc", action["metadata"]!!.jsonObject["extensions"]!!.jsonObject["com_nous_nonce"]!!.jsonPrimitive.content)
-        assertEquals("1970-01-01T00:00:00Z", action["timestamp"]!!.jsonPrimitive.content)
+        assertEquals("1970-01-01T00:00:00.000Z", action["timestamp"]!!.jsonPrimitive.content)   // JS toISOString shape
         assertEquals("yes", body["a2uiRendererDataModel"]!!.jsonObject["surfaces"]!!.jsonObject["s1"]!!.jsonObject["formData"]!!.jsonObject["choice"]!!.jsonPrimitive.content)
         http.postResponse = Http.Response(403, """{"error":{"code":"NONCE_MISMATCH","message":"stale"}}""", emptyMap())
         val rej = e.postAction("s1", "x", "b", JsonObject(emptyMap())); assertFalse(rej.ok); assertEquals("stale", rej.message)

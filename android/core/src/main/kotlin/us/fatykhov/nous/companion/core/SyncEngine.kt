@@ -120,7 +120,9 @@ class SyncEngine(
             put("version", "v1.0")
             put("action", buildJsonObject {
                 put("name", name); put("surfaceId", surfaceId); put("sourceComponentId", sourceComponentId)
-                put("timestamp", java.time.Instant.ofEpochMilli(nowMs()).toString())
+                // JS toISOString() always carries 3 fraction digits; Instant.toString() varies.
+                put("timestamp", java.time.format.DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSS'Z'")
+                    .withZone(java.time.ZoneOffset.UTC).format(java.time.Instant.ofEpochMilli(nowMs())))
                 put("context", context)
                 put("metadata", buildJsonObject { put("extensions", buildJsonObject { put("com_nous_nonce", s?.nonce ?: "") }) })
             })
