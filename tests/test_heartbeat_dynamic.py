@@ -1415,6 +1415,52 @@ class TestSelfDisabledFlag:
         assert check._self_disabled is True
 
     @pytest.mark.asyncio
+    async def test_failed_disable_commit_leaves_check_runnable(self):
+        """codex P2 (PR #656): a disable whose commit fails must not poison
+        the in-memory check. The row stays enabled and sync() keeps the same
+        instance (unchanged signature), so a flag set before the commit made
+        every later run() return skipped until restart."""
+        db, mock_session = _mock_db()
+        registry = CheckRegistry()
+        loader = DynamicCheckLoader(
+            db=db,
+            registry=registry,
+            runner=AsyncMock(),
+            agent_id="test-agent",
+        )
+        check = _make_dynamic_check(name="disable_me")
+        registry.register(check, permanent=False)
+        loader._loaded_ids = {"id-1"}
+        loader._id_to_name = {"id-1": "disable_me"}
+        loader._signatures = {"disable_me": "sig"}
+
+        mock_model = MagicMock()
+        mock_model.id = "id-1"
+        mock_model.enabled = True
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_model
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.commit = AsyncMock(side_effect=RuntimeError("db down"))
+
+        with pytest.raises(RuntimeError, match="db down"):
+            await loader.manage_check(action="disable", name="disable_me")
+
+        assert check._self_disabled is False
+        assert registry.get_check("disable_me") is check
+        assert "id-1" in loader._loaded_ids
+
+        # The check still executes: run() is not short-circuited to skipped.
+        runner = AsyncMock()
+        runner.run_turn = AsyncMock(
+            return_value=('{"has_findings": false, "findings": []}', MagicMock(), {}),
+        )
+        runner.end_conversation = AsyncMock()
+        check._runner = runner
+        result = await check.run()
+        assert result.skipped is False
+        runner.run_turn.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_self_disabled_in_check_result(self):
         """57. run() reports self_disabled=True when the check disables itself
         DURING execution (the manage_check(disable) path) — not when it was

@@ -1244,3 +1244,141 @@ async def test_shutdown_total_drain_bounded_to_one_timeout():
         "total budget via _dag_shutdown_drain_deadline, not each consume a "
         "full dag_tick_timeout independently"
     )
+
+
+# ---------------------------------------------------------------------------
+# codex P1 (PR #656 round 2): a check that disables itself mid-run must not
+# advance its DAG node until the run has finished and been recorded.
+# ---------------------------------------------------------------------------
+
+
+def _self_disabling_setup(fail_after_disable: bool = False):
+    """A DAG-managed check whose LLM turn disables itself (as
+    manage_check(action="disable") does: flag + unregister) and then blocks
+    until released, plus an orchestrator sharing the same registry."""
+    from types import SimpleNamespace
+
+    from nous.dag.orchestrator import DAGOrchestrator
+
+    registry = CheckRegistry()
+    disabled = asyncio.Event()
+    release = asyncio.Event()
+    agent = MagicMock()
+
+    check = DynamicCheck(
+        check_id="dag-check-id",
+        name="dag-self-disabler",
+        prompt="do the node's work",
+        tools=["heartbeat_check_manage"],
+        interval=1,
+        timeout=30,
+        runner=agent,
+    )
+
+    async def turn_that_disables(*args, **kwargs):
+        check._self_disabled = True
+        registry.unregister(check.name)
+        disabled.set()
+        await release.wait()  # still executing tools after the disable
+        if fail_after_disable:
+            raise RuntimeError("tool failed after disable")
+        return ('{"has_findings": false, "findings": []}', MagicMock(), {})
+
+    agent.run_turn = AsyncMock(side_effect=turn_that_disables)
+    agent.end_conversation = AsyncMock()
+    registry.register(check)
+
+    stats_order: list[str] = []
+    loader = MagicMock()
+    loader._registry = registry
+
+    async def record_stats(check_id, success, error_msg=None):
+        stats_order.append("success" if success else "failure")
+
+    loader.update_run_stats = AsyncMock(side_effect=record_stats)
+
+    hb = HeartbeatRunner(
+        settings=_make_settings(heartbeat_enabled=True),
+        registry=registry,
+        runner=MagicMock(),
+        brain=MagicMock(),
+        heart=MagicMock(),
+        bus=None,
+        http_client=None,
+        finding_store=None,
+        api_client=None,
+        dynamic_loader=loader,
+    )
+    store = AsyncMock()
+    orch = DAGOrchestrator(
+        store=store,
+        dynamic_loader=loader,
+        settings=Settings(_env_file=None),
+    )
+    node = SimpleNamespace(
+        id="node-1",
+        name="monitor",
+        completion_check=None,
+        check_name=check.name,
+        status="running",
+    )
+    return hb, orch, store, node, disabled, release, stats_order
+
+
+@pytest.mark.asyncio
+async def test_self_disabled_check_node_waits_for_run_to_finish():
+    hb, orch, store, node, disabled, release, stats_order = _self_disabling_setup()
+
+    tick = asyncio.create_task(hb._tick())
+    await asyncio.wait_for(disabled.wait(), timeout=3.0)
+
+    # Mid-run: the check is unregistered, but its run has not finished.
+    await orch._sync_check_node(node)
+    assert node.status == "running"
+    store.update_node.assert_not_called()
+
+    release.set()
+    await asyncio.wait_for(tick, timeout=3.0)
+    assert stats_order == ["success"]  # recorded before the node advances
+
+    await orch._sync_check_node(node)
+    assert node.status == "completed"
+    store.update_node.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_self_disabled_check_node_fails_when_run_fails():
+    hb, orch, store, node, disabled, release, stats_order = _self_disabling_setup(
+        fail_after_disable=True,
+    )
+
+    tick = asyncio.create_task(hb._tick())
+    await asyncio.wait_for(disabled.wait(), timeout=3.0)
+    await orch._sync_check_node(node)
+    assert node.status == "running"
+
+    release.set()
+    await asyncio.wait_for(tick, timeout=3.0)
+    assert stats_order == ["failure"]
+
+    await orch._sync_check_node(node)
+    assert node.status == "failed"
+    assert store.update_node.await_args.kwargs["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_worker_evidence_deferred_while_self_disabling_run_in_flight():
+    """The completion_check path's is_check_disabled evidence is committed
+    DURING the run, so it must not count until the run has finished."""
+    hb, orch, store, node, disabled, release, _ = _self_disabling_setup()
+    loader = orch._dynamic_loader
+    loader.get_successful_run_count = AsyncMock(return_value=0)
+    loader.is_check_disabled = AsyncMock(return_value=True)
+
+    tick = asyncio.create_task(hb._tick())
+    await asyncio.wait_for(disabled.wait(), timeout=3.0)
+    assert await orch._heartbeat_worker_has_run(node) is False
+
+    release.set()
+    await asyncio.wait_for(tick, timeout=3.0)
+    assert await orch._heartbeat_worker_has_run(node) is True

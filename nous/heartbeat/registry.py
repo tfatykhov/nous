@@ -140,10 +140,21 @@ class CheckRegistry:
     def __init__(self) -> None:
         self._checks: dict[str, BaseCheck] = {}
         self._permanent: set[str] = set()
+        # Execution state, kept apart from registration: a dynamic check can
+        # unregister itself (manage_check disable) while its run is still
+        # executing tools. The DAG orchestrator must key node completion on
+        # the RUN finishing, not on registry absence, so the runner brackets
+        # every run with begin_run/end_run.
+        self._in_flight: dict[str, int] = {}
+        # Outcome of the run during which a check disabled itself.
+        self._disabled_run_outcome: dict[str, bool] = {}
 
     def register(self, check: BaseCheck, permanent: bool = False) -> None:
         """Register a check. Permanent checks cannot be unregistered."""
         self._checks[check.name] = check
+        # A fresh registration starts with no recorded outcome, so a stale
+        # failure from an earlier check of the same name cannot leak into it.
+        self._disabled_run_outcome.pop(check.name, None)
         if permanent:
             self._permanent.add(check.name)
         logger.info("Registered heartbeat check: %s (permanent=%s)", check.name, permanent)
@@ -157,6 +168,39 @@ class CheckRegistry:
             del self._checks[name]
             return True
         return False
+
+    def begin_run(self, name: str) -> None:
+        """Mark a run of ``name`` as in flight (call before ``check.run()``)."""
+        self._in_flight[name] = self._in_flight.get(name, 0) + 1
+
+    def end_run(
+        self,
+        name: str,
+        succeeded: bool | None,
+        *,
+        self_disabled: bool = False,
+    ) -> None:
+        """Mark a run of ``name`` finished, after its stats are recorded.
+
+        ``succeeded`` is None for a run that was skipped (or cancelled)
+        without an outcome. The outcome is kept only for a run that disabled
+        its own check, since that run is the check's last.
+        """
+        remaining = self._in_flight.get(name, 0) - 1
+        if remaining > 0:
+            self._in_flight[name] = remaining
+        else:
+            self._in_flight.pop(name, None)
+        if self_disabled and succeeded is not None:
+            self._disabled_run_outcome[name] = succeeded
+
+    def is_in_flight(self, name: str) -> bool:
+        """Whether a run of ``name`` has started and not yet finished."""
+        return self._in_flight.get(name, 0) > 0
+
+    def self_disabled_run_failed(self, name: str) -> bool:
+        """Whether ``name`` disabled itself during a run that then failed."""
+        return self._disabled_run_outcome.get(name) is False
 
     def get_due_checks(self, now: datetime | None = None) -> list[BaseCheck]:
         """Get all checks that are due to run."""

@@ -523,6 +523,13 @@ class HeartbeatRunner:
                     )
                     continue
 
+            # Bracket the run so the DAG loop cannot read a mid-run
+            # self-disable (manage_check unregisters the check before run()
+            # returns) as node completion. end_run fires in the finally,
+            # after the run's stats are recorded. No await separates this
+            # from the live re-check above.
+            self._registry.begin_run(check.name)
+            run_succeeded: bool | None = None
             try:
                 result: CheckResult = await asyncio.wait_for(
                     check.run(),
@@ -547,6 +554,7 @@ class HeartbeatRunner:
 
                 # F034.5: Update run stats in DB for dynamic checks
                 await self._record_run_stats(check, success=True)
+                run_succeeded = True
 
                 # #273: Collect self-disabled checks with callbacks
                 if isinstance(check, DynamicCheck) and result.self_disabled and check.on_complete_prompt:
@@ -564,11 +572,19 @@ class HeartbeatRunner:
                 logger.warning("Heartbeat check '%s' timed out", check.name)
                 # F034.5: Record timeout as error for dynamic checks
                 await self._record_run_stats(check, success=False, error_msg="timeout")
+                run_succeeded = False
             except Exception as exc:
                 check.mark_failure()
                 logger.exception("Heartbeat check '%s' failed", check.name)
                 # F034.5: Record error for dynamic checks
                 await self._record_run_stats(check, success=False, error_msg=str(exc)[:200])
+                run_succeeded = False
+            finally:
+                self._registry.end_run(
+                    check.name,
+                    run_succeeded,
+                    self_disabled=getattr(check, "_self_disabled", False) is True,
+                )
 
         # #273: Fire callbacks as background tasks (non-blocking)
         for cb_check in callback_candidates:
@@ -1211,6 +1227,9 @@ class HeartbeatRunner:
         check = self._registry.get_check(name)
         if check is None:
             return None
+        # Same run bracket as _tick: see the comment there.
+        self._registry.begin_run(check.name)
+        run_succeeded: bool | None = None
         try:
             result = await asyncio.wait_for(check.run(), timeout=check.timeout)
             # A skipped result means run() returned early because the check
@@ -1219,6 +1238,7 @@ class HeartbeatRunner:
                 check.mark_success()
                 # F034.5: Update DB stats for dynamic checks
                 await self._record_run_stats(check, success=True)
+                run_succeeded = True
             if result.tokens_used:
                 self._tokens_used_today += result.tokens_used
             # #273: Fire callback if check self-disabled
@@ -1239,3 +1259,9 @@ class HeartbeatRunner:
             # F034.5: Update DB stats for dynamic checks on failure
             await self._record_run_stats(check, success=False, error_msg=str(e)[:200])
             raise
+        finally:
+            self._registry.end_run(
+                check.name,
+                run_succeeded,
+                self_disabled=getattr(check, "_self_disabled", False) is True,
+            )

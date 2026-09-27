@@ -175,6 +175,23 @@ _SUBTASK_BACKED = frozenset({"subtask", "callback"})
 # re-creating the permanent 'running' wedge the reaper exists to prevent.
 _MAX_REAP_CANCEL_RETRIES = 5
 
+
+def _registry_run_in_flight(registry: object, name: str | None) -> bool:
+    """Whether the heartbeat runner is mid-run on check ``name``.
+
+    Identity checks (``is True`` / ``is False``) keep a stand-in registry
+    without run tracking from reading as in flight or failed.
+    """
+    fn = getattr(registry, "is_in_flight", None)
+    return bool(name) and callable(fn) and fn(name) is True
+
+
+def _registry_disabled_run_failed(registry: object, name: str | None) -> bool:
+    """Whether check ``name`` disabled itself during a run that then failed."""
+    fn = getattr(registry, "self_disabled_run_failed", None)
+    return bool(name) and callable(fn) and fn(name) is True
+
+
 # Completion check polling
 _CHECK_CMD_TIMEOUT = 10.0  # Hard timeout per check command invocation
 
@@ -1388,7 +1405,27 @@ class DAGOrchestrator:
             return
 
         registry = getattr(self._dynamic_loader, '_registry', None)
+        # codex P1 (PR #656): the DAG tick runs on its own loop, so it can
+        # observe a check that disabled itself mid-run — manage_check
+        # unregisters it while the run is still executing tools, before the
+        # runner records the run's outcome. Registry absence/inactivity only
+        # means "will not run again"; completion is the RUN finishing, so
+        # defer while a run is in flight and honor a failed final run.
+        if registry is not None and _registry_run_in_flight(registry, node.check_name):
+            return
         check = registry.get_check(node.check_name) if registry else None
+        if (check is None or not check.active) and _registry_disabled_run_failed(
+            registry,
+            node.check_name,
+        ):
+            await self._store.update_node(
+                node.id,
+                status="failed",
+                error="Check disabled itself but its final run failed",
+                completed_at=datetime.now(UTC),
+            )
+            node.status = "failed"
+            return
         if check is None:
             # Check was unregistered — for DAG-managed checks this means
             # self-disable completed (DynamicCheckLoader unregisters on disable).
@@ -1699,6 +1736,12 @@ class DAGOrchestrator:
             return False
         if successful_runs:
             return True
+        # codex P1 (PR #656): enabled=False commits DURING the run that
+        # disables itself, so it proves the run finished only once that run
+        # is no longer in flight.
+        registry = getattr(self._dynamic_loader, "_registry", None)
+        if registry is not None and _registry_run_in_flight(registry, node.check_name):
+            return False
         try:
             disabled = await self._dynamic_loader.is_check_disabled(node.check_name)
         except Exception:

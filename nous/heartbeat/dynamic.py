@@ -565,13 +565,16 @@ class DynamicCheckLoader:
                 return {"status": "enabled", "name": name}
 
             elif action == "disable":
-                # Set _self_disabled on in-memory check before unregistering
-                existing = self._registry.get_check(name)
-                if existing and isinstance(existing, DynamicCheck):
-                    existing._self_disabled = True
                 model.enabled = False
                 model.updated_at = datetime.now(UTC)
                 await session.commit()
+                # codex P2 (PR #656): flag the in-memory check only once the
+                # disable is durable. Flagging before the commit left a failed
+                # commit with an enabled, registered check whose run() skips
+                # forever (sync() keeps the instance: same signature).
+                existing = self._registry.get_check(name)
+                if existing and isinstance(existing, DynamicCheck):
+                    existing._self_disabled = True
                 self._registry.unregister(name)
                 self._signatures.pop(name, None)
                 check_id = str(model.id)
