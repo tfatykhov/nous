@@ -138,7 +138,7 @@ object Chart {
         return out
     }
 
-    private val NAIVE = Regex("""^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$""")
+    private val NAIVE = JsRegex.compile("""^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$""")
 
     /** `Date.parse` with the producer's convention: a naive datetime is UTC. Null = NaN. */
     fun parseInstant(t: String): Long? {

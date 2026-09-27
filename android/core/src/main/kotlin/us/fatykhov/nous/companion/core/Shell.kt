@@ -20,7 +20,7 @@ object Shell {
 
     /** Cut on grapheme clusters, on a word boundary when one is close to the limit. */
     fun shorten(title: String): String {
-        val t = title.replace(Regex("\\s+"), " ").trim()
+        val t = title.replace(JsRegex.compile("\\s+"), " ").trim()
         val units = mutableListOf<String>()
         val it = BreakIterator.getCharacterInstance(); it.setText(t)
         var start = it.first(); var end = it.next()
@@ -29,7 +29,7 @@ object Shell {
         val kept = units.subList(0, CHIP_MAX)
         val sp = kept.lastIndexOf(" ")
         val body = (if (sp >= CHIP_MAX - 8) kept.subList(0, sp) else kept).joinToString("")
-        return body.replace(Regex("[\\s:,—-]+$"), "") + "…"
+        return body.replace(JsRegex.compile("[\\s:,—-]+$"), "") + "…"
     }
 
     /** Only these functions may be evaluated for a chip label — an allowlist, so a new effectful function is unsafe by default. */

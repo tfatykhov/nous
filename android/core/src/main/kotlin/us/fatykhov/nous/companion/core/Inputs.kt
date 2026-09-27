@@ -105,7 +105,7 @@ object Inputs {
         return if (d && t) DateKind.DATETIME else if (t) DateKind.TIME else DateKind.DATE
     }
 
-    private val ZONE = Regex("""[zZ]$|[+-]\d{2}:\d{2}$""")
+    private val ZONE = JsRegex.compile("""[zZ]$|[+-]\d{2}:\d{2}$""")
 
     /**
      * Normalize an incoming ISO value to what the control shows (web `normalizeForControl`):

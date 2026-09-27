@@ -22,13 +22,13 @@ sealed interface Block {
 }
 
 object Markdown {
-    private val UNORDERED = Regex("""^\s*[-*+]\s+(.*)$""")
-    private val ORDERED = Regex("""^\s*\d+[.)]\s+(.*)$""")
-    private val HEADING = Regex("""^(#{1,6})\s+(.*)$""")
-    private val FENCE = Regex("""^\s*```(.*)$""")
-    private val LINK = Regex("""^\[([^\]]*)\]\(([^)]*)\)""")
+    private val UNORDERED = JsRegex.compile("""^\s*[-*+]\s+(.*)$""")
+    private val ORDERED = JsRegex.compile("""^\s*\d+[.)]\s+(.*)$""")
+    private val HEADING = JsRegex.compile("""^(#{1,6})\s+(.*)$""")
+    private val FENCE = JsRegex.compile("""^\s*```(.*)$""")
+    private val LINK = JsRegex.compile("""^\[([^\]]*)\]\(([^)]*)\)""")
 
-    fun isSafeUrl(url: String): Boolean = Regex("""^(https?:|mailto:)""", RegexOption.IGNORE_CASE).containsMatchIn(url.trim())
+    fun isSafeUrl(url: String): Boolean = JsRegex.compile("""^(https?:|mailto:)""", RegexOption.IGNORE_CASE).containsMatchIn(url.trim())
 
     fun parseInline(src: String): List<Inline> {
         val out = mutableListOf<Inline>()
@@ -70,7 +70,7 @@ object Markdown {
     }
 
     fun parse(src: String): List<Block> {
-        val lines = src.split(Regex("\r?\n"))
+        val lines = src.split(JsRegex.compile("\r?\n"))
         val blocks = mutableListOf<Block>()
         val paragraph = mutableListOf<String>()
         fun flushParagraph() {

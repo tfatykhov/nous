@@ -31,12 +31,12 @@ class OkHttpTransport(private val settings: Settings) : Http {
     private fun url(path: String) = settings.baseUrl + path
 
     override suspend fun get(path: String): Http.Response =
-        plain.newCall(Request.Builder().url(url(path)).get().build()).await().toCore()
+        plain.newCall(Request.Builder().url(url(path)).get().build()).await()
 
     override suspend fun postJson(path: String, body: String): Http.Response {
         val client = if (path == "/a2ui/call") call else plain
         val req = Request.Builder().url(url(path)).post(body.toRequestBody("application/json".toMediaType())).build()
-        return client.newCall(req).await().toCore()
+        return client.newCall(req).await()
     }
 
     override suspend fun stream(path: String, onOpen: () -> Unit, onChunk: (String) -> Unit) = withContext(Dispatchers.IO) {
@@ -69,10 +69,20 @@ class OkHttpTransport(private val settings: Settings) : Http {
         Http.Response(code, body.string(), headers.names().associateWith { headers[it] ?: "" })
     }
 
-    private suspend fun Call.await(): Response = suspendCancellableCoroutine { cont ->
+    /**
+     * The body is read HERE, on OkHttp's thread. The engine runs on Main, so a
+     * continuation resumed with the raw `Response` would read the body on Main
+     * and hit `NetworkOnMainThreadException` on any body larger than what the
+     * socket already buffered (found on the emulator: `/health` passed, the
+     * 44 KB micro-app snapshots did not).
+     */
+    private suspend fun Call.await(): Http.Response = suspendCancellableCoroutine { cont ->
         enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) { if (cont.isActive) cont.resumeWithException(e) }
-            override fun onResponse(call: Call, response: Response) { cont.resume(response) }
+            override fun onResponse(call: Call, response: Response) {
+                val core = try { response.toCore() } catch (e: IOException) { if (cont.isActive) cont.resumeWithException(e); return }
+                cont.resume(core)
+            }
         })
         cont.invokeOnCancellation { cancel() }
     }

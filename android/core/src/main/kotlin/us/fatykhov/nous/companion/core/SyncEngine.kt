@@ -106,11 +106,13 @@ class SyncEngine(
             // Stream ended (EOF, error, or resync request). R2/R5: never resume; rehydrate.
             reconnects += 1
             if (resync) { store.resync(); return true }
+            lastError = "stream ended"
             store.connection = Connection.ERROR; attempt += 1
             return false
         } catch (e: kotlinx.coroutines.CancellationException) { throw e }
         catch (e: Exception) {
-            lastError = e.message
+            // Class name too: a Kotlin `!!` NPE carries no message, and "none" hides the failure.
+            lastError = e.javaClass.simpleName + (e.message?.let { ": $it" } ?: "")
             store.connection = Connection.ERROR
             attempt += 1
             return false

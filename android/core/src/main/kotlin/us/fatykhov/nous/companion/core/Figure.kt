@@ -3,15 +3,14 @@ package us.fatykhov.nous.companion.core
 /**
  * ScoreCard value classifier (port of `figure.ts`): is a row value a FIGURE
  * (preformatted scalar datum) or PROSE? Length is never a criterion. The
- * regexes are copied verbatim; Java's `\p{L}`/`\p{Nd}`/`\p{Sc}`/`\p{M}` match
- * JS `u`-mode semantics for these classes.
+ * regexes are copied verbatim and compiled through [JsRegex], which spells
+ * out `\s` (NBSP/NNBSP…) and `\d` (ASCII) the way JS reads them on BOTH the
+ * JVM and Android; `\p{L}`/`\p{Nd}`/`\p{Sc}`/`\p{M}` are portable as written.
  */
 object Figure {
-    /** JS `u`-mode parity: `\s` must match NBSP/NNBSP and `\p{…}` classes are Unicode-aware. */
-    private fun ure(pattern: String): Regex =
-        java.util.regex.Pattern.compile(pattern, java.util.regex.Pattern.UNICODE_CHARACTER_CLASS).toRegex()
-    /** The two web patterns compiled WITHOUT the `u` flag: `\d` must stay ASCII there (a JS invariant). */
-    private fun ascii(pattern: String): Regex = java.util.regex.Pattern.compile(pattern).toRegex()
+    private fun ure(pattern: String): Regex = JsRegex.compile(pattern)
+    /** The two web patterns written without the `u` flag — same translation; `\d` is ASCII in JS either way. */
+    private fun ascii(pattern: String): Regex = JsRegex.compile(pattern)
 
     private const val PLACEHOLDER = """^([—–−-]{1,3}|[Nn]/[Aa]|TBD)$"""
     private fun ranged(core: String) = """$core(?:\s?[–—-]\s?$core)?"""
@@ -41,7 +40,7 @@ object Figure {
     private const val CONNECTOR = """(?:per|pro|par|por|al|all|na|в|на|за)"""
     private const val UNIT = """(\s?(?:$PERCENT|[°′″])(?:\p{L}\p{M}*){0,2}|\s?(?![eE](?:$|/))$WORD\.?(?:/$WORD\.?|\s$CONNECTOR\s$WORD\.?)?|\s?/$WORD\.?|\s?$SYMBOL)?"""
     private const val UNIT_AFTER_PREFIX = """(\s?(?:$PERCENT|[°′″])(?:\p{L}\p{M}*){0,2}|\s?(?![eE](?:$|/))$WORD\.?(?:/$WORD\.?)?|\s?/$WORD\.?|\s?$SYMBOL)?"""
-    // Grouping/decimal separators incl. Arabic U+066B / U+066C; `\s` matches NBSP/NNBSP under UNICODE_CHARACTER_CLASS (JS parity).
+    // Grouping/decimal separators incl. Arabic U+066B / U+066C; `\s` matches NBSP/NNBSP via JsRegex (JS parity).
     private const val DIGITS = """\p{Nd}(?:[\p{Nd}.,'’\s٫٬]*\p{Nd})?(?:[eE][+\-−]?\p{Nd}+)?"""
     private const val MANTISSA = """(?:$DIGITS|∞|NaN)"""
     private fun shaped(core: String) = """(?:${ranged(core)}|\($core\))"""

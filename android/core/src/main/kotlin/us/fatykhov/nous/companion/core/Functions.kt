@@ -117,10 +117,10 @@ class Functions(
             return d.toString()
         }
 
-        private val JS_DECIMAL = Regex("""^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$""")
-        private val JS_HEX = Regex("""^0[xX]([0-9a-fA-F]+)$""")
-        private val JS_OCT = Regex("""^0[oO]([0-7]+)$""")
-        private val JS_BIN = Regex("""^0[bB]([01]+)$""")
+        private val JS_DECIMAL = JsRegex.compile("""^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$""")
+        private val JS_HEX = JsRegex.compile("""^0[xX]([0-9a-fA-F]+)$""")
+        private val JS_OCT = JsRegex.compile("""^0[oO]([0-7]+)$""")
+        private val JS_BIN = JsRegex.compile("""^0[bB]([01]+)$""")
 
         /** JS `Number(str)`: "" → 0; decimal/exponent forms; 0x/0o/0b prefixes; Infinity; else NaN.
          *  NOT Java's grammar: "12d", "12f" and hex-floats are NaN in JS. */
@@ -191,7 +191,7 @@ class Functions(
         "regex" -> {
             val v = toDisplayString(arg(args, "value", ctx))
             val pattern = toDisplayString(arg(args, "pattern", ctx) ?: JsonPrimitive(""))
-            val ok = try { Regex(pattern).containsMatchIn(v) } catch (_: Exception) { false }
+            val ok = try { JsRegex.compile(pattern).containsMatchIn(v) } catch (_: Exception) { false }
             vr(ok, "Invalid format.")
         }
         "length" -> {
@@ -204,7 +204,7 @@ class Functions(
             val ok = v.isFinite() && v >= num(args, "min", ctx, Double.NEGATIVE_INFINITY) && v <= num(args, "max", ctx, Double.POSITIVE_INFINITY)
             vr(ok, "Out of range.")
         }
-        "email" -> vr(Regex("""^[^\s@]+@[^\s@]+\.[^\s@]+$""").matches(toDisplayString(arg(args, "value", ctx))), "Invalid email address.")
+        "email" -> vr(JsRegex.compile("""^[^\s@]+@[^\s@]+\.[^\s@]+$""").matches(toDisplayString(arg(args, "value", ctx))), "Invalid email address.")
         "and" -> JsonPrimitive(((args["values"] as? JsonArray) ?: JsonArray(emptyList())).all { toBool(resolveDynamic(it, ctx)) })
         "or" -> JsonPrimitive(((args["values"] as? JsonArray) ?: JsonArray(emptyList())).any { toBool(resolveDynamic(it, ctx)) })
         "not" -> JsonPrimitive(!toBool(arg(args, "value", ctx)))
@@ -261,8 +261,8 @@ class Functions(
         return s.substring(start) to i
     }
 
-    private val FN = Regex("""^(@?[A-Za-z_]\w*)\((.*)\)$""", RegexOption.DOT_MATCHES_ALL)
-    private val NUM = Regex("""^-?\d+(\.\d+)?$""")
+    private val FN = JsRegex.compile("""^(@?[A-Za-z_]\w*)\((.*)\)$""", RegexOption.DOT_MATCHES_ALL)
+    private val NUM = JsRegex.compile("""^-?\d+(\.\d+)?$""")
 
     private fun evalExpression(expr: String, ctx: EvalContext): JsonElement? {
         if (expr == "") return JsonPrimitive("")
@@ -310,7 +310,7 @@ class Functions(
     /** Minimal CLDR pattern formatter. Date-only strings are CALENDAR dates (local, not UTC midnight). */
     fun formatDateCldr(value: JsonElement?, pattern: String): String {
         val raw = toDisplayString(value)
-        val d: ZonedDateTime = Regex("""^(\d{4})-(\d{2})-(\d{2})$""").find(raw)?.let { m ->
+        val d: ZonedDateTime = JsRegex.compile("""^(\d{4})-(\d{2})-(\d{2})$""").find(raw)?.let { m ->
             LocalDate.of(m.groupValues[1].toInt(), m.groupValues[2].toInt(), m.groupValues[3].toInt()).atStartOfDay(zone)
         } ?: run {
             try { OffsetDateTime.parse(raw).atZoneSameInstant(zone) } catch (_: Exception) {
