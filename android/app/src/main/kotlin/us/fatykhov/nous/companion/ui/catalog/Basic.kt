@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.ClickableText
@@ -132,7 +133,14 @@ fun ColumnView(node: Node.Render) {
 @Composable
 fun RowView(node: Node.Render) {
     val align = when (node.props.str("align")) { "center" -> Alignment.CenterVertically; "end" -> Alignment.Bottom; else -> Alignment.Top }
-    Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = arrangement(node.props.str("justify")), verticalAlignment = align) {
+    // A plain Row, not a scroller: a horizontal List/StatRow inside it would be
+    // infinite-inside-infinite width, which Compose refuses. The web's flex row
+    // simply lets content wrap or overflow; FlowRow is the faithful analogue.
+    androidx.compose.foundation.layout.FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = arrangement(node.props.str("justify")),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
         Children(node.props["children"], node)
     }
 }
@@ -140,7 +148,8 @@ fun RowView(node: Node.Render) {
 @Composable
 fun ListView(node: Node.Render) {
     if (node.props.str("direction") == "horizontal")
-        Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) { Children(node.props["children"], node) }
+        // Bounded by the screen width (never infinite), then scrollable inside — legal even when nested.
+        Row(modifier = Modifier.fillMaxWidth().widthIn(max = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) { Children(node.props["children"], node) }
     else Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) { Children(node.props["children"], node) }
 }
 

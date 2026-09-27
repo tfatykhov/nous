@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -105,7 +106,7 @@ fun StatTileView(node: Node.Render) {
 
 @Composable
 fun StatRowView(node: Node.Render) {
-    Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) { Children(node.props["children"], node) }
+    Row(modifier = Modifier.fillMaxWidth().widthIn(max = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) { Children(node.props["children"], node) }
 }
 
 @Composable
@@ -186,7 +187,7 @@ fun DagGraphView(node: Node.Render) {
     val edges = Graphs.dagEdges(host.resolve(node.props["edges"], node.scope), nodes)
     val layout = Graphs.dagLayout(nodes, edges)
     val density = androidx.compose.ui.platform.LocalDensity.current
-    Box(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).background(t.surface, RoundedCornerShape(8.dp)).border(1.dp, t.border, RoundedCornerShape(8.dp)).padding(6.dp)) {
+    Box(modifier = Modifier.fillMaxWidth().widthIn(max = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp).horizontalScroll(rememberScrollState()).background(t.surface, RoundedCornerShape(8.dp)).border(1.dp, t.border, RoundedCornerShape(8.dp)).padding(6.dp)) {
         Canvas(modifier = Modifier.width(with(density) { layout.width.toFloat().toDp() }).height(with(density) { layout.height.toFloat().toDp() })) {
             for (e in edges) {
                 val a = layout.pos[e.from] ?: continue; val b = layout.pos[e.to] ?: continue
