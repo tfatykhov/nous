@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 import pytest
 
-from unittest.mock import AsyncMock, MagicMock
-
-from nous.observability.snapshots import BehaviorSnapshot
 from nous.observability.drift import Anomaly, DriftDetector
-
+from nous.observability.snapshots import BehaviorSnapshot
 
 # ------------------------------------------------------------------
 # BehaviorSnapshot tests
@@ -52,13 +51,35 @@ class TestBehaviorSnapshot:
         d = snap.to_metrics_dict()
         # Should have all numeric fields (excluding timestamp and interval_changes)
         expected_keys = {
-            "fact_count", "fact_count_delta", "episode_count", "episode_count_delta",
-            "active_censor_count", "active_censor_delta", "procedure_count", "decision_count",
-            "facts_admitted", "facts_rejected_dedup", "facts_rejected_admission", "admission_rate",
-            "checks_run", "findings_created", "findings_resolved", "triage_sessions_opened",
-            "sleep_ran", "episodes_compacted", "facts_pruned", "contradictions_resolved",
-            "events_processed", "events_dropped", "handler_error_count", "handler_error_rate",
-            "turns_processed", "avg_turn_latency_ms", "tool_calls",
+            "fact_count",
+            "fact_count_delta",
+            "episode_count",
+            "episode_count_delta",
+            "active_censor_count",
+            "active_censor_delta",
+            "procedure_count",
+            "decision_count",
+            "facts_admitted",
+            "facts_rejected_dedup",
+            "facts_rejected_admission",
+            "admission_rate",
+            "checks_run",
+            "findings_created",
+            "findings_resolved",
+            "triage_sessions_opened",
+            "sleep_ran",
+            "episodes_compacted",
+            "facts_pruned",
+            "contradictions_resolved",
+            "events_processed",
+            "events_dropped",
+            "handler_error_count",
+            "handler_error_rate",
+            "turns_processed",
+            "avg_turn_latency_ms",
+            "tool_calls",
+            "inactive_fact_count",
+            "inactive_fact_delta",
         }
         assert set(d.keys()) == expected_keys
 
@@ -86,12 +107,12 @@ class TestBehaviorDriftCheckHasUpdates:
         check = BehaviorDriftCheck.__new__(BehaviorDriftCheck)
         # Bypass __init__ (which needs Heart/Brain); wire only what run() touches.
         from nous.heartbeat.schemas import CheckResult  # noqa: F401
+
         check._detector = MagicMock()
         check._last_snapshot = None
         check._last_anomalies = []
-        check._capture_snapshot = AsyncMock(
-            return_value=BehaviorSnapshot(timestamp=datetime.now(UTC))
-        )
+        check._last_counts_ok = True  # simulate a successful count query
+        check._capture_snapshot = AsyncMock(return_value=BehaviorSnapshot(timestamp=datetime.now(UTC)))
         check._load_baseline = AsyncMock(return_value=[object()])  # truthy baseline
         check._store_snapshot = AsyncMock()
         return check
@@ -101,8 +122,13 @@ class TestBehaviorDriftCheckHasUpdates:
         check = self._build_check()
         check._detector.detect.return_value = [
             Anomaly(
-                metric="fact_count_delta", current=99, mean=5.0, stddev=1.0,
-                z_score=94.0, direction="above", severity="alert",
+                metric="fact_count_delta",
+                current=99,
+                mean=5.0,
+                stddev=1.0,
+                z_score=94.0,
+                direction="above",
+                severity="alert",
             )
         ]
         result = await check.run()
@@ -203,6 +229,7 @@ class TestBehaviorDriftCheck:
     def test_initialization_and_name(self):
         """Check can be instantiated with minimal args."""
         from unittest.mock import MagicMock
+
         from nous.heartbeat.checks import BehaviorDriftCheck
 
         mock_heart = MagicMock()
@@ -222,6 +249,7 @@ class TestBehaviorDriftCheck:
     def test_default_interval(self):
         """Falls back to 3600 if setting is missing."""
         from unittest.mock import MagicMock
+
         from nous.heartbeat.checks import BehaviorDriftCheck
 
         mock_settings = MagicMock(spec=[])  # No attributes
@@ -231,3 +259,1026 @@ class TestBehaviorDriftCheck:
             settings=mock_settings,
         )
         assert check.interval == 3600
+
+
+# ------------------------------------------------------------------
+# Residualization + materiality floor (fact_count_delta false positive)
+# ------------------------------------------------------------------
+
+
+class TestResidualization:
+    """A fact drop that facts_pruned explains must not alert; an unexplained
+    drop of the same magnitude must still alert at full strength.
+
+    Regression for the `fact_count_delta` false positive that was triaged by
+    hand 7+ times: the explanation was already in the same snapshot, unused.
+    """
+
+    @staticmethod
+    def _history():
+        # Quiet baseline: small churn, nothing deactivated.
+        return [
+            _make_snapshot(fact_count_delta=d, inactive_fact_delta=0, facts_pruned=0)
+            for d in (2, -1, 3, 0, 1, -2, 4, 1, 0, 2)
+        ]
+
+    def _delta_anomalies(self, current):
+        return [a for a in DriftDetector().detect(current, self._history()) if a.metric == "fact_count_delta"]
+
+    def test_explained_drop_is_silent(self):
+        # 661 facts vanish, 669 deactivations recorded -> fully accounted for.
+        current = _make_snapshot(fact_count_delta=-661, inactive_fact_delta=669, facts_pruned=669)
+        assert self._delta_anomalies(current) == []
+
+    def test_unexplained_drop_still_fires(self):
+        # Same magnitude, but nothing was deactivated -> genuinely anomalous.
+        current = _make_snapshot(fact_count_delta=-661, inactive_fact_delta=0, facts_pruned=0)
+        anomalies = self._delta_anomalies(current)
+        assert len(anomalies) == 1
+        assert anomalies[0].direction == "down"
+        assert anomalies[0].severity == "alert"
+
+    def test_partially_explained_drop_fires_on_the_remainder(self):
+        # Real case, 2026-09-16: -366 delta but only 11 deactivations.
+        current = _make_snapshot(fact_count_delta=-366, inactive_fact_delta=11, facts_pruned=11)
+        anomalies = self._delta_anomalies(current)
+        assert len(anomalies) == 1
+        # Reported in residual space, and labelled as such so the finding text
+        # cannot pass the residual off as the raw metric.
+        assert anomalies[0].residualized_by == "inactive_fact_delta"
+        assert anomalies[0].raw_current == -366
+        assert anomalies[0].current == -355
+
+    def test_small_deviation_below_floor_is_silent(self):
+        # Many sigma against a near-constant series, but only ~20 facts --
+        # statistically real, operationally meaningless.
+        current = _make_snapshot(fact_count_delta=-20, inactive_fact_delta=0, facts_pruned=0)
+        assert self._delta_anomalies(current) == []
+
+    def test_deviation_just_above_floor_fires(self):
+        # Guards the boundary so the floor cannot be raised silently.
+        current = _make_snapshot(fact_count_delta=-60, inactive_fact_delta=0, facts_pruned=0)
+        assert len(self._delta_anomalies(current)) == 1
+
+    def test_floor_does_not_apply_to_rate_metrics(self):
+        """admission_rate lives in [0, 1]; a 50.0 floor would mute it forever."""
+        assert DriftDetector.THRESHOLDS["admission_rate"].get("min_abs_deviation", 0.0) == 0.0
+
+    def test_non_residualized_metrics_report_raw(self):
+        history = [_make_snapshot(events_dropped=n) for n in (0, 1, 0, 0, 1, 0, 2, 0, 1, 0)]
+        current = _make_snapshot(events_dropped=50)
+        anomalies = [a for a in DriftDetector().detect(current, history) if a.metric == "events_dropped"]
+        assert len(anomalies) == 1
+        assert anomalies[0].residualized_by is None
+        assert anomalies[0].raw_current is None
+        assert anomalies[0].current == 50
+
+
+# ------------------------------------------------------------------
+# Prune accounting + residual metadata propagation (Codex P2s, PR #641)
+# ------------------------------------------------------------------
+
+
+def _ids(*ranges: range) -> frozenset[UUID]:
+    """Deterministic fact IDs, so tests can say which facts are inactive."""
+    return frozenset(UUID(int=i) for r in ranges for i in r)
+
+
+class _FakeRow:
+    def __init__(self, **kw):
+        # inactive_facts=N is shorthand for "facts 0..N-1 are inactive".
+        if "inactive_facts" in kw:
+            kw["inactive_ids"] = list(_ids(range(kw.pop("inactive_facts"))))
+        self.__dict__.update(kw)
+
+
+class _FakeSession:
+    """Records every statement executed and replays a canned row."""
+
+    def __init__(self, row, sink, boom=False):
+        self._row = row
+        self._sink = sink
+        self._boom = boom
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def execute(self, stmt, params=None):
+        self._sink.append((str(stmt), params))
+        if self._boom:
+            raise RuntimeError("connection reset")
+        result = MagicMock()
+        result.fetchone.return_value = self._row
+        return result
+
+
+class _FakeDB:
+    def __init__(self, row, sink, boom=False):
+        self._row = row
+        self._sink = sink
+        self._boom = boom
+
+    def session(self):
+        return _FakeSession(self._row, self._sink, self._boom)
+
+
+def _drift_check(db, agent_id="agent-b"):
+    from nous.heartbeat.checks import BehaviorDriftCheck
+
+    check = BehaviorDriftCheck.__new__(BehaviorDriftCheck)
+    check._db = db
+    check._bus_stats = None
+    check._last_snapshot = None
+    check._last_anomalies = []
+    check._last_counts_ok = False  # real _capture_snapshot overwrites this each tick
+    check._settings = MagicMock(agent_id=agent_id)
+    return check
+
+
+class TestPruneAccounting:
+    """facts_pruned must be derived from the SAME snapshot as fact_count, by
+    differencing the inactive count -- not from an ``updated_at`` wall-clock
+    window.
+
+    A window cannot be made consistent with the counts: ``heart.facts.updated_at``
+    is stamped by a BEFORE UPDATE trigger with ``clock_timestamp()`` (write
+    time, not commit time), so a batch prune that writes before the snapshot
+    and commits after it is invisible to the counts while already sitting below
+    any cutoff -- permanently lost from the next window.
+    """
+
+    _ROW = dict(facts=900, episodes=10, censors=2, procedures=5)
+
+    @pytest.mark.asyncio
+    async def test_pruned_is_inactive_count_delta(self):
+        sink = []
+        check = _drift_check(_FakeDB(_FakeRow(inactive_facts=140, **self._ROW), sink))
+        check._last_snapshot = BehaviorSnapshot(
+            timestamp=datetime.now(UTC),
+            fact_count=1000,
+            inactive_fact_count=100,
+            inactive_ids=_ids(range(100)),
+        )
+        snap = await check._capture_snapshot()
+        # 100 facts left the active set; 40 of them show up as newly inactive.
+        assert snap.fact_count_delta == -100
+        assert snap.facts_pruned == 40
+        assert snap.inactive_fact_delta == 40
+        assert snap.inactive_fact_count == 140
+
+    @pytest.mark.asyncio
+    async def test_no_wall_clock_window_in_the_query(self):
+        """The bug this replaces: a cutoff computed off the application clock
+        before the query, so a deactivation landing while we waited on a pooled
+        connection was dropped from the active count but excluded by the window.
+        """
+        sink = []
+        check = _drift_check(_FakeDB(_FakeRow(inactive_facts=1, **self._ROW), sink))
+        await check._capture_snapshot()
+        sql, params = sink[0]
+        assert "updated_at" not in sql, "prune window must not be time-based"
+        # No clock cutoff may reach the count query -- agent scoping only.
+        assert set(params) == {"aid"}
+        assert not any(isinstance(v, datetime) for v in params.values())
+        # ...and both fact reads come from one statement => one MVCC snapshot.
+        assert sql.count("heart.facts") == 2
+        assert len(sink) == 1
+
+    @pytest.mark.asyncio
+    async def test_first_tick_after_restart_reports_zero_prunes(self):
+        """prev is None, so fact_count_delta is 0; facts_pruned must be 0 too,
+        or the residual would subtract an explanation for a change of nothing.
+        """
+        sink = []
+        check = _drift_check(_FakeDB(_FakeRow(inactive_facts=140, **self._ROW), sink))
+        snap = await check._capture_snapshot()
+        assert snap.fact_count_delta == 0
+        assert snap.facts_pruned == 0
+        assert snap.inactive_fact_delta == 0
+        assert snap.inactive_fact_count == 140
+
+    @pytest.mark.asyncio
+    async def test_reactivation_nets_out(self):
+        """A fact moving inactive -> active is +1 delta and -1 inactive delta,
+        so the residual is 0 rather than a phantom unexplained gain -- and it
+        is not a prune.
+        """
+        sink = []
+        check = _drift_check(_FakeDB(_FakeRow(inactive_facts=99, **self._ROW), sink))
+        check._last_snapshot = BehaviorSnapshot(
+            timestamp=datetime.now(UTC),
+            fact_count=899,
+            inactive_fact_count=100,
+            inactive_ids=_ids(range(100)),
+        )
+        snap = await check._capture_snapshot()
+        assert snap.fact_count_delta == 1
+        assert snap.inactive_fact_delta == -1
+        assert snap.facts_pruned == 0
+        metrics = snap.to_metrics_dict()
+        assert metrics["fact_count_delta"] + metrics["inactive_fact_delta"] == 0
+
+
+class TestAnomalyPersistenceCarriesResidualMetadata:
+    """_last_anomalies is what gets written to nous_system.behavior_snapshots
+    and replayed by /behavior/anomalies and /behavior/drift-report. If it drops
+    residualized_by/raw_current, those endpoints present the residual (-355) as
+    though it were the raw fact_count_delta (-366).
+    """
+
+    def _check(self, anomaly):
+        from nous.heartbeat.checks import BehaviorDriftCheck
+
+        check = BehaviorDriftCheck.__new__(BehaviorDriftCheck)
+        check._detector = MagicMock()
+        check._detector.detect.return_value = [anomaly]
+        check._last_snapshot = None
+        check._last_anomalies = []
+        check._last_counts_ok = True  # simulate a successful count query
+        check._capture_snapshot = AsyncMock(return_value=BehaviorSnapshot(timestamp=datetime.now(UTC)))
+        check._load_baseline = AsyncMock(return_value=[object()])
+        check._store_snapshot = AsyncMock()
+        return check
+
+    @pytest.mark.asyncio
+    async def test_residual_fields_survive_serialization(self):
+        check = self._check(
+            Anomaly(
+                metric="fact_count_delta",
+                current=-355,
+                mean=1.0,
+                stddev=2.0,
+                z_score=-178.0,
+                direction="down",
+                severity="alert",
+                residualized_by="facts_pruned",
+                raw_current=-366,
+            )
+        )
+        await check.run()
+        assert len(check._last_anomalies) == 1
+        stored = check._last_anomalies[0]
+        assert stored["residualized_by"] == "facts_pruned"
+        assert stored["raw_current"] == -366
+        assert stored["current"] == -355
+
+    @pytest.mark.asyncio
+    async def test_plain_anomaly_stores_explicit_nulls(self):
+        check = self._check(
+            Anomaly(
+                metric="events_dropped",
+                current=50,
+                mean=0.5,
+                stddev=0.7,
+                z_score=70.0,
+                direction="up",
+                severity="alert",
+            )
+        )
+        await check.run()
+        stored = check._last_anomalies[0]
+        assert stored["residualized_by"] is None
+        assert stored["raw_current"] is None
+
+
+class TestCountsAreAgentScoped:
+    """The snapshot these counts feed is written and read back under agent_id
+    (_store_snapshot / _load_baseline), so an unscoped count lets another
+    agent on a shared database move this agent's deltas -- and, for the
+    residualized pair, lets agent A's prune explain away agent B's fact drop.
+    """
+
+    _ROW = dict(facts=900, episodes=10, censors=2, procedures=5, inactive_facts=100)
+
+    @pytest.mark.asyncio
+    async def test_every_count_filters_on_the_current_agent(self):
+        sink = []
+        check = _drift_check(_FakeDB(_FakeRow(**self._ROW), sink), agent_id="agent-b")
+        await check._capture_snapshot()
+        sql, params = sink[0]
+        assert params == {"aid": "agent-b"}
+        # Both halves of the residualized pair must be scoped, or they stop
+        # describing the same population.
+        assert sql.count("agent_id = :aid") == 5
+        for table in ("heart.facts", "heart.episodes", "heart.censors", "heart.procedures"):
+            assert table in sql
+
+    @pytest.mark.asyncio
+    async def test_no_unscoped_count_remains(self):
+        sink = []
+        check = _drift_check(_FakeDB(_FakeRow(**self._ROW), sink))
+        await check._capture_snapshot()
+        sql, _ = sink[0]
+        # Each subquery must carry the agent predicate.
+        assert sql.count("(SELECT ") == sql.count("agent_id = :aid")
+
+
+class TestCountQueryFailureDoesNotFabricateDrift:
+    """On a swallowed DB error the counts stayed at their 0 defaults, so every
+    delta became -prev.count, the residual added two large negatives instead of
+    cancelling, the zeroed snapshot entered the baseline, and recovery produced
+    the mirror-image anomaly on the next tick.
+    """
+
+    _PREV = dict(
+        fact_count=1000,
+        inactive_fact_count=100,
+        inactive_ids=_ids(range(100)),
+        episode_count=50,
+        active_censor_count=6,
+        procedure_count=9,
+    )
+
+    def _prev_snapshot(self):
+        return BehaviorSnapshot(timestamp=datetime.now(UTC), **self._PREV)
+
+    @pytest.mark.asyncio
+    async def test_query_exception_carries_previous_counts_forward(self):
+        sink = []
+        check = _drift_check(_FakeDB(None, sink, boom=True))
+        check._last_snapshot = self._prev_snapshot()
+        snap = await check._capture_snapshot()
+        assert snap.fact_count == 1000
+        assert snap.inactive_fact_count == 100
+        assert snap.fact_count_delta == 0
+        assert snap.facts_pruned == 0
+        assert snap.episode_count_delta == 0
+        assert snap.active_censor_delta == 0
+        assert snap.procedure_count == 9
+
+    @pytest.mark.asyncio
+    async def test_empty_result_row_is_treated_as_failure(self):
+        sink = []
+        check = _drift_check(_FakeDB(None, sink))
+        check._last_snapshot = self._prev_snapshot()
+        snap = await check._capture_snapshot()
+        assert snap.fact_count_delta == 0
+        assert snap.facts_pruned == 0
+
+    @pytest.mark.asyncio
+    async def test_failure_on_the_first_tick_aborts_instead_of_zeroing(self):
+        """Superseded round-2 behavior: this used to publish an all-zero
+        snapshot. See TestStartupCountFailureAbortsTheTick for why that was
+        worse than skipping -- the zero became the baseline."""
+        sink = []
+        check = _drift_check(_FakeDB(None, sink, boom=True))
+        assert await check._capture_snapshot() is None
+
+    @pytest.mark.asyncio
+    async def test_recovery_after_failure_does_not_mirror_an_anomaly(self):
+        """Tick 1 fails, tick 2 recovers with unchanged real counts -> the
+        recovery tick must report no movement, not a rebound spike."""
+        check = _drift_check(_FakeDB(None, [], boom=True))
+        check._last_snapshot = self._prev_snapshot()
+        failed = await check._capture_snapshot()
+        check._last_snapshot = failed
+
+        check._db = _FakeDB(_FakeRow(facts=1000, episodes=50, censors=6, procedures=9, inactive_facts=100), [])
+        recovered = await check._capture_snapshot()
+        assert recovered.fact_count_delta == 0
+        assert recovered.facts_pruned == 0
+
+
+class TestZeroVarianceResidualBaseline:
+    """Residualization makes a constant baseline the NORMAL case: when every
+    historical change was explained, the residual series is all zeros. Skipping
+    on zero variance would then let residualization silence the very metric it
+    exists to sharpen.
+    """
+
+    def _history(self, pairs):
+        return [
+            BehaviorSnapshot(timestamp=datetime.now(UTC), fact_count_delta=d, inactive_fact_delta=p, facts_pruned=p)
+            for d, p in pairs
+        ]
+
+    def test_material_drop_fires_against_a_flat_zero_residual(self):
+        # Raw deltas vary, but every one is fully explained -> residual == 0.
+        history = self._history([(-10, 10), (-40, 40), (-5, 5)] * 4)
+        detector = DriftDetector()
+        current = BehaviorSnapshot(
+            timestamp=datetime.now(UTC), fact_count_delta=-100, inactive_fact_delta=0, facts_pruned=0
+        )
+        anomalies = detector.detect(current, history)
+        found = [a for a in anomalies if a.metric == "fact_count_delta"]
+        assert len(found) == 1
+        assert found[0].current == -100
+        assert found[0].z_score is None, "undefined sigma must not be faked"
+        assert found[0].stddev == 0.0
+        assert found[0].direction == "down"
+        assert found[0].severity == "alert"
+        assert found[0].residualized_by == "inactive_fact_delta"
+
+    def test_nonzero_constant_residual_baseline_also_alerts(self):
+        """Codex's example: every historical residual is 5."""
+        history = self._history([(-5, 10), (-35, 40), (0, 5)] * 4)
+        assert {d + p for d, p in [(-5, 10), (-35, 40), (0, 5)]} == {5}
+        current = BehaviorSnapshot(
+            timestamp=datetime.now(UTC), fact_count_delta=-100, inactive_fact_delta=0, facts_pruned=0
+        )
+        found = [a for a in DriftDetector().detect(current, history) if a.metric == "fact_count_delta"]
+        assert len(found) == 1
+        assert found[0].mean == 5.0
+
+    def test_explained_change_stays_quiet_against_a_flat_baseline(self):
+        """The fallback must not turn residualization into a noise machine:
+        a fully-explained drop still residualizes to 0 and says nothing."""
+        history = self._history([(-10, 10), (-40, 40), (-5, 5)] * 4)
+        current = BehaviorSnapshot(
+            timestamp=datetime.now(UTC), fact_count_delta=-500, inactive_fact_delta=500, facts_pruned=500
+        )
+        found = [a for a in DriftDetector().detect(current, history) if a.metric == "fact_count_delta"]
+        assert found == []
+
+    def test_immaterial_departure_from_a_flat_baseline_stays_quiet(self):
+        """Below the 50-fact materiality floor -> still no alert, because the
+        floor is the only scale the fallback has."""
+        history = self._history([(-10, 10), (-40, 40), (-5, 5)] * 4)
+        current = BehaviorSnapshot(
+            timestamp=datetime.now(UTC), fact_count_delta=-20, inactive_fact_delta=0, facts_pruned=0
+        )
+        found = [a for a in DriftDetector().detect(current, history) if a.metric == "fact_count_delta"]
+        assert found == []
+
+    def test_metric_without_a_floor_still_skips_on_zero_variance(self):
+        """A metric with no min_abs_deviation gives the fallback no scale to
+        judge against, so a constant baseline must stay silent."""
+        history = [BehaviorSnapshot(timestamp=datetime.now(UTC), episodes_compacted=0) for _ in range(12)]
+        current = BehaviorSnapshot(timestamp=datetime.now(UTC), episodes_compacted=99)
+        found = [a for a in DriftDetector().detect(current, history) if a.metric == "episodes_compacted"]
+        assert found == []
+
+
+class TestStartupCountFailureAbortsTheTick:
+    """Round-2 left a hole: with prev None there was nothing to carry forward,
+    so an all-zero snapshot was installed as _last_snapshot and the next
+    successful tick reported the whole corpus as a fresh delta.
+    """
+
+    @pytest.mark.asyncio
+    async def test_capture_returns_none_on_startup_failure(self):
+        check = _drift_check(_FakeDB(None, [], boom=True))
+        assert await check._capture_snapshot() is None
+
+    @pytest.mark.asyncio
+    async def test_run_skips_the_tick_without_storing_a_snapshot(self):
+        from nous.heartbeat.checks import BehaviorDriftCheck
+
+        check = BehaviorDriftCheck.__new__(BehaviorDriftCheck)
+        check._detector = MagicMock()
+        check._last_snapshot = None
+        check._last_anomalies = []
+        check._capture_snapshot = AsyncMock(return_value=None)
+        check._load_baseline = AsyncMock(return_value=[object()] * 20)
+        check._store_snapshot = AsyncMock()
+
+        result = await check.run()
+        assert result.has_updates is False
+        assert result.findings == []
+        check._store_snapshot.assert_not_awaited()
+        check._detector.detect.assert_not_called()
+        assert check._last_snapshot is None, "must not seed a zero baseline"
+
+
+class TestCountsUnavailableSupprestsStore:
+    """P2 regression guard: when the count query fails but a previous snapshot
+    exists, run() must carry the previous values forward for in-memory anomaly
+    detection but must NOT write the carried-forward snapshot to the DB.
+
+    Persisting zero deltas would corrupt the baseline: every subsequent tick
+    sees a mirror-image anomaly (the whole corpus appearing as a fresh delta)
+    and variance collapses toward zero, making the z-score detector hypersensitive.
+    """
+
+    @pytest.mark.asyncio
+    async def test_counts_failure_with_prev_suppresses_store(self):
+        """Carried-forward snapshot must NOT be written to the DB."""
+        from nous.heartbeat.checks import BehaviorDriftCheck
+        from nous.observability.snapshots import BehaviorSnapshot
+
+        check = BehaviorDriftCheck.__new__(BehaviorDriftCheck)
+        check._detector = MagicMock()
+        check._last_snapshot = None
+        check._last_anomalies = []
+        # Simulate: _capture_snapshot ran with counts_ok=False (carry-forward case)
+        # and set _last_counts_ok=False before returning a non-None snapshot.
+        check._last_counts_ok = False
+        check._capture_snapshot = AsyncMock(return_value=BehaviorSnapshot(timestamp=datetime.now(UTC)))
+        check._load_baseline = AsyncMock(return_value=[])
+        check._store_snapshot = AsyncMock()
+
+        await check.run()
+
+        check._store_snapshot.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_counts_failure_with_prev_skips_detection(self):
+        """The P2 finding: detection must be gated on _last_counts_ok too.
+
+        When counts are unavailable but a previous snapshot exists, the carried-
+        forward snapshot has zero deltas for all count-derived metrics.  A
+        baseline that shows sustained growth (e.g. +50 facts/interval) treats
+        those zeros as a large downward anomaly and emits a high-urgency Finding
+        even though no current observation was made.
+
+        Before the fix, only _store_snapshot was gated; _detector.detect ran
+        unconditionally, so this test would have failed: it would find one
+        Finding with severity='alert'.
+        """
+        from nous.heartbeat.checks import BehaviorDriftCheck
+
+        check = BehaviorDriftCheck.__new__(BehaviorDriftCheck)
+        check._detector = MagicMock()
+        # Baseline reflects steady growth — zero delta looks like a big drop.
+        check._detector.detect.return_value = [
+            Anomaly(
+                metric="fact_count_delta",
+                current=0,
+                mean=50.0,
+                stddev=2.0,
+                z_score=-25.0,
+                direction="down",
+                severity="alert",
+            )
+        ]
+        check._last_snapshot = None
+        check._last_anomalies = []
+        # counts were NOT available (carry-forward case after a transient failure)
+        check._last_counts_ok = False
+        check._capture_snapshot = AsyncMock(return_value=BehaviorSnapshot(timestamp=datetime.now(UTC)))
+        check._load_baseline = AsyncMock(return_value=[object()] * 10)
+        check._store_snapshot = AsyncMock()
+
+        result = await check.run()
+
+        check._detector.detect.assert_not_called()
+        assert result.findings == [], "fabricated zeros must not produce findings"
+        assert result.has_updates is False
+
+    @pytest.mark.asyncio
+    async def test_counts_ok_persists_snapshot(self):
+        """When counts are available, the snapshot is written to the DB normally."""
+        from nous.heartbeat.checks import BehaviorDriftCheck
+        from nous.observability.snapshots import BehaviorSnapshot
+
+        check = BehaviorDriftCheck.__new__(BehaviorDriftCheck)
+        check._detector = MagicMock()
+        check._detector.detect.return_value = []
+        check._last_snapshot = None
+        check._last_anomalies = []
+        check._last_counts_ok = True  # counts were available this tick
+        check._capture_snapshot = AsyncMock(return_value=BehaviorSnapshot(timestamp=datetime.now(UTC)))
+        check._load_baseline = AsyncMock(return_value=[])
+        check._store_snapshot = AsyncMock()
+
+        await check.run()
+
+        check._store_snapshot.assert_awaited_once()
+
+
+class TestBaselineExcludesLegacySnapshots:
+    """Pre-rollout snapshots have facts_pruned stuck at 0 and globally scoped
+    corpus counts, so mixing them into the residual baseline lets stale prune
+    gaps and other agents' spikes set today's mean and stddev.
+    """
+
+    @pytest.mark.asyncio
+    async def test_v1_snapshots_are_kept_but_tagged_with_their_version(self):
+        from nous.heartbeat.checks import (
+            SNAPSHOT_METRICS_VERSION,
+            BehaviorDriftCheck,
+        )
+
+        rows = [
+            _FakeRow(timestamp=datetime.now(UTC), metrics={"fact_count_delta": -900, "facts_pruned": 0}),
+            _FakeRow(
+                timestamp=datetime.now(UTC),
+                metrics={"fact_count_delta": -3, "facts_pruned": 3, "metrics_version": SNAPSHOT_METRICS_VERSION},
+            ),
+        ]
+
+        class _Sess:
+            async def __aenter__(self_inner):
+                return self_inner
+
+            async def __aexit__(self_inner, *a):
+                return False
+
+            async def execute(self_inner, *a, **k):
+                r = MagicMock()
+                r.fetchall.return_value = rows
+                return r
+
+        db = MagicMock()
+        db.session = lambda: _Sess()
+
+        check = BehaviorDriftCheck.__new__(BehaviorDriftCheck)
+        check._db = db
+        check._settings = MagicMock(agent_id="a")
+
+        baseline = await check._load_baseline()
+        # Kept (unchanged metrics are still comparable), but stamped as v1 so
+        # DriftDetector excludes it from the changed fact metrics.
+        assert [s.metrics_version for s in baseline] == [1, SNAPSHOT_METRICS_VERSION]
+        assert baseline[1].fact_count_delta == -3
+        assert baseline[1].facts_pruned == 3
+
+    def test_v1_rows_do_not_feed_changed_metrics(self):
+        """A v1 -900 fact drop must not set today's residual baseline: with it
+        mixed in, a genuine unexplained -300 would sit inside the inflated
+        stddev and go unreported."""
+        v1 = [
+            BehaviorSnapshot(timestamp=datetime.now(UTC), metrics_version=1, fact_count_delta=-900) for _ in range(10)
+        ]
+        v2 = [BehaviorSnapshot(timestamp=datetime.now(UTC), fact_count_delta=d) for d in [0, 1, -1] * 4]
+        current = BehaviorSnapshot(timestamp=datetime.now(UTC), fact_count_delta=-300)
+        anomalies = DriftDetector().detect(current, v1 + v2)
+        assert "fact_count_delta" in {a.metric for a in anomalies}
+
+    def test_v1_rows_still_feed_unchanged_metrics(self):
+        """handler_error_rate means the same thing in v1 and v2, so its v1
+        history must count towards min_samples and the baseline."""
+        v1 = [
+            BehaviorSnapshot(timestamp=datetime.now(UTC), metrics_version=1, handler_error_rate=r)
+            for r in [0.01, 0.02, 0.01, 0.02, 0.01, 0.02]
+        ]
+        current = BehaviorSnapshot(timestamp=datetime.now(UTC), handler_error_rate=0.5)
+        anomalies = DriftDetector().detect(current, v1)
+        assert "handler_error_rate" in {a.metric for a in anomalies}
+        # ...while the same rows are not enough samples for a changed metric.
+        assert "fact_count_delta" not in {a.metric for a in anomalies}
+
+    @pytest.mark.asyncio
+    async def test_stored_metrics_carry_the_version(self):
+        from nous.heartbeat.checks import (
+            SNAPSHOT_METRICS_VERSION,
+            BehaviorDriftCheck,
+        )
+
+        captured = {}
+
+        class _Sess:
+            async def __aenter__(self_inner):
+                return self_inner
+
+            async def __aexit__(self_inner, *a):
+                return False
+
+            async def execute(self_inner, stmt, params=None):
+                captured.update(params or {})
+                return MagicMock()
+
+            async def commit(self_inner):
+                return None
+
+        db = MagicMock()
+        db.session = lambda: _Sess()
+
+        check = BehaviorDriftCheck.__new__(BehaviorDriftCheck)
+        check._db = db
+        check._settings = MagicMock(agent_id="a")
+        check._last_anomalies = []
+
+        await check._store_snapshot(BehaviorSnapshot(timestamp=datetime.now(UTC), fact_count=5))
+        import json as _j
+
+        assert _j.loads(captured["metrics"])["metrics_version"] == (SNAPSHOT_METRICS_VERSION)
+
+
+class TestMassPruneIsNeverSilentOnBothMetrics:
+    """Residualization cancels a mass prune out of fact_count_delta by design,
+    which makes facts_pruned the only metric left that can report it. On a
+    baseline of quiet zero-prune snapshots that series has no variance, so
+    without a materiality floor the zero-variance branch dropped it too and
+    the prune vanished from both metrics at once.
+    """
+
+    def _quiet_history(self, n=12):
+        return [
+            BehaviorSnapshot(timestamp=datetime.now(UTC), fact_count_delta=0, inactive_fact_delta=0, facts_pruned=0)
+            for _ in range(n)
+        ]
+
+    def test_mass_prune_reported_by_facts_pruned(self):
+        current = BehaviorSnapshot(
+            timestamp=datetime.now(UTC), fact_count_delta=-400, inactive_fact_delta=400, facts_pruned=400
+        )
+        anomalies = DriftDetector().detect(current, self._quiet_history())
+        by_metric = {a.metric: a for a in anomalies}
+        # fact_count_delta is correctly explained away...
+        assert "fact_count_delta" not in by_metric
+        # ...so facts_pruned must carry the signal.
+        assert "facts_pruned" in by_metric
+        assert by_metric["facts_pruned"].current == 400
+        assert by_metric["facts_pruned"].z_score is None
+
+    def test_small_prune_against_a_quiet_baseline_stays_silent(self):
+        current = BehaviorSnapshot(
+            timestamp=datetime.now(UTC), fact_count_delta=-3, inactive_fact_delta=3, facts_pruned=3
+        )
+        anomalies = DriftDetector().detect(current, self._quiet_history())
+        assert [a for a in anomalies if a.metric == "facts_pruned"] == []
+
+
+class TestFactsPrunedIsAGrossCount:
+    """facts_pruned used to be the NET inactive-count delta, so an interval
+    that pruned 100 facts and reactivated 100 others (FactManager._get_current
+    sets active=True repairing supersession cycles) reported 0 prunes: the
+    mass prune was invisible to the one metric monitoring it. It is now the
+    gross count of newly inactive IDs; the signed net moved to
+    inactive_fact_delta, which is what residualizes fact_count_delta.
+    """
+
+    _ROW = dict(facts=900, episodes=10, censors=2, procedures=5)
+
+    async def _offset_prune_snapshot(self):
+        # Previously inactive: 0..99. Now: 100..199 -- 100 pruned, 100 reactivated.
+        row = _FakeRow(inactive_ids=list(_ids(range(100, 200))), **self._ROW)
+        check = _drift_check(_FakeDB(row, []))
+        check._last_snapshot = BehaviorSnapshot(
+            timestamp=datetime.now(UTC), fact_count=900, inactive_fact_count=100, inactive_ids=_ids(range(100))
+        )
+        return await check._capture_snapshot()
+
+    @pytest.mark.asyncio
+    async def test_prune_offset_by_reactivation_is_still_counted(self):
+        snap = await self._offset_prune_snapshot()
+        assert snap.inactive_fact_count == 100
+        assert snap.inactive_fact_delta == 0
+        assert snap.fact_count_delta == 0
+        assert snap.facts_pruned == 100
+
+    @pytest.mark.asyncio
+    async def test_offset_mass_prune_fires_and_residual_stays_quiet(self):
+        snap = await self._offset_prune_snapshot()
+        quiet = [BehaviorSnapshot(timestamp=datetime.now(UTC)) for _ in range(12)]
+        by_metric = {a.metric: a for a in DriftDetector().detect(snap, quiet)}
+        assert by_metric["facts_pruned"].current == 100
+        assert "fact_count_delta" not in by_metric
+
+    @pytest.mark.asyncio
+    async def test_next_tick_diffs_against_this_ticks_ids(self):
+        check = _drift_check(_FakeDB(_FakeRow(inactive_facts=5, **self._ROW), []))
+        check._last_snapshot = await check._capture_snapshot()
+        assert check._last_snapshot.inactive_ids == _ids(range(5))
+        check._db = _FakeDB(_FakeRow(inactive_facts=7, **self._ROW), [])
+        snap = await check._capture_snapshot()
+        assert snap.facts_pruned == 2
+
+    def test_ids_are_not_persisted_as_a_metric(self):
+        snap = BehaviorSnapshot(timestamp=datetime.now(UTC), inactive_ids=_ids(range(3)))
+        assert "inactive_ids" not in snap.to_metrics_dict()
+
+    def test_reactivation_still_residualizes_fact_count_delta(self):
+        quiet = [BehaviorSnapshot(timestamp=datetime.now(UTC)) for _ in range(12)]
+        current = BehaviorSnapshot(timestamp=datetime.now(UTC), fact_count_delta=80, inactive_fact_delta=-80)
+        assert DriftDetector().detect(current, quiet) == []
+
+
+class TestV2FactsPrunedCarriesOverAsInactiveDelta:
+    """v2 stored the signed inactive delta under facts_pruned. Readers rename
+    it to inactive_fact_delta so fact_count_delta keeps its residualized
+    baseline across the upgrade; the v2 facts_pruned itself is not comparable
+    with the v3 gross count and is excluded.
+    """
+
+    def test_normalize_renames_v2_value(self):
+        from nous.observability.snapshots import normalize_stored_metrics
+
+        assert normalize_stored_metrics({"metrics_version": 2, "facts_pruned": -7})["inactive_fact_delta"] == -7
+
+    def test_normalize_leaves_v1_and_current_rows_alone(self):
+        from nous.observability.snapshots import SNAPSHOT_METRICS_VERSION, normalize_stored_metrics
+
+        assert "inactive_fact_delta" not in normalize_stored_metrics({"facts_pruned": 0})
+        cur = {"metrics_version": SNAPSHOT_METRICS_VERSION, "facts_pruned": 4, "inactive_fact_delta": 1}
+        assert normalize_stored_metrics(cur) == cur
+
+    def test_comparability_across_v3(self):
+        from nous.observability.snapshots import metric_comparable
+
+        assert not metric_comparable("facts_pruned", 2)
+        assert metric_comparable("inactive_fact_delta", 2)
+        assert metric_comparable("fact_count_delta", 2)
+        assert not metric_comparable("inactive_fact_delta", 1)
+
+    @pytest.mark.asyncio
+    async def test_v2_rows_keep_the_residual_baseline(self):
+        from nous.heartbeat.checks import BehaviorDriftCheck
+
+        prunes = (40, 60, 50, 45, 55, 50, 40, 60, 50, 50)
+        rows = [
+            _FakeRow(
+                timestamp=datetime.now(UTC), metrics={"fact_count_delta": -d, "facts_pruned": d, "metrics_version": 2}
+            )
+            for d in prunes
+        ]
+
+        class _Sess:
+            async def __aenter__(self_inner):
+                return self_inner
+
+            async def __aexit__(self_inner, *a):
+                return False
+
+            async def execute(self_inner, *a, **k):
+                r = MagicMock()
+                r.fetchall.return_value = rows
+                return r
+
+        db = MagicMock()
+        db.session = lambda: _Sess()
+        check = BehaviorDriftCheck.__new__(BehaviorDriftCheck)
+        check._db = db
+        check._settings = MagicMock(agent_id="a")
+        baseline = await check._load_baseline()
+        assert [s.inactive_fact_delta for s in baseline] == list(prunes)
+        # The residual history is all zeros, so an unexplained -100 fires on
+        # the zero-variance fallback -- impossible if v2 rows had been dropped.
+        current = BehaviorSnapshot(timestamp=datetime.now(UTC), fact_count_delta=-100)
+        anomalies = DriftDetector().detect(current, baseline)
+        found = [a for a in anomalies if a.metric == "fact_count_delta"]
+        assert len(found) == 1 and found[0].current == -100
+        # v2 facts_pruned was a net figure; it must not seed the gross baseline.
+        assert [a for a in anomalies if a.metric == "facts_pruned"] == []
+
+
+class TestBaselineRejectsIncompatibleVersionsBothWays:
+    """A snapshot from a NEWER writer is as incomparable as an older one:
+    during a rolling upgrade or rollback this process can share the database
+    with a v3 writer.
+    """
+
+    async def _baseline_for(self, versions):
+        from nous.heartbeat.checks import BehaviorDriftCheck
+
+        rows = []
+        for i, v in enumerate(versions):
+            m = {"fact_count_delta": -i, "facts_pruned": i}
+            if v is not None:
+                m["metrics_version"] = v
+            rows.append(_FakeRow(timestamp=datetime.now(UTC), metrics=m))
+
+        class _Sess:
+            async def __aenter__(self_inner):
+                return self_inner
+
+            async def __aexit__(self_inner, *a):
+                return False
+
+            async def execute(self_inner, *a, **k):
+                r = MagicMock()
+                r.fetchall.return_value = rows
+                return r
+
+        db = MagicMock()
+        db.session = lambda: _Sess()
+        check = BehaviorDriftCheck.__new__(BehaviorDriftCheck)
+        check._db = db
+        check._settings = MagicMock(agent_id="a")
+        return await check._load_baseline()
+
+    @pytest.mark.asyncio
+    async def test_newer_version_snapshots_are_rejected(self):
+        from nous.heartbeat.checks import SNAPSHOT_METRICS_VERSION
+
+        baseline = await self._baseline_for([SNAPSHOT_METRICS_VERSION + 1, SNAPSHOT_METRICS_VERSION + 1])
+        assert baseline == []
+
+    @pytest.mark.asyncio
+    async def test_older_versions_survive_newer_are_dropped(self):
+        from nous.heartbeat.checks import SNAPSHOT_METRICS_VERSION
+
+        baseline = await self._baseline_for(
+            [
+                None,  # v1, implicit
+                SNAPSHOT_METRICS_VERSION,
+                SNAPSHOT_METRICS_VERSION + 1,
+            ]
+        )
+        assert [s.metrics_version for s in baseline] == [1, SNAPSHOT_METRICS_VERSION]
+
+
+class TestMetricComparable:
+    def test_changed_metrics_are_not_comparable_across_versions(self):
+        from nous.observability.snapshots import (
+            METRIC_DEFINITION_CHANGES,
+            SNAPSHOT_METRICS_VERSION,
+            metric_comparable,
+        )
+
+        for version, changed in METRIC_DEFINITION_CHANGES.items():
+            for m in changed:
+                assert not metric_comparable(m, version - 1), m
+                assert metric_comparable(m, SNAPSHOT_METRICS_VERSION), m
+
+    def test_unchanged_metrics_are_comparable_across_versions(self):
+        from nous.observability.snapshots import metric_comparable
+
+        for m in ("handler_error_rate", "events_dropped", "admission_rate"):
+            assert metric_comparable(m, 1)
+
+    def test_newer_writer_is_comparable_for_nothing(self):
+        from nous.observability.snapshots import SNAPSHOT_METRICS_VERSION, metric_comparable
+
+        assert not metric_comparable("handler_error_rate", SNAPSHOT_METRICS_VERSION + 1)
+
+    def test_residualized_pairs_change_together(self):
+        """Residualized pairs must change together, or the residual would
+        combine two definitions."""
+        from nous.observability.snapshots import metric_comparable
+
+        for metric, explainer in DriftDetector.RESIDUALIZE.items():
+            assert metric_comparable(metric, 1) == metric_comparable(explainer, 1)
+
+
+class TestTrendConsumersFilterPerMetric:
+    """/behavior/trends and the observability dashboard's drift_trends
+    aggregate stored metrics across rows. The version filter must apply to
+    the metric being read, not to whole rows: a v1 fact_count_delta is a
+    different (global) quantity, but a v1 handler_error_rate is not, and
+    dropping its rows truncated that history for no reason.
+    """
+
+    def _rows(self):
+        from nous.observability.snapshots import SNAPSHOT_METRICS_VERSION
+
+        now = datetime.now(UTC)
+        return [
+            _FakeRow(
+                timestamp=now - timedelta(hours=3),
+                metrics={"fact_count_delta": -900, "handler_error_rate": 0.1},
+            ),
+            _FakeRow(
+                timestamp=now - timedelta(hours=2),
+                metrics={"fact_count_delta": -900, "handler_error_rate": 0.3, "metrics_version": 1},
+            ),
+            _FakeRow(
+                timestamp=now - timedelta(hours=1),
+                metrics={
+                    "fact_count_delta": -2,
+                    "handler_error_rate": 0.2,
+                    "metrics_version": SNAPSHOT_METRICS_VERSION,
+                },
+            ),
+            _FakeRow(
+                timestamp=now,
+                metrics={
+                    "fact_count_delta": 7,
+                    "handler_error_rate": 0.9,
+                    "metrics_version": SNAPSHOT_METRICS_VERSION + 1,
+                },
+            ),
+        ]
+
+    async def _client_get(self, path):
+        from httpx import ASGITransport, AsyncClient
+
+        from nous.api.rest import create_app
+        from nous.config import Settings
+
+        rows = self._rows()
+
+        class _Sess:
+            async def __aenter__(self_inner):
+                return self_inner
+
+            async def __aexit__(self_inner, *a):
+                return False
+
+            async def execute(self_inner, *a, **k):
+                r = MagicMock()
+                r.fetchall.return_value = rows
+                r.fetchone.return_value = None
+                return r
+
+        db = MagicMock()
+        db.session = lambda: _Sess()
+        app = create_app(MagicMock(), MagicMock(), MagicMock(), MagicMock(), db, Settings(_env_file=None))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            resp = await c.get(path)
+        assert resp.status_code == 200, resp.text
+        return resp.json()
+
+    @pytest.mark.asyncio
+    async def test_trends_keeps_v1_history_for_unchanged_metric(self):
+        data = await self._client_get("/behavior/trends?metric=handler_error_rate")
+        assert [p["value"] for p in data["points"]] == [0.1, 0.3, 0.2]
+        assert data["stats"]["mean"] == 0.2
+        assert data["excluded_incompatible"] == 1  # only the newer writer
+
+    @pytest.mark.asyncio
+    async def test_trends_drops_v1_rows_for_changed_metric(self):
+        data = await self._client_get("/behavior/trends?metric=fact_count_delta")
+        assert [p["value"] for p in data["points"]] == [-2]
+        assert data["excluded_incompatible"] == 3
+
+    @pytest.mark.asyncio
+    async def test_dashboard_filters_each_series_independently(self):
+        data = await self._client_get("/dashboard/observability")
+        trends = data["drift_trends"]
+        assert [p["v"] for p in trends["handler_error_rate"]] == [0.1, 0.3, 0.2]
+        assert [p["v"] for p in trends["fact_count_delta"]] == [-2]

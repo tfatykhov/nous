@@ -62,6 +62,12 @@ from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
 from nous.observability.retrieval_logger import RETRIEVAL_PATHS as _RETRIEVAL_PATHS
+from nous.observability.snapshots import (
+    SNAPSHOT_METRICS_VERSION,
+    metric_comparable,
+    normalize_stored_metrics,
+    stored_metrics_version,
+)
 from nous.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -1835,10 +1841,16 @@ def create_app(
             trend_metrics = ["fact_count_delta", "handler_error_rate"]
             trends = {m: [] for m in trend_metrics}
             for row in rows:
-                metrics = row.metrics if isinstance(row.metrics, dict) else {}
+                metrics = normalize_stored_metrics(row.metrics if isinstance(row.metrics, dict) else {})
+                version = stored_metrics_version(metrics)
                 ts = row.timestamp.isoformat()
                 for m in trend_metrics:
-                    trends[m].append({"t": ts, "v": metrics.get(m, 0)})
+                    # Per-series version filter: fact_count_delta changed scope
+                    # in v2 (charting both definitions on one line would show
+                    # an artifact step), handler_error_rate did not, so its
+                    # v1 history stays on the chart.
+                    if metric_comparable(m, version):
+                        trends[m].append({"t": ts, "v": metrics.get(m, 0)})
             result["drift_trends"] = trends
         except Exception:
             logger.debug("dashboard_observability: drift_trends failed", exc_info=True)
@@ -2943,8 +2955,16 @@ def create_app(
             rows = result.fetchall()
         points = []
         values = []
+        excluded = 0
         for row in rows:
-            metrics = row.metrics if isinstance(row.metrics, dict) else {}
+            metrics = normalize_stored_metrics(row.metrics if isinstance(row.metrics, dict) else {})
+            # Version filter is mandatory, not cosmetic: this endpoint returns
+            # a mean and stddev, and v1 fact metrics are global where v2 are
+            # agent-scoped. It is applied to THIS metric only -- an unchanged
+            # metric such as handler_error_rate keeps its v1 history.
+            if not metric_comparable(metric, stored_metrics_version(metrics)):
+                excluded += 1
+                continue
             val = metrics.get(metric, 0)
             points.append({"timestamp": row.timestamp.isoformat(), "value": val})
             values.append(float(val))
@@ -2953,7 +2973,14 @@ def create_app(
             stats = {"mean": round(st.mean(values), 2), "min": min(values), "max": max(values)}
             if len(values) > 1:
                 stats["stddev"] = round(st.stdev(values), 2)
-        return JSONResponse({"metric": metric, "hours": hours, "points": points, "stats": stats})
+        # Surfaced so a caller can tell "quiet week" from "the window is
+        # short because older snapshots use an incompatible definition of
+        # this metric".
+        return JSONResponse({
+            "metric": metric, "hours": hours, "points": points,
+            "stats": stats, "metrics_version": SNAPSHOT_METRICS_VERSION,
+            "excluded_incompatible": excluded,
+        })
 
     async def behavior_anomalies(request: Request) -> JSONResponse:
         from datetime import UTC, datetime, timedelta
@@ -2991,7 +3018,20 @@ def create_app(
         else:
             lines = [f"Drift detected at {row.timestamp.isoformat()}:"]
             for a in anomalies:
-                lines.append(f"  - {a.get('metric', '?')}: {a.get('current', '?')} ({a.get('direction', '?')} from baseline)")
+                # A residualized metric's "current" is the UNEXPLAINED remainder,
+                # not the raw metric value, so it must never be printed bare as
+                # though it were the raw number. Snapshots written before
+                # residualization shipped carry no residualized_by and render
+                # with the original one-line form.
+                explained_by = a.get("residualized_by")
+                if explained_by:
+                    lines.append(
+                        f"  - {a.get('metric', '?')}: {a.get('raw_current', '?')} raw "
+                        f"-> {a.get('current', '?')} unexplained after {explained_by} "
+                        f"({a.get('direction', '?')} from baseline)"
+                    )
+                else:
+                    lines.append(f"  - {a.get('metric', '?')}: {a.get('current', '?')} ({a.get('direction', '?')} from baseline)")
             report = "\n".join(lines)
         return JSONResponse({"report": report, "anomalies": anomalies, "snapshot_time": row.timestamp.isoformat()})
 

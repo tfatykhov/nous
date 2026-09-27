@@ -373,8 +373,13 @@
       <h2>Active Drift Anomalies</h2>
       {#each d.drift.anomalies as a}
         <div class="anomaly" class:anomaly--alert={a.severity === 'alert'}>
-          <strong>{a.metric}</strong>: {a.current}
-          ({a.direction} from {a.mean} ± {a.stddev})
+          <strong>{a.metric}</strong>:
+          {#if a.residualized_by}
+            {a.raw_current} raw → {a.current} unexplained after {a.residualized_by}
+          {:else}
+            {a.current}
+          {/if}
+          ({a.direction} from {a.mean}{a.z_score != null ? ' ± ' + a.stddev : ', previously constant'})
         </div>
       {/each}
     </section>
