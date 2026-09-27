@@ -93,6 +93,9 @@ class StrategyCardDistiller:
         # flight, the latest outcome is stored here so it runs after the
         # current distillation completes (finding #3).
         self._pending: dict[str, str] = {}
+        # Tracked tasks: all asyncio.Tasks spawned by this distiller, so
+        # shutdown() can await them before the process exits.
+        self._tasks: set = set()
         if bus is not None:
             bus.on("decision_reviewed", self._on_decision_reviewed)
 
@@ -132,15 +135,25 @@ class StrategyCardDistiller:
             if key in self._in_flight:
                 self._pending[key] = outcome
             else:
-                asyncio.create_task(
-                    self._deactivate_card_for_decision(decision_id),
-                    name=f"strategy_card_deactivate_{decision_id}",
+                self._track_task(
+                    asyncio.create_task(
+                        self._deactivate_card_for_decision(decision_id),
+                        name=f"strategy_card_deactivate_{decision_id}",
+                    )
                 )
             return
-        asyncio.create_task(
-            self._distil(decision_id, outcome),
-            name=f"strategy_card_distil_{decision_id}",
+        self._track_task(
+            asyncio.create_task(
+                self._distil(decision_id, outcome),
+                name=f"strategy_card_distil_{decision_id}",
+            )
         )
+
+    def _track_task(self, task: asyncio.Task) -> asyncio.Task:
+        """Track a task so it can be awaited during shutdown."""
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
 
     # ------------------------------------------------------------------
     # Core distillation (async, errors are swallowed)
@@ -184,16 +197,20 @@ class StrategyCardDistiller:
             pending_outcome = self._pending.pop(key, None)
             if pending_outcome is not None:
                 if pending_outcome in GRADED_OUTCOMES:
-                    asyncio.create_task(
-                        self._distil(decision_id, pending_outcome),
-                        name=f"strategy_card_distil_{decision_id}_followup",
+                    self._track_task(
+                        asyncio.create_task(
+                            self._distil(decision_id, pending_outcome),
+                            name=f"strategy_card_distil_{decision_id}_followup",
+                        )
                     )
                 else:
                     # Latest review was noise/superseded: deactivate any card
                     # that was just created by this distillation.
-                    asyncio.create_task(
-                        self._deactivate_card_for_decision(decision_id),
-                        name=f"strategy_card_deactivate_{decision_id}_followup",
+                    self._track_task(
+                        asyncio.create_task(
+                            self._deactivate_card_for_decision(decision_id),
+                            name=f"strategy_card_deactivate_{decision_id}_followup",
+                        )
                     )
 
     async def _do_distil(self, decision_id: UUID, outcome: str) -> None:
@@ -447,3 +464,10 @@ class StrategyCardDistiller:
                 procedure_id,
                 exc_info=True,
             )
+
+    async def shutdown(self) -> None:
+        """Await all in-flight distillation tasks before process shutdown."""
+        tasks = list(self._tasks)
+        if tasks:
+            logger.debug("StrategyCardDistiller: draining %d in-flight task(s)", len(tasks))
+            await asyncio.gather(*tasks, return_exceptions=True)
