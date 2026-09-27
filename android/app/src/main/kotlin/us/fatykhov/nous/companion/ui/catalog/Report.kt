@@ -111,6 +111,9 @@ fun DeltaListView(node: Node.Render) {
     }
 }
 
+/** The web's `td`/`th` horizontal cell padding (`0.5rem`), which a Compose `Row` has no equivalent of. */
+private val CELL_PAD = 6.dp
+
 @Composable
 fun DataTableView(node: Node.Render) {
     val host = LocalSurfaceHost.current; val t = LocalNousTheme.current
@@ -118,12 +121,18 @@ fun DataTableView(node: Node.Render) {
     val (items, omitted) = rows(host, node, "rows")
     val empty = node.props.str("emptyText")?.trim()?.takeIf { it.isNotEmpty() } ?: "no rows"
     Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Row(Modifier.fillMaxWidth()) { for (c in columns) Text(c.str("label") ?: c.str("key")!!, color = t.muted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, textAlign = if (c.str("align") == "end") TextAlign.End else TextAlign.Start, modifier = Modifier.weight(1f)) }
+        // Cells carry their own horizontal padding (the web's `td { padding: … 0.5rem }`).
+        // Without it a right-aligned figure butts straight against the next column's
+        // text — "0.8indoor rowing", and a header row reading "HoursType".
+        Row(Modifier.fillMaxWidth()) { for (c in columns) Text(c.str("label") ?: c.str("key")!!, color = t.muted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, textAlign = if (c.str("align") == "end") TextAlign.End else TextAlign.Start, modifier = Modifier.weight(1f).padding(horizontal = CELL_PAD)) }
         HorizontalDivider(color = t.border)
         if (items.isEmpty()) Text(empty, color = t.muted, fontSize = 13.sp)
-        for (r in items) Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
-            for (c in columns) { val end = c.str("align") == "end"; val sec = (c["secondary"] as? JsonPrimitive)?.content == "true"
-                Text(Functions.toDisplayString(r[c.str("key")!!]), color = if (sec) t.muted else t.text, fontSize = 13.sp, fontFamily = if (end) t.mono else t.display.let { androidx.compose.ui.text.font.FontFamily.Default }, textAlign = if (end) TextAlign.End else TextAlign.Start, modifier = Modifier.weight(1f)) }
+        for ((i, r) in items.withIndex()) {
+            Row(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+                for (c in columns) { val end = c.str("align") == "end"; val sec = (c["secondary"] as? JsonPrimitive)?.content == "true"
+                    Text(Functions.toDisplayString(r[c.str("key")!!]), color = if (sec) t.muted else t.text, fontSize = 13.sp, fontFamily = if (end) t.mono else t.display.let { androidx.compose.ui.text.font.FontFamily.Default }, textAlign = if (end) TextAlign.End else TextAlign.Start, modifier = Modifier.weight(1f).padding(horizontal = CELL_PAD)) }
+            }
+            if (i < items.lastIndex) HorizontalDivider(color = t.border)   // web: border-bottom on every row but the last
         }
         Omitted(omitted)
     }
