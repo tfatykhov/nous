@@ -3,7 +3,7 @@ package us.fatykhov.nous.companion
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.test.core.app.ApplicationProvider
@@ -72,7 +72,9 @@ class RenderFixturesTest {
                 if ((c["component"] as? kotlinx.serialization.json.JsonPrimitive)?.content != "Text") continue
                 val lit = (c["text"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content ?: continue
                 val probe = lit.lineSequence().first().removePrefix("#").trimStart('#').trim().takeIf { it.isNotEmpty() && !it.contains('$') && !it.contains('*') && !it.contains('`') && !it.contains('[') } ?: continue
-                rule.onNodeWithText(probe, substring = true, useUnmergedTree = true).assertExists("${f.name}: text '$probe' not rendered")
+                // At least one: a fixture may legitimately repeat a literal (00_incremental has four "Book now" buttons).
+                assertTrue("${f.name}: text '$probe' not rendered",
+                    rule.onAllNodesWithText(probe, substring = true, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty())
             }
         }
         assertTrue("no fixture used only ported components — the sweep proved nothing", checked >= 10)
