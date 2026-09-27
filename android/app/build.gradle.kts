@@ -7,6 +7,10 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+// Inside `android {}` the identifier `java` is the JavaPluginExtension, so the
+// JDK decoder is reached through a top-level function instead.
+fun decodeBase64(s: String): ByteArray = java.util.Base64.getDecoder().decode(s)
+
 android {
     namespace = "us.fatykhov.nous.companion"
     compileSdk = 37
@@ -27,7 +31,7 @@ android {
     if (!betaKeystoreB64.isNullOrEmpty() && !betaKeystorePassword.isNullOrEmpty()) {
         val ks = layout.buildDirectory.file("beta.jks").get().asFile
         ks.parentFile.mkdirs()
-        ks.writeBytes(java.util.Base64.getDecoder().decode(betaKeystoreB64))
+        ks.writeBytes(decodeBase64(betaKeystoreB64))
         signingConfigs {
             getByName("debug") {
                 storeFile = ks
