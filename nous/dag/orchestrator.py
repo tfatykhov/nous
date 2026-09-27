@@ -192,6 +192,20 @@ def _registry_disabled_run_failed(registry: object, name: str | None) -> bool:
     return bool(name) and callable(fn) and fn(name) is True
 
 
+def _registry_final_run_failed(registry: object, name: str | None) -> bool:
+    """Whether check ``name``'s self-disabling final run finished and failed.
+
+    Shared by both check-node paths (_sync_check_node and the
+    completion_check poll) so neither can accept a disabled check as worker
+    completion while its last run's failure is still unrecorded.
+    """
+    return (
+        registry is not None
+        and not _registry_run_in_flight(registry, name)
+        and _registry_disabled_run_failed(registry, name)
+    )
+
+
 def _registry_consume_disabled_run_failure(registry: object, name: str | None) -> None:
     """Release the registry's retained failure for ``name`` once recorded."""
     fn = getattr(registry, "consume_self_disabled_run_failure", None)
@@ -1421,7 +1435,7 @@ class DAGOrchestrator:
         if registry is not None and _registry_run_in_flight(registry, node.check_name):
             return
         check = registry.get_check(node.check_name) if registry else None
-        if (check is None or not check.active) and _registry_disabled_run_failed(
+        if (check is None or not check.active) and _registry_final_run_failed(
             registry,
             node.check_name,
         ):
@@ -1491,6 +1505,22 @@ class DAGOrchestrator:
             # success" instruction was wrong): computed once here and
             # reused for the rest of this node's iteration — see below for
             # why re-checking per-branch was itself the bug.
+            # codex P1 (PR #656 round 5): a check whose final run disabled
+            # itself and then failed leaves enabled=False in the DB, which
+            # _heartbeat_worker_has_run accepts as worker evidence. Honor the
+            # retained failure first, as _sync_check_node does, so a passing
+            # shell check cannot complete a node whose worker failed.
+            registry = getattr(self._dynamic_loader, "_registry", None)
+            if _registry_final_run_failed(registry, node.check_name):
+                await self._finalize_awaiting_check_node(
+                    node,
+                    status="failed",
+                    error="Check disabled itself but its final run failed",
+                )
+                # Consumed only after the failure is persisted.
+                _registry_consume_disabled_run_failure(registry, node.check_name)
+                continue
+
             worker_has_run = await self._heartbeat_worker_has_run(node)
             if node.awaiting_check_at is None and worker_has_run:
                 established_at = datetime.now(UTC)

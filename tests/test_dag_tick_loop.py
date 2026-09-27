@@ -1557,3 +1557,60 @@ def test_retained_self_disabled_failures_are_bounded():
     assert not registry.self_disabled_run_failed("dag-0-node")
     assert registry.self_disabled_run_failed(f"dag-{total - 1}-node")
     assert registry._in_flight == {}
+
+
+# ---------------------------------------------------------------------------
+# codex P1 (PR #656 round 5): the completion_check path must honor a failed
+# self-disabling final run before accepting enabled=False as worker evidence.
+# ---------------------------------------------------------------------------
+
+
+async def _awaiting_check_after_run(fail_after_disable: bool):
+    hb, orch, store, node, disabled, release, _ = _self_disabling_setup(
+        fail_after_disable=fail_after_disable,
+    )
+    loader = orch._dynamic_loader
+    loader.get_successful_run_count = AsyncMock(return_value=0)
+    loader.is_check_disabled = AsyncMock(return_value=True)
+    loader.manage_check = AsyncMock()
+
+    tick = asyncio.create_task(hb._tick())
+    await asyncio.wait_for(disabled.wait(), timeout=3.0)
+    release.set()
+    await asyncio.wait_for(tick, timeout=3.0)
+
+    node.status = "awaiting_check"
+    node.completion_check = "true"
+    node.awaiting_check_at = None
+    node.started_at = datetime.now().astimezone()
+    node.completion_check_interval = None
+    node.last_check_at = None
+    node.max_check_attempts = None
+    node.check_attempts = 0
+    node.timeout_seconds = 600
+    node.result = None
+    dag = MagicMock()
+    dag.nodes = [node]
+    orch._run_completion_check = AsyncMock(return_value=MagicMock(status="success", detail=None))
+    orch._read_node_result = AsyncMock(return_value="done")
+    await orch._poll_awaiting_checks(dag)
+    return hb._registry, orch, node, loader
+
+
+@pytest.mark.asyncio
+async def test_completion_check_node_fails_when_self_disabled_run_fails():
+    registry, orch, node, loader = await _awaiting_check_after_run(True)
+
+    assert node.status == "failed"
+    orch._run_completion_check.assert_not_called()
+    assert node.check_attempts == 0
+    loader.manage_check.assert_awaited()  # heartbeat check cancelled
+    assert registry._disabled_run_failures == {}
+
+
+@pytest.mark.asyncio
+async def test_completion_check_node_completes_when_self_disabled_run_succeeds():
+    registry, orch, node, _ = await _awaiting_check_after_run(False)
+
+    assert node.status == "completed"
+    orch._run_completion_check.assert_awaited_once()
