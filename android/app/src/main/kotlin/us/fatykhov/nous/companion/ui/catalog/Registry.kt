@@ -37,6 +37,18 @@ object Registry {
         "Timeline" to { n -> TimelineView(n) },
         "DagGraph" to { n -> DagGraphView(n) },
         "MemoryGraph" to { n -> MemoryGraphView(n) },
+        // micro-app + F094/F096 vocabulary (PR 5)
+        "AppHeader" to { n -> AppHeaderView(n) },
+        "AppFooter" to { n -> AppFooterView(n) },
+        "Section" to { n -> SectionView(n) },
+        "Sparkline" to { n -> SparklineView(n) },
+        "LineChart" to { n -> LineChartView(n) },
+        "BarChart" to { n -> BarChartView(n) },
+        "MetricCard" to { n -> MetricCardView(n) },
+        "ScoreCard" to { n -> ScoreCardView(n) },
+        "DeltaList" to { n -> DeltaListView(n) },
+        "DataTable" to { n -> DataTableView(n) },
+        "ChipRow" to { n -> ChipRowView(n) },
     )
     val names: Set<String> get() = renderers.keys
 }

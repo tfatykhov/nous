@@ -8,6 +8,8 @@ package us.fatykhov.nous.companion.core
  *
  * PR 3: the six template builders' vocabulary + basic layout/display.
  * PR 4: the basic-catalog inputs, Modal and Tabs (two-way binding).
+ * PR 5: micro-app chrome, charts and the F096 report vocabulary. Only
+ * Video/AudioPlayer remain unsupported (they are unimplemented on the web too).
  */
 object Registry {
     val ported: Set<String> = setOf(
@@ -15,5 +17,7 @@ object Registry {
         "TextField", "CheckBox", "ChoicePicker", "Slider", "DateTimeInput", "Modal", "Tabs",
         "ApprovalPanel", "ActionReviewCard", "StatTile", "StatRow", "KeyValueTable",
         "DecisionCard", "ConfidenceMeter", "Timeline", "DagGraph", "MemoryGraph",
+        "AppHeader", "AppFooter", "Section", "Sparkline", "LineChart", "BarChart",
+        "MetricCard", "ScoreCard", "DeltaList", "DataTable", "ChipRow",
     )
 }

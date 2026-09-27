@@ -418,37 +418,52 @@
       }
     },
     "AppHeader": {
-      "status": "unsupported",
+      "status": "ported",
       "props": {
-        "title": "ignored:pr5",
-        "subtitle": "ignored:pr5",
-        "composedAt": "ignored:pr5",
-        "staleAfterS": "ignored:pr5",
-        "note": "ignored:pr5",
-        "weight": "ignored:pr5",
-        "accessibility": "ignored:pr5"
+        "title": "handled",
+        "subtitle": "handled",
+        "composedAt": "handled",
+        "staleAfterS": "handled",
+        "note": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
       }
     },
     "AppFooter": {
-      "status": "unsupported",
+      "status": "ported",
       "props": {
-        "refineOptions": "ignored:pr5",
-        "agentActions": "ignored:pr5",
-        "showRefresh": "ignored:pr5",
-        "weight": "ignored:pr5",
-        "accessibility": "ignored:pr5"
+        "refineOptions": "handled",
+        "agentActions": "handled",
+        "showRefresh": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
       }
     },
     "Section": {
-      "status": "unsupported",
+      "status": "ported",
       "props": {
-        "title": "ignored:pr5",
-        "child": "ignored:pr5",
-        "provenance": "ignored:pr5",
-        "caption": "ignored:pr5",
-        "layout": "ignored:pr5",
-        "weight": "ignored:pr5",
-        "accessibility": "ignored:pr5"
+        "title": "handled",
+        "child": "handled",
+        "provenance": "handled",
+        "caption": "handled",
+        "layout": "handled:grid/rail/cards render as the child's own stack in the beta (enum acknowledged)",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      },
+      "enums": {
+        "provenance": [
+          "source",
+          "model"
+        ],
+        "layout": [
+          "stack",
+          "hero",
+          "grid-2",
+          "grid-3",
+          "rail",
+          "accordion",
+          "cards"
+        ]
       }
     },
     "StatRow": {
@@ -468,96 +483,136 @@
       }
     },
     "Sparkline": {
-      "status": "unsupported",
+      "status": "ported",
       "props": {
-        "path": "ignored:pr5",
-        "label": "ignored:pr5",
-        "tone": "ignored:pr5",
-        "trendline": "ignored:pr5",
-        "weight": "ignored:pr5",
-        "accessibility": "ignored:pr5"
+        "path": "handled",
+        "label": "handled",
+        "tone": "handled",
+        "trendline": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      },
+      "enums": {
+        "tone": [
+          "neutral",
+          "ok",
+          "warn",
+          "crit"
+        ]
       }
     },
     "LineChart": {
-      "status": "unsupported",
+      "status": "ported",
       "props": {
-        "path": "ignored:pr5",
-        "label": "ignored:pr5",
-        "series": "ignored:pr5",
-        "xLabel": "ignored:pr5",
-        "yLabel": "ignored:pr5",
-        "weight": "ignored:pr5",
-        "accessibility": "ignored:pr5"
+        "path": "handled",
+        "label": "handled",
+        "series": "handled",
+        "xLabel": "ignored:axis labels omitted in the beta",
+        "yLabel": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
       }
     },
     "BarChart": {
-      "status": "unsupported",
+      "status": "ported",
       "props": {
-        "path": "ignored:pr5",
-        "label": "ignored:pr5",
-        "orientation": "ignored:pr5",
-        "tone": "ignored:pr5",
-        "weight": "ignored:pr5",
-        "accessibility": "ignored:pr5"
+        "path": "handled",
+        "label": "handled",
+        "orientation": "handled",
+        "tone": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      },
+      "enums": {
+        "orientation": [
+          "vertical",
+          "horizontal"
+        ],
+        "tone": [
+          "neutral",
+          "ok",
+          "warn",
+          "crit"
+        ]
       }
     },
     "MetricCard": {
-      "status": "unsupported",
+      "status": "ported",
       "props": {
-        "label": "ignored:pr5",
-        "value": "ignored:pr5",
-        "unit": "ignored:pr5",
-        "delta": "ignored:pr5",
-        "tone": "ignored:pr5",
-        "caption": "ignored:pr5",
-        "trend": "ignored:pr5",
-        "trendline": "ignored:pr5",
-        "footnote": "ignored:pr5",
-        "weight": "ignored:pr5",
-        "accessibility": "ignored:pr5"
+        "label": "handled",
+        "value": "handled",
+        "unit": "handled",
+        "delta": "handled",
+        "tone": "handled",
+        "caption": "handled",
+        "trend": "handled",
+        "trendline": "handled",
+        "footnote": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      },
+      "enums": {
+        "tone": [
+          "neutral",
+          "ok",
+          "warn",
+          "crit"
+        ]
       }
     },
     "ScoreCard": {
-      "status": "unsupported",
+      "status": "ported",
       "props": {
-        "title": "ignored:pr5",
-        "status": "ignored:pr5",
-        "tone": "ignored:pr5",
-        "value": "ignored:pr5",
-        "unit": "ignored:pr5",
-        "caption": "ignored:pr5",
-        "items": "ignored:pr5",
-        "note": "ignored:pr5",
-        "format": "ignored:pr5",
-        "weight": "ignored:pr5",
-        "accessibility": "ignored:pr5"
+        "title": "handled",
+        "status": "handled",
+        "tone": "handled",
+        "value": "handled",
+        "unit": "handled",
+        "caption": "handled",
+        "items": "handled",
+        "note": "handled",
+        "format": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
+      },
+      "enums": {
+        "tone": [
+          "neutral",
+          "ok",
+          "warn",
+          "crit"
+        ],
+        "format": [
+          "figure",
+          "prose"
+        ]
       }
     },
     "DeltaList": {
-      "status": "unsupported",
+      "status": "ported",
       "props": {
-        "rows": "ignored:pr5",
-        "emptyText": "ignored:pr5",
-        "weight": "ignored:pr5",
-        "accessibility": "ignored:pr5"
+        "rows": "handled",
+        "emptyText": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
       }
     },
     "DataTable": {
-      "status": "unsupported",
+      "status": "ported",
       "props": {
-        "columns": "ignored:pr5",
-        "rows": "ignored:pr5",
-        "emptyText": "ignored:pr5",
-        "weight": "ignored:pr5",
-        "accessibility": "ignored:pr5"
+        "columns": "handled",
+        "rows": "handled",
+        "emptyText": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
       }
     },
     "ChipRow": {
-      "status": "unsupported",
+      "status": "ported",
       "props": {
-        "items": "ignored:pr5",
-        "weight": "ignored:pr5",
-        "accessibility": "ignored:pr5"
+        "items": "handled",
+        "weight": "handled",
+        "accessibility": "ignored:pr5-a11y"
       }
     }
   },
