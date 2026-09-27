@@ -466,8 +466,18 @@ class StrategyCardDistiller:
             )
 
     async def shutdown(self) -> None:
-        """Await all in-flight distillation tasks before process shutdown."""
-        tasks = list(self._tasks)
-        if tasks:
+        """Await all in-flight distillation tasks before process shutdown.
+
+        Loops until the tracked set is empty: a task's finally block can
+        schedule follow-ups via _track_task while gather() is running, so
+        a single snapshot misses those newly registered tasks.  After each
+        gather we yield once so call_soon-scheduled done callbacks
+        (_tasks.discard) have a chance to fire before the next while-check.
+        """
+        while self._tasks:
+            tasks = list(self._tasks)
             logger.debug("StrategyCardDistiller: draining %d in-flight task(s)", len(tasks))
             await asyncio.gather(*tasks, return_exceptions=True)
+            # Yield to the event loop so call_soon-scheduled _tasks.discard
+            # callbacks fire before the next iteration checks self._tasks.
+            await asyncio.sleep(0)

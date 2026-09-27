@@ -532,9 +532,6 @@ class ContextEngine:
                             _sc_in_deduped += 1
                         deduped.append(_tail_p)
                         _n_to_backfill -= 1
-            # Update shared counter: count strategy cards that survived into the catalog.
-            if _sc_enabled and _sc_max > 0:
-                _sc_turn_used += sum(1 for p in deduped if getattr(p, "kind", None) == "strategy")
             if deduped:
                 desc_cap = getattr(self._settings, "proc_catalog_desc_chars", 120)
                 max_chars = getattr(self._settings, "proc_catalog_max_chars", 4000)
@@ -590,6 +587,13 @@ class ContextEngine:
                     row_lines.pop()
 
                 shown = len(row_lines)
+                # Update shared counter after truncation so only rendered cards count.
+                # Pass 3 can drop rows from the end (oldest/lowest priority); a strategy
+                # card removed there must not exhaust the per-turn cap for later sections.
+                if _sc_enabled and _sc_max > 0:
+                    _sc_turn_used += sum(
+                        1 for p in deduped[:shown] if getattr(p, "kind", None) == "strategy"
+                    )
                 # Omitted lower bound: distinct names dropped by the caps PLUS rows not even
                 # fetched (active rows beyond the fetch window). "+" because dups make it a
                 # lower bound. NOTE: catalog↔get_procedure consistency for DUPLICATE names is
@@ -1523,6 +1527,24 @@ class ContextEngine:
                                 "StrategyCards (combined): total_cards=%d served=%d (cap=%d)",
                                 len(_sc_combined), len(_sc_combined_served), _sc_max,
                             )
+                            # Backfill ordinary candidates that were cut by total_slots
+                            # now that strategy-card removals freed slots (finding #4).
+                            _combined_ids = {id(p) for p in all_procedures}
+                            _sc_now = sum(
+                                1 for p in all_procedures
+                                if getattr(p, "kind", None) == "strategy"
+                            )
+                            for _tail_p in _before_slots[total_slots:]:
+                                if len(all_procedures) >= total_slots:
+                                    break
+                                if id(_tail_p) in _combined_ids:
+                                    continue
+                                if getattr(_tail_p, "kind", None) == "strategy":
+                                    if _sc_now >= _max_sc_combined:
+                                        continue
+                                    _sc_now += 1
+                                all_procedures.append(_tail_p)
+                                _combined_ids.add(id(_tail_p))
 
                 if all_procedures:
                     for p in all_procedures:

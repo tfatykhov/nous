@@ -328,7 +328,17 @@ class Brain:
             async with self.db.session() as session:
                 result = await self._record(input, session)
                 await session.commit()
-                return result
+            # Emit on the in-process bus only after the transaction commits so
+            # a rollback never leaves an audit event for a decision that does
+            # not exist (finding #3 — post-commit bus publish).
+            if self._bus is not None:
+                from nous.events import Event as BusEvent
+                await self._bus.emit(BusEvent(
+                    type="decision_recorded",
+                    agent_id=self.agent_id,
+                    data={"decision_id": str(result.id), "category": input.category},
+                ))
+            return result
         return await self._record(input, session)
 
     def _is_noise_decision(self, description: str, reasons: list[ReasonInput]) -> bool:
@@ -449,16 +459,6 @@ class Brain:
             "decision_recorded",
             {"decision_id": str(decision.id), "category": input.category},
         )
-
-        # F040: Emit on in-process EventBus for reverse graph linking.
-        # The DB audit event (via _emit_event) does NOT reach the bus.
-        if self._bus is not None:
-            from nous.events import Event as BusEvent
-            await self._bus.emit(BusEvent(
-                type="decision_recorded",
-                agent_id=self.agent_id,
-                data={"decision_id": str(decision.id), "category": input.category},
-            ))
 
         # 8. Auto-link (isolated in nested savepoint + try/except — P1-1)
         # Nested savepoint ensures SQL errors in auto_link don't abort the

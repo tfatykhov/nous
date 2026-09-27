@@ -1772,3 +1772,243 @@ def test_shared_sc_cap_catalog_reduces_recommendations_allowance():
     recommendation_sc = ["sc-candidate"]
     _sc_served = recommendation_sc if _sc_unlimited else recommendation_sc[:_max_sc]
     assert len(_sc_served) == 0, "No strategy card should pass to recommendations when catalog exhausted the cap"
+
+
+# ---------------------------------------------------------------------------
+# Round 6 tests (four findings)
+# ---------------------------------------------------------------------------
+
+
+async def test_shutdown_drains_follow_up_tasks(mock_brain, mock_heart):
+    """shutdown() keeps draining until _tasks is empty, including follow-ups.
+
+    A task's finally block can call _track_task to register a follow-up
+    while asyncio.gather() is running.  A single-snapshot shutdown misses
+    those new tasks.
+
+    Mutation: replace ``while self._tasks`` with ``if tasks`` (old snapshot
+    behaviour) → the follow-up task is NOT awaited and the assertion fails.
+    """
+    completed: list[str] = []
+
+    settings = _make_settings()
+    distiller = StrategyCardDistiller(
+        brain=mock_brain,
+        heart=mock_heart,
+        settings=settings,
+        bus=None,
+        llm_client=None,
+    )
+
+    # Register a first task that, when it completes, registers a second task.
+    async def _first():
+        await asyncio.sleep(0)
+        completed.append("first")
+
+        async def _followup():
+            await asyncio.sleep(0)
+            completed.append("followup")
+
+        distiller._track_task(
+            asyncio.create_task(_followup(), name="test_followup")
+        )
+
+    distiller._track_task(asyncio.create_task(_first(), name="test_first"))
+
+    # Neither task has run yet (just scheduled).
+    assert completed == []
+
+    await distiller.shutdown()
+
+    assert "first" in completed, "First task must complete during shutdown"
+    assert "followup" in completed, (
+        "Follow-up task registered while shutdown was draining must also complete"
+    )
+
+
+def test_catalog_sc_counter_uses_rendered_rows_not_deduped():
+    """_sc_turn_used counts only strategy cards that survive budget truncation.
+
+    Pass 3 (drop whole rows from end) can remove a low-priority strategy card.
+    The counter must reflect what the model actually sees, not the pre-truncation
+    deduped list.
+
+    Mutation: move the counter update before pass-3 truncation → counter
+    increments for a card that was dropped from row_lines, exhausting the
+    cap for later sections even though no card appeared in the prompt.
+    """
+    def _proc(name, kind=None):
+        p = MagicMock()
+        p.name = name
+        p.kind = kind
+        return p
+
+    ordinary = _proc("ordinary-1")
+    sc1 = _proc("sc-1", "strategy")
+
+    # Strategy card is LOW priority: at index 1 in deduped (last).
+    # Pass 3 drops from the end, so with budget for 1 row, sc1 is dropped.
+    deduped = [ordinary, sc1]
+    row_lines = ["- ordinary-1 (general)", "- sc-1 (general)"]
+    row_lines = row_lines[:1]  # pass-3 keeps only the first (ordinary); sc1 dropped
+    shown = len(row_lines)  # 1
+
+    # Post-truncation count: only rows in deduped[:shown] — sc1 is NOT in that slice.
+    rendered_sc_count = sum(
+        1 for p in deduped[:shown] if getattr(p, "kind", None) == "strategy"
+    )
+    assert rendered_sc_count == 0, (
+        f"Strategy card dropped by pass-3 must not increment the counter; "
+        f"rendered_sc_count={rendered_sc_count}"
+    )
+
+    # Pre-truncation count (the bug): would be 1, incorrectly consuming the cap.
+    premature_count = sum(1 for p in deduped if getattr(p, "kind", None) == "strategy")
+    assert premature_count == 1, "Sanity: pre-truncation count sees the dropped card"
+    assert premature_count != rendered_sc_count, (
+        "Post-truncation count must differ from pre-truncation count for this scenario"
+    )
+
+
+def test_passive_path_backfills_after_combined_cap():
+    """Ordinary procedures backfill slots freed by the combined strategy-card cap.
+
+    When Critic returns 2 strategy cards and only 1 fits the cap, the freed
+    slot must be filled from the tail that was cut by total_slots.
+
+    Mutation: remove the backfill loop → all_procedures has 1 fewer item
+    than total_slots even though a non-strategy candidate was available.
+    """
+    def _proc(name, kind=None):
+        p = MagicMock()
+        p.name = name
+        p.kind = kind
+        return p
+
+    crit_sc1 = _proc("sc-1", "strategy")
+    crit_sc2 = _proc("sc-2", "strategy")
+    emb1 = _proc("emb-1")
+    emb2 = _proc("emb-2")
+    emb3 = _proc("emb-3")  # cut by total_slots; should be backfilled
+
+    total_slots = 4
+    _sc_max = 1
+    _sc_turn_used = 0
+    _max_sc_combined = max(0, _sc_max - _sc_turn_used)
+
+    # Critic + embedding merge, then total_slots cut
+    _before_slots = [crit_sc1, crit_sc2, emb1, emb2, emb3]
+    all_procedures = _before_slots[:total_slots]  # [sc1, sc2, emb1, emb2]
+
+    # Apply strategy cap: sc2 removed
+    _sc_combined = [p for p in all_procedures if getattr(p, "kind", None) == "strategy"]
+    assert len(_sc_combined) == 2
+    _sc_excess_ids = {id(p) for p in _sc_combined[_max_sc_combined:]}
+    all_procedures = [p for p in all_procedures if id(p) not in _sc_excess_ids]
+    # → [sc1, emb1, emb2]  (3 items — 1 below total_slots)
+
+    # Backfill freed slot from tail
+    _combined_ids = {id(p) for p in all_procedures}
+    _sc_now = sum(1 for p in all_procedures if getattr(p, "kind", None) == "strategy")
+    for _tail_p in _before_slots[total_slots:]:
+        if len(all_procedures) >= total_slots:
+            break
+        if id(_tail_p) in _combined_ids:
+            continue
+        if getattr(_tail_p, "kind", None) == "strategy":
+            if _sc_now >= _max_sc_combined:
+                continue
+            _sc_now += 1
+        all_procedures.append(_tail_p)
+        _combined_ids.add(id(_tail_p))
+
+    assert len(all_procedures) == total_slots, (
+        f"Backfill must restore all_procedures to total_slots={total_slots}, "
+        f"got {len(all_procedures)}"
+    )
+    sc_count = sum(1 for p in all_procedures if getattr(p, "kind", None) == "strategy")
+    assert sc_count == 1, f"Exactly 1 strategy card should remain, got {sc_count}"
+    assert emb3 in all_procedures, "emb3 (from tail) must have been backfilled"
+
+
+async def test_bus_emit_fires_after_commit(mock_brain, mock_heart):
+    """Brain.record() emits the decision_recorded bus event AFTER commit.
+
+    Mutation: move the bus emit back inside _record() (before commit) →
+    emit is called before session.commit(), violating post-commit ordering.
+    """
+    from contextlib import asynccontextmanager
+    from datetime import UTC, datetime
+
+    call_order: list[str] = []
+
+    mock_bus = MagicMock()
+
+    async def _fake_emit(event):
+        call_order.append("bus_emit")
+
+    mock_bus.emit = AsyncMock(side_effect=_fake_emit)
+
+    from nous.brain.brain import Brain
+    from nous.brain.schemas import DecisionDetail, ReasonInput, RecordInput
+
+    fake_detail = DecisionDetail(
+        id=uuid4(),
+        agent_id="test-agent",
+        description="test",
+        confidence=0.8,
+        category="tooling",
+        stakes="low",
+        tags=[],
+        reasons=[],
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+        reviewed_at=None,
+        outcome="pending",
+        reviewer=None,
+        superseded_by=None,
+        bridge=None,
+    )
+
+    async def _fake_inner_record(inp, session):
+        call_order.append("_record")
+        return fake_detail
+
+    mock_session = AsyncMock()
+
+    async def _fake_commit():
+        call_order.append("commit")
+
+    mock_session.commit = AsyncMock(side_effect=_fake_commit)
+
+    mock_db = MagicMock()
+
+    @asynccontextmanager
+    async def _session_ctx():
+        yield mock_session
+
+    mock_db.session = _session_ctx
+
+    brain = Brain.__new__(Brain)
+    brain.db = mock_db
+    brain.agent_id = "test-agent"
+    brain._bus = mock_bus
+
+    with patch.object(brain, "_record", side_effect=_fake_inner_record):
+        inp = RecordInput(
+            description="test decision",
+            confidence=0.8,
+            category="tooling",
+            stakes="low",
+            reasons=[ReasonInput(type="analysis", text="testing")],
+        )
+        await brain.record(inp)
+
+    assert "commit" in call_order, "session.commit must be called"
+    assert "bus_emit" in call_order, "bus.emit must be called"
+    commit_idx = call_order.index("commit")
+    emit_idx = call_order.index("bus_emit")
+    assert commit_idx < emit_idx, (
+        f"bus.emit must fire AFTER session.commit; "
+        f"call order: {call_order}"
+    )
