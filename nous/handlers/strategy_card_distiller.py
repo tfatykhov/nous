@@ -111,8 +111,6 @@ class StrategyCardDistiller:
             data: dict = getattr(event, "data", {}) or {}
             outcome = data.get("outcome")
             decision_id_raw = data.get("decision_id")
-        if outcome not in GRADED_OUTCOMES:
-            return
         if not decision_id_raw:
             return
         try:
@@ -122,6 +120,20 @@ class StrategyCardDistiller:
                 "StrategyCardDistiller: invalid decision_id %r, skipping",
                 decision_id_raw,
             )
+            return
+        if outcome not in GRADED_OUTCOMES:
+            # Ungraded review (noise/superseded): retire any existing card.
+            # Coalesce with any in-flight distillation: record the ungraded
+            # outcome in _pending so the follow-up deactivates rather than
+            # creating a fresh card for a decision that is now noise/superseded.
+            key = str(decision_id)
+            if key in self._in_flight:
+                self._pending[key] = outcome
+            else:
+                asyncio.create_task(
+                    self._deactivate_card_for_decision(decision_id),
+                    name=f"strategy_card_deactivate_{decision_id}",
+                )
             return
         asyncio.create_task(
             self._distil(decision_id, outcome),
@@ -164,14 +176,23 @@ class StrategyCardDistiller:
             )
         finally:
             self._in_flight.discard(key)
-            # If a newer review arrived while we were running, kick off a
-            # fresh distillation for that outcome now.
+            # If a newer review arrived while we were running, dispatch the
+            # appropriate follow-up: re-distil for a graded outcome, or
+            # deactivate for an ungraded one (noise/superseded).
             pending_outcome = self._pending.pop(key, None)
             if pending_outcome is not None:
-                asyncio.create_task(
-                    self._distil(decision_id, pending_outcome),
-                    name=f"strategy_card_distil_{decision_id}_followup",
-                )
+                if pending_outcome in GRADED_OUTCOMES:
+                    asyncio.create_task(
+                        self._distil(decision_id, pending_outcome),
+                        name=f"strategy_card_distil_{decision_id}_followup",
+                    )
+                else:
+                    # Latest review was noise/superseded: deactivate any card
+                    # that was just created by this distillation.
+                    asyncio.create_task(
+                        self._deactivate_card_for_decision(decision_id),
+                        name=f"strategy_card_deactivate_{decision_id}_followup",
+                    )
 
     async def _do_distil(self, decision_id: UUID, outcome: str) -> None:
         if not self._llm:
@@ -255,6 +276,14 @@ class StrategyCardDistiller:
                     .where(Procedure.agent_id == self._brain.agent_id)
                     .values(active=False)
                 )
+            # Disambiguate name before insert: append a counter suffix when an
+            # active procedure already has the same case-insensitive name, so a
+            # generic title ('Validate Before Deploying') produced by two different
+            # decisions does not cause a unique-constraint violation on the second
+            # insert and silently leave that decision without a card.
+            unique_name = await self._make_unique_name(inp.name, session)
+            if unique_name != inp.name:
+                inp = inp.model_copy(update={"name": unique_name})
             detail = await self._heart.procedures.store(inp, session=session)
             if self._graph_linker is not None:
                 try:
@@ -327,6 +356,51 @@ class StrategyCardDistiller:
             .limit(1)
         )
         return result.scalar_one_or_none()
+
+    async def _deactivate_card_for_decision(self, decision_id: UUID) -> None:
+        """Deactivate any active strategy card for a decision (noise/superseded review)."""
+        try:
+            existing_id = await self._find_existing_card(decision_id)
+            if existing_id is not None:
+                await self._deactivate_procedure(existing_id)
+                logger.info(
+                    "StrategyCardDistiller: deactivated card %s for decision %s (ungraded review)",
+                    existing_id,
+                    decision_id,
+                )
+        except Exception:
+            logger.warning(
+                "StrategyCardDistiller: failed to deactivate card for decision %s",
+                decision_id,
+                exc_info=True,
+            )
+
+    async def _make_unique_name(self, name: str, session: Any) -> str:
+        """Return a name unique among active procedures, appending ' (N)' if needed.
+
+        Runs inside the caller's transaction so the uniqueness check is
+        consistent with any preceding deactivation within the same session.
+        """
+        from sqlalchemy import func, select
+
+        from nous.storage.models import Procedure
+
+        base = name[:495]  # reserve room for ' (NN)' suffix
+        candidate = base
+        for suffix_n in range(2, 21):
+            result = await session.execute(
+                select(Procedure.id)
+                .where(Procedure.agent_id == self._brain.agent_id)
+                .where(func.lower(Procedure.name) == func.lower(candidate))
+                .where(Procedure.active.is_(True))
+                .limit(1)
+            )
+            if result.scalar_one_or_none() is None:
+                return candidate
+            candidate = f"{base} ({suffix_n})"
+        # Exhausted retries; return the last candidate and let the store call
+        # raise the constraint error rather than silently losing the card.
+        return candidate
 
     async def _deactivate_procedure(self, procedure_id: UUID) -> None:
         """Soft-delete an existing strategy card."""

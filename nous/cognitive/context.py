@@ -1208,8 +1208,9 @@ class ContextEngine:
                 ):
                     _max_sc = max(0, getattr(self._settings, "strategy_cards_max_per_turn", 1))
                     _sc_hits = [p for p in selected if getattr(p, "kind", None) == "strategy"]
-                    _sc_served = _sc_hits[:_max_sc]
-                    if len(_sc_hits) > _max_sc:
+                    # 0 is documented as unlimited — skip the cap entirely.
+                    _sc_served = _sc_hits if _max_sc == 0 else _sc_hits[:_max_sc]
+                    if _max_sc > 0 and len(_sc_hits) > _max_sc:
                         # Filter excess cards in-place to preserve the original
                         # ranking so a high-ranked card is not moved to the tail
                         # where the token-budget loop could cut it (finding #4).
@@ -1432,7 +1433,8 @@ class ContextEngine:
                         p for p in embedding_procedures
                         if getattr(p, "kind", None) != "strategy"
                     ]
-                    strategy_served = strategy_hits[:max_sc]
+                    # 0 is documented as unlimited — skip the cap.
+                    strategy_served = strategy_hits if max_sc == 0 else strategy_hits[:max_sc]
                     embedding_procedures = non_strategy + strategy_served
                     if strategy_hits:
                         logger.debug(
@@ -1452,6 +1454,37 @@ class ContextEngine:
                 all_procedures = all_procedures[:total_slots]
                 _tr_filtered(_before_slots, all_procedures, "procedure",
                              SLICED_OFF, "total_slot_limit")
+
+                # Reasoning Maps L1: enforce strategy card cap on the COMBINED
+                # list (critic picks may themselves be strategy cards, so the
+                # embedding-only pre-filter above is insufficient).  Do this
+                # after the total_slots cut so the trace is accurate.
+                if (
+                    all_procedures
+                    and getattr(self._settings, "strategy_cards_retrieval_enabled", False)
+                ):
+                    _max_sc_combined = max(
+                        0, getattr(self._settings, "strategy_cards_max_per_turn", 1)
+                    )
+                    if _max_sc_combined > 0:  # 0 = unlimited
+                        _sc_combined = [
+                            p for p in all_procedures
+                            if getattr(p, "kind", None) == "strategy"
+                        ]
+                        if len(_sc_combined) > _max_sc_combined:
+                            _sc_combined_served = _sc_combined[:_max_sc_combined]
+                            _sc_excess_ids = {id(p) for p in _sc_combined[_max_sc_combined:]}
+                            all_procedures = [
+                                p for p in all_procedures if id(p) not in _sc_excess_ids
+                            ]
+                            _tr_filtered(
+                                _sc_combined, _sc_combined_served, "procedure",
+                                SLICED_OFF, "strategy_card_cap_combined",
+                            )
+                            logger.debug(
+                                "StrategyCards (combined): total_cards=%d served=%d (cap=%d)",
+                                len(_sc_combined), len(_sc_combined_served), _max_sc_combined,
+                            )
 
                 if all_procedures:
                     for p in all_procedures:

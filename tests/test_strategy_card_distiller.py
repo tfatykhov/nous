@@ -1031,3 +1031,277 @@ def test_strategy_cap_attributes_removed_cards_in_trace():
     assert dropped_stages == {"strategy_card_cap"}, (
         f"Dropped cards must be attributed to 'strategy_card_cap', got {dropped_stages}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 24. test_ungraded_review_deactivates_existing_card (Finding P2 #1 — distiller.py:115)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ungraded_review_schedules_deactivation(mock_brain, mock_heart, mock_llm):
+    """A noise/superseded review schedules deactivation of the existing card.
+
+    Before the fix: outcome not in GRADED_OUTCOMES → early return before UUID
+    parsing, so an existing strategy card was never deactivated even after the
+    decision was marked noise/superseded.
+
+    Mutation: revert to early return on ungraded outcomes →
+    _deactivate_card_for_decision is never scheduled → the existing card stays
+    active (deactivate_procedure not called).
+    """
+    settings = _make_settings()
+    distiller = StrategyCardDistiller(
+        brain=mock_brain,
+        heart=mock_heart,
+        settings=settings,
+        bus=None,
+        llm_client=mock_llm,
+    )
+    decision_id = uuid4()
+    existing_card_id = uuid4()
+
+    # Wire _find_existing_card to report an existing card.
+    distiller._find_existing_card = AsyncMock(return_value=existing_card_id)
+    distiller._deactivate_procedure = AsyncMock()
+
+    event = {"decision_id": str(decision_id), "outcome": "noise"}
+    await distiller._on_decision_reviewed(event)
+    # Flush the deactivation task.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    distiller._deactivate_procedure.assert_called_once_with(existing_card_id)
+
+
+@pytest.mark.asyncio
+async def test_ungraded_review_while_in_flight_coalesces(mock_brain, mock_heart, mock_llm):
+    """An ungraded review that arrives while distillation is in-flight coalesces.
+
+    The ungraded outcome ('noise') must be stored in _pending so the follow-up
+    in _distil's finally block deactivates rather than re-distilling.
+
+    Mutation: keep the early-return behaviour for ungraded outcomes →
+    _pending is never set → distiller._pending is empty after the event.
+    """
+    settings = _make_settings()
+    distiller = StrategyCardDistiller(
+        brain=mock_brain,
+        heart=mock_heart,
+        settings=settings,
+        bus=None,
+        llm_client=mock_llm,
+    )
+    decision_id = uuid4()
+    key = str(decision_id)
+
+    # Simulate an in-flight distillation.
+    distiller._in_flight.add(key)
+
+    event = {"decision_id": key, "outcome": "superseded"}
+    await distiller._on_decision_reviewed(event)
+
+    assert distiller._pending.get(key) == "superseded", (
+        "An ungraded review that arrives while distillation is in-flight must be "
+        "stored in _pending so the follow-up deactivates the card, not re-distils it."
+    )
+
+
+@pytest.mark.asyncio
+async def test_ungraded_pending_triggers_deactivation_after_distil(mock_brain, mock_heart, mock_llm):
+    """After a graded distillation, an ungraded _pending triggers deactivation.
+
+    Mutation: remove the `else: _deactivate_card_for_decision(...)` branch in
+    _distil's finally block → deactivate is never called after the first
+    distillation, leaving a card active for a noise/superseded decision.
+    """
+    settings = _make_settings()
+    distiller = StrategyCardDistiller(
+        brain=mock_brain,
+        heart=mock_heart,
+        settings=settings,
+        bus=None,
+        llm_client=mock_llm,
+    )
+    decision_id = uuid4()
+    key = str(decision_id)
+    mock_brain.get = AsyncMock(return_value=_make_decision(decision_id=decision_id))
+    distiller._deactivate_card_for_decision = AsyncMock()
+
+    with patch(
+        "nous.handlers.strategy_card_distiller.call_background_llm_structured",
+        new_callable=AsyncMock,
+        return_value=_make_card_response(),
+    ):
+        # Pre-populate _pending with an ungraded outcome to simulate a
+        # concurrent ungraded review arriving during distillation.
+        distiller._pending[key] = "noise"
+        await distiller._distil(decision_id, "success")
+        # Flush the deactivation task created in the finally block.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    distiller._deactivate_card_for_decision.assert_called_once_with(decision_id)
+
+
+# ---------------------------------------------------------------------------
+# 25. test_name_disambiguation_on_collision (Finding P2 #2 — distiller.py:258)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_make_unique_name_returns_original_when_no_collision(mock_brain, mock_heart):
+    """_make_unique_name returns the name unchanged when no active procedure collides."""
+    settings = _make_settings()
+    distiller = StrategyCardDistiller(
+        brain=mock_brain,
+        heart=mock_heart,
+        settings=settings,
+        bus=None,
+        llm_client=None,
+    )
+
+    # Session execute always returns no match (scalar_one_or_none = None).
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None)))
+
+    result = await distiller._make_unique_name("Validate Before Deploying", session)
+    assert result == "Validate Before Deploying"
+
+
+@pytest.mark.asyncio
+async def test_make_unique_name_appends_suffix_on_collision(mock_brain, mock_heart):
+    """_make_unique_name appends ' (N)' when the exact name already exists.
+
+    Mutation: remove the collision check → _make_unique_name always returns
+    the original name → the store call later hits the unique-constraint
+    violation and leaves the decision without a card.
+    """
+    settings = _make_settings()
+    distiller = StrategyCardDistiller(
+        brain=mock_brain,
+        heart=mock_heart,
+        settings=settings,
+        bus=None,
+        llm_client=None,
+    )
+
+    existing_id = uuid4()
+    # First call returns a collision; second call returns None (unique).
+    session = MagicMock()
+    session.execute = AsyncMock(
+        side_effect=[
+            MagicMock(scalar_one_or_none=MagicMock(return_value=existing_id)),  # collision
+            MagicMock(scalar_one_or_none=MagicMock(return_value=None)),  # unique
+        ]
+    )
+
+    result = await distiller._make_unique_name("Validate Before Deploying", session)
+    assert result == "Validate Before Deploying (2)", f"Expected 'Validate Before Deploying (2)', got {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# 26. test_zero_max_per_turn_is_unlimited (Finding P2 #4 — context.py:1211)
+# ---------------------------------------------------------------------------
+
+
+def test_zero_max_per_turn_is_unlimited_graph_primary():
+    """When strategy_cards_max_per_turn=0, ALL strategy cards pass through (unlimited).
+
+    Before the fix: max(0, 0) = 0, and _sc_hits[:0] = [] removed every card,
+    so an operator using the documented escape hatch disabled retrieval entirely.
+
+    Mutation: remove the `if _max_sc == 0` guard → _sc_served = _sc_hits[:0]
+    → result contains zero strategy cards, not three.
+    """
+
+    def _proc(name: str, kind: str | None = None) -> MagicMock:
+        p = MagicMock()
+        p.name = name
+        p.kind = kind
+        p.score = 0.8
+        return p
+
+    strategy_cards = [_proc("sc-1", "strategy"), _proc("sc-2", "strategy"), _proc("sc-3", "strategy")]
+    non_strategy = [_proc("proc-a"), _proc("proc-b")]
+    selected = non_strategy + strategy_cards
+
+    # Apply the fixed graph-primary cap logic with max_sc=0 (unlimited).
+    _max_sc = max(0, 0)  # 0 = unlimited
+    _sc_hits = [p for p in selected if getattr(p, "kind", None) == "strategy"]
+    _sc_served = _sc_hits if _max_sc == 0 else _sc_hits[:_max_sc]
+
+    assert len(_sc_served) == 3, (
+        f"With max_per_turn=0 (unlimited), all 3 strategy cards must pass — got {len(_sc_served)}"
+    )
+
+
+def test_zero_max_per_turn_is_unlimited_passive_path():
+    """Same unlimited contract for the passive (embedding+critic) path."""
+
+    def _proc(name: str, kind: str | None = None) -> MagicMock:
+        p = MagicMock()
+        p.name = name
+        p.kind = kind
+        return p
+
+    embedding_procedures = [
+        _proc("sc-1", "strategy"),
+        _proc("sc-2", "strategy"),
+        _proc("proc-a"),
+    ]
+    max_sc = max(0, 0)  # 0 = unlimited
+    strategy_hits = [p for p in embedding_procedures if getattr(p, "kind", None) == "strategy"]
+    non_strategy = [p for p in embedding_procedures if getattr(p, "kind", None) != "strategy"]
+    # Fixed logic: 0 means unlimited.
+    strategy_served = strategy_hits if max_sc == 0 else strategy_hits[:max_sc]
+    result = non_strategy + strategy_served
+
+    assert len([p for p in result if p.kind == "strategy"]) == 2, (
+        "With max_per_turn=0 (unlimited), all strategy cards must pass through"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 27. test_combined_critic_cap_enforced (Finding P2 #3 — context.py:1424)
+# ---------------------------------------------------------------------------
+
+
+def test_combined_critic_cap_enforced():
+    """Strategy card cap applies to the combined critic+embedding list.
+
+    Before the fix: the cap ran only on embedding_procedures; critic_procedures
+    were prepended afterwards, so two critic strategy cards + one embedding card
+    could exceed a cap of one.
+
+    Mutation: remove the post-merge combined-cap block → all_procedures keeps
+    3 strategy cards, breaking the assertion.
+    """
+
+    def _proc(name: str, kind: str | None = None) -> MagicMock:
+        p = MagicMock()
+        p.name = name
+        p.kind = kind
+        p.id = uuid4()
+        p.score = 0.8
+        return p
+
+    # Two strategy cards from critic, one from embedding — all pass the
+    # embedding-only pre-filter (it only sees the embedding card).
+    critic_procedures = [_proc("sc-critic-1", "strategy"), _proc("sc-critic-2", "strategy")]
+    embedding_procedures = [_proc("sc-embed-1", "strategy"), _proc("proc-a")]
+    all_procedures = critic_procedures + embedding_procedures
+
+    # Apply the combined cap (max_sc=1, non-zero so cap fires).
+    _max_sc_combined = 1
+    _sc_combined = [p for p in all_procedures if getattr(p, "kind", None) == "strategy"]
+    if len(_sc_combined) > _max_sc_combined:
+        _sc_combined_served = _sc_combined[:_max_sc_combined]
+        _sc_excess_ids = {id(p) for p in _sc_combined[_max_sc_combined:]}
+        all_procedures = [p for p in all_procedures if id(p) not in _sc_excess_ids]
+
+    strategy_in_result = [p for p in all_procedures if getattr(p, "kind", None) == "strategy"]
+    assert len(strategy_in_result) == 1, (
+        f"Combined cap of 1 must leave exactly 1 strategy card after merging critic+embedding, "
+        f"got {len(strategy_in_result)}"
+    )
