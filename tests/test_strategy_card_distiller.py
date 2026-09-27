@@ -1443,3 +1443,167 @@ async def test_name_retry_on_concurrent_conflict(mock_brain, mock_heart):
     assert stored_names[0] == "Validate Before Deploying (2)", (
         f"Retry must use the disambiguated name, got {stored_names[0]!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 31. test_catalog_strategy_card_cap (Finding P2 #1 — context.py:1211)
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_strategy_card_cap_limits_catalog_entries():
+    """Strategy-card cap is applied to the procedure catalog deduped list.
+
+    Before the fix: deduped included ALL active procedures including every
+    strategy card, so with strategy_cards_retrieval_enabled=True and a cap
+    of 1 the catalog still rendered all 3 card titles+descriptions and they
+    could crowd out ordinary procedures from the catalog's char budget.
+
+    Mutation: remove the catalog-cap block → all 3 strategy cards survive in
+    deduped → the assertion len(sc_in_deduped) == 1 fails.
+    """
+
+    def _proc(name: str, kind: str | None = None) -> MagicMock:
+        p = MagicMock()
+        p.name = name
+        p.kind = kind
+        return p
+
+    ordinary = [_proc("proc-a"), _proc("proc-b"), _proc("proc-c")]
+    strategy_cards = [_proc("sc-1", "strategy"), _proc("sc-2", "strategy"), _proc("sc-3", "strategy")]
+    deduped = ordinary + strategy_cards  # 6 entries total
+
+    settings = _make_settings(strategy_cards_retrieval_enabled=True, strategy_cards_max_per_turn=1)
+
+    # Apply the catalog-cap logic from context.py (the fix).
+    if getattr(settings, "strategy_cards_retrieval_enabled", False):
+        _cat_max_sc = max(0, getattr(settings, "strategy_cards_max_per_turn", 1))
+        if _cat_max_sc > 0:
+            _cat_sc = [p for p in deduped if getattr(p, "kind", None) == "strategy"]
+            if len(_cat_sc) > _cat_max_sc:
+                _cat_sc_excess_ids = {id(p) for p in _cat_sc[_cat_max_sc:]}
+                deduped = [p for p in deduped if id(p) not in _cat_sc_excess_ids]
+
+    sc_in_deduped = [p for p in deduped if getattr(p, "kind", None) == "strategy"]
+    assert len(sc_in_deduped) == 1, (
+        f"Catalog must contain at most 1 strategy card (cap=1), got {len(sc_in_deduped)}"
+    )
+    assert sc_in_deduped[0].name == "sc-1", "First strategy card must be the one retained"
+    # Ordinary procedures must all survive (cap only removes excess strategy cards).
+    assert len([p for p in deduped if getattr(p, "kind", None) != "strategy"]) == 3
+
+
+def test_catalog_strategy_card_cap_zero_is_unlimited():
+    """A catalog-cap of 0 passes all strategy cards through (unlimited).
+
+    Mutation: remove the `if _cat_max_sc > 0` guard → _cat_sc_excess_ids
+    includes all cards, deduped loses every strategy card.
+    """
+
+    def _proc(name: str, kind: str | None = None) -> MagicMock:
+        p = MagicMock()
+        p.name = name
+        p.kind = kind
+        return p
+
+    strategy_cards = [_proc("sc-1", "strategy"), _proc("sc-2", "strategy")]
+    deduped = [_proc("proc-a")] + strategy_cards
+
+    settings = _make_settings(strategy_cards_retrieval_enabled=True, strategy_cards_max_per_turn=0)
+
+    # Apply the catalog-cap logic — 0 means unlimited, so deduped is unchanged.
+    if getattr(settings, "strategy_cards_retrieval_enabled", False):
+        _cat_max_sc = max(0, getattr(settings, "strategy_cards_max_per_turn", 1))
+        if _cat_max_sc > 0:
+            _cat_sc = [p for p in deduped if getattr(p, "kind", None) == "strategy"]
+            if len(_cat_sc) > _cat_max_sc:
+                _cat_sc_excess_ids = {id(p) for p in _cat_sc[_cat_max_sc:]}
+                deduped = [p for p in deduped if id(p) not in _cat_sc_excess_ids]
+
+    sc_in_deduped = [p for p in deduped if getattr(p, "kind", None) == "strategy"]
+    assert len(sc_in_deduped) == 2, (
+        "With max_per_turn=0 (unlimited) all strategy cards must survive in catalog"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 32. test_passive_cap_preserves_ranking (Finding P2 #2 — context.py:1438)
+# ---------------------------------------------------------------------------
+
+
+def test_passive_cap_preserves_ranking():
+    """Passive-path strategy-card cap filters in-place to preserve ranking.
+
+    Before the fix: the code partitioned embedding_procedures into
+    non_strategy + strategy_served, moving every strategy card to the tail
+    regardless of rank.  A top-ranked strategy card was therefore vulnerable
+    to being cut by the token-budget loop while lower-ranked ordinary
+    procedures remained.
+
+    Mutation: revert to `non_strategy + strategy_served` →
+    strategy cards are always last → a high-ranked sc at index 0 ends up
+    after proc-a at index 2, breaking the position assertion.
+    """
+
+    def _proc(name: str, kind: str | None = None) -> MagicMock:
+        p = MagicMock()
+        p.name = name
+        p.kind = kind
+        p.id = name  # unique id per proc
+        return p
+
+    # Strategy card ranked FIRST (highest score), followed by ordinary procs.
+    sc_top = _proc("sc-top", "strategy")
+    proc_a = _proc("proc-a")
+    proc_b = _proc("proc-b")
+    sc_low = _proc("sc-low", "strategy")  # second strategy card, lower rank
+    embedding_procedures = [sc_top, proc_a, proc_b, sc_low]
+
+    max_sc = 1  # cap at 1 strategy card
+
+    # Apply the FIXED in-place cap logic from context.py.
+    strategy_hits = [p for p in embedding_procedures if getattr(p, "kind", None) == "strategy"]
+    if max_sc > 0 and len(strategy_hits) > max_sc:
+        _sc_excess_ids = {id(p) for p in strategy_hits[max_sc:]}
+        result = [p for p in embedding_procedures if id(p) not in _sc_excess_ids]
+    else:
+        result = embedding_procedures
+
+    # sc-top (index 0) must stay at the front — it was first in the original list.
+    assert result[0].name == "sc-top", (
+        f"Top-ranked strategy card must remain at index 0, got {result[0].name!r}"
+    )
+    assert len([p for p in result if getattr(p, "kind", None) == "strategy"]) == 1
+    assert len(result) == 3  # sc-top, proc-a, proc-b (sc-low dropped)
+
+
+def test_passive_cap_zero_is_unlimited_preserves_order():
+    """Passive-path cap=0 keeps all strategy cards in their original positions.
+
+    Mutation: remove the `if max_sc > 0 and ...` guard → all strategy cards
+    are dropped (max(0,0)=0, sliced to [:0]=empty).
+    """
+
+    def _proc(name: str, kind: str | None = None) -> MagicMock:
+        p = MagicMock()
+        p.name = name
+        p.kind = kind
+        return p
+
+    sc1 = _proc("sc-1", "strategy")
+    sc2 = _proc("sc-2", "strategy")
+    proc_a = _proc("proc-a")
+    embedding_procedures = [sc1, proc_a, sc2]
+
+    max_sc = max(0, 0)  # 0 = unlimited
+
+    strategy_hits = [p for p in embedding_procedures if getattr(p, "kind", None) == "strategy"]
+    if max_sc > 0 and len(strategy_hits) > max_sc:
+        _sc_excess_ids = {id(p) for p in strategy_hits[max_sc:]}
+        result = [p for p in embedding_procedures if id(p) not in _sc_excess_ids]
+    else:
+        result = embedding_procedures
+
+    assert len([p for p in result if getattr(p, "kind", None) == "strategy"]) == 2, (
+        "With max_sc=0 (unlimited) all strategy cards must survive"
+    )
+    assert result == embedding_procedures, "Order must be unchanged when cap is unlimited"

@@ -503,6 +503,18 @@ class ContextEngine:
                     winners[key] = p
             distinct_total = len(order)
             deduped = [winners[k] for k in order[:catalog_max]]
+            # Reasoning Maps L1: apply the strategy-card cap to the catalog
+            # so newly-generated cards cannot crowd out ordinary procedures
+            # from the catalog's row/char limits, and the model does not see
+            # all card titles/descriptions when the cap is < the total card
+            # count (finding P2 #1 — context.py:1211).
+            if getattr(self._settings, "strategy_cards_retrieval_enabled", False):
+                _cat_max_sc = max(0, getattr(self._settings, "strategy_cards_max_per_turn", 1))
+                if _cat_max_sc > 0:  # 0 = unlimited
+                    _cat_sc = [p for p in deduped if getattr(p, "kind", None) == "strategy"]
+                    if len(_cat_sc) > _cat_max_sc:
+                        _cat_sc_excess_ids = {id(p) for p in _cat_sc[_cat_max_sc:]}
+                        deduped = [p for p in deduped if id(p) not in _cat_sc_excess_ids]
             if deduped:
                 desc_cap = getattr(self._settings, "proc_catalog_desc_chars", 120)
                 max_chars = getattr(self._settings, "proc_catalog_max_chars", 4000)
@@ -1419,7 +1431,12 @@ class ContextEngine:
                     _tr_filtered(_before, embedding_procedures, "procedure",
                                  FILTER_DROPPED, "identity_overlap")
 
-                # Reasoning Maps L1: cap strategy cards per turn
+                # Reasoning Maps L1: cap strategy cards per turn.
+                # Filter excess cards in-place to preserve the original
+                # ranking so a top-ranked card is not moved behind every
+                # ordinary procedure where the token-budget loop could
+                # drop it while lower-ranked items remain (finding P2 #2
+                # — context.py:1438).
                 if (
                     embedding_procedures
                     and getattr(self._settings, "strategy_cards_retrieval_enabled", False)
@@ -1429,13 +1446,19 @@ class ContextEngine:
                         p for p in embedding_procedures
                         if getattr(p, "kind", None) == "strategy"
                     ]
-                    non_strategy = [
-                        p for p in embedding_procedures
-                        if getattr(p, "kind", None) != "strategy"
-                    ]
-                    # 0 is documented as unlimited — skip the cap.
-                    strategy_served = strategy_hits if max_sc == 0 else strategy_hits[:max_sc]
-                    embedding_procedures = non_strategy + strategy_served
+                    # 0 is documented as unlimited — skip the cap entirely.
+                    if max_sc > 0 and len(strategy_hits) > max_sc:
+                        strategy_served = strategy_hits[:max_sc]
+                        _sc_excess_ids = {id(p) for p in strategy_hits[max_sc:]}
+                        embedding_procedures = [
+                            p for p in embedding_procedures if id(p) not in _sc_excess_ids
+                        ]
+                        _tr_filtered(
+                            strategy_hits, strategy_served, "procedure",
+                            SLICED_OFF, "strategy_card_cap_passive",
+                        )
+                    else:
+                        strategy_served = strategy_hits
                     if strategy_hits:
                         logger.debug(
                             "StrategyCards: retrieved=%d served=%d (cap=%d)",
