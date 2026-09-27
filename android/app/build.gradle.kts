@@ -1,3 +1,5 @@
+import java.util.Base64
+
 // `:app` — Nous Companion for Android (spec §7). Compose UI over `:core`.
 // Compiled and tested in CI (Temurin 21 + Android SDK); this module is
 // excluded from the build on a machine without an SDK.
@@ -7,9 +9,9 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
-// Inside `android {}` the identifier `java` is the JavaPluginExtension, so the
-// JDK decoder is reached through a top-level function instead.
-fun decodeBase64(s: String): ByteArray = java.util.Base64.getDecoder().decode(s)
+// `java` is the JavaPluginExtension throughout an AGP script, so the JDK
+// class is imported by name above instead of qualified inline.
+fun decodeBase64(s: String): ByteArray = Base64.getDecoder().decode(s)
 
 android {
     namespace = "us.fatykhov.nous.companion"
