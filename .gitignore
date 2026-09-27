@@ -36,3 +36,11 @@ scripts/diag/_proc_*.json
 
 # Prod DB backups (pg_dump artifacts, never commit)
 backups/
+
+# F097 Android
+android/local.properties
+android/.gradle/
+android/**/build/
+android/.kotlin/
+*.jks
+*.keystore
