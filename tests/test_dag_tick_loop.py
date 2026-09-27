@@ -976,3 +976,107 @@ async def test_heartbeat_task_done_before_pending_drain():
         "_task was still running when stop() entered the _dag_pending_task drain; "
         "Fix 4 (P2): cancel _task before the DAG drain"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests for Codex round-4 fixes (P2 #1, P1 #2)
+# ---------------------------------------------------------------------------
+
+
+def test_dag_tick_interval_must_be_positive():
+    """dag_tick_interval=0 must be rejected; asyncio.sleep(0) turns the loop
+    into a tight busy-poll that starves the event loop and floods the logs.
+
+    Fix (Codex P2 round-4): constrained to ge=1.
+    """
+    with pytest.raises(ValueError):
+        Settings(dag_tick_interval=0)
+
+
+def test_dag_tick_interval_negative_must_be_rejected():
+    """dag_tick_interval=-1 must be rejected."""
+    with pytest.raises(ValueError):
+        Settings(dag_tick_interval=-1)
+
+
+def test_dag_tick_timeout_must_be_positive():
+    """dag_tick_timeout=0 would make every tick time out immediately and
+    spawn endless shielded tasks in the background, saturating the pool.
+
+    Fix (Codex P2 round-4): constrained to ge=1.
+    """
+    with pytest.raises(ValueError):
+        Settings(dag_tick_timeout=0)
+
+
+def test_dag_tick_timeout_negative_must_be_rejected():
+    """dag_tick_timeout=-5 must be rejected."""
+    with pytest.raises(ValueError):
+        Settings(dag_tick_timeout=-5)
+
+
+@pytest.mark.asyncio
+async def test_stop_tracks_pending_task_through_shutdown_drain_timeout():
+    """_dag_pending_task must not be cleared when the in-loop shutdown drain
+    times out — stop() needs the reference to drain the task itself.
+
+    Before Fix 5 (Codex P1 round-4): _dag_loop always executed
+    ``self._dag_pending_task = None`` after its bounded shutdown drain,
+    even when the drain timed out and inner_task was still running.
+    stop() then found no pending task and returned, leaving inner_task racing
+    with DB shutdown.
+
+    After the fix: _dag_pending_task is preserved on drain timeout so stop()
+    can observe the still-running task and wait for it via asyncio.wait.
+    """
+    # Keep the shutdown-drain window short so it times out while the tick
+    # is still running, then release the tick inside stop()'s own drain
+    # window so the fix can be verified.
+    settings = _make_settings(dag_tick_interval=0, dag_tick_timeout=0.06)
+
+    tick_started = asyncio.Event()
+    tick_release = asyncio.Event()
+    tick_completed = asyncio.Event()
+
+    async def controlled_tick():
+        tick_started.set()
+        await tick_release.wait()
+        tick_completed.set()
+
+    dag_orchestrator = MagicMock()
+    dag_orchestrator.tick = AsyncMock(side_effect=controlled_tick)
+
+    runner = _make_runner(settings, dag_orchestrator)
+
+    with patch.object(runner, "_detect_missed_checks", AsyncMock()):
+        await runner.start()
+        await asyncio.wait_for(tick_started.wait(), timeout=3.0)
+
+        # Release the tick after the shutdown-drain window (dag_tick_timeout)
+        # but within stop()'s own drain window, so the tick can complete if
+        # stop() still holds the reference — which it only does with the fix.
+        async def delayed_release():
+            await asyncio.sleep(settings.dag_tick_timeout * 1.5)
+            tick_release.set()
+
+        release_task = asyncio.create_task(delayed_release(), name="tick-releaser")
+        completed_at_stop_return: bool = False
+        try:
+            await asyncio.wait_for(runner.stop(), timeout=5.0)
+            # Capture state immediately after stop() returns, before any further
+            # yields that would allow delayed_release to run.
+            completed_at_stop_return = tick_completed.is_set()
+        finally:
+            release_task.cancel()
+            tick_release.set()
+            try:
+                await asyncio.wait_for(release_task, timeout=0.5)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
+
+    assert completed_at_stop_return, (
+        "stop() returned before inner_task completed — "
+        "_dag_pending_task was cleared in the shutdown drain timeout path, "
+        "losing the reference stop() needs to drain the in-flight tick; "
+        "Fix 5 (P1 round-4): preserve _dag_pending_task on drain timeout"
+    )

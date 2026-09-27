@@ -1593,8 +1593,8 @@ class Settings(BaseSettings):
     google_service_account_json: str = Field("", validation_alias="GOOGLE_SERVICE_ACCOUNT_JSON")
 
     # DAG tick loop — decoupled from heartbeat (fix/dag-tick-own-loop)
-    dag_tick_interval: int = 30  # seconds between DAG orchestrator ticks
-    dag_tick_timeout: int = 300  # max seconds for a single DAG tick before log+continue
+    dag_tick_interval: int = Field(default=30, ge=1)  # seconds between DAG orchestrator ticks
+    dag_tick_timeout: int = Field(default=300, ge=1)  # max seconds for a single DAG tick before log+continue
 
     # F034: Heartbeat
     heartbeat_enabled: bool = True

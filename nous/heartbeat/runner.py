@@ -337,6 +337,7 @@ class HeartbeatRunner:
                         # RUNNING — drain it with a bounded deadline so
                         # shutdown cannot hang indefinitely on a hung DB or
                         # network call (Fix 1, Codex P1 round-3).
+                        _shutdown_drain_timed_out = False
                         try:
                             await asyncio.wait_for(
                                 asyncio.shield(inner_task),
@@ -345,14 +346,21 @@ class HeartbeatRunner:
                         except TimeoutError:
                             logger.warning(
                                 "F038: In-flight DAG tick did not finish within "
-                                "%ds during shutdown drain — proceeding without it",
+                                "%ds during shutdown drain — stop() will drain it",
                                 self._settings.dag_tick_timeout,
                             )
+                            # Fix 5 (Codex P1 round-4): do NOT clear
+                            # _dag_pending_task when the drain times out.
+                            # inner_task is still running; stop() reads the
+                            # reference and drains it via asyncio.wait before
+                            # shutdown_components() closes the DB pool.
+                            _shutdown_drain_timed_out = True
                         except Exception:
                             logger.exception(
                                 "F038: DAG orchestrator tick failed during shutdown drain"
                             )
-                        self._dag_pending_task = None
+                        if not _shutdown_drain_timed_out:
+                            self._dag_pending_task = None
                         self._last_dag_tick = datetime.now(UTC)
                         raise
                     except Exception:
