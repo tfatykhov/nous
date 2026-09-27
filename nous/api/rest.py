@@ -64,6 +64,7 @@ from nous.observability.retrieval_logger import RETRIEVAL_PATHS as _RETRIEVAL_PA
 from nous.observability.snapshots import (
     SNAPSHOT_METRICS_VERSION,
     metric_comparable,
+    normalize_stored_metrics,
     stored_metrics_version,
 )
 from nous.storage.database import Database
@@ -1837,7 +1838,7 @@ def create_app(
             trend_metrics = ["fact_count_delta", "handler_error_rate"]
             trends = {m: [] for m in trend_metrics}
             for row in rows:
-                metrics = row.metrics if isinstance(row.metrics, dict) else {}
+                metrics = normalize_stored_metrics(row.metrics if isinstance(row.metrics, dict) else {})
                 version = stored_metrics_version(metrics)
                 ts = row.timestamp.isoformat()
                 for m in trend_metrics:
@@ -2868,7 +2869,7 @@ def create_app(
         values = []
         excluded = 0
         for row in rows:
-            metrics = row.metrics if isinstance(row.metrics, dict) else {}
+            metrics = normalize_stored_metrics(row.metrics if isinstance(row.metrics, dict) else {})
             # Version filter is mandatory, not cosmetic: this endpoint returns
             # a mean and stddev, and v1 fact metrics are global where v2 are
             # agent-scoped. It is applied to THIS metric only -- an unchanged

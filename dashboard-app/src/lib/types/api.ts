@@ -230,7 +230,7 @@ export interface ObsAnomaly {
   /** When fact_count_delta is residualized: the raw observed value before
    *  the prune adjustment. Null for non-residualized metrics. */
   raw_current?: number | null;
-  /** Name of the metric whose value was subtracted (e.g. "facts_pruned").
+  /** Name of the metric whose value was subtracted (e.g. "inactive_fact_delta").
    *  Null for non-residualized metrics. */
   residualized_by?: string | null;
 }

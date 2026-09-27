@@ -22,7 +22,11 @@ from nous.config import Settings
 from nous.heart import Heart
 from nous.heartbeat.registry import BaseCheck
 from nous.heartbeat.schemas import CheckResult, Finding, TunableParam
-from nous.observability.snapshots import SNAPSHOT_METRICS_VERSION, stored_metrics_version
+from nous.observability.snapshots import (
+    SNAPSHOT_METRICS_VERSION,
+    normalize_stored_metrics,
+    stored_metrics_version,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1091,6 +1095,7 @@ class BehaviorDriftCheck(BaseCheck):
         prev = self._last_snapshot
         fact_count = episode_count = censor_count = procedure_count = 0
         inactive_fact_count = 0
+        inactive_ids: frozenset = frozenset()
         counts_ok = False
         if self._db:
             try:
@@ -1118,8 +1123,8 @@ class BehaviorDriftCheck(BaseCheck):
                             " WHERE agent_id = :aid AND active = true) AS censors, "
                             "(SELECT COUNT(*) FROM heart.procedures "
                             " WHERE agent_id = :aid AND active = true) AS procedures, "
-                            "(SELECT COUNT(*) FROM heart.facts "
-                            " WHERE agent_id = :aid AND active = false) AS inactive_facts"
+                            "(SELECT COALESCE(array_agg(id), '{}') FROM heart.facts "
+                            " WHERE agent_id = :aid AND active = false) AS inactive_ids"
                         ),
                         {"aid": self._settings.agent_id},
                     )
@@ -1131,7 +1136,8 @@ class BehaviorDriftCheck(BaseCheck):
                             row.censors,
                             row.procedures,
                         )
-                        inactive_fact_count = row.inactive_facts
+                        inactive_ids = frozenset(row.inactive_ids or ())
+                        inactive_fact_count = len(inactive_ids)
                         counts_ok = True
             except Exception:
                 logger.debug("Snapshot: DB query failed", exc_info=True)
@@ -1154,6 +1160,7 @@ class BehaviorDriftCheck(BaseCheck):
             logger.debug("Snapshot: counts unavailable, carrying previous forward")
             fact_count = prev.fact_count
             inactive_fact_count = prev.inactive_fact_count
+            inactive_ids = prev.inactive_ids
             episode_count = prev.episode_count
             censor_count = prev.active_censor_count
             procedure_count = prev.procedure_count
@@ -1179,7 +1186,17 @@ class BehaviorDriftCheck(BaseCheck):
         #
         # On the first tick after a restart prev is None, so this is 0 -- and
         # fact_count_delta is 0 on that tick too, so the pair still agrees.
-        facts_pruned = inactive_fact_count - prev.inactive_fact_count if prev else 0
+        inactive_fact_delta = inactive_fact_count - prev.inactive_fact_count if prev else 0
+
+        # facts_pruned is the GROSS count: IDs inactive now that were not
+        # inactive at the previous tick. The net delta above cannot serve as
+        # the reported prune metric -- 100 pruned + 100 reactivated nets to 0
+        # and the mass prune would never be seen. Differencing ID sets keeps
+        # the same no-cutoff property as the count difference. Residual limit:
+        # a fact deactivated, reactivated and deactivated again within one
+        # interval counts once; only an always-on audit log could see that.
+        # The ID set costs O(inactive facts) per tick.
+        facts_pruned = len(inactive_ids - prev.inactive_ids) if prev else 0
 
         bus_data = self._bus_stats.to_dict() if self._bus_stats else {}
         handlers = bus_data.get("handlers", {})
@@ -1193,6 +1210,8 @@ class BehaviorDriftCheck(BaseCheck):
             fact_count=fact_count,
             fact_count_delta=fact_count - (prev.fact_count if prev else fact_count),
             inactive_fact_count=inactive_fact_count,
+            inactive_ids=inactive_ids,
+            inactive_fact_delta=inactive_fact_delta,
             facts_pruned=facts_pruned,
             episode_count=episode_count,
             episode_count_delta=episode_count - (prev.episode_count if prev else episode_count),
@@ -1260,7 +1279,9 @@ class BehaviorDriftCheck(BaseCheck):
                 rows = result.fetchall()
             snapshots = []
             for row in rows:
-                metrics = row.metrics if isinstance(row.metrics, dict) else _json.loads(row.metrics)
+                metrics = normalize_stored_metrics(
+                    row.metrics if isinstance(row.metrics, dict) else _json.loads(row.metrics)
+                )
                 # Version comparability is decided PER METRIC by
                 # DriftDetector (see snapshots.metric_comparable): a v1 row's
                 # corpus counts are global and its facts_pruned was never
@@ -1274,7 +1295,7 @@ class BehaviorDriftCheck(BaseCheck):
                 # Build snapshot from stored metrics, defaulting missing keys to 0
                 kwargs: dict[str, Any] = {"timestamp": row.timestamp, "metrics_version": version}
                 for k in BehaviorSnapshot.__dataclass_fields__:
-                    if k in ("timestamp", "interval_changes", "metrics_version"):
+                    if k in ("timestamp", "interval_changes", "metrics_version", "inactive_ids"):
                         continue
                     kwargs[k] = metrics.get(k, 0)
                 snapshots.append(BehaviorSnapshot(**kwargs))

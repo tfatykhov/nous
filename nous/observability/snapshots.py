@@ -12,7 +12,10 @@ from typing import Any
 #:   1 -> original: global corpus counts, facts_pruned never populated.
 #:   2 -> agent-scoped corpus counts, facts_pruned populated from the inactive
 #:        count delta (so fact_count_delta residualization is meaningful).
-SNAPSHOT_METRICS_VERSION = 2
+#:   3 -> facts_pruned is GROSS deactivations (inactive-ID set difference);
+#:        the signed inactive-count delta v2 stored under facts_pruned moved
+#:        to inactive_fact_delta (see normalize_stored_metrics).
+SNAPSHOT_METRICS_VERSION = 3
 
 #: Metrics whose DEFINITION changed at each version, including metrics that
 #: were introduced then (a v1 row has no value for those, and reading one back
@@ -28,6 +31,14 @@ METRIC_DEFINITION_CHANGES: dict[int, frozenset[str]] = {
         "procedure_count",
         # Newly populated / newly introduced (v1 stored 0 or nothing).
         "facts_pruned", "inactive_fact_count",
+        # First stored under the name facts_pruned; normalize_stored_metrics
+        # renames it for v2 rows, so it is comparable from v2 on, not v1.
+        "inactive_fact_delta",
+    }),
+    3: frozenset({
+        # Net inactive-count delta -> gross deactivation count. A net delta
+        # reports 100 pruned + 100 reactivated as 0, hiding the mass prune.
+        "facts_pruned",
     }),
 }
 
@@ -36,6 +47,21 @@ def stored_metrics_version(metrics: dict[str, Any]) -> int:
     """Version a stored metrics blob was written under. Rows predating the
     stamp carry no key and are version 1."""
     return int(metrics.get("metrics_version", 1))
+
+
+def normalize_stored_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    """Map a stored metrics blob onto CURRENT metric names.
+
+    v2 stored the signed inactive-count delta as facts_pruned; v3 calls that
+    quantity inactive_fact_delta (and facts_pruned is now a gross count, which
+    metric_comparable already excludes for v2). Carrying the v2 value across
+    under its new name keeps fact_count_delta's residualized baseline intact
+    across the upgrade instead of blinding it for a full baseline window.
+    Every reader must call this before looking up metrics by name.
+    """
+    if stored_metrics_version(metrics) == 2 and "inactive_fact_delta" not in metrics:
+        return {**metrics, "inactive_fact_delta": metrics.get("facts_pruned", 0)}
+    return metrics
 
 
 def metric_comparable(metric: str, version: int) -> bool:
@@ -75,6 +101,15 @@ class BehaviorSnapshot:
     # differencing it instead of by a wall-clock window (see
     # BehaviorDriftCheck._capture_snapshot).
     inactive_fact_count: int = 0
+    # SIGNED change in inactive_fact_count since the previous snapshot: new
+    # deactivations minus reactivations. This, not facts_pruned, is what
+    # explains fact_count_delta (the two are read from one snapshot, so they
+    # cannot disagree). facts_pruned is the gross deactivation count.
+    inactive_fact_delta: int = 0
+    # IDs behind inactive_fact_count, so the NEXT snapshot can count gross
+    # deactivations by set difference. In-memory only: not a metric, never
+    # persisted, and empty on snapshots rebuilt from the database.
+    inactive_ids: frozenset = field(default_factory=frozenset, repr=False, compare=False)
     episode_count: int = 0
     episode_count_delta: int = 0
     active_censor_count: int = 0
@@ -116,6 +151,7 @@ class BehaviorSnapshot:
         return {
             "fact_count": self.fact_count, "fact_count_delta": self.fact_count_delta,
             "inactive_fact_count": self.inactive_fact_count,
+            "inactive_fact_delta": self.inactive_fact_delta,
             "episode_count": self.episode_count, "episode_count_delta": self.episode_count_delta,
             "active_censor_count": self.active_censor_count, "active_censor_delta": self.active_censor_delta,
             "procedure_count": self.procedure_count, "decision_count": self.decision_count,
