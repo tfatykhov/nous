@@ -121,8 +121,7 @@ fun ConnectScreen(graph: AppGraph, onConnected: () -> Unit) {
                         val res = probe.getOrNull()
                         if (res == null || !res.ok) {
                             error = "Couldn't reach Nous at $base" + (res?.let { " (HTTP ${it.status})" } ?: "") + " — check Tailscale and the address." +
-                                (probe.exceptionOrNull()?.let { "
-${it.javaClass.simpleName}: ${it.message}" } ?: "")
+                                (probe.exceptionOrNull()?.let { "\n${it.javaClass.simpleName}: ${it.message}" } ?: "")
                             graph.settings.baseUrl = ""
                         } else {
                             graph.settings.deviceName = name.trim().ifEmpty { "Android" }
