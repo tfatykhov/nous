@@ -6,7 +6,7 @@ import statistics
 from dataclasses import dataclass
 from typing import Any
 
-from nous.observability.snapshots import BehaviorSnapshot
+from nous.observability.snapshots import BehaviorSnapshot, metric_comparable
 
 
 @dataclass
@@ -80,7 +80,15 @@ class DriftDetector:
                     value += float(metrics.get(_e, 0))
                 return value
 
-            values = [_value_of(s.to_metrics_dict()) for s in history]
+            # Per-metric version filter: a baseline row written under an
+            # older definition of THIS metric (or of its explainer) is left
+            # out, while the same row still counts for unchanged metrics.
+            values = [
+                _value_of(s.to_metrics_dict())
+                for s in history
+                if metric_comparable(metric, s.metrics_version)
+                and (explainer is None or metric_comparable(explainer, s.metrics_version))
+            ]
             if len(values) < config["min_samples"]:
                 continue
             mean = statistics.mean(values)

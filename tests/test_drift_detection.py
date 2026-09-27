@@ -809,7 +809,7 @@ class TestBaselineExcludesLegacySnapshots:
     """
 
     @pytest.mark.asyncio
-    async def test_v1_snapshots_are_dropped_from_the_baseline(self):
+    async def test_v1_snapshots_are_kept_but_tagged_with_their_version(self):
         from nous.heartbeat.checks import (
             SNAPSHOT_METRICS_VERSION,
             BehaviorDriftCheck,
@@ -843,9 +843,36 @@ class TestBaselineExcludesLegacySnapshots:
         check._settings = MagicMock(agent_id="a")
 
         baseline = await check._load_baseline()
-        assert len(baseline) == 1
-        assert baseline[0].fact_count_delta == -3
-        assert baseline[0].facts_pruned == 3
+        # Kept (unchanged metrics are still comparable), but stamped as v1 so
+        # DriftDetector excludes it from the changed fact metrics.
+        assert [s.metrics_version for s in baseline] == [1, SNAPSHOT_METRICS_VERSION]
+        assert baseline[1].fact_count_delta == -3
+        assert baseline[1].facts_pruned == 3
+
+    def test_v1_rows_do_not_feed_changed_metrics(self):
+        """A v1 -900 fact drop must not set today's residual baseline: with it
+        mixed in, a genuine unexplained -300 would sit inside the inflated
+        stddev and go unreported."""
+        v1 = [
+            BehaviorSnapshot(timestamp=datetime.now(UTC), metrics_version=1, fact_count_delta=-900) for _ in range(10)
+        ]
+        v2 = [BehaviorSnapshot(timestamp=datetime.now(UTC), fact_count_delta=d) for d in [0, 1, -1] * 4]
+        current = BehaviorSnapshot(timestamp=datetime.now(UTC), fact_count_delta=-300)
+        anomalies = DriftDetector().detect(current, v1 + v2)
+        assert "fact_count_delta" in {a.metric for a in anomalies}
+
+    def test_v1_rows_still_feed_unchanged_metrics(self):
+        """handler_error_rate means the same thing in v1 and v2, so its v1
+        history must count towards min_samples and the baseline."""
+        v1 = [
+            BehaviorSnapshot(timestamp=datetime.now(UTC), metrics_version=1, handler_error_rate=r)
+            for r in [0.01, 0.02, 0.01, 0.02, 0.01, 0.02]
+        ]
+        current = BehaviorSnapshot(timestamp=datetime.now(UTC), handler_error_rate=0.5)
+        anomalies = DriftDetector().detect(current, v1)
+        assert "handler_error_rate" in {a.metric for a in anomalies}
+        # ...while the same rows are not enough samples for a changed metric.
+        assert "fact_count_delta" not in {a.metric for a in anomalies}
 
     @pytest.mark.asyncio
     async def test_stored_metrics_carry_the_version(self):
@@ -955,7 +982,7 @@ class TestBaselineRejectsIncompatibleVersionsBothWays:
         assert baseline == []
 
     @pytest.mark.asyncio
-    async def test_only_the_matching_version_survives(self):
+    async def test_older_versions_survive_newer_are_dropped(self):
         from nous.heartbeat.checks import SNAPSHOT_METRICS_VERSION
 
         baseline = await self._baseline_for(
@@ -965,75 +992,121 @@ class TestBaselineRejectsIncompatibleVersionsBothWays:
                 SNAPSHOT_METRICS_VERSION + 1,
             ]
         )
-        assert len(baseline) == 1
-        assert baseline[0].fact_count_delta == -1
+        assert [s.metrics_version for s in baseline] == [1, SNAPSHOT_METRICS_VERSION]
 
 
-class TestTrendConsumersFilterByVersion:
-    """_load_baseline is not the only reader of behavior_snapshots.
-    /behavior/trends returns a mean and stddev over the window, and the
-    observability dashboard charts fact_count_delta over 7 days — both
-    aggregated across rows without checking the version, so for as long as v1
-    rows remain in the window they blended global (v1) and agent-scoped (v2)
-    fact metrics into the same statistics and the same line.
+class TestMetricComparable:
+    def test_changed_metrics_are_not_comparable_across_versions(self):
+        from nous.observability.snapshots import METRIC_DEFINITION_CHANGES, metric_comparable
+
+        for m in METRIC_DEFINITION_CHANGES[2]:
+            assert not metric_comparable(m, 1), m
+            assert metric_comparable(m, 2), m
+
+    def test_unchanged_metrics_are_comparable_across_versions(self):
+        from nous.observability.snapshots import metric_comparable
+
+        for m in ("handler_error_rate", "events_dropped", "admission_rate"):
+            assert metric_comparable(m, 1)
+
+    def test_newer_writer_is_comparable_for_nothing(self):
+        from nous.observability.snapshots import SNAPSHOT_METRICS_VERSION, metric_comparable
+
+        assert not metric_comparable("handler_error_rate", SNAPSHOT_METRICS_VERSION + 1)
+
+    def test_residualized_pairs_change_together(self):
+        """Residualized pairs must change together, or the residual would
+        combine two definitions."""
+        from nous.observability.snapshots import metric_comparable
+
+        for metric, explainer in DriftDetector.RESIDUALIZE.items():
+            assert metric_comparable(metric, 1) == metric_comparable(explainer, 1)
+
+
+class TestTrendConsumersFilterPerMetric:
+    """/behavior/trends and the observability dashboard's drift_trends
+    aggregate stored metrics across rows. The version filter must apply to
+    the metric being read, not to whole rows: a v1 fact_count_delta is a
+    different (global) quantity, but a v1 handler_error_rate is not, and
+    dropping its rows truncated that history for no reason.
     """
 
-    def _rest_source(self):
-        from pathlib import Path
+    def _rows(self):
+        from nous.observability.snapshots import SNAPSHOT_METRICS_VERSION
 
-        return (Path(__file__).resolve().parents[1] / "nous/api/rest.py").read_text()
+        now = datetime.now(UTC)
+        return [
+            _FakeRow(
+                timestamp=now - timedelta(hours=3),
+                metrics={"fact_count_delta": -900, "handler_error_rate": 0.1},
+            ),
+            _FakeRow(
+                timestamp=now - timedelta(hours=2),
+                metrics={"fact_count_delta": -900, "handler_error_rate": 0.3, "metrics_version": 1},
+            ),
+            _FakeRow(
+                timestamp=now - timedelta(hours=1),
+                metrics={
+                    "fact_count_delta": -2,
+                    "handler_error_rate": 0.2,
+                    "metrics_version": SNAPSHOT_METRICS_VERSION,
+                },
+            ),
+            _FakeRow(
+                timestamp=now,
+                metrics={
+                    "fact_count_delta": 7,
+                    "handler_error_rate": 0.9,
+                    "metrics_version": SNAPSHOT_METRICS_VERSION + 1,
+                },
+            ),
+        ]
 
-    def test_predicate_matches_the_stamp_written_by_store_snapshot(self):
-        from nous.observability.snapshots import (
-            CURRENT_METRICS_VERSION_SQL,
-            SNAPSHOT_METRICS_VERSION,
-        )
+    async def _client_get(self, path):
+        from httpx import ASGITransport, AsyncClient
 
-        assert CURRENT_METRICS_VERSION_SQL.endswith(f"= {SNAPSHOT_METRICS_VERSION}")
-        # Unstamped rows must fall back to v1, not to the current version --
-        # COALESCE'ing to the current value would defeat the whole guard.
-        assert "COALESCE" in CURRENT_METRICS_VERSION_SQL
-        assert ", 1)" in CURRENT_METRICS_VERSION_SQL
+        from nous.api.rest import create_app
+        from nous.config import Settings
 
-    def _metric_aggregating_reads(self):
-        """Every query that reads `metrics` across MORE THAN ONE row.
+        rows = self._rows()
 
-        A LIMIT 1 read shows the newest snapshot as written and cannot blend
-        definitions, and the anomalies-only reads carry no metric statistics,
-        so neither needs the filter. Only cross-row metric aggregation does.
-        """
-        src = self._rest_source()
-        reads = []
-        marker = "FROM nous_system.behavior_snapshots "
-        i = src.find(marker)
-        while i != -1:
-            stmt = src[i : i + 420]
-            end = stmt.find("), {")
-            stmt = stmt[:end] if end != -1 else stmt
-            if "metrics" in src[max(0, i - 120) : i] and "LIMIT 1" not in stmt:
-                reads.append(stmt)
-            i = src.find(marker, i + 1)
-        return reads
+        class _Sess:
+            async def __aenter__(self_inner):
+                return self_inner
 
-    def test_every_cross_row_metric_reader_applies_the_filter(self):
-        """Guard against a new aggregating consumer being added without it."""
-        reads = self._metric_aggregating_reads()
-        # /behavior/trends and the observability dashboard's drift_trends.
-        assert len(reads) == 2, f"unexpected reader set: {reads}"
-        for stmt in reads:
-            assert "CURRENT_METRICS_VERSION_SQL" in stmt, f"unfiltered cross-row metric read: {stmt}"
+            async def __aexit__(self_inner, *a):
+                return False
 
-    def test_single_row_readers_are_deliberately_unfiltered(self):
-        """Pinning the reasoning: a LIMIT 1 read must NOT be filtered, or the
-        dashboard would show nothing at all until this build writes its first
-        snapshot after a rollback."""
-        src = self._rest_source()
-        latest = src[src.find("async def behavior_snapshot_latest") :][:700]
-        assert "LIMIT 1" in latest
-        assert "CURRENT_METRICS_VERSION_SQL" not in latest
+            async def execute(self_inner, *a, **k):
+                r = MagicMock()
+                r.fetchall.return_value = rows
+                r.fetchone.return_value = None
+                return r
 
-    def test_trends_endpoint_reports_the_version(self):
-        src = self._rest_source()
-        assert '"metrics_version": SNAPSHOT_METRICS_VERSION' in src, (
-            "callers need to distinguish a quiet week from a window truncated by the version change"
-        )
+        db = MagicMock()
+        db.session = lambda: _Sess()
+        app = create_app(MagicMock(), MagicMock(), MagicMock(), MagicMock(), db, Settings(_env_file=None))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            resp = await c.get(path)
+        assert resp.status_code == 200, resp.text
+        return resp.json()
+
+    @pytest.mark.asyncio
+    async def test_trends_keeps_v1_history_for_unchanged_metric(self):
+        data = await self._client_get("/behavior/trends?metric=handler_error_rate")
+        assert [p["value"] for p in data["points"]] == [0.1, 0.3, 0.2]
+        assert data["stats"]["mean"] == 0.2
+        assert data["excluded_incompatible"] == 1  # only the newer writer
+
+    @pytest.mark.asyncio
+    async def test_trends_drops_v1_rows_for_changed_metric(self):
+        data = await self._client_get("/behavior/trends?metric=fact_count_delta")
+        assert [p["value"] for p in data["points"]] == [-2]
+        assert data["excluded_incompatible"] == 3
+
+    @pytest.mark.asyncio
+    async def test_dashboard_filters_each_series_independently(self):
+        data = await self._client_get("/dashboard/observability")
+        trends = data["drift_trends"]
+        assert [p["v"] for p in trends["handler_error_rate"]] == [0.1, 0.3, 0.2]
+        assert [p["v"] for p in trends["fact_count_delta"]] == [-2]

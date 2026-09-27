@@ -62,8 +62,9 @@ from nous.events import Event, EventBus
 from nous.heart import Heart
 from nous.observability.retrieval_logger import RETRIEVAL_PATHS as _RETRIEVAL_PATHS
 from nous.observability.snapshots import (
-    CURRENT_METRICS_VERSION_SQL,
     SNAPSHOT_METRICS_VERSION,
+    metric_comparable,
+    stored_metrics_version,
 )
 from nous.storage.database import Database
 
@@ -1828,22 +1829,24 @@ def create_app(
             async with database.session() as session:
                 from sqlalchemy import text
                 cutoff = datetime.now(UTC) - timedelta(days=7)
-                # Same version filter as /behavior/trends: fact_count_delta
-                # changed scope in v2, so charting both definitions on one
-                # line would show a step change that is purely an artifact.
                 tr2 = await session.execute(text(
                     "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
-                    "WHERE agent_id = :aid AND timestamp > :cutoff "
-                    f"AND {CURRENT_METRICS_VERSION_SQL} ORDER BY timestamp"
+                    "WHERE agent_id = :aid AND timestamp > :cutoff ORDER BY timestamp"
                 ), {"aid": settings.agent_id, "cutoff": cutoff})
                 rows = tr2.fetchall()
             trend_metrics = ["fact_count_delta", "handler_error_rate"]
             trends = {m: [] for m in trend_metrics}
             for row in rows:
                 metrics = row.metrics if isinstance(row.metrics, dict) else {}
+                version = stored_metrics_version(metrics)
                 ts = row.timestamp.isoformat()
                 for m in trend_metrics:
-                    trends[m].append({"t": ts, "v": metrics.get(m, 0)})
+                    # Per-series version filter: fact_count_delta changed scope
+                    # in v2 (charting both definitions on one line would show
+                    # an artifact step), handler_error_rate did not, so its
+                    # v1 history stays on the chart.
+                    if metric_comparable(m, version):
+                        trends[m].append({"t": ts, "v": metrics.get(m, 0)})
             result["drift_trends"] = trends
         except Exception:
             logger.debug("dashboard_observability: drift_trends failed", exc_info=True)
@@ -2856,21 +2859,23 @@ def create_app(
         async with database.session() as session:
             from sqlalchemy import text
             cutoff = datetime.now(UTC) - timedelta(hours=hours)
-            # Version filter is mandatory here, not cosmetic: this endpoint
-            # returns a mean and stddev over the window, and v1 fact metrics
-            # are global where v2 are agent-scoped. Mixing them blends another
-            # agent's corpus into these statistics for as long as v1 rows
-            # remain in the window.
             result = await session.execute(text(
                 "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
-                "WHERE agent_id = :aid AND timestamp > :cutoff "
-                f"AND {CURRENT_METRICS_VERSION_SQL} ORDER BY timestamp"
+                "WHERE agent_id = :aid AND timestamp > :cutoff ORDER BY timestamp"
             ), {"aid": settings.agent_id, "cutoff": cutoff})
             rows = result.fetchall()
         points = []
         values = []
+        excluded = 0
         for row in rows:
             metrics = row.metrics if isinstance(row.metrics, dict) else {}
+            # Version filter is mandatory, not cosmetic: this endpoint returns
+            # a mean and stddev, and v1 fact metrics are global where v2 are
+            # agent-scoped. It is applied to THIS metric only -- an unchanged
+            # metric such as handler_error_rate keeps its v1 history.
+            if not metric_comparable(metric, stored_metrics_version(metrics)):
+                excluded += 1
+                continue
             val = metrics.get(metric, 0)
             points.append({"timestamp": row.timestamp.isoformat(), "value": val})
             values.append(float(val))
@@ -2880,10 +2885,12 @@ def create_app(
             if len(values) > 1:
                 stats["stddev"] = round(st.stdev(values), 2)
         # Surfaced so a caller can tell "quiet week" from "the window is
-        # short because older snapshots use an incompatible definition".
+        # short because older snapshots use an incompatible definition of
+        # this metric".
         return JSONResponse({
             "metric": metric, "hours": hours, "points": points,
             "stats": stats, "metrics_version": SNAPSHOT_METRICS_VERSION,
+            "excluded_incompatible": excluded,
         })
 
     async def behavior_anomalies(request: Request) -> JSONResponse:

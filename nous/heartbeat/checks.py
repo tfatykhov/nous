@@ -22,7 +22,7 @@ from nous.config import Settings
 from nous.heart import Heart
 from nous.heartbeat.registry import BaseCheck
 from nous.heartbeat.schemas import CheckResult, Finding, TunableParam
-from nous.observability.snapshots import SNAPSHOT_METRICS_VERSION
+from nous.observability.snapshots import SNAPSHOT_METRICS_VERSION, stored_metrics_version
 
 logger = logging.getLogger(__name__)
 
@@ -1261,34 +1261,22 @@ class BehaviorDriftCheck(BaseCheck):
             snapshots = []
             for row in rows:
                 metrics = row.metrics if isinstance(row.metrics, dict) else _json.loads(row.metrics)
-                # Skip snapshots written under an older metric definition.
-                #
-                # Version 1 snapshots are not comparable with version 2 ones:
-                # facts_pruned was never populated (so their residual is just
-                # the raw delta) and the corpus counts were global rather than
-                # agent-scoped. Mixing the two lets stale prune gaps and other
-                # agents' spikes set the mean and stddev for today's residual,
-                # which both masks real unexplained drops and invents
-                # transition-only alerts.
-                #
-                # The baseline simply starts smaller after rollout; min_samples
-                # holds detection off until enough v2 samples exist, which is
-                # the conservative direction (quiet, not wrong).
-                # Equality, not `<`: a snapshot from a NEWER writer is just as
-                # incomparable as an older one. During a rolling upgrade or a
-                # rollback this process can share the database with a v3
-                # writer, and accepting those rows would reintroduce exactly
-                # the mixed-definition contamination this guard exists to
-                # prevent.
-                if metrics.get("metrics_version", 1) != SNAPSHOT_METRICS_VERSION:
+                # Version comparability is decided PER METRIC by
+                # DriftDetector (see snapshots.metric_comparable): a v1 row's
+                # corpus counts are global and its facts_pruned was never
+                # populated, but its handler_error_rate etc. mean exactly what
+                # they mean today, so the row is kept for those. A row from a
+                # NEWER writer (rolling upgrade / rollback sharing the DB) is
+                # comparable for nothing -- drop it here rather than carry it.
+                version = stored_metrics_version(metrics)
+                if version > SNAPSHOT_METRICS_VERSION:
                     continue
                 # Build snapshot from stored metrics, defaulting missing keys to 0
-                kwargs: dict[str, Any] = {"timestamp": row.timestamp}
+                kwargs: dict[str, Any] = {"timestamp": row.timestamp, "metrics_version": version}
                 for k in BehaviorSnapshot.__dataclass_fields__:
-                    if k == "timestamp" or k == "interval_changes":
+                    if k in ("timestamp", "interval_changes", "metrics_version"):
                         continue
                     kwargs[k] = metrics.get(k, 0)
-                kwargs.pop("metrics_version", None)
                 snapshots.append(BehaviorSnapshot(**kwargs))
             return snapshots
         except Exception:

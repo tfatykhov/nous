@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-
 #: Schema version stamped into every stored behavior-snapshot metrics blob.
 #: Bump whenever a metric's DEFINITION changes (scope, units, or which inputs
 #: feed it) so consumers can refuse to compare across the change.
@@ -15,22 +14,58 @@ from typing import Any
 #:        count delta (so fact_count_delta residualization is meaningful).
 SNAPSHOT_METRICS_VERSION = 2
 
-#: SQL predicate selecting only snapshots written under the CURRENT metric
-#: definition. Every reader of nous_system.behavior_snapshots that aggregates
-#: across rows must apply it, or it will average incompatible definitions --
-#: v1 fact counts are global while v2 are agent-scoped, so a mixed window
-#: silently blends another agent's corpus into this one's mean and stddev.
-#: Rows predating the stamp have no key and default to version 1.
-CURRENT_METRICS_VERSION_SQL = (
-    "COALESCE((metrics->>'metrics_version')::int, 1) = "
-    f"{SNAPSHOT_METRICS_VERSION}"
-)
+#: Metrics whose DEFINITION changed at each version, including metrics that
+#: were introduced then (a v1 row has no value for those, and reading one back
+#: would fabricate a 0). Comparability is decided PER METRIC, not per row: a v1
+#: handler_error_rate means exactly what a v2 one does, so dropping whole v1
+#: rows would needlessly truncate every unchanged metric's history.
+METRIC_DEFINITION_CHANGES: dict[int, frozenset[str]] = {
+    2: frozenset({
+        # Corpus counts became agent-scoped (v1 counted every agent's rows).
+        "fact_count", "fact_count_delta",
+        "episode_count", "episode_count_delta",
+        "active_censor_count", "active_censor_delta",
+        "procedure_count",
+        # Newly populated / newly introduced (v1 stored 0 or nothing).
+        "facts_pruned", "inactive_fact_count",
+    }),
+}
+
+
+def stored_metrics_version(metrics: dict[str, Any]) -> int:
+    """Version a stored metrics blob was written under. Rows predating the
+    stamp carry no key and are version 1."""
+    return int(metrics.get("metrics_version", 1))
+
+
+def metric_comparable(metric: str, version: int) -> bool:
+    """Whether ``metric`` from a row written at ``version`` is comparable with
+    the same metric under the CURRENT definition.
+
+    Every reader that aggregates a metric across stored snapshots must apply
+    this per metric, or it will average incompatible definitions -- v1 fact
+    counts are global while v2 are agent-scoped, so a mixed window silently
+    blends another agent's corpus into this one's mean and stddev.
+
+    A row from a NEWER writer is never comparable: this process cannot know
+    what that version changed (rolling upgrade / rollback sharing one DB).
+    """
+    if version > SNAPSHOT_METRICS_VERSION:
+        return False
+    return not any(
+        metric in METRIC_DEFINITION_CHANGES.get(v, frozenset())
+        for v in range(version + 1, SNAPSHOT_METRICS_VERSION + 1)
+    )
 
 
 @dataclass
 class BehaviorSnapshot:
     """Point-in-time snapshot of key system metrics."""
     timestamp: datetime
+    #: Version this snapshot's metrics were written under. Not a metric (kept
+    #: out of to_metrics_dict); DriftDetector uses it to skip, per metric,
+    #: baseline values whose definition has since changed.
+    metrics_version: int = SNAPSHOT_METRICS_VERSION
 
     # Memory metrics
     fact_count: int = 0
