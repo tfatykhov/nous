@@ -14,9 +14,10 @@ checks instead of waiting:
        (a) integrity: every row must satisfy ``confidence ==
            calibrate_confidence(confidence_raw, calibration_factor)``,
            in either era;
-       (b) currency: every calibration this build performed must have
-           used the configured factor, else the deployment is still
-           scaling with a stale override.
+       (b) currency: every calibration since the most recent one that
+           used the configured factor must have used it too, else the
+           deployment is still (or again) scaling with a stale override.
+           Latest-wins, so fixing an override lets --strict recover.
      Rows predating migration 073 have a NULL factor and are skipped, so
      history cannot pin --strict to a permanent failure — and because
      only this build writes those columns, no date cutoff is needed to
@@ -272,7 +273,7 @@ async def run(
                                    float(r["calibration_factor"]))
         ) > _VALUE_TOLERANCE
     ]
-    # (b) By default every row carrying provenance is current: those columns
+    # (b) By default every row carrying provenance is in scope: those columns
     # only exist from migration 073, so writing them IS the signal that the
     # current build produced the row. That leaves no unchecked window at
     # rollout -- the very first post-deploy calibration is validated, so a
@@ -280,21 +281,44 @@ async def run(
     # rather than hidden behind a cutoff date that had not arrived yet.
     #
     # A cutoff is only meaningful for a LATER factor change, and is opt-in via
-    # --retired-at. Either way this does not age out: a persistent stale
-    # override keeps failing until someone fixes the deployment, where a
-    # rolling window would let it go quiet after a month.
+    # --retired-at.
     if retired_at is None:
-        current_era = scoped
+        in_scope = scoped
     else:
-        current_era = [
+        in_scope = [
             r for r in scoped
             if r["calibration_applied_at"] is not None
             and r["calibration_applied_at"] >= retired_at
         ]
-    bad_ratios = [
-        r for r in current_era
-        if abs(float(r["calibration_factor"]) - factor) > _FACTOR_TOLERANCE
-    ]
+
+    def _stale(r) -> bool:
+        return abs(float(r["calibration_factor"]) - factor) > _FACTOR_TOLERANCE
+
+    # Currency asks about the deployment as it is NOW, so it is latest-wins.
+    # The current build stamps provenance on stale-override writes too, so
+    # judging every provenanced row would keep a remediated deployment failing
+    # --strict forever over writes made before the fix. Instead, once correct
+    # writes follow the last stale one, the cohort starts at the first of
+    # them (the remediation point) and earlier stale writes are superseded --
+    # reported, not failed. This still does not age out: while the override
+    # persists no correct write follows it, so the whole in-scope set stays
+    # the cohort, and a stale write AFTER a fix (regression) re-opens the
+    # failure. Integrity (a) keeps judging every provenanced row regardless.
+    def _applied(r) -> datetime:
+        at = r["calibration_applied_at"]
+        return at if at is not None else datetime.min.replace(tzinfo=UTC)
+
+    last_stale = max((_applied(r) for r in in_scope if _stale(r)),
+                     default=None)
+    remediated_at = None if last_stale is None else min(
+        (_applied(r) for r in in_scope
+         if not _stale(r) and _applied(r) > last_stale),
+        default=None,
+    )
+    current_era = (in_scope if remediated_at is None
+                   else [r for r in in_scope if _applied(r) >= remediated_at])
+    bad_ratios = [r for r in current_era if _stale(r)]
+    n_superseded_stale = sum(1 for r in in_scope if _stale(r)) - len(bad_ratios)
     sanity_ok = not bad_ratios and not bad_integrity
 
     # Step 2: counterfactual on pre-F058 reviewed
@@ -316,11 +340,12 @@ async def run(
     # report a blend whose weights shift as reviews accumulate, so it could
     # not say whether either policy moved calibration. Rows predating
     # migration 073 carry no provenance but were written under F058, so they
-    # belong to the historical factor's cohort.
+    # belong to the HISTORICAL factor's cohort -- not counterfactual_factor,
+    # which is a hypothesis for step 2 and never produced a stored value.
     post_f058 = [r for r in rows if r["is_post_f058"]]
     eras: dict[float, list] = {}
     for r in post_f058:
-        applied = (counterfactual_factor if r["applied_factor"] is None
+        applied = (_HISTORICAL_F058_FACTOR if r["applied_factor"] is None
                    else float(r["applied_factor"]))
         key = next((k for k in eras if abs(k - applied) <= _FACTOR_TOLERANCE),
                    applied)
@@ -352,6 +377,7 @@ async def run(
             "n_prior_era": len(scoped) - len(current_era),
             "n_bad": len(bad_ratios),
             "n_bad_integrity": len(bad_integrity),
+            "n_superseded_stale": n_superseded_stale,
         },
         "counterfactual": {
             "raw": summarize("Pre-F058 RAW", raw_pairs),
@@ -479,6 +505,9 @@ async def _async_main(argv: list[str] | None = None) -> int:
     elif s["ok"]:
         print(f"   [PASS] all {s['n_current_era']} in-scope calibrations "
               f"used factor {args.factor:.4f}")
+        if s["n_superseded_stale"]:
+            print(f"   [INFO] {s['n_superseded_stale']} earlier stale-factor "
+                  f"writes predate the fix and are superseded")
     else:
         print(f"   [FAIL] {s['n_bad']} calibrations used a factor other than "
               f"{args.factor:.4f} — the deployment is still scaling with a "
@@ -542,6 +571,9 @@ def _build_md(result: dict, factor: float,
     elif s["ok"]:
         sanity_line = (f"- **PASS** all {s['n_current_era']} in-scope "
                        f"calibrations used factor `{factor:.4f}`")
+        if s.get("n_superseded_stale"):
+            sanity_line += (f" ({s['n_superseded_stale']} earlier stale-factor "
+                            f"writes predate the fix and are superseded)")
     else:
         sanity_line = (f"- **FAIL** {s['n_bad']} calibrations used a factor "
                        f"other than `{factor:.4f}` — the deployment is still "

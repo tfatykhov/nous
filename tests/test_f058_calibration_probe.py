@@ -592,3 +592,67 @@ class TestDirectionCheckSeparatesCalibrationEras:
         assert "Post-F058 RAW @1.0000" in md
         assert "Post-F058 RAW @0.7627" in md
         assert "n=1 @ `0.7627`" in md
+
+
+class TestCurrencyRecoversAfterTheOverrideIsFixed:
+    """Codex round-7 P2: the current build stamps provenance on stale-override
+    writes too, so judging every provenanced row kept n_bad nonzero forever
+    after the operator fixed the environment -- --strict could never recover.
+    Currency is now latest-wins; integrity still judges every row.
+    """
+
+    _T0 = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
+
+    @pytest.mark.asyncio
+    async def test_stale_then_corrected_passes(self):
+        conn = _FakeConn(
+            [(0.9, 0.7627, self._T0 + timedelta(hours=h)) for h in range(3)]
+            + [(0.9, 1.0, self._T0 + timedelta(days=1, hours=h))
+               for h in range(2)]
+        )
+        result = await run(conn, "a", 1.0)
+        s = result["sanity"]
+        assert s["ok"] is True
+        assert s["n_bad"] == 0
+        assert s["n_superseded_stale"] == 3
+        assert s["n_current_era"] == 2
+        assert verdict_exit_code(result) == 0
+
+    @pytest.mark.asyncio
+    async def test_stale_write_after_a_fix_fails_again(self):
+        conn = _FakeConn([
+            (0.9, 1.0, self._T0),
+            (0.9, 0.7627, self._T0 + timedelta(hours=1)),
+        ])
+        result = await run(conn, "a", 1.0)
+        assert result["sanity"]["ok"] is False
+        assert result["sanity"]["n_bad"] == 1
+
+    @pytest.mark.asyncio
+    async def test_superseded_rows_still_face_integrity(self):
+        conn = _FakeConn([
+            (0.9, 0.7627, self._T0, 0.9),  # claims 0.7627, stored unscaled
+            (0.9, 1.0, self._T0 + timedelta(days=1)),
+        ])
+        result = await run(conn, "a", 1.0)
+        assert result["sanity"]["n_bad"] == 0
+        assert result["sanity"]["n_bad_integrity"] == 1
+        assert result["sanity"]["ok"] is False
+
+
+class TestUnprovenancedRowsUseTheHistoricalFactor:
+    """Codex round-7 P2: --counterfactual-factor is a step-2 hypothesis; it
+    never produced a stored value, so it must not label pre-073 rows in step 3.
+    """
+
+    @pytest.mark.asyncio
+    async def test_counterfactual_override_does_not_relabel_history(self):
+        rows = [
+            {"raw": c, "stored": calibrate_confidence(c, _HISTORICAL_F058_FACTOR),
+             "is_post_f058": True, "applied_factor": None, "outcome": o}
+            for c, o in [(0.9, "failure"), (0.8, "success")]
+        ]
+        conn = _FakeConn([(1.0, 1.0, _AFTER)], rows)
+        d = (await run(conn, "a", 1.0, 0.5))["post_f058_direction"]
+        assert [e["factor"] for e in d] == [_HISTORICAL_F058_FACTOR]
+        assert d[0]["raw"]["n"] == 2
