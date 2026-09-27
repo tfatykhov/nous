@@ -134,6 +134,16 @@ class HeartbeatRunner:
     async def stop(self) -> None:
         """Stop the heartbeat loop and DAG tick loop."""
         self._running = False
+        # Fix 4 (Codex P2): cancel the heartbeat check loop FIRST so it cannot
+        # wake from sleep and launch new tool-using checks (with external side
+        # effects) while DAG work is still draining.
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
         if self._dag_task:
             self._dag_task.cancel()
             try:
@@ -147,6 +157,10 @@ class HeartbeatRunner:
         # after — an in-flight tick would otherwise write to a closed pool.
         # Always clear the reference so stop() never leaves it pointing at a
         # finished (or live) task.
+        # Fix 2 (Codex P1): use asyncio.wait (not asyncio.wait_for) so the
+        # pending task is never cancelled on timeout.  Cancelling a shielded
+        # tick reintroduces the unsafe CancelledError window between primitive
+        # creation and the node's running transition.
         _pending = self._dag_pending_task
         self._dag_pending_task = None
         if _pending is not None and not _pending.done():
@@ -155,28 +169,24 @@ class HeartbeatRunner:
                 "(waiting up to %ds)",
                 self._settings.dag_tick_timeout,
             )
-            try:
-                await asyncio.wait_for(
-                    _pending,
-                    timeout=self._settings.dag_tick_timeout,
-                )
-            except TimeoutError:
+            done, _ = await asyncio.wait(
+                {_pending},
+                timeout=self._settings.dag_tick_timeout,
+            )
+            if not done:
                 logger.error(
                     "F038: Timed-out DAG tick did not complete within %ds "
-                    "during shutdown — cancelling it",
+                    "during shutdown — leaving it running to avoid unsafe "
+                    "cancellation",
                     self._settings.dag_tick_timeout,
                 )
-            except Exception:
-                logger.exception(
-                    "F038: Timed-out DAG tick raised during shutdown drain"
-                )
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+            else:
+                try:
+                    _pending.result()
+                except Exception:
+                    logger.exception(
+                        "F038: Timed-out DAG tick raised during shutdown drain"
+                    )
 
         # Clean up dedicated runner and its API client
         if self._dedicated_runner is not None:
@@ -281,6 +291,18 @@ class HeartbeatRunner:
                         "and is still running in background",
                     )
                     continue
+                # Fix 3 (Codex P2): harvest the result of a completed pending
+                # task so that (a) last_dag_tick reflects its success and
+                # (b) any exception is logged via the structured failure path
+                # rather than emitted as an unhandled task exception.
+                if self._dag_pending_task is not None:  # done — consume it
+                    try:
+                        self._dag_pending_task.result()
+                        self._last_dag_tick = datetime.now(UTC)
+                    except Exception:
+                        logger.exception(
+                            "F038: DAG tick raised after timing out"
+                        )
                 self._dag_pending_task = None  # clear any completed reference
 
                 async with self._dag_tick_lock:
@@ -312,10 +334,20 @@ class HeartbeatRunner:
                         # a new tick from starting while it is still running.
                     except asyncio.CancelledError:
                         # Outer task was cancelled. inner_task is STILL
-                        # RUNNING — await it (shielded) so it completes
-                        # before we release the lock and propagate.
+                        # RUNNING — drain it with a bounded deadline so
+                        # shutdown cannot hang indefinitely on a hung DB or
+                        # network call (Fix 1, Codex P1 round-3).
                         try:
-                            await asyncio.shield(inner_task)
+                            await asyncio.wait_for(
+                                asyncio.shield(inner_task),
+                                timeout=self._settings.dag_tick_timeout,
+                            )
+                        except TimeoutError:
+                            logger.warning(
+                                "F038: In-flight DAG tick did not finish within "
+                                "%ds during shutdown drain — proceeding without it",
+                                self._settings.dag_tick_timeout,
+                            )
                         except Exception:
                             logger.exception(
                                 "F038: DAG orchestrator tick failed during shutdown drain"

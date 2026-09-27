@@ -755,3 +755,224 @@ async def test_stop_drains_pending_task_after_timeout():
         except Exception:
             tick_release.set()
             raise
+
+
+# ---------------------------------------------------------------------------
+# Tests for Codex round-3 fixes (P1 #1, P1 #2, P2 #3, P2 #4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drain_bounded_when_inner_task_hangs():
+    """stop() must return within dag_tick_timeout when a tick is in-flight and hangs.
+
+    Fix 1 (Codex P1 round-3): The CancelledError handler in _dag_loop now
+    uses asyncio.wait_for(asyncio.shield(inner_task), timeout=dag_tick_timeout)
+    instead of a naked asyncio.shield() with no deadline.  Without the fix,
+    a tick blocked on a hung DB or network operation would make _dag_task.cancel()
+    / await _dag_task hang indefinitely, stalling shutdown_components().
+    """
+    settings = _make_settings(dag_tick_interval=0, dag_tick_timeout=0.25)
+
+    tick_started = asyncio.Event()
+
+    async def forever_tick():
+        tick_started.set()
+        await asyncio.Event().wait()  # never completes
+
+    dag_orchestrator = MagicMock()
+    dag_orchestrator.tick = AsyncMock(side_effect=forever_tick)
+
+    runner = _make_runner(settings, dag_orchestrator)
+
+    with patch.object(runner, "_detect_missed_checks", AsyncMock()):
+        await runner.start()
+        await asyncio.wait_for(tick_started.wait(), timeout=3.0)
+
+        # stop() is called while the tick is in-flight (before dag_tick_timeout fires).
+        # Without Fix 1 it would hang forever; with Fix 1 it returns within the bound.
+        start_t = asyncio.get_event_loop().time()
+        await asyncio.wait_for(runner.stop(), timeout=5.0)
+        elapsed = asyncio.get_event_loop().time() - start_t
+
+        # Allow generous headroom for CI variance — the key assertion is that
+        # stop() returns at all (asyncio.wait_for above would raise on a hang).
+        # An upper bound of 4× dag_tick_timeout distinguishes "bounded" from
+        # "hung but happened to finish".
+        assert elapsed < 4 * settings.dag_tick_timeout, (
+            f"stop() took {elapsed:.3f}s — expected < "
+            f"{4 * settings.dag_tick_timeout:.3f}s; "
+            "the in-flight shutdown drain must be bounded by dag_tick_timeout"
+        )
+
+
+@pytest.mark.asyncio
+async def test_pending_drain_does_not_cancel_inner_task():
+    """stop() must not cancel a timed-out pending tick during the drain.
+
+    Fix 2 (Codex P1 round-3): asyncio.wait is used instead of asyncio.wait_for
+    so the pending task is never cancelled on timeout.  asyncio.wait_for would
+    cancel the task, reintroducing the unsafe CancelledError window between
+    primitive creation and the node's running transition.
+    """
+    settings = _make_settings(dag_tick_interval=0, dag_tick_timeout=0.05)
+
+    tick_started = asyncio.Event()
+    tick_release = asyncio.Event()
+
+    async def hanging_tick():
+        tick_started.set()
+        await tick_release.wait()
+
+    dag_orchestrator = MagicMock()
+    dag_orchestrator.tick = AsyncMock(side_effect=hanging_tick)
+
+    runner = _make_runner(settings, dag_orchestrator)
+
+    with patch.object(runner, "_detect_missed_checks", AsyncMock()):
+        await runner.start()
+        await asyncio.wait_for(tick_started.wait(), timeout=3.0)
+        # Let the soft deadline fire so the tick becomes _dag_pending_task.
+        await asyncio.sleep(0.2)
+
+        pending = runner._dag_pending_task
+        assert pending is not None and not pending.done(), (
+            "tick must be timed-out and still running before calling stop()"
+        )
+
+        # stop() will try to drain but the tick never finishes (tick_release
+        # not set).  Fix 2: no cancellation; stop() returns after the drain
+        # timeout expires.
+        await asyncio.wait_for(runner.stop(), timeout=1.5)
+
+        # Brief yield so any queued cancellation could land.
+        await asyncio.sleep(0.02)
+
+        assert not pending.cancelled(), (
+            "stop() cancelled the timed-out pending tick; use asyncio.wait (not asyncio.wait_for) in the pending drain"
+        )
+
+    # Release the still-running task to silence asyncio "task was destroyed"
+    # warnings.
+    tick_release.set()
+    try:
+        await asyncio.wait_for(pending, timeout=0.5)
+    except Exception:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_completed_pending_tick_updates_last_dag_tick():
+    """last_dag_tick must be updated when a timed-out tick eventually completes.
+
+    Fix 3 (Codex P2 round-3): Without this fix the loop only sets last_dag_tick
+    in the normal (non-timeout) completion path.  A tick that times out and
+    finishes later never updated the timestamp, so slow-but-successful ticks
+    reported zero progress on the status endpoint.
+    """
+    settings = _make_settings(dag_tick_interval=0, dag_tick_timeout=0.05)
+
+    tick_count = 0
+    tick_1_started = asyncio.Event()
+    tick_1_release = asyncio.Event()
+    tick_2_started = asyncio.Event()
+    tick_2_gate = asyncio.Event()  # hold tick 2 so we can inspect before it finishes
+
+    async def side_effect():
+        nonlocal tick_count
+        tick_count += 1
+        if tick_count == 1:
+            tick_1_started.set()
+            await tick_1_release.wait()
+        elif tick_count == 2:
+            tick_2_started.set()
+            await tick_2_gate.wait()
+
+    dag_orchestrator = MagicMock()
+    dag_orchestrator.tick = AsyncMock(side_effect=side_effect)
+
+    runner = _make_runner(settings, dag_orchestrator)
+
+    with patch.object(runner, "_detect_missed_checks", AsyncMock()):
+        await runner.start()
+        try:
+            await asyncio.wait_for(tick_1_started.wait(), timeout=3.0)
+            # Let the timeout fire; tick 1 is now in _dag_pending_task.
+            await asyncio.sleep(0.2)
+
+            assert runner.last_dag_tick is None, "last_dag_tick should be None while tick 1 is still pending"
+
+            # Release tick 1 so it completes from the background.
+            tick_1_release.set()
+
+            # Wait for tick 2 to start — this proves the loop iterated again
+            # and processed tick 1's completed result (Fix 3).
+            await asyncio.wait_for(tick_2_started.wait(), timeout=3.0)
+            await asyncio.sleep(0.05)  # let the timestamp assignment land
+
+            assert runner.last_dag_tick is not None, (
+                "last_dag_tick not set after a timed-out tick eventually completed; "
+                "Fix 3 (P2): harvest the completed _dag_pending_task result"
+            )
+        finally:
+            tick_2_gate.set()
+            tick_1_release.set()
+            await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_task_done_before_pending_drain():
+    """_task (heartbeat loop) must be cancelled before stop() drains _dag_pending_task.
+
+    Fix 4 (Codex P2 round-3): Without this fix the heartbeat loop stayed alive
+    while DAG work drained, allowing it to wake from sleep and launch new checks
+    — including ones with external side effects — after shutdown had begun.
+
+    We verify the ordering by patching the pending task's .done() method to
+    record the state of _task at the exact moment the drain code inspects it.
+    """
+    settings = _make_settings(dag_tick_interval=0, dag_tick_timeout=0.3)
+
+    tick_started = asyncio.Event()
+    tick_release = asyncio.Event()
+
+    async def slow_tick():
+        tick_started.set()
+        await tick_release.wait()
+
+    dag_orchestrator = MagicMock()
+    dag_orchestrator.tick = AsyncMock(side_effect=slow_tick)
+
+    runner = _make_runner(settings, dag_orchestrator)
+
+    with patch.object(runner, "_detect_missed_checks", AsyncMock()):
+        await runner.start()
+        await asyncio.wait_for(tick_started.wait(), timeout=3.0)
+        # Let the soft deadline fire so the tick enters _dag_pending_task.
+        await asyncio.sleep(0.1)
+
+        pending = runner._dag_pending_task
+        assert pending is not None and not pending.done()
+
+        # Patch .done() on the pending task to record _task's state the first
+        # time the drain code calls it (the `if _pending is not None and not
+        # _pending.done():` check in stop()).
+        _orig_done = pending.done
+        hb_task_state_at_drain: list[bool] = []
+
+        def _recording_done() -> bool:
+            result = _orig_done()
+            if not hb_task_state_at_drain:
+                hb_task_state_at_drain.append(runner._task is None or runner._task.done())
+            return result
+
+        pending.done = _recording_done  # type: ignore[method-assign]
+
+        tick_release.set()  # release so drain can complete quickly
+        await asyncio.wait_for(runner.stop(), timeout=2.0)
+
+    assert hb_task_state_at_drain, "drain code never called _pending.done()"
+    assert hb_task_state_at_drain[0], (
+        "_task was still running when stop() entered the _dag_pending_task drain; "
+        "Fix 4 (P2): cancel _task before the DAG drain"
+    )
