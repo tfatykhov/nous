@@ -939,6 +939,43 @@ class TestMassPruneIsNeverSilentOnBothMetrics:
         assert [a for a in anomalies if a.metric == "facts_pruned"] == []
 
 
+class TestReactivationIsNotReportedAsAPrune:
+    """facts_pruned is the signed inactive-count delta, so a mass reactivation
+    (FactManager._get_current sets active=True) makes it negative. The signed
+    value still residualizes fact_count_delta, but the metric's own test must
+    not report a reactivation as a prune anomaly.
+    """
+
+    def _quiet_history(self, n=12):
+        return [BehaviorSnapshot(timestamp=datetime.now(UTC), fact_count_delta=0, facts_pruned=0) for _ in range(n)]
+
+    def test_mass_reactivation_is_not_a_prune_anomaly(self):
+        current = BehaviorSnapshot(timestamp=datetime.now(UTC), fact_count_delta=80, facts_pruned=-80)
+        anomalies = DriftDetector().detect(current, self._quiet_history())
+        assert [a for a in anomalies if a.metric == "facts_pruned"] == []
+
+    def test_reactivation_still_residualizes_fact_count_delta(self):
+        current = BehaviorSnapshot(timestamp=datetime.now(UTC), fact_count_delta=80, facts_pruned=-80)
+        anomalies = DriftDetector().detect(current, self._quiet_history())
+        assert [a for a in anomalies if a.metric == "fact_count_delta"] == []
+
+    def test_mass_prune_still_fires(self):
+        current = BehaviorSnapshot(timestamp=datetime.now(UTC), fact_count_delta=-80, facts_pruned=80)
+        anomalies = DriftDetector().detect(current, self._quiet_history())
+        pruned = [a for a in anomalies if a.metric == "facts_pruned"]
+        assert len(pruned) == 1 and pruned[0].direction == "up" and pruned[0].current == 80
+
+    def test_prunes_stopping_reads_the_clamped_value(self):
+        history = [
+            BehaviorSnapshot(timestamp=datetime.now(UTC), fact_count_delta=-p, facts_pruned=p)
+            for p in (55, 60, 65, 58, 62, 60, 57, 63, 60, 60)
+        ]
+        current = BehaviorSnapshot(timestamp=datetime.now(UTC), fact_count_delta=20, facts_pruned=-20)
+        pruned = [a for a in DriftDetector().detect(current, history) if a.metric == "facts_pruned"]
+        assert len(pruned) == 1
+        assert pruned[0].direction == "down" and pruned[0].current == 0
+
+
 class TestBaselineRejectsIncompatibleVersionsBothWays:
     """A snapshot from a NEWER writer is as incomparable as an older one:
     during a rolling upgrade or rollback this process can share the database

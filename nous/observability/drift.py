@@ -40,6 +40,14 @@ class DriftDetector:
         "fact_count_delta": "facts_pruned",
     }
 
+    # Metrics tested on their positive part only. facts_pruned is the SIGNED
+    # inactive-count delta, so it goes negative when facts are reactivated
+    # (FactManager._get_current sets active=True repairing supersession
+    # cycles). The signed value is what residualizes fact_count_delta, but a
+    # reactivation is not a prune and must not be reported as one, so the
+    # metric's own test reads max(0, v). The explainer term is left signed.
+    NONNEGATIVE: frozenset[str] = frozenset({"facts_pruned"})
+
     # Per-metric absolute floor on |current - mean|. A z-score computed over a
     # near-constant series has a tiny denominator, so a trivially small change
     # can score many sigma. The floor suppresses those statistically-real but
@@ -76,6 +84,8 @@ class DriftDetector:
 
             def _value_of(metrics: dict[str, Any], _m: str = metric, _e: str | None = explainer) -> float:
                 value = float(metrics.get(_m, 0))
+                if _m in self.NONNEGATIVE:
+                    value = max(0.0, value)
                 if _e:
                     value += float(metrics.get(_e, 0))
                 return value
