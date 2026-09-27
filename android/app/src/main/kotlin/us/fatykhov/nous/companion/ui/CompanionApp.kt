@@ -74,6 +74,20 @@ fun CompanionApp(graph: AppGraph, route: Route, navigate: (Route) -> Unit) {
 
 // ------------------------------------------------------------- Connect
 
+/** Material's default field colours are for ITS scheme; on the Nous ground the typed text was near-invisible. */
+@Composable
+fun fieldColors(): androidx.compose.material3.TextFieldColors {
+    val t = LocalNousTheme.current
+    return androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+        focusedTextColor = t.text, unfocusedTextColor = t.text, disabledTextColor = t.muted,
+        cursorColor = t.accent,
+        focusedBorderColor = t.accent, unfocusedBorderColor = t.border,
+        focusedLabelColor = t.accent, unfocusedLabelColor = t.muted,
+        focusedPlaceholderColor = t.muted, unfocusedPlaceholderColor = t.muted,
+        focusedContainerColor = t.surface, unfocusedContainerColor = t.surface,
+    )
+}
+
 @Composable
 fun ConnectScreen(graph: AppGraph, onConnected: () -> Unit) {
     val t = LocalNousTheme.current
@@ -89,27 +103,34 @@ fun ConnectScreen(graph: AppGraph, onConnected: () -> Unit) {
         Text("Android beta", color = t.accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
         Text("Connect to your Nous", color = t.text, fontSize = 30.sp, fontWeight = FontWeight.Bold, lineHeight = 34.sp)
         Text("The app reaches Nous over your tailnet. Keep Tailscale on while you use it.", color = t.soft, fontSize = 15.sp)
-        OutlinedTextField(value = url, onValueChange = { url = it }, label = { Text("Nous address") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+        OutlinedTextField(value = url, onValueChange = { url = it }, label = { Text("Nous address") }, modifier = Modifier.fillMaxWidth(), singleLine = true, colors = fieldColors())
         Text("The HTTPS address from `tailscale serve` on the Nous host.", color = t.muted, fontSize = 13.sp)
-        OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Device name") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+        OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Device name") }, modifier = Modifier.fillMaxWidth(), singleLine = true, colors = fieldColors())
         Button(
             onClick = {
                 error = ""; busy = true
                 scope.launch {
-                    val base = url.trim().trimEnd('/')
-                    val probe = runCatching { graph.settings.baseUrl = base; graph.http.get("/health") }
-                    val res = probe.getOrNull()
-                    if (res == null || !res.ok) {
-                        error = "Couldn't reach Nous at $base — check Tailscale and the address." + (probe.exceptionOrNull()?.message?.let { "\n$it" } ?: "")
-                        graph.settings.baseUrl = ""
-                    } else {
-                        graph.settings.deviceName = name.trim().ifEmpty { "Android" }
-                        if (Build.VERSION.SDK_INT >= 33) askNotif.launch(Manifest.permission.POST_NOTIFICATIONS)
-                        graph.push.refreshConfig()
-                        graph.lifecycle.onStart(androidx.lifecycle.ProcessLifecycleOwner.get())
-                        onConnected()
-                    }
-                    busy = false
+                    try {
+                        val base = url.trim().trimEnd('/')
+                        graph.settings.baseUrl = base
+                        val probe = runCatching { graph.http.get("/health") }
+                        val res = probe.getOrNull()
+                        if (res == null || !res.ok) {
+                            error = "Couldn't reach Nous at $base" + (res?.let { " (HTTP ${it.status})" } ?: "") + " — check Tailscale and the address." +
+                                (probe.exceptionOrNull()?.let { "
+${it.javaClass.simpleName}: ${it.message}" } ?: "")
+                            graph.settings.baseUrl = ""
+                        } else {
+                            graph.settings.deviceName = name.trim().ifEmpty { "Android" }
+                            // Everything after the probe is best-effort: a failure here must never block the navigation.
+                            runCatching { if (Build.VERSION.SDK_INT >= 33) askNotif.launch(Manifest.permission.POST_NOTIFICATIONS) }
+                            runCatching { graph.push.refreshConfig() }
+                            runCatching { graph.lifecycle.onStart(androidx.lifecycle.ProcessLifecycleOwner.get()) }
+                            onConnected()
+                        }
+                    } catch (e: Exception) {
+                        error = "Connect failed: ${e.javaClass.simpleName}: ${e.message}"
+                    } finally { busy = false }
                 }
             },
             enabled = !busy && url.startsWith("http"), modifier = Modifier.fillMaxWidth().height(54.dp),

@@ -23,7 +23,6 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -89,7 +88,7 @@ fun TextFieldView(node: Node.Render) {
             visualTransformation = if (variant == "obscured") PasswordVisualTransformation() else VisualTransformation.None,
             keyboardOptions = KeyboardOptions(keyboardType = when (variant) { "number" -> KeyboardType.Number; "obscured" -> KeyboardType.Password; else -> KeyboardType.Text }),
             modifier = Modifier.fillMaxWidth().semantics { contentDescription = "textfield:${node.componentId}" },
-            colors = TextFieldDefaults.colors(focusedContainerColor = t.surface, unfocusedContainerColor = t.surface, focusedTextColor = t.text, unfocusedTextColor = t.text, focusedIndicatorColor = t.accent, unfocusedIndicatorColor = t.border),
+            colors = us.fatykhov.nous.companion.ui.fieldColors(),
         )
         Failures(node)
     }
@@ -129,7 +128,7 @@ fun ChoicePickerView(node: Node.Render) {
     }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
         FieldLabel(host.text(node.props["label"], node.scope))
-        if (filterable) OutlinedTextField(value = filter, onValueChange = { filter = it }, placeholder = { Text("Filter options", color = t.muted) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        if (filterable) OutlinedTextField(value = filter, onValueChange = { filter = it }, placeholder = { Text("Filter options", color = t.muted) }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = us.fatykhov.nous.companion.ui.fieldColors())
         if (chips) androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             for (o in visible) {
                 val on = o.value in selected
