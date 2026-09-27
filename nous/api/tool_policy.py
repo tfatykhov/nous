@@ -13,7 +13,7 @@ from types import MappingProxyType
 from typing import Any
 
 from nous.api.execution_context import FOREGROUND_KINDS, ExecutionContext
-from nous.api.tool_classes import tool_class
+from nous.api.tool_classes import is_compensable_call, tool_class
 from nous.cognitive.execution_ledger import classify_side_effect
 
 _ALL = frozenset({"none", "write", "external", "irreversible"})
@@ -68,7 +68,7 @@ def evaluate(ctx: ExecutionContext, tool_name: str, tool_input: Mapping[str, Any
     # "not_compensable" — the true constraint — rather than "spawn", which
     # masks the undoability violation and prevents force_block from activating
     # in warn mode.
-    if ctx.undoable and level != "none" and not cls.compensable:
+    if ctx.undoable and level != "none" and not is_compensable_call(tool_name, tool_input):
         return "not_compensable"
     if cls.spawns and not (
         policy.spawn is True

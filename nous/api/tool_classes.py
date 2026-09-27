@@ -28,7 +28,6 @@ _READ = ToolClass("none")
 _WRITE = ToolClass("write")
 _WRITE_C = ToolClass("write", compensable=True)
 _SPAWN = ToolClass("write", spawns=True)
-_SPAWN_C = ToolClass("write", spawns=True, compensable=True)
 _EXTERNAL = ToolClass("external")
 
 TOOL_CLASSES: Mapping[str, ToolClass] = MappingProxyType({
@@ -37,7 +36,8 @@ TOOL_CLASSES: Mapping[str, ToolClass] = MappingProxyType({
     "web_search": _READ, "web_fetch": _READ, "list_tasks": _READ, "cache_retrieve": _READ,
     "recall_hubs": _READ, "list_decisions": _READ,
     "submit_final_report": _READ,  # injected via extra_tools in hardened subtasks
-    # local writes — compensable where a compensator exists
+    # local writes — compensable where a compensator exists. heartbeat_check_manage
+    # is compensable for action="disable" ONLY: see is_compensable_call.
     "write_file": _WRITE_C, "learn_fact": _WRITE, "record_decision": _WRITE, "create_censor": _WRITE,
     "store_identity": _WRITE, "learn_skill": _WRITE, "complete_initiation": _WRITE,
     "cancel_task": _WRITE, "heartbeat_check_manage": _WRITE_C, "ingest_document": _WRITE,
@@ -45,9 +45,10 @@ TOOL_CLASSES: Mapping[str, ToolClass] = MappingProxyType({
     "compose_surface": _WRITE, "dag_manage": _WRITE,
     "run_python": _WRITE,  # the floor; code that reaches the network is external
     "bash": _WRITE,        # the floor; classify_side_effect reads the command itself
-    # start other agent work — schedule_task + heartbeat_check_create are compensable
-    "spawn_task": _SPAWN, "spawn_sync": _SPAWN, "schedule_task": _SPAWN_C,
-    "heartbeat_check_create": _SPAWN_C, "dag_create": _SPAWN,
+    # start other agent work — NOT compensable: cancelling a schedule or check
+    # after it fired does not undo the work it already spawned
+    "spawn_task": _SPAWN, "spawn_sync": _SPAWN, "schedule_task": _SPAWN,
+    "heartbeat_check_create": _SPAWN, "dag_create": _SPAWN,
     # leave the host — NOT compensable (cannot unsend)
     "send_file": _EXTERNAL, "send_email": _EXTERNAL,
 })
@@ -73,6 +74,19 @@ _NETWORK_CODE = re.compile(
 def tool_class(name: str) -> ToolClass | None:
     """The declared class, or None for a tool nobody classified."""
     return TOOL_CLASSES.get(name)
+
+
+def is_compensable_call(name: str, tool_input: Mapping[str, object]) -> bool:
+    """True when THIS call can be undone. ``heartbeat_check_manage`` is
+    compensable only for ``action="disable"`` (compared exactly as the handler
+    does): enable/update/delete re-arm or rewrite a check's future runs, which
+    a snapshot cannot take back."""
+    cls = TOOL_CLASSES.get(name)
+    if cls is None or not cls.compensable:
+        return False
+    if name == "heartbeat_check_manage":
+        return tool_input.get("action") == "disable"
+    return True
 
 
 def code_reaches_network(code: str) -> bool:

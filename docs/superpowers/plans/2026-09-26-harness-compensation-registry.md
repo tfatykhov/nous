@@ -23,9 +23,7 @@ The existing `tool_classes.py` declares a tool's risk class in a static `TOOL_CL
 | Tool | Compensator | Snapshot |
 |------|-------------|----------|
 | `write_file` | Restore prior content (or delete if file was new) | Prior file content + whether file existed, stored in `nous_system.compensation_snapshots` |
-| `schedule_task` | Cancel the created schedule | Schedule id from tool result |
-| `heartbeat_check_create` | Disable the created check | Check name from tool args |
-| `heartbeat_check_manage` | Reverse the action (enable↔disable) | Prior enabled state |
+| `heartbeat_check_manage` (`action="disable"` only) | Re-enable the check | Check name from tool args |
 | `resolve_decision` | Restore prior outcome | Prior outcome/resolution_note from before the resolve |
 
 **NOT compensable (explicitly):**
@@ -33,6 +31,9 @@ The existing `tool_classes.py` declares a tool's risk class in a static `TOOL_CL
 | Tool | Why |
 |------|-----|
 | `send_email` | Cannot unsend |
+| `schedule_task` | Spawns work: cancelling after the schedule fired does not undo the subtask it started (Option A, PR #652) |
+| `heartbeat_check_create` | Spawns work: a new check can be due immediately and run `bash` before any revert (Option A) |
+| `heartbeat_check_manage` (`enable`/`update`/`delete`) | Re-arms or rewrites a check's future runs; `tool_classes.is_compensable_call` admits only `disable` |
 | `send_file` | Cannot unsend |
 | `bash` | Arbitrary commands — no general undo |
 | `run_python` | Arbitrary code — no general undo |
@@ -112,7 +113,7 @@ The check is in `DAGCreateRequest._validate_graph` (which already walks the grap
 - Test: `tests/test_compensation.py`
 
 - [ ] Add `compensable: bool = False` to `ToolClass` dataclass
-- [ ] Mark compensable tools in `TOOL_CLASSES`: `write_file`, `schedule_task`, `heartbeat_check_create`, `heartbeat_check_manage`, `resolve_decision`
+- [ ] Mark compensable tools in `TOOL_CLASSES`: `write_file`, `heartbeat_check_manage` (per call: `disable` only, via `is_compensable_call`), `resolve_decision`
 - [ ] Create `nous/api/compensation.py` with `CompensationRegistry`, `CompensationResult`, `register()`, `get()`, `is_compensable()`
 - [ ] Tests: registry stores and retrieves compensators; `is_compensable` matches `TOOL_CLASSES`
 
@@ -136,9 +137,7 @@ The check is in `DAGCreateRequest._validate_graph` (which already walks the grap
 - Test: `tests/test_compensation.py`
 
 - [ ] `compensate_write_file`: read prior content before write; on revert, restore or delete
-- [ ] `compensate_schedule_task`: cancel the schedule
-- [ ] `compensate_heartbeat_check_create`: disable the check
-- [ ] `compensate_heartbeat_check_manage`: reverse enable↔disable
+- [ ] `compensate_heartbeat_check_manage`: re-enable a check the call disabled (`disable` is the only compensable action)
 - [ ] `compensate_resolve_decision`: restore prior outcome
 - [ ] Tests for each compensator
 
@@ -149,7 +148,7 @@ The check is in `DAGCreateRequest._validate_graph` (which already walks the grap
 - Modify: `nous/api/compensation.py`
 - Test: `tests/test_compensation.py`
 
-- [ ] Before dispatch of a compensable tool in background context, call `SnapshotStore.capture()`
+- [ ] Before dispatch of a compensable call in ANY background context (undoable or not), call `SnapshotStore.capture()`; `undoable` only decides whether a snapshot that cannot be taken (oversized file) blocks the call
 - [ ] Pass ledger_entry_id to the capture
 - [ ] Wire `CompensationRegistry` and `SnapshotStore` on `AgentRunner`
 

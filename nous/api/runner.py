@@ -468,7 +468,7 @@ class AgentRunner:
         self._ledger_store = store
 
     def set_snapshot_store(self, store: Any, workspace_dir: str) -> None:
-        """Phase 2.8: compensation snapshots for compensable tools in undoable contexts."""
+        """Phase 2.8: compensation snapshots for compensable calls in background contexts."""
         self._snap_store = store
         self._workspace_dir = workspace_dir
 
@@ -508,29 +508,35 @@ class AgentRunner:
         tool_input: dict,
         entry_id: Any,
     ) -> bool:
-        """Capture a pre-dispatch snapshot for compensable tools in undoable contexts.
+        """Capture a pre-dispatch snapshot for compensable calls in background contexts.
 
-        Fail-open: a capture failure logs a warning but never blocks the call.
-        Only fires when the context is undoable, the tool is compensable, and the
-        snapshot store is wired. Called between _open_for_call and actual dispatch
-        so the ledger entry_id is available to link the snapshot. Returns True
-        when a snapshot was stored.
+        Fires for every background context (``is_background``) -- undoable or
+        not -- when the call is compensable (``is_compensable_call``) and the
+        snapshot store is wired: the snapshot is what makes a revert, and the
+        auto action_review card, possible where no human is in the loop.
+        ``undoable`` only decides whether a missing snapshot BLOCKS the call
+        (an oversized file); elsewhere capture is fail-open. Called between
+        _open_for_call and actual dispatch so the ledger entry_id is available
+        to link the snapshot. Returns True when a snapshot was stored.
 
         Reads the arguments the handler will RECEIVE (``_handler_args``): a
         required arg salvaged from leaked XML changes the target path and
         trims the payload, so snapshotting the raw input would record a
         different file and content hash than the one actually written.
         """
-        if not getattr(ctx, "undoable", False):
+        undoable = getattr(ctx, "undoable", False)
+        if not (undoable or ctx.is_background):
             return False
         if self._snap_store is None or entry_id is None:
             return False
-        from nous.api.tool_classes import tool_class as _tool_class
+        from nous.api.tool_classes import is_compensable_call, tool_class
 
-        cls = _tool_class(tool_name)
+        cls = tool_class(tool_name)
         if cls is None or not cls.compensable:
-            return False
+            return False  # cheap pre-check before the dispatcher's arg repair
         tool_input = self._handler_args(tool_name, tool_input)
+        if not is_compensable_call(tool_name, tool_input):
+            return False
         try:
             snap_data: dict = {}
             if tool_name == "write_file":
@@ -541,6 +547,13 @@ class AgentRunner:
                 path = tool_input.get("path", "")
                 snap_data = await snapshot_for_write_file(path, self._workspace_dir)
                 if snap_data.get("oversized"):
+                    if not undoable:
+                        logger.warning(
+                            "Harness Phase 2.8: %r too large to snapshot; ledger entry %s will not be revertible",
+                            path,
+                            entry_id,
+                        )
+                        return False
                     raise SnapshotBlocksDispatch(
                         f"write_file refused: {path!r} is too large to snapshot for undoable revert "
                         f"(exceeds {1}MiB limit)"
@@ -549,20 +562,9 @@ class AgentRunner:
                 # detect if the file was modified between the write and the revert.
                 content = tool_input.get("content", "") or ""
                 snap_data["written_content_hash"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            elif tool_name == "heartbeat_check_create":
-                snap_data = {"check_name": tool_input.get("name", "")}
             elif tool_name == "heartbeat_check_manage":
-                snap_data = {
-                    "check_name": tool_input.get("name", ""),
-                    "action": tool_input.get("action", ""),
-                    # prior_enabled requires a DB lookup; captured as None here and
-                    # the compensator will fail gracefully when it's missing.
-                    "prior_enabled": None,
-                }
-            elif tool_name == "schedule_task":
-                # schedule_id only exists post-dispatch; compensator reads it from
-                # snapshot_data and fails gracefully when absent.
-                snap_data = {}
+                # is_compensable_call admitted only action="disable"
+                snap_data = {"check_name": tool_input.get("name", ""), "action": "disable"}
             elif tool_name == "resolve_decision":
                 snap_data = {
                     "decision_id": str(tool_input.get("decision_id") or tool_input.get("id", "")),
@@ -2164,8 +2166,8 @@ class AgentRunner:
                                 keys_this_turn,
                             )
                             # Phase 2.8: capture pre-dispatch snapshot for compensable
-                            # tools in undoable contexts. Fail-open except for
-                            # oversized files, which refuse rather than silently
+                            # calls in background contexts. Fail-open except for
+                            # oversized files in undoable contexts, which refuse rather than silently
                             # proceeding without a snapshot.
                             _snap_blocked: str | None = None
                             _snapshotted = False
@@ -2782,8 +2784,8 @@ class AgentRunner:
                                 keys_this_turn,
                             )
                             # Phase 2.8: capture pre-dispatch snapshot for compensable
-                            # tools in undoable contexts. Fail-open except for
-                            # oversized files, which refuse rather than silently
+                            # calls in background contexts. Fail-open except for
+                            # oversized files in undoable contexts, which refuse rather than silently
                             # proceeding without a snapshot.
                             _snap_blocked2: str | None = None
                             _snapshotted2 = False

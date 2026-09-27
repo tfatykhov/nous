@@ -38,8 +38,9 @@ from nous.dag.schemas import DAGCreateRequest, DAGEdgeSpec, DAGNodeSpec
 
 
 def test_compensable_tools_are_marked() -> None:
-    """The five clearly-reversible tools are marked compensable."""
-    expected = {"write_file", "schedule_task", "heartbeat_check_create", "heartbeat_check_manage", "resolve_decision"}
+    """Option A: only the clearly-reversible, non-spawning tools are compensable
+    (heartbeat_check_manage per-call -- see is_compensable_call)."""
+    expected = {"write_file", "heartbeat_check_manage", "resolve_decision"}
     actual = {name for name, cls in TOOL_CLASSES.items() if cls.compensable}
     assert actual == expected
 
@@ -85,12 +86,13 @@ def test_registry_rejects_non_compensable_tool() -> None:
         registry.register("send_email", noop)
 
 
-def test_register_compensators_registers_all_five() -> None:
+def test_register_compensators_registers_the_compensable_surface() -> None:
     registry = CompensationRegistry()
     register_compensators(registry)
-    expected = {"write_file", "schedule_task", "heartbeat_check_create", "heartbeat_check_manage", "resolve_decision"}
-    for name in expected:
+    for name in ("write_file", "heartbeat_check_manage", "resolve_decision"):
         assert registry.is_registered(name), f"{name} not registered"
+    for name in ("schedule_task", "heartbeat_check_create"):
+        assert not registry.is_registered(name), f"{name} must not be revertible"
 
 
 # ---------------------------------------------------------------------------
@@ -888,3 +890,166 @@ def test_auto_review_requires_a2ui_and_persisted_ledger(off) -> None:
             compensation_auto_review_enabled=True,
             **off,
         )
+
+
+# ---------------------------------------------------------------------------
+# Option A: spawning tools are not compensable; heartbeat_check_manage is
+# compensable for action="disable" only.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("tool", ["schedule_task", "heartbeat_check_create"])
+def test_spawning_tools_are_not_compensable(tool) -> None:
+    """Cancelling a schedule/check after it fired does not undo the subtask it
+    spawned, so neither may run on an undoable node."""
+    assert not TOOL_CLASSES[tool].compensable
+    with pytest.raises(ValueError, match="compensable"):
+        CompensationRegistry().register(tool, compensate_write_file)
+    ctx = ExecutionContext(kind="dag_node", undoable=True)
+    assert evaluate(ctx, tool, {"name": "x", "task": "t"}) == "not_compensable"
+
+
+@pytest.mark.parametrize("tool", ["schedule_task", "heartbeat_check_create"])
+def test_undoable_node_refuses_spawning_tool_even_in_warn_mode(tool) -> None:
+    """The existing not_compensable force-block refuses them at the choke point."""
+    from test_runner_authorization import _runner
+
+    from nous.api.runner import Refusal
+
+    r, _ = _runner([tool], tool_context_policy_mode="warn")
+    ctx = ExecutionContext(kind="dag_node", undoable=True, session_id="s1")
+    refusal = r._authorize_tool_call(ctx, tool, {tool}, "s1", {"name": "x"})
+    assert isinstance(refusal, Refusal) and "not_compensable" in refusal.text
+
+
+@pytest.mark.parametrize("action", ["enable", "update", "delete", "Disable", None])
+def test_heartbeat_check_manage_only_disable_is_compensable(action) -> None:
+    from nous.api.tool_classes import is_compensable_call
+
+    inp = {"name": "c"} if action is None else {"name": "c", "action": action}
+    assert not is_compensable_call("heartbeat_check_manage", inp)
+    ctx = ExecutionContext(kind="dag_node", undoable=True)
+    assert evaluate(ctx, "heartbeat_check_manage", inp) == "not_compensable"
+
+
+def test_heartbeat_check_manage_disable_allowed_on_undoable_node() -> None:
+    from nous.api.tool_classes import is_compensable_call
+
+    inp = {"name": "c", "action": "disable"}
+    assert is_compensable_call("heartbeat_check_manage", inp)
+    assert evaluate(ExecutionContext(kind="dag_node", undoable=True), "heartbeat_check_manage", inp) is None
+
+
+@pytest.mark.asyncio
+async def test_compensate_heartbeat_check_manage_re_enables_a_disabled_check() -> None:
+    """The loader signature is manage_check(action, name=...)."""
+    from unittest.mock import AsyncMock
+
+    from nous.api.compensation import compensate_heartbeat_check_manage
+
+    loader = SimpleNamespace(manage_check=AsyncMock(return_value={"status": "enabled"}))
+    deps = SimpleNamespace(heartbeat_loader=loader)
+    res = await compensate_heartbeat_check_manage(uuid4(), {"check_name": "c", "action": "disable"}, deps)
+    assert res.success
+    loader.manage_check.assert_awaited_once_with("enable", name="c")
+
+    loader.manage_check.reset_mock()
+    res = await compensate_heartbeat_check_manage(uuid4(), {"check_name": "c", "action": "enable"}, deps)
+    assert not res.success
+    loader.manage_check.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("inp", "expected"),
+    [({"name": "c", "action": "disable"}, True), ({"name": "c", "action": "enable"}, False)],
+)
+async def test_capture_snapshots_heartbeat_check_manage_disable_only(inp, expected) -> None:
+    from unittest.mock import AsyncMock
+
+    from nous.api.runner import AgentRunner
+
+    runner = object.__new__(AgentRunner)
+    runner._snap_store = AsyncMock()
+    runner._workspace_dir = "/"
+    runner._dispatcher = SimpleNamespace()
+    got = await runner._capture_compensation_snapshot(
+        ExecutionContext(kind="subtask"), "heartbeat_check_manage", inp, uuid4()
+    )
+    assert got is expected
+    assert runner._snap_store.capture.await_count == int(expected)
+
+
+# ---------------------------------------------------------------------------
+# codex P2 (runner.py:525): background contexts snapshot regardless of undoable
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_capture_snapshot_in_background_non_undoable_context() -> None:
+    """Before the fix, `if not ctx.undoable: return False` meant a write_file
+    from a subtask/scheduled/heartbeat turn was never snapshotted."""
+    from unittest.mock import AsyncMock
+
+    from nous.api.runner import AgentRunner
+
+    runner = object.__new__(AgentRunner)
+    runner._snap_store = AsyncMock()
+    runner._workspace_dir = tempfile.gettempdir()
+    runner._dispatcher = SimpleNamespace()
+    inp = {"path": f"p2_{uuid4().hex[:8]}.txt", "content": "x"}
+
+    for kind in ("subtask", "scheduled", "heartbeat_callback", "background"):
+        assert await runner._capture_compensation_snapshot(ExecutionContext(kind=kind), "write_file", inp, uuid4())
+    # a foreground turn has a human in the loop: unchanged, no snapshot
+    assert not await runner._capture_compensation_snapshot(
+        ExecutionContext(kind="interactive"), "write_file", inp, uuid4()
+    )
+    assert runner._snap_store.capture.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_oversized_write_blocks_only_when_undoable() -> None:
+    """A non-undoable background write of a big file proceeds without a
+    snapshot (fail-open) instead of being newly refused."""
+    from unittest.mock import AsyncMock
+
+    from nous.api.runner import AgentRunner
+
+    runner = object.__new__(AgentRunner)
+    runner._snap_store = AsyncMock()
+    runner._workspace_dir = "/"
+    runner._dispatcher = SimpleNamespace()
+    big = {"path": "big.bin", "full_path": "/big.bin", "existed": True, "prior_content": None, "oversized": True}
+    with patch("nous.api.compensation.snapshot_for_write_file", new=AsyncMock(return_value=big)):
+        got = await runner._capture_compensation_snapshot(
+            ExecutionContext(kind="subtask"), "write_file", {"path": "big.bin", "content": "y"}, uuid4()
+        )
+    assert got is False
+    runner._snap_store.capture.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("kind", "background", "pushed"), [("subtask", True, 1), ("interactive", False, 0)])
+async def test_background_non_undoable_write_snapshots_and_pushes_review_once(kind, background, pushed) -> None:
+    """End to end through _tool_loop: one snapshot and one action_review card
+    per compensable background call, none for a foreground call."""
+    from unittest.mock import AsyncMock
+
+    from test_runner_authorization import _one_tool_call_then_done_with
+    from test_runner_ledger import _FakeStore, _run_loop
+    from test_runner_ledger import _runner as _ledger_runner
+
+    store = _FakeStore()
+    r, _ = _ledger_runner(store, compensation_enabled=True, compensation_auto_review_enabled=True)
+    snap_store = AsyncMock()
+    r.set_snapshot_store(snap_store, tempfile.gettempdir())
+    pusher = AsyncMock()
+    r.set_action_review_pusher(pusher)
+    r._call_api = _one_tool_call_then_done_with("write_file", {"path": f"p2_{uuid4().hex[:8]}.txt", "content": "x"})
+    await _run_loop(r, is_background=background, context=ExecutionContext(kind=kind, session_id="s1"))
+
+    assert snap_store.capture.await_count == pushed
+    assert pusher.await_count == pushed
+    if pushed:
+        assert pusher.await_args.args[:2] == ("write_file", "id-write_file")

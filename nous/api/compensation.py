@@ -8,6 +8,9 @@ compensator needs the database and domain objects at runtime.
 Snapshot lifecycle:
   1. Before dispatch of a compensable tool in a background context,
      ``SnapshotStore.capture`` persists the prior state.
+     Spawning tools (schedule_task, heartbeat_check_create) are deliberately
+     NOT compensable: cancelling after the first fire does not undo the work
+     it already started.
   2. On ``review.revert``, the handler reads the snapshot and calls the
      compensator. ``mark_reverted`` is idempotent (double revert = no-op).
 """
@@ -241,68 +244,29 @@ async def compensate_write_file(
         return CompensationResult(False, f"revert failed: {exc}")
 
 
-async def compensate_schedule_task(
-    entry_id: UUID,
-    snapshot_data: dict[str, Any],
-    deps: Any,
-) -> CompensationResult:
-    """Cancel a schedule that was created."""
-    schedule_id = snapshot_data.get("schedule_id")
-    if not schedule_id:
-        return CompensationResult(False, "no schedule_id in snapshot")
-    heart = getattr(deps, "heart", None)
-    if heart is None:
-        return CompensationResult(False, "heart not available")
-    try:
-        from nous.heart.schedules import deactivate_schedule
-
-        async with heart._db.session() as s:
-            ok = await deactivate_schedule(s, UUID(schedule_id), heart._agent_id)
-            await s.commit()
-        if ok:
-            return CompensationResult(True, f"cancelled schedule {schedule_id}")
-        return CompensationResult(True, f"schedule {schedule_id} already inactive")
-    except Exception as exc:
-        return CompensationResult(False, f"revert failed: {exc}")
-
-
-async def compensate_heartbeat_check_create(
-    entry_id: UUID,
-    snapshot_data: dict[str, Any],
-    deps: Any,
-) -> CompensationResult:
-    """Disable a heartbeat check that was created."""
-    check_name = snapshot_data.get("check_name")
-    if not check_name:
-        return CompensationResult(False, "no check_name in snapshot")
-    loader = getattr(deps, "heartbeat_loader", None)
-    if loader is None:
-        return CompensationResult(False, "heartbeat loader not available")
-    try:
-        await loader.manage_check(check_name, action="disable")
-        return CompensationResult(True, f"disabled check {check_name!r}")
-    except Exception as exc:
-        return CompensationResult(False, f"revert failed: {exc}")
-
-
 async def compensate_heartbeat_check_manage(
     entry_id: UUID,
     snapshot_data: dict[str, Any],
     deps: Any,
 ) -> CompensationResult:
-    """Reverse an enable/disable action on a heartbeat check."""
+    """Re-enable a heartbeat check the call disabled.
+
+    Only ``action="disable"`` is compensable (``is_compensable_call``), so the
+    runner only snapshots that action. Revert is a human tap on the
+    action_review card; a check that was already disabled before the call is
+    re-enabled too, since its prior state is not captured.
+    """
     check_name = snapshot_data.get("check_name")
-    prior_enabled = snapshot_data.get("prior_enabled")
-    if not check_name or prior_enabled is None:
-        return CompensationResult(False, "missing check_name or prior_enabled in snapshot")
+    if not check_name:
+        return CompensationResult(False, "no check_name in snapshot")
+    if snapshot_data.get("action") != "disable":
+        return CompensationResult(False, f"action {snapshot_data.get('action')!r} is not revertible")
     loader = getattr(deps, "heartbeat_loader", None)
     if loader is None:
         return CompensationResult(False, "heartbeat loader not available")
     try:
-        action = "enable" if prior_enabled else "disable"
-        await loader.manage_check(check_name, action=action)
-        state = "enabled" if prior_enabled else "disabled"
-        return CompensationResult(True, f"restored check {check_name!r} to {state}")
+        await loader.manage_check("enable", name=check_name)
+        return CompensationResult(True, f"re-enabled check {check_name!r}")
     except Exception as exc:
         return CompensationResult(False, f"revert failed: {exc}")
 
@@ -345,7 +309,5 @@ async def compensate_resolve_decision(
 def register_compensators(registry: CompensationRegistry) -> None:
     """Register all built-in compensators."""
     registry.register("write_file", compensate_write_file)
-    registry.register("schedule_task", compensate_schedule_task)
-    registry.register("heartbeat_check_create", compensate_heartbeat_check_create)
     registry.register("heartbeat_check_manage", compensate_heartbeat_check_manage)
     registry.register("resolve_decision", compensate_resolve_decision)
