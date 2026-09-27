@@ -29,6 +29,8 @@ interface Http {
     }
     suspend fun get(path: String): Response
     suspend fun postJson(path: String, body: String): Response
+    /** PUT with a JSON body — the token registration upsert (`/a2ui/push/tokens`). */
+    suspend fun putJson(path: String, body: String): Response
     /**
      * Open the SSE stream and deliver raw text chunks until EOF/error. The
      * implementation must never send `Last-Event-ID` (spec R2) and must

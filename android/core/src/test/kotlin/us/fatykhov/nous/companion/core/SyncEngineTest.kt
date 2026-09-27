@@ -22,10 +22,11 @@ class SyncEngineTest {
 
     /** Scripted HTTP: GET responses by path; the stream delivers `frames` then ends (EOF). */
     open class FakeHttp(private val gets: Map<String, Http.Response>, private val frames: List<String> = emptyList()) : Http {
-        val calls = mutableListOf<String>(); val posts = mutableListOf<Pair<String, String>>(); var streams = 0
+        val calls = mutableListOf<String>(); val posts = mutableListOf<Pair<String, String>>(); val puts = mutableListOf<Pair<String, String>>(); var streams = 0
         var postResponse = Http.Response(200, """{"ok":true,"message":"done","resolved":true}""", emptyMap())
         override suspend fun get(path: String): Http.Response { calls.add(path); return gets[path] ?: Http.Response(404, "{}", emptyMap()) }
         override suspend fun postJson(path: String, body: String): Http.Response { posts.add(path to body); return postResponse }
+        override suspend fun putJson(path: String, body: String): Http.Response { puts.add(path to body); return postResponse }
         override suspend fun stream(path: String, onOpen: () -> Unit, onChunk: (String) -> Unit) { calls.add(path); streams += 1; onOpen(); frames.forEach(onChunk) }
     }
     private fun ok(body: String, vararg h: Pair<String, String>) = Http.Response(200, body, h.toMap())

@@ -534,3 +534,201 @@ async def test_companion_routes_absent_without_a_build(
         response = await client.get("/companion")
 
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# F097 push routes
+#
+# These pin the CLIENT/SERVER CONTRACT, not just the handlers. The Android
+# TokenWorker builds one request; the route accepts one shape. Nothing else
+# in either codebase checks that those agree, and the first version of this
+# pair did not: the worker POSTed to a PUT-only route and treated the
+# resulting 405 as "this server has no push", so registration would have
+# failed silently, forever, while reporting success.
+# ---------------------------------------------------------------------------
+
+
+class FakePushService:
+    """Records calls; answers the way the real service does."""
+
+    def __init__(self, configured: bool = True) -> None:
+        self.configured = configured
+        self.registered: list[dict[str, Any]] = []
+        self.deregistered: list[str] = []
+        self.tested: list[str] = []
+
+    def client_config_payload(self) -> dict[str, Any]:
+        if not self.configured:
+            return {"enabled": False, "reason": "not configured"}
+        return {
+            "enabled": True,
+            "project_id": "p",
+            "application_id": "1:2:android:3",
+            "api_key": "A" + "b" * 38,
+            "sender_id": "12",
+        }
+
+    async def register(self, installation_id: str, **kwargs: Any) -> tuple[int, dict]:
+        self.registered.append({"installation_id": installation_id, **kwargs})
+        return 200, {"ok": True, "created": True}
+
+    async def deregister(self, installation_id: str) -> tuple[int, dict]:
+        self.deregistered.append(installation_id)
+        return 200, {"ok": True}
+
+    async def list_installations(self) -> dict:
+        return {"configured": self.configured, "installations": []}
+
+    async def send_test(self, installation_id: str) -> tuple[int, dict]:
+        self.tested.append(installation_id)
+        return 200, {"ok": True}
+
+
+@pytest.fixture
+def fake_push() -> FakePushService:
+    return FakePushService()
+
+
+@pytest_asyncio.fixture
+async def push_client(brain, heart, cognitive, db, settings, fake_service, fake_router, fake_push):
+    app = create_app(
+        MockAgentRunner(),
+        brain,
+        heart,
+        cognitive,
+        db,
+        settings,
+        surface_service=fake_service,
+        action_router=fake_router,
+        push_service=fake_push,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        yield c
+
+
+JSON = {"content-type": "application/json"}
+
+
+async def test_push_config_serves_the_four_public_values(push_client) -> None:
+    response = await push_client.get("/a2ui/push/config")
+
+    assert response.status_code == 200
+    assert response.json()["project_id"] == "p"
+
+
+async def test_push_config_is_200_even_when_unconfigured(
+    brain, heart, cognitive, db, settings, fake_service, fake_router
+) -> None:
+    """"Not configured" is an answer the app renders, not an outage.
+
+    A 503 here would be indistinguishable from the tailnet being down, which
+    is a different thing for the user to go and fix.
+    """
+    app = create_app(
+        MockAgentRunner(), brain, heart, cognitive, db, settings,
+        surface_service=fake_service, action_router=fake_router,
+        push_service=FakePushService(configured=False),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        response = await c.get("/a2ui/push/config")
+
+    assert response.status_code == 200
+    assert response.json() == {"enabled": False, "reason": "not configured"}
+
+
+async def test_push_config_without_a_push_service_is_not_an_error(client) -> None:
+    """An older deployment answers the same way: disabled, with a reason."""
+    response = await client.get("/a2ui/push/config")
+
+    assert response.status_code == 200
+    assert response.json()["enabled"] is False
+
+
+async def test_register_accepts_the_exact_body_the_android_worker_sends(
+    push_client, fake_push
+) -> None:
+    """Verb AND field names, together, as TokenWorker builds them."""
+    response = await push_client.put(
+        "/a2ui/push/tokens",
+        json={
+            "installation_id": "abc",
+            "fcm_token": "tok",
+            "name": "Pixel",
+            "app_version": "0.1.0",
+            "notifications_enabled": True,
+        },
+        headers=JSON,
+    )
+
+    assert response.status_code == 200
+    assert fake_push.registered == [
+        {
+            "installation_id": "abc",
+            "fcm_token": "tok",
+            "name": "Pixel",
+            "app_version": "0.1.0",
+            "notifications_enabled": True,
+        }
+    ]
+
+
+async def test_register_rejects_a_non_json_content_type(push_client) -> None:
+    """The CSRF control, same as /a2ui/action: a cross-origin simple request
+    cannot carry application/json without a preflight."""
+    response = await push_client.put(
+        "/a2ui/push/tokens", content="{}", headers={"content-type": "text/plain"}
+    )
+
+    assert response.status_code == 415
+
+
+async def test_register_rejects_a_non_object_body(push_client) -> None:
+    response = await push_client.put("/a2ui/push/tokens", json=[1, 2], headers=JSON)
+
+    assert response.status_code == 400
+
+
+async def test_deregister_routes_the_path_parameter(push_client, fake_push) -> None:
+    response = await push_client.delete("/a2ui/push/tokens/abc")
+
+    assert response.status_code == 200
+    assert fake_push.deregistered == ["abc"]
+
+
+async def test_installations_listing_is_served(push_client) -> None:
+    response = await push_client.get("/a2ui/push/installations")
+
+    assert response.status_code == 200
+    assert response.json()["installations"] == []
+
+
+async def test_installations_is_not_swallowed_by_the_token_detail_route(
+    push_client, fake_push
+) -> None:
+    """Route ordering: /tokens/{id} must not shadow a sibling collection."""
+    await push_client.get("/a2ui/push/installations")
+
+    assert fake_push.deregistered == []
+
+
+async def test_test_push_routes_and_reports(push_client, fake_push) -> None:
+    response = await push_client.post(
+        "/a2ui/push/test", json={"installation_id": "abc"}, headers=JSON
+    )
+
+    assert response.status_code == 200
+    assert fake_push.tested == ["abc"]
+
+
+async def test_push_routes_are_503_without_the_service(client) -> None:
+    """Everything except /config, which reports a reason instead."""
+    for method, path in (
+        ("put", "/a2ui/push/tokens"),
+        ("post", "/a2ui/push/test"),
+    ):
+        response = await getattr(client, method)(path, json={}, headers=JSON)
+        assert response.status_code == 503, path
+
+    assert (await client.get("/a2ui/push/installations")).status_code == 503
+    assert (await client.delete("/a2ui/push/tokens/x")).status_code == 503

@@ -39,6 +39,11 @@ class OkHttpTransport(private val settings: Settings) : Http {
         return client.newCall(req).await()
     }
 
+    override suspend fun putJson(path: String, body: String): Http.Response {
+        val req = Request.Builder().url(url(path)).put(body.toRequestBody("application/json".toMediaType())).build()
+        return plain.newCall(req).await()
+    }
+
     override suspend fun stream(path: String, onOpen: () -> Unit, onChunk: (String) -> Unit) = withContext(Dispatchers.IO) {
         val req = Request.Builder().url(url(path)).header("Accept", "text/event-stream").get().build()
         val c = stream.newCall(req)
