@@ -27,6 +27,9 @@ class NousMessagingService : FirebaseMessagingService() {
         val d = message.data
         if (d["v"] != "1") return
         val graph = (application as NousApp).graph
+        // A disconnected phone still has an initialised FirebaseApp until the
+        // process dies; a push that races the deregistration must not post.
+        if (!graph.settings.configured) return
         when (d["type"]) {
             "surface" -> {
                 val id = d["surface_id"] ?: return
@@ -47,6 +50,11 @@ class NousMessagingService : FirebaseMessagingService() {
     override fun onDeletedMessages() { ReconcileFlag.pending = true }
 
     private fun post(ctx: Context, surfaceId: String, title: String, body: String, priority: Int, expiresAt: String?) {
+        val remaining = expiresAt?.let { runCatching { java.time.OffsetDateTime.parse(it).toInstant().toEpochMilli() - System.currentTimeMillis() }.getOrNull() }
+        // A delayed push for a card that has already expired: posting it would
+        // show stale content with NO timeout, until a dismiss or hydration
+        // happened to clear it (codex P2).
+        if (remaining != null && remaining <= 0) return
         val intent = Intent(ctx, MainActivity::class.java).apply {
             // The data URI only makes each PendingIntent distinct; there is no exported scheme.
             data = Uri.parse("nouscompanion://s/${Uri.encode(surfaceId)}")
@@ -58,9 +66,7 @@ class NousMessagingService : FirebaseMessagingService() {
             .setContentTitle(title).setContentText(body)
             .setStyle(Notification.BigTextStyle().bigText(body))
             .setContentIntent(pi).setAutoCancel(true)
-            .apply {
-                expiresAt?.let { runCatching { java.time.OffsetDateTime.parse(it).toInstant().toEpochMilli() - System.currentTimeMillis() }.getOrNull()?.takeIf { ms -> ms > 0 }?.let { ms -> setTimeoutAfter(ms) } }
-            }
+            .apply { remaining?.let { setTimeoutAfter(it) } }
             .build()
         (ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(surfaceId, PushManager.NOTIF_ID, n)
     }
@@ -69,6 +75,10 @@ class NousMessagingService : FirebaseMessagingService() {
 object Notifications {
     fun cancel(ctx: Context, surfaceId: String) {
         (ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(surfaceId, PushManager.NOTIF_ID)
+    }
+    /** Disconnect: nothing this phone shows may outlive its registration. */
+    fun cancelAll(ctx: Context) {
+        (ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancelAll()
     }
     /** Spec §6.6 reconcile: cancel every active notification whose tag is not live. */
     fun reconcile(ctx: Context, liveIds: Set<String>) {

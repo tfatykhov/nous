@@ -171,3 +171,20 @@ class FunctionsTest {
         assertEquals("NaN", Functions.toFixed(Double.NaN, 2)); assertEquals("Infinity", Functions.toFixed(Double.POSITIVE_INFINITY, 1))
     }
 }
+
+class FunctionsCodexRound1Test {
+    @Test fun jsNumberPastLongDoesNotSaturate() {
+        assertEquals("100000000000000000000", Functions.jsNumber(1e20))
+        assertEquals("-100000000000000000000", Functions.jsNumber(-1e20))
+        assertEquals("123456789012345680000", Functions.jsNumber(123456789012345678901.0))   // JS: shortest digits, zero-padded
+        assertEquals("9007199254740992", Functions.jsNumber(9007199254740992.0))
+        assertEquals("0", Functions.jsNumber(-0.0))
+    }
+
+    @Test fun invalidCalendarDateFormatsAsEmptyNotAThrow() {
+        val f = Functions()
+        assertEquals("", f.formatDateCldr(kotlinx.serialization.json.JsonPrimitive("2025-02-30"), "MMMM d, yyyy"))
+        assertEquals("", f.formatDateCldr(kotlinx.serialization.json.JsonPrimitive("2025-13-01"), "MMMM d, yyyy"))
+        assertEquals("February 28, 2025", f.formatDateCldr(kotlinx.serialization.json.JsonPrimitive("2025-02-28"), "MMMM d, yyyy"))
+    }
+}

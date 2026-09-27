@@ -31,6 +31,8 @@ interface Http {
     suspend fun postJson(path: String, body: String): Response
     /** PUT with a JSON body — the token registration upsert (`/a2ui/push/tokens`). */
     suspend fun putJson(path: String, body: String): Response
+    /** DELETE — the only way to deregister a push installation (spec §6.3). */
+    suspend fun delete(path: String): Response
     /**
      * Open the SSE stream and deliver raw text chunks until EOF/error. The
      * implementation must never send `Last-Event-ID` (spec R2) and must
@@ -95,20 +97,31 @@ class SyncEngine(
                 if (upto > 0) store.setSurfaceUpto(id, upto)
             }
             store.setDeliveredFloor(idx["latest_seq"]?.jsonPrimitive?.longOrNull ?: 0L)
-            store.connection = Connection.LIVE
-            attempt = 0
+            // LIVE is published from the stream's onOpen, not here. The web
+            // sets 'live' right after CONSTRUCTING its EventSource (transport.ts),
+            // which is before the socket opens — so a hydration that succeeds
+            // while the stream endpoint is unreachable presents stale snapshots
+            // as current with actions enabled, and resets the backoff counter
+            // every cycle so the retry never grows past its first tier. The
+            // OkHttp transport has a real open (the 200), so this port uses it;
+            // the same fix is owed to the web (codex round 1 on #659).
             val parser = SseParser()
             var resync = false
-            http.stream("/a2ui/stream?since=${store.lastSeq}", onOpen = {}) { chunk ->
+            var opened = false
+            http.stream("/a2ui/stream?since=${store.lastSeq}", onOpen = {
+                opened = true
+                store.connection = Connection.LIVE
+                attempt = 0
+            }) { chunk ->
                 for (ev in parser.feed(chunk)) when (ev.event) {
                     "a2ui" -> store.apply(ev.id, Json.parseToJsonElement(ev.data).jsonObject)
                     "control" -> if ((Json.parseToJsonElement(ev.data) as? JsonObject)?.get("type")?.stringOrNull == "resync") resync = true
                 }
             }
             // Stream ended (EOF, error, or resync request). R2/R5: never resume; rehydrate.
-            reconnects += 1
+            if (opened) reconnects += 1
             if (resync) { store.resync(); return true }
-            lastError = "stream ended"
+            lastError = if (opened) "stream ended" else "stream did not open"
             store.connection = Connection.ERROR; attempt += 1
             return false
         } catch (e: kotlinx.coroutines.CancellationException) { throw e }

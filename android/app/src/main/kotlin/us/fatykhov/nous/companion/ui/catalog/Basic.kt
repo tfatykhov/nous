@@ -196,7 +196,10 @@ private const val UNKNOWN_ICON = "M11 18h2v-2h-2v2zm1-16C6.48 2 2 6.48 2 12s4.48
 fun IconView(node: Node.Render) {
     val host = LocalSurfaceHost.current; val t = LocalNousTheme.current
     val raw = host.resolve(node.props["name"], node.scope)
-    val path = (raw as? JsonObject)?.str("svgPath") ?: raw?.stringOrNull?.let { ICONS[it] } ?: UNKNOWN_ICON
+    // A custom icon's `svgPath` is itself a DynamicString: `{svgPath: {path: "/icons/x"}}`
+    // is schema-valid, and resolving only the outer object left the binding unread.
+    val custom = (raw as? JsonObject)?.get("svgPath")?.let { host.resolve(it, node.scope) }?.stringOrNull
+    val path = custom ?: raw?.stringOrNull?.let { ICONS[it] } ?: UNKNOWN_ICON
     val p = remember(path) { runCatching { PathParser().parsePathString(path).toPath() }.getOrNull() ?: Path() }
     androidx.compose.foundation.Canvas(modifier = Modifier.size(20.dp).semantics { contentDescription = raw?.stringOrNull ?: "icon" }) {
         val s = size.minDimension / 24f
@@ -213,7 +216,12 @@ fun ButtonView(node: Node.Render) {
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
     val failures = host.functions.runChecks(node.props["checks"] as? JsonArray, host.ctx(node.scope))
-    val enabled = !busy && failures.isEmpty()
+    // Actions pause while not LIVE: during a reconnect backoff the snapshot on
+    // screen may be stale, and an approval submitted against it would be
+    // accepted by the server if the card was merely UPDATED rather than
+    // resolved. The Inbox already hides itself on ERROR; this is the same
+    // rule at the action itself (codex P1).
+    val enabled = !busy && failures.isEmpty() && host.store.connection == us.fatykhov.nous.companion.core.Connection.LIVE
     val onClick: () -> Unit = {
         error = ""
         val action = node.props["action"] as? JsonObject

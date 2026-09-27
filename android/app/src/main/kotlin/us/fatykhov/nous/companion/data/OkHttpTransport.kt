@@ -44,20 +44,34 @@ class OkHttpTransport(private val settings: Settings) : Http {
         return plain.newCall(req).await()
     }
 
-    override suspend fun stream(path: String, onOpen: () -> Unit, onChunk: (String) -> Unit) = withContext(Dispatchers.IO) {
+    override suspend fun delete(path: String): Http.Response =
+        plain.newCall(Request.Builder().url(url(path)).delete().build()).await()
+
+    /**
+     * The blocking read stays on IO; `onOpen` and every chunk are delivered on
+     * the CALLER's dispatcher (Main). `SyncEngine` applies chunks straight into
+     * `SurfaceStore`, which is main-confined and read by Compose — applying
+     * from the IO thread raced local edits and recomposition (codex P1).
+     *
+     * Chunks are whole lines, not byte windows: OkHttp hands back arbitrary
+     * byte counts, and a fresh `String(bytes)` per window replaces the two
+     * halves of a multi-byte character with U+FFFD. okio decodes a line only
+     * once it is complete, so non-ASCII text arrives intact (codex P2).
+     */
+    override suspend fun stream(path: String, onOpen: () -> Unit, onChunk: (String) -> Unit) {
         val req = Request.Builder().url(url(path)).header("Accept", "text/event-stream").get().build()
         val c = stream.newCall(req)
         activeStream = c
         try {
-            c.execute().use { res ->
-                if (!res.isSuccessful) return@use
-                onOpen()
-                val src = res.body.source()
-                val buf = ByteArray(8 * 1024)
-                while (true) {
-                    val n = src.read(buf)
-                    if (n < 0) break
-                    onChunk(String(buf, 0, n, Charsets.UTF_8))
+            withContext(Dispatchers.IO) {
+                c.execute().use { res ->
+                    if (!res.isSuccessful) return@use
+                    withContext(Dispatchers.Main.immediate) { onOpen() }
+                    val src = res.body.source()
+                    while (true) {
+                        val line = src.readUtf8Line() ?: break
+                        withContext(Dispatchers.Main.immediate) { onChunk(line + "\n") }
+                    }
                 }
             }
         } catch (_: IOException) {

@@ -151,11 +151,21 @@ fun BarChartView(node: Node.Render) {
     Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(Functions.toDisplayString(node.props["label"]), color = t.muted, fontSize = 12.sp)
         if (!SeriesState(series, kind)) {
+            // A negative bar is as long as its magnitude (zero-based, §3) and must
+            // never read as positive: the web hatches it and prints the signed value.
+            // Here: a hollow bar (outline, dimmed fill) plus the signed label — the
+            // vertical layout previously showed only the category, so −10 and +10
+            // were identical (codex P1).
+            @Composable fun bar(v: Double, m: Modifier) = Box(
+                if (v < 0) m.background(t.tone(tone).copy(alpha = 0.25f), RoundedCornerShape(2.dp)).border(1.dp, t.tone(tone), RoundedCornerShape(2.dp))
+                else m.background(t.tone(tone), RoundedCornerShape(2.dp)),
+            )
             if (horizontal) Column(verticalArrangement = Arrangement.spacedBy(4.dp)) { for ((cat, v) in bars) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(cat, color = t.muted, fontSize = 11.sp, modifier = Modifier.width(72.dp)); Box(Modifier.weight(1f).height(10.dp)) { Box(Modifier.fillMaxWidth((Math.abs(v) / maxAbs).toFloat().coerceIn(0f, 1f)).height(10.dp).background(t.tone(tone), RoundedCornerShape(2.dp))) }
+                Text(cat, color = t.muted, fontSize = 11.sp, modifier = Modifier.width(72.dp)); Box(Modifier.weight(1f).height(10.dp)) { bar(v, Modifier.fillMaxWidth((Math.abs(v) / maxAbs).toFloat().coerceIn(0f, 1f)).height(10.dp)) }
                 Text(Chart.formatTick(v), color = t.text, fontFamily = t.mono, fontSize = 11.sp) } }
-            else Row(Modifier.fillMaxWidth().height(120.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.Bottom) { for ((cat, v) in bars) Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                Box(Modifier.fillMaxWidth().height((100 * Math.abs(v) / maxAbs).toFloat().coerceIn(0f, 100f).dp).background(t.tone(tone), RoundedCornerShape(2.dp))); Text(cat.takeLast(5), color = t.chartAxis, fontSize = 9.sp, fontFamily = t.mono) } }
+            else Row(Modifier.fillMaxWidth().height(140.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.Bottom) { for ((cat, v) in bars) Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(Chart.formatTick(v), color = t.text, fontFamily = t.mono, fontSize = 9.sp)
+                bar(v, Modifier.fillMaxWidth().height((100 * Math.abs(v) / maxAbs).toFloat().coerceIn(0f, 100f).dp)); Text(cat.takeLast(5), color = t.chartAxis, fontSize = 9.sp, fontFamily = t.mono) } }
         }
     }
 }

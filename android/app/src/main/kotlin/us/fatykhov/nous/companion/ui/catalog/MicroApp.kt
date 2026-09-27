@@ -110,6 +110,10 @@ fun AppFooterView(node: Node.Render) {
     var closing by remember { mutableStateOf(false) }
     val closeArm = remember { Shell.CloseAll { System.currentTimeMillis() } }
     var armed by remember { mutableStateOf(false) }
+    // The 4 s expiry lived only in a non-observable getter, so an armed
+    // "sure? close" stayed on screen until something else recomposed. Disarm
+    // on a timer, like the web's setTimeout (codex P2).
+    LaunchedEffect(armed) { if (armed) { delay(Shell.CLOSE_ALL_ARM_MS); armed = false; closeArm.disarm() } }
     val meta = metaOf(host)
     val pending = ActivityRules.pendingActionOf(meta)
     val now = rememberNow(fast = pending != null || host.store.activity[host.surfaceId] != null)
@@ -172,9 +176,13 @@ fun SectionView(node: Node.Render) {
     Column(modifier = Modifier.fillMaxWidth().then(if (model) Modifier.border(1.dp, t.warn, RoundedCornerShape(8.dp)).padding(8.dp) else Modifier).alpha(if (dimmed) 0.72f else 1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         HorizontalDivider(color = t.border)
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().then(if (collapsible) Modifier.clickable { open = !open } else Modifier)) {
+            // Both weighted: an unweighted caption is measured FIRST and a long one
+            // takes the whole row, leaving the weighted title zero width — which
+            // Compose renders as one letter per line ("S/i/g/n/a/l/s", seen on the
+            // Bitsgap app). CSS never goes below a word's width; Compose will.
             Text(node.props.str("title") ?: "", color = t.text, fontSize = if (layout == "hero") 20.sp else 15.sp, fontWeight = FontWeight.SemiBold, fontFamily = t.display, modifier = Modifier.weight(1f))
             if (model) Text("model-supplied", color = t.warn, fontSize = 11.sp, modifier = Modifier.border(1.dp, t.warn, RoundedCornerShape(999.dp)).padding(horizontal = 6.dp, vertical = 1.dp))
-            if (caption.isNotEmpty()) Text(caption, color = t.muted, fontSize = 12.sp)
+            if (caption.isNotEmpty()) Text(caption, color = t.muted, fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End, modifier = Modifier.weight(1.4f))
             if (collapsible) Text(if (open) "▾" else "▸", color = t.muted)
         }
         // A collapsed panel is NOT composed (mirrors Tabs); layouts grid-2/grid-3/cards/rail lay out the child's items —

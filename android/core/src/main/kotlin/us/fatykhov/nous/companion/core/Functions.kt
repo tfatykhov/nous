@@ -113,7 +113,13 @@ class Functions(
         fun jsNumber(d: Double): String {
             if (d.isNaN()) return "NaN"
             if (d.isInfinite()) return if (d > 0) "Infinity" else "-Infinity"
-            if (d == Math.floor(d) && Math.abs(d) < 1e21) return d.toLong().toString()
+            if (d == Math.floor(d) && Math.abs(d) < 1e21) {
+                if (Math.abs(d) < 9.0e18) return d.toLong().toString()
+                // Past Long, `toLong()` saturates (1e20 → 9223372036854775807). JS prints the
+                // shortest round-trip digits then pads with zeros; expanding Double.toString's
+                // exponent form does exactly that (1.0E20 → 100000000000000000000).
+                return java.math.BigDecimal(d.toString()).stripTrailingZeros().toPlainString()
+            }
             return d.toString()
         }
 
@@ -311,7 +317,10 @@ class Functions(
     fun formatDateCldr(value: JsonElement?, pattern: String): String {
         val raw = toDisplayString(value)
         val d: ZonedDateTime = JsRegex.compile("""^(\d{4})-(\d{2})-(\d{2})$""").find(raw)?.let { m ->
-            LocalDate.of(m.groupValues[1].toInt(), m.groupValues[2].toInt(), m.groupValues[3].toInt()).atStartOfDay(zone)
+            // A date that matches the shape but is not a calendar date (2025-02-30) is ""
+            // — the web's `Number.isNaN(date.getTime())` check — never a throw that aborts a render.
+            try { LocalDate.of(m.groupValues[1].toInt(), m.groupValues[2].toInt(), m.groupValues[3].toInt()).atStartOfDay(zone) }
+            catch (_: java.time.DateTimeException) { return "" }
         } ?: run {
             try { OffsetDateTime.parse(raw).atZoneSameInstant(zone) } catch (_: Exception) {
                 try { LocalDateTime.parse(raw).atZone(zone) } catch (_: Exception) { return "" }

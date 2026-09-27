@@ -27,6 +27,7 @@ class SyncEngineTest {
         override suspend fun get(path: String): Http.Response { calls.add(path); return gets[path] ?: Http.Response(404, "{}", emptyMap()) }
         override suspend fun postJson(path: String, body: String): Http.Response { posts.add(path to body); return postResponse }
         override suspend fun putJson(path: String, body: String): Http.Response { puts.add(path to body); return postResponse }
+        override suspend fun delete(path: String): Http.Response { calls.add("DELETE $path"); return Http.Response(200, "{}", emptyMap()) }
         override suspend fun stream(path: String, onOpen: () -> Unit, onChunk: (String) -> Unit) { calls.add(path); streams += 1; onOpen(); frames.forEach(onChunk) }
     }
     private fun ok(body: String, vararg h: Pair<String, String>) = Http.Response(200, body, h.toMap())
@@ -132,5 +133,49 @@ class SyncEngineTest {
         assertNull(body["callAgentFunction"]!!.jsonObject["metadata"])
         http.postResponse = Http.Response(200, """{"agentFunctionResponse":{"error":{"code":"X","message":"boom"}}}""", emptyMap())
         val err = e.callAgentFunction("s1", "app.refine", JsonObject(emptyMap())); assertFalse(err.ok); assertEquals("boom", err.message)
+    }
+}
+
+class SyncEngineOpenGateTest {
+    private val unconfined = CoroutineScope(Dispatchers.Unconfined)
+    private fun ok(body: String) = Http.Response(200, body, emptyMap())
+
+    /** A stream that ends without ever opening (endpoint unreachable, proxy refuses streaming). */
+    class NeverOpens(gets: Map<String, Http.Response>) : SyncEngineTest.FakeHttp(gets) {
+        override suspend fun stream(path: String, onOpen: () -> Unit, onChunk: (String) -> Unit) { calls.add(path); streams += 1 }
+    }
+
+    @Test fun liveIsPublishedOnlyWhenTheStreamOpens() = runTest {
+        val store = SurfaceStore()
+        val seen = mutableListOf<Connection>()
+        store.onChange { seen.add(store.connection) }
+        val e = SyncEngine(store, NeverOpens(mapOf("/a2ui/surfaces" to ok("""{"latest_seq":1,"surfaces":[]}"""))), unconfined)
+
+        assertFalse(e.cycle())
+
+        assertFalse(Connection.LIVE in seen, "hydration succeeded but the tail never opened: nothing may be presented as live")
+        assertEquals(Connection.ERROR, store.connection)
+        assertEquals("stream did not open", e.lastError)
+    }
+
+    @Test fun backoffGrowsWhenTheStreamKeepsFailingToOpen() = runTest {
+        val store = SurfaceStore()
+        val e = SyncEngine(store, NeverOpens(mapOf("/a2ui/surfaces" to ok("""{"latest_seq":1,"surfaces":[]}"""))), unconfined)
+
+        e.cycle(); e.cycle(); e.cycle()
+
+        assertEquals(3, e.attempt, "attempt must not reset to 0 on a cycle whose stream never opened")
+        assertEquals(0, e.reconnects)
+    }
+
+    @Test fun anOpenedStreamResetsTheBackoff() = runTest {
+        val store = SurfaceStore()
+        val http = SyncEngineTest.FakeHttp(mapOf("/a2ui/surfaces" to ok("""{"latest_seq":1,"surfaces":[]}""")))
+        val e = SyncEngine(store, http, unconfined)
+
+        e.cycle(); e.cycle()
+
+        assertEquals(1, e.attempt, "each opened stream resets attempt to 0 before EOF bumps it to 1")
+        assertEquals(2, e.reconnects)
     }
 }

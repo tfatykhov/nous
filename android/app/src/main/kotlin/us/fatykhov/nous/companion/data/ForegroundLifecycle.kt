@@ -6,7 +6,10 @@ import android.net.Network
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import kotlinx.coroutines.launch
 import us.fatykhov.nous.companion.core.Connection
+import us.fatykhov.nous.companion.push.Notifications
+import us.fatykhov.nous.companion.push.ReconcileFlag
 
 /**
  * Spec §7.3: the SSE stream runs only while the app is in the foreground.
@@ -16,6 +19,8 @@ import us.fatykhov.nous.companion.core.Connection
  * the stream so R2 reconnects immediately.
  */
 class ForegroundLifecycle(private val graph: AppGraph) : DefaultLifecycleObserver {
+    private var lastConnection: Connection? = null
+
     fun install() {
         ProcessLifecycleOwner.get().lifecycle.addObserver(this)
         val cm = graph.appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
@@ -23,13 +28,33 @@ class ForegroundLifecycle(private val graph: AppGraph) : DefaultLifecycleObserve
             override fun onLost(network: Network) { graph.http.cancelStream() }
             override fun onAvailable(network: Network) { graph.http.cancelStream() }
         })
+        // Spec §6.6 reconcile runs on EVERY completed hydration, from the store
+        // — not from a screen. It used to live in the Inbox composable, so a
+        // cold start from a notification (which opens the Surface route) or a
+        // foreground on Settings never reconciled, and `onDeletedMessages`'s
+        // pending flag had no consumer until the user happened to visit the
+        // inbox (codex P2).
+        graph.store.onChange {
+            val now = graph.store.connection
+            val becameLive = now == Connection.LIVE && lastConnection != Connection.LIVE
+            lastConnection = now
+            if (now == Connection.LIVE && (becameLive || ReconcileFlag.pending)) {
+                Notifications.reconcile(graph.appContext, graph.store.surfaces.keys.toSet())
+                ReconcileFlag.pending = false
+            }
+        }
     }
 
     override fun onStart(owner: LifecycleOwner) {
         if (!graph.settings.configured) return
         graph.store.connection = Connection.RESYNCING
         graph.engine.connect()
-        graph.push.registerIfPossible()
+        // A config fetch that failed at first run (transient outage) left no
+        // Firebase options, and registerIfPossible() is a no-op without them —
+        // push would stay off for the life of the install. Fetch again when
+        // missing; otherwise just re-register (codex P2).
+        if (graph.settings.firebaseOptions == null) graph.mainScope.launch { graph.push.refreshConfig() }
+        else graph.push.registerIfPossible()
     }
 
     override fun onStop(owner: LifecycleOwner) {

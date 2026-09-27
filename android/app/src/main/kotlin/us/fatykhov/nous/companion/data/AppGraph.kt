@@ -17,7 +17,9 @@ class AppGraph(context: Context) {
     val mainScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     val http = OkHttpTransport(settings)
     val engine = SyncEngine(store, http, mainScope)
-    val functions = Functions(fmt = AndroidFormatter, opener = { url -> UrlOpener.open(appContext, url) })
+    // The device zone, not the :core default of UTC: the web formatter uses LOCAL
+    // date getters, so an offset-bearing timestamp shows the user's wall clock.
+    val functions = Functions(fmt = AndroidFormatter, opener = { url -> UrlOpener.open(appContext, url) }, zone = java.time.ZoneId.systemDefault())
     val push = PushManager(appContext, settings, http)
     val lifecycle = ForegroundLifecycle(this)
 }

@@ -72,9 +72,13 @@ fun Children(children: JsonElement?, node: Node.Render) {
     val host = LocalSurfaceHost.current
     val s = host.surface ?: return
     val walker = Walker(UiRegistry.names)
+    // Keyed by component identity, like the web's keyed each: an
+    // `updateComponents` that inserts or reorders children would otherwise
+    // hand a sibling's remembered state (a Modal's open, a Tabs' selection,
+    // a Button's busy) to whichever component now sits at that position.
     for (c in walker.children(s, children, node.scope)) when (c) {
-        is Child.Static -> Render(c.componentId, node.scope, node.depth, node.ancestors)
-        is Child.Template -> Render(c.componentId, c.scope, node.depth, node.ancestors)
+        is Child.Static -> androidx.compose.runtime.key(c.componentId) { Render(c.componentId, node.scope, node.depth, node.ancestors) }
+        is Child.Template -> androidx.compose.runtime.key(c.componentId, c.scope) { Render(c.componentId, c.scope, node.depth, node.ancestors) }
         is Child.Omitted -> Text(c.note, color = LocalNousTheme.current.muted, fontSize = 12.sp)
     }
 }

@@ -3,7 +3,8 @@ package us.fatykhov.nous.companion.ui.catalog
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -39,6 +40,7 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import us.fatykhov.nous.companion.core.Functions
+import us.fatykhov.nous.companion.core.GNode
 import us.fatykhov.nous.companion.core.Graphs
 import us.fatykhov.nous.companion.core.Node
 import us.fatykhov.nous.companion.core.stringOrNull
@@ -212,15 +214,49 @@ fun MemoryGraphView(node: Node.Render) {
     val scope = rememberCoroutineScope()
     var selected by remember { mutableStateOf("") }
     var error by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    val expanded = remember { mutableSetOf<String>() }
     val nodes = Graphs.graphNodes(host.resolve(node.props["nodes"], node.scope))
     val edges = Graphs.graphEdges(host.resolve(node.props["edges"], node.scope))
     val focus = Graphs.focusId(node.props.str("focusNodeId"), nodes)
     val pos = Graphs.radialLayout(nodes, focus)
     val density = androidx.compose.ui.platform.LocalDensity.current
+    // Port of MemoryGraphView.expand: select, call expandGraphNode over /a2ui/call,
+    // and merge the returned neighbourhood into the surface's LOCAL data model,
+    // deduped so re-expansion and overlapping neighbourhoods never duplicate.
+    fun expand(n: GNode) {
+        if (busy) return
+        selected = n.id
+        if (n.id in expanded) return
+        busy = true; error = ""
+        scope.launch {
+            val r = host.engine.callAgentFunction(host.surfaceId, "expandGraphNode", buildJsonObject { put("nodeId", n.id); put("nodeType", n.type ?: "fact") })
+            busy = false
+            if (!r.ok) { error = r.message; return@launch }
+            expanded.add(n.id)
+            val value = r.value as? JsonObject ?: return@launch
+            val dm = host.surface?.dataModel as? JsonObject ?: return@launch
+            val mergedNodes = ((dm["nodes"] as? JsonArray)?.toList() ?: emptyList()).toMutableList()
+            val knownN = mergedNodes.mapNotNull { (it as? JsonObject)?.str("id") }.toMutableSet()
+            for (el in (value["nodes"] as? JsonArray) ?: JsonArray(emptyList())) { val id = (el as? JsonObject)?.str("id"); if (id != null && knownN.add(id)) mergedNodes.add(el) }
+            fun key(e: JsonObject) = "${e.str("source")}→${e.str("target")}:${e.str("relation") ?: ""}"
+            val mergedEdges = ((dm["edges"] as? JsonArray)?.toList() ?: emptyList()).toMutableList()
+            val knownE = mergedEdges.mapNotNull { (it as? JsonObject)?.let(::key) }.toMutableSet()
+            for (el in (value["edges"] as? JsonArray) ?: JsonArray(emptyList())) { val o = el as? JsonObject ?: continue; if (o.str("source") != null && o.str("target") != null && knownE.add(key(o))) mergedEdges.add(el) }
+            host.store.patchLocal(host.surfaceId, "/nodes", JsonArray(mergedNodes))
+            host.store.patchLocal(host.surfaceId, "/edges", JsonArray(mergedEdges))
+        }
+    }
     Column(modifier = Modifier.fillMaxWidth().background(t.surface, RoundedCornerShape(8.dp)).border(1.dp, t.border, RoundedCornerShape(8.dp)).padding(6.dp)) {
         Canvas(modifier = Modifier.fillMaxWidth().height(with(density) { Graphs.GRAPH_H.toFloat().toDp() })
-            .clickable {
-                // Tap → nearest node → expandGraphNode RPC (merge is server data; the web merges locally, PR 5 parity).
+            .pointerInput(nodes, pos) {
+                detectTapGestures { off ->
+                    // Nearest node within a finger's radius; the layout is in GRAPH_W×GRAPH_H, x scaled to the canvas.
+                    val sx = size.width / Graphs.GRAPH_W.toFloat()
+                    val hit = nodes.mapNotNull { n -> pos[n.id]?.let { p -> n to Math.hypot((p.x.toFloat() * sx - off.x).toDouble(), (p.y.toFloat() - off.y).toDouble()) } }
+                        .minByOrNull { it.second }?.takeIf { it.second <= 28f * density.density }?.first
+                    if (hit != null) expand(hit)
+                }
             }) {
             val sx = size.width / Graphs.GRAPH_W.toFloat()
             for (e in edges) {
@@ -234,6 +270,7 @@ fun MemoryGraphView(node: Node.Render) {
                 if (n.id == selected) drawCircle(t.text, radius = r, center = Offset(p.x.toFloat() * sx, p.y.toFloat()), style = Stroke(2f))
             }
         }
+        if (busy) Text("expanding…", color = t.muted, fontSize = 12.sp)
         if (error.isNotEmpty()) Text(error, color = t.crit, fontSize = 12.sp)
     }
 }

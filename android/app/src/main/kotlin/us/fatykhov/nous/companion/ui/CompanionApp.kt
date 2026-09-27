@@ -40,15 +40,20 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 import us.fatykhov.nous.companion.core.Connection
+import us.fatykhov.nous.companion.core.Net
 import us.fatykhov.nous.companion.core.Shell
 import us.fatykhov.nous.companion.core.SurfaceState
 import us.fatykhov.nous.companion.data.AppGraph
 import us.fatykhov.nous.companion.push.Notifications
-import us.fatykhov.nous.companion.push.ReconcileFlag
 import us.fatykhov.nous.companion.push.TokenState
+
+/** Android 16+ runtime permission for private / link-local / CGNAT addresses; a string so older compile targets need no constant. */
+private const val LOCAL_NETWORK_PERMISSION = "android.permission.ACCESS_LOCAL_NETWORK"
 
 sealed interface Route {
     data object Inbox : Route
@@ -100,7 +105,19 @@ fun ConnectScreen(graph: AppGraph, onConnected: () -> Unit) {
     var error by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val askNotif = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    // Granting notifications after the token Worker already ran would leave the
+    // server holding notifications_enabled=false for the rest of the session;
+    // re-register from the result (codex P2).
+    val askNotif = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { graph.push.registerIfPossible() }
+    // Android 16+ (API 36) gates private / link-local / CGNAT addresses behind a
+    // runtime permission — and a Tailscale host IS one (100.64/10 or *.ts.net).
+    // Ask before the probe, and continue the probe from the result either way:
+    // a denial makes the probe fail with a message that names the cause.
+    var afterLocalNet by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val askLocalNet = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { afterLocalNet?.invoke(); afterLocalNet = null }
+    fun needsLocalNetworkPermission(base: String): Boolean =
+        Build.VERSION.SDK_INT >= 36 && Net.isLocalNetworkHost(Net.hostOf(base)) &&
+            androidx.core.content.ContextCompat.checkSelfPermission(graph.appContext, LOCAL_NETWORK_PERMISSION) != android.content.pm.PackageManager.PERMISSION_GRANTED
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
         Spacer(Modifier.height(24.dp))
         Text("Nous Companion", color = t.text, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -110,8 +127,7 @@ fun ConnectScreen(graph: AppGraph, onConnected: () -> Unit) {
         OutlinedTextField(value = url, onValueChange = { url = it }, label = { Text("Nous address") }, modifier = Modifier.fillMaxWidth(), singleLine = true, colors = fieldColors())
         Text("The HTTPS address from `tailscale serve` on the Nous host.", color = t.muted, fontSize = 13.sp)
         OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Device name") }, modifier = Modifier.fillMaxWidth(), singleLine = true, colors = fieldColors())
-        Button(
-            onClick = {
+        val runProbe: () -> Unit = {
                 error = ""; busy = true
                 scope.launch {
                     try {
@@ -120,8 +136,9 @@ fun ConnectScreen(graph: AppGraph, onConnected: () -> Unit) {
                         val probe = runCatching { graph.http.get("/health") }
                         val res = probe.getOrNull()
                         if (res == null || !res.ok) {
+                            val localHint = if (Build.VERSION.SDK_INT >= 36 && Net.isLocalNetworkHost(Net.hostOf(base))) "\nThis address is on your local network or tailnet, which also needs Android's local-network permission." else ""
                             error = "Couldn't reach Nous at $base" + (res?.let { " (HTTP ${it.status})" } ?: "") + " — check Tailscale and the address." +
-                                (probe.exceptionOrNull()?.let { "\n${it.javaClass.simpleName}: ${it.message}" } ?: "")
+                                (probe.exceptionOrNull()?.let { "\n${it.javaClass.simpleName}: ${it.message}" } ?: "") + localHint
                             graph.settings.baseUrl = ""
                         } else {
                             graph.settings.deviceName = name.trim().ifEmpty { "Android" }
@@ -135,6 +152,11 @@ fun ConnectScreen(graph: AppGraph, onConnected: () -> Unit) {
                         error = "Connect failed: ${e.javaClass.simpleName}: ${e.message}"
                     } finally { busy = false }
                 }
+        }
+        Button(
+            onClick = {
+                val base = url.trim().trimEnd('/')
+                if (needsLocalNetworkPermission(base)) { afterLocalNet = runProbe; askLocalNet.launch(LOCAL_NETWORK_PERMISSION) } else runProbe()
             },
             enabled = !busy && url.startsWith("http"), modifier = Modifier.fillMaxWidth().height(54.dp),
             colors = ButtonDefaults.buttonColors(containerColor = t.accentDim, contentColor = t.onAccent), shape = RoundedCornerShape(14.dp),
@@ -151,12 +173,11 @@ fun InboxScreen(graph: AppGraph, version: Int, navigate: (Route) -> Unit) {
     val t = LocalNousTheme.current
     val feed = remember(version) { graph.store.ordered() }
     val conn = graph.store.connection
-    LaunchedEffect(version) {
-        // Spec §6.6 reconcile: cancel notifications for surfaces the index no longer lists.
-        if (conn == Connection.LIVE) { Notifications.reconcile(graph.appContext, feed.map { it.surfaceId }.toSet()); ReconcileFlag.pending = false }
-    }
+    // Notification reconcile moved to ForegroundLifecycle (store-driven, every hydration).
     val closeAll = remember { Shell.CloseAll { System.currentTimeMillis() } }
     var closeAllArmed by remember { mutableStateOf(false) }
+    // Disarm on a timer; the getter alone never recomposed, so "sure?" could stay up indefinitely (codex P2).
+    LaunchedEffect(closeAllArmed) { if (closeAllArmed) { delay(Shell.CLOSE_ALL_ARM_MS); closeAllArmed = false; closeAll.disarm() } }
     val scope = rememberCoroutineScope()
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -254,6 +275,9 @@ fun SurfaceScreen(graph: AppGraph, version: Int, id: String, onBack: () -> Unit)
                 androidx.compose.runtime.CompositionLocalProvider(LocalSurfaceHost provides host) {
                     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
                         @Suppress("UNUSED_EXPRESSION") version
+                        // ERROR keeps the last snapshot visible (the web does too) but says
+                        // so, and ButtonView pauses actions until the stream is back.
+                        if (graph.store.connection == Connection.ERROR) Text("Not connected — this card may be out of date. Actions resume when the connection is back.", color = t.warn, fontSize = 13.sp, modifier = Modifier.padding(bottom = 12.dp))
                         Render("root", null, 0, emptyList())
                         Spacer(Modifier.height(32.dp))
                     }
@@ -288,7 +312,16 @@ fun SettingsScreen(graph: AppGraph, onDisconnect: () -> Unit = {}, onBack: () ->
             KV("installation", graph.settings.installationId.take(8))
         }
         TextButton(onClick = { us.fatykhov.nous.companion.data.UrlOpener.open(graph.appContext, graph.settings.baseUrl + "/companion") }) { Text("Open web companion", color = t.accent) }
-        TextButton(onClick = { graph.engine.stop(); graph.settings.clear(); onDisconnect() }) { Text("Disconnect this phone", color = t.crit) }
+        TextButton(onClick = { scope.launch {
+            graph.engine.stop()
+            // Deregister FIRST, while the installation id still exists: after clear()
+            // nothing could name the orphaned row, and the server would keep pushing
+            // to a phone that shows the setup screen (codex P1). Bounded and
+            // best-effort — a dead server must not trap the user on this phone.
+            runCatching { withTimeout(5_000) { graph.http.delete("/a2ui/push/tokens/" + java.net.URLEncoder.encode(graph.settings.installationId, "UTF-8")) } }
+            Notifications.cancelAll(graph.appContext)
+            graph.settings.clear(); onDisconnect()
+        } }) { Text("Disconnect this phone", color = t.crit) }
         Text("Nous Companion " + runCatching { graph.appContext.packageManager.getPackageInfo(graph.appContext.packageName, 0).versionName }.getOrNull(), color = t.muted, fontSize = 12.sp)
     }
 }
