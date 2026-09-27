@@ -807,15 +807,23 @@ async def test_shutdown_drain_bounded_when_inner_task_hangs():
 
 
 @pytest.mark.asyncio
-async def test_pending_drain_does_not_cancel_inner_task():
-    """stop() must not cancel a timed-out pending tick during the drain.
+async def test_pending_drain_cancels_inner_task_after_timeout():
+    """stop() must cancel a still-running pending tick after the drain window.
 
-    Fix 2 (Codex P1 round-3): asyncio.wait is used instead of asyncio.wait_for
-    so the pending task is never cancelled on timeout.  asyncio.wait_for would
-    cancel the task, reintroducing the unsafe CancelledError window between
-    primitive creation and the node's running transition.
+    Fix 7 (Codex P1 round-5): when the asyncio.wait in stop()'s drain
+    times out the task is still running.  The old behaviour logged and
+    returned, leaving the tick racing with shutdown_components() which
+    closes the DB and subtask pool immediately after stop() returns.
+    The new behaviour cancels the task so it cannot access closed resources.
+
+    Design note: round-3 required asyncio.wait (not asyncio.wait_for) in
+    the drain so the task is not cancelled on the *first* timeout attempt —
+    that window gives an in-flight tick a full dag_tick_timeout to finish
+    gracefully.  Only if it is *still* running after that full window is
+    cancellation triggered, making it the lesser evil compared to DB writes
+    against a closed pool.
     """
-    settings = _make_settings(dag_tick_interval=0, dag_tick_timeout=0.05)
+    settings = _make_settings(dag_tick_interval=1, dag_tick_timeout=0.05)
 
     tick_started = asyncio.Event()
     tick_release = asyncio.Event()
@@ -840,25 +848,22 @@ async def test_pending_drain_does_not_cancel_inner_task():
             "tick must be timed-out and still running before calling stop()"
         )
 
-        # stop() will try to drain but the tick never finishes (tick_release
-        # not set).  Fix 2: no cancellation; stop() returns after the drain
-        # timeout expires.
-        await asyncio.wait_for(runner.stop(), timeout=1.5)
+        # stop() drains the pending task, times out (tick never finishes),
+        # and cancels it. tick_release is set in finally so the cancelled
+        # coroutine can clean up.
+        try:
+            await asyncio.wait_for(runner.stop(), timeout=1.5)
+        finally:
+            tick_release.set()
 
-        # Brief yield so any queued cancellation could land.
+        # Brief yield so cancellation propagates.
         await asyncio.sleep(0.02)
 
-        assert not pending.cancelled(), (
-            "stop() cancelled the timed-out pending tick; use asyncio.wait (not asyncio.wait_for) in the pending drain"
+        assert pending.done(), (
+            "stop() returned but the pending tick is still running — "
+            "it may access the DB after shutdown_components() closes it; "
+            "Fix 7 (P1 round-5): cancel the pending task after the drain timeout"
         )
-
-    # Release the still-running task to silence asyncio "task was destroyed"
-    # warnings.
-    tick_release.set()
-    try:
-        await asyncio.wait_for(pending, timeout=0.5)
-    except Exception:
-        pass
 
 
 @pytest.mark.asyncio
@@ -1079,4 +1084,107 @@ async def test_stop_tracks_pending_task_through_shutdown_drain_timeout():
         "_dag_pending_task was cleared in the shutdown drain timeout path, "
         "losing the reference stop() needs to drain the in-flight tick; "
         "Fix 5 (P1 round-4): preserve _dag_pending_task on drain timeout"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests for Codex round-5 fixes (P2 #1, P1 #2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stop_harvests_already_completed_pending_tick():
+    """stop() must consume the result of an already-done _dag_pending_task.
+
+    Fix 6 (Codex P2 round-5): when a timed-out tick finishes while
+    _dag_loop is sleeping between iterations, _pending.done() is True at
+    the moment stop() inspects it.  The old code skipped the entire drain
+    block (`if _pending is not None and not _pending.done()`), so
+    last_dag_tick was never updated and any exception was silently dropped.
+    """
+    settings = _make_settings(dag_tick_interval=1, dag_tick_timeout=0.05)
+
+    tick_started = asyncio.Event()
+    tick_release = asyncio.Event()
+
+    async def controlled_tick():
+        tick_started.set()
+        await tick_release.wait()
+
+    dag_orchestrator = MagicMock()
+    dag_orchestrator.tick = AsyncMock(side_effect=controlled_tick)
+
+    runner = _make_runner(settings, dag_orchestrator)
+
+    with patch.object(runner, "_detect_missed_checks", AsyncMock()):
+        await runner.start()
+        await asyncio.wait_for(tick_started.wait(), timeout=3.0)
+        # Let the soft deadline fire; tick is now the pending task.
+        await asyncio.sleep(0.15)
+
+        pending = runner._dag_pending_task
+        assert pending is not None and not pending.done()
+
+        # Release the tick and let it complete fully before calling stop().
+        tick_release.set()
+        await asyncio.sleep(0.1)  # give the task time to finish
+
+        assert pending.done(), "tick should be done before stop() is called"
+
+        # stop() must harvest the already-done result and update last_dag_tick.
+        await asyncio.wait_for(runner.stop(), timeout=3.0)
+
+    assert runner.last_dag_tick is not None, (
+        "last_dag_tick was not updated after stop() processed an already-completed "
+        "_dag_pending_task; "
+        "Fix 6 (P2 round-5): handle _pending.done() in stop()"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_pending_tick_after_drain_timeout():
+    """stop() must cancel _dag_pending_task when the drain window times out.
+
+    Fix 7 (Codex P1 round-5): previously stop() logged an error and returned
+    while the task was still running, leaving it to access the DB and subtask
+    pool after shutdown_components() had closed them.  After the fix, stop()
+    cancels the task so it cannot mutate shared resources post-teardown.
+
+    We verify by confirming the pending task is done (cancelled or complete)
+    by the time stop() returns.
+    """
+    settings = _make_settings(dag_tick_interval=1, dag_tick_timeout=0.05)
+
+    tick_started = asyncio.Event()
+    tick_release = asyncio.Event()
+
+    async def controlled_tick():
+        tick_started.set()
+        await tick_release.wait()
+
+    dag_orchestrator = MagicMock()
+    dag_orchestrator.tick = AsyncMock(side_effect=controlled_tick)
+
+    runner = _make_runner(settings, dag_orchestrator)
+
+    with patch.object(runner, "_detect_missed_checks", AsyncMock()):
+        await runner.start()
+        await asyncio.wait_for(tick_started.wait(), timeout=3.0)
+        # Let the soft deadline fire; tick is now the pending task.
+        await asyncio.sleep(0.15)
+
+        pending = runner._dag_pending_task
+        assert pending is not None and not pending.done()
+
+        # Do NOT release the tick — it must remain blocked so stop()'s
+        # asyncio.wait times out, triggering the cancellation path.
+        try:
+            await asyncio.wait_for(runner.stop(), timeout=3.0)
+        finally:
+            tick_release.set()  # unblock so the cancelled task can clean up
+
+    assert pending.done(), (
+        "stop() returned but _dag_pending_task is still running — "
+        "it may access the DB after shutdown_components() closes it; "
+        "Fix 7 (P1 round-5): cancel the pending task after the drain window times out"
     )

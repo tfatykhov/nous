@@ -24,9 +24,9 @@ from nous.brain import Brain
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
+from nous.heartbeat.dynamic import CALLBACK_RETRY_DELAY_SECONDS, DynamicCheck, DynamicCheckLoader
 from nous.heartbeat.finding_store import FindingStore
 from nous.heartbeat.registry import BaseCheck, CheckRegistry
-from nous.heartbeat.dynamic import CALLBACK_RETRY_DELAY_SECONDS, DynamicCheck, DynamicCheckLoader
 from nous.heartbeat.schemas import CheckResult, Finding, FindingAction, HeartbeatResult
 from nous.heartbeat.tuner import HeartbeatTuner
 
@@ -163,30 +163,52 @@ class HeartbeatRunner:
         # creation and the node's running transition.
         _pending = self._dag_pending_task
         self._dag_pending_task = None
-        if _pending is not None and not _pending.done():
-            logger.warning(
-                "F038: Draining timed-out DAG tick during shutdown "
-                "(waiting up to %ds)",
-                self._settings.dag_tick_timeout,
-            )
-            done, _ = await asyncio.wait(
-                {_pending},
-                timeout=self._settings.dag_tick_timeout,
-            )
-            if not done:
-                logger.error(
-                    "F038: Timed-out DAG tick did not complete within %ds "
-                    "during shutdown — leaving it running to avoid unsafe "
-                    "cancellation",
-                    self._settings.dag_tick_timeout,
-                )
-            else:
+        if _pending is not None:
+            if _pending.done():
+                # Fix 6 (Codex P2 round-5): task completed while _dag_loop
+                # slept between iterations — harvest its result so
+                # last_dag_tick reflects a successful tick and any exception
+                # is routed through the structured failure log rather than
+                # silently dropped as an unhandled task exception.
                 try:
                     _pending.result()
+                    self._last_dag_tick = datetime.now(UTC)
                 except Exception:
-                    logger.exception(
-                        "F038: Timed-out DAG tick raised during shutdown drain"
+                    logger.exception("F038: DAG pending tick raised (already completed at shutdown)")
+            else:
+                logger.warning(
+                    "F038: Draining timed-out DAG tick during shutdown (waiting up to %ds)",
+                    self._settings.dag_tick_timeout,
+                )
+                done, _ = await asyncio.wait(
+                    {_pending},
+                    timeout=self._settings.dag_tick_timeout,
+                )
+                if not done:
+                    # Fix 7 (Codex P1 round-5): cancel the task so it cannot
+                    # access the DB or subtask pool after shutdown_components()
+                    # closes them.  We have already waited a full dag_tick_timeout
+                    # for a graceful finish; cancellation is the lesser evil
+                    # compared to writing to a closed pool.  The round-3
+                    # "do-not-cancel" constraint applied only to the _dag_loop
+                    # CancelledError path where the tick had just started and
+                    # the primitive/node-transition window was live.
+                    logger.error(
+                        "F038: Timed-out DAG tick did not complete within %ds "
+                        "during shutdown — cancelling to prevent DB access "
+                        "after resource teardown",
+                        self._settings.dag_tick_timeout,
                     )
+                    _pending.cancel()
+                    try:
+                        await _pending
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                else:
+                    try:
+                        _pending.result()
+                    except Exception:
+                        logger.exception("F038: Timed-out DAG tick raised during shutdown drain")
 
         # Clean up dedicated runner and its API client
         if self._dedicated_runner is not None:
@@ -271,8 +293,7 @@ class HeartbeatRunner:
 
                 if self._dag_tick_lock.locked():
                     logger.warning(
-                        "F038: DAG tick skipped — previous tick still running "
-                        "(interval=%ds, timeout=%ds)",
+                        "F038: DAG tick skipped — previous tick still running (interval=%ds, timeout=%ds)",
                         self._settings.dag_tick_interval,
                         self._settings.dag_tick_timeout,
                     )
@@ -282,13 +303,9 @@ class HeartbeatRunner:
                 # wait_for deadline fires. Single-flight is maintained by
                 # checking the pending-task reference (the lock was released
                 # when the timeout path exited `async with`).
-                if (
-                    self._dag_pending_task is not None
-                    and not self._dag_pending_task.done()
-                ):
+                if self._dag_pending_task is not None and not self._dag_pending_task.done():
                     logger.warning(
-                        "F038: DAG tick skipped — previous tick timed out "
-                        "and is still running in background",
+                        "F038: DAG tick skipped — previous tick timed out and is still running in background",
                     )
                     continue
                 # Fix 3 (Codex P2): harvest the result of a completed pending
@@ -300,15 +317,11 @@ class HeartbeatRunner:
                         self._dag_pending_task.result()
                         self._last_dag_tick = datetime.now(UTC)
                     except Exception:
-                        logger.exception(
-                            "F038: DAG tick raised after timing out"
-                        )
+                        logger.exception("F038: DAG tick raised after timing out")
                 self._dag_pending_task = None  # clear any completed reference
 
                 async with self._dag_tick_lock:
-                    inner_task: asyncio.Task = asyncio.create_task(
-                        self.dag_orchestrator.tick()
-                    )
+                    inner_task: asyncio.Task = asyncio.create_task(self.dag_orchestrator.tick())
                     # Track for post-timeout single-flight (see check above).
                     self._dag_pending_task = inner_task
                     try:
@@ -356,9 +369,7 @@ class HeartbeatRunner:
                             # shutdown_components() closes the DB pool.
                             _shutdown_drain_timed_out = True
                         except Exception:
-                            logger.exception(
-                                "F038: DAG orchestrator tick failed during shutdown drain"
-                            )
+                            logger.exception("F038: DAG orchestrator tick failed during shutdown drain")
                         if not _shutdown_drain_timed_out:
                             self._dag_pending_task = None
                         self._last_dag_tick = datetime.now(UTC)
@@ -376,7 +387,11 @@ class HeartbeatRunner:
                 logger.exception("F038: DAG tick loop iteration failed")
 
     async def _record_run_stats(
-        self, check: BaseCheck, *, success: bool, error_msg: str | None = None,
+        self,
+        check: BaseCheck,
+        *,
+        success: bool,
+        error_msg: str | None = None,
     ) -> None:
         """Single choke point for persisting a check's run outcome to the DB.
 
@@ -432,7 +447,9 @@ class HeartbeatRunner:
             return
         try:
             await self._dynamic_loader.update_run_stats(
-                check.check_id, success=success, error_msg=error_msg,
+                check.check_id,
+                success=success,
+                error_msg=error_msg,
             )
         except Exception as exc:
             outcome = "success" if success else "failure"
@@ -440,7 +457,8 @@ class HeartbeatRunner:
                 "F034.5/#590: failed to record %s run stats for check "
                 "'%s' — this run's record is LOST (downstream consumers "
                 "cannot distinguish this from the check never having run)",
-                outcome, check.name,
+                outcome,
+                check.name,
                 exc_info=exc,
             )
 
@@ -479,8 +497,7 @@ class HeartbeatRunner:
                 live = self._registry.get_check(check.name)
                 if live is None or not live.active or live._self_disabled:
                     logger.info(
-                        "Heartbeat check '%s' was unregistered or disabled "
-                        "after snapshot — skipping",
+                        "Heartbeat check '%s' was unregistered or disabled after snapshot — skipping",
                         check.name,
                     )
                     continue
@@ -496,8 +513,7 @@ class HeartbeatRunner:
                 # record stats or findings — no LLM turn ran.
                 if result.skipped:
                     logger.debug(
-                        "Heartbeat check '%s' skipped at execution boundary "
-                        "(disabled concurrently)",
+                        "Heartbeat check '%s' skipped at execution boundary (disabled concurrently)",
                         check.name,
                     )
                     continue
@@ -512,11 +528,7 @@ class HeartbeatRunner:
                 await self._record_run_stats(check, success=True)
 
                 # #273: Collect self-disabled checks with callbacks
-                if (
-                    isinstance(check, DynamicCheck)
-                    and result.self_disabled
-                    and check.on_complete_prompt
-                ):
+                if isinstance(check, DynamicCheck) and result.self_disabled and check.on_complete_prompt:
                     callback_candidates.append(check)
 
                 if result.has_updates:
@@ -526,7 +538,7 @@ class HeartbeatRunner:
                     for f in result.findings:
                         current_fingerprints.setdefault(check.name, set()).add(f.fingerprint())
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 check.mark_failure()
                 logger.warning("Heartbeat check '%s' timed out", check.name)
                 # F034.5: Record timeout as error for dynamic checks
@@ -666,7 +678,10 @@ class HeartbeatRunner:
                     new_urgency = _ESCALATION_LADDER.get(f.urgency, "high")
                     logger.info(
                         "F034.1: Escalating finding %s (%s -> %s): %s",
-                        fp, f.urgency, new_urgency, f.summary[:60],
+                        fp,
+                        f.urgency,
+                        new_urgency,
+                        f.summary[:60],
                     )
                     f.urgency = new_urgency
                     time_escalated_checks.add(f.check_name)
@@ -685,12 +700,12 @@ class HeartbeatRunner:
                     continue  # already time-escalated, skip accumulation
                 if self._finding_store.check_accumulation_escalation(check_name):
                     logger.info(
-                        "F034.1: Accumulation escalation for check '%s'", check_name,
+                        "F034.1: Accumulation escalation for check '%s'",
+                        check_name,
                     )
                     # Send accumulation alert via Telegram
                     ack_items = [
-                        t for t in self._finding_store.get_digest_items()
-                        if t.finding.check_name == check_name
+                        t for t in self._finding_store.get_digest_items() if t.finding.check_name == check_name
                     ]
                     if ack_items:
                         lines = [f"[Heartbeat] Accumulation alert: {check_name} ({len(ack_items)} findings)"]
@@ -721,14 +736,17 @@ class HeartbeatRunner:
         actionable = [f for f in findings if f.needs_action]
         logger.info(
             "Heartbeat triage: %d routed, %d actionable, budget=%s",
-            len(findings), len(actionable), "ok" if self._has_budget() else "exhausted",
+            len(findings),
+            len(actionable),
+            "ok" if self._has_budget() else "exhausted",
         )
         if actionable and self._has_budget():
             await self._cognitive_triage(actionable)
         elif actionable and not self._has_budget():
             logger.warning(
                 "Heartbeat budget exhausted (%d/%d tokens) — %d actionable finding(s) not triaged",
-                self._tokens_used_today, self._settings.heartbeat_daily_token_budget,
+                self._tokens_used_today,
+                self._settings.heartbeat_daily_token_budget,
                 len(actionable),
             )
 
@@ -766,7 +784,8 @@ class HeartbeatRunner:
         try:
             heartbeat_model = self._settings.heartbeat_model or self._settings.background_model
             response_text, _context, usage = await triage_runner.run_turn(
-                session_id, message,
+                session_id,
+                message,
                 platform="heartbeat",
                 skip_episode=True,
                 is_subtask=True,
@@ -780,24 +799,27 @@ class HeartbeatRunner:
 
             logger.info(
                 "Heartbeat cognitive triage used %d tokens (daily: %d/%d)",
-                result.tokens_used, self._tokens_used_today,
+                result.tokens_used,
+                self._tokens_used_today,
                 self._settings.heartbeat_daily_token_budget,
             )
 
             if self._bus:
                 _parent = getattr(self, "_current_tick_event", None)
-                await self._bus.emit(Event(
-                    type="heartbeat_triage",
-                    agent_id=self._settings.agent_id,
-                    data={
-                        "session_id": session_id,
-                        "findings_count": len(findings),
-                        "tokens_used": result.tokens_used,
-                        "response_summary": result.response[:200],
-                    },
-                    trace_id=_parent.trace_id if _parent else None,
-                    caused_by=_parent.event_id if _parent else None,
-                ))
+                await self._bus.emit(
+                    Event(
+                        type="heartbeat_triage",
+                        agent_id=self._settings.agent_id,
+                        data={
+                            "session_id": session_id,
+                            "findings_count": len(findings),
+                            "tokens_used": result.tokens_used,
+                            "response_summary": result.response[:200],
+                        },
+                        trace_id=_parent.trace_id if _parent else None,
+                        caused_by=_parent.event_id if _parent else None,
+                    )
+                )
         except Exception:
             logger.exception("Heartbeat cognitive triage failed")
 
@@ -842,7 +864,8 @@ class HeartbeatRunner:
             if not self._has_budget():
                 logger.warning(
                     "#273: Skipping callback for '%s' — budget exhausted (attempt %d)",
-                    check.name, attempt + 1,
+                    check.name,
+                    attempt + 1,
                 )
                 break
             if attempt == 1:
@@ -851,7 +874,8 @@ class HeartbeatRunner:
 
             try:
                 response_text, _ctx, usage = await triage_runner.run_turn(
-                    session_id, instruction,
+                    session_id,
+                    instruction,
                     platform="heartbeat",
                     skip_episode=True,
                     is_subtask=True,
@@ -859,16 +883,20 @@ class HeartbeatRunner:
                     model_override=heartbeat_model,
                     is_background=True,
                     context=ExecutionContext(
-                        kind="heartbeat_callback", session_id=session_id,
+                        kind="heartbeat_callback",
+                        session_id=session_id,
                         declared_tools=tuple(check.on_complete_tools or ()) or None,
-                        check_name=check.name, run_id=run_id,
+                        check_name=check.name,
+                        run_id=run_id,
                     ),
                 )
                 tokens = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)
                 self._tokens_used_today += tokens
                 logger.info(
                     "#273: Callback for '%s' completed (tokens=%d, attempt=%d)",
-                    check.name, tokens, attempt + 1,
+                    check.name,
+                    tokens,
+                    attempt + 1,
                 )
                 # Success — clean up and return
                 try:
@@ -879,7 +907,8 @@ class HeartbeatRunner:
             except Exception:
                 logger.exception(
                     "#273: Callback for '%s' failed (attempt %d/2)",
-                    check.name, attempt + 1,
+                    check.name,
+                    attempt + 1,
                 )
                 # Clean up session before retry
                 try:
@@ -890,9 +919,7 @@ class HeartbeatRunner:
                 session_id = f"dynamic-callback-{check.name}-{uuid4().hex[:8]}"
 
         # Layer 2: Both attempts failed — send Telegram notification
-        await self._send_telegram(
-            f"[Heartbeat] Callback failed for check '{check.name}' — manual follow-up needed"
-        )
+        await self._send_telegram(f"[Heartbeat] Callback failed for check '{check.name}' — manual follow-up needed")
 
         # Layer 3: Create warning Finding
         failure_finding = Finding(
@@ -959,8 +986,7 @@ class HeartbeatRunner:
                     if age_h >= threshold * 0.75:
                         near_escalation = " \u2b06\ufe0f"
                 lines.append(
-                    f"  - [{item.finding.urgency}] {item.finding.summary[:60]}"
-                    f" (x{item.seen_count}){near_escalation}"
+                    f"  - [{item.finding.urgency}] {item.finding.summary[:60]} (x{item.seen_count}){near_escalation}"
                 )
             if len(check_items) > 5:
                 lines.append(f"  ... and {len(check_items) - 5} more")
@@ -1050,6 +1076,7 @@ class HeartbeatRunner:
         try:
             # Query last heartbeat event from DB
             from sqlalchemy import select
+
             from nous.storage.models import Event as EventModel
 
             async with self._heart.db.session() as session:
@@ -1066,7 +1093,8 @@ class HeartbeatRunner:
                     if gap > self._settings.heartbeat_tick_interval * 10:
                         logger.warning(
                             "Heartbeat was offline for %.0f seconds (last tick: %s)",
-                            gap, row.isoformat(),
+                            gap,
+                            row.isoformat(),
                         )
         except Exception:
             logger.debug("Could not detect missed heartbeat checks (non-fatal)")
@@ -1116,7 +1144,8 @@ class HeartbeatRunner:
             report = await self._tuner.tune(self._finding_store, self._registry)
             logger.info(
                 "F034.3/HB-3: scheduled tuning pass — %d adjustment(s), %d skipped",
-                len(report.adjustments), len(report.skipped_checks),
+                len(report.adjustments),
+                len(report.skipped_checks),
             )
         except Exception:
             logger.exception("F034.3/HB-3: scheduled tuning pass failed")
@@ -1172,11 +1201,7 @@ class HeartbeatRunner:
             if result.tokens_used:
                 self._tokens_used_today += result.tokens_used
             # #273: Fire callback if check self-disabled
-            if (
-                isinstance(check, DynamicCheck)
-                and result.self_disabled
-                and check.on_complete_prompt
-            ):
+            if isinstance(check, DynamicCheck) and result.self_disabled and check.on_complete_prompt:
                 if self._has_budget():
                     asyncio.create_task(
                         self._execute_callback(check),
