@@ -81,7 +81,10 @@ class RenderFixturesTest {
             fun visit(cid: String, scope: us.fatykhov.nous.companion.core.Scope?) {
                 if (!reachable.add(cid)) return
                 val comp = surface.components[cid] ?: return
+                val kind = (comp["component"] as? kotlinx.serialization.json.JsonPrimitive)?.content
                 for (key in walker.CHILD_KEYS) {
+                    // A Modal's `content` is composed only once opened (web: `{#if isOpen}`), so it is not visible text.
+                    if (kind == "Modal" && key == "content") continue
                     val v = comp[key] ?: continue
                     val kids = when (key) {
                         "children" -> walker.children(surface, v, scope)
