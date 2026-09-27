@@ -1,0 +1,55 @@
+name: Android
+
+# F097 §11. Path-filtered: the catalog ratchet that must gate every PR lives
+# in ci.yml (tests/test_android_catalog_coverage.py); this workflow builds
+# the native client and re-runs the JVM parity suite whenever the client,
+# the catalogs, the fixtures or the web companion sources change.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - "nous/a2ui/catalogs/**"
+      - "tests/fixtures/a2ui/**"
+      - "dashboard-app/src/companion/**"
+      - ".github/workflows/android.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "android/**"
+      - "nous/a2ui/catalogs/**"
+      - "tests/fixtures/a2ui/**"
+      - "dashboard-app/src/companion/**"
+      - ".github/workflows/android.yml"
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: ":core (JVM)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests
+        working-directory: android
+        # No Android SDK is needed for :core; settings.gradle.kts excludes :app when none is found.
+        run: ./gradlew :core:test --console=plain
+
+      - name: Test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-test-results
+          path: android/core/build/test-results/test/*.xml
+          if-no-files-found: ignore
