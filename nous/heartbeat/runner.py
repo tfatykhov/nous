@@ -79,6 +79,10 @@ class HeartbeatRunner:
         # The next iteration checks this to maintain single-flight even after
         # the lock has been released by the timeout path.
         self._dag_pending_task: asyncio.Task | None = None
+        # Absolute loop.time() deadline set when _dag_loop begins draining an
+        # in-flight tick during shutdown.  stop() reads this so the two drain
+        # windows share one total budget instead of each taking dag_tick_timeout.
+        self._dag_shutdown_drain_deadline: float | None = None
         self._running = False
         self._tick_count: int = 0
         self._tokens_used_today: int = 0
@@ -176,13 +180,22 @@ class HeartbeatRunner:
                 except Exception:
                     logger.exception("F038: DAG pending tick raised (already completed at shutdown)")
             else:
+                # Fix 8 (Codex P1 round-6): honour any budget already spent
+                # by _dag_loop's own shutdown drain.  If _dag_loop set a
+                # deadline before timing out, use the remaining seconds so the
+                # combined wait never exceeds one dag_tick_timeout.
+                loop = asyncio.get_running_loop()
+                if self._dag_shutdown_drain_deadline is not None:
+                    drain_timeout = max(0.0, self._dag_shutdown_drain_deadline - loop.time())
+                else:
+                    drain_timeout = float(self._settings.dag_tick_timeout)
                 logger.warning(
-                    "F038: Draining timed-out DAG tick during shutdown (waiting up to %ds)",
-                    self._settings.dag_tick_timeout,
+                    "F038: Draining timed-out DAG tick during shutdown (waiting up to %.1fs)",
+                    drain_timeout,
                 )
                 done, _ = await asyncio.wait(
                     {_pending},
-                    timeout=self._settings.dag_tick_timeout,
+                    timeout=drain_timeout,
                 )
                 if not done:
                     # Fix 7 (Codex P1 round-5): cancel the task so it cannot
@@ -350,6 +363,14 @@ class HeartbeatRunner:
                         # RUNNING — drain it with a bounded deadline so
                         # shutdown cannot hang indefinitely on a hung DB or
                         # network call (Fix 1, Codex P1 round-3).
+                        #
+                        # Fix 8 (Codex P1 round-6): record an absolute
+                        # deadline so stop()'s second drain uses the
+                        # REMAINING budget rather than a fresh full timeout.
+                        # Without this the two drain windows stack and the
+                        # total wait can reach 2 × dag_tick_timeout.
+                        loop = asyncio.get_running_loop()
+                        self._dag_shutdown_drain_deadline = loop.time() + self._settings.dag_tick_timeout
                         _shutdown_drain_timed_out = False
                         try:
                             await asyncio.wait_for(
