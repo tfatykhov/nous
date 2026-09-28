@@ -2786,6 +2786,23 @@ class Settings(BaseSettings):
         ),
     )
 
+    a2ui_assets_dir: str = Field(
+        default="",
+        description=(
+            "Persistent directory for agent-hosted companion assets, served "
+            "under the existing /dashboard/v2 mount AFTER the image's own "
+            "static directory. Empty = <workspace_dir>/companion-assets, "
+            "which is inside the workspace volume. It exists because the "
+            "only served directory an agent had was the image's dist, and "
+            "anything written there is deleted when the container is "
+            "recreated — the Italy app lost its photos that way on "
+            "2026-09-28. The app's own files always win a name clash, and "
+            "this directory serves an ALLOWLIST of image types only: it is "
+            "agent-writable, persistent and same-origin with /a2ui/action, "
+            "so HTML or script from it is refused outright."
+        ),
+    )
+
     # --- F097: FCM push for the Android companion -------------------------
     a2ui_push_enabled: bool = Field(
         default=True,
@@ -3015,6 +3032,12 @@ class Settings(BaseSettings):
         """Resolved attachments directory (defaults under workspace_dir)."""
         import os
         return self.attachments_dir or os.path.join(self.workspace_dir, "attachments")
+
+    @property
+    def companion_assets_root(self) -> str:
+        """Resolved companion-assets directory (defaults under workspace_dir)."""
+        import os
+        return self.a2ui_assets_dir or os.path.join(self.workspace_dir, "companion-assets")
 
     @property
     def db_url(self) -> str:

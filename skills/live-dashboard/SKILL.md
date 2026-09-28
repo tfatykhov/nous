@@ -508,6 +508,35 @@ So: build the link into the record's markdown field server-side and bind a
 unguessable md5 shard (`/5/52/`, not the `/6/6e/` you would infer). Resolve via
 the Commons API, then GET each URL and assert `200` + `image/*` BEFORE composing.
 
+### Hosting your own images: `companion-assets/`, never the app's static directory
+
+When you mirror an image locally (map tiles, photos, anything a remote host
+might rate-limit or remove), put it under **`<workspace>/companion-assets/`**:
+
+```
+/tmp/nous-workspace/companion-assets/<app>/<file>.jpg
+        served at →  /dashboard/v2/<app>/<file>.jpg
+```
+
+That directory is in the workspace **volume**, so it survives a rebuild.
+
+**Do NOT write into `/app/static/dashboard-v2/dist/`.** It is served, which is
+why it is tempting, but it is part of the Docker image: everything added
+there is silently deleted the next time the container is recreated. This
+happened — the Italy app lost every photo on a restart while the originals
+sat in the workspace (2026-09-28).
+
+Rules the server enforces, so design for them rather than discovering them:
+
+- **Images only**: `.png .jpg .jpeg .webp .gif .avif .svg`. Anything else —
+  `.html`, `.js`, `.json` — returns 404 from this directory, by design.
+- **The app's own files win a name clash.** Use a per-app subdirectory and you
+  will never collide.
+- A new file is served immediately; no restart, no registration.
+- Verify the same way as a remote image: GET the URL and assert `200` +
+  `image/*` BEFORE composing. A freshness chip that checks the served path
+  must check `companion-assets/`, not `dist/`.
+
 ## agent_script: exec the file, never `import` it
 
 The script sandbox is a LONG-LIVED process, so `sys.modules` persists between

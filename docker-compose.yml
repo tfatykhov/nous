@@ -93,6 +93,9 @@ services:
       # are mounted — an unconfigured push service reports why at
       # GET /a2ui/push/config and sends nothing, so leaving these empty is a
       # supported state, not a broken one. Telegram keeps firing either way.
+      # Agent-hosted companion assets. Empty = <workspace>/companion-assets,
+      # which is inside the workspace volume and so survives a rebuild.
+      - NOUS_A2UI_ASSETS_DIR=${NOUS_A2UI_ASSETS_DIR:-}
       - NOUS_A2UI_PUSH_ENABLED=${NOUS_A2UI_PUSH_ENABLED:-true}
       - NOUS_A2UI_FCM_SERVICE_ACCOUNT_FILE=${NOUS_A2UI_FCM_SERVICE_ACCOUNT_FILE:-}
       - NOUS_A2UI_FCM_GOOGLE_SERVICES_FILE=${NOUS_A2UI_FCM_GOOGLE_SERVICES_FILE:-}
