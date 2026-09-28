@@ -112,7 +112,24 @@ object Themes {
 
 val LocalNousTheme = staticCompositionLocalOf { Themes.nousDefault }
 
+/**
+ * Installs the theme AND the press feedback that goes with it. Without an
+ * indication of its own, every `Modifier.clickable` in the app — inbox cards,
+ * tabs, choice chips — fell back to Compose's debug indication: a faint BLACK
+ * overlay, which on a dark surface is no feedback at all. The ripple is drawn
+ * in the theme's text colour, so it is light on the dark themes and dark on
+ * `paper`, at an alpha strong enough to be seen on either.
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun NousThemed(theme: NousTheme, content: @Composable () -> Unit) {
-    CompositionLocalProvider(LocalNousTheme provides theme, content = content)
+    CompositionLocalProvider(
+        LocalNousTheme provides theme,
+        androidx.compose.foundation.LocalIndication provides androidx.compose.material3.ripple(color = theme.text),
+        androidx.compose.material3.LocalRippleConfiguration provides androidx.compose.material3.RippleConfiguration(
+            color = theme.text,
+            rippleAlpha = androidx.compose.material.ripple.RippleAlpha(draggedAlpha = 0.18f, focusedAlpha = 0.14f, hoveredAlpha = 0.10f, pressedAlpha = 0.22f),
+        ),
+        content = content,
+    )
 }
