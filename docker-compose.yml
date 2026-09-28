@@ -89,6 +89,9 @@ services:
       - NOUS_CROSS_ENCODER_TEXT_LIMIT=${NOUS_CROSS_ENCODER_TEXT_LIMIT:-512}
       # HuggingFace cache dir — pinned so the volume mount below matches
       - HF_HOME=/root/.cache/huggingface
+      # Agent-hosted companion assets. Empty = <workspace>/companion-assets,
+      # which is inside the workspace volume and so survives a rebuild.
+      - NOUS_A2UI_ASSETS_DIR=${NOUS_A2UI_ASSETS_DIR:-}
       # F097: FCM push for the Android companion. Inert until BOTH files below
       # are mounted — an unconfigured push service reports why at
       # GET /a2ui/push/config and sends nothing, so leaving these empty is a

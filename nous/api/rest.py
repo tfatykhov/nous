@@ -49,9 +49,9 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Mount, Route
-from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
 
+from nous.api.companion_assets import OverlayStaticFiles
 from nous.api.execution_context import ExecutionContext
 from nous.api.models import Attachment
 from nous.api.runner import AgentRunner
@@ -3444,7 +3444,7 @@ def create_app(
         ".map": "application/json",
     }
 
-    class _NoCacheStaticFiles(StaticFiles):
+    class _NoCacheStaticFiles(OverlayStaticFiles):
         """StaticFiles wrapper that (1) forces ETag re-validation on every
         request and (2) corrects the Content-Type for module-script-critical
         asset types. Every dashboard PR was hitting stale-bundle issues
@@ -3468,8 +3468,22 @@ def create_app(
         "static", "dashboard-v2", "dist",
     )
     if os.path.isdir(dashboard_v2_dir):
+        # Agent-hosted assets live in the workspace VOLUME and are served
+        # behind the image's own files, so an asset keeps its URL across a
+        # rebuild (see nous/api/companion_assets.py). Created best-effort so
+        # the agent finds it; a missing directory is simply skipped at lookup.
+        companion_assets_dir = settings.companion_assets_root
+        try:
+            os.makedirs(companion_assets_dir, exist_ok=True)
+        except OSError:
+            logger.warning("companion assets dir %s could not be created", companion_assets_dir)
         routes.append(
-            Mount("/dashboard/v2", app=_NoCacheStaticFiles(directory=dashboard_v2_dir, html=True)),
+            Mount(
+                "/dashboard/v2",
+                app=_NoCacheStaticFiles(
+                    directory=dashboard_v2_dir, overlay_dir=companion_assets_dir, html=True
+                ),
+            ),
         )
         # Redirect bare /dashboard and /dashboard/ to the Svelte v2 app — only
         # when the build exists (otherwise /dashboard would redirect to a 404).
