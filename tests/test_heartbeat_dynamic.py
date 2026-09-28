@@ -2352,6 +2352,75 @@ class TestInFlightRunCancellation:
         assert result.skipped is False
 
     @pytest.mark.asyncio
+    async def test_overlapping_runs_both_cancellable(self):
+        """A REST trigger can overlap a tick on the same instance. When one
+        run ends, the other must stay reachable by a later disable."""
+        from nous.heartbeat.dynamic import DynamicCheckCancelled
+
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "twice")
+        runner = AsyncMock()
+        runner.end_conversation = AsyncMock()
+        first_release, second_started, effects = asyncio.Event(), asyncio.Event(), []
+        calls = 0
+
+        async def _run_turn(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                await first_release.wait()
+                return ('{"has_findings": false, "findings": []}', MagicMock(), {})
+            second_started.set()
+            await asyncio.Event().wait()  # never released
+            effects.append("late side effect")
+            return ('{"has_findings": false, "findings": []}', MagicMock(), {})
+
+        runner.run_turn = AsyncMock(side_effect=_run_turn)
+        check = _tracked_check(loader, "twice", runner)
+
+        first = asyncio.create_task(check.run())
+        await asyncio.sleep(0)
+        second = asyncio.create_task(check.run())
+        await asyncio.wait_for(second_started.wait(), 1)
+        first_release.set()
+        assert (await asyncio.wait_for(first, 1)).skipped is False
+
+        await loader.manage_check(action="disable", name="twice")
+        with pytest.raises(DynamicCheckCancelled):
+            await asyncio.wait_for(second, 1)
+        assert effects == []
+        assert loader._active_runs == {}
+
+    @pytest.mark.asyncio
+    async def test_turn_that_swallows_cancel_still_fails(self):
+        """If the turn catches the cancellation and returns anyway, a run the
+        DAG terminated must still be a failure (no findings, no on_complete)."""
+        from nous.heartbeat.dynamic import DynamicCheckCancelled
+
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "stubborn")
+        runner = AsyncMock()
+        runner.end_conversation = AsyncMock()
+        started = asyncio.Event()
+
+        async def _run_turn(*args, **kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                pass
+            return ('{"has_findings": true, "findings": [{"summary": "x"}]}', MagicMock(), {})
+
+        runner.run_turn = AsyncMock(side_effect=_run_turn)
+        check = _tracked_check(loader, "stubborn", runner)
+
+        run = asyncio.create_task(check.run())
+        await asyncio.wait_for(started.wait(), 1)
+        await loader.manage_check(action="disable", name="stubborn")
+        with pytest.raises(DynamicCheckCancelled):
+            await asyncio.wait_for(run, 1)
+
+    @pytest.mark.asyncio
     async def test_caller_cancellation_still_propagates(self):
         """The runner's own timeout/stop cancels the run and stays a
         CancelledError (not converted to a disable failure)."""
@@ -2366,7 +2435,7 @@ class TestInFlightRunCancellation:
         with pytest.raises(asyncio.CancelledError):
             await run
         assert effects == []
-        assert check._run_task is None
+        assert check._run_tasks == set()
         assert loader._active_runs == {}
 
     @pytest.mark.asyncio

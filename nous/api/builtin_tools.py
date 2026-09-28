@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +80,9 @@ async def bash_tool(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(workspace),
+            # Own process group, so a cancelled turn can stop the whole
+            # command (``a; b``, pipelines), not only the /bin/sh parent.
+            start_new_session=True,
         )
 
         try:
@@ -91,6 +96,19 @@ async def bash_tool(
                 f"Command timed out after {effective_timeout}s.\n"
                 f"Command: {command}"
             )
+        except asyncio.CancelledError:
+            # The calling turn was cancelled (e.g. its heartbeat check was
+            # disabled by the DAG mid-run): don't leave the command running.
+            if proc.returncode is None:
+                try:
+                    if hasattr(os, "killpg"):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    else:
+                        proc.kill()
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+            raise
 
         # Decode and truncate
         stdout_text = stdout.decode("utf-8", errors="replace")

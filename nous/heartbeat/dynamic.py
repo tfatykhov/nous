@@ -42,10 +42,10 @@ class DynamicCheckCancelled(RuntimeError):
     """A check's in-flight run was cancelled because the check was disabled."""
 
 
-# The DynamicCheck whose run owns the current task (and every task it spawns,
+# The check-run task that owns the current task (and every task it spawns,
 # since create_task copies the context). Lets a check disable ITSELF from a
 # tool call without cancelling the very run that is making the call.
-_CURRENT_CHECK_RUN: contextvars.ContextVar[DynamicCheck | None] = contextvars.ContextVar(
+_CURRENT_CHECK_RUN: contextvars.ContextVar[asyncio.Task | None] = contextvars.ContextVar(
     "nous_current_check_run", default=None
 )
 
@@ -100,22 +100,27 @@ class DynamicCheck(BaseCheck):
         # ``active_runs`` is owned by the loader so it can reach a running
         # instance even after the registry dropped or replaced it.
         self._active_runs = active_runs
-        self._run_task: asyncio.Task | None = None
-        self._run_cancel_requested = False
+        # One entry per in-flight run (a REST trigger can overlap a tick), and
+        # the subset whose cancellation came from a disable.
+        self._run_tasks: set[asyncio.Task] = set()
+        self._disable_cancelled: set[asyncio.Task] = set()
 
     def cancel_run(self) -> bool:
-        """Cancel this check's in-flight run, if any. Returns True if cancelled.
+        """Cancel this check's in-flight runs, if any. Returns True if any cancelled.
 
         A run never cancels itself: a check that disables itself from one of
         its own tool calls is finishing its final run, which must complete.
         """
-        task = self._run_task
-        if task is None or task.done() or _CURRENT_CHECK_RUN.get() is self:
-            return False
-        self._self_disabled = True
-        self._run_cancel_requested = True
-        task.cancel()
-        return True
+        cancelled = False
+        for task in list(self._run_tasks):
+            if task.done() or _CURRENT_CHECK_RUN.get() is task:
+                continue
+            self._disable_cancelled.add(task)
+            task.cancel()
+            cancelled = True
+        if cancelled:
+            self._self_disabled = True
+        return cancelled
 
     def set_cron(self, cron_expr: str | None) -> None:
         """Set cron expression for scheduling."""
@@ -178,7 +183,7 @@ class DynamicCheck(BaseCheck):
             self._run_turn(session_id, instruction),
             name=f"dynamic-check-run-{self.name}",
         )
-        self._run_task = run_task
+        self._run_tasks.add(run_task)
         if self._active_runs is not None:
             self._active_runs.setdefault(self.name, set()).add(self)
         try:
@@ -186,11 +191,7 @@ class DynamicCheck(BaseCheck):
                 response_text, _ctx, usage = await run_task
             except asyncio.CancelledError:
                 current = asyncio.current_task()
-                if (
-                    self._run_cancel_requested
-                    and run_task.cancelled()
-                    and not (current is not None and current.cancelling())
-                ):
+                if run_task in self._disable_cancelled and not (current is not None and current.cancelling()):
                     # Cancelled by a disable, not by our caller: surface it as
                     # a failed run so the runner records it and never reads it
                     # as success (the runner's own cancel still propagates).
@@ -200,6 +201,10 @@ class DynamicCheck(BaseCheck):
             except Exception:
                 logger.exception("DynamicCheck '%s' failed", self.name)
                 raise
+            if run_task in self._disable_cancelled:
+                # The turn swallowed the cancel and returned anyway: a run the
+                # DAG terminated is still a failed run, never a completion.
+                raise DynamicCheckCancelled(f"check '{self.name}' was disabled while running")
 
             findings = self._parse_findings(response_text or "")
             tokens = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)
@@ -212,9 +217,9 @@ class DynamicCheck(BaseCheck):
         finally:
             if not run_task.done():
                 run_task.cancel()
-            self._run_task = None
-            self._run_cancel_requested = False
-            if self._active_runs is not None:
+            self._run_tasks.discard(run_task)
+            self._disable_cancelled.discard(run_task)
+            if self._active_runs is not None and not self._run_tasks:
                 runs = self._active_runs.get(self.name)
                 if runs is not None:
                     runs.discard(self)
@@ -228,7 +233,7 @@ class DynamicCheck(BaseCheck):
     async def _run_turn(self, session_id: str, instruction: str) -> tuple:
         """Run the agent turn inside this check's own run task."""
         assert self._runner is not None
-        _CURRENT_CHECK_RUN.set(self)
+        _CURRENT_CHECK_RUN.set(asyncio.current_task())
         return await self._runner.run_turn(
             session_id,
             instruction,
