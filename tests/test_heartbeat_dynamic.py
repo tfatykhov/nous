@@ -2217,3 +2217,182 @@ class TestSkippedResultCallers:
                     assert call.kwargs.get("success") is not True, (
                         "trigger_check() must not record success stats for a skipped run"
                     )
+
+
+# ===========================================================================
+# TestInFlightRunCancellation — codex P1 (PR #656): disabling a check must
+# stop a run that is ALREADY executing, not only prevent the next start.
+# ===========================================================================
+
+
+def _loader_with_disable_row(registry: CheckRegistry, name: str) -> DynamicCheckLoader:
+    db, mock_session = _mock_db()
+    loader = DynamicCheckLoader(db=db, registry=registry, runner=AsyncMock(), agent_id="test-agent")
+    mock_model = MagicMock()
+    mock_model.id = "id-1"
+    mock_model.enabled = True
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = mock_model
+    mock_session.execute = AsyncMock(return_value=mock_result)
+    mock_session.commit = AsyncMock()
+    loader._loaded_ids = {"id-1"}
+    loader._id_to_name = {"id-1": name}
+    loader._signatures = {name: "sig"}
+    return loader
+
+
+def _tracked_check(loader: DynamicCheckLoader, name: str, runner) -> DynamicCheck:
+    check = DynamicCheck(
+        check_id="id-1",
+        name=name,
+        prompt="p",
+        tools=["bash"],
+        runner=runner,
+        active_runs=loader._active_runs,
+    )
+    loader._registry.register(check, permanent=False)
+    return check
+
+
+def _blocking_runner(started: asyncio.Event, release: asyncio.Event, effects: list[str]):
+    runner = AsyncMock()
+    runner.end_conversation = AsyncMock()
+
+    async def _run_turn(*args, **kwargs):
+        started.set()
+        await release.wait()  # mid-turn: e.g. between two tool calls
+        effects.append("side effect after disable")
+        return ('{"has_findings": true, "findings": [{"summary": "x"}]}', MagicMock(), {})
+
+    runner.run_turn = AsyncMock(side_effect=_run_turn)
+    return runner
+
+
+class TestInFlightRunCancellation:
+    @pytest.mark.asyncio
+    async def test_external_disable_cancels_executing_run(self):
+        """A DAG reap/cancel (manage_check disable from outside the run) while
+        the run is mid-turn cancels the run: no further side effects, and the
+        run surfaces as a failure rather than a success with findings."""
+        from nous.heartbeat.dynamic import DynamicCheckCancelled
+
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "dag-node-check")
+        started, release, effects = asyncio.Event(), asyncio.Event(), []
+        check = _tracked_check(loader, "dag-node-check", _blocking_runner(started, release, effects))
+
+        run = asyncio.create_task(check.run())
+        await asyncio.wait_for(started.wait(), 1)
+        await loader.manage_check(action="disable", name="dag-node-check")
+        release.set()
+
+        with pytest.raises(DynamicCheckCancelled):
+            await asyncio.wait_for(run, 1)
+        assert effects == []
+        assert check._self_disabled is True
+        assert loader._active_runs == {}
+        check._runner.end_conversation.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_delete_cancels_executing_run(self):
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "doomed")
+        loader._db.session.return_value.__aenter__.return_value.delete = AsyncMock()
+        started, release, effects = asyncio.Event(), asyncio.Event(), []
+        check = _tracked_check(loader, "doomed", _blocking_runner(started, release, effects))
+
+        run = asyncio.create_task(check.run())
+        await asyncio.wait_for(started.wait(), 1)
+        await loader.manage_check(action="delete", name="doomed")
+        release.set()
+
+        with pytest.raises(RuntimeError):
+            await asyncio.wait_for(run, 1)
+        assert effects == []
+
+    @pytest.mark.asyncio
+    async def test_sync_removal_cancels_executing_run(self):
+        """A check disabled in the DB by another path is dropped by sync();
+        its in-flight run must stop too."""
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "gone")
+        loader._fetch_enabled = AsyncMock(return_value=[])
+        started, release, effects = asyncio.Event(), asyncio.Event(), []
+        check = _tracked_check(loader, "gone", _blocking_runner(started, release, effects))
+
+        run = asyncio.create_task(check.run())
+        await asyncio.wait_for(started.wait(), 1)
+        await loader.sync()
+        release.set()
+
+        with pytest.raises(RuntimeError):
+            await asyncio.wait_for(run, 1)
+        assert effects == []
+
+    @pytest.mark.asyncio
+    async def test_self_disable_from_own_tool_call_does_not_cancel(self):
+        """A check that disables itself from one of its own tool calls is
+        finishing its final run: that run must complete, not be cancelled."""
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "pipeline-step")
+        runner = AsyncMock()
+        runner.end_conversation = AsyncMock()
+        check = _tracked_check(loader, "pipeline-step", runner)
+
+        async def _run_turn(*args, **kwargs):
+            # Tools may run in a child task; the context is inherited.
+            await asyncio.create_task(loader.manage_check(action="disable", name="pipeline-step"))
+            await asyncio.sleep(0)
+            return ('{"has_findings": false, "findings": []}', MagicMock(), {})
+
+        runner.run_turn = AsyncMock(side_effect=_run_turn)
+
+        result = await asyncio.wait_for(check.run(), 1)
+        assert result.self_disabled is True
+        assert result.skipped is False
+
+    @pytest.mark.asyncio
+    async def test_caller_cancellation_still_propagates(self):
+        """The runner's own timeout/stop cancels the run and stays a
+        CancelledError (not converted to a disable failure)."""
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "slow")
+        started, release, effects = asyncio.Event(), asyncio.Event(), []
+        check = _tracked_check(loader, "slow", _blocking_runner(started, release, effects))
+
+        run = asyncio.create_task(check.run())
+        await asyncio.wait_for(started.wait(), 1)
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+        assert effects == []
+        assert check._run_task is None
+        assert loader._active_runs == {}
+
+    @pytest.mark.asyncio
+    async def test_tick_records_cancelled_run_as_failed(self):
+        """Through the heartbeat runner: an externally disabled mid-run check
+        is recorded as a failed final run (never success, no findings), and
+        the heartbeat tick itself is not cancelled."""
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "dag-node-check")
+        loader.update_run_stats = AsyncMock()
+        started, release, effects = asyncio.Event(), asyncio.Event(), []
+        check = _tracked_check(loader, "dag-node-check", _blocking_runner(started, release, effects))
+        check.interval = 1
+        hb = _make_runner_for_skip_tests(registry)
+        hb._dynamic_loader = loader
+
+        tick = asyncio.create_task(hb._tick())
+        await asyncio.wait_for(started.wait(), 1)
+        assert registry.is_in_flight("dag-node-check")
+        await loader.manage_check(action="disable", name="dag-node-check")
+        release.set()
+        await asyncio.wait_for(tick, 2)
+
+        assert effects == []
+        assert check.consecutive_failures == 1
+        assert not registry.is_in_flight("dag-node-check")
+        assert registry.self_disabled_run_failed("dag-node-check")
+        for call in loader.update_run_stats.call_args_list:
+            assert call.kwargs.get("success") is not True
