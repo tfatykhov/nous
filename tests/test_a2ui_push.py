@@ -795,3 +795,65 @@ def test_firebase_client_config_payload_shape() -> None:
         "api_key",
         "sender_id",
     }
+
+
+# ---------------------------------------------------------------------------
+# Telegram card ping toggle (duplicate-alert removal after push is proven)
+# ---------------------------------------------------------------------------
+
+
+async def _pings(svc, monkeypatch, **push_kwargs) -> list[str]:
+    sent: list[str] = []
+
+    async def record(title, surface_id, text=None):
+        sent.append(surface_id)
+
+    monkeypatch.setattr(svc, "_notify_telegram", record)
+    await svc.push_built(_approval(), **push_kwargs)
+    await asyncio.gather(*list(svc._pending_tasks))
+    return sent
+
+
+@pytest.mark.postgres_only
+async def test_telegram_ping_fires_by_default(pushy_service, monkeypatch) -> None:
+    assert len(await _pings(pushy_service, monkeypatch)) == 1
+    assert len(pushy_service.recorder.surfaces) == 1
+
+
+@pytest.mark.postgres_only
+async def test_telegram_ping_off_leaves_push_only(pushy_service, monkeypatch) -> None:
+    pushy_service._settings = pushy_service._settings.model_copy(
+        update={"a2ui_telegram_notify_enabled": False}
+    )
+    assert await _pings(pushy_service, monkeypatch) == []
+    assert len(pushy_service.recorder.surfaces) == 1
+
+
+@pytest.mark.postgres_only
+async def test_telegram_stays_the_fallback_when_push_would_not_carry(
+    db, push_settings, monkeypatch
+) -> None:
+    """Turning the ping off must never leave a notifying card with no alert."""
+    svc = SurfaceService(
+        db,
+        push_settings.model_copy(update={"a2ui_telegram_notify_enabled": False}),
+        push=RecordingPush(configured=False),
+    )
+    try:
+        assert len(await _pings(svc, monkeypatch)) == 1
+    finally:
+        async with db.session() as session:
+            await session.execute(
+                delete(A2uiSurface).where(A2uiSurface.agent_id == push_settings.agent_id)
+            )
+            await session.commit()
+
+
+@pytest.mark.postgres_only
+async def test_telegram_ping_off_does_not_ping_non_notifying_cards(
+    pushy_service, monkeypatch
+) -> None:
+    pushy_service._settings = pushy_service._settings.model_copy(
+        update={"a2ui_telegram_notify_enabled": False}
+    )
+    assert await _pings(pushy_service, monkeypatch, notify=False) == []

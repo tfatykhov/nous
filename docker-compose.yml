@@ -92,13 +92,15 @@ services:
       # F097: FCM push for the Android companion. Inert until BOTH files below
       # are mounted — an unconfigured push service reports why at
       # GET /a2ui/push/config and sends nothing, so leaving these empty is a
-      # supported state, not a broken one. Telegram keeps firing either way.
+      # supported state, not a broken one (Telegram then carries every card ping).
       - NOUS_A2UI_PUSH_ENABLED=${NOUS_A2UI_PUSH_ENABLED:-true}
       - NOUS_A2UI_FCM_SERVICE_ACCOUNT_FILE=${NOUS_A2UI_FCM_SERVICE_ACCOUNT_FILE:-}
       - NOUS_A2UI_FCM_GOOGLE_SERVICES_FILE=${NOUS_A2UI_FCM_GOOGLE_SERVICES_FILE:-}
       - NOUS_A2UI_ANDROID_PACKAGE=${NOUS_A2UI_ANDROID_PACKAGE:-us.fatykhov.nous.companion}
       - NOUS_A2UI_PUSH_TIMEOUT_SECONDS=${NOUS_A2UI_PUSH_TIMEOUT_SECONDS:-10}
       - NOUS_A2UI_PUSH_MAX_INSTALLATIONS=${NOUS_A2UI_PUSH_MAX_INSTALLATIONS:-10}
+      # Card pings on Telegram. Off = push only; Telegram still fires for any card push would not carry.
+      - NOUS_A2UI_TELEGRAM_NOTIFY_ENABLED=${NOUS_A2UI_TELEGRAM_NOTIFY_ENABLED:-false}
     volumes:
       # F042: persist downloaded cross-encoder models across container restarts
       - huggingface_cache:/root/.cache/huggingface

@@ -2800,6 +2800,18 @@ class Settings(BaseSettings):
             "the accepted cost of the beta."
         ),
     )
+    a2ui_telegram_notify_enabled: bool = Field(
+        default=True,
+        description=(
+            "F097 follow-up: send the one-line '[companion]' Telegram ping "
+            "for notifying cards. Set false once the Android push leg is "
+            "proven, to stop duplicate alerts. Telegram is still used as a "
+            "FALLBACK for any card that would not be pushed (push disabled "
+            "or unconfigured), so turning this off never silences a card. "
+            "Scope: only the card ping — chat replies, files, heartbeat and "
+            "DAG deliveries are unaffected."
+        ),
+    )
     a2ui_fcm_service_account_file: str = Field(
         default="",
         description=(
