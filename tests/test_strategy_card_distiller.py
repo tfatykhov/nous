@@ -2015,20 +2015,29 @@ async def test_bus_emit_fires_after_commit(mock_brain, mock_heart):
 
 
 async def test_bus_emit_fires_after_caller_owned_commit():
-    """Brain.record(session=...) publishes decision_recorded once the CALLER commits.
+    """Brain.record(session=...) publishes decision_recorded once the CALLER's
+    OUTER transaction commits.
 
     Covers the caller-owned path (DeliberationEngine.start passes session=):
-    nothing is emitted before the caller's commit, a SAVEPOINT rollback does
+    nothing is emitted before the caller's commit, a released (committed)
+    SAVEPOINT does not publish — SQLAlchemy fires ``after_commit`` for it too,
+    and the outer transaction may still roll back — a SAVEPOINT rollback does
     not drop the event, and a rolled-back outer transaction emits nothing.
-    Mutation: return straight from ``_record`` on the caller-owned path →
-    decision_recorded is never published and DecisionGraphLinker never runs.
-    """
-    import asyncio
-    from datetime import UTC, datetime
+    Mutations: return straight from ``_record`` on the caller-owned path →
+    never published; drop the nested-transaction check in the commit hook →
+    published when the SAVEPOINT is released, before the outer rollback.
 
+    Runs a real SQLAlchemy ``Session`` on stdlib sqlite3 (no async driver
+    needed): ``_emit_after_commit`` only touches ``session.sync_session``,
+    which is where AsyncSession's transaction events fire anyway.
+    """
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from sqlalchemy import create_engine
+    from sqlalchemy import event as sa_event
     from sqlalchemy import text as sa_text
-    from sqlalchemy.ext.asyncio import AsyncSession as _AsyncSession
-    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.orm import Session
 
     from nous.brain.brain import Brain
     from nous.brain.schemas import DecisionDetail, ReasonInput, RecordInput
@@ -2051,37 +2060,51 @@ async def test_bus_emit_fires_after_caller_owned_commit():
         )
 
     async def _fake_inner_record(inp, session):
-        await session.execute(sa_text("SELECT 1"))  # autobegin, like the real _record
+        session.sync_session.execute(sa_text("SELECT 1"))  # autobegin, like the real _record
         return _detail()
 
     inp = RecordInput(
         description="test decision", confidence=0.8, category="tooling", stakes="low",
         reasons=[ReasonInput(type="analysis", text="testing")],
     )
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    engine = create_engine("sqlite://")
+
+    # pysqlite defers BEGIN, which breaks SAVEPOINT; SQLAlchemy's documented fix.
+    @sa_event.listens_for(engine, "connect")
+    def _no_pysqlite_begin(dbapi_conn, _rec):
+        dbapi_conn.isolation_level = None
+
+    @sa_event.listens_for(engine, "begin")
+    def _emit_begin(conn):
+        conn.exec_driver_sql("BEGIN")
+
     try:
         with patch.object(brain, "_record", side_effect=_fake_inner_record):
-            async with _AsyncSession(engine) as session:
-                detail = await brain.record(inp, session=session)
-                async with session.begin_nested() as sp:
-                    await session.execute(sa_text("SELECT 1"))
-                    await sp.rollback()
+            # Committed SAVEPOINT, then the outer transaction rolls back.
+            with Session(engine) as sync_sess:
+                await brain.record(inp, session=SimpleNamespace(sync_session=sync_sess))
+                with sync_sess.begin_nested():
+                    sync_sess.execute(sa_text("SELECT 1"))
+                await asyncio.sleep(0)
+                assert emitted == [], "a released SAVEPOINT must not publish"
+                sync_sess.rollback()
+                sync_sess.execute(sa_text("SELECT 1"))
+                sync_sess.commit()
+                await asyncio.sleep(0)
+            assert emitted == [], "a rolled-back decision must not be published"
+
+            # Rolled-back SAVEPOINT, then the outer transaction commits.
+            with Session(engine) as sync_sess:
+                detail = await brain.record(inp, session=SimpleNamespace(sync_session=sync_sess))
+                sp = sync_sess.begin_nested()
+                sync_sess.execute(sa_text("SELECT 1"))
+                sp.rollback()
                 await asyncio.sleep(0)
                 assert emitted == [], "must not publish before the caller commits"
-                await session.commit()
+                sync_sess.commit()
                 await asyncio.sleep(0)
             assert len(emitted) == 1
             assert emitted[0].type == "decision_recorded"
             assert emitted[0].data["decision_id"] == str(detail.id)
-
-            emitted.clear()
-            async with _AsyncSession(engine) as session:
-                await brain.record(inp, session=session)
-                await session.rollback()
-                # A later transaction on the same session must not resurrect it.
-                await session.execute(sa_text("SELECT 1"))
-                await session.commit()
-                await asyncio.sleep(0)
-            assert emitted == [], "a rolled-back decision must not be published"
     finally:
-        await engine.dispose()
+        engine.dispose()

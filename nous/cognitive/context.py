@@ -159,6 +159,10 @@ _IDENTITY_OVERLAP_THRESHOLD = 0.6
 # reaching the prompt is the point of the fix. Verbatim-seeded bullets score 1.0.
 _IDENTITY_LINE_COVERAGE_THRESHOLD = 0.75
 
+# Extra list_procedures pages the catalog may read to backfill slots freed by the
+# strategy-card cap when the first fetch window is dominated by strategy cards.
+_CATALOG_BACKFILL_MAX_PAGES = 10
+
 
 def _is_system_episode(episode) -> bool:
     """Check if an episode is an internal/system episode that shouldn't surface."""
@@ -522,10 +526,36 @@ class ContextEngine:
                     # but not initially included in the catalog_max slice.
                     _n_to_backfill = _pre_filter_len - len(deduped)
                     _sc_in_deduped = sum(1 for p in deduped if getattr(p, "kind", None) == "strategy")
-                    for _tail_key in order[catalog_max:]:
-                        if _n_to_backfill <= 0:
-                            break
-                        _tail_p = winners[_tail_key]
+                    _tail_i = catalog_max
+                    _pages = 0
+                    while _n_to_backfill > 0:
+                        if _tail_i >= len(order):
+                            # Fetched window exhausted (e.g. dominated by strategy
+                            # cards): page further so older ordinary procedures can
+                            # still fill the catalog. Bounded; best-effort.
+                            if len(procs) >= total_active or _pages >= _CATALOG_BACKFILL_MAX_PAGES:
+                                break
+                            _pages += 1
+                            try:
+                                _page, _ = await self._heart.list_procedures(
+                                    limit=fetch_limit, offset=len(procs),
+                                    active_only=True, session=session,
+                                )
+                            except Exception as e:
+                                logger.warning("Procedure catalog backfill page failed: %s", e)
+                                break
+                            if not _page:
+                                break
+                            procs = procs + list(_page)
+                            for p in _page:
+                                key = getattr(p, "name", "") or ""
+                                if key and key not in winners:
+                                    order.append(key)
+                                    winners[key] = p
+                            distinct_total = len(order)
+                            continue
+                        _tail_p = winners[order[_tail_i]]
+                        _tail_i += 1
                         if getattr(_tail_p, "kind", None) == "strategy":
                             if _sc_in_deduped >= _cat_cap:
                                 continue  # tail strategy card also over cap

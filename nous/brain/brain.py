@@ -369,7 +369,11 @@ class Brain:
         if pending is None:
             pending = sync_session.info["nous_brain_pending_bus_events"] = []
 
-            def _on_commit(_sess: Any) -> None:
+            def _on_commit(sess: Any) -> None:
+                # after_commit also fires when a SAVEPOINT is released; the
+                # outer transaction can still roll back, so wait for it.
+                if sess.in_nested_transaction():
+                    return
                 loop = asyncio.get_running_loop()
                 for ev in pending:
                     task = loop.create_task(self._bus.emit(ev))
