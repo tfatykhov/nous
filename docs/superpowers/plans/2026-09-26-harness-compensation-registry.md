@@ -203,7 +203,7 @@ The check is in `DAGCreateRequest._validate_graph` (which already walks the grap
 |---------|---------|-------------|
 | `NOUS_COMPENSATION_ENABLED` | `false` | Master switch for the compensation registry. When false, no snapshots are captured and compensators are not registered. Requires `NOUS_EXECUTION_LEDGER_PERSIST_ENABLED` (snapshots are keyed by ledger row) and `NOUS_A2UI_ENABLED` (`review.revert` is the revert path). An `undoable` DAG node refuses any call it cannot snapshot, and any non-compensable side effect, whatever `NOUS_TOOL_CONTEXT_POLICY_MODE` is. |
 | `NOUS_COMPENSATION_AUTO_REVIEW_ENABLED` | `false` | Push an action_review surface automatically after a compensable background mutation. Requires `NOUS_COMPENSATION_ENABLED`. |
-| `NOUS_DAG_APPROVAL_PROCEED_DEFAULT_ENABLED` | `false` | Allow approval nodes to default to 'proceed' when all downstream nodes are declared undoable. Requires `NOUS_COMPENSATION_ENABLED`. |
+| `NOUS_DAG_APPROVAL_PROCEED_DEFAULT_ENABLED` | `false` | Allow approval nodes to default to 'proceed' when all downstream nodes are declared undoable and none declares a `completion_check` (a shell command run outside tool authorization and snapshot capture). Requires `NOUS_COMPENSATION_ENABLED` and `NOUS_COMPENSATION_AUTO_REVIEW_ENABLED` (the review card is the user's only revert surface for a background mutation). |
 
 ## Deliberately deferred
 

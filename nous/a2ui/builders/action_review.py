@@ -14,6 +14,13 @@ from ..dsl import ActionReviewCard, Button, Column, Row, Surface, Text, TextFiel
 from ._shared import _validated_trace_id
 
 
+def _is_compensable_tool(name: str) -> bool:
+    from nous.api.tool_classes import TOOL_CLASSES
+
+    tc = TOOL_CLASSES.get(name)
+    return tc is not None and tc.compensable
+
+
 def action_review(params: dict[str, Any]) -> Any:
     title = params["title"]
     trace_id = _validated_trace_id(params.get("trace_id"))
@@ -21,8 +28,18 @@ def action_review(params: dict[str, Any]) -> Any:
 
     allowed = ["review.acknowledge", "review.course_correct", "review.make_rule"]
 
-    # Phase 2.8: offer Revert when the action is compensable.
-    revertible = compensation.get("revertible", False) and compensation.get("handler")
+    # Phase 2.8: offer Revert only for a block the server derived
+    # (a2ui.tools._server_compensation, from the snapshot store + registry):
+    # revertible must be literally True, the handler a tool declared
+    # compensable, and the card linked to a ledger row. A caller-invented
+    # handler string never yields the button.
+    handler = compensation.get("handler")
+    revertible = (
+        compensation.get("revertible") is True
+        and isinstance(handler, str)
+        and _is_compensable_tool(handler)
+        and bool(trace_id)
+    )
     if revertible:
         allowed.append("review.revert")
 
@@ -67,15 +84,17 @@ def action_review(params: dict[str, Any]) -> Any:
 
     if revertible:
         verbs.append("revert")
-        components.extend([
-            Button(
-                "revert",
-                child="revert_l",
-                variant="borderless",
-                action=event("review.revert", ctx),
-            ),
-            Text("revert_l", "Undo this action"),
-        ])
+        components.extend(
+            [
+                Button(
+                    "revert",
+                    child="revert_l",
+                    variant="borderless",
+                    action=event("review.revert", ctx),
+                ),
+                Text("revert_l", "Undo this action"),
+            ]
+        )
 
     s.add(
         Column("root", children=["card", "correction_field", "acts"], align="stretch"),

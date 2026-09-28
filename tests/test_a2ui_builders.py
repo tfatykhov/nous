@@ -234,10 +234,11 @@ def test_action_review_offers_revert_when_revertible_and_handler() -> None:
     built = action_review(
         {
             **REVIEW_PARAMS,
+            "trace_id": "0b7e1c8a-3f7a-4c55-9a55-2f1f6b1d9e10",
             "compensation": {
                 "revertible": True,
-                "handler": "restore_findings",
-                "note": "Findings are soft-deleted for 30 days.",
+                "handler": "write_file",
+                "note": "The prior file content was snapshotted.",
             },
         }
     )

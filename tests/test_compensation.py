@@ -12,6 +12,7 @@ Tests cover:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import tempfile
@@ -37,6 +38,11 @@ from nous.dag.schemas import DAGCreateRequest, DAGEdgeSpec, DAGNodeSpec
 def _h(text: str) -> str:
     """The ``written_content_hash`` the runner records for ``text``."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _written(text: str) -> dict:
+    """The ``written_content_hash`` + ``written_size`` the runner records for ``text``."""
+    return {"written_content_hash": _h(text), "written_size": len(text.encode("utf-8"))}
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +147,7 @@ async def test_compensate_write_file_restores_content() -> None:
             "full_path": path,
             "existed": True,
             "prior_content": "original content",
-            "written_content_hash": _h("new content after write"),
+            **_written("new content after write"),
         }
         result = await compensate_write_file(uuid4(), snapshot_data, None)
         assert result.success
@@ -163,7 +169,7 @@ async def test_compensate_write_file_deletes_new_file() -> None:
         "full_path": path,
         "existed": False,
         "prior_content": None,
-        "written_content_hash": _h("was created by write_file"),
+        **_written("was created by write_file"),
     }
     result = await compensate_write_file(uuid4(), snapshot_data, None)
     assert result.success
@@ -178,7 +184,7 @@ async def test_compensate_write_file_already_absent() -> None:
         "full_path": path,
         "existed": False,
         "prior_content": None,
-        "written_content_hash": _h("x"),
+        **_written("x"),
     }
     result = await compensate_write_file(uuid4(), snapshot_data, None)
     assert result.success
@@ -327,7 +333,8 @@ def test_action_review_shows_revert_when_revertible_and_handler() -> None:
         {
             "title": "Wrote config file",
             "did": "Created /workspace/config.yaml",
-            "compensation": {"revertible": True, "handler": "compensate_write_file", "note": ""},
+            "trace_id": str(uuid4()),
+            "compensation": {"revertible": True, "handler": "write_file", "note": ""},
         }
     )
     assert "review.revert" in built.allowed_actions
@@ -436,6 +443,7 @@ def test_proceed_default_enabled_with_compensation_enabled_is_ok() -> None:
         dag_approval_nodes_enabled=True,
         dag_approval_proceed_default_enabled=True,
         compensation_enabled=True,
+        compensation_auto_review_enabled=True,
     )
     assert s.dag_approval_proceed_default_enabled is True
 
@@ -564,7 +572,7 @@ async def test_compensate_write_file_refuses_when_removed_after_write() -> None:
         "full_path": path,
         "existed": True,
         "prior_content": "the original content",
-        "written_content_hash": _h("what write_file wrote"),
+        **_written("what write_file wrote"),
     }
     result = await compensate_write_file(uuid4(), snapshot_data, None)
     try:
@@ -588,7 +596,7 @@ async def test_compensate_write_file_fails_when_existed_no_prior_content() -> No
         "full_path": path,
         "existed": True,
         "prior_content": None,  # capture was not possible
-        "written_content_hash": _h("written"),
+        **_written("written"),
     }
     try:
         result = await compensate_write_file(uuid4(), snapshot_data, None)
@@ -693,6 +701,7 @@ def test_proceed_default_with_ledger_persist_and_compensation_is_ok() -> None:
         dag_approval_nodes_enabled=True,
         dag_approval_proceed_default_enabled=True,
         compensation_enabled=True,
+        compensation_auto_review_enabled=True,
         execution_ledger_persist_enabled=True,
     )
     assert s.dag_approval_proceed_default_enabled is True
@@ -722,6 +731,7 @@ async def test_compensate_write_file_refuses_stale_revert() -> None:
             "existed": True,
             "prior_content": "original content",
             "written_content_hash": written_hash,
+            "written_size": len(written_content.encode("utf-8")),
         }
         result = await compensate_write_file(uuid4(), snapshot_data, None)
         assert result.success is False
@@ -750,6 +760,7 @@ async def test_compensate_write_file_proceeds_when_hash_matches() -> None:
             "existed": True,
             "prior_content": "original content",
             "written_content_hash": written_hash,
+            "written_size": len(written_content.encode("utf-8")),
         }
         result = await compensate_write_file(uuid4(), snapshot_data, None)
         assert result.success
@@ -1325,7 +1336,8 @@ async def test_undoable_check_disable_refused_when_prior_state_unreadable() -> N
 @pytest.mark.asyncio
 async def test_capture_resolve_decision_records_prior_review_state() -> None:
     """The snapshot used to hard-code prior_outcome=None; it now records the
-    fields Brain.review overwrites plus the outcome this call writes."""
+    fields Brain.review overwrites. The state the call writes is recorded
+    after it succeeds (_after_compensable_call), not guessed beforehand."""
     from unittest.mock import AsyncMock
 
     prior = {"outcome": "pending", "outcome_result": None, "reviewed_at": None, "reviewer": None, "superseded_by": None}
@@ -1338,7 +1350,7 @@ async def test_capture_resolve_decision_records_prior_review_state() -> None:
     )
     store.decision_state.assert_awaited_once_with(did)
     data = store.capture.await_args.kwargs["snapshot_data"]
-    assert data == {"decision_id": did, "prior": prior, "written_outcome": "noise"}
+    assert data == {"decision_id": did, "prior": prior}
 
 
 class _FakeSession:
@@ -1359,6 +1371,15 @@ class _FakeSession:
 
     async def commit(self):
         self.committed = True
+
+
+_WRITTEN_DECISION = {
+    "outcome": "noise",
+    "outcome_result": "later reviewer",
+    "reviewed_at": "2026-09-20T08:00:00+00:00",
+    "reviewer": "agent",
+    "superseded_by": None,
+}
 
 
 class _FakeBrain:
@@ -1388,7 +1409,7 @@ async def test_compensate_resolve_decision_uses_brain_public_interface_and_real_
     }
     res = await compensate_resolve_decision(
         uuid4(),
-        {"decision_id": did, "prior": prior, "written_outcome": "noise"},
+        {"decision_id": did, "prior": prior, "written": _WRITTEN_DECISION},
         SimpleNamespace(brain=brain),
     )
     assert res.success, res.message
@@ -1401,6 +1422,11 @@ async def test_compensate_resolve_decision_uses_brain_public_interface_and_real_
     assert values["reviewer"] == "agent" and values["superseded_by"] is None
     params = stmt.compile().params
     assert "agent-x" in params.values() and "noise" in params.values()  # agent scope + stale guard
+    # the stale guard covers EVERY written review field, not just the outcome
+    where = str(stmt.compile())
+    for col in ("outcome", "outcome_result", "reviewed_at", "reviewer", "superseded_by"):
+        assert f"decisions.{col} IS NOT DISTINCT FROM" in where, col
+    assert "later reviewer" in params.values()
 
 
 @pytest.mark.asyncio
@@ -1408,10 +1434,17 @@ async def test_compensate_resolve_decision_refuses_stale_or_unrecorded() -> None
     from nous.api.compensation import compensate_resolve_decision
 
     did = str(uuid4())
-    snap = {"decision_id": did, "prior": {"outcome": "pending"}, "written_outcome": "noise"}
-    # re-resolved since: the guarded UPDATE matches nothing
+    snap = {"decision_id": did, "prior": {"outcome": "pending"}, "written": _WRITTEN_DECISION}
+    # reviewed again since: the guarded UPDATE matches nothing
     res = await compensate_resolve_decision(uuid4(), snap, SimpleNamespace(brain=_FakeBrain(rowcount=0)))
-    assert not res.success and "re-resolved" in res.message
+    assert not res.success and "reviewed again" in res.message
+    # a snapshot that never recorded the written state cannot rule out a
+    # later same-outcome review, so it never writes (the old outcome-only guard)
+    brain = _FakeBrain(rowcount=1)
+    res = await compensate_resolve_decision(
+        uuid4(), {"decision_id": did, "prior": {"outcome": "pending"}}, SimpleNamespace(brain=brain)
+    )
+    assert not res.success and "not recorded" in res.message and brain.session_obj.stmts == []
     # a snapshot without the prior state never writes
     brain = _FakeBrain(rowcount=1)
     res = await compensate_resolve_decision(
@@ -1477,3 +1510,187 @@ async def test_server_compensation_ignores_caller_handler() -> None:
     store.get_by_ledger_entry.return_value = None
     comp = await _server_compensation({"revertible": True, "handler": "x"}, str(uuid4()), store, registry)
     assert comp["revertible"] is False and comp["handler"] is None
+
+
+# ---------------------------------------------------------------------------
+# PR #652 round 3
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("compensation", "with_trace"),
+    [
+        ({"revertible": True, "handler": "anything"}, True),  # invented handler string
+        ({"revertible": True, "handler": "send_email"}, True),  # a real but irreversible tool
+        ({"revertible": "yes", "handler": "write_file"}, True),  # truthy, not True
+        ({"revertible": True, "handler": "write_file"}, False),  # no ledger row to revert
+    ],
+)
+def test_action_review_builder_never_trusts_caller_revert_fields(compensation, with_trace) -> None:
+    """codex P2 (action_review.py:27): any truthy revertible + nonempty
+    handler used to yield an 'Undo this action' button."""
+    from nous.a2ui.builders.action_review import action_review
+
+    params = {"title": "t", "did": "d", "compensation": compensation}
+    if with_trace:
+        params["trace_id"] = str(uuid4())
+    built = action_review(params)
+    assert "review.revert" not in built.allowed_actions
+    assert "revert" not in [c["id"] for c in built.components]
+
+
+def test_proceed_default_requires_auto_review() -> None:
+    """codex P1 (config.py:2960): without the auto review card a proceed-default
+    mutation offers the user no revert surface at all."""
+    from pydantic import ValidationError
+
+    from nous.config import Settings
+
+    with pytest.raises(ValidationError, match="requires compensation_auto_review_enabled"):
+        Settings(
+            _env_file=None,
+            ANTHROPIC_API_KEY="test-key",
+            dag_approval_nodes_enabled=True,
+            dag_approval_proceed_default_enabled=True,
+            compensation_enabled=True,
+            compensation_auto_review_enabled=False,
+        )
+
+
+def test_proceed_default_rejects_downstream_completion_check() -> None:
+    """codex P1 (schemas.py:507): a completion_check is a raw shell command run
+    by the orchestrator outside tool authorization and snapshot capture."""
+    nodes, edges = _approval_node(default_outcome="proceed", undoable_successor=True)
+    nodes[2] = nodes[2].model_copy(update={"completion_check": "curl -X POST https://example.com/hook"})
+    with _mock_settings(dag_approval_proceed_default_enabled=True):
+        with pytest.raises(ValueError, match="completion_check"):
+            DAGCreateRequest(name="test", nodes=nodes, edges=edges)
+    # upstream of the approval (runs before any default) is unaffected
+    nodes, edges = _approval_node(default_outcome="proceed", undoable_successor=True)
+    nodes[0] = nodes[0].model_copy(update={"completion_check": "test -f /tmp/x"})
+    with _mock_settings(dag_approval_proceed_default_enabled=True):
+        assert len(DAGCreateRequest(name="test", nodes=nodes, edges=edges).nodes) == 3
+
+
+@pytest.mark.asyncio
+async def test_stale_check_refuses_a_grown_file_without_reading_it(tmp_path) -> None:
+    """codex P2 (compensation.py:267): the stale check did an unbounded
+    synchronous f.read() on the event loop before refusing."""
+    target = tmp_path / "f.txt"
+    target.write_text("x" * 10_000)
+    snap = {"full_path": str(target), "existed": True, "prior_content": "old", **_written("short")}
+    with patch("builtins.open", side_effect=AssertionError("must not read a size-mismatched file")):
+        res = await compensate_write_file(uuid4(), snap, None)
+    assert not res.success and "modified after" in res.message
+    assert target.read_text() == "x" * 10_000
+
+
+@pytest.mark.asyncio
+async def test_file_revert_refused_without_written_size(tmp_path) -> None:
+    target = tmp_path / "f.txt"
+    target.write_text("new")
+    snap = {"full_path": str(target), "existed": True, "prior_content": "old", "written_content_hash": _h("new")}
+    res = await compensate_write_file(uuid4(), snap, None)
+    assert not res.success and target.read_text() == "new"
+
+
+@pytest.mark.asyncio
+async def test_write_path_lock_is_shared_per_resolved_path(tmp_path) -> None:
+    """codex P1 (runner.py:577): relative and absolute spellings of one target
+    serialize on the same lock, and the map does not grow unbounded."""
+    from nous.api import compensation as comp
+
+    ws = str(tmp_path)
+    a = comp.write_path_lock("sub/../f.txt", ws)
+    assert a is comp.write_path_lock(str(tmp_path / "f.txt"), ws)
+    assert a is not comp.write_path_lock("g.txt", ws)
+    await a.acquire()
+    comp.release_write_path_lock(a)
+    assert comp.write_path_key("f.txt", ws) not in comp._write_path_locks
+
+
+@pytest.mark.asyncio
+async def test_concurrent_writes_to_one_path_snapshot_and_write_in_turn(tmp_path) -> None:
+    """codex P1 (runner.py:577): two background writes to one path both
+    snapshotted the pre-A content; reverting B then erased A while passing
+    the stale check. Capture + write now share one critical section, so B's
+    snapshot records A's content."""
+    from test_runner_authorization import _one_tool_call_then_done_with
+    from test_runner_ledger import _FakeStore, _run_loop
+    from test_runner_ledger import _runner as _ledger_runner
+
+    from nous.api.compensation import SnapshotStore
+
+    target = tmp_path / "shared.txt"
+    target.write_text("original")
+    captured: list[dict] = []
+
+    class _Store(SnapshotStore):
+        def __init__(self) -> None:
+            pass
+
+        async def capture(self, *, ledger_entry_id, tool_name, snapshot_data):
+            captured.append(snapshot_data)
+            return uuid4()
+
+    runners = []
+    for content in ("A", "B"):
+        r, d = _ledger_runner(_FakeStore(), compensation_enabled=True)
+        r.set_snapshot_store(_Store(), str(tmp_path))
+
+        async def dispatch(name, inp, _content=content, **kw):
+            await asyncio.sleep(0.05)  # the write is slow: the other call must wait
+            target.write_text(_content)
+            return "ok", False
+
+        d.dispatch = dispatch
+        r._call_api = _one_tool_call_then_done_with("write_file", {"path": "shared.txt", "content": content})
+        runners.append(r)
+    await asyncio.gather(
+        *(
+            _run_loop(r, is_background=True, context=ExecutionContext(kind="subtask", session_id=f"s{i}"))
+            for i, r in enumerate(runners)
+        )
+    )
+    priors = sorted(c["prior_content"] for c in captured)
+    assert len(captured) == 2
+    # one call saw the original, the other saw the first call's write -- never both "original"
+    assert priors in (["A", "original"], ["B", "original"])
+
+
+@pytest.mark.asyncio
+async def test_after_compensable_call_records_the_written_decision_state() -> None:
+    """codex P2 (compensation.py:357): the revert guard now needs the full
+    post-call review state, read right after the call succeeded."""
+    from unittest.mock import AsyncMock
+
+    store = AsyncMock()
+    store.decision_state.return_value = _WRITTEN_DECISION
+    runner = _bare_runner(store)
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
+    runner._action_review_pusher = None
+    did = str(uuid4())
+    entry = uuid4()
+    await runner._after_compensable_call(
+        ExecutionContext(kind="subtask"),
+        "resolve_decision",
+        entry,
+        "s1",
+        snapshotted=True,
+        status="success",
+        tool_input={"decision_id": did, "outcome": "noise"},
+    )
+    store.decision_state.assert_awaited_once_with(did)
+    store.record_written_state.assert_awaited_once_with(entry, _WRITTEN_DECISION)
+    # a failed call records nothing
+    store.reset_mock()
+    await runner._after_compensable_call(
+        ExecutionContext(kind="subtask"),
+        "resolve_decision",
+        entry,
+        "s1",
+        snapshotted=True,
+        status="error",
+        tool_input={"decision_id": did},
+    )
+    store.record_written_state.assert_not_awaited()

@@ -510,6 +510,21 @@ class DAGCreateRequest(BaseModel):
                     f"Approval node '{appr.name}': default_option is a 'proceed' option, "
                     f"but downstream acting nodes {non_undoable} are not declared undoable"
                 )
+            # A completion_check is a model-authored shell command the
+            # orchestrator runs directly (create_subprocess_shell): it never
+            # passes tool authorization or snapshot capture, so `undoable`
+            # cannot cover it. Any downstream node carrying one is refused.
+            shell_checked = sorted(
+                name
+                for name in downstream
+                if name in nodes_by_name and (nodes_by_name[name].completion_check or "").strip()
+            )
+            if shell_checked:
+                raise ValueError(
+                    f"Approval node '{appr.name}': default_option is a 'proceed' option, "
+                    f"but downstream nodes {shell_checked} declare a completion_check -- a shell "
+                    "command run outside the undoable tool path, which cannot be reverted"
+                )
 
     def _downstream_of(self, roots: set[str]) -> set[str]:
         """Every node reachable from ``roots`` along PREDECESSOR_EDGE_TYPES."""

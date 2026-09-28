@@ -37,6 +37,7 @@ from nous.api.cache_optimizer import CacheBreakDetector
 from nous.api.cache_optimizer import _hash as cache_hash
 from nous.api.call_outcome import CallOutcome
 from nous.api.compaction import ConversationCompactor
+from nous.api.compensation import release_write_path_lock, write_path_lock
 from nous.api.execution_context import ExecutionContext, resolve_context
 from nous.api.idempotency import idempotency_key
 from nous.api.models import (  # noqa: F401 — re-exported for backward compat
@@ -491,6 +492,52 @@ class AgentRunner:
         for fork in self._forks:
             fork.set_action_review_pusher(pusher)
 
+    async def _acquire_write_lock(self, tool_name: str, tool_input: dict) -> asyncio.Lock | None:
+        """Phase 2.8: hold the target path's lock across a write_file's
+        snapshot capture AND its write, in every context. Two writes to one
+        path otherwise both snapshot the same prior content, and reverting
+        the later one would erase the earlier write while passing the stale
+        check. Keyed on the repaired path the handler will write."""
+        if tool_name != "write_file":
+            return None
+        path = self._handler_args(tool_name, tool_input).get("path")
+        if not isinstance(path, str) or not path:
+            return None
+        lock = write_path_lock(path, self._workspace_dir)
+        await lock.acquire()
+        return lock
+
+    async def _after_compensable_call(
+        self,
+        ctx: ExecutionContext,
+        tool_name: str,
+        entry_id: Any,
+        session_id: str | None,
+        *,
+        snapshotted: bool,
+        status: str,
+        tool_input: dict,
+    ) -> None:
+        """After a snapshotted call succeeded: record the state it wrote
+        where a revert must check it (resolve_decision -- the full review
+        state, so a later re-review is never undone), then push the review
+        card. Fail-open: the call already happened."""
+        if snapshotted and status == "success" and tool_name == "resolve_decision" and self._snap_store is not None:
+            decision_id = str(self._handler_args(tool_name, tool_input).get("decision_id") or "")
+            try:
+                written = await self._snap_store.decision_state(decision_id)
+                if written is not None:
+                    await self._snap_store.record_written_state(entry_id, written)
+            except Exception:
+                logger.warning(
+                    "Harness Phase 2.8: written state not recorded for %s; its revert will be refused",
+                    tool_name,
+                    exc_info=True,
+                )
+        await self._maybe_push_action_review(
+            ctx, tool_name, entry_id, session_id, snapshotted=snapshotted, status=status
+        )
+
     async def _maybe_push_action_review(
         self,
         ctx: ExecutionContext,
@@ -579,8 +626,9 @@ class AgentRunner:
                     return _unrevertible(f"{path!r} is too large to snapshot (exceeds 1MiB limit)")
                 # Record what's about to be written so compensate_write_file can
                 # detect if the file was modified between the write and the revert.
-                content = tool_input.get("content", "") or ""
-                snap_data["written_content_hash"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                content = (tool_input.get("content", "") or "").encode("utf-8")
+                snap_data["written_content_hash"] = hashlib.sha256(content).hexdigest()
+                snap_data["written_size"] = len(content)
             elif tool_name == "heartbeat_check_manage":
                 # is_compensable_call admitted only action="disable". Record
                 # whether the check was enabled BEFORE the call: disabling an
@@ -604,9 +652,10 @@ class AgentRunner:
                     "prior_enabled": prior_enabled,
                 }
             elif tool_name == "resolve_decision":
-                # The prior review state the revert restores, plus the outcome
-                # this call writes: the revert only applies while the decision
-                # still carries it (a later re-resolution is not overwritten).
+                # The prior review state the revert restores. The state this
+                # call writes is recorded after it succeeds
+                # (_after_compensable_call); the revert applies only while the
+                # decision still carries all of it.
                 decision_id = str(tool_input.get("decision_id") or "")
                 prior = await self._snap_store.decision_state(decision_id)
                 if prior is None:
@@ -614,7 +663,6 @@ class AgentRunner:
                 snap_data = {
                     "decision_id": decision_id,
                     "prior": prior,
-                    "written_outcome": tool_input.get("outcome"),
                 }
             else:
                 return False
@@ -2210,100 +2258,108 @@ class AgentRunner:
                                 ledger.current_turn if ledger else None,
                                 keys_this_turn,
                             )
-                            # Phase 2.8: capture pre-dispatch snapshot for compensable
-                            # calls in background contexts. Fail-open except in undoable
-                            # contexts, which refuse rather than proceed without a snapshot.
-                            _snap_blocked: str | None = None
-                            _snapshotted = False
+                            # Phase 2.8: a write_file's snapshot and its write share one
+                            # per-path critical section (see compensation.write_path_lock).
+                            _write_lock = await self._acquire_write_lock(tc["name"], dispatch_input)
                             try:
-                                _snapshotted = await self._capture_compensation_snapshot(
-                                    _ctx,
-                                    tc["name"],
-                                    dispatch_input,
-                                    entry_id,
-                                )
-                            except Exception as _sbd:
-                                from nous.api.compensation import SnapshotBlocksDispatch
-
-                                if isinstance(_sbd, SnapshotBlocksDispatch):
-                                    _snap_blocked = str(_sbd)
-                                    await self._ledger_close(
+                                # Phase 2.8: capture pre-dispatch snapshot for compensable
+                                # calls in background contexts. Fail-open except in undoable
+                                # contexts, which refuse rather than proceed without a snapshot.
+                                _snap_blocked: str | None = None
+                                _snapshotted = False
+                                try:
+                                    _snapshotted = await self._capture_compensation_snapshot(
+                                        _ctx,
+                                        tc["name"],
+                                        dispatch_input,
                                         entry_id,
-                                        "blocked",
-                                        _snap_blocked,
-                                        keyed=send_key is not None,
                                     )
+                                except Exception as _sbd:
+                                    from nous.api.compensation import SnapshotBlocksDispatch
+
+                                    if isinstance(_sbd, SnapshotBlocksDispatch):
+                                        _snap_blocked = str(_sbd)
+                                        await self._ledger_close(
+                                            entry_id,
+                                            "blocked",
+                                            _snap_blocked,
+                                            keyed=send_key is not None,
+                                        )
+                                        if ledger:
+                                            ledger.record(
+                                                tc["name"],
+                                                dispatch_input,
+                                                _snap_blocked,
+                                                "blocked",
+                                            )
+                                if _snap_blocked is not None:
+                                    result_text, is_error = _snap_blocked, True
+                                    duration_ms = int((time.monotonic() - start_time) * 1000)
+                                elif suppressed is not None:
+                                    result_text, is_error = suppressed.text, suppressed.is_error
                                     if ledger:
                                         ledger.record(
                                             tc["name"],
                                             dispatch_input,
-                                            _snap_blocked,
-                                            "blocked",
+                                            result_text,
+                                            "blocked" if is_error else "success",
                                         )
-                            if _snap_blocked is not None:
-                                result_text, is_error = _snap_blocked, True
-                                duration_ms = int((time.monotonic() - start_time) * 1000)
-                            elif suppressed is not None:
-                                result_text, is_error = suppressed.text, suppressed.is_error
-                                if ledger:
-                                    ledger.record(
-                                        tc["name"],
-                                        dispatch_input,
-                                        result_text,
-                                        "blocked" if is_error else "success",
-                                    )
-                            else:
-                                outcome = CallOutcome()
-                                timed_out = False
-                                try:
-                                    async for item in self._dispatch_with_keepalive(
-                                        tc["name"],
-                                        dispatch_input,
-                                        session_id=session_id,
-                                        turn_number=_stream_turn_number,  # F091
-                                        context=_ctx,  # harness Phase 1a
-                                        outcome=outcome,  # harness Phase 2b
-                                    ):
-                                        if isinstance(item, StreamEvent):
-                                            yield item
-                                        else:
-                                            result_text, is_error, timed_out = item
-                                except (asyncio.CancelledError, GeneratorExit):
-                                    # Client disconnect / stream closed mid-call: the
-                                    # side effect may or may not have happened.
+                                else:
+                                    outcome = CallOutcome()
+                                    timed_out = False
+                                    try:
+                                        async for item in self._dispatch_with_keepalive(
+                                            tc["name"],
+                                            dispatch_input,
+                                            session_id=session_id,
+                                            turn_number=_stream_turn_number,  # F091
+                                            context=_ctx,  # harness Phase 1a
+                                            outcome=outcome,  # harness Phase 2b
+                                        ):
+                                            if isinstance(item, StreamEvent):
+                                                yield item
+                                            else:
+                                                result_text, is_error, timed_out = item
+                                    except (asyncio.CancelledError, GeneratorExit):
+                                        # Client disconnect / stream closed mid-call: the
+                                        # side effect may or may not have happened.
+                                        await self._ledger_close(
+                                            entry_id,
+                                            "unknown",
+                                            "stream closed mid-call — outcome unknown",
+                                            external_ref=outcome.external_ref,
+                                            keyed=send_key is not None,
+                                        )
+                                        raise
+                                    _status = _close_status(is_error, timed_out or outcome.uncertain)
                                     await self._ledger_close(
                                         entry_id,
-                                        "unknown",
-                                        "stream closed mid-call — outcome unknown",
+                                        _status,
+                                        result_text,
+                                        output_of=tc["name"],
                                         external_ref=outcome.external_ref,
                                         keyed=send_key is not None,
                                     )
-                                    raise
-                                _status = _close_status(is_error, timed_out or outcome.uncertain)
-                                await self._ledger_close(
-                                    entry_id,
-                                    _status,
-                                    result_text,
-                                    output_of=tc["name"],
-                                    external_ref=outcome.external_ref,
-                                    keyed=send_key is not None,
-                                )
-                                await self._maybe_push_action_review(
-                                    _ctx,
-                                    tc["name"],
-                                    entry_id,
-                                    session_id,
-                                    snapshotted=_snapshotted,
-                                    status=_status,
-                                )
-                                # F026: Record in execution ledger (post-dispatch)
-                                if ledger:
-                                    ledger.record(
+                                    await self._after_compensable_call(
+                                        _ctx,
                                         tc["name"],
-                                        dispatch_input,
-                                        result_text,
-                                        "error" if is_error else "success",
+                                        entry_id,
+                                        session_id,
+                                        snapshotted=_snapshotted,
+                                        status=_status,
+                                        tool_input=dispatch_input,
                                     )
+                                    # F026: Record in execution ledger (post-dispatch)
+                                    if ledger:
+                                        ledger.record(
+                                            tc["name"],
+                                            dispatch_input,
+                                            result_text,
+                                            "error" if is_error else "success",
+                                        )
+                            finally:
+                                if _write_lock is not None:
+                                    release_write_path_lock(_write_lock)
                             duration_ms = int((time.monotonic() - start_time) * 1000)
                         else:
                             duration_ms = 0
@@ -2827,99 +2883,109 @@ class AgentRunner:
                                 ledger.current_turn if ledger else None,
                                 keys_this_turn,
                             )
-                            # Phase 2.8: capture pre-dispatch snapshot for compensable
-                            # calls in background contexts. Fail-open except in undoable
-                            # contexts, which refuse rather than proceed without a snapshot.
-                            _snap_blocked2: str | None = None
-                            _snapshotted2 = False
+                            # Phase 2.8: a write_file's snapshot and its write share one
+                            # per-path critical section (see compensation.write_path_lock).
+                            _write_lock2 = await self._acquire_write_lock(tool_name, tool_input)
                             try:
-                                _snapshotted2 = await self._capture_compensation_snapshot(
-                                    ctx,
-                                    tool_name,
-                                    tool_input,
-                                    entry_id,
-                                )
-                            except Exception as _sbd2:
-                                from nous.api.compensation import SnapshotBlocksDispatch
-
-                                if isinstance(_sbd2, SnapshotBlocksDispatch):
-                                    _snap_blocked2 = str(_sbd2)
-                                    await self._ledger_close(
-                                        entry_id,
-                                        "blocked",
-                                        _snap_blocked2,
-                                        keyed=send_key is not None,
-                                    )
-                                    if ledger:
-                                        ledger.record(
-                                            tool_name,
-                                            tool_input,
-                                            _snap_blocked2,
-                                            "blocked",
-                                        )
-                            if _snap_blocked2 is not None:
-                                result_text, is_error = _snap_blocked2, True
-                            elif suppressed is not None:
-                                result_text, is_error = suppressed.text, suppressed.is_error
-                            else:
-                                outcome = CallOutcome()
-                                keyed = send_key is not None
-                                # @codex P1 on e8841b2: in-flight heartbeat
-                                # for tool calls that may exceed stall_timeout.
-                                # Cancels in the finally regardless of success.
-                                _hb = self._start_activity_heartbeat(dag_node_id) if dag_node_id is not None else None
+                                # Phase 2.8: capture pre-dispatch snapshot for compensable
+                                # calls in background contexts. Fail-open except in undoable
+                                # contexts, which refuse rather than proceed without a snapshot.
+                                _snap_blocked2: str | None = None
+                                _snapshotted2 = False
                                 try:
-                                    result_text, is_error = await self._dispatcher.dispatch(
+                                    _snapshotted2 = await self._capture_compensation_snapshot(
+                                        ctx,
                                         tool_name,
                                         tool_input,
-                                        session_id=session_id,
-                                        is_background=is_background,
-                                        turn_number=turn_number,  # F091 (caller-captured)
-                                        context=ctx,  # harness Phase 1a
-                                        outcome=outcome,  # harness Phase 2b
+                                        entry_id,
                                     )
-                                except asyncio.CancelledError:
-                                    # Subtask timeout / shutdown: the side effect may
-                                    # or may not have happened (an orphaned SMTP
-                                    # thread can still deliver) — record exactly
-                                    # that, then re-raise.
+                                except Exception as _sbd2:
+                                    from nous.api.compensation import SnapshotBlocksDispatch
+
+                                    if isinstance(_sbd2, SnapshotBlocksDispatch):
+                                        _snap_blocked2 = str(_sbd2)
+                                        await self._ledger_close(
+                                            entry_id,
+                                            "blocked",
+                                            _snap_blocked2,
+                                            keyed=send_key is not None,
+                                        )
+                                        if ledger:
+                                            ledger.record(
+                                                tool_name,
+                                                tool_input,
+                                                _snap_blocked2,
+                                                "blocked",
+                                            )
+                                if _snap_blocked2 is not None:
+                                    result_text, is_error = _snap_blocked2, True
+                                elif suppressed is not None:
+                                    result_text, is_error = suppressed.text, suppressed.is_error
+                                else:
+                                    outcome = CallOutcome()
+                                    keyed = send_key is not None
+                                    # @codex P1 on e8841b2: in-flight heartbeat
+                                    # for tool calls that may exceed stall_timeout.
+                                    # Cancels in the finally regardless of success.
+                                    _hb = (
+                                        self._start_activity_heartbeat(dag_node_id) if dag_node_id is not None else None
+                                    )
+                                    try:
+                                        result_text, is_error = await self._dispatcher.dispatch(
+                                            tool_name,
+                                            tool_input,
+                                            session_id=session_id,
+                                            is_background=is_background,
+                                            turn_number=turn_number,  # F091 (caller-captured)
+                                            context=ctx,  # harness Phase 1a
+                                            outcome=outcome,  # harness Phase 2b
+                                        )
+                                    except asyncio.CancelledError:
+                                        # Subtask timeout / shutdown: the side effect may
+                                        # or may not have happened (an orphaned SMTP
+                                        # thread can still deliver) — record exactly
+                                        # that, then re-raise.
+                                        await self._ledger_close(
+                                            entry_id,
+                                            "unknown",
+                                            "cancelled mid-call — outcome unknown",
+                                            external_ref=outcome.external_ref,
+                                            keyed=keyed,
+                                        )
+                                        raise
+                                    except Exception as exc:
+                                        # The type only: an exception message can echo arguments.
+                                        await self._ledger_close(
+                                            entry_id,
+                                            _close_status(True, outcome.uncertain),
+                                            f"{type(exc).__name__} raised during dispatch",
+                                            external_ref=outcome.external_ref,
+                                            keyed=keyed,
+                                        )
+                                        raise
+                                    finally:
+                                        await self._stop_activity_heartbeat(_hb)
+                                    _status2 = _close_status(is_error, outcome.uncertain)
                                     await self._ledger_close(
                                         entry_id,
-                                        "unknown",
-                                        "cancelled mid-call — outcome unknown",
+                                        _status2,
+                                        result_text,
+                                        output_of=tool_name,
                                         external_ref=outcome.external_ref,
                                         keyed=keyed,
                                     )
-                                    raise
-                                except Exception as exc:
-                                    # The type only: an exception message can echo arguments.
-                                    await self._ledger_close(
+                                    await self._after_compensable_call(
+                                        ctx,
+                                        tool_name,
                                         entry_id,
-                                        _close_status(True, outcome.uncertain),
-                                        f"{type(exc).__name__} raised during dispatch",
-                                        external_ref=outcome.external_ref,
-                                        keyed=keyed,
+                                        session_id,
+                                        snapshotted=_snapshotted2,
+                                        status=_status2,
+                                        tool_input=tool_input,
                                     )
-                                    raise
-                                finally:
-                                    await self._stop_activity_heartbeat(_hb)
-                                _status2 = _close_status(is_error, outcome.uncertain)
-                                await self._ledger_close(
-                                    entry_id,
-                                    _status2,
-                                    result_text,
-                                    output_of=tool_name,
-                                    external_ref=outcome.external_ref,
-                                    keyed=keyed,
-                                )
-                                await self._maybe_push_action_review(
-                                    ctx,
-                                    tool_name,
-                                    entry_id,
-                                    session_id,
-                                    snapshotted=_snapshotted2,
-                                    status=_status2,
-                                )
+                            finally:
+                                if _write_lock2 is not None:
+                                    release_write_path_lock(_write_lock2)
                         duration_ms = int((time.monotonic() - start_time) * 1000)
 
                         # F026: Record in execution ledger (post-dispatch). A

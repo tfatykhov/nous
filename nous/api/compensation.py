@@ -35,6 +35,37 @@ logger = logging.getLogger(__name__)
 # Cap for file snapshots: matches the read_file tool's 1 MiB limit.
 _FILE_SNAPSHOT_MAX_BYTES = 1 * 1024 * 1024
 
+# One lock per resolved target path, shared by every runner fork in the
+# process: a write_file's snapshot capture and its write run inside one
+# critical section, so two concurrent writes to a path cannot both snapshot
+# the same prior content (the second revert would then erase the first write).
+_write_path_locks: dict[str, asyncio.Lock] = {}
+
+
+def write_path_key(path: str, workspace_dir: str) -> str:
+    """The key a write_file target is serialized on: the resolved path."""
+    import os
+
+    full_path = os.path.join(workspace_dir, path) if not os.path.isabs(path) else path
+    return os.path.realpath(full_path)
+
+
+def write_path_lock(path: str, workspace_dir: str) -> asyncio.Lock:
+    """The process-wide lock for a write_file target."""
+    key = write_path_key(path, workspace_dir)
+    lock = _write_path_locks.get(key)
+    if lock is None:
+        lock = _write_path_locks[key] = asyncio.Lock()
+    return lock
+
+
+def release_write_path_lock(lock: asyncio.Lock) -> None:
+    """Release ``lock`` and drop idle entries so the map stays bounded."""
+    lock.release()
+    for key, held in list(_write_path_locks.items()):
+        if held is lock and not held.locked() and not getattr(held, "_waiters", None):
+            del _write_path_locks[key]
+
 
 class SnapshotBlocksDispatch(Exception):
     """Raised when a required snapshot cannot be captured, preventing the dispatch.
@@ -136,6 +167,30 @@ class SnapshotStore:
             await s.commit()
             return (res.rowcount or 0) == 1
 
+    async def record_written_state(self, ledger_entry_id: UUID, written: dict[str, Any]) -> bool:
+        """Merge ``written`` -- the state the call left behind, read right
+        after it succeeded -- into its snapshot, so the revert can refuse
+        once anything has changed that state since. Returns whether a row
+        was updated."""
+
+        async def _write() -> bool:
+            async with self._db.session() as s:
+                row = (
+                    await s.execute(
+                        select(CompensationSnapshot)
+                        .where(CompensationSnapshot.ledger_entry_id == ledger_entry_id)
+                        .where(CompensationSnapshot.agent_id == self._agent_id)
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if row is None:
+                    return False
+                row.snapshot_data = {**(row.snapshot_data or {}), "written": written}
+                await s.commit()
+                return True
+
+        return await asyncio.wait_for(_write(), timeout=self._timeout)
+
     async def check_enabled(self, name: str) -> bool | None:
         """Whether dynamic check ``name`` is enabled right now, or None when
         no such check exists. Read before a ``heartbeat_check_manage``
@@ -234,12 +289,15 @@ async def compensate_write_file(
 ) -> CompensationResult:
     """Restore prior file content or delete if file was new.
 
-    Stale-revert guard: the current file is hashed and compared with the
-    ``written_content_hash`` recorded at snapshot time before anything is
-    touched. A mismatch -- or a file our write left present that is now gone
-    -- means something changed it after our ``write_file`` ran, and the
-    revert is refused rather than discard that newer change. A snapshot
-    without the hash cannot make that distinction and is refused too.
+    Stale-revert guard: the current file is compared with the
+    ``written_size`` and ``written_content_hash`` recorded at snapshot time
+    before anything is touched. A mismatch -- or a file our write left
+    present that is now gone -- means something changed it after our
+    ``write_file`` ran, and the revert is refused rather than discard that
+    newer change. A snapshot without both cannot make that distinction and
+    is refused too. The size is compared first, so a file that has since
+    grown is refused without being read; the bounded hash read and the
+    restore run on a worker thread, never on the event loop.
     """
     import hashlib
     import os
@@ -248,42 +306,57 @@ async def compensate_write_file(
     existed = snapshot_data.get("existed", False)
     prior_content = snapshot_data.get("prior_content")
     written_content_hash: str | None = snapshot_data.get("written_content_hash")
+    written_size = snapshot_data.get("written_size")
 
     if not full_path:
         return CompensationResult(False, "no path in snapshot")
-    if written_content_hash is None:
+    if written_content_hash is None or not isinstance(written_size, int):
         # Without the hash of what the call wrote there is no way to tell our
         # write from a newer one, so the revert could destroy newer content.
         return CompensationResult(False, "revert refused: snapshot does not record what was written")
-    if not os.path.exists(full_path):
+
+    def _current_matches() -> bool | None:
+        """None: the file is gone. Otherwise whether it still holds exactly
+        what our write left -- read at most ``written_size + 1`` bytes."""
+        try:
+            size = os.path.getsize(full_path)
+        except FileNotFoundError:
+            return None
+        if size != written_size:
+            return False
+        with open(full_path, "rb") as f:
+            data = f.read(written_size + 1)
+        return len(data) == written_size and hashlib.sha256(data).hexdigest() == written_content_hash
+
+    try:
+        matches = await asyncio.to_thread(_current_matches)
+    except Exception as exc:
+        return CompensationResult(False, f"stale-check read failed: {exc}")
+    if matches is None:
         if not existed:
             return CompensationResult(True, "file already absent")
         # Our write left the file present: its absence now is a newer change.
         return CompensationResult(False, f"revert refused: {full_path!r} was removed after the original write")
+    if not matches:
+        return CompensationResult(
+            False,
+            f"revert refused: {full_path!r} was modified after the original write; "
+            "revert would overwrite newer content",
+        )
 
-    # Stale-revert guard: refuse if the file was modified after our write.
-    try:
-        with open(full_path, "rb") as f:
-            current_hash = hashlib.sha256(f.read()).hexdigest()
-        if current_hash != written_content_hash:
-            return CompensationResult(
-                False,
-                f"revert refused: {full_path!r} was modified after the original write; "
-                "revert would overwrite newer content",
-            )
-    except Exception as exc:
-        return CompensationResult(False, f"stale-check read failed: {exc}")
+    if existed and prior_content is None:
+        return CompensationResult(False, "file existed but prior content not captured")
 
-    try:
-        if existed and prior_content is not None:
+    def _restore() -> str:
+        if existed:
             with open(full_path, "w", encoding="utf-8") as f:
                 f.write(prior_content)
-            return CompensationResult(True, f"restored prior content of {full_path}")
-        elif not existed:
-            os.remove(full_path)
-            return CompensationResult(True, f"deleted {full_path} (was new)")
-        else:
-            return CompensationResult(False, "file existed but prior content not captured")
+            return f"restored prior content of {full_path}"
+        os.remove(full_path)
+        return f"deleted {full_path} (was new)"
+
+    try:
+        return CompensationResult(True, await asyncio.to_thread(_restore))
     except Exception as exc:
         return CompensationResult(False, f"revert failed: {exc}")
 
@@ -333,34 +406,51 @@ async def compensate_resolve_decision(
     """Restore the review fields ``Brain.review`` overwrote.
 
     Uses the Brain's public ``db`` / ``agent_id``. Stale guard: the update
-    applies only while the decision still carries the outcome this call
-    wrote, so a later re-resolution is never silently undone.
+    applies only while the decision still carries EVERY review field this
+    call wrote (``written``, read right after the call succeeded), so a
+    later re-review -- even one keeping the same outcome with a new note,
+    reviewer or timestamp -- is never silently undone. A snapshot without
+    the written state cannot make that distinction and is refused.
     """
     from nous.storage.models import Decision
 
     decision_id = snapshot_data.get("decision_id")
     prior = snapshot_data.get("prior")
+    written = snapshot_data.get("written")
     if not decision_id:
         return CompensationResult(False, "no decision_id in snapshot")
     if not isinstance(prior, dict):
         return CompensationResult(False, "prior state of the decision was not recorded; not reverting")
+    if not isinstance(written, dict):
+        return CompensationResult(
+            False, "revert refused: the state this call wrote was not recorded, so a later review cannot be ruled out"
+        )
     brain = getattr(deps, "brain", None)
     if brain is None:
         return CompensationResult(False, "brain not available")
-    reviewed_at = prior.get("reviewed_at")
-    superseded_by = prior.get("superseded_by")
+
+    def _ts(value: Any) -> datetime | None:
+        return datetime.fromisoformat(value) if value else None
+
+    def _uuid(value: Any) -> UUID | None:
+        return UUID(value) if value else None
+
     try:
         stmt = (
             update(Decision)
             .where(Decision.id == UUID(decision_id))
             .where(Decision.agent_id == brain.agent_id)
-            .where(Decision.outcome == snapshot_data.get("written_outcome"))
+            .where(Decision.outcome.is_not_distinct_from(written.get("outcome")))
+            .where(Decision.outcome_result.is_not_distinct_from(written.get("outcome_result")))
+            .where(Decision.reviewed_at.is_not_distinct_from(_ts(written.get("reviewed_at"))))
+            .where(Decision.reviewer.is_not_distinct_from(written.get("reviewer")))
+            .where(Decision.superseded_by.is_not_distinct_from(_uuid(written.get("superseded_by"))))
             .values(
                 outcome=prior.get("outcome"),
                 outcome_result=prior.get("outcome_result"),
-                reviewed_at=datetime.fromisoformat(reviewed_at) if reviewed_at else None,
+                reviewed_at=_ts(prior.get("reviewed_at")),
                 reviewer=prior.get("reviewer"),
-                superseded_by=UUID(superseded_by) if superseded_by else None,
+                superseded_by=_uuid(prior.get("superseded_by")),
             )
         )
         async with brain.db.session() as s:
@@ -370,7 +460,7 @@ async def compensate_resolve_decision(
             return CompensationResult(True, f"restored decision {decision_id} to outcome={prior.get('outcome')!r}")
         return CompensationResult(
             False,
-            f"revert refused: decision {decision_id} not found or re-resolved since the original call",
+            f"revert refused: decision {decision_id} not found or reviewed again since the original call",
         )
     except Exception as exc:
         return CompensationResult(False, f"revert failed: {exc}")

@@ -1876,7 +1876,8 @@ class Settings(BaseSettings):
     # background mutation. Requires compensation_enabled.
     compensation_auto_review_enabled: bool = False
     # Allow approval nodes to default to 'proceed' when all downstream
-    # nodes are declared undoable. Requires compensation_enabled.
+    # nodes are declared undoable. Requires compensation_enabled and
+    # compensation_auto_review_enabled.
     dag_approval_proceed_default_enabled: bool = False
 
     # F087: act on tokens_consumed, which only becomes non-zero once the
@@ -3146,6 +3147,14 @@ class Settings(BaseSettings):
             )
         if self.compensation_auto_review_enabled and not self.compensation_enabled:
             raise ValueError("compensation_auto_review_enabled=True requires compensation_enabled=True")
+        if self.dag_approval_proceed_default_enabled and not self.compensation_auto_review_enabled:
+            # The auto action_review card is the only surface that offers
+            # review.revert for a background mutation: without it an approval
+            # that proceeded by default leaves nothing the user can undo from.
+            raise ValueError(
+                "dag_approval_proceed_default_enabled=True requires compensation_auto_review_enabled=True "
+                "(the review card is how a user reverts what a proceed-default let through)"
+            )
         return self
 
     @model_validator(mode="after")
