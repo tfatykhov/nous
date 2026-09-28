@@ -91,6 +91,7 @@ def create_app(
     context_logger: Any | None = None,
     surface_service: Any | None = None,
     action_router: Any | None = None,
+    push_service: Any | None = None,
     dag_orchestrator: Any | None = None,
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
@@ -3187,6 +3188,96 @@ def create_app(
         )
         return JSONResponse(payload, status_code=status_code)
 
+    def _a2ui_push():
+        """The push service, or None when A2UI is off / it was not wired."""
+        try:
+            if not settings.a2ui_enabled or not push_service:
+                return None
+        except (RuntimeError, AttributeError):
+            return None
+        return push_service
+
+    async def a2ui_push_config(request: Request) -> JSONResponse:
+        """GET /a2ui/push/config — the four public Firebase client values.
+
+        Always 200: `{enabled: false, reason}` is a legitimate answer the app
+        renders in Settings. A 503 here would be indistinguishable from the
+        tailnet being down, which is a different thing for the user to fix.
+        """
+        push = _a2ui_push()
+        if push is None:
+            return JSONResponse({"enabled": False, "reason": "A2UI not available"})
+        return JSONResponse(push.client_config_payload())
+
+    async def a2ui_push_register(request: Request) -> JSONResponse:
+        """PUT /a2ui/push/tokens — upsert this install's FCM token."""
+        push = _a2ui_push()
+        if push is None:
+            return JSONResponse({"error": "A2UI not available"}, status_code=503)
+        # Same CSRF control as /a2ui/action: no CORS middleware exists and
+        # Request.json() never checks, but a cross-origin simple request
+        # cannot carry application/json without a preflight.
+        if "application/json" not in (request.headers.get("content-type", "") or ""):
+            return JSONResponse(
+                {"error": "Content-Type must be application/json"}, status_code=415
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "body must be an object"}, status_code=400)
+        status_code, payload = await push.register(
+            str(body.get("installation_id") or ""),
+            fcm_token=str(body.get("fcm_token") or ""),
+            name=body.get("name") or "",
+            app_version=body.get("app_version") or "",
+            notifications_enabled=bool(body.get("notifications_enabled", True)),
+        )
+        return JSONResponse(payload, status_code=status_code)
+
+    async def a2ui_push_deregister(request: Request) -> JSONResponse:
+        """DELETE /a2ui/push/tokens/{installation_id} — the only way to unregister."""
+        push = _a2ui_push()
+        if push is None:
+            return JSONResponse({"error": "A2UI not available"}, status_code=503)
+        status_code, payload = await push.deregister(
+            request.path_params["installation_id"]
+        )
+        return JSONResponse(payload, status_code=status_code)
+
+    async def a2ui_push_installations(request: Request) -> JSONResponse:
+        """GET /a2ui/push/installations — operator view; never the token."""
+        push = _a2ui_push()
+        if push is None:
+            return JSONResponse({"error": "A2UI not available"}, status_code=503)
+        return JSONResponse(await push.list_installations())
+
+    async def a2ui_push_test(request: Request) -> JSONResponse:
+        """POST /a2ui/push/test — send one test push and REPORT the failure.
+
+        The ordinary send path swallows everything (a lost push loses only a
+        pointer). This one exists to tell an operator why it is not working,
+        so it is the one place that surfaces the error.
+        """
+        push = _a2ui_push()
+        if push is None:
+            return JSONResponse({"error": "A2UI not available"}, status_code=503)
+        if "application/json" not in (request.headers.get("content-type", "") or ""):
+            return JSONResponse(
+                {"error": "Content-Type must be application/json"}, status_code=415
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "body must be an object"}, status_code=400)
+        status_code, payload = await push.send_test(
+            str(body.get("installation_id") or "")
+        )
+        return JSONResponse(payload, status_code=status_code)
+
     async def a2ui_catalog(request: Request) -> JSONResponse:
         """GET /a2ui/catalog/{name} — serve a vendored catalog by short name."""
         from nous.a2ui.validator import load_catalog
@@ -3233,6 +3324,17 @@ def create_app(
         Route("/a2ui/surfaces", a2ui_surfaces_index),
         Route("/a2ui/action", a2ui_action, methods=["POST"]),
         Route("/a2ui/call", a2ui_call, methods=["POST"]),
+        # F097 push. Detail before collection, same rule as the surfaces pair
+        # above: Starlette matches top-down.
+        Route("/a2ui/push/config", a2ui_push_config),
+        Route("/a2ui/push/installations", a2ui_push_installations),
+        Route("/a2ui/push/test", a2ui_push_test, methods=["POST"]),
+        Route(
+            "/a2ui/push/tokens/{installation_id}",
+            a2ui_push_deregister,
+            methods=["DELETE"],
+        ),
+        Route("/a2ui/push/tokens", a2ui_push_register, methods=["PUT"]),
         Route("/a2ui/catalog/{name}", a2ui_catalog),
         # F035.1: Event bus observability
         Route("/events/stats", events_stats),

@@ -1,0 +1,108 @@
+package us.fatykhov.nous.companion.data
+
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import us.fatykhov.nous.companion.core.Http
+import java.io.IOException
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+
+/**
+ * `:core.Http` over OkHttp (spec §7.3). Three clients: the stream (45 s read
+ * = 3× the 15 s keepalive, no call timeout), `/a2ui/call` (200 s: refine
+ * runs up to three 60 s compose rounds) and everything else (15 s). The
+ * stream never sends `Last-Event-ID` (R2) and returns on any failure.
+ */
+class OkHttpTransport(private val settings: Settings) : Http {
+    private val plain = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(15, TimeUnit.SECONDS).build()
+    private val call = plain.newBuilder().readTimeout(200, TimeUnit.SECONDS).build()
+    private val stream = plain.newBuilder().readTimeout(45, TimeUnit.SECONDS).callTimeout(0, TimeUnit.SECONDS).build()
+    @Volatile private var activeStream: Call? = null
+
+    private fun url(path: String) = settings.baseUrl + path
+
+    override suspend fun get(path: String): Http.Response =
+        plain.newCall(Request.Builder().url(url(path)).get().build()).await()
+
+    override suspend fun postJson(path: String, body: String): Http.Response {
+        val client = if (path == "/a2ui/call") call else plain
+        val req = Request.Builder().url(url(path)).post(body.toRequestBody("application/json".toMediaType())).build()
+        return client.newCall(req).await()
+    }
+
+    override suspend fun putJson(path: String, body: String): Http.Response {
+        val req = Request.Builder().url(url(path)).put(body.toRequestBody("application/json".toMediaType())).build()
+        return plain.newCall(req).await()
+    }
+
+    override suspend fun delete(path: String): Http.Response =
+        plain.newCall(Request.Builder().url(url(path)).delete().build()).await()
+
+    /**
+     * The blocking read stays on IO; `onOpen` and every chunk are delivered on
+     * the CALLER's dispatcher (Main). `SyncEngine` applies chunks straight into
+     * `SurfaceStore`, which is main-confined and read by Compose — applying
+     * from the IO thread raced local edits and recomposition (codex P1).
+     *
+     * Chunks are whole lines, not byte windows: OkHttp hands back arbitrary
+     * byte counts, and a fresh `String(bytes)` per window replaces the two
+     * halves of a multi-byte character with U+FFFD. okio decodes a line only
+     * once it is complete, so non-ASCII text arrives intact (codex P2).
+     */
+    override suspend fun stream(path: String, onOpen: () -> Unit, onChunk: (String) -> Unit) {
+        val req = Request.Builder().url(url(path)).header("Accept", "text/event-stream").get().build()
+        val c = stream.newCall(req)
+        activeStream = c
+        try {
+            withContext(Dispatchers.IO) {
+                c.execute().use { res ->
+                    if (!res.isSuccessful) return@use
+                    withContext(Dispatchers.Main.immediate) { onOpen() }
+                    val src = res.body.source()
+                    while (true) {
+                        val line = src.readUtf8Line() ?: break
+                        withContext(Dispatchers.Main.immediate) { onChunk(line + "\n") }
+                    }
+                }
+            }
+        } catch (_: IOException) {
+            // EOF, timeout, or a network switch cancelled us: the engine reruns R1.
+        } finally {
+            if (activeStream === c) activeStream = null
+        }
+    }
+
+    /** Cancel the live stream so the engine reconnects at once (network switch). */
+    fun cancelStream() { activeStream?.cancel() }
+
+    private fun Response.toCore(): Http.Response = use {
+        Http.Response(code, body.string(), headers.names().associateWith { headers[it] ?: "" })
+    }
+
+    /**
+     * The body is read HERE, on OkHttp's thread. The engine runs on Main, so a
+     * continuation resumed with the raw `Response` would read the body on Main
+     * and hit `NetworkOnMainThreadException` on any body larger than what the
+     * socket already buffered (found on the emulator: `/health` passed, the
+     * 44 KB micro-app snapshots did not).
+     */
+    private suspend fun Call.await(): Http.Response = suspendCancellableCoroutine { cont ->
+        enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) { if (cont.isActive) cont.resumeWithException(e) }
+            override fun onResponse(call: Call, response: Response) {
+                val core = try { response.toCore() } catch (e: IOException) { if (cont.isActive) cont.resumeWithException(e); return }
+                cont.resume(core)
+            }
+        })
+        cont.invokeOnCancellation { cancel() }
+    }
+}

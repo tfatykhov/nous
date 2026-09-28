@@ -1,3 +1,6 @@
 *.sh text eol=lf
 *.py text eol=lf
 *.md text
+android/gradlew text eol=lf
+*.bat text eol=crlf
+*.jar binary

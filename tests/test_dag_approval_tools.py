@@ -136,8 +136,11 @@ def test_main_builds_the_surface_service_before_the_orchestrator():
 
     source = (Path(__file__).resolve().parents[1] / "nous" / "main.py").read_text(encoding="utf-8")
     orchestrator_at = source.index("dag_orchestrator = DAGOrchestrator(")
-    assert source.count("SurfaceService(database, settings, heart=heart)") == 1
-    assert source.index("SurfaceService(database, settings, heart=heart)") < orchestrator_at
+    # Matched on the constructor name alone: F097 added a `push=` argument, so
+    # pinning the full call text made this fail for a reason that has nothing
+    # to do with the ordering it exists to protect.
+    assert source.count("SurfaceService(") == 1
+    assert source.index("SurfaceService(") < orchestrator_at
     # The A2UI block used to start with its own `surface_service = None`; left
     # in place it would wipe the service built above, and every companion
     # action — every approval tap — would fail.

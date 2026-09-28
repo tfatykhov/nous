@@ -2786,6 +2786,68 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- F097: FCM push for the Android companion -------------------------
+    a2ui_push_enabled: bool = Field(
+        default=True,
+        description=(
+            "F097 kill switch for the FCM push leg. Ships ON but is INERT "
+            "until both file settings below point at real files — an "
+            "unconfigured push service reports itself unconfigured and sends "
+            "nothing, so there is nothing to land dark. Push carries a "
+            "pointer to a surface that is already durable, so the failure "
+            "mode of the whole leg is a missed notification, never lost "
+            "state. Telegram keeps firing either way; duplicate alerts are "
+            "the accepted cost of the beta."
+        ),
+    )
+    a2ui_fcm_service_account_file: str = Field(
+        default="",
+        description=(
+            "F097: path INSIDE THE CONTAINER to the Firebase service-account "
+            "JSON used to mint FCM OAuth tokens. Empty = push not configured "
+            "(the config endpoint reports why and the send path is a no-op). "
+            "Mount it read-only; it is a credential and never leaves the "
+            "server — the app is served only the four public client values."
+        ),
+    )
+    a2ui_fcm_google_services_file: str = Field(
+        default="",
+        description=(
+            "F097: path INSIDE THE CONTAINER to the console's "
+            "google-services.json. The server selects the client matching "
+            "NOUS_A2UI_ANDROID_PACKAGE and serves its four public values to "
+            "the app at GET /a2ui/push/config, so one generic APK works "
+            "against any Firebase project and the public repo ships no "
+            "project config. Changing projects takes effect on the app's "
+            "next process start."
+        ),
+    )
+    a2ui_android_package: str = Field(
+        default="us.fatykhov.nous.companion",
+        description=(
+            "F097: the Android applicationId. Must equal the app's, or the "
+            "google-services.json client lookup finds nothing and FCM's "
+            "restricted_package_name rejects every send."
+        ),
+    )
+    a2ui_push_timeout_seconds: int = Field(
+        default=10,
+        ge=1,
+        description=(
+            "F097: overall bound on one push fan-out across all registered "
+            "installations. One unreachable phone must not hold the others."
+        ),
+    )
+    a2ui_push_max_installations: int = Field(
+        default=10,
+        ge=1,
+        description=(
+            "F097: registered installations per agent. A bound on accidental "
+            "growth, not access control — the tailnet is the access control. "
+            "A new installation_id beyond the cap gets 409."
+        ),
+    )
+
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":
         object.__setattr__(self, '_compaction_threshold_explicit',

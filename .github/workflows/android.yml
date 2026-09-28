@@ -1,0 +1,87 @@
+name: Android
+
+# F097 §11. Path-filtered: the catalog ratchet that must gate every PR lives
+# in ci.yml (tests/test_android_catalog_coverage.py); this workflow builds
+# the native client and re-runs the JVM parity suite whenever the client,
+# the catalogs, the fixtures or the web companion sources change.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - "nous/a2ui/catalogs/**"
+      - "tests/fixtures/a2ui/**"
+      - "dashboard-app/src/companion/**"
+      - ".github/workflows/android.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "android/**"
+      - "nous/a2ui/catalogs/**"
+      - "tests/fixtures/a2ui/**"
+      - "dashboard-app/src/companion/**"
+      - ".github/workflows/android.yml"
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: ":core (JVM)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Unit tests
+        working-directory: android
+        # Force :app out even though the runner has an SDK: this job is the SDK-free proof.
+        run: ./gradlew :core:test -Pnous.includeApp=false --console=plain
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: core-test-results
+          path: android/core/build/test-results/test/*.xml
+          if-no-files-found: ignore
+
+  app:
+    name: ":app (APK + unit tests)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Robolectric jar cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-${{ hashFiles('android/gradle/libs.versions.toml') }}
+      - name: Build and test
+        working-directory: android
+        env:
+          ANDROID_BETA_KEYSTORE_B64: ${{ secrets.ANDROID_BETA_KEYSTORE_B64 }}
+          ANDROID_BETA_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_BETA_KEYSTORE_PASSWORD }}
+        run: ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --console=plain
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nous-companion-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: app-test-results
+          path: |
+            android/app/build/test-results/**/*.xml
+            android/app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore
