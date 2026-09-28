@@ -34,8 +34,8 @@ import hashlib
 import json
 import logging
 import os
-import sys
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -46,8 +46,7 @@ logger = logging.getLogger(__name__)
 # original — same schema, sessions cleaned to remove answer-leakage. See
 # repo README: https://github.com/xiaowu0162/LongMemEval (data section).
 LONGMEMEVAL_URL = (
-    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/"
-    "resolve/main/longmemeval_s_cleaned.json"
+    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json"
 )
 # SHA-256 of the upstream file. Empty = skip verification (first download).
 # Updated when upstream changes; mismatch aborts the download (fail-closed).
@@ -111,7 +110,7 @@ class LMEIngestStats:
     n_episodes_summarised: int = 0
 
 
-def _parse_lme_date(date_str: str) -> "datetime | None":
+def _parse_lme_date(date_str: str) -> datetime | None:
     """Parse a LongMemEval haystack date like '2023/05/20 (Sat) 02:21' to a
     timezone-aware datetime (UTC). Returns None on parse failure.
 
@@ -119,13 +118,11 @@ def _parse_lme_date(date_str: str) -> "datetime | None":
     The day-of-week token is informational; we strip it before parsing.
     """
     import re
-    from datetime import datetime, timezone
+
     # Drop the parenthetical day-of-week
     cleaned = re.sub(r"\s*\([A-Za-z]+\)\s*", " ", date_str).strip()
     try:
-        return datetime.strptime(cleaned, "%Y/%m/%d %H:%M").replace(
-            tzinfo=timezone.utc
-        )
+        return datetime.strptime(cleaned, "%Y/%m/%d %H:%M").replace(tzinfo=UTC)
     except ValueError:
         return None
 
@@ -138,11 +135,7 @@ def _session_to_transcript(session: list | dict) -> str:
     50 chars total (see episode_summarizer.py:118).
     """
     turns = session if isinstance(session, list) else (session.get("turns") or [])
-    return "\n\n".join(
-        f"{t.get('role', 'user')}: {t.get('content', '')}"
-        for t in turns
-        if t.get("content")
-    )
+    return "\n\n".join(f"{t.get('role', 'user')}: {t.get('content', '')}" for t in turns if t.get("content"))
 
 
 # ---------------------------------------------------------------------------
@@ -231,11 +224,7 @@ def _stratify(
 
     if len(picked) < n:
         # Top up from any remaining questions in any type
-        remaining = [
-            q
-            for qt in QUESTION_TYPES
-            for q in by_type[qt][counts[qt] :]
-        ]
+        remaining = [q for qt in QUESTION_TYPES for q in by_type[qt][counts[qt] :]]
         rng.shuffle(remaining)
         picked.extend(remaining[: n - len(picked)])
 
@@ -277,10 +266,10 @@ async def _replay_sessions_into_scratch(
     """
     from nous.api.anthropic_client import create_client
     from nous.brain.embeddings import EmbeddingProvider
-    from nous.heart.heart import Heart
-    from nous.heart.schemas import EpisodeInput
     from nous.handlers.episode_summarizer import EpisodeSummarizer
     from nous.handlers.fact_extractor import FactExtractor
+    from nous.heart.heart import Heart
+    from nous.heart.schemas import EpisodeInput
     from nous.storage.database import Database
     from nous_eval.ingest import _settings_for_ingest
 
@@ -298,11 +287,23 @@ async def _replay_sessions_into_scratch(
     api_client = None
     try:
         await db.connect()
-        # Surface schema drift before we start ingesting — without this,
-        # a stale-schema container would let inserts silently poison the
-        # asyncpg session and the operator sees an empty corpus instead
-        # of a clear schema error.
-        from nous_eval.schema_preflight import assert_eval_db_schema_matches_orm
+        # Apply any pending migrations first, then assert all columns exist.
+        # Running migrations before the preflight means the baked eval-DB
+        # image stays usable after new columns are added by a later migration
+        # (e.g. migration 073 adds calibration_factor / calibration_applied_at
+        # to brain.decisions).  A baked image records no migration history,
+        # so seed it first or run_migrations replays everything and fails.
+        # Without the migrate step a stale-schema
+        # container would let inserts silently poison the asyncpg session and
+        # the operator sees an empty corpus instead of a clear schema error.
+        from nous.storage.migrator import run_migrations
+        from nous_eval.schema_preflight import (
+            assert_eval_db_schema_matches_orm,
+            seed_baked_migration_history,
+        )
+
+        await seed_baked_migration_history(db.engine)
+        await run_migrations(db.engine)
         await assert_eval_db_schema_matches_orm(db)
         embedder = EmbeddingProvider(
             api_key=settings.openai_api_key,
@@ -323,12 +324,17 @@ async def _replay_sessions_into_scratch(
 
         # bus=None: handlers' constructors tolerate this (F051.5 refactor).
         summarizer = EpisodeSummarizer(
-            heart=heart, brain=None, settings=settings,
-            bus=None, llm_client=api_client,
+            heart=heart,
+            brain=None,
+            settings=settings,
+            bus=None,
+            llm_client=api_client,
         )
         extractor = FactExtractor(
-            heart=heart, settings=settings,
-            bus=None, llm_client=api_client,
+            heart=heart,
+            settings=settings,
+            bus=None,
+            llm_client=api_client,
             # F051.5: disable the hybrid-search pre-check — RRF score is
             # unreliable on a near-empty corpus (lone fact returns ≈1.0
             # → trips dedup for every subsequent candidate). Heart.learn's
@@ -364,10 +370,7 @@ async def _replay_sessions_into_scratch(
             # (LongMemEval haystacks routinely have 30-50 sessions, and the
             # answer can be in any of them). Result: empty gold_ids on most
             # qrels, harness throws away the row.
-            answer_indices = [
-                i for i, sid in enumerate(session_ids)
-                if sid in answer_sids
-            ]
+            answer_indices = [i for i, sid in enumerate(session_ids) if sid in answer_sids]
             selected = list(answer_indices)
             for i in range(len(all_sessions)):
                 if len(selected) >= max_sessions_per_question:
@@ -380,11 +383,7 @@ async def _replay_sessions_into_scratch(
             for session_idx, session in indexed_sessions:
                 # Per-session key for provenance lookup. Prefer the string ID
                 # when present (cleaned upstream); fall back to int index.
-                session_key = (
-                    session_ids[session_idx]
-                    if session_idx < len(session_ids)
-                    else session_idx
-                )
+                session_key = session_ids[session_idx] if session_idx < len(session_ids) else session_idx
                 transcript = _session_to_transcript(session)
                 if not transcript:
                     logger.debug("F051.5: qid=%s session=%d empty transcript, skipping", qid, session_idx)
@@ -401,29 +400,28 @@ async def _replay_sessions_into_scratch(
                     continue
 
                 # 1. Materialize episode (EpisodeInput.summary required).
-                ep = await heart.start_episode(EpisodeInput(
-                    summary=transcript[:500] or "(empty)",
-                    trigger="lme_replay",
-                    tags=["longmemeval", q.get("question_type", "")],
-                ))
+                ep = await heart.start_episode(
+                    EpisodeInput(
+                        summary=transcript[:500] or "(empty)",
+                        trigger="lme_replay",
+                        tags=["longmemeval", q.get("question_type", "")],
+                    )
+                )
                 # 1a. 2026-05-24: backdate episode to the LongMemEval session
                 # date so temporal-reasoning questions get real timestamps.
                 # heart.start_episode sets started_at=now(); we overwrite via
                 # raw SQL because the Heart API doesn't expose started_at.
-                session_date_str = (
-                    haystack_dates[session_idx]
-                    if session_idx < len(haystack_dates)
-                    else None
-                )
+                session_date_str = haystack_dates[session_idx] if session_idx < len(haystack_dates) else None
                 if session_date_str:
                     parsed_date = _parse_lme_date(session_date_str)
                     if parsed_date is not None:
                         from sqlalchemy import text as sa_text
+
                         async with db.session() as ds:
-                            await ds.execute(sa_text(
-                                "UPDATE heart.episodes SET started_at = :t "
-                                "WHERE id = :i"
-                            ), {"t": parsed_date, "i": ep.id})
+                            await ds.execute(
+                                sa_text("UPDATE heart.episodes SET started_at = :t WHERE id = :i"),
+                                {"t": parsed_date, "i": ep.id},
+                            )
                             await ds.commit()
 
                 # 2. Summarize directly. Returns None on early-return / LLM error.
@@ -473,8 +471,10 @@ async def _replay_sessions_into_scratch(
                 logger.info(
                     "F051.5: completed %d/%d questions (n_sessions_replayed=%d, "
                     "n_sessions_reused=%d), sleeping %.1fs before next batch",
-                    completed, len(picked),
-                    stats.n_sessions_replayed, stats.n_sessions_reused,
+                    completed,
+                    len(picked),
+                    stats.n_sessions_replayed,
+                    stats.n_sessions_reused,
                     inter_question_sleep_seconds,
                 )
                 await asyncio.sleep(inter_question_sleep_seconds)
@@ -533,7 +533,8 @@ def _write_qrels(
                         "F051.5: qid=%s answer_session_id %r not found in "
                         "provenance map (was the session capped by "
                         "--max-sessions-per-question?) — skipping",
-                        qid, sid,
+                        qid,
+                        sid,
                     )
                     continue
                 gold_ids.extend(str(u) for u in ids_for_session.get("episode", []))
@@ -546,8 +547,10 @@ def _write_qrels(
                 # below and the final aggregate stat.
                 n_missing_gold += 1
                 logger.warning(
-                    "F051.5: qid=%s no gold_ids populated — answer_session_ids=%r produced 0 memories (skipping qrel emit)",
-                    qid, answer_sids,
+                    "F051.5: qid=%s no gold_ids populated — "
+                    "answer_session_ids=%r produced 0 memories (skipping qrel emit)",
+                    qid,
+                    answer_sids,
                 )
                 continue
             fh.write(
@@ -572,7 +575,10 @@ def _write_qrels(
             )
     logger.info(
         "F051.5: wrote %d qrels to %s (%d with empty gold_ids, %d sessions reused)",
-        len(picked), out_path, n_missing_gold, stats.n_sessions_reused,
+        len(picked),
+        out_path,
+        n_missing_gold,
+        stats.n_sessions_reused,
     )
 
 
@@ -586,29 +592,38 @@ def _parse_args(argv: list[str] | None) -> IngestLMEConfig:
     p.add_argument("--n", type=int, default=DEFAULT_N)
     p.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
     p.add_argument("--out-qrels", type=Path, default=None)  # falls back to _default_out_qrels()
-    p.add_argument("--scratch-db-url", default=os.environ.get(
-        "NOUS_EVAL_SCRATCH_DB_URL",
-        "postgresql+asyncpg://nous:nous_eval@localhost:5433/nous_eval_scratch",
-    ))
+    p.add_argument(
+        "--scratch-db-url",
+        default=os.environ.get(
+            "NOUS_EVAL_SCRATCH_DB_URL",
+            "postgresql+asyncpg://nous:nous_eval@localhost:5433/nous_eval_scratch",
+        ),
+    )
     p.add_argument("--skip-download", action="store_true")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument(
-        "--max-sessions-per-question", type=int, default=50,
+        "--max-sessions-per-question",
+        type=int,
+        default=50,
         help="F051.5 cost guardrail. Bumped to 50 (2026-05-25) so the ingest "
-             "covers the median ~48-session haystack the LongMemEval paper "
-             "assumes; the earlier cap of 10 masked distractor difficulty.",
+        "covers the median ~48-session haystack the LongMemEval paper "
+        "assumes; the earlier cap of 10 masked distractor difficulty.",
     )
     p.add_argument(
-        "--inter-question-sleep-seconds", type=float, default=0.0,
+        "--inter-question-sleep-seconds",
+        type=float,
+        default=0.0,
         help="F051.5: pause this many seconds after every "
-             "--inter-question-batch questions complete. Default 0 = no pacing "
-             "(matches original behavior). Set to e.g. 30 to spread Sonnet load "
-             "across natural break-points.",
+        "--inter-question-batch questions complete. Default 0 = no pacing "
+        "(matches original behavior). Set to e.g. 30 to spread Sonnet load "
+        "across natural break-points.",
     )
     p.add_argument(
-        "--inter-question-batch", type=int, default=5,
+        "--inter-question-batch",
+        type=int,
+        default=5,
         help="F051.5: questions per pacing batch (default 5; ~100 Sonnet calls "
-             "at default --max-sessions-per-question=10).",
+        "at default --max-sessions-per-question=10).",
     )
     ns = p.parse_args(argv)
     return IngestLMEConfig(
@@ -627,9 +642,7 @@ def _parse_args(argv: list[str] | None) -> IngestLMEConfig:
 async def run(config: IngestLMEConfig) -> LMEIngestStats:
     """Ingest entry point — importable for tests."""
     if not config.skip_download:
-        src = _download_if_missing(
-            config.cache_dir, LONGMEMEVAL_URL, LONGMEMEVAL_SHA256 or None
-        )
+        src = _download_if_missing(config.cache_dir, LONGMEMEVAL_URL, LONGMEMEVAL_SHA256 or None)
     else:
         src = config.cache_dir / "longmemeval_s_cleaned.json"
 

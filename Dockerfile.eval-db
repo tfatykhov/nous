@@ -36,6 +36,10 @@ ENV POSTGRES_USER=nous \
 # 00_init.sql prefix guarantees it runs before any numeric migration file.
 COPY sql/init.sql /docker-entrypoint-initdb.d/00_init.sql
 COPY sql/migrations/*.sql /docker-entrypoint-initdb.d/
+# initdb records nothing in nous_system.schema_migrations; this runs last
+# (zz_) and records every migration above so the harness's run_migrations
+# applies only migrations added after the image was built.
+COPY --chmod=755 Dockerfile.eval-db.record-migrations.sh /docker-entrypoint-initdb.d/zz_record_migrations.sh
 
 # Staged JSONL fixtures produced by the operator's ingest run.
 COPY nous-eval-fixtures-staging/ /fixtures/

@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from nous.api.retrieval_pipeline import run_recall_pipeline
@@ -32,10 +33,10 @@ from nous.api.tools import _format_pipeline_text
 from nous.brain.brain import Brain
 from nous.brain.embeddings import EmbeddingProvider
 from nous.config import Settings
-from nous_eval.config import EvalSettings
 from nous.heart.heart import Heart
 from nous.runtime_config import RuntimeConfig
 from nous.storage.database import Database
+from nous_eval.config import EvalSettings
 
 if TYPE_CHECKING:
     from nous_eval.qrels_loader import Qrel
@@ -180,7 +181,7 @@ class RunResult:
 
 async def run_matrix(
     configs: list[RetrievalConfig],
-    qrels: list["Qrel"],
+    qrels: list[Qrel],
     eval_settings: EvalSettings,
     main_settings_template: Settings,
     top_k: int = 10,
@@ -218,18 +219,13 @@ async def run_matrix(
         try:
             await eval_db.connect()
         except Exception as exc:
-            logger.exception(
-                "F051: Database.connect failed for config=%s", cfg.name
-            )
+            logger.exception("F051: Database.connect failed for config=%s", cfg.name)
             # Surface a synthetic QrelResult for each qrel so downstream
             # metrics know this config produced nothing.
             results.append(
                 RunResult(
                     config=cfg,
-                    per_qrel=[
-                        _errored_qrel_result(idx, q, f"db_connect_failed: {exc}")
-                        for idx, q in enumerate(qrels)
-                    ],
+                    per_qrel=[_errored_qrel_result(idx, q, f"db_connect_failed: {exc}") for idx, q in enumerate(qrels)],
                     duration_seconds=time.monotonic() - t0,
                 )
             )
@@ -246,9 +242,7 @@ async def run_matrix(
                 }
                 attempted: set[str] = set()
                 for idx, qrel in enumerate(qrels):
-                    qr, ran_flags = await _run_one(
-                        heart, brain, eval_scoped, qrel, idx, top_k
-                    )
+                    qr, ran_flags = await _run_one(heart, brain, eval_scoped, qrel, idx, top_k)
                     per_qrel.append(qr)
                     attempted |= qr.attempted_legs
                     for k, v in ran_flags.items():
@@ -289,9 +283,7 @@ async def run_matrix(
 # ---------------------------------------------------------------------------
 
 
-def _apply_config_flags(
-    base: Settings, cfg: RetrievalConfig
-) -> Settings:
+def _apply_config_flags(base: Settings, cfg: RetrievalConfig) -> Settings:
     """Apply ``cfg.flags`` onto a Settings copy, filtering unknown keys.
 
     Unknown keys are dropped with a WARNING rather than raising. A flag
@@ -310,8 +302,7 @@ def _apply_config_flags(
     unknown = set(cfg.flags) - known
     if unknown:
         logger.warning(
-            "F051: config %s references Settings fields not present on "
-            "the base: %s — skipping those flags",
+            "F051: config %s references Settings fields not present on the base: %s — skipping those flags",
             cfg.name,
             sorted(unknown),
         )
@@ -338,9 +329,7 @@ def _apply_config_flags(
     return base.model_copy(update=update)
 
 
-def _settings_for_eval_db(
-    eval_settings: EvalSettings, base: Settings
-) -> Settings:
+def _settings_for_eval_db(eval_settings: EvalSettings, base: Settings) -> Settings:
     """Clone production Settings but swap DB connection + disable handlers.
 
     The disable list is filtered through ``hasattr(Settings, name)`` so the
@@ -390,9 +379,7 @@ def make_eval_embedding_provider(
 
 
 @asynccontextmanager
-async def _build_heart_for_eval(
-    db: Database, settings: Settings
-) -> AsyncIterator[Heart]:
+async def _build_heart_for_eval(db: Database, settings: Settings) -> AsyncIterator[Heart]:
     """Construct a Heart bound to the eval DB, closing on exit.
 
     Uses ``async with`` so the embedding provider's httpx client is always
@@ -400,13 +387,28 @@ async def _build_heart_for_eval(
     heartbeat) are not started — those belong to :mod:`nous.main`, not to
     the eval harness.
 
-    Pre-flight: asserts the eval DB has every column the ORM expects.
-    Without this, missing migrations cascade into asyncpg
+    Pre-flight: applies any pending migrations, then asserts the eval DB
+    has every column the ORM expects.  Running migrations first means the
+    baked eval-DB image (nous-eval-db:v2026-Q2) stays usable even after
+    new columns are added by a migration that post-dates the image build
+    (e.g. migration 073 adds calibration_factor / calibration_applied_at
+    to brain.decisions).  The baked image records no migration history, so
+    ``seed_baked_migration_history`` first marks what it already contains —
+    otherwise run_migrations replays every migration and fails on the first
+    non-idempotent one.  The schema preflight then verifies the apply
+    succeeded.  Without this, missing migrations cascade into asyncpg
     InFailedSQLTransactionError mid-query and the eval reports something
     like "0% sufficient" with no surface signal that the schema is the
     problem (see PR #398 for the cascade fix).
     """
-    from nous_eval.schema_preflight import assert_eval_db_schema_matches_orm
+    from nous.storage.migrator import run_migrations
+    from nous_eval.schema_preflight import (
+        assert_eval_db_schema_matches_orm,
+        seed_baked_migration_history,
+    )
+
+    await seed_baked_migration_history(db.engine)
+    await run_migrations(db.engine)
     await assert_eval_db_schema_matches_orm(db)
 
     embedding_provider = make_eval_embedding_provider(settings)
@@ -427,14 +429,17 @@ async def _build_heart_for_eval(
         try:
             from nous.api.anthropic_client import create_client
             from nous.heart.query_expansion import QueryExpander
+
             api_client = create_client(settings)
             await api_client.start()
-            heart.set_query_expander(QueryExpander(
-                llm=api_client,
-                settings=settings,
-                db=db,
-                model=settings.query_expansion_model,
-            ))
+            heart.set_query_expander(
+                QueryExpander(
+                    llm=api_client,
+                    settings=settings,
+                    db=db,
+                    model=settings.query_expansion_model,
+                )
+            )
         except Exception:
             logger.warning(
                 "F050: harness QueryExpander wiring failed; f050_on collapses to baseline",
@@ -448,11 +453,14 @@ async def _build_heart_for_eval(
     if getattr(settings, "residual_activation_enabled", False):
         try:
             from nous.heart.residual_activation import ResidualActivator
-            heart.set_residual_activator(ResidualActivator(
-                settings=settings,
-                wm=heart.working_memory,
-                db=db,
-            ))
+
+            heart.set_residual_activator(
+                ResidualActivator(
+                    settings=settings,
+                    wm=heart.working_memory,
+                    db=db,
+                )
+            )
             logger.info("F055: harness ResidualActivator wired for eval")
         except Exception:
             logger.warning(
@@ -469,14 +477,14 @@ async def _build_heart_for_eval(
         try:
             if api_client is None:
                 from nous.api.anthropic_client import create_client
+
                 api_client = create_client(settings)
                 await api_client.start()
             heart.facts.set_llm_client(api_client, model=settings.contradiction_model)
             logger.info("F377: harness dedup tiebreaker LLM client wired for eval")
         except Exception:
             logger.warning(
-                "F377: harness dedup tiebreaker wiring failed; tiebreaker collapses "
-                "to fail-open dedup",
+                "F377: harness dedup tiebreaker wiring failed; tiebreaker collapses to fail-open dedup",
                 exc_info=True,
             )
 
@@ -534,9 +542,9 @@ async def _build_densifier_for_eval(
     is required (raises ``RuntimeError`` if ``OPENAI_API_KEY`` is unset) since
     backfill is meaningless without embeddings.
     """
+    from nous.brain.embeddings import EmbeddingProvider
     from nous.brain.graph_densifier import GraphDensifier
     from nous.brain.graph_linker import GraphLinker
-    from nous.brain.embeddings import EmbeddingProvider
 
     # F054 fix: EmbeddingProvider takes api_key as a string, not a Settings
     # object. The previous `EmbeddingProvider(settings)` call silently produced
@@ -545,9 +553,7 @@ async def _build_densifier_for_eval(
     # embeddings) but cross-type re-embedding was broken on every density_eval
     # run between F053 merge (b258cbe) and this fix.
     if not settings.openai_api_key:
-        raise RuntimeError(
-            "F053 density_eval requires an embedder (set OPENAI_API_KEY)"
-        )
+        raise RuntimeError("F053 density_eval requires an embedder (set OPENAI_API_KEY)")
     embedder = EmbeddingProvider(
         api_key=settings.openai_api_key,
         model=settings.embedding_model,
@@ -577,7 +583,7 @@ async def _run_one(
     heart: Heart,
     brain: Brain,
     settings: Settings,
-    qrel: "Qrel",
+    qrel: Qrel,
     idx: int,
     top_k: int,
 ) -> tuple[QrelResult, dict[str, bool]]:
@@ -608,9 +614,7 @@ async def _run_one(
         )
     except Exception as exc:
         # Per plan silent-failure table: captured, not zero-scored.
-        logger.exception(
-            "F051: pipeline raised for qrel %d (%r)", idx, qrel.query[:80]
-        )
+        logger.exception("F051: pipeline raised for qrel %d (%r)", idx, qrel.query[:80])
         return (
             QrelResult(
                 qrel_index=idx,
@@ -642,7 +646,8 @@ async def _run_one(
     served: list = []
     try:
         _format_pipeline_text(
-            pipeline_results, stats,
+            pipeline_results,
+            stats,
             # `memory_types or ["all"]`: None crashes on `"all" in None`, and
             # `[]` would silently narrow every section to nothing.
             memory_types or ["all"],
@@ -651,8 +656,7 @@ async def _run_one(
         served_ids = [i for i, _t in served]
     except Exception:
         # Never let a reporting side-channel fail a scored run.
-        logger.warning("F051: served-id collection failed for qrel %d", idx,
-                       exc_info=True)
+        logger.warning("F051: served-id collection failed for qrel %d", idx, exc_info=True)
         served_ids = None  # not collected — must not score as 0.0
 
     retrieved_ids = [r.id for r in pipeline_results]
@@ -685,10 +689,7 @@ async def _run_one(
             error=None,
             # Real failures only — non-error diagnostics are excluded so
             # ``_stage_error_summary`` never calls a healthy run partial.
-            stage_errors={
-                k: v for k, v in stats.n_stage_errors.items()
-                if k not in _NON_ERROR_STAGE_COUNTERS
-            },
+            stage_errors={k: v for k, v in stats.n_stage_errors.items() if k not in _NON_ERROR_STAGE_COUNTERS},
         ),
         {
             "graph_expansion_used": stats.graph_expansion_used,
@@ -698,18 +699,10 @@ async def _run_one(
             # caller. Without these, run_matrix discarded every stage failure
             # and the report showed plausible metrics with no sign that a leg
             # had crashed.
-            **{
-                f"stage_error_{k}": v
-                for k, v in stats.n_stage_errors.items()
-                if k not in _NON_ERROR_STAGE_COUNTERS
-            },
+            **{f"stage_error_{k}": v for k, v in stats.n_stage_errors.items() if k not in _NON_ERROR_STAGE_COUNTERS},
             # Non-failure diagnostics live in the same dict upstream but must
             # NOT reach the partial-run banner (see _NON_ERROR_STAGE_COUNTERS).
-            **{
-                f"stage_info_{k}": v
-                for k, v in stats.n_stage_errors.items()
-                if k in _NON_ERROR_STAGE_COUNTERS
-            },
+            **{f"stage_info_{k}": v for k, v in stats.n_stage_errors.items() if k in _NON_ERROR_STAGE_COUNTERS},
         },
     )
 
@@ -722,9 +715,11 @@ async def _run_one(
 # every healthy graph-enabled eval as a partial run and declare its metrics
 # invalid for comparison, which is worse than no banner at all: a warning
 # that fires on success trains operators to ignore it.
-_NON_ERROR_STAGE_COUNTERS: frozenset[str] = frozenset({
-    "heart_graph_memory_duplicates",
-})
+_NON_ERROR_STAGE_COUNTERS: frozenset[str] = frozenset(
+    {
+        "heart_graph_memory_duplicates",
+    }
+)
 
 
 def _leg_of(r) -> str:
@@ -785,7 +780,7 @@ def _score_rank(
     return first_rank, n_hits
 
 
-def _errored_qrel_result(idx: int, qrel: "Qrel", error: str) -> QrelResult:
+def _errored_qrel_result(idx: int, qrel: Qrel, error: str) -> QrelResult:
     """Build a zero-retrieval QrelResult carrying an error tag.
 
     Used when the config-level setup (DB connect) fails — we still produce
