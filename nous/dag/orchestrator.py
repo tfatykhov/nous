@@ -1510,18 +1510,20 @@ class DAGOrchestrator:
             # _heartbeat_worker_has_run accepts as worker evidence. Honor the
             # retained failure first, as _sync_check_node does, so a passing
             # shell check cannot complete a node whose worker failed.
-            registry = getattr(self._dynamic_loader, "_registry", None)
-            if _registry_final_run_failed(registry, node.check_name):
-                await self._finalize_awaiting_check_node(
-                    node,
-                    status="failed",
-                    error="Check disabled itself but its final run failed",
-                )
-                # Consumed only after the failure is persisted.
-                _registry_consume_disabled_run_failure(registry, node.check_name)
+            if await self._fail_if_final_run_failed(node):
                 continue
 
             worker_has_run = await self._heartbeat_worker_has_run(node)
+            # codex P1 (PR #656 round 6): the run can finish — and fail —
+            # while the helper above awaits the DB, after which the helper
+            # sees the durable enabled=False row and returns True. Re-read
+            # the registry after every await on this path; a run still in
+            # flight is not evidence yet (it may still fail), so defer —
+            # without skipping the timeout backstop below.
+            if await self._fail_if_final_run_failed(node):
+                continue
+            if self._check_run_in_flight(node):
+                worker_has_run = False
             if node.awaiting_check_at is None and worker_has_run:
                 established_at = datetime.now(UTC)
                 await self._store.update_node(
@@ -1604,13 +1606,24 @@ class DAGOrchestrator:
                 attempts = (node.check_attempts or 0) + 1
                 now = datetime.now(UTC)
 
+                result = None
                 if check.status == "success":
-                    # worker_has_run is guaranteed True here — we already
-                    # `continue`d above otherwise, in this SAME iteration,
-                    # with no intervening await that could change the
-                    # underlying run_count/error_count/enabled state. No
-                    # need to re-check.
                     result = await self._read_node_result(node, dag)
+                # codex P1 (PR #656 round 6): the shell command and result
+                # read are awaited too, so the worker's final run can start,
+                # disable itself and fail meanwhile. Re-read after the last
+                # await, before accepting a result.
+                if await self._fail_if_final_run_failed(
+                    node, check_attempts=attempts, last_check_at=now,
+                ):
+                    continue
+                if check.status == "success" and self._check_run_in_flight(node):
+                    check = CheckResult(status="pending", detail=check.detail)
+
+                if check.status == "success":
+                    # worker_has_run was established above; the in-flight
+                    # and retained-failure re-reads just before this branch
+                    # cover every await since then.
                     # Terminal transition + heartbeat cancel both go through
                     # _finalize_awaiting_check_node — see its docstring for
                     # why cleanup lives there and not inline per-branch.
@@ -1652,6 +1665,33 @@ class DAGOrchestrator:
                 logger.exception(
                     "Error polling completion check for node %s", node.name
                 )
+
+    def _check_run_in_flight(self, node: DAGNode) -> bool:
+        """Whether node's heartbeat check has a run executing right now."""
+        registry = getattr(self._dynamic_loader, "_registry", None)
+        return _registry_run_in_flight(registry, node.check_name)
+
+    async def _fail_if_final_run_failed(self, node: DAGNode, **fields: Any) -> bool:
+        """Fail an awaiting_check node whose self-disabling final run failed.
+
+        codex P1 (PR #656 round 5/6): enabled=False in the DB counts as
+        worker evidence, so a retained final-run failure must win over it.
+        The registry is live state, so callers re-read it after every await
+        in _poll_awaiting_checks rather than trusting an earlier answer.
+        Returns True if the node was failed.
+        """
+        registry = getattr(self._dynamic_loader, "_registry", None)
+        if not _registry_final_run_failed(registry, node.check_name):
+            return False
+        await self._finalize_awaiting_check_node(
+            node,
+            status="failed",
+            error="Check disabled itself but its final run failed",
+            **fields,
+        )
+        # Consumed only after the failure is persisted.
+        _registry_consume_disabled_run_failure(registry, node.check_name)
+        return True
 
     async def _heartbeat_worker_has_run(self, node: DAGNode) -> bool:
         """Whether node's heartbeat check has completed at least one

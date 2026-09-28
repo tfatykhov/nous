@@ -1614,3 +1614,117 @@ async def test_completion_check_node_completes_when_self_disabled_run_succeeds()
 
     assert node.status == "completed"
     orch._run_completion_check.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# codex P1 (PR #656 round 6): the retained failure is re-read after every
+# await in the completion_check poll, and a run still in flight is not
+# accepted as worker evidence.
+# ---------------------------------------------------------------------------
+
+
+async def _awaiting_check_mid_run(fail_after_disable: bool, finish_during: str | None):
+    """Poll a completion_check node against a self-disabling check run.
+
+    ``worker_evidence``: the run is in flight when the poll starts and
+    finishes inside the awaited worker-evidence lookup. ``completion_check``:
+    the run starts and finishes inside the awaited shell command.
+    ``result_read``: likewise inside the awaited result-file read. None: the
+    run is in flight for the whole poll.
+    """
+    hb, orch, store, node, disabled, release, _ = _self_disabling_setup(
+        fail_after_disable=fail_after_disable,
+    )
+    loader = orch._dynamic_loader
+    loader.is_check_disabled = AsyncMock(return_value=True)
+    loader.manage_check = AsyncMock()
+    tick: asyncio.Task | None = None
+
+    async def start_run():
+        nonlocal tick
+        tick = asyncio.create_task(hb._tick())
+        await asyncio.wait_for(disabled.wait(), timeout=3.0)
+
+    async def finish_run():
+        release.set()
+        await asyncio.wait_for(tick, timeout=3.0)
+
+    async def successful_runs(*args, **kwargs):
+        if finish_during == "worker_evidence":
+            await finish_run()
+        return 0
+
+    async def shell_check(*args, **kwargs):
+        if finish_during == "completion_check":
+            await start_run()
+            await finish_run()
+        return MagicMock(status="success", detail=None)
+
+    async def read_result(*args, **kwargs):
+        if finish_during == "result_read":
+            await start_run()
+            await finish_run()
+        return "done"
+
+    if finish_during in ("completion_check", "result_read"):
+        # An earlier run succeeded; the final run has not started yet.
+        loader.get_successful_run_count = AsyncMock(return_value=1)
+    elif finish_during is None:
+        # An earlier run succeeded; the final run is in flight throughout.
+        loader.get_successful_run_count = AsyncMock(return_value=1)
+        await start_run()
+    else:
+        loader.get_successful_run_count = AsyncMock(side_effect=successful_runs)
+        await start_run()
+    orch._run_completion_check = AsyncMock(side_effect=shell_check)
+    orch._read_node_result = AsyncMock(side_effect=read_result)
+
+    node.status = "awaiting_check"
+    node.completion_check = "true"
+    node.awaiting_check_at = datetime.now().astimezone()
+    node.started_at = datetime.now().astimezone()
+    node.completion_check_interval = None
+    node.last_check_at = None
+    node.max_check_attempts = None
+    node.check_attempts = 0
+    node.timeout_seconds = 600
+    node.result = None
+    dag = MagicMock()
+    dag.nodes = [node]
+    await orch._poll_awaiting_checks(dag)
+    if not tick.done():
+        await finish_run()
+    return hb._registry, orch, store, node, loader
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish_during", ["worker_evidence", "completion_check", "result_read"])
+async def test_completion_check_rechecks_final_run_failure_after_await(finish_during):
+    registry, orch, store, node, loader = await _awaiting_check_mid_run(
+        True,
+        finish_during,
+    )
+
+    assert node.status == "failed"
+    final = store.update_node.await_args_list[-1].kwargs
+    assert final["status"] == "failed"
+    assert final["error"] == "Check disabled itself but its final run failed"
+    assert all(c.kwargs.get("status") != "completed" for c in store.update_node.await_args_list)
+    loader.manage_check.assert_awaited()  # heartbeat check cancelled
+    assert registry._disabled_run_failures == {}
+
+
+@pytest.mark.asyncio
+async def test_completion_check_defers_while_final_run_in_flight():
+    _, orch, _, node, _ = await _awaiting_check_mid_run(False, None)
+
+    assert node.status == "awaiting_check"
+    orch._run_completion_check.assert_not_called()
+    assert node.check_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_completion_check_completes_when_final_run_succeeds_mid_poll():
+    _, _, _, node, _ = await _awaiting_check_mid_run(False, "completion_check")
+
+    assert node.status == "completed"
