@@ -700,6 +700,46 @@ class TestDynamicCheckLoaderCRUD:
         assert registry.get_check("new_check") is not None
 
     @pytest.mark.asyncio
+    async def test_sync_does_not_unregister_check_created_mid_sync(self):
+        """codex P1 (PR #656 round 8): a sync whose enabled-row snapshot
+        predates a concurrent create_check must not unregister the new check."""
+        loader, registry, mock_session = self._make_loader()
+        fetched = asyncio.Event()
+        release = asyncio.Event()
+
+        async def stale_fetch():
+            fetched.set()
+            await release.wait()
+            return []  # snapshot taken before the new check committed
+
+        loader._fetch_enabled = stale_fetch
+        mock_model = MagicMock()
+        mock_model.id = "new-uuid-001"
+        mock_session.add = MagicMock()
+        mock_session.commit = AsyncMock()
+        mock_session.refresh = AsyncMock()
+
+        with patch("nous.storage.models.DynamicCheckModel") as MockModel:
+            MockModel.return_value = mock_model
+            sync = asyncio.create_task(loader.sync())
+            await fetched.wait()
+            create = asyncio.create_task(
+                loader.create_check(
+                    name="dag_check",
+                    description="A DAG node's worker",
+                    prompt="Do the node's work",
+                    interval_seconds=3600,
+                )
+            )
+            for _ in range(5):
+                await asyncio.sleep(0)
+            release.set()
+            await asyncio.wait_for(asyncio.gather(sync, create), timeout=3.0)
+
+        assert registry.get_check("dag_check") is not None
+        assert "new-uuid-001" in loader._loaded_ids
+
+    @pytest.mark.asyncio
     async def test_create_rejects_low_interval(self):
         """33. interval_seconds < MIN_INTERVAL raises ValueError."""
         loader, _, _ = self._make_loader()
@@ -778,7 +818,7 @@ class TestDynamicCheckLoaderCRUD:
     async def test_manage_enable(self):
         """38. manage_check(action='enable') enables and syncs."""
         loader, _, mock_session = self._make_loader()
-        loader.sync = AsyncMock()
+        loader._sync_locked = AsyncMock()
 
         mock_model = MagicMock()
         mock_model.enabled = False
@@ -791,7 +831,7 @@ class TestDynamicCheckLoaderCRUD:
 
         assert result["status"] == "enabled"
         assert mock_model.enabled is True
-        loader.sync.assert_called_once()
+        loader._sync_locked.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_manage_disable(self):
@@ -849,7 +889,7 @@ class TestDynamicCheckLoaderCRUD:
     async def test_manage_update(self):
         """41. manage_check(action='update') updates fields and re-syncs."""
         loader, _, mock_session = self._make_loader()
-        loader.sync = AsyncMock()
+        loader._sync_locked = AsyncMock()
 
         mock_model = MagicMock()
         mock_model.prompt = "Old prompt"
@@ -865,7 +905,7 @@ class TestDynamicCheckLoaderCRUD:
 
         assert result["status"] == "updated"
         assert mock_model.prompt == "New prompt"
-        loader.sync.assert_called_once()
+        loader._sync_locked.assert_called_once()
 
 
 # ===========================================================================

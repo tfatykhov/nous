@@ -1864,6 +1864,17 @@ class DAGOrchestrator:
         reaches awaiting_check when completion_check is a non-empty
         string, so that branch is unreachable in practice.)
         """
+        # codex P1 (PR #656 round 8): callers decide the terminal status
+        # after their last in-flight read, but the check stays registered
+        # until _cancel_heartbeat_check below — a run could start during the
+        # awaited update and do work after the node was decided. Fence new
+        # runs before the first await; the disable unregisters (and so
+        # unfences) the check. If the status write fails the node is not
+        # terminal, so its worker must be able to run again.
+        registry = getattr(self._dynamic_loader, "_registry", None)
+        fence = getattr(registry, "fence", None) if node.check_name else None
+        if callable(fence):
+            fence(node.check_name)
         completed_at = datetime.now(UTC)
         update_kwargs: dict[str, object] = {"status": status, "completed_at": completed_at}
         if error is not None:
@@ -1875,7 +1886,12 @@ class DAGOrchestrator:
         if last_check_at is not None:
             update_kwargs["last_check_at"] = last_check_at
 
-        await self._store.update_node(node.id, **update_kwargs)
+        try:
+            await self._store.update_node(node.id, **update_kwargs)
+        except BaseException:
+            if callable(fence):
+                registry.unfence(node.check_name)
+            raise
         node.status = status
         if result is not None:
             node.result = result

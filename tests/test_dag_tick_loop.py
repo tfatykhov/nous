@@ -1757,3 +1757,91 @@ async def test_completion_check_defers_any_outcome_while_run_in_flight(shell_sta
     assert node.check_attempts == 1  # the poll is counted as pending
     assert all(c.kwargs.get("status") not in ("completed", "failed") for c in store.update_node.await_args_list)
     loader.manage_check.assert_not_awaited()  # worker neither disabled nor cancelled
+
+
+# ---------------------------------------------------------------------------
+# codex P1 (PR #656 round 8): no heartbeat run may start while an
+# awaiting_check node's terminal status is being persisted — the decision was
+# made before that await, and the check is only disabled after it.
+# ---------------------------------------------------------------------------
+
+
+def _finalize_setup(update_fails: bool = False):
+    from types import SimpleNamespace
+
+    from nous.dag.orchestrator import DAGOrchestrator
+
+    registry = CheckRegistry()
+    agent = MagicMock()
+    agent.run_turn = AsyncMock(return_value=('{"has_findings": false, "findings": []}', MagicMock(), {}))
+    agent.end_conversation = AsyncMock()
+    check = DynamicCheck(
+        check_id="dag-check-id",
+        name="dag-worker",
+        prompt="do the node's work",
+        tools=[],
+        interval=1,
+        timeout=30,
+        runner=agent,
+    )
+    registry.register(check)
+    loader = MagicMock()
+    loader._registry = registry
+    loader.update_run_stats = AsyncMock()
+    loader.manage_check = AsyncMock()
+    hb = HeartbeatRunner(
+        settings=_make_settings(heartbeat_enabled=True),
+        registry=registry,
+        runner=MagicMock(),
+        brain=MagicMock(),
+        heart=MagicMock(),
+        bus=None,
+        http_client=None,
+        finding_store=None,
+        api_client=None,
+        dynamic_loader=loader,
+    )
+    store = AsyncMock()
+
+    async def update_node(node_id, **fields):
+        # A scheduled tick and a REST trigger land during the terminal write.
+        await hb._tick()
+        await hb.trigger_check(check.name)
+        if update_fails:
+            raise RuntimeError("db down")
+
+    store.update_node = AsyncMock(side_effect=update_node)
+    orch = DAGOrchestrator(store=store, dynamic_loader=loader, settings=Settings(_env_file=None))
+    node = SimpleNamespace(
+        id="node-1",
+        name="monitor",
+        check_name=check.name,
+        status="awaiting_check",
+        result=None,
+        check_attempts=0,
+        last_check_at=None,
+    )
+    return hb, orch, registry, node, agent, loader
+
+
+@pytest.mark.asyncio
+async def test_no_check_run_starts_while_node_terminal_status_is_persisted():
+    _, orch, registry, node, agent, loader = _finalize_setup()
+
+    await orch._finalize_awaiting_check_node(node, status="completed", result={"ok": True})
+
+    assert node.status == "completed"
+    agent.run_turn.assert_not_called()  # neither the tick nor the trigger ran it
+    loader.manage_check.assert_awaited_once_with(action="disable", name="dag-worker")
+
+
+@pytest.mark.asyncio
+async def test_failed_terminal_write_lets_the_check_run_again():
+    hb, orch, registry, node, agent, _ = _finalize_setup(update_fails=True)
+
+    with pytest.raises(RuntimeError):
+        await orch._finalize_awaiting_check_node(node, status="completed")
+
+    assert node.status == "awaiting_check"
+    assert not registry.is_fenced("dag-worker")
+    assert [c.name for c in registry.get_due_checks()] == ["dag-worker"]

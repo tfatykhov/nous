@@ -357,6 +357,12 @@ class DynamicCheckLoader:
         self._signatures: dict[str, str] = {}  # name -> signature for change detection
         # name -> instances with a run in flight (maintained by DynamicCheck.run)
         self._active_runs: dict[str, set[DynamicCheck]] = {}
+        # codex P1 (PR #656 round 8): sync() reconciles a DB snapshot against
+        # _loaded_ids/_signatures, which create_check and manage_check mutate
+        # from other tasks (the DAG loop, REST). Interleaved, a stale snapshot
+        # unregisters a just-created check or resurrects a just-disabled one,
+        # so sync, create and manage run one at a time.
+        self._mutation_lock = asyncio.Lock()
 
     def _cancel_active_runs(self, name: str) -> None:
         """Cancel every in-flight run of ``name`` (a disabled check stops now)."""
@@ -380,6 +386,11 @@ class DynamicCheckLoader:
 
     async def sync(self) -> int:
         """Load/reload dynamic checks from DB. Returns count of active checks."""
+        async with self._mutation_lock:
+            return await self._sync_locked()
+
+    async def _sync_locked(self) -> int:
+        """sync() body; the caller holds ``_mutation_lock``."""
         rows = await self._fetch_enabled()
 
         current_ids = {str(r.id) for r in rows}
@@ -582,6 +593,34 @@ class DynamicCheckLoader:
         on_complete_tools: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create a new dynamic check. Returns the check dict."""
+        async with self._mutation_lock:
+            return await self._create_check_locked(
+                name,
+                description,
+                prompt,
+                tools,
+                interval_seconds,
+                cron_expr,
+                timeout_seconds,
+                urgent,
+                on_complete_prompt,
+                on_complete_tools,
+            )
+
+    async def _create_check_locked(
+        self,
+        name: str,
+        description: str,
+        prompt: str,
+        tools: list[str] | None = None,
+        interval_seconds: int = 3600,
+        cron_expr: str | None = None,
+        timeout_seconds: int | None = None,
+        urgent: bool = False,
+        on_complete_prompt: str | None = None,
+        on_complete_tools: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """create_check() body; the caller holds ``_mutation_lock``."""
         if timeout_seconds is None:
             timeout_seconds = self._default_timeout
         from nous.storage.models import DynamicCheckModel
@@ -680,6 +719,13 @@ class DynamicCheckLoader:
         self, action: str, name: str | None = None, updates: dict | None = None,
     ) -> dict[str, Any]:
         """List, enable, disable, delete, or update a dynamic check."""
+        async with self._mutation_lock:
+            return await self._manage_check_locked(action, name, updates)
+
+    async def _manage_check_locked(
+        self, action: str, name: str | None, updates: dict | None,
+    ) -> dict[str, Any]:
+        """manage_check() body; the caller holds ``_mutation_lock``."""
         from nous.storage.models import DynamicCheckModel
 
         if action == "list":
@@ -702,7 +748,7 @@ class DynamicCheckLoader:
                 model.enabled = True
                 model.updated_at = datetime.now(UTC)
                 await session.commit()
-                await self.sync()
+                await self._sync_locked()
                 return {"status": "enabled", "name": name}
 
             elif action == "disable":
@@ -779,7 +825,7 @@ class DynamicCheckLoader:
                     raise ValueError("on_complete_tools must be a subset of check tools")
                 model.updated_at = datetime.now(UTC)
                 await session.commit()
-                await self.sync()
+                await self._sync_locked()
                 return {"status": "updated", "name": name}
 
             else:

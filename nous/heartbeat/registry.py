@@ -158,6 +158,10 @@ class CheckRegistry:
         # the set, so a failure nobody consumes (its DAG was cancelled first)
         # cannot grow it without limit.
         self._disabled_run_failures: dict[str, None] = {}
+        # Checks that may not start a new run: the DAG orchestrator fences a
+        # check before persisting its node's terminal status, so no run can
+        # start between that decision and the check's disable.
+        self._fenced: set[str] = set()
 
     def register(self, check: BaseCheck, permanent: bool = False) -> None:
         """Register a check. Permanent checks cannot be unregistered."""
@@ -165,6 +169,7 @@ class CheckRegistry:
         # A fresh registration starts with no recorded outcome, so a stale
         # failure from an earlier check of the same name cannot leak into it.
         self._disabled_run_failures.pop(check.name, None)
+        self._fenced.discard(check.name)
         if permanent:
             self._permanent.add(check.name)
         logger.info("Registered heartbeat check: %s (permanent=%s)", check.name, permanent)
@@ -174,10 +179,24 @@ class CheckRegistry:
         if name in self._permanent:
             logger.warning("Cannot unregister permanent check: %s", name)
             return False
+        # An unregistered check cannot start a run, so its fence is moot.
+        self._fenced.discard(name)
         if name in self._checks:
             del self._checks[name]
             return True
         return False
+
+    def fence(self, name: str) -> None:
+        """Stop new runs of ``name`` from starting (in-flight runs continue)."""
+        self._fenced.add(name)
+
+    def unfence(self, name: str) -> None:
+        """Let runs of ``name`` start again."""
+        self._fenced.discard(name)
+
+    def is_fenced(self, name: str) -> bool:
+        """Whether new runs of ``name`` are fenced off."""
+        return name in self._fenced
 
     def begin_run(self, name: str) -> None:
         """Mark a run of ``name`` as in flight (call before ``check.run()``)."""
@@ -225,7 +244,7 @@ class CheckRegistry:
     def get_due_checks(self, now: datetime | None = None) -> list[BaseCheck]:
         """Get all checks that are due to run."""
         now = now or datetime.now(UTC)
-        return [c for c in self._checks.values() if c.is_due(now)]
+        return [c for c in self._checks.values() if c.name not in self._fenced and c.is_due(now)]
 
     def get_check(self, name: str) -> BaseCheck | None:
         """Get a check by name."""

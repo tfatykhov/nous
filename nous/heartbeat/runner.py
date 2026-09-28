@@ -541,7 +541,12 @@ class HeartbeatRunner:
             # node.
             if isinstance(check, DynamicCheck):
                 live = self._registry.get_check(check.name)
-                if live is None or not live.active or live._self_disabled:
+                if (
+                    live is None
+                    or not live.active
+                    or live._self_disabled
+                    or self._registry.is_fenced(check.name)
+                ):
                     logger.info(
                         "Heartbeat check '%s' was unregistered or disabled after snapshot — skipping",
                         check.name,
@@ -1261,6 +1266,9 @@ class HeartbeatRunner:
         check = self._registry.get_check(name)
         if check is None:
             return None
+        # A check whose DAG node is being terminalized starts no new run.
+        if self._registry.is_fenced(name):
+            return CheckResult(skipped=True)
         # Same run bracket as _tick (outcome defaults to failed): see the
         # comment there.
         self._registry.begin_run(check.name)
