@@ -153,6 +153,39 @@ class SnapshotStore:
 
         return await asyncio.wait_for(_read(), timeout=self._timeout)
 
+    async def decision_state(self, decision_id: str) -> dict[str, Any] | None:
+        """The review fields ``Brain.review`` overwrites, as they are now, or
+        None when this agent has no such decision. Read before a
+        ``resolve_decision`` so its revert restores exactly this state."""
+        from nous.storage.models import Decision
+
+        async def _read() -> dict[str, Any] | None:
+            async with self._db.session() as s:
+                row = (
+                    await s.execute(
+                        select(
+                            Decision.outcome,
+                            Decision.outcome_result,
+                            Decision.reviewed_at,
+                            Decision.reviewer,
+                            Decision.superseded_by,
+                        )
+                        .where(Decision.id == UUID(decision_id))
+                        .where(Decision.agent_id == self._agent_id)
+                    )
+                ).first()
+            if row is None:
+                return None
+            return {
+                "outcome": row[0],
+                "outcome_result": row[1],
+                "reviewed_at": row[2].isoformat() if row[2] is not None else None,
+                "reviewer": row[3],
+                "superseded_by": str(row[4]) if row[4] is not None else None,
+            }
+
+        return await asyncio.wait_for(_read(), timeout=self._timeout)
+
 
 async def snapshot_for_write_file(
     path: str,
@@ -201,11 +234,12 @@ async def compensate_write_file(
 ) -> CompensationResult:
     """Restore prior file content or delete if file was new.
 
-    Stale-revert guard: when a ``written_content_hash`` was recorded at
-    snapshot time, the current file content is hashed and compared before
-    any write.  A mismatch means the file was modified after our
-    ``write_file`` ran; the revert is refused to avoid silently discarding
-    those newer changes.
+    Stale-revert guard: the current file is hashed and compared with the
+    ``written_content_hash`` recorded at snapshot time before anything is
+    touched. A mismatch -- or a file our write left present that is now gone
+    -- means something changed it after our ``write_file`` ran, and the
+    revert is refused rather than discard that newer change. A snapshot
+    without the hash cannot make that distinction and is refused too.
     """
     import hashlib
     import os
@@ -217,35 +251,28 @@ async def compensate_write_file(
 
     if not full_path:
         return CompensationResult(False, "no path in snapshot")
+    if written_content_hash is None:
+        # Without the hash of what the call wrote there is no way to tell our
+        # write from a newer one, so the revert could destroy newer content.
+        return CompensationResult(False, "revert refused: snapshot does not record what was written")
     if not os.path.exists(full_path):
-        # File is absent. If it was new (existed=False), absence IS the reverted state.
-        # If it existed before, we must recreate it — otherwise the original content is lost.
         if not existed:
             return CompensationResult(True, "file already absent")
-        if prior_content is not None:
-            try:
-                os.makedirs(os.path.dirname(full_path) or ".", exist_ok=True)
-                with open(full_path, "w", encoding="utf-8") as f:
-                    f.write(prior_content)
-                return CompensationResult(True, f"recreated prior content of {full_path}")
-            except Exception as exc:
-                return CompensationResult(False, f"revert failed: {exc}")
-        return CompensationResult(False, "file existed but prior content not captured; cannot recreate")
+        # Our write left the file present: its absence now is a newer change.
+        return CompensationResult(False, f"revert refused: {full_path!r} was removed after the original write")
 
     # Stale-revert guard: refuse if the file was modified after our write.
-    if written_content_hash is not None:
-        try:
-            with open(full_path, encoding="utf-8", errors="replace") as f:
-                current_bytes = f.read().encode("utf-8")
-            current_hash = hashlib.sha256(current_bytes).hexdigest()
-            if current_hash != written_content_hash:
-                return CompensationResult(
-                    False,
-                    f"revert refused: {full_path!r} was modified after the original write; "
-                    "revert would overwrite newer content",
-                )
-        except Exception as exc:
-            return CompensationResult(False, f"stale-check read failed: {exc}")
+    try:
+        with open(full_path, "rb") as f:
+            current_hash = hashlib.sha256(f.read()).hexdigest()
+        if current_hash != written_content_hash:
+            return CompensationResult(
+                False,
+                f"revert refused: {full_path!r} was modified after the original write; "
+                "revert would overwrite newer content",
+            )
+    except Exception as exc:
+        return CompensationResult(False, f"stale-check read failed: {exc}")
 
     try:
         if existed and prior_content is not None:
@@ -303,32 +330,48 @@ async def compensate_resolve_decision(
     snapshot_data: dict[str, Any],
     deps: Any,
 ) -> CompensationResult:
-    """Restore a decision's prior outcome."""
+    """Restore the review fields ``Brain.review`` overwrote.
+
+    Uses the Brain's public ``db`` / ``agent_id``. Stale guard: the update
+    applies only while the decision still carries the outcome this call
+    wrote, so a later re-resolution is never silently undone.
+    """
+    from nous.storage.models import Decision
+
     decision_id = snapshot_data.get("decision_id")
-    prior_outcome = snapshot_data.get("prior_outcome")
+    prior = snapshot_data.get("prior")
     if not decision_id:
         return CompensationResult(False, "no decision_id in snapshot")
+    if not isinstance(prior, dict):
+        return CompensationResult(False, "prior state of the decision was not recorded; not reverting")
     brain = getattr(deps, "brain", None)
     if brain is None:
         return CompensationResult(False, "brain not available")
+    reviewed_at = prior.get("reviewed_at")
+    superseded_by = prior.get("superseded_by")
     try:
-        async with brain._db.session() as s:
-            from nous.storage.models import Decision
-
-            result = await s.execute(
-                update(Decision)
-                .where(Decision.id == UUID(decision_id))
-                .where(Decision.agent_id == brain._agent_id)
-                .values(
-                    outcome=prior_outcome,
-                    resolution_note=snapshot_data.get("prior_resolution_note"),
-                    resolved_at=snapshot_data.get("prior_resolved_at"),
-                )
+        stmt = (
+            update(Decision)
+            .where(Decision.id == UUID(decision_id))
+            .where(Decision.agent_id == brain.agent_id)
+            .where(Decision.outcome == snapshot_data.get("written_outcome"))
+            .values(
+                outcome=prior.get("outcome"),
+                outcome_result=prior.get("outcome_result"),
+                reviewed_at=datetime.fromisoformat(reviewed_at) if reviewed_at else None,
+                reviewer=prior.get("reviewer"),
+                superseded_by=UUID(superseded_by) if superseded_by else None,
             )
+        )
+        async with brain.db.session() as s:
+            result = await s.execute(stmt)
             await s.commit()
         if (result.rowcount or 0) > 0:
-            return CompensationResult(True, f"restored decision {decision_id} to outcome={prior_outcome!r}")
-        return CompensationResult(False, f"decision {decision_id} not found")
+            return CompensationResult(True, f"restored decision {decision_id} to outcome={prior.get('outcome')!r}")
+        return CompensationResult(
+            False,
+            f"revert refused: decision {decision_id} not found or re-resolved since the original call",
+        )
     except Exception as exc:
         return CompensationResult(False, f"revert failed: {exc}")
 

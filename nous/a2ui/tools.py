@@ -375,10 +375,10 @@ async def _server_compensation(
             if snap is not None and snap.reverted_at is None:
                 revertible = compensation_registry.is_registered(snap.tool_name)
                 if revertible:
-                    # Populate handler so the builder's truthy check passes.
-                    # The review.revert handler uses the snapshot, not this
-                    # field, so the value is informational only.
-                    compensation.setdefault("handler", snap.tool_name)
+                    # The handler is the snapshot's tool, never the caller's
+                    # string: review.revert dispatches on the snapshot, so a
+                    # caller-chosen label would misdescribe what Revert undoes.
+                    compensation["handler"] = snap.tool_name
         except Exception:
             pass  # fail-closed: no revert button rather than a false one
     compensation["revertible"] = revertible

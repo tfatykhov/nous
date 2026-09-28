@@ -436,9 +436,13 @@ class AgentRunner:
                 )
 
         policy_mode = self._settings.tool_context_policy_mode
-        if policy_mode == "off":
-            return None
-        violation = tool_policy.evaluate(ctx, tool_name, tool_input)
+        # Undoability is checked BEFORE the policy kill switch: an undoable
+        # node's non-compensable call is refused in every mode, off included.
+        violation = tool_policy.undoable_violation(ctx, tool_name, tool_input)
+        if violation is None:
+            if policy_mode == "off":
+                return None
+            violation = tool_policy.evaluate(ctx, tool_name, tool_input)
         if violation is None:
             return None
         # not_compensable is a safety invariant, not a policy preference: block
@@ -524,7 +528,9 @@ class AgentRunner:
         snapshot store is wired: the snapshot is what makes a revert, and the
         auto action_review card, possible where no human is in the loop.
         ``undoable`` only decides whether a missing snapshot BLOCKS the call
-        (an oversized file); elsewhere capture is fail-open. Called between
+        (compensation not wired, no durable ledger row, an oversized file,
+        unreadable prior state, a failed write); elsewhere capture is
+        fail-open. Called between
         _open_for_call and actual dispatch so the ledger entry_id is available
         to link the snapshot. Returns True when a snapshot was stored.
 
@@ -533,40 +539,44 @@ class AgentRunner:
         trims the payload, so snapshotting the raw input would record a
         different file and content hash than the one actually written.
         """
+        from nous.api.compensation import SnapshotBlocksDispatch, snapshot_for_write_file
+        from nous.api.tool_classes import is_compensable_call, tool_class
+
         undoable = getattr(ctx, "undoable", False)
         if not (undoable or ctx.is_background):
             return False
-        if self._snap_store is None or entry_id is None:
-            return False
-        from nous.api.tool_classes import is_compensable_call, tool_class
-
         cls = tool_class(tool_name)
         if cls is None or not cls.compensable:
             return False  # cheap pre-check before the dispatcher's arg repair
         tool_input = self._handler_args(tool_name, tool_input)
         if not is_compensable_call(tool_name, tool_input):
             return False
+
+        def _unrevertible(reason: str) -> bool:
+            # An undoable context promised this call can be undone: without a
+            # snapshot it cannot, so the call is refused. Elsewhere capture is
+            # fail-open -- the call runs, it just cannot be reverted.
+            if undoable:
+                raise SnapshotBlocksDispatch(
+                    f"{tool_name} refused: this node is declared undoable but {reason}, so the call "
+                    "could not be reverted"
+                )
+            logger.warning("Harness Phase 2.8: %s not revertible (ledger entry %s): %s", tool_name, entry_id, reason)
+            return False
+
+        if self._snap_store is None:
+            return _unrevertible("compensation is not wired")
+        if entry_id is None:
+            return _unrevertible("no durable ledger row was written for it")
         try:
             snap_data: dict = {}
             if tool_name == "write_file":
                 import hashlib
 
-                from nous.api.compensation import SnapshotBlocksDispatch, snapshot_for_write_file
-
                 path = tool_input.get("path", "")
                 snap_data = await snapshot_for_write_file(path, self._workspace_dir)
                 if snap_data.get("oversized"):
-                    if not undoable:
-                        logger.warning(
-                            "Harness Phase 2.8: %r too large to snapshot; ledger entry %s will not be revertible",
-                            path,
-                            entry_id,
-                        )
-                        return False
-                    raise SnapshotBlocksDispatch(
-                        f"write_file refused: {path!r} is too large to snapshot for undoable revert "
-                        f"(exceeds {1}MiB limit)"
-                    )
+                    return _unrevertible(f"{path!r} is too large to snapshot (exceeds 1MiB limit)")
                 # Record what's about to be written so compensate_write_file can
                 # detect if the file was modified between the write and the revert.
                 content = tool_input.get("content", "") or ""
@@ -584,16 +594,27 @@ class AgentRunner:
                         "Harness Phase 2.8: prior state lookup failed for check %r", check_name, exc_info=True
                     )
                     prior_enabled = None
+                if not isinstance(prior_enabled, bool):
+                    prior_enabled = None
+                    if undoable:
+                        return _unrevertible(f"the prior state of check {check_name!r} could not be read")
                 snap_data = {
                     "check_name": check_name,
                     "action": "disable",
-                    "prior_enabled": prior_enabled if isinstance(prior_enabled, bool) else None,
+                    "prior_enabled": prior_enabled,
                 }
             elif tool_name == "resolve_decision":
+                # The prior review state the revert restores, plus the outcome
+                # this call writes: the revert only applies while the decision
+                # still carries it (a later re-resolution is not overwritten).
+                decision_id = str(tool_input.get("decision_id") or "")
+                prior = await self._snap_store.decision_state(decision_id)
+                if prior is None:
+                    return _unrevertible(f"decision {decision_id!r} was not found")
                 snap_data = {
-                    "decision_id": str(tool_input.get("decision_id") or tool_input.get("id", "")),
-                    # prior_outcome requires a DB lookup; captured as None here.
-                    "prior_outcome": None,
+                    "decision_id": decision_id,
+                    "prior": prior,
+                    "written_outcome": tool_input.get("outcome"),
                 }
             else:
                 return False
@@ -603,17 +624,11 @@ class AgentRunner:
                 snapshot_data=snap_data,
             )
             return True
-        except Exception as _snap_exc:
-            from nous.api.compensation import SnapshotBlocksDispatch
-
-            if isinstance(_snap_exc, SnapshotBlocksDispatch):
-                raise
-            logger.warning(
-                "Harness Phase 2.8: snapshot capture failed for %s (compensation may not be available for revert)",
-                tool_name,
-                exc_info=True,
-            )
-            return False
+        except SnapshotBlocksDispatch:
+            raise
+        except Exception as exc:
+            logger.warning("Harness Phase 2.8: snapshot capture failed for %s", tool_name, exc_info=True)
+            return _unrevertible(f"its snapshot could not be stored ({type(exc).__name__})")
 
     async def _ledger_open(
         self,
@@ -2196,9 +2211,8 @@ class AgentRunner:
                                 keys_this_turn,
                             )
                             # Phase 2.8: capture pre-dispatch snapshot for compensable
-                            # calls in background contexts. Fail-open except for
-                            # oversized files in undoable contexts, which refuse rather than silently
-                            # proceeding without a snapshot.
+                            # calls in background contexts. Fail-open except in undoable
+                            # contexts, which refuse rather than proceed without a snapshot.
                             _snap_blocked: str | None = None
                             _snapshotted = False
                             try:
@@ -2814,9 +2828,8 @@ class AgentRunner:
                                 keys_this_turn,
                             )
                             # Phase 2.8: capture pre-dispatch snapshot for compensable
-                            # calls in background contexts. Fail-open except for
-                            # oversized files in undoable contexts, which refuse rather than silently
-                            # proceeding without a snapshot.
+                            # calls in background contexts. Fail-open except in undoable
+                            # contexts, which refuse rather than proceed without a snapshot.
                             _snap_blocked2: str | None = None
                             _snapshotted2 = False
                             try:

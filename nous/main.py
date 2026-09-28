@@ -1235,6 +1235,22 @@ async def create_components(settings: Settings) -> dict:
         except ImportError:
             logger.debug("F038: DAG module not available yet")
 
+    # Harness Phase 2.8: compensation lives at the dispatch layer, so it is
+    # wired independently of any consumer. set_snapshot_store reaches every
+    # runner fork too, including the heartbeat runner's (forked in
+    # HeartbeatRunner.start, before this line). The A2UI block below only
+    # consumes it (review.revert, the Revert button, the auto review card).
+    _comp_registry = None
+    _snap_store = None
+    if settings.compensation_enabled:
+        from nous.api.compensation import CompensationRegistry, SnapshotStore, register_compensators
+
+        _comp_registry = CompensationRegistry()
+        register_compensators(_comp_registry)
+        _snap_store = SnapshotStore(database, settings.agent_id)
+        runner.set_snapshot_store(_snap_store, settings.workspace_dir)
+        logger.info("Harness: compensation registry wired (%d compensators)", len(_comp_registry._compensators))
+
     # F092: A2UI companion surfaces (the SurfaceService itself is built above
     # the DAG block — Harness Phase 3).
     action_router = None
@@ -1276,20 +1292,6 @@ async def create_components(settings: Settings) -> dict:
                     settings=settings,
                 ),
             )
-        # Phase 2.8: wire compensation when enabled.
-        _comp_registry = None
-        _snap_store = None
-        if settings.compensation_enabled:
-            from nous.api.compensation import CompensationRegistry, SnapshotStore, register_compensators
-
-            _comp_registry = CompensationRegistry()
-            register_compensators(_comp_registry)
-            _snap_store = SnapshotStore(database, settings.agent_id)
-            runner.set_snapshot_store(_snap_store, settings.workspace_dir)
-            logger.info(
-                "Harness: compensation registry wired (%d compensators)", len(list(_comp_registry._compensators))
-            )
-
         action_router = ActionRouter(
             database,
             settings,

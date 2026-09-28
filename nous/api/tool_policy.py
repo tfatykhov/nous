@@ -48,6 +48,22 @@ CONTEXT_POLICY: Mapping[str, ContextPolicy] = MappingProxyType(
 )
 
 
+def undoable_violation(ctx: ExecutionContext, tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
+    """``"not_compensable"`` when an ``undoable`` context makes a call that
+    has a side effect and cannot be undone, else None.
+
+    Separate from :func:`evaluate` because it is a safety invariant, not a
+    policy preference: the runner enforces it even when the context policy
+    is ``off`` or ``warn`` -- an undoable claim with no undo is false."""
+    if not ctx.undoable:
+        return None
+    if classify_side_effect(tool_name, dict(tool_input)) == "none":
+        return None
+    if not is_compensable_call(tool_name, tool_input):
+        return "not_compensable"
+    return None
+
+
 def evaluate(ctx: ExecutionContext, tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
     """None if ``ctx`` may make this call; otherwise the violation code:
     ``unclassified``, ``undeclared``, ``level:<level>``, ``spawn``, ``reenable``."""
@@ -68,7 +84,7 @@ def evaluate(ctx: ExecutionContext, tool_name: str, tool_input: Mapping[str, Any
     # "not_compensable" — the true constraint — rather than "spawn", which
     # masks the undoability violation and prevents force_block from activating
     # in warn mode.
-    if ctx.undoable and level != "none" and not is_compensable_call(tool_name, tool_input):
+    if undoable_violation(ctx, tool_name, tool_input) is not None:
         return "not_compensable"
     if cls.spawns and not (
         policy.spawn is True

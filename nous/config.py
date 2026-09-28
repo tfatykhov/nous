@@ -3134,26 +3134,18 @@ class Settings(BaseSettings):
                 "dag_approval_proceed_default_enabled=True requires compensation_enabled=True "
                 "(an unanswered approval may only proceed when side effects are revertible)"
             )
-        if (
-            self.dag_approval_proceed_default_enabled
-            and self.compensation_enabled
-            and not self.execution_ledger_persist_enabled
-        ):
+        if self.compensation_enabled and not (self.execution_ledger_persist_enabled and self.a2ui_enabled):
+            # A snapshot is keyed by its durable ledger row, and the only way
+            # to revert is the A2UI review.revert action: without either,
+            # compensation captures nothing reversible, and a proceed-default
+            # approval would let "undoable" mutations through with no undo.
             raise ValueError(
-                "dag_approval_proceed_default_enabled=True with compensation_enabled=True "
-                "requires execution_ledger_persist_enabled=True "
-                "(compensation snapshots are linked to ledger entry IDs; "
-                "without persistent ledger storage, revert is impossible)"
+                "compensation_enabled=True requires execution_ledger_persist_enabled=True "
+                "(snapshots are linked to ledger entry IDs) and a2ui_enabled=True "
+                "(review.revert is the revert path)"
             )
         if self.compensation_auto_review_enabled and not self.compensation_enabled:
             raise ValueError("compensation_auto_review_enabled=True requires compensation_enabled=True")
-        if self.compensation_auto_review_enabled and not (self.a2ui_enabled and self.execution_ledger_persist_enabled):
-            # The card is an A2UI surface, and a snapshot exists only for a
-            # persisted ledger row: without either the flag would be a no-op.
-            raise ValueError(
-                "compensation_auto_review_enabled=True requires a2ui_enabled=True "
-                "and execution_ledger_persist_enabled=True"
-            )
         return self
 
     @model_validator(mode="after")
