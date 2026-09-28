@@ -39,7 +39,17 @@ class DynamicCheckLimitReached(ValueError):
 
 
 class DynamicCheckCancelled(RuntimeError):
-    """A check's in-flight run was cancelled because the check was disabled."""
+    """A check's in-flight run was cancelled because the check was disabled.
+
+    ``by_sibling_run`` is True when the disable came from ANOTHER run of the
+    same check disabling itself: that run is the check's final run and owns
+    the outcome, so this cancelled sibling must not be reported as a failed
+    final run (codex P2, PR #656).
+    """
+
+    def __init__(self, message: str, *, by_sibling_run: bool = False) -> None:
+        super().__init__(message)
+        self.by_sibling_run = by_sibling_run
 
 
 # The check-run task that owns the current task (and every task it spawns,
@@ -104,18 +114,24 @@ class DynamicCheck(BaseCheck):
         # the subset whose cancellation came from a disable.
         self._run_tasks: set[asyncio.Task] = set()
         self._disable_cancelled: set[asyncio.Task] = set()
+        # The subset cancelled because a sibling run disabled the check.
+        self._sibling_cancelled: set[asyncio.Task] = set()
 
-    def cancel_run(self) -> bool:
+    def cancel_run(self, *, by_sibling_run: bool = False) -> bool:
         """Cancel this check's in-flight runs, if any. Returns True if any cancelled.
 
         A run never cancels itself: a check that disables itself from one of
         its own tool calls is finishing its final run, which must complete.
+        ``by_sibling_run`` marks the cancelled runs as siblings of that final
+        run, so they do not report the final run's outcome.
         """
         cancelled = False
         for task in list(self._run_tasks):
             if task.done() or _CURRENT_CHECK_RUN.get() is task:
                 continue
             self._disable_cancelled.add(task)
+            if by_sibling_run:
+                self._sibling_cancelled.add(task)
             task.cancel()
             cancelled = True
         if cancelled:
@@ -196,7 +212,10 @@ class DynamicCheck(BaseCheck):
                     # a failed run so the runner records it and never reads it
                     # as success (the runner's own cancel still propagates).
                     logger.info("DynamicCheck '%s' cancelled mid-run: check disabled", self.name)
-                    raise DynamicCheckCancelled(f"check '{self.name}' was disabled while running") from None
+                    raise DynamicCheckCancelled(
+                        f"check '{self.name}' was disabled while running",
+                        by_sibling_run=run_task in self._sibling_cancelled,
+                    ) from None
                 raise
             except Exception:
                 logger.exception("DynamicCheck '%s' failed", self.name)
@@ -204,7 +223,10 @@ class DynamicCheck(BaseCheck):
             if run_task in self._disable_cancelled:
                 # The turn swallowed the cancel and returned anyway: a run the
                 # DAG terminated is still a failed run, never a completion.
-                raise DynamicCheckCancelled(f"check '{self.name}' was disabled while running")
+                raise DynamicCheckCancelled(
+                    f"check '{self.name}' was disabled while running",
+                    by_sibling_run=run_task in self._sibling_cancelled,
+                )
 
             findings = self._parse_findings(response_text or "")
             tokens = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)
@@ -219,6 +241,7 @@ class DynamicCheck(BaseCheck):
                 run_task.cancel()
             self._run_tasks.discard(run_task)
             self._disable_cancelled.discard(run_task)
+            self._sibling_cancelled.discard(run_task)
             if self._active_runs is not None and not self._run_tasks:
                 runs = self._active_runs.get(self.name)
                 if runs is not None:
@@ -316,8 +339,13 @@ class DynamicCheckLoader:
 
     def _cancel_active_runs(self, name: str) -> None:
         """Cancel every in-flight run of ``name`` (a disabled check stops now)."""
-        for check in list(self._active_runs.get(name, ())):
-            if check.cancel_run():
+        checks = list(self._active_runs.get(name, ()))
+        # A run of ``name`` disabling its own check is that check's final run;
+        # the runs cancelled here are its siblings, not the final run.
+        initiator = _CURRENT_CHECK_RUN.get()
+        by_sibling_run = initiator is not None and any(initiator in c._run_tasks for c in checks)
+        for check in checks:
+            if check.cancel_run(by_sibling_run=by_sibling_run):
                 logger.info("F034.5: Cancelled in-flight run of disabled check '%s'", name)
 
     def set_runner(self, runner: AgentRunner) -> None:

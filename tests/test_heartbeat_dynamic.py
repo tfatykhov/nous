@@ -2465,3 +2465,80 @@ class TestInFlightRunCancellation:
         assert registry.self_disabled_run_failed("dag-node-check")
         for call in loader.update_run_stats.call_args_list:
             assert call.kwargs.get("success") is not True
+
+    @pytest.mark.asyncio
+    async def test_self_disable_does_not_blame_cancelled_sibling_run(self):
+        """codex P2 (PR #656): a scheduled tick run overlaps a forced REST
+        run; the REST run disables its own check and succeeds. The tick run it
+        cancels is a sibling, not the final run, so the registry must not
+        retain a self-disabled-run failure (the DAG would fail the node)."""
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "overlap")
+        loader.update_run_stats = AsyncMock()
+        runner = AsyncMock()
+        runner.end_conversation = AsyncMock()
+        tick_started, effects = asyncio.Event(), []
+        calls = 0
+
+        async def _run_turn(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:  # the scheduled tick's run: mid-turn when cancelled
+                tick_started.set()
+                await asyncio.Event().wait()
+                effects.append("late side effect")
+            else:  # the REST run: disables its own check, then finishes
+                await loader.manage_check(action="disable", name="overlap")
+            return ('{"has_findings": false, "findings": []}', MagicMock(), {})
+
+        runner.run_turn = AsyncMock(side_effect=_run_turn)
+        check = _tracked_check(loader, "overlap", runner)
+        check.interval = 1
+        hb = _make_runner_for_skip_tests(registry)
+        hb._dynamic_loader = loader
+
+        tick = asyncio.create_task(hb._tick())
+        await asyncio.wait_for(tick_started.wait(), 1)
+        result = await asyncio.wait_for(hb.trigger_check("overlap"), 2)
+        await asyncio.wait_for(tick, 2)
+
+        assert result.self_disabled is True and result.skipped is False
+        assert effects == []
+        assert not registry.is_in_flight("overlap")
+        assert not registry.self_disabled_run_failed("overlap")
+
+    @pytest.mark.asyncio
+    async def test_failed_self_disabling_run_is_still_retained(self):
+        """The owning run's own failure after it disabled its check is still
+        the final run's failure, even with a cancelled sibling alongside."""
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "overlap-fail")
+        loader.update_run_stats = AsyncMock()
+        runner = AsyncMock()
+        runner.end_conversation = AsyncMock()
+        tick_started = asyncio.Event()
+        calls = 0
+
+        async def _run_turn(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                tick_started.set()
+                await asyncio.Event().wait()
+            await loader.manage_check(action="disable", name="overlap-fail")
+            raise RuntimeError("final run broke after disabling")
+
+        runner.run_turn = AsyncMock(side_effect=_run_turn)
+        check = _tracked_check(loader, "overlap-fail", runner)
+        check.interval = 1
+        hb = _make_runner_for_skip_tests(registry)
+        hb._dynamic_loader = loader
+
+        tick = asyncio.create_task(hb._tick())
+        await asyncio.wait_for(tick_started.wait(), 1)
+        with pytest.raises(RuntimeError, match="final run broke"):
+            await asyncio.wait_for(hb.trigger_check("overlap-fail"), 2)
+        await asyncio.wait_for(tick, 2)
+
+        assert not registry.is_in_flight("overlap-fail")
+        assert registry.self_disabled_run_failed("overlap-fail")

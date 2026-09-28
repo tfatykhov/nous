@@ -24,7 +24,12 @@ from nous.brain import Brain
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
-from nous.heartbeat.dynamic import CALLBACK_RETRY_DELAY_SECONDS, DynamicCheck, DynamicCheckLoader
+from nous.heartbeat.dynamic import (
+    CALLBACK_RETRY_DELAY_SECONDS,
+    DynamicCheck,
+    DynamicCheckCancelled,
+    DynamicCheckLoader,
+)
 from nous.heartbeat.finding_store import FindingStore
 from nous.heartbeat.registry import BaseCheck, CheckRegistry
 from nous.heartbeat.schemas import CheckResult, Finding, FindingAction, HeartbeatResult
@@ -35,6 +40,20 @@ logger = logging.getLogger(__name__)
 # Audit HB-9: a single escalation step bumps urgency one level, never skipping
 # straight to "high". _should_escalate gates the timing per current urgency.
 _ESCALATION_LADDER: dict[str, str] = {"low": "normal", "normal": "high", "high": "high"}
+
+
+def _cancelled_by_sibling_run(exc: BaseException) -> bool:
+    """Whether ``exc`` is a run cancelled because a SIBLING run disabled the check."""
+    return isinstance(exc, DynamicCheckCancelled) and exc.by_sibling_run
+
+
+def _is_final_run(check: BaseCheck, sibling_cancelled: bool) -> bool:
+    """Whether this run is its check's self-disabling final run.
+
+    A run cancelled because another run of the same check disabled it is not
+    the final run: the disabling run owns the outcome (codex P2, PR #656).
+    """
+    return getattr(check, "_self_disabled", False) is True and not sibling_cancelled
 
 
 class HeartbeatRunner:
@@ -533,6 +552,7 @@ class HeartbeatRunner:
             # only a recorded success or an explicit skip overrides it.
             self._registry.begin_run(check.name)
             run_succeeded: bool | None = False
+            sibling_cancelled = False
             try:
                 result: CheckResult = await asyncio.wait_for(
                     check.run(),
@@ -580,6 +600,7 @@ class HeartbeatRunner:
             except Exception as exc:
                 check.mark_failure()
                 logger.exception("Heartbeat check '%s' failed", check.name)
+                sibling_cancelled = _cancelled_by_sibling_run(exc)
                 # F034.5: Record error for dynamic checks
                 await self._record_run_stats(check, success=False, error_msg=str(exc)[:200])
                 run_succeeded = False
@@ -587,7 +608,7 @@ class HeartbeatRunner:
                 self._registry.end_run(
                     check.name,
                     run_succeeded,
-                    self_disabled=getattr(check, "_self_disabled", False) is True,
+                    self_disabled=_is_final_run(check, sibling_cancelled),
                 )
 
         # #273: Fire callbacks as background tasks (non-blocking)
@@ -1235,6 +1256,7 @@ class HeartbeatRunner:
         # comment there.
         self._registry.begin_run(check.name)
         run_succeeded: bool | None = False
+        sibling_cancelled = False
         try:
             result = await asyncio.wait_for(check.run(), timeout=check.timeout)
             # A skipped result means run() returned early because the check
@@ -1263,6 +1285,7 @@ class HeartbeatRunner:
             return result
         except Exception as e:
             check.mark_failure()
+            sibling_cancelled = _cancelled_by_sibling_run(e)
             # F034.5: Update DB stats for dynamic checks on failure
             await self._record_run_stats(check, success=False, error_msg=str(e)[:200])
             raise
@@ -1270,5 +1293,5 @@ class HeartbeatRunner:
             self._registry.end_run(
                 check.name,
                 run_succeeded,
-                self_disabled=getattr(check, "_self_disabled", False) is True,
+                self_disabled=_is_final_run(check, sibling_cancelled),
             )
