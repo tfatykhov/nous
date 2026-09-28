@@ -649,7 +649,8 @@ class SurfaceService:
 
         should_notify = built.priority >= 1 if notify is None else notify
         if created and should_notify:
-            self._schedule_bg(self._notify_telegram(built.title, surface_id, text=notify_text))
+            if self._telegram_ping_wanted(built, notify):
+                self._schedule_bg(self._notify_telegram(built.title, surface_id, text=notify_text))
             # F097: the same condition that stamped push_notified_at above.
             # `_push_intended` is the single definition both read, so the flag
             # can never disagree with whether a push was actually attempted.
@@ -678,6 +679,17 @@ class SurfaceService:
         if self._push is None or not getattr(self._push, "configured", False):
             return False
         return built.priority >= 1 if notify is None else bool(notify)
+
+    def _telegram_ping_wanted(self, built: BuiltSurface, notify: bool | None) -> bool:
+        """Should a notifying card also ping Telegram?
+
+        Always, unless `a2ui_telegram_notify_enabled` is off — and even then
+        Telegram stays the fallback for any card the push leg would not
+        carry, so the switch can remove a duplicate but never the only alert.
+        """
+        if getattr(self._settings, "a2ui_telegram_notify_enabled", True):
+            return True
+        return not self._push_intended(built, notify)
 
     def _schedule_dismiss(self, surface_ids: Iterable[str]) -> None:
         """Cancel the phone notifications for surfaces that just went terminal.
