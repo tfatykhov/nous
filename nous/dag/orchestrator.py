@@ -1617,7 +1617,10 @@ class DAGOrchestrator:
                     node, check_attempts=attempts, last_check_at=now,
                 ):
                     continue
-                if check.status == "success" and self._check_run_in_flight(node):
+                # codex P1 (PR #656 round 7): a run in flight may still be
+                # doing the work that changes the completion state, so no
+                # shell outcome -- pass OR fail -- is terminal until it ends.
+                if check.status != "pending" and self._check_run_in_flight(node):
                     check = CheckResult(status="pending", detail=check.detail)
 
                 if check.status == "success":

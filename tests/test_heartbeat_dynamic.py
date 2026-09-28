@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -2542,3 +2543,171 @@ class TestInFlightRunCancellation:
 
         assert not registry.is_in_flight("overlap-fail")
         assert registry.self_disabled_run_failed("overlap-fail")
+
+
+# ===========================================================================
+# codex P1 (PR #656 round 7): a disable that lands after the turn finished but
+# before run() resumed must still be attributed to the disable, not read as
+# the check's own self-disable (which would fire on_complete).
+# ===========================================================================
+
+
+def _disable_between_turn_and_resume(loader, check, *, by_sibling_run=False, raise_exc=None):
+    """Runner whose turn ends and, before run() resumes, gets disabled.
+
+    The callback is queued inside the turn's final step, so it runs after the
+    turn task is done but before run()'s wakeup. It runs in the test's own
+    context (not the run's), i.e. as an external disable.
+    """
+    outside = contextvars.copy_context()
+
+    def _disable():
+        assert all(t.done() for t in check._run_tasks)
+        if by_sibling_run:
+            check.cancel_run(by_sibling_run=True)
+        else:  # manage_check's post-commit steps
+            check._self_disabled = True
+            loader._cancel_active_runs(check.name)
+
+    async def _run_turn(*args, **kwargs):
+        asyncio.get_running_loop().call_soon(_disable, context=outside)
+        if raise_exc is not None:
+            raise raise_exc
+        return ('{"has_findings": false, "findings": []}', MagicMock(), {})
+
+    check._runner.run_turn = AsyncMock(side_effect=_run_turn)
+
+
+class TestDisableAfterTurnBeforeResume:
+    @pytest.mark.asyncio
+    async def test_external_disable_of_done_turn_is_not_self_disable(self):
+        from nous.heartbeat.dynamic import DynamicCheckCancelled
+
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "dag-node")
+        runner = AsyncMock()
+        runner.end_conversation = AsyncMock()
+        check = _tracked_check(loader, "dag-node", runner)
+        _disable_between_turn_and_resume(loader, check)
+
+        with pytest.raises(DynamicCheckCancelled) as exc_info:
+            await asyncio.wait_for(check.run(), 1)
+        assert exc_info.value.by_sibling_run is False
+        assert loader._active_runs == {}
+
+    @pytest.mark.asyncio
+    async def test_sibling_disable_of_done_turn_keeps_sibling_attribution(self):
+        from nous.heartbeat.dynamic import DynamicCheckCancelled
+
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "sib")
+        runner = AsyncMock()
+        runner.end_conversation = AsyncMock()
+        check = _tracked_check(loader, "sib", runner)
+        _disable_between_turn_and_resume(loader, check, by_sibling_run=True)
+
+        with pytest.raises(DynamicCheckCancelled) as exc_info:
+            await asyncio.wait_for(check.run(), 1)
+        assert exc_info.value.by_sibling_run is True
+
+    @pytest.mark.asyncio
+    async def test_sibling_disable_of_failed_done_turn_is_not_the_final_run(self):
+        """The turn failed on its own; a sibling's self-disable then marked
+        it before run() resumed. Its failure is not the final run's."""
+        from nous.heartbeat.dynamic import RUN_OUTCOME
+
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "sib-fail")
+        runner = AsyncMock()
+        runner.end_conversation = AsyncMock()
+        check = _tracked_check(loader, "sib-fail", runner)
+        _disable_between_turn_and_resume(
+            loader,
+            check,
+            by_sibling_run=True,
+            raise_exc=RuntimeError("turn broke"),
+        )
+
+        outcome: dict[str, bool] = {}
+        token = RUN_OUTCOME.set(outcome)
+        try:
+            with pytest.raises(RuntimeError, match="turn broke"):
+                await asyncio.wait_for(check.run(), 1)
+        finally:
+            RUN_OUTCOME.reset(token)
+        assert outcome == {"final_run": False}
+
+    @pytest.mark.asyncio
+    async def test_tick_fires_no_callback_for_externally_disabled_done_turn(self):
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "cb-check")
+        loader.update_run_stats = AsyncMock()
+        runner = AsyncMock()
+        runner.end_conversation = AsyncMock()
+        check = _tracked_check(loader, "cb-check", runner)
+        check.interval = 1
+        check.on_complete_prompt = "notify"
+        _disable_between_turn_and_resume(loader, check)
+        hb = _make_runner_for_skip_tests(registry)
+        hb._dynamic_loader = loader
+        hb._execute_callback = AsyncMock()
+
+        await asyncio.wait_for(hb._tick(), 2)
+        await asyncio.sleep(0)
+
+        hb._execute_callback.assert_not_called()
+        for call in loader.update_run_stats.call_args_list:
+            assert call.kwargs.get("success") is not True
+
+
+class TestFinalRunDecidedByTheRun:
+    @pytest.mark.asyncio
+    async def test_disable_during_stats_write_does_not_claim_failed_run(self):
+        """codex P1 (PR #656 round 7): a run fails on its own and ends; an
+        external disable lands while the runner is still writing that run's
+        stats. The run never disabled its check, so the registry must not
+        retain it as a failed final run (the DAG would fail the node)."""
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "late-disable")
+        runner = AsyncMock()
+        runner.end_conversation = AsyncMock()
+        runner.run_turn = AsyncMock(side_effect=RuntimeError("turn broke"))
+        check = _tracked_check(loader, "late-disable", runner)
+        hb = _make_runner_for_skip_tests(registry)
+        hb._dynamic_loader = loader
+
+        async def _stats(*args, **kwargs):
+            # manage_check(disable)'s post-commit steps, from outside the run
+            check._self_disabled = True
+            loader._cancel_active_runs("late-disable")
+
+        loader.update_run_stats = AsyncMock(side_effect=_stats)
+
+        with pytest.raises(RuntimeError, match="turn broke"):
+            await asyncio.wait_for(hb.trigger_check("late-disable"), 2)
+
+        loader.update_run_stats.assert_awaited()
+        assert not registry.is_in_flight("late-disable")
+        assert not registry.self_disabled_run_failed("late-disable")
+
+    @pytest.mark.asyncio
+    async def test_self_disabling_run_that_fails_is_still_final(self):
+        """The snapshot still reports a run that disabled its own check."""
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "own")
+        loader.update_run_stats = AsyncMock()
+        runner = AsyncMock()
+        runner.end_conversation = AsyncMock()
+
+        async def _run_turn(*args, **kwargs):
+            await loader.manage_check(action="disable", name="own")
+            raise RuntimeError("final run broke")
+
+        runner.run_turn = AsyncMock(side_effect=_run_turn)
+        _tracked_check(loader, "own", runner)
+        hb = _make_runner_for_skip_tests(registry)
+        hb._dynamic_loader = loader
+
+        with pytest.raises(RuntimeError, match="final run broke"):
+            await asyncio.wait_for(hb.trigger_check("own"), 2)
+        assert registry.self_disabled_run_failed("own")

@@ -26,6 +26,7 @@ from nous.events import Event, EventBus
 from nous.heart import Heart
 from nous.heartbeat.dynamic import (
     CALLBACK_RETRY_DELAY_SECONDS,
+    RUN_OUTCOME,
     DynamicCheck,
     DynamicCheckCancelled,
     DynamicCheckLoader,
@@ -47,12 +48,17 @@ def _cancelled_by_sibling_run(exc: BaseException) -> bool:
     return isinstance(exc, DynamicCheckCancelled) and exc.by_sibling_run
 
 
-def _is_final_run(check: BaseCheck, sibling_cancelled: bool) -> bool:
+def _is_final_run(check: BaseCheck, sibling_cancelled: bool, outcome: dict[str, bool]) -> bool:
     """Whether this run is its check's self-disabling final run.
 
     A run cancelled because another run of the same check disabled it is not
     the final run: the disabling run owns the outcome (codex P2, PR #656).
+    A DynamicCheck records the answer itself in ``outcome`` when its run
+    ends; the live flag is only a fallback for runs that recorded nothing
+    (codex P1, PR #656 round 7).
     """
+    if "final_run" in outcome:
+        return outcome["final_run"]
     return getattr(check, "_self_disabled", False) is True and not sibling_cancelled
 
 
@@ -553,6 +559,8 @@ class HeartbeatRunner:
             self._registry.begin_run(check.name)
             run_succeeded: bool | None = False
             sibling_cancelled = False
+            outcome: dict[str, bool] = {}
+            outcome_token = RUN_OUTCOME.set(outcome)
             try:
                 result: CheckResult = await asyncio.wait_for(
                     check.run(),
@@ -605,10 +613,11 @@ class HeartbeatRunner:
                 await self._record_run_stats(check, success=False, error_msg=str(exc)[:200])
                 run_succeeded = False
             finally:
+                RUN_OUTCOME.reset(outcome_token)
                 self._registry.end_run(
                     check.name,
                     run_succeeded,
-                    self_disabled=_is_final_run(check, sibling_cancelled),
+                    self_disabled=_is_final_run(check, sibling_cancelled, outcome),
                 )
 
         # #273: Fire callbacks as background tasks (non-blocking)
@@ -1257,6 +1266,8 @@ class HeartbeatRunner:
         self._registry.begin_run(check.name)
         run_succeeded: bool | None = False
         sibling_cancelled = False
+        outcome: dict[str, bool] = {}
+        outcome_token = RUN_OUTCOME.set(outcome)
         try:
             result = await asyncio.wait_for(check.run(), timeout=check.timeout)
             # A skipped result means run() returned early because the check
@@ -1290,8 +1301,9 @@ class HeartbeatRunner:
             await self._record_run_stats(check, success=False, error_msg=str(e)[:200])
             raise
         finally:
+            RUN_OUTCOME.reset(outcome_token)
             self._registry.end_run(
                 check.name,
                 run_succeeded,
-                self_disabled=_is_final_run(check, sibling_cancelled),
+                self_disabled=_is_final_run(check, sibling_cancelled, outcome),
             )

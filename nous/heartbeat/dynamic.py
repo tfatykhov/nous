@@ -59,6 +59,14 @@ _CURRENT_CHECK_RUN: contextvars.ContextVar[asyncio.Task | None] = contextvars.Co
     "nous_current_check_run", default=None
 )
 
+# Per-run outcome slot set by the heartbeat runner around ``check.run()``.
+# run() records ``final_run`` (did THIS run disable its own check) before it
+# gives up ownership of its task, so the runner never infers it from the live
+# ``_self_disabled`` flag after an await.
+RUN_OUTCOME: contextvars.ContextVar[dict[str, bool] | None] = contextvars.ContextVar(
+    "nous_check_run_outcome", default=None
+)
+
 # Tools allowed for dynamic checks.
 # Note: bash is included per spec but could execute arbitrary commands;
 # check creation is restricted to admin/conversation so risk is accepted.
@@ -127,12 +135,17 @@ class DynamicCheck(BaseCheck):
         """
         cancelled = False
         for task in list(self._run_tasks):
-            if task.done() or _CURRENT_CHECK_RUN.get() is task:
+            if _CURRENT_CHECK_RUN.get() is task:
                 continue
+            # A done turn whose run() has not resumed yet is still an active
+            # run (codex P1, PR #656 round 7): mark it too, or it would return
+            # self_disabled=True and fire on_complete for a disable it did
+            # not make. run() removes a task from _run_tasks once consumed.
             self._disable_cancelled.add(task)
             if by_sibling_run:
                 self._sibling_cancelled.add(task)
-            task.cancel()
+            if not task.done():
+                task.cancel()
             cancelled = True
         if cancelled:
             self._self_disabled = True
@@ -237,6 +250,14 @@ class DynamicCheck(BaseCheck):
                 self_disabled=self._self_disabled,
             )
         finally:
+            # Decide here, while this run still owns run_task, whether it is
+            # the check's self-disabling final run (codex P1, PR #656 round
+            # 7). The caller must not re-read the live _self_disabled flag
+            # later: a disable landing after this run ended (during the
+            # awaits below or in the caller's stats write) is not this run's.
+            outcome = RUN_OUTCOME.get()
+            if outcome is not None:
+                outcome["final_run"] = self._self_disabled and run_task not in self._sibling_cancelled
             if not run_task.done():
                 run_task.cancel()
             self._run_tasks.discard(run_task)

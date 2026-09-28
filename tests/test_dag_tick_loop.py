@@ -1623,7 +1623,11 @@ async def test_completion_check_node_completes_when_self_disabled_run_succeeds()
 # ---------------------------------------------------------------------------
 
 
-async def _awaiting_check_mid_run(fail_after_disable: bool, finish_during: str | None):
+async def _awaiting_check_mid_run(
+    fail_after_disable: bool,
+    finish_during: str | None,
+    shell_status: str = "success",
+):
     """Poll a completion_check node against a self-disabling check run.
 
     ``worker_evidence``: the run is in flight when the poll starts and
@@ -1658,7 +1662,10 @@ async def _awaiting_check_mid_run(fail_after_disable: bool, finish_during: str |
         if finish_during == "completion_check":
             await start_run()
             await finish_run()
-        return MagicMock(status="success", detail=None)
+        elif finish_during == "start_in_check":
+            # A new run starts during the shell command and is still running.
+            await start_run()
+        return MagicMock(status=shell_status, detail=None)
 
     async def read_result(*args, **kwargs):
         if finish_during == "result_read":
@@ -1666,7 +1673,7 @@ async def _awaiting_check_mid_run(fail_after_disable: bool, finish_during: str |
             await finish_run()
         return "done"
 
-    if finish_during in ("completion_check", "result_read"):
+    if finish_during in ("completion_check", "result_read", "start_in_check"):
         # An earlier run succeeded; the final run has not started yet.
         loader.get_successful_run_count = AsyncMock(return_value=1)
     elif finish_during is None:
@@ -1728,3 +1735,25 @@ async def test_completion_check_completes_when_final_run_succeeds_mid_poll():
     _, _, _, node, _ = await _awaiting_check_mid_run(False, "completion_check")
 
     assert node.status == "completed"
+
+
+# ---------------------------------------------------------------------------
+# codex P1 (PR #656 round 7): a run that starts during the awaited shell
+# command defers EVERY shell outcome, not only a pass — the run may be doing
+# the work that changes the completion state.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shell_status", ["success", "failed"])
+async def test_completion_check_defers_any_outcome_while_run_in_flight(shell_status):
+    _, orch, store, node, loader = await _awaiting_check_mid_run(
+        False,
+        "start_in_check",
+        shell_status,
+    )
+
+    assert node.status == "awaiting_check"
+    assert node.check_attempts == 1  # the poll is counted as pending
+    assert all(c.kwargs.get("status") not in ("completed", "failed") for c in store.update_node.await_args_list)
+    loader.manage_check.assert_not_awaited()  # worker neither disabled nor cancelled
