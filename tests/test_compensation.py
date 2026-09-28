@@ -1659,38 +1659,98 @@ async def test_concurrent_writes_to_one_path_snapshot_and_write_in_turn(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_after_compensable_call_records_the_written_decision_state() -> None:
-    """codex P2 (compensation.py:357): the revert guard now needs the full
-    post-call review state, read right after the call succeeded."""
+async def test_after_compensable_call_records_the_transactional_decision_state() -> None:
+    """codex P1 #652 (runner.py:530/660): the written AND prior review states
+    come from the resolving transaction (CallOutcome.review_capture) -- never
+    a post-dispatch re-read that could adopt a later review."""
     from unittest.mock import AsyncMock
 
+    from nous.api.call_outcome import CallOutcome
+
     store = AsyncMock()
-    store.decision_state.return_value = _WRITTEN_DECISION
+    store.decision_state.return_value = {**_WRITTEN_DECISION, "outcome_result": "a later review"}
     runner = _bare_runner(store)
     runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
     runner._action_review_pusher = None
     did = str(uuid4())
     entry = uuid4()
+    prior = {**_WRITTEN_DECISION, "outcome_result": "concurrent review", "reviewer": "someone"}
+    outcome = CallOutcome(review_capture={"prior": prior, "written": _WRITTEN_DECISION})
+    kwargs = dict(snapshotted=True, tool_input={"decision_id": did, "outcome": "noise"})
     await runner._after_compensable_call(
-        ExecutionContext(kind="subtask"),
-        "resolve_decision",
-        entry,
-        "s1",
-        snapshotted=True,
-        status="success",
-        tool_input={"decision_id": did, "outcome": "noise"},
+        ExecutionContext(kind="subtask"), "resolve_decision", entry, "s1", status="success", outcome=outcome, **kwargs
     )
-    store.decision_state.assert_awaited_once_with(did)
-    store.record_written_state.assert_awaited_once_with(entry, _WRITTEN_DECISION)
-    # a failed call records nothing
+    store.decision_state.assert_not_awaited()
+    store.record_written_state.assert_awaited_once_with(entry, _WRITTEN_DECISION, prior=prior)
+    # no transactional capture -> nothing recorded (the revert is refused)
     store.reset_mock()
     await runner._after_compensable_call(
         ExecutionContext(kind="subtask"),
         "resolve_decision",
         entry,
         "s1",
-        snapshotted=True,
-        status="error",
-        tool_input={"decision_id": did},
+        status="success",
+        outcome=CallOutcome(),
+        **kwargs,
     )
     store.record_written_state.assert_not_awaited()
+    # a failed call records nothing
+    await runner._after_compensable_call(
+        ExecutionContext(kind="subtask"), "resolve_decision", entry, "s1", status="error", outcome=outcome, **kwargs
+    )
+    store.record_written_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_file_revert_waits_for_an_in_flight_write(tmp_path) -> None:
+    """codex P1 #652 (compensation.py:332): the revert holds the write_file
+    path lock across its stale check AND restore, so a write in flight lands
+    first and the revert then refuses instead of overwriting it."""
+    from nous.api import compensation as comp
+
+    target = tmp_path / "f.txt"
+    target.write_text("ours")
+    snap = {
+        "full_path": str(target),
+        "existed": True,
+        "prior_content": "original",
+        **_written("ours"),
+    }
+    lock = comp.write_path_lock("f.txt", str(tmp_path))
+    await lock.acquire()  # a concurrent write_file holds the path
+    task = asyncio.create_task(comp.compensate_write_file(uuid4(), snap, None))
+    await asyncio.sleep(0.05)
+    assert not task.done()
+    target.write_text("newer")
+    comp.release_write_path_lock(lock)
+    res = await task
+    assert not res.success and "modified" in res.message
+    assert target.read_text() == "newer"
+
+
+@pytest.mark.asyncio
+async def test_unreadable_prior_file_blocks_an_undoable_write(tmp_path) -> None:
+    """codex P1 #652 (compensation.py:275): an existing file whose content
+    cannot be read yields an explicit capture failure, and an undoable node
+    refuses the write rather than overwrite what it cannot restore."""
+    from nous.api import compensation as comp
+    from nous.api.compensation import SnapshotBlocksDispatch
+
+    (tmp_path / "wo.txt").write_text("secret")
+
+    def _denied(*a, **k):
+        raise PermissionError("write-only file")
+
+    with patch.object(comp, "open", _denied, create=True):
+        snap = await comp.snapshot_for_write_file("wo.txt", str(tmp_path))
+        assert snap["existed"] and snap["prior_content"] is None and "PermissionError" in snap["capture_error"]
+        runner = _bare_runner(SimpleNamespace(capture=None))
+        runner._workspace_dir = str(tmp_path)
+        runner._handler_args = lambda name, inp: inp
+        with pytest.raises(SnapshotBlocksDispatch, match="could not be read"):
+            await runner._capture_compensation_snapshot(
+                ExecutionContext(kind="dag_node", undoable=True),
+                "write_file",
+                {"path": "wo.txt", "content": "x"},
+                uuid4(),
+            )

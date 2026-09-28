@@ -167,11 +167,15 @@ class SnapshotStore:
             await s.commit()
             return (res.rowcount or 0) == 1
 
-    async def record_written_state(self, ledger_entry_id: UUID, written: dict[str, Any]) -> bool:
-        """Merge ``written`` -- the state the call left behind, read right
-        after it succeeded -- into its snapshot, so the revert can refuse
-        once anything has changed that state since. Returns whether a row
-        was updated."""
+    async def record_written_state(
+        self, ledger_entry_id: UUID, written: dict[str, Any], *, prior: dict[str, Any] | None = None
+    ) -> bool:
+        """Merge ``written`` -- the state the call left behind -- into its
+        snapshot, so the revert can refuse once anything has changed that
+        state since. ``prior``, when given, replaces the pre-dispatch prior
+        state (read inside the call's own transaction, it is exact where the
+        pre-dispatch read could be overtaken by a concurrent write). Returns
+        whether a row was updated."""
 
         async def _write() -> bool:
             async with self._db.session() as s:
@@ -185,7 +189,10 @@ class SnapshotStore:
                 ).scalar_one_or_none()
                 if row is None:
                     return False
-                row.snapshot_data = {**(row.snapshot_data or {}), "written": written}
+                merged = {**(row.snapshot_data or {}), "written": written}
+                if prior is not None:
+                    merged["prior"] = prior
+                row.snapshot_data = merged
                 await s.commit()
                 return True
 
@@ -250,7 +257,8 @@ async def snapshot_for_write_file(
 
     I/O is offloaded to a worker thread so the event loop is never stalled.
     Files larger than ``_FILE_SNAPSHOT_MAX_BYTES`` are flagged ``oversized=True``
-    and will not have ``prior_content`` captured; callers in undoable contexts
+    and an existing file whose content cannot be read carries ``capture_error``;
+    neither has ``prior_content`` captured, and callers in undoable contexts
     should raise ``SnapshotBlocksDispatch`` rather than proceed without a snapshot.
     """
     import os
@@ -259,6 +267,7 @@ async def snapshot_for_write_file(
     existed = os.path.exists(full_path)
     prior_content: str | None = None
     oversized = False
+    capture_error: str | None = None
     if existed:
         try:
             file_size = os.path.getsize(full_path)
@@ -271,15 +280,21 @@ async def snapshot_for_write_file(
                         return f.read()
 
                 prior_content = await asyncio.to_thread(_read)
-        except Exception:
+        except Exception as exc:
+            # The file exists but its content could not be read: the snapshot
+            # cannot restore it, and callers must know that (capture_error).
             prior_content = None
-    return {
+            capture_error = f"{type(exc).__name__}: {exc}"
+    snap: dict[str, Any] = {
         "path": path,
         "full_path": full_path,
         "existed": existed,
         "prior_content": prior_content,
         "oversized": oversized,
     }
+    if capture_error is not None:
+        snap["capture_error"] = capture_error
+    return snap
 
 
 async def compensate_write_file(
@@ -299,9 +314,6 @@ async def compensate_write_file(
     grown is refused without being read; the bounded hash read and the
     restore run on a worker thread, never on the event loop.
     """
-    import hashlib
-    import os
-
     full_path = snapshot_data.get("full_path", "")
     existed = snapshot_data.get("existed", False)
     prior_content = snapshot_data.get("prior_content")
@@ -314,6 +326,31 @@ async def compensate_write_file(
         # Without the hash of what the call wrote there is no way to tell our
         # write from a newer one, so the revert could destroy newer content.
         return CompensationResult(False, "revert refused: snapshot does not record what was written")
+
+    # The same per-path lock write_file holds across its snapshot and write:
+    # held across the stale check AND the restore, no write can land between
+    # them and be overwritten by this revert.
+    lock = write_path_lock(full_path, "")
+    await lock.acquire()
+    try:
+        return await _check_and_restore_write_file(
+            full_path, existed, prior_content, written_size, written_content_hash
+        )
+    finally:
+        release_write_path_lock(lock)
+
+
+async def _check_and_restore_write_file(
+    full_path: str,
+    existed: bool,
+    prior_content: str | None,
+    written_size: int,
+    written_content_hash: str,
+) -> CompensationResult:
+    """``compensate_write_file``'s stale check and restore; the caller holds
+    the target's write-path lock."""
+    import hashlib
+    import os
 
     def _current_matches() -> bool | None:
         """None: the file is gone. Otherwise whether it still holds exactly

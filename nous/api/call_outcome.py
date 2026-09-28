@@ -16,6 +16,9 @@ from dataclasses import dataclass
 class CallOutcome:
     external_ref: str | None = None   # provider id: SMTP Message-ID, Telegram message_id
     uncertain: bool = False           # the provider may have acted although the call failed
+    # Phase 2.8: resolve_decision's review state before/after its write, read
+    # inside the resolving transaction under a row lock (Brain.review capture=).
+    review_capture: dict | None = None
 
 
 _current: ContextVar[CallOutcome | None] = ContextVar("tool_call_outcome", default=None)

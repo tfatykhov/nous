@@ -517,17 +517,26 @@ class AgentRunner:
         snapshotted: bool,
         status: str,
         tool_input: dict,
+        outcome: CallOutcome | None = None,
     ) -> None:
         """After a snapshotted call succeeded: record the state it wrote
         where a revert must check it (resolve_decision -- the full review
         state, so a later re-review is never undone), then push the review
         card. Fail-open: the call already happened."""
         if snapshotted and status == "success" and tool_name == "resolve_decision" and self._snap_store is not None:
-            decision_id = str(self._handler_args(tool_name, tool_input).get("decision_id") or "")
+            # The prior and written states come from the resolving transaction
+            # itself (row-locked), never a re-read before or after it: a
+            # concurrent review can then neither be adopted as "written" nor
+            # be skipped over by "prior".
+            capture = outcome.review_capture if outcome is not None else None
             try:
-                written = await self._snap_store.decision_state(decision_id)
-                if written is not None:
-                    await self._snap_store.record_written_state(entry_id, written)
+                if isinstance(capture, dict) and "prior" in capture and "written" in capture:
+                    await self._snap_store.record_written_state(entry_id, capture["written"], prior=capture["prior"])
+                else:
+                    logger.warning(
+                        "Harness Phase 2.8: %s reported no transactional review state; its revert will be refused",
+                        tool_name,
+                    )
             except Exception:
                 logger.warning(
                     "Harness Phase 2.8: written state not recorded for %s; its revert will be refused",
@@ -624,6 +633,8 @@ class AgentRunner:
                 snap_data = await snapshot_for_write_file(path, self._workspace_dir)
                 if snap_data.get("oversized"):
                     return _unrevertible(f"{path!r} is too large to snapshot (exceeds 1MiB limit)")
+                if snap_data.get("capture_error"):
+                    return _unrevertible(f"the prior content of {path!r} could not be read")
                 # Record what's about to be written so compensate_write_file can
                 # detect if the file was modified between the write and the revert.
                 content = (tool_input.get("content", "") or "").encode("utf-8")
@@ -2348,6 +2359,7 @@ class AgentRunner:
                                         snapshotted=_snapshotted,
                                         status=_status,
                                         tool_input=dispatch_input,
+                                        outcome=outcome,
                                     )
                                     # F026: Record in execution ledger (post-dispatch)
                                     if ledger:
@@ -2982,6 +2994,7 @@ class AgentRunner:
                                         snapshotted=_snapshotted2,
                                         status=_status2,
                                         tool_input=tool_input,
+                                        outcome=outcome,
                                     )
                             finally:
                                 if _write_lock2 is not None:

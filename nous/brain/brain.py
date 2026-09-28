@@ -64,6 +64,18 @@ _NOISE_KEYWORDS = frozenset({
 })
 
 
+def _review_state(decision: Decision) -> dict:
+    """The review fields ``_review`` overwrites, JSON-safe, in the shape
+    ``SnapshotStore.decision_state`` records."""
+    return {
+        "outcome": decision.outcome,
+        "outcome_result": decision.outcome_result,
+        "reviewed_at": decision.reviewed_at.isoformat() if decision.reviewed_at is not None else None,
+        "reviewer": decision.reviewer,
+        "superseded_by": str(decision.superseded_by) if decision.superseded_by is not None else None,
+    }
+
+
 def apply_outcome_demotion(
     scored: list[tuple[object, str | None, float | None]],
     factors: dict[str, float],
@@ -996,6 +1008,7 @@ class Brain:
         superseded_by: UUID | None = None,
         session: AsyncSession | None = None,
         preserve_graded: bool = False,
+        capture: dict | None = None,
     ) -> DecisionDetail:
         """Record outcome for a decision.
 
@@ -1003,18 +1016,22 @@ class Brain:
         GRADED_OUTCOMES. Relabelling a graded decision as noise/superseded
         removes a data point from calibration, so a caller that must not
         touch calibration (a background turn) sets this.
+        capture: when given, receives ``prior`` and ``written`` -- the review
+        fields just before and just after this write, read under the row
+        lock inside this transaction, so no concurrent review can land
+        between them (harness Phase 2.8 compensation snapshots).
         """
         if session is None:
             async with self.db.session() as session:
                 detail = await self._review(
                     decision_id, outcome, result, reviewer, superseded_by, session,
-                    preserve_graded,
+                    preserve_graded, capture,
                 )
                 await session.commit()
                 return detail
         return await self._review(
             decision_id, outcome, result, reviewer, superseded_by, session,
-            preserve_graded,
+            preserve_graded, capture,
         )
 
     async def review_many(
@@ -1080,6 +1097,7 @@ class Brain:
         superseded_by: UUID | None,
         session: AsyncSession,
         preserve_graded: bool = False,
+        capture: dict | None = None,
     ) -> DecisionDetail:
         # Validate via Pydantic (P2-18)
         validated = ReviewInput(
@@ -1092,7 +1110,7 @@ class Brain:
         # Row-locked when preserving a grade, so a concurrent review cannot
         # grade the decision between this check and the write below.
         decision = await self._get_decision_orm(
-            decision_id, session, for_update=preserve_graded
+            decision_id, session, for_update=preserve_graded or capture is not None
         )
         if decision is None:
             raise ValueError(f"Decision {decision_id} not found")
@@ -1119,6 +1137,8 @@ class Brain:
                 "(it would drop out of calibration) — re-grade it in an interactive turn"
             )
 
+        if capture is not None:
+            capture["prior"] = _review_state(decision)
         decision.outcome = validated.outcome
         decision.outcome_result = validated.result
         decision.reviewed_at = datetime.now(UTC)
@@ -1132,6 +1152,8 @@ class Brain:
         )
 
         await session.flush()
+        if capture is not None:
+            capture["written"] = _review_state(decision)
 
         # Emit event (P2-9)
         await self._emit_event(

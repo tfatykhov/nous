@@ -2163,6 +2163,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     "different outcome (e.g. 'noise' or 'failure')."
                 )}],
             }
+        # Phase 2.8: the review state around this write, read inside the
+        # resolving transaction, is what a compensation snapshot records.
+        call_outcome = _outcome_var.get()
+        capture: dict | None = {} if call_outcome is not None else None
         try:
             detail = await brain.review(
                 UUID(decision_id),
@@ -2171,7 +2175,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 reviewer=_BG_REVIEWER if _is_background else "agent",
                 superseded_by=UUID(superseded_by) if superseded_by else None,
                 preserve_graded=_is_background,
+                capture=capture,
             )
+            if call_outcome is not None:
+                call_outcome.review_capture = capture
             text = f"Decision {detail.id} resolved: outcome={detail.outcome}"
             if detail.superseded_by:
                 text += f", superseded_by={detail.superseded_by}"

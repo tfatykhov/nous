@@ -165,6 +165,38 @@ class TestResolveDecision:
         assert detail.outcome == "noise"
 
     @pytest.mark.asyncio
+    async def test_resolve_decision_reports_review_state_from_its_own_transaction(self, tools, brain):
+        """codex P1 #652 (runner.py:530/660): the compensation snapshot's prior
+        and written review states come from the resolving transaction, not
+        from re-reads a concurrent review could slip between."""
+        from nous.api.call_outcome import CallOutcome
+        from nous.api.call_outcome import _current as outcome_var
+        from nous.api.compensation import SnapshotStore
+
+        did = await self._make_decision(tools, brain)
+        await brain.review(uuid.UUID(did), "noise", result="earlier review", reviewer="someone")
+        store = SnapshotStore(brain.db, brain.agent_id)
+        before = await store.decision_state(did)
+        outcome = CallOutcome()
+        token = outcome_var.set(outcome)
+        try:
+            await tools["resolve_decision"](decision_id=did, outcome="noise", resolution_note="mine")
+        finally:
+            outcome_var.reset(token)
+        written = await store.decision_state(did)
+        # a later review lands after the call: the capture still reports the call's own write
+        await brain.review(uuid.UUID(did), "noise", result="later review", reviewer="someone-else")
+        def _naive(state):  # the SQLite test DB drops the UTC offset on read
+            ts = state["reviewed_at"]
+            return {**state, "reviewed_at": ts and ts.split("+")[0]}
+
+        cap = outcome.review_capture
+        assert _naive(cap["prior"]) == _naive(before)
+        assert _naive(cap["written"]) == _naive(written)
+        assert cap["prior"]["outcome_result"] == "earlier review"
+        assert cap["written"]["outcome_result"] == "mine"
+
+    @pytest.mark.asyncio
     async def test_resolve_decision_noise_allowed_in_background(self, tools, brain):
         """A background turn may mark a pending decision as noise, attributed to it."""
         did = await self._make_decision(tools, brain)
