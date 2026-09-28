@@ -22,9 +22,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -37,6 +34,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -153,13 +151,12 @@ fun ConnectScreen(graph: AppGraph, onConnected: () -> Unit) {
                     } finally { busy = false }
                 }
         }
-        Button(
+        NousButton(
             onClick = {
                 val base = url.trim().trimEnd('/')
                 if (needsLocalNetworkPermission(base)) { afterLocalNet = runProbe; askLocalNet.launch(LOCAL_NETWORK_PERMISSION) } else runProbe()
             },
-            enabled = !busy && url.startsWith("http"), modifier = Modifier.fillMaxWidth().height(54.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = t.accentDim, contentColor = t.onAccent), shape = RoundedCornerShape(14.dp),
+            enabled = url.startsWith("http"), busy = busy, kind = ButtonKind.Primary, modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(14.dp),
         ) { Text(if (busy) "Connecting…" else "Connect", fontSize = 16.sp, fontWeight = FontWeight.SemiBold) }
         if (error.isNotEmpty()) Text(error, color = t.crit, fontSize = 14.sp)
         Text("Nothing is exposed publicly. The web companion keeps working as before.", color = t.muted, fontSize = 13.sp)
@@ -190,7 +187,7 @@ fun InboxScreen(graph: AppGraph, version: Int, navigate: (Route) -> Unit) {
             if (feed.isEmpty()) Text(if (conn == Connection.LIVE) "Nothing needs you right now. Surfaces Nous pushes — escalations, action reviews, triage — appear here." else "Connecting…", color = t.muted, fontSize = 15.sp, modifier = Modifier.padding(top = 24.dp))
             val micro = feed.filter { Shell.kindOf(it.surfaceId) == "micro_app" }
             for (s in feed) SurfaceRow(graph, s) { navigate(Route.Surface(s.surfaceId)) }
-            if (micro.size >= 2) OutlinedButton(onClick = {
+            if (micro.size >= 2) NousButton(onClick = {
                 val ids = closeAll.tap(micro.map { it.surfaceId })
                 closeAllArmed = ids == null
                 if (ids != null) scope.launch { for (id in ids) if (graph.store.surfaces.containsKey(id)) graph.engine.postAction(id, "app.close", "footer", JsonObject(emptyMap())) }
@@ -219,11 +216,13 @@ private fun SurfaceRow(graph: AppGraph, s: SurfaceState, onOpen: () -> Unit) {
     val kind = Shell.kindOf(s.surfaceId)
     val label = Shell.chipLabel(s, graph.functions)
     val title = s.title.ifEmpty { Shell.chipTooltip(s, graph.functions) }
-    Column(Modifier.fillMaxWidth().background(t.surface, RoundedCornerShape(14.dp)).border(1.dp, if (s.priority >= 2) t.warn.copy(alpha = 0.6f) else t.border, RoundedCornerShape(14.dp)).clickable(onClick = onOpen).padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(t.surface, RoundedCornerShape(14.dp)).border(1.dp, if (s.priority >= 2) t.warn.copy(alpha = 0.6f) else t.border, RoundedCornerShape(14.dp)).clickable(onClickLabel = "open", role = androidx.compose.ui.semantics.Role.Button, onClick = onOpen).padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(label, color = if (s.priority >= 2) t.warn else t.soft, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.background(t.surfaceHover, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 3.dp))
             if (s.priority >= 2) Text("needs you", color = t.warn, fontSize = 12.sp)
+            Spacer(Modifier.weight(1f))
+            Text("›", color = t.muted, fontSize = 18.sp)
         }
         Text(title, color = t.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Text(kind, color = t.muted, fontSize = 12.sp)
@@ -237,7 +236,7 @@ private fun NotConnected(graph: AppGraph) {
         Spacer(Modifier.height(32.dp))
         Text("Can't reach Nous", color = t.text, fontSize = 24.sp, fontWeight = FontWeight.Bold)
         Text("This phone isn't on your tailnet. Turn on Tailscale, then try again. Notifications still arrive while you're away.", color = t.soft, fontSize = 15.sp)
-        Button(onClick = { graph.engine.connect() }, colors = ButtonDefaults.buttonColors(containerColor = t.accentDim, contentColor = t.onAccent), modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(14.dp)) { Text("Retry") }
+        NousButton(onClick = { graph.engine.connect() }, kind = ButtonKind.Primary, modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(14.dp)) { Text("Retry", color = t.onAccent, fontWeight = FontWeight.SemiBold) }
         graph.engine.lastError?.let { Text(it, color = t.muted, fontSize = 12.sp) }
         Text("Cards aren't shown while disconnected, so nothing here is ever out of date.", color = t.muted, fontSize = 13.sp)
     }
@@ -304,7 +303,7 @@ fun SettingsScreen(graph: AppGraph, onDisconnect: () -> Unit = {}, onBack: () ->
             KV("Push", graph.push.status); KV("Registered", TokenState.registeredAt?.let { java.text.DateFormat.getTimeInstance().format(it) } ?: "—")
             KV("System permission", if (graph.push.notificationsEnabled()) "Allowed" else "Blocked")
             TokenState.lastError?.let { KV("Last error", it) }
-            OutlinedButton(onClick = { scope.launch { graph.push.refreshConfig(); val r = runCatching { graph.http.postJson("/a2ui/push/test", """{"installation_id":"${graph.settings.installationId}"}""") }.getOrNull(); testMsg = if (r?.ok == true) "Test notification sent" else "Not available (${r?.status ?: "offline"})" } }, modifier = Modifier.fillMaxWidth()) { Text("Send test notification", color = t.text) }
+            NousButton(onClick = { scope.launch { graph.push.refreshConfig(); val r = runCatching { graph.http.postJson("/a2ui/push/test", """{"installation_id":"${graph.settings.installationId}"}""") }.getOrNull(); testMsg = if (r?.ok == true) "Test notification sent" else "Not available (${r?.status ?: "offline"})" } }, modifier = Modifier.fillMaxWidth()) { Text("Send test notification", color = t.text) }
             if (testMsg.isNotEmpty()) Text(testMsg, color = t.muted, fontSize = 13.sp)
         }
         Section("Diagnostics") {
