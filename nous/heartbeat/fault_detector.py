@@ -109,11 +109,44 @@ class ProcessFaultCheck(BaseCheck):
         # ensures the baseline is never empty when the minimum setting of 5 is
         # used.
         fetch_limit = max(baseline_window + 5, consec_err_threshold + 1)
+        now = datetime.now(UTC)
+        runs_by_phase = {p: await recorder.get_recent_runs(p, limit=fetch_limit) for p in _SLEEP_PHASES}
+
+        # Sleep baseline: the oldest row any tracked phase has logged.  Every
+        # tracked phase records a row whenever a sleep cycle reaches it, so once
+        # another phase's log is older than the gap threshold, a phase with no
+        # rows at all has been skipped for at least that long (e.g. every sleep
+        # is interrupted before reaching it).  The oldest FETCHED row is a lower
+        # bound on log age, so this can only under-report, never over-report.
+        oldest_logged: datetime | None = None
+        for phase_runs in runs_by_phase.values():
+            for r in phase_runs:
+                ts = r["started_at"]
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+                if oldest_logged is None or ts < oldest_logged:
+                    oldest_logged = ts
+        log_age_hours = (now - oldest_logged).total_seconds() / 3600.0 if oldest_logged else 0.0
+
         for process_name in _SLEEP_PHASES:
-            runs = await recorder.get_recent_runs(process_name, limit=fetch_limit)
+            runs = runs_by_phase[process_name]
             if not runs:
-                # Phase has never run (or ran before migration 077).
-                # Skip — not a finding until we have a baseline.
+                # No sleep-phase history at all (or too recent since migration
+                # 077) — not a finding until the log establishes a baseline.
+                if log_age_hours > max_gap_hours:
+                    findings.append(
+                        Finding(
+                            source="fault_detector",
+                            summary=(
+                                f"Process {process_name!r} has not completed "
+                                f"in {int(log_age_hours)}h of sleep-phase logging "
+                                f"(never recorded a run; threshold {max_gap_hours}h)"
+                            ),
+                            urgency="normal",
+                            needs_action=True,
+                            check_name=self.name,
+                        )
+                    )
                 continue
 
             finished_runs = [r for r in runs if r["status"] == "finished"]
@@ -121,7 +154,6 @@ class ProcessFaultCheck(BaseCheck):
             # ----------------------------------------------------------------
             # 1. Missed run: no finished row in the last N hours
             # ----------------------------------------------------------------
-            now = datetime.now(UTC)
             last_finished = next((r for r in runs if r["status"] == "finished"), None)
             if last_finished is None:
                 gap_hours = max_gap_hours + 1  # trigger the check

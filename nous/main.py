@@ -976,14 +976,21 @@ async def create_components(settings: Settings) -> dict:
                     from nous.heartbeat.fault_detector import (
                         ProcessFaultCheck, RetrievalCanaryCheck,
                     )
-                    registry.register(
-                        ProcessFaultCheck(
-                            db=database,
-                            settings=settings,
-                            agent_id=settings.agent_id,
+                    # ProcessFaultCheck watches sleep phases only; with sleep
+                    # disabled no SleepHandler/recorder exists, so stale rows
+                    # from an earlier deployment would age into missed-run
+                    # findings for a subsystem the operator turned off.
+                    if settings.sleep_enabled:
+                        registry.register(
+                            ProcessFaultCheck(
+                                db=database,
+                                settings=settings,
+                                agent_id=settings.agent_id,
+                            )
                         )
-                    )
-                    logger.info("Fault detector: ProcessFaultCheck registered")
+                        logger.info("Fault detector: ProcessFaultCheck registered")
+                    else:
+                        logger.info("Fault detector: ProcessFaultCheck skipped (sleep disabled)")
                     canary_path = getattr(settings, "fault_detector_canary_path", "")
                     if canary_path:
                         registry.register(

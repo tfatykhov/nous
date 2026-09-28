@@ -270,6 +270,92 @@ class TestProcessFaultCheckMissedRun:
         # No findings for phases we've never seen (can't detect drift with no data)
         assert not result.findings
 
+    @pytest.mark.asyncio
+    async def test_finding_when_phase_absent_but_other_phases_logged_past_gap(self):
+        """A phase that never records a run is flagged once other phases' log
+        is older than the gap (e.g. every sleep is interrupted before it).
+
+        Mutation evidence: restore the unconditional ``continue`` on empty
+        history and no finding is produced for sleep/generalize.
+        """
+        now = datetime.now(UTC)
+        runs = {
+            f"sleep/{phase}": [_run(now, 1.0), _run(now, 25.0), _run(now, 49.0)]
+            for phase in ["review", "prune", "reflect", "resolve_contradictions", "stale_scan"]
+        }
+        settings = _mock_settings(fault_detector_sleep_max_gap_hours=48)
+        check = ProcessFaultCheck(db=MagicMock(), settings=settings, agent_id="test-agent")
+
+        async def _fake_get(process_name, limit=20):
+            return runs.get(process_name, [])
+
+        async def _fake_count(*a, **kw):
+            return 0
+
+        recorder_mock = AsyncMock()
+        recorder_mock.get_recent_runs = _fake_get
+        with patch("nous.heartbeat.fault_detector.ProcessRecorder", return_value=recorder_mock):
+            with patch.object(check, "_count_stale_eligible", _fake_count):
+                result = await check.run()
+
+        missing = [f for f in result.findings if "never recorded" in f.summary]
+        assert any("generalize" in f.summary for f in missing)
+        assert not any("stale_scan" in f.summary for f in result.findings)
+
+    @pytest.mark.asyncio
+    async def test_no_finding_for_absent_phase_while_log_is_young(self):
+        """Within the gap threshold after rollout an absent phase is not flagged."""
+        now = datetime.now(UTC)
+        runs = {"sleep/review": [_run(now, 1.0), _run(now, 25.0)]}
+        settings = _mock_settings(fault_detector_sleep_max_gap_hours=48)
+        check = ProcessFaultCheck(db=MagicMock(), settings=settings, agent_id="test-agent")
+
+        async def _fake_get(process_name, limit=20):
+            return runs.get(process_name, [])
+
+        recorder_mock = AsyncMock()
+        recorder_mock.get_recent_runs = _fake_get
+        with patch("nous.heartbeat.fault_detector.ProcessRecorder", return_value=recorder_mock):
+            result = await check.run()
+
+        assert not result.findings
+
+
+class TestMainGatesProcessCheckOnSleep:
+    """ProcessFaultCheck registration must be gated on sleep_enabled; the
+    retrieval canary must not be.
+
+    Mutation evidence: drop the ``if settings.sleep_enabled`` guard in main.py
+    and the first assertion fails.
+    """
+
+    @staticmethod
+    def _enclosing_if_tests(tree, target_name):
+        import ast
+
+        found = []
+
+        def walk(node, ifs):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == target_name:
+                found.append(list(ifs))
+            for child in ast.iter_child_nodes(node):
+                walk(child, ifs + [ast.unparse(node.test)] if isinstance(node, ast.If) else ifs)
+
+        walk(tree, [])
+        return found
+
+    def test_process_check_gated_canary_not(self):
+        import ast
+
+        import nous.main as main_module
+
+        tree = ast.parse(open(main_module.__file__).read())
+        process = self._enclosing_if_tests(tree, "ProcessFaultCheck")
+        canary = self._enclosing_if_tests(tree, "RetrievalCanaryCheck")
+        assert process and canary
+        assert all(any("sleep_enabled" in t for t in ifs) for ifs in process)
+        assert not any(any("sleep_enabled" in t for t in ifs) for ifs in canary)
+
 
 class TestProcessFaultCheckConsecutiveErrors:
     """Detect 'N consecutive error rows'."""

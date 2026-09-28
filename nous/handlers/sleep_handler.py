@@ -1556,22 +1556,28 @@ class SleepHandler:
             cutoff = datetime.now(UTC) - timedelta(days=settings.stale_scan_age_days)
             excluded = list(settings.stale_scan_excluded_categories or [])
             async with self._heart.db.session() as session:
-                stmt = (
-                    select(Fact)
-                    .where(
-                        Fact.agent_id == self._heart.agent_id,
-                        Fact.active == True,  # noqa: E712
-                        Fact.created_at < cutoff,
-                    )
-                    .where((Fact.last_recalled_at.is_(None)) | (Fact.last_recalled_at < cutoff))
-                )
+                aged = [
+                    Fact.agent_id == self._heart.agent_id,
+                    Fact.active == True,  # noqa: E712
+                    Fact.created_at < cutoff,
+                ]
                 if excluded:
                     # NULL NOT IN (...) evaluates to UNKNOWN in SQL,
                     # so a plain notin_ would silently exclude every
                     # uncategorized fact from deactivation. Add the
                     # NULL branch explicitly so the exclusion only
                     # skips the NAMED categories. Codex P2 on PR #405.
-                    stmt = stmt.where(Fact.category.is_(None) | Fact.category.notin_(excluded))
+                    aged.append(Fact.category.is_(None) | Fact.category.notin_(excluded))
+                # Fault detector: the examined population is every aged fact,
+                # BEFORE the recall filter — the deactivated set is a subset of
+                # it, so items_changed/items_examined is a real ratio (a collapse
+                # means the recall predicate stopped selecting anything).
+                aged_count = (await session.execute(select(func.count()).select_from(Fact).where(*aged))).scalar_one()
+                stmt = (
+                    select(Fact)
+                    .where(*aged)
+                    .where((Fact.last_recalled_at.is_(None)) | (Fact.last_recalled_at < cutoff))
+                )
                 result = await session.execute(stmt)
                 stale_facts = result.scalars().all()
 
@@ -1603,7 +1609,7 @@ class SleepHandler:
                 # Fault detector: record how many facts were examined so
                 # ProcessFaultCheck can detect zero-change collapse even when
                 # no facts were actually deactivated.
-                sleep_stats["stale_examined"] = len(stale_facts)
+                sleep_stats["stale_examined"] = aged_count
                 sleep_stats["stale_deactivated"] = count
                 logger.info(
                     "Stale scan: deactivated %d facts older than %d days "
