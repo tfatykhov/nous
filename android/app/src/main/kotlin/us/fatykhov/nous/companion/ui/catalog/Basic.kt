@@ -16,12 +16,8 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.ClickableText
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -77,7 +73,9 @@ fun TextView(node: Node.Render) {
     val raw = host.text(node.props["text"], node.scope)
     val caption = node.props.str("variant") == "caption"
     val base = if (caption) 13.sp else 15.sp
-    val color = if (caption) t.muted else t.text
+    // Inside a button the label takes the BUTTON's ink (web: the child inherits
+    // `color`), so a primary button's text is on-accent, not the theme's text colour.
+    val color = us.fatykhov.nous.companion.ui.LocalButtonInk.current ?: if (caption) t.muted else t.text
     Column(modifier = Modifier.weightOf(node), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         for (b in Markdown.parse(raw)) when (b) {
             is Block.Heading -> {
@@ -242,11 +240,14 @@ fun ButtonView(node: Node.Render) {
     }
     Column(modifier = Modifier.weightOf(node), verticalArrangement = Arrangement.spacedBy(3.dp)) {
         val label: @Composable () -> Unit = { ChildSlot(node.props["child"], node) }
-        when (node.props.str("variant")) {
-            "primary" -> Button(onClick = onClick, enabled = enabled, colors = ButtonDefaults.buttonColors(containerColor = t.accent, contentColor = t.onAccent), shape = RoundedCornerShape(8.dp)) { label() }
-            "borderless" -> TextButton(onClick = onClick, enabled = enabled) { label() }
-            else -> OutlinedButton(onClick = onClick, enabled = enabled, shape = RoundedCornerShape(8.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = t.text)) { label() }
+        val kind = when (node.props.str("variant")) {
+            "primary" -> us.fatykhov.nous.companion.ui.ButtonKind.Primary
+            "borderless" -> us.fatykhov.nous.companion.ui.ButtonKind.Borderless
+            else -> us.fatykhov.nous.companion.ui.ButtonKind.Default
         }
+        // `busy` while the action is in flight: the tap is acknowledged at once
+        // instead of the button sitting unchanged until the server answers.
+        us.fatykhov.nous.companion.ui.NousButton(onClick = onClick, enabled = enabled || busy, busy = busy, kind = kind) { label() }
         if (error.isNotEmpty()) Text(error, color = t.crit, fontSize = 12.sp)
         else failures.firstOrNull()?.message?.let { Text(it, color = t.muted, fontSize = 12.sp) }
     }

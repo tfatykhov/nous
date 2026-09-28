@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -140,7 +139,7 @@ fun AppFooterView(node: Node.Render) {
     fun call(name: String, args: JsonObject, kind: ActivityKind, id: String) { if (locked) return; error = ""; val token = host.store.beginActivity(host.surfaceId, kind, id)
         scope.launch { var held = false; try { val r = host.engine.callAgentFunction(host.surfaceId, name, args); if (r.ok) held = host.store.holdForModel(host.surfaceId, token, ActivityRules.responseSeq(r.value)) else error = r.message } finally { if (!held) host.store.endActivityIf(host.surfaceId, token, false) } } }
     @Composable fun Ctl(label: String, pressed: Boolean, enabled: Boolean, primary: Boolean = false, onClick: () -> Unit) {
-        OutlinedButton(onClick = onClick, enabled = enabled, shape = RoundedCornerShape(999.dp)) {
+        us.fatykhov.nous.companion.ui.NousButton(onClick = onClick, enabled = enabled, shape = RoundedCornerShape(999.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 8.dp)) {
             Text((if (pressed) "… " else "") + label, color = if (pressed) t.accent else if (primary) t.text else t.soft, fontSize = 13.sp)
         }
     }
