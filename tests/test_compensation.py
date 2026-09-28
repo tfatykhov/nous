@@ -949,12 +949,16 @@ async def test_compensate_heartbeat_check_manage_re_enables_a_disabled_check() -
 
     loader = SimpleNamespace(manage_check=AsyncMock(return_value={"status": "enabled"}))
     deps = SimpleNamespace(heartbeat_loader=loader)
-    res = await compensate_heartbeat_check_manage(uuid4(), {"check_name": "c", "action": "disable"}, deps)
+    res = await compensate_heartbeat_check_manage(
+        uuid4(), {"check_name": "c", "action": "disable", "prior_enabled": True}, deps
+    )
     assert res.success
     loader.manage_check.assert_awaited_once_with("enable", name="c")
 
     loader.manage_check.reset_mock()
-    res = await compensate_heartbeat_check_manage(uuid4(), {"check_name": "c", "action": "enable"}, deps)
+    res = await compensate_heartbeat_check_manage(
+        uuid4(), {"check_name": "c", "action": "enable", "prior_enabled": True}, deps
+    )
     assert not res.success
     loader.manage_check.assert_not_awaited()
 
@@ -1053,3 +1057,123 @@ async def test_background_non_undoable_write_snapshots_and_pushes_review_once(ki
     assert pusher.await_count == pushed
     if pushed:
         assert pusher.await_args.args[:2] == ("write_file", "id-write_file")
+
+
+# ---------------------------------------------------------------------------
+# codex P2 (compensation.py:269): a no-op disable reverts to disabled
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("snap", "success", "enabled"),
+    [
+        ({"prior_enabled": True}, True, True),
+        ({"prior_enabled": False}, True, False),  # already disabled: left disabled
+        ({"prior_enabled": None}, False, False),  # unknown: never enable
+        ({}, False, False),  # not recorded: never enable
+    ],
+)
+async def test_revert_check_disable_restores_prior_enabled_state(snap, success, enabled) -> None:
+    """Before the fix every revert called manage_check("enable"), starting a
+    check that was already disabled when the compensated call ran."""
+    from unittest.mock import AsyncMock
+
+    from nous.api.compensation import compensate_heartbeat_check_manage
+
+    loader = SimpleNamespace(manage_check=AsyncMock())
+    res = await compensate_heartbeat_check_manage(
+        uuid4(), {"check_name": "c", "action": "disable", **snap}, SimpleNamespace(heartbeat_loader=loader)
+    )
+    assert res.success is success
+    assert loader.manage_check.await_count == int(enabled)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("state", "recorded"), [(True, True), (False, False), (None, None), (RuntimeError, None)])
+async def test_capture_records_prior_enabled_state_of_the_check(state, recorded) -> None:
+    from unittest.mock import AsyncMock
+
+    from nous.api.runner import AgentRunner
+
+    runner = object.__new__(AgentRunner)
+    runner._snap_store = AsyncMock()
+    if state is RuntimeError:
+        runner._snap_store.check_enabled.side_effect = RuntimeError("db down")
+    else:
+        runner._snap_store.check_enabled.return_value = state
+    runner._workspace_dir = "/"
+    runner._dispatcher = SimpleNamespace()
+    assert await runner._capture_compensation_snapshot(
+        ExecutionContext(kind="subtask"), "heartbeat_check_manage", {"name": "c", "action": "disable"}, uuid4()
+    )
+    runner._snap_store.check_enabled.assert_awaited_once_with("c")
+    assert runner._snap_store.capture.await_args.kwargs["snapshot_data"] == {
+        "check_name": "c",
+        "action": "disable",
+        "prior_enabled": recorded,
+    }
+
+
+@pytest.mark.asyncio
+async def test_review_revert_passes_the_heartbeat_dynamic_loader() -> None:
+    """HeartbeatRunner exposes ``dynamic_loader``; reading ``_loader`` gave
+    the compensator None, so no check revert could ever run."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nous.a2ui.actions import ActionContext, ActionRouter
+    from nous.api.compensation import CompensationRegistry, register_compensators
+
+    registry = CompensationRegistry()
+    register_compensators(registry)
+    entry_id = uuid4()
+    snap_store = MagicMock()
+    snap_store.get_by_ledger_entry = AsyncMock(
+        return_value=SimpleNamespace(
+            id=uuid4(),
+            tool_name="heartbeat_check_manage",
+            snapshot_data={"check_name": "c", "action": "disable", "prior_enabled": True},
+            reverted_at=None,
+        )
+    )
+    snap_store.mark_reverted = AsyncMock()
+    loader = SimpleNamespace(manage_check=AsyncMock())
+    router = ActionRouter(
+        database=None,
+        settings=SimpleNamespace(a2ui_action_rate_per_minute=100, a2ui_trust_forwarded_identity=False),
+        surface_service=None,
+        heartbeat_runner=SimpleNamespace(dynamic_loader=loader),
+        compensation_registry=registry,
+        snapshot_store=snap_store,
+    )
+    surface = SimpleNamespace(trace_id=str(entry_id), surface_id="surf-1", data_model={})
+    ctx = ActionContext(surface=surface, name="review.revert", context={}, data_model={}, services=router)
+    result = await router._handlers["review.revert"].fn(ctx)
+    assert result.ok, result.message
+    loader.manage_check.assert_awaited_once_with("enable", name="c")
+
+
+# ---------------------------------------------------------------------------
+# codex P2 (main.py:1230): the heartbeat fork gets compensation wiring
+# ---------------------------------------------------------------------------
+
+
+def test_fork_inherits_and_receives_compensation_wiring() -> None:
+    """HeartbeatRunner.start() forks before main.py wires compensation; the
+    fork must still snapshot and push review cards."""
+    from unittest.mock import MagicMock
+
+    from test_runner_ledger import _FakeStore
+    from test_runner_ledger import _runner as _ledger_runner
+
+    parent, _ = _ledger_runner(_FakeStore(), compensation_enabled=True)
+    early = parent.fork(MagicMock())  # predates wiring
+    store, pusher = MagicMock(), MagicMock()
+    parent.set_snapshot_store(store, "/ws")
+    parent.set_action_review_pusher(pusher)
+    late = parent.fork(MagicMock())  # postdates wiring
+
+    for fork in (early, late):
+        assert fork._snap_store is store
+        assert fork._workspace_dir == "/ws"
+        assert fork._action_review_pusher is pusher

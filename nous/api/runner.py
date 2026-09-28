@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import time
+import weakref
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, Callable
 from contextvars import ContextVar
@@ -357,6 +358,10 @@ class AgentRunner:
         self._snap_store: Any | None = None
         self._workspace_dir: str = settings.workspace_dir
         self._action_review_pusher: Any | None = None
+        # Live forks, so compensation wiring set AFTER a fork (the heartbeat
+        # runner forks in HeartbeatRunner.start, before main.py wires it)
+        # still reaches them.
+        self._forks: weakref.WeakSet[AgentRunner] = weakref.WeakSet()
         self._pending_corrections: dict[str, list[str]] = {}
         self._claim_verifier: ClaimVerifier | None = ClaimVerifier() if settings.claim_verification_enabled else None
         self._intent_tracker: IntentTracker | None = IntentTracker() if settings.claim_verification_enabled else None
@@ -471,12 +476,16 @@ class AgentRunner:
         """Phase 2.8: compensation snapshots for compensable calls in background contexts."""
         self._snap_store = store
         self._workspace_dir = workspace_dir
+        for fork in self._forks:
+            fork.set_snapshot_store(store, workspace_dir)
 
     def set_action_review_pusher(self, pusher: Any) -> None:
         """Phase 2.8: ``async pusher(tool_name, ledger_entry_id, session_id)``
         publishing an ``action_review`` card for a compensable background
         mutation (NOUS_COMPENSATION_AUTO_REVIEW_ENABLED)."""
         self._action_review_pusher = pusher
+        for fork in self._forks:
+            fork.set_action_review_pusher(pusher)
 
     async def _maybe_push_action_review(
         self,
@@ -563,8 +572,23 @@ class AgentRunner:
                 content = tool_input.get("content", "") or ""
                 snap_data["written_content_hash"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
             elif tool_name == "heartbeat_check_manage":
-                # is_compensable_call admitted only action="disable"
-                snap_data = {"check_name": tool_input.get("name", ""), "action": "disable"}
+                # is_compensable_call admitted only action="disable". Record
+                # whether the check was enabled BEFORE the call: disabling an
+                # already-disabled check succeeds, and its revert must leave
+                # it disabled rather than start it.
+                check_name = tool_input.get("name", "")
+                try:
+                    prior_enabled = await self._snap_store.check_enabled(check_name)
+                except Exception:
+                    logger.warning(
+                        "Harness Phase 2.8: prior state lookup failed for check %r", check_name, exc_info=True
+                    )
+                    prior_enabled = None
+                snap_data = {
+                    "check_name": check_name,
+                    "action": "disable",
+                    "prior_enabled": prior_enabled if isinstance(prior_enabled, bool) else None,
+                }
             elif tool_name == "resolve_decision":
                 snap_data = {
                     "decision_id": str(tool_input.get("decision_id") or tool_input.get("id", "")),
@@ -877,6 +901,12 @@ class AgentRunner:
         forked._ledgers = self._ledgers
         forked._ledger_store = self._ledger_store  # harness Phase 1b
         forked._ledger_pending_tasks = self._ledger_pending_tasks
+        # Phase 2.8: compensation wiring -- copied now, and propagated by the
+        # setters if it is wired after this fork exists.
+        forked._snap_store = self._snap_store
+        forked._workspace_dir = self._workspace_dir
+        forked._action_review_pusher = self._action_review_pusher
+        self._forks.add(forked)
         # F035.4: Context logger NOT propagated to forks — heartbeat triage
         # uses a dedicated API client on a separate connection pool, and the
         # context logger's async DB writer can contend with triage DB sessions.

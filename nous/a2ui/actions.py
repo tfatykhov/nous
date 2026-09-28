@@ -696,7 +696,9 @@ def _register_default_handlers(router: ActionRouter) -> None:
             return ActionResult(ok=False, message=f"no compensator for {snapshot.tool_name}")
 
         deps = _CompensationDeps(
-            heart=router._heart, brain=router._brain, heartbeat_loader=getattr(router._heartbeat, "_loader", None)
+            heart=router._heart,
+            brain=router._brain,
+            heartbeat_loader=getattr(router._heartbeat, "dynamic_loader", None),
         )
         try:
             result = await compensator(ledger_entry_id, snapshot.snapshot_data, deps)

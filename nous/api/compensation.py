@@ -136,6 +136,23 @@ class SnapshotStore:
             await s.commit()
             return (res.rowcount or 0) == 1
 
+    async def check_enabled(self, name: str) -> bool | None:
+        """Whether dynamic check ``name`` is enabled right now, or None when
+        no such check exists. Read before a ``heartbeat_check_manage``
+        disable so its revert restores the prior state."""
+        from nous.storage.models import DynamicCheckModel
+
+        async def _read() -> bool | None:
+            async with self._db.session() as s:
+                result = await s.execute(
+                    select(DynamicCheckModel.enabled)
+                    .where(DynamicCheckModel.agent_id == self._agent_id)
+                    .where(DynamicCheckModel.name == name)
+                )
+                return result.scalar_one_or_none()
+
+        return await asyncio.wait_for(_read(), timeout=self._timeout)
+
 
 async def snapshot_for_write_file(
     path: str,
@@ -249,18 +266,28 @@ async def compensate_heartbeat_check_manage(
     snapshot_data: dict[str, Any],
     deps: Any,
 ) -> CompensationResult:
-    """Re-enable a heartbeat check the call disabled.
+    """Restore a heartbeat check the call disabled to its prior state.
 
     Only ``action="disable"`` is compensable (``is_compensable_call``), so the
-    runner only snapshots that action. Revert is a human tap on the
-    action_review card; a check that was already disabled before the call is
-    re-enabled too, since its prior state is not captured.
+    runner only snapshots that action, recording ``prior_enabled``. A check
+    that was already disabled before the call is left disabled (the disable
+    was a no-op); a check whose prior state is unknown is NOT enabled, since
+    that could start autonomous work that was inactive before the call.
     """
     check_name = snapshot_data.get("check_name")
     if not check_name:
         return CompensationResult(False, "no check_name in snapshot")
     if snapshot_data.get("action") != "disable":
         return CompensationResult(False, f"action {snapshot_data.get('action')!r} is not revertible")
+    if "prior_enabled" not in snapshot_data:
+        return CompensationResult(
+            False, f"prior state of check {check_name!r} was not recorded (snapshot predates capture); not enabling"
+        )
+    prior_enabled = snapshot_data["prior_enabled"]
+    if prior_enabled is False:
+        return CompensationResult(True, f"check {check_name!r} was already disabled before the call; left disabled")
+    if prior_enabled is not True:
+        return CompensationResult(False, f"prior state of check {check_name!r} is unknown; not enabling")
     loader = getattr(deps, "heartbeat_loader", None)
     if loader is None:
         return CompensationResult(False, "heartbeat loader not available")
