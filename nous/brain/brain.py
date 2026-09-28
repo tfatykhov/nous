@@ -7,13 +7,16 @@ its own session from the database connection pool.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import case, delete, func, or_, select, text
+from sqlalchemy import event as sa_event
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -130,6 +133,8 @@ class Brain:
         # F040: Optional EventBus for decision_recorded emission.
         # Injected post-construction in main.py (same pattern as Heart._bus).
         self._bus = None
+        # Strong refs for post-commit emits scheduled from SQLAlchemy hooks.
+        self._pending_emits: set[asyncio.Task] = set()
 
     # --- Lifecycle (P2-11) ---
 
@@ -332,14 +337,55 @@ class Brain:
             # a rollback never leaves an audit event for a decision that does
             # not exist (finding #3 — post-commit bus publish).
             if self._bus is not None:
-                from nous.events import Event as BusEvent
-                await self._bus.emit(BusEvent(
-                    type="decision_recorded",
-                    agent_id=self.agent_id,
-                    data={"decision_id": str(result.id), "category": input.category},
-                ))
+                await self._bus.emit(self._decision_recorded_event(result.id, input.category))
             return result
-        return await self._record(input, session)
+        result = await self._record(input, session)
+        # Caller-owned transaction: publish only once the CALLER commits, so
+        # DecisionGraphLinker still runs for decisions recorded under a
+        # passed-in session (e.g. DeliberationEngine.start) and a rollback
+        # publishes nothing.
+        if self._bus is not None:
+            self._emit_after_commit(session, self._decision_recorded_event(result.id, input.category))
+        return result
+
+    def _decision_recorded_event(self, decision_id: UUID, category: str) -> Any:
+        from nous.events import Event as BusEvent
+
+        return BusEvent(
+            type="decision_recorded",
+            agent_id=self.agent_id,
+            data={"decision_id": str(decision_id), "category": category},
+        )
+
+    def _emit_after_commit(self, session: AsyncSession, bus_event: Any) -> None:
+        """Queue ``bus_event`` for the bus when ``session``'s outer transaction commits.
+
+        Dropped if the transaction rolls back first. ``EventBus.emit`` only
+        does ``put_nowait``, so scheduling it as a task from the synchronous
+        SQLAlchemy hook preserves post-commit ordering.
+        """
+        sync_session = session.sync_session
+        pending = sync_session.info.get("nous_brain_pending_bus_events")
+        if pending is None:
+            pending = sync_session.info["nous_brain_pending_bus_events"] = []
+
+            def _on_commit(_sess: Any) -> None:
+                loop = asyncio.get_running_loop()
+                for ev in pending:
+                    task = loop.create_task(self._bus.emit(ev))
+                    self._pending_emits.add(task)
+                    task.add_done_callback(self._pending_emits.discard)
+                pending.clear()
+
+            def _on_end(_sess: Any, transaction: Any) -> None:
+                # Only the OUTER transaction's end discards (after_commit has
+                # already drained on commit); a SAVEPOINT rollback keeps them.
+                if transaction.parent is None:
+                    pending.clear()
+
+            sa_event.listen(sync_session, "after_commit", _on_commit)
+            sa_event.listen(sync_session, "after_transaction_end", _on_end)
+        pending.append(bus_event)
 
     def _is_noise_decision(self, description: str, reasons: list[ReasonInput]) -> bool:
         """Lightweight pre-check to detect obvious non-decisions.

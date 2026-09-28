@@ -2012,3 +2012,76 @@ async def test_bus_emit_fires_after_commit(mock_brain, mock_heart):
         f"bus.emit must fire AFTER session.commit; "
         f"call order: {call_order}"
     )
+
+
+async def test_bus_emit_fires_after_caller_owned_commit():
+    """Brain.record(session=...) publishes decision_recorded once the CALLER commits.
+
+    Covers the caller-owned path (DeliberationEngine.start passes session=):
+    nothing is emitted before the caller's commit, a SAVEPOINT rollback does
+    not drop the event, and a rolled-back outer transaction emits nothing.
+    Mutation: return straight from ``_record`` on the caller-owned path →
+    decision_recorded is never published and DecisionGraphLinker never runs.
+    """
+    import asyncio
+    from datetime import UTC, datetime
+
+    from sqlalchemy import text as sa_text
+    from sqlalchemy.ext.asyncio import AsyncSession as _AsyncSession
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from nous.brain.brain import Brain
+    from nous.brain.schemas import DecisionDetail, ReasonInput, RecordInput
+
+    emitted: list = []
+    mock_bus = MagicMock()
+    mock_bus.emit = AsyncMock(side_effect=lambda ev: emitted.append(ev))
+
+    brain = Brain.__new__(Brain)
+    brain.agent_id = "test-agent"
+    brain._bus = mock_bus
+    brain._pending_emits = set()
+
+    def _detail():
+        return DecisionDetail(
+            id=uuid4(), agent_id="test-agent", description="test", confidence=0.8,
+            category="tooling", stakes="low", tags=[], reasons=[],
+            created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
+            reviewed_at=None, outcome="pending", reviewer=None, superseded_by=None, bridge=None,
+        )
+
+    async def _fake_inner_record(inp, session):
+        await session.execute(sa_text("SELECT 1"))  # autobegin, like the real _record
+        return _detail()
+
+    inp = RecordInput(
+        description="test decision", confidence=0.8, category="tooling", stakes="low",
+        reasons=[ReasonInput(type="analysis", text="testing")],
+    )
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        with patch.object(brain, "_record", side_effect=_fake_inner_record):
+            async with _AsyncSession(engine) as session:
+                detail = await brain.record(inp, session=session)
+                async with session.begin_nested() as sp:
+                    await session.execute(sa_text("SELECT 1"))
+                    await sp.rollback()
+                await asyncio.sleep(0)
+                assert emitted == [], "must not publish before the caller commits"
+                await session.commit()
+                await asyncio.sleep(0)
+            assert len(emitted) == 1
+            assert emitted[0].type == "decision_recorded"
+            assert emitted[0].data["decision_id"] == str(detail.id)
+
+            emitted.clear()
+            async with _AsyncSession(engine) as session:
+                await brain.record(inp, session=session)
+                await session.rollback()
+                # A later transaction on the same session must not resurrect it.
+                await session.execute(sa_text("SELECT 1"))
+                await session.commit()
+                await asyncio.sleep(0)
+            assert emitted == [], "a rolled-back decision must not be published"
+    finally:
+        await engine.dispose()
