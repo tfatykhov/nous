@@ -260,9 +260,20 @@ async def snapshot_for_write_file(
     and an existing file whose content cannot be read carries ``capture_error``;
     neither has ``prior_content`` captured, and callers in undoable contexts
     should raise ``SnapshotBlocksDispatch`` rather than proceed without a snapshot.
+
+    A path ``write_file`` would refuse (outside the workspace, via ``..`` or a
+    symlink) is checked with the handler's own ``_validate_path`` BEFORE any
+    filesystem access and flagged ``invalid_path``: nothing outside the
+    workspace is ever stat'ed or read into a snapshot.
     """
     import os
 
+    from nous.api.builtin_tools import _validate_path
+
+    try:
+        _validate_path(path, workspace_dir)
+    except ValueError as exc:
+        return {"path": path, "invalid_path": str(exc)}
     full_path = os.path.join(workspace_dir, path) if not os.path.isabs(path) else path
     existed = os.path.exists(full_path)
     prior_content: str | None = None
@@ -425,12 +436,26 @@ async def compensate_heartbeat_check_manage(
         return CompensationResult(True, f"check {check_name!r} was already disabled before the call; left disabled")
     if prior_enabled is not True:
         return CompensationResult(False, f"prior state of check {check_name!r} is unknown; not enabling")
+    written = snapshot_data.get("written")
+    if not (isinstance(written, dict) and written.get("check_id") and written.get("enabled_state_token")):
+        return CompensationResult(
+            False,
+            f"revert refused: the state the disable of {check_name!r} wrote was not recorded, "
+            "so a later enable/disable cannot be ruled out",
+        )
     loader = getattr(deps, "heartbeat_loader", None)
     if loader is None:
         return CompensationResult(False, "heartbeat loader not available")
     try:
-        await loader.manage_check("enable", name=check_name)
-        return CompensationResult(True, f"re-enabled check {check_name!r}")
+        # Conditional on the check still being exactly what this disable left:
+        # a later explicit disable (or enable) replaced the token, and
+        # re-enabling then would override that newer intent.
+        if await loader.enable_if_unchanged(check_name, written["check_id"], written["enabled_state_token"]):
+            return CompensationResult(True, f"re-enabled check {check_name!r}")
+        return CompensationResult(
+            False,
+            f"revert refused: check {check_name!r} was changed or removed after the original disable",
+        )
     except Exception as exc:
         return CompensationResult(False, f"revert failed: {exc}")
 

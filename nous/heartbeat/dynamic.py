@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from croniter import croniter
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from nous.api.execution_context import ExecutionContext
 from nous.heartbeat.registry import BaseCheck
@@ -46,6 +46,13 @@ ALLOWED_TOOLS = frozenset({
 })
 
 MIN_INTERVAL_SECONDS = 300  # 5 minutes minimum
+
+# Metadata key stamped fresh by every enable/disable (Phase 2.8 revert guard).
+_STATE_TOKEN_KEY = "enabled_state_token"
+
+
+def _meta(model: Any) -> dict:
+    return model.metadata_ if isinstance(model.metadata_, dict) else {}
 CALLBACK_RETRY_DELAY_SECONDS = 30
 
 
@@ -529,8 +536,16 @@ class DynamicCheckLoader:
 
     async def manage_check(
         self, action: str, name: str | None = None, updates: dict | None = None,
+        *, capture: dict | None = None,
     ) -> dict[str, Any]:
-        """List, enable, disable, delete, or update a dynamic check."""
+        """List, enable, disable, delete, or update a dynamic check.
+
+        Every enable/disable stamps a fresh ``enabled_state_token`` in the
+        row's metadata. ``capture``, when given to a disable, receives the
+        check's prior ``enabled`` and the token this disable wrote, so a
+        compensation revert can refuse once anyone has toggled it since
+        (``enable_if_unchanged``).
+        """
         from nous.storage.models import DynamicCheckModel
 
         if action == "list":
@@ -551,6 +566,7 @@ class DynamicCheckLoader:
 
             if action == "enable":
                 model.enabled = True
+                model.metadata_ = {**_meta(model), _STATE_TOKEN_KEY: uuid4().hex}
                 model.updated_at = datetime.now(UTC)
                 await session.commit()
                 await self.sync()
@@ -561,9 +577,15 @@ class DynamicCheckLoader:
                 existing = self._registry.get_check(name)
                 if existing and isinstance(existing, DynamicCheck):
                     existing._self_disabled = True
+                prior_enabled = model.enabled
+                token = uuid4().hex
                 model.enabled = False
+                model.metadata_ = {**_meta(model), _STATE_TOKEN_KEY: token}
                 model.updated_at = datetime.now(UTC)
                 await session.commit()
+                if capture is not None:
+                    capture["prior_enabled"] = prior_enabled
+                    capture["written"] = {"check_id": str(model.id), _STATE_TOKEN_KEY: token}
                 self._registry.unregister(name)
                 self._signatures.pop(name, None)
                 check_id = str(model.id)
@@ -627,6 +649,37 @@ class DynamicCheckLoader:
 
             else:
                 raise ValueError(f"Unknown action: {action}")
+
+    async def enable_if_unchanged(self, name: str, check_id: str, token: str) -> bool:
+        """Re-enable check ``name`` only while it is still the disabled row
+        ``check_id`` carrying ``token`` -- the state one disable left. Any
+        later enable/disable (or delete and re-create) changes that, and the
+        conditional update then touches nothing. Returns whether it enabled."""
+        from uuid import UUID
+
+        from nous.storage.models import DynamicCheckModel
+
+        async with self._db.session() as session:
+            result = await session.execute(
+                update(DynamicCheckModel)
+                .where(DynamicCheckModel.agent_id == self._agent_id)
+                .where(DynamicCheckModel.name == name)
+                .where(DynamicCheckModel.id == UUID(check_id))
+                .where(DynamicCheckModel.enabled == False)  # noqa: E712
+                .where(DynamicCheckModel.metadata_[_STATE_TOKEN_KEY].astext == token)
+                .values(
+                    enabled=True,
+                    metadata_=DynamicCheckModel.metadata_.op("||")(
+                        func.jsonb_build_object(_STATE_TOKEN_KEY, uuid4().hex)
+                    ),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+        if (result.rowcount or 0) != 1:
+            return False
+        await self.sync()
+        return True
 
     async def _list_checks(self) -> dict[str, Any]:
         """List all dynamic checks with status."""

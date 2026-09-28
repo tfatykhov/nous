@@ -4881,11 +4881,18 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
 
     async def heartbeat_check_manage(**kwargs) -> dict:
         try:
+            # Phase 2.8: a disable reports the state it wrote, which a
+            # compensation snapshot records for its stale-revert guard.
+            call_outcome = _outcome_var.get()
+            capture: dict | None = {} if call_outcome is not None and kwargs["action"] == "disable" else None
             result = await loader.manage_check(
                 action=kwargs["action"],
                 name=kwargs.get("name"),
                 updates=kwargs.get("updates"),
+                **({"capture": capture} if capture is not None else {}),
             )
+            if capture is not None:
+                call_outcome.check_capture = capture
             return {"content": [{"type": "text", "text": json.dumps(result)}]}
         except ValueError as e:
             return _tool_error(f"Error: {e}")

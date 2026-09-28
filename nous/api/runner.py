@@ -543,6 +543,29 @@ class AgentRunner:
                     tool_name,
                     exc_info=True,
                 )
+        if (
+            snapshotted
+            and status == "success"
+            and tool_name == "heartbeat_check_manage"
+            and self._snap_store is not None
+        ):
+            # The state token the disable wrote, from its own transaction: the
+            # revert re-enables only while the check still carries it.
+            capture = outcome.check_capture if outcome is not None else None
+            try:
+                if isinstance(capture, dict) and isinstance(capture.get("written"), dict):
+                    await self._snap_store.record_written_state(entry_id, capture["written"])
+                else:
+                    logger.warning(
+                        "Harness Phase 2.8: %s reported no written check state; its revert will be refused",
+                        tool_name,
+                    )
+            except Exception:
+                logger.warning(
+                    "Harness Phase 2.8: written state not recorded for %s; its revert will be refused",
+                    tool_name,
+                    exc_info=True,
+                )
         await self._maybe_push_action_review(
             ctx, tool_name, entry_id, session_id, snapshotted=snapshotted, status=status
         )
@@ -631,6 +654,10 @@ class AgentRunner:
 
                 path = tool_input.get("path", "")
                 snap_data = await snapshot_for_write_file(path, self._workspace_dir)
+                if snap_data.get("invalid_path"):
+                    # write_file refuses this path itself, so the call cannot
+                    # change anything: there is nothing to snapshot or revert.
+                    return False
                 if snap_data.get("oversized"):
                     return _unrevertible(f"{path!r} is too large to snapshot (exceeds 1MiB limit)")
                 if snap_data.get("capture_error"):

@@ -19,6 +19,9 @@ class CallOutcome:
     # Phase 2.8: resolve_decision's review state before/after its write, read
     # inside the resolving transaction under a row lock (Brain.review capture=).
     review_capture: dict | None = None
+    # Phase 2.8: a heartbeat_check_manage disable's prior state and the
+    # state token it wrote (DynamicCheckLoader.manage_check capture=).
+    check_capture: dict | None = None
 
 
 _current: ContextVar[CallOutcome | None] = ContextVar("tool_call_outcome", default=None)

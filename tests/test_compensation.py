@@ -985,6 +985,9 @@ def test_heartbeat_check_manage_disable_allowed_on_undoable_node() -> None:
     assert evaluate(ExecutionContext(kind="dag_node", undoable=True), "heartbeat_check_manage", inp) is None
 
 
+_WRITTEN_CHECK = {"check_id": "cid", "enabled_state_token": "tok"}
+
+
 @pytest.mark.asyncio
 async def test_compensate_heartbeat_check_manage_re_enables_a_disabled_check() -> None:
     """The loader signature is manage_check(action, name=...)."""
@@ -992,20 +995,20 @@ async def test_compensate_heartbeat_check_manage_re_enables_a_disabled_check() -
 
     from nous.api.compensation import compensate_heartbeat_check_manage
 
-    loader = SimpleNamespace(manage_check=AsyncMock(return_value={"status": "enabled"}))
+    loader = SimpleNamespace(enable_if_unchanged=AsyncMock(return_value=True))
     deps = SimpleNamespace(heartbeat_loader=loader)
     res = await compensate_heartbeat_check_manage(
-        uuid4(), {"check_name": "c", "action": "disable", "prior_enabled": True}, deps
+        uuid4(), {"check_name": "c", "action": "disable", "prior_enabled": True, "written": _WRITTEN_CHECK}, deps
     )
     assert res.success
-    loader.manage_check.assert_awaited_once_with("enable", name="c")
+    loader.enable_if_unchanged.assert_awaited_once_with("c", "cid", "tok")
 
-    loader.manage_check.reset_mock()
+    loader.enable_if_unchanged.reset_mock()
     res = await compensate_heartbeat_check_manage(
-        uuid4(), {"check_name": "c", "action": "enable", "prior_enabled": True}, deps
+        uuid4(), {"check_name": "c", "action": "enable", "prior_enabled": True, "written": _WRITTEN_CHECK}, deps
     )
     assert not res.success
-    loader.manage_check.assert_not_awaited()
+    loader.enable_if_unchanged.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1126,12 +1129,14 @@ async def test_revert_check_disable_restores_prior_enabled_state(snap, success, 
 
     from nous.api.compensation import compensate_heartbeat_check_manage
 
-    loader = SimpleNamespace(manage_check=AsyncMock())
+    loader = SimpleNamespace(enable_if_unchanged=AsyncMock(return_value=True))
     res = await compensate_heartbeat_check_manage(
-        uuid4(), {"check_name": "c", "action": "disable", **snap}, SimpleNamespace(heartbeat_loader=loader)
+        uuid4(),
+        {"check_name": "c", "action": "disable", "written": _WRITTEN_CHECK, **snap},
+        SimpleNamespace(heartbeat_loader=loader),
     )
     assert res.success is success
-    assert loader.manage_check.await_count == int(enabled)
+    assert loader.enable_if_unchanged.await_count == int(enabled)
 
 
 @pytest.mark.asyncio
@@ -1177,12 +1182,12 @@ async def test_review_revert_passes_the_heartbeat_dynamic_loader() -> None:
         return_value=SimpleNamespace(
             id=uuid4(),
             tool_name="heartbeat_check_manage",
-            snapshot_data={"check_name": "c", "action": "disable", "prior_enabled": True},
+            snapshot_data={"check_name": "c", "action": "disable", "prior_enabled": True, "written": _WRITTEN_CHECK},
             reverted_at=None,
         )
     )
     snap_store.mark_reverted = AsyncMock()
-    loader = SimpleNamespace(manage_check=AsyncMock())
+    loader = SimpleNamespace(enable_if_unchanged=AsyncMock(return_value=True))
     router = ActionRouter(
         database=None,
         settings=SimpleNamespace(a2ui_action_rate_per_minute=100, a2ui_trust_forwarded_identity=False),
@@ -1195,7 +1200,7 @@ async def test_review_revert_passes_the_heartbeat_dynamic_loader() -> None:
     ctx = ActionContext(surface=surface, name="review.revert", context={}, data_model={}, services=router)
     result = await router._handlers["review.revert"].fn(ctx)
     assert result.ok, result.message
-    loader.manage_check.assert_awaited_once_with("enable", name="c")
+    loader.enable_if_unchanged.assert_awaited_once_with("c", "cid", "tok")
 
 
 # ---------------------------------------------------------------------------
@@ -1754,3 +1759,104 @@ async def test_unreadable_prior_file_blocks_an_undoable_write(tmp_path) -> None:
                 {"path": "wo.txt", "content": "x"},
                 uuid4(),
             )
+
+
+@pytest.mark.asyncio
+async def test_snapshot_never_reads_a_path_outside_the_workspace(tmp_path) -> None:
+    """codex P1 #652 (compensation.py:280): a write_file target outside the
+    workspace (absolute or ``..``) is rejected with the handler's own path
+    check BEFORE any filesystem access, so its contents never reach a
+    snapshot; the runner then stores no snapshot (write_file refuses the
+    call itself)."""
+    from nous.api import compensation as comp
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("host secret")
+    for path in (str(secret), "../secret.txt"):
+        snap = await comp.snapshot_for_write_file(path, str(workspace))
+        assert "prior_content" not in snap and "existed" not in snap
+        assert "outside workspace" in snap["invalid_path"]
+
+    store = SimpleNamespace(capture=None)
+    runner = _bare_runner(store)
+    runner._workspace_dir = str(workspace)
+    runner._handler_args = lambda name, inp: inp
+    assert not await runner._capture_compensation_snapshot(
+        ExecutionContext(kind="dag_node", undoable=True),
+        "write_file",
+        {"path": "../secret.txt", "content": "x"},
+        uuid4(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_check_revert_refused_after_a_later_disable() -> None:
+    """codex P1 #652 (compensation.py:432): a revert re-enables the check only
+    while it still carries the state token its own disable wrote. Before the
+    fix it called manage_check("enable") unconditionally, overriding a later
+    explicit disable. A snapshot without the written token is refused."""
+    from unittest.mock import AsyncMock
+
+    from nous.api.compensation import compensate_heartbeat_check_manage
+
+    snap = {"check_name": "c", "action": "disable", "prior_enabled": True, "written": _WRITTEN_CHECK}
+    # a later disable replaced the token: the conditional enable touches nothing
+    loader = SimpleNamespace(enable_if_unchanged=AsyncMock(return_value=False), manage_check=AsyncMock())
+    res = await compensate_heartbeat_check_manage(uuid4(), snap, SimpleNamespace(heartbeat_loader=loader))
+    assert not res.success and "changed or removed" in res.message
+    loader.manage_check.assert_not_awaited()
+
+    loader.enable_if_unchanged.reset_mock()
+    legacy = {k: v for k, v in snap.items() if k != "written"}
+    res = await compensate_heartbeat_check_manage(uuid4(), legacy, SimpleNamespace(heartbeat_loader=loader))
+    assert not res.success and "not recorded" in res.message
+    loader.enable_if_unchanged.assert_not_awaited()
+    loader.manage_check.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_disable_captures_its_state_token_and_runner_records_it() -> None:
+    """codex P1 #652 (compensation.py:432): manage_check(disable, capture=)
+    reports the token it stamped, and the runner records it as the written
+    state of the snapshot."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nous.api.call_outcome import CallOutcome
+    from nous.heartbeat.dynamic import DynamicCheckLoader
+
+    loader = object.__new__(DynamicCheckLoader)
+    loader._registry = MagicMock(get_check=MagicMock(return_value=None))
+    loader._signatures, loader._loaded_ids, loader._id_to_name = {}, set(), {}
+    model = SimpleNamespace(id=uuid4(), enabled=True, metadata_={"other": 1}, updated_at=None)
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=model)))
+    session.commit = AsyncMock()
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=session)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    loader._db = SimpleNamespace(session=lambda: ctx)
+    loader._agent_id = "a"
+    capture: dict = {}
+    await loader.manage_check("disable", name="c", capture=capture)
+    token = model.metadata_["enabled_state_token"]
+    assert model.metadata_["other"] == 1 and model.enabled is False
+    assert capture == {"prior_enabled": True, "written": {"check_id": str(model.id), "enabled_state_token": token}}
+
+    store = AsyncMock()
+    runner = _bare_runner(store)
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
+    runner._action_review_pusher = None
+    entry = uuid4()
+    await runner._after_compensable_call(
+        ExecutionContext(kind="subtask"),
+        "heartbeat_check_manage",
+        entry,
+        "s1",
+        snapshotted=True,
+        status="success",
+        tool_input={"name": "c", "action": "disable"},
+        outcome=CallOutcome(check_capture=capture),
+    )
+    store.record_written_state.assert_awaited_once_with(entry, capture["written"])
