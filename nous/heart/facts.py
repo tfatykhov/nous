@@ -160,9 +160,7 @@ class ExemplarHit(NamedTuple):
 # `FactManager.LEGACY_SUMMARY_FIELDS` must exclude them: `id`/`content` the
 # caller already holds, `score` is search-time, and `recency_status`/
 # `recency_date` are transient verdicts the recency resolver writes downstream.
-_NOT_PERSISTED_FACT_FIELDS = frozenset(
-    {"id", "content", "score", "recency_status", "recency_date"}
-)
+_NOT_PERSISTED_FACT_FIELDS = frozenset({"id", "content", "score", "recency_status", "recency_date"})
 
 
 class FactManager:
@@ -184,8 +182,8 @@ class FactManager:
         embeddings: EmbeddingProvider | None,
         agent_id: str,
         admission_controller: AdmissionController | None = None,
-        actionability_classifier: "ActionabilityClassifier | None" = None,
-        settings: "Settings | None" = None,
+        actionability_classifier: ActionabilityClassifier | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self.db = db
         self.embeddings = embeddings
@@ -307,6 +305,7 @@ class FactManager:
         """
         try:
             from nous.brain.edge_provenance import classify  # F065
+
             async with session.begin_nested():
                 stmt = (
                     pg_insert(GraphEdge)
@@ -375,9 +374,7 @@ class FactManager:
     # F027: LLM supersession classifier
     # ------------------------------------------------------------------
 
-    async def _classify_fact_pair(
-        self, old_content: str, new_content: str
-    ) -> dict | None:
+    async def _classify_fact_pair(self, old_content: str, new_content: str) -> dict | None:
         """Classify relationship between two facts using LLM.
 
         Returns {relation, current_fact, confidence} or None on failure.
@@ -403,9 +400,7 @@ class FactManager:
             max_tokens=300,
         )
 
-    async def is_distinct_fact(
-        self, existing_content: str, candidate_content: str
-    ) -> bool | None:
+    async def is_distinct_fact(self, existing_content: str, candidate_content: str) -> bool | None:
         """F377 dedup tiebreaker for the Leg-1 (RRF pre-check) path.
 
         Returns ``True`` if the candidate is a DISTINCT fact (store it, do not
@@ -456,13 +451,13 @@ class FactManager:
         folded_in = " ".join(input.content.lower().split())
         folded_dupe = " ".join((dupe.content or "").lower().split())
         if folded_in == folded_dupe:
-            return False                      # identical statement -> dedup
+            return False  # identical statement -> dedup
         if not self._band_budget_ok():
-            return True                       # budget spent -> STORE (never swallow)
+            return True  # budget spent -> STORE (never swallow)
         verdict = await self.is_distinct_fact(dupe.content, input.content)
         if verdict is None:
-            return True                       # LLM down -> STORE (never swallow)
-        return verdict                        # DISTINCT -> route; DUPLICATE -> dedup
+            return True  # LLM down -> STORE (never swallow)
+        return verdict  # DISTINCT -> route; DUPLICATE -> dedup
 
     # ------------------------------------------------------------------
     # F027: Retrieval soft suppression
@@ -694,7 +689,9 @@ class FactManager:
         if min_chars and len(input.content.strip()) < min_chars:
             logger.info(
                 "Fact rejected by min-content floor (%d < %d): %.60s",
-                len(input.content.strip()), min_chars, input.content,
+                len(input.content.strip()),
+                min_chars,
+                input.content,
             )
             return FactRejected(
                 content=input.content,
@@ -725,9 +722,7 @@ class FactManager:
         # RC-2: when caller provides a precomputed vector, skip the embedder
         # entirely so batched ingest (Task 4) can embed once per batch.
         embedding = (
-            precomputed_embedding
-            if precomputed_embedding is not None
-            else await self._embed_with_retry(input.content)
+            precomputed_embedding if precomputed_embedding is not None else await self._embed_with_retry(input.content)
         )
 
         # Near-duplicate detection: cosine similarity > threshold.
@@ -778,14 +773,17 @@ class FactManager:
                 if (
                     check_contradictions
                     and getattr(self._settings, "same_slot_conflict_routing_enabled", True)
-                    and input.subject_key and input.attribute_key
+                    and input.subject_key
+                    and input.attribute_key
                 )
                 else None
             )
             # Codex r16: normal inputs only — exemplar rows are excluded at the
             # SQL level inside _find_duplicate (exemplar inputs never reach here).
             found = await self._find_duplicate(
-                embedding, exclude_ids, session,
+                embedding,
+                exclude_ids,
+                session,
                 candidate_event_date=input.event_date,
                 prefer_slot=prefer_slot,
                 probed_ids=probed_ids,
@@ -797,11 +795,7 @@ class FactManager:
                 # not a duplicate — it's a separate event temporal_reasoning
                 # needs preserved (e.g., API key obtained March 10 vs rotated
                 # March 12). Fall through to session.add(fact) below.
-                if (
-                    input.event_date is not None
-                    and dupe.event_date is not None
-                    and input.event_date != dupe.event_date
-                ):
+                if input.event_date is not None and dupe.event_date is not None and input.event_date != dupe.event_date:
                     pass  # do NOT return; treat as new event
                 elif (
                     # Codex r6: routing exists to FEED a resolver
@@ -815,8 +809,10 @@ class FactManager:
                     # is_distinct_fact budget/LLM call below.
                     check_contradictions
                     and getattr(self._settings, "same_slot_conflict_routing_enabled", True)
-                    and input.subject_key and input.attribute_key
-                    and dupe.subject_key and dupe.attribute_key
+                    and input.subject_key
+                    and input.attribute_key
+                    and dupe.subject_key
+                    and dupe.attribute_key
                     and input.subject_key == dupe.subject_key
                     and input.attribute_key == dupe.attribute_key
                     and await self._same_slot_value_variant(input, dupe)
@@ -839,9 +835,7 @@ class FactManager:
                     # below) — it MUST remain visible to _resolve_key_conflicts.
                     routed_dupe_id = dupe.id
                 else:
-                    band_action = await self._classify_dupe_in_band(
-                        dupe, dupe_similarity, input, check_contradictions
-                    )
+                    band_action = await self._classify_dupe_in_band(dupe, dupe_similarity, input, check_contradictions)
                     if band_action is None:
                         # Confirm existing fact instead of creating new
                         return await self._confirm_duplicate(dupe, input, session)
@@ -893,8 +887,7 @@ class FactManager:
             # routed correction — none of it may zero the novelty term.
             if routed_dupe_id is not None:
                 same_slot_rows = await session.execute(
-                    select(Fact.id)
-                    .where(
+                    select(Fact.id).where(
                         Fact.agent_id == self.agent_id,
                         Fact.active == True,  # noqa: E712
                         Fact.subject_key == input.subject_key,
@@ -909,20 +902,29 @@ class FactManager:
             source_text = await self._get_source_text(input, session)
 
             admission_result = await self._admission_controller.score(
-                input, embedding, max_sim, source_text, session,
+                input,
+                embedding,
+                max_sim,
+                source_text,
+                session,
                 utility_override=utility_override,
             )
             if not admission_result.admitted:
                 logger.info(
                     "Fact rejected by admission: %s — %s",
-                    input.content[:80], admission_result.explanation,
+                    input.content[:80],
+                    admission_result.explanation,
                 )
-                await self._emit_event(session, "fact_rejected", {
-                    "content": input.content[:200],
-                    "source": input.source,
-                    "scores": admission_result.scores,
-                    "composite_score": admission_result.composite_score,
-                })
+                await self._emit_event(
+                    session,
+                    "fact_rejected",
+                    {
+                        "content": input.content[:200],
+                        "source": input.source,
+                        "scores": admission_result.scores,
+                        "composite_score": admission_result.composite_score,
+                    },
+                )
                 return FactRejected(
                     content=input.content,
                     composite_score=admission_result.composite_score,
@@ -969,7 +971,8 @@ class FactManager:
             encoded_censors=encoded_censors,
             admission_score=admission_result.composite_score if admission_result else None,
             admission_scores=(
-                admission_result.scores if admission_result and not admission_result.bypassed and admission_result.scores
+                admission_result.scores
+                if admission_result and not admission_result.bypassed and admission_result.scores
                 else None
             ),
             actionable=actionable_verdict,
@@ -1012,11 +1015,7 @@ class FactManager:
                 # this gate junk keys ("red", "1876", "ab") would persist.
                 # A scalar-only subject_key ("red") is filtered here too —
                 # zero rows, no crash (round 16).
-                if (
-                    nk
-                    and nk not in seen_keys
-                    and is_keyable_entity(nk, min_chars=min_chars)
-                ):
+                if nk and nk not in seen_keys and is_keyable_entity(nk, min_chars=min_chars):
                     seen_keys.add(nk)
                     session.add(FactEntityKey(fact_id=fact.id, entity_key=nk, agent_id=self.agent_id))
                 if len(seen_keys) >= max_keys:
@@ -1060,9 +1059,7 @@ class FactManager:
         # has an id. Returns a ContradictionWarning for CONTRADICTION.
         band_warning: ContradictionWarning | None = None
         if band_action is not None and band_dupe is not None:
-            band_warning = await self._apply_band_action(
-                fact, band_dupe, band_action, band_sim, session
-            )
+            band_warning = await self._apply_band_action(fact, band_dupe, band_action, band_sim, session)
 
         # Subject + similarity supersession (006.2)
         # F075: pass the new fact's event_date so supersession can bypass
@@ -1098,7 +1095,10 @@ class FactManager:
             # mirror _resolve_key_conflicts' bool contract so _learn gates
             # the post-insert scan + domain threshold on this path too.
             new_fact_lost = await self._supersede_by_subject(
-                fact.id, input.subject, embedding, session,
+                fact.id,
+                input.subject,
+                embedding,
+                session,
                 new_content=input.content,
                 new_event_date=input.event_date,
                 exclude_ids=exclude_ids,
@@ -1112,7 +1112,11 @@ class FactManager:
             and input.attribute_key
         ):
             new_fact_lost = await self._resolve_key_conflicts(
-                fact, input, session, exclude_ids, keep_both_ids=keep_both_ids,
+                fact,
+                input,
+                session,
+                exclude_ids,
+                keep_both_ids=keep_both_ids,
             )
 
         await self._emit_event(
@@ -1141,12 +1145,13 @@ class FactManager:
                 # visible, this scan would re-match the same active pair and
                 # re-run its own (non-idempotent) CONTRADICTION handling.
                 safe_excludes = (
-                    list(exclude_ids) + [fact.id]
-                    + ([routed_dupe_id] if routed_dupe_id else [])
-                    + keep_both_ids
+                    list(exclude_ids) + [fact.id] + ([routed_dupe_id] if routed_dupe_id else []) + keep_both_ids
                 )
                 contradiction = await self._find_contradiction(
-                    embedding, fact.content, safe_excludes, session,
+                    embedding,
+                    fact.content,
+                    safe_excludes,
+                    session,
                     new_fact_id=fact.id,
                 )
                 if contradiction is not None:
@@ -1261,8 +1266,13 @@ class FactManager:
 
                 if relation == "REFINEMENT":
                     await self._create_graph_edge(
-                        new_fact_id, row.id, "fact", "fact",
-                        "refines", 0.8, session,
+                        new_fact_id,
+                        row.id,
+                        "fact",
+                        "fact",
+                        "refines",
+                        0.8,
+                        session,
                     )
                     return None
 
@@ -1275,8 +1285,13 @@ class FactManager:
                             old_fact.active = False
                             old_fact.confidence = max(0.0, (old_fact.confidence or 1.0) * 0.3)
                         await self._create_graph_edge(
-                            new_fact_id, row.id, "fact", "fact",
-                            "supersedes", 1.0, session,
+                            new_fact_id,
+                            row.id,
+                            "fact",
+                            "fact",
+                            "supersedes",
+                            1.0,
+                            session,
                         )
                         return None
                     else:
@@ -1297,8 +1312,13 @@ class FactManager:
                         if new_fact:
                             new_fact.contradiction_of = row.id
                     await self._create_graph_edge(
-                        new_fact_id, row.id, "fact", "fact",
-                        "contradicts", 1.0, session,
+                        new_fact_id,
+                        row.id,
+                        "fact",
+                        "fact",
+                        "contradicts",
+                        1.0,
+                        session,
                     )
                     old_fact = await self._get_fact_orm(row.id, session)
                     if old_fact:
@@ -1405,9 +1425,7 @@ class FactManager:
             )
         )
         excluded = set(exclude_ids or [])
-        _supersession_threshold = (
-            self._settings.fact_supersession_threshold if self._settings else 0.80
-        )
+        _supersession_threshold = self._settings.fact_supersession_threshold if self._settings else 0.80
         for old in result.scalars().all():
             # Audit S11: a fact the F377 tiebreaker (or the S3 band
             # classifier) just ruled DISTINCT must not be superseded —
@@ -1416,20 +1434,14 @@ class FactManager:
             if old.id in excluded:
                 continue
             # F075: skip supersession on date-disagreement.
-            if (
-                new_event_date is not None
-                and old.event_date is not None
-                and new_event_date != old.event_date
-            ):
+            if new_event_date is not None and old.event_date is not None and new_event_date != old.event_date:
                 continue
             if old.embedding is not None:
                 similarity = self._cosine_similarity(embedding, old.embedding)
                 if similarity > _supersession_threshold:
                     # F027: LLM disambiguation for ambiguous range
                     if similarity <= 0.95 and self._llm is not None and new_content:
-                        classification = await self._classify_fact_pair(
-                            old.content, new_content
-                        )
+                        classification = await self._classify_fact_pair(old.content, new_content)
                         if classification:
                             relation = classification.get("relation", "")
                             current = classification.get("current_fact", "")
@@ -1437,8 +1449,13 @@ class FactManager:
                                 continue  # Skip — not actually related
                             if relation == "REFINEMENT":
                                 await self._create_graph_edge(
-                                    new_fact_id, old.id, "fact", "fact",
-                                    "refines", 0.8, session,
+                                    new_fact_id,
+                                    old.id,
+                                    "fact",
+                                    "fact",
+                                    "refines",
+                                    0.8,
+                                    session,
                                 )
                                 continue  # Keep both
                             if relation == "UPDATE" and current == "old":
@@ -1494,11 +1511,20 @@ class FactManager:
                     # only — the dominant cause of the 261 superseded_by vs 2
                     # supersedes-edge gap in the 2026-06-13 prod audit.
                     await self._create_graph_edge(
-                        new_fact_id, old.id, "fact", "fact", "supersedes", 1.0, session,
+                        new_fact_id,
+                        old.id,
+                        "fact",
+                        "fact",
+                        "supersedes",
+                        1.0,
+                        session,
                     )
                     logger.info(
                         "Superseded fact %s (subject=%s, sim=%.2f) by %s",
-                        old.id, subject, similarity, new_fact_id,
+                        old.id,
+                        subject,
+                        similarity,
+                        new_fact_id,
                     )
         return False
 
@@ -1540,11 +1566,7 @@ class FactManager:
         # at the prod 0.80 threshold). Classify every dedup hit below MAX; true
         # duplicates (>= MAX) still confirm. At the 0.95 default this is a no-op
         # (the caller only returns >= 0.95 hits → similarity < MAX is False).
-        if (
-            not check_contradictions
-            or self._llm is None
-            or not (similarity < self.CONTRADICTION_SIMILARITY_MAX)
-        ):
+        if not check_contradictions or self._llm is None or not (similarity < self.CONTRADICTION_SIMILARITY_MAX):
             return None
         # Cost cap: skip classification (fall open to confirm) when the hourly
         # Haiku budget is spent.
@@ -1609,7 +1631,13 @@ class FactManager:
         """
         if action == "refines":
             await self._create_graph_edge(
-                new_fact.id, dupe.id, "fact", "fact", "refines", 0.8, session,
+                new_fact.id,
+                dupe.id,
+                "fact",
+                "fact",
+                "refines",
+                0.8,
+                session,
             )
             return None
         if action == "supersede_old":
@@ -1617,13 +1645,25 @@ class FactManager:
             dupe.active = False
             dupe.confidence = max(0.0, (dupe.confidence or 1.0) * 0.3)
             await self._create_graph_edge(
-                new_fact.id, dupe.id, "fact", "fact", "supersedes", 1.0, session,
+                new_fact.id,
+                dupe.id,
+                "fact",
+                "fact",
+                "supersedes",
+                1.0,
+                session,
             )
             return None
         if action == "contradiction":
             new_fact.contradiction_of = dupe.id
             await self._create_graph_edge(
-                new_fact.id, dupe.id, "fact", "fact", "contradicts", 1.0, session,
+                new_fact.id,
+                dupe.id,
+                "fact",
+                "fact",
+                "contradicts",
+                1.0,
+                session,
             )
             dupe.confidence = max(0.0, (dupe.confidence or 1.0) - 0.2)
             return ContradictionWarning(
@@ -1655,9 +1695,7 @@ class FactManager:
         """
         if input.event_date is not None and dupe.event_date is None:
             dupe.event_date = input.event_date
-            dupe.event_date_classified_at = (
-                input.event_date_classified_at or datetime.now(UTC)
-            )
+            dupe.event_date_classified_at = input.event_date_classified_at or datetime.now(UTC)
         # Fill subject_key + attribute_key as a PAIR — only when both input
         # keys are present and both row keys are NULL (avoids half-keyed rows).
         if (
@@ -1703,11 +1741,7 @@ class FactManager:
                 # codex P2 round 4: mirrors the _learn stop-policy gate above
                 # — same bypass-the-extractor risk applies to the dedup-confirm
                 # path.
-                if (
-                    nk
-                    and nk not in seen_dupe_keys
-                    and is_keyable_entity(nk, min_chars=min_chars)
-                ):
+                if nk and nk not in seen_dupe_keys and is_keyable_entity(nk, min_chars=min_chars):
                     seen_dupe_keys.add(nk)
                     await session.execute(
                         pg_insert(FactEntityKey)
@@ -1837,10 +1871,7 @@ class FactManager:
 
         # Build exclude clause (P1-2)
         exclude_clause = ""
-        threshold = (
-            float(self._settings.fact_native_cosine_threshold)
-            if self._settings is not None else 0.95
-        )
+        threshold = float(self._settings.fact_native_cosine_threshold) if self._settings is not None else 0.95
         params: dict = {
             "embedding": embedding_str,
             "agent_id": self.agent_id,
@@ -1919,8 +1950,7 @@ class FactManager:
                     # the full set looking for a date-compatible row before
                     # falling back to legacy (unfiltered) slot narrowing.
                     date_compatible_same_slot = [
-                        r for r in same_slot
-                        if r.event_date is None or r.event_date == candidate_event_date
+                        r for r in same_slot if r.event_date is None or r.event_date == candidate_event_date
                     ]
                     if date_compatible_same_slot:
                         candidates = date_compatible_same_slot
@@ -2124,9 +2154,7 @@ class FactManager:
         await session.flush()
 
         # F022: Bridge — also create graph edge
-        await self._create_graph_edge(
-            new_detail.id, old_fact_id, "fact", "fact", "supersedes", 1.0, session
-        )
+        await self._create_graph_edge(new_detail.id, old_fact_id, "fact", "fact", "supersedes", 1.0, session)
 
         await self._emit_event(
             session,
@@ -2200,7 +2228,10 @@ class FactManager:
         self._exemplar_exists_gen += 1
 
     async def inherit_conflict_slot_keys(
-        self, replacement_id: UUID, source_ids: list[UUID], session: AsyncSession,
+        self,
+        replacement_id: UUID,
+        source_ids: list[UUID],
+        session: AsyncSession,
     ) -> None:
         """codex P2 round 9: merged/replacement facts (F031 contradiction-
         resolution MERGE, F027 cluster-consolidation MERGE in sleep_handler.py)
@@ -2314,17 +2345,14 @@ class FactManager:
             return
 
         replacement_row = (
-            await session.execute(
-                select(Fact.subject_key, Fact.attribute_key).where(Fact.id == replacement_id)
-            )
+            await session.execute(select(Fact.subject_key, Fact.attribute_key).where(Fact.id == replacement_id))
         ).first()
         replacement_subject_key = replacement_row.subject_key if replacement_row else None
         replacement_attribute_key = replacement_row.attribute_key if replacement_row else None
 
         sources = (
             await session.execute(
-                select(Fact.subject_key, Fact.attribute_key, Fact.learned_at)
-                .where(Fact.id.in_(source_ids))
+                select(Fact.subject_key, Fact.attribute_key, Fact.learned_at).where(Fact.id.in_(source_ids))
             )
         ).all()
         complete = [s for s in sources if s.subject_key is not None and s.attribute_key is not None]
@@ -2358,9 +2386,9 @@ class FactManager:
             # below is checked against this set before an insert is even
             # attempted — deterministic, no rowcount inspection needed.
             existing_keys = set(
-                (await session.execute(
-                    select(FactEntityKey.entity_key).where(FactEntityKey.fact_id == replacement_id)
-                )).scalars().all()
+                (await session.execute(select(FactEntityKey.entity_key).where(FactEntityKey.fact_id == replacement_id)))
+                .scalars()
+                .all()
             )
             remaining = max(0, max_keys - len(existing_keys))
 
@@ -2373,9 +2401,7 @@ class FactManager:
             # spent) — subject-key reservation is best-effort within the
             # cap: a replacement already at/over the cap does not evict an
             # existing row to make room.
-            subject_key_value = (
-                newest.subject_key if newest is not None and not skip_slot_copy else None
-            )
+            subject_key_value = newest.subject_key if newest is not None and not skip_slot_copy else None
             if (
                 subject_key_value
                 and is_keyable_entity(subject_key_value, min_chars=min_chars)
@@ -2391,9 +2417,7 @@ class FactManager:
                 remaining -= 1
 
             if remaining > 0:
-                union_stmt = select(FactEntityKey.entity_key).where(
-                    FactEntityKey.fact_id.in_(source_ids)
-                )
+                union_stmt = select(FactEntityKey.entity_key).where(FactEntityKey.fact_id.in_(source_ids))
                 # codex P2 round 15: exclude keys already on the replacement
                 # (existing rows, plus the subject key handled above) from
                 # the candidates BEFORE the LIMIT — so remaining counts only
@@ -2402,12 +2426,10 @@ class FactManager:
                 if excluded:
                     union_stmt = union_stmt.where(FactEntityKey.entity_key.notin_(excluded))
                 union_keys = (
-                    await session.execute(
-                        union_stmt.distinct()
-                        .order_by(FactEntityKey.entity_key)
-                        .limit(remaining)
-                    )
-                ).scalars().all()
+                    (await session.execute(union_stmt.distinct().order_by(FactEntityKey.entity_key).limit(remaining)))
+                    .scalars()
+                    .all()
+                )
                 for key in union_keys:
                     await session.execute(
                         pg_insert(FactEntityKey)
@@ -2511,9 +2533,7 @@ class FactManager:
         rows = await session.execute(sql, params)
         return [dict(r._mapping) for r in rows.fetchall()]
 
-    async def resolve_key_conflict_pair(
-        self, id1: UUID, id2: UUID, c1: str, c2: str
-    ) -> bool:
+    async def resolve_key_conflict_pair(self, id1: UUID, id2: UUID, c1: str, c2: str) -> bool:
         """064 R2 sweep/backfill seam: confirm a same-key pair via the F027
         classifier and resolve per policy. fact1 (id1/c1) is the OLDER fact.
         Owns its session + commit. Returns True iff a supersession was written.
@@ -2544,12 +2564,7 @@ class FactManager:
             # active (server_default=True, ORM may return None before flush).
             old_active = f_old.active if f_old.active is not None else True
             new_active = f_new.active if f_new.active is not None else True
-            if (
-                not old_active
-                or not new_active
-                or f_old.superseded_by is not None
-                or f_new.superseded_by is not None
-            ):
+            if not old_active or not new_active or f_old.superseded_by is not None or f_new.superseded_by is not None:
                 logger.debug(
                     "resolve_key_conflict_pair: pair no longer current — skipping (%s, %s)",
                     id1,
@@ -2598,7 +2613,10 @@ class FactManager:
             return ok
 
     async def _resolve_key_conflicts(
-        self, fact: Fact, input: FactInput, session: AsyncSession,
+        self,
+        fact: Fact,
+        input: FactInput,
+        session: AsyncSession,
         exclude_ids: list[UUID],
         keep_both_ids: list[UUID] | None = None,
     ) -> bool:
@@ -2636,11 +2654,7 @@ class FactManager:
         for old in rows.scalars().all():
             if old.id in exclude_ids:
                 continue
-            if (
-                input.event_date is not None
-                and old.event_date is not None
-                and input.event_date != old.event_date
-            ):
+            if input.event_date is not None and old.event_date is not None and input.event_date != old.event_date:
                 continue  # F075 precedence: distinct events, never supersede
             if not self._key_budget_ok():
                 logger.warning("R2: key-conflict classifier hourly budget spent — deferring to sleep sweep")
@@ -2890,9 +2904,7 @@ class FactManager:
             await session.flush()
 
         # F022: Bridge — also create graph edge
-        await self._create_graph_edge(
-            new_detail.id, fact_id, "fact", "fact", "contradicts", 1.0, session
-        )
+        await self._create_graph_edge(new_detail.id, fact_id, "fact", "fact", "contradicts", 1.0, session)
 
         # Reduce confidence of old fact by 0.2 (min 0.0)
         old_confidence = old_fact.confidence or 1.0
@@ -2946,8 +2958,12 @@ class FactManager:
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._list_by_category(categories, active_only, limit, session, exclude_sources, require_tag, learned_within_days)
-        return await self._list_by_category(categories, active_only, limit, session, exclude_sources, require_tag, learned_within_days)
+                return await self._list_by_category(
+                    categories, active_only, limit, session, exclude_sources, require_tag, learned_within_days
+                )
+        return await self._list_by_category(
+            categories, active_only, limit, session, exclude_sources, require_tag, learned_within_days
+        )
 
     async def _list_by_category(
         self,
@@ -2959,12 +2975,9 @@ class FactManager:
         require_tag: str | None = None,
         learned_within_days: int | None = None,
     ) -> list[FactSummary]:
-        stmt = (
-            select(Fact)
-            .where(
-                Fact.agent_id == self.agent_id,
-                Fact.category.in_(categories),
-            )
+        stmt = select(Fact).where(
+            Fact.agent_id == self.agent_id,
+            Fact.category.in_(categories),
         )
         if active_only:
             stmt = stmt.where(Fact.active == True)  # noqa: E712
@@ -2973,8 +2986,9 @@ class FactManager:
             # correctly excluded (they carry no tag).
             stmt = stmt.where(Fact.tags.any(require_tag))
         if learned_within_days is not None:
-            from datetime import datetime, timedelta, timezone
-            cutoff = datetime.now(timezone.utc) - timedelta(days=learned_within_days)
+            from datetime import datetime, timedelta
+
+            cutoff = datetime.now(UTC) - timedelta(days=learned_within_days)
             stmt = stmt.where(Fact.learned_at >= cutoff)
         if exclude_sources:
             # Category-scoped (codex r1): only RULE facts from excluded sources
@@ -3076,9 +3090,7 @@ class FactManager:
                 return await self._get_superseded_contents_impl(fact_ids, session)
         return await self._get_superseded_contents_impl(fact_ids, session)
 
-    async def _get_superseded_contents_impl(
-        self, fact_ids: list[UUID], session: AsyncSession
-    ) -> dict[UUID, list[str]]:
+    async def _get_superseded_contents_impl(self, fact_ids: list[UUID], session: AsyncSession) -> dict[UUID, list[str]]:
         stmt = (
             select(Fact.superseded_by, Fact.content)
             .where(
@@ -3171,10 +3183,11 @@ class FactManager:
         exclude_categories: list[str] | None = None,
         session: AsyncSession | None = None,
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
-        date_window: "DateWindow | None" = None,
+        date_window: DateWindow | None = None,
         include_categories: list[str] | None = None,
         require_keyword_hit: bool = False,
         penalty_limit: int | None = None,
+        track_access: bool = True,
     ) -> list[FactSummary]:
         """Hybrid search over facts.
 
@@ -3191,11 +3204,39 @@ class FactManager:
                 #574 r3 — the RRF missing-leg penalty is nearly free, so score
                 floors cannot exclude vector-only nearest-neighbor noise).
                 Forces the single-query path (variant fusion unsupported).
+            track_access: when False, skip _fire_track_access so probe/canary
+                paths do not inflate recall_count or refresh last_recalled_at.
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window, include_categories, require_keyword_hit, penalty_limit)
-        return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window, include_categories, require_keyword_hit, penalty_limit)
+                return await self._search(
+                    query,
+                    limit,
+                    category,
+                    active_only,
+                    exclude_categories,
+                    session,
+                    variant_pairs,
+                    date_window,
+                    include_categories,
+                    require_keyword_hit,
+                    penalty_limit,
+                    track_access=track_access,
+                )
+        return await self._search(
+            query,
+            limit,
+            category,
+            active_only,
+            exclude_categories,
+            session,
+            variant_pairs,
+            date_window,
+            include_categories,
+            require_keyword_hit,
+            penalty_limit,
+            track_access=track_access,
+        )
 
     async def _search(
         self,
@@ -3206,10 +3247,11 @@ class FactManager:
         exclude_categories: list[str] | None,
         session: AsyncSession,
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
-        date_window: "DateWindow | None" = None,
+        date_window: DateWindow | None = None,
         include_categories: list[str] | None = None,
         require_keyword_hit: bool = False,
         penalty_limit: int | None = None,
+        track_access: bool = True,
     ) -> list[FactSummary]:
         # Generate query embedding
         embedding = None
@@ -3258,9 +3300,7 @@ class FactManager:
         # cap cannot cover (it only clamps ranks ABOVE the penalty).
         # penalty_limit + 1, not penalty_limit: the boundary rank drifts at
         # exactly penalty_limit.
-        primary_limit = (
-            max(penalty_limit + 1, limit) if penalty_limit is not None else limit
-        )
+        primary_limit = max(penalty_limit + 1, limit) if penalty_limit is not None else limit
         if variant_pairs and len(variant_pairs) > 1 and not require_keyword_hit:
             results = await hybrid_search_multi(
                 session=session,
@@ -3290,7 +3330,8 @@ class FactManager:
         # the caller parsed a window and we have a query embedding. Empty leg is a
         # no-op, so this preserves today's ordering when the window finds nothing.
         if date_window is not None and embedding is not None:
-            from nous.heart.search import _rrf_merge_n, _resolve_rrf_k
+            from nous.heart.search import _resolve_rrf_k, _rrf_merge_n
+
             k_leg = self._settings.date_leg_k if self._settings else 15
             date_leg = await self._date_window_leg(session, embedding, date_window, k_leg)
             if date_leg:
@@ -3299,8 +3340,11 @@ class FactManager:
                 # fact queries kept rescoring with the caller's limit.
                 if penalty_limit is not None:
                     results = _rrf_merge_n(
-                        [results, date_leg], _resolve_rrf_k(), penalty_limit,
-                        return_limit=limit, cap_ranks_at_penalty=True,
+                        [results, date_leg],
+                        _resolve_rrf_k(),
+                        penalty_limit,
+                        return_limit=limit,
+                        cap_ranks_at_penalty=True,
                     )
                 else:
                     results = _rrf_merge_n([results, date_leg], _resolve_rrf_k(), limit)
@@ -3340,7 +3384,8 @@ class FactManager:
 
         # F027: Apply supersession filter and fire access tracking
         summaries = self.apply_supersession_filter(summaries)
-        self._fire_track_access([s.id for s in summaries])
+        if track_access:
+            self._fire_track_access([s.id for s in summaries])
         return summaries
 
     async def _search_all(
@@ -3357,7 +3402,7 @@ class FactManager:
         as hybrid_search() but intentionally omits the active=true filter so
         superseded/inactive facts are included.
         """
-        from nous.heart.search import _resolve_vector_weight, _resolve_rrf_k, _rrf_merge
+        from nous.heart.search import _resolve_rrf_k, _resolve_vector_weight, _rrf_merge
 
         vw = _resolve_vector_weight()
         rrf_k = _resolve_rrf_k()
@@ -3443,11 +3488,11 @@ class FactManager:
 
     async def _date_window_leg(
         self,
-        session: "AsyncSession",
+        session: AsyncSession,
         embedding: list[float],
-        window: "DateWindow",
+        window: DateWindow,
         limit: int,
-    ) -> list[tuple["UUID", float]]:
+    ) -> list[tuple[UUID, float]]:
         """F075 L3: in-window active dated facts, ranked by cosine to the query.
 
         Returns (id, cosine) tuples ordered best-first. Ranking is cosine-to-query
@@ -3470,10 +3515,16 @@ class FactManager:
             ORDER BY t.embedding <=> CAST(:qvec AS vector)
             LIMIT :limit
         """)
-        result = await session.execute(sql, {
-            "agent_id": self.agent_id, "qvec": qvec,
-            "lo": window.start, "hi": window.end, "limit": limit,
-        })
+        result = await session.execute(
+            sql,
+            {
+                "agent_id": self.agent_id,
+                "qvec": qvec,
+                "lo": window.start,
+                "hi": window.end,
+                "limit": limit,
+            },
+        )
         return [(row.id, float(row.score)) for row in result.all()]
 
     # ------------------------------------------------------------------
@@ -3497,12 +3548,28 @@ class FactManager:
         if session is None:
             async with self.db.session() as session:
                 return await self._list_all(
-                    limit, offset, category, active_only,
-                    confidence_min, date_from, date_to, sort, order, session,
+                    limit,
+                    offset,
+                    category,
+                    active_only,
+                    confidence_min,
+                    date_from,
+                    date_to,
+                    sort,
+                    order,
+                    session,
                 )
         return await self._list_all(
-            limit, offset, category, active_only,
-            confidence_min, date_from, date_to, sort, order, session,
+            limit,
+            offset,
+            category,
+            active_only,
+            confidence_min,
+            date_from,
+            date_to,
+            sort,
+            order,
+            session,
         )
 
     async def _list_all(
@@ -3582,7 +3649,6 @@ class FactManager:
         return await self._count_stale(older_than_days, session)
 
     async def _count_stale(self, older_than_days: int, session: AsyncSession) -> int:
-        from datetime import timedelta
         cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
         result = await session.execute(
             select(func.count())
@@ -3719,7 +3785,8 @@ class FactManager:
                     raise ValueError(f"Cycle winner {tip.id} not found for fact {fact_id}")
                 logger.warning(
                     "Supersession CYCLE detected at fact %s — breaking: winner %s",
-                    fact_id, tip.id,
+                    fact_id,
+                    tip.id,
                 )
                 winner.superseded_by = None
                 winner.active = True
@@ -3730,9 +3797,7 @@ class FactManager:
             visited.add(deepest.id)
             current_id = deepest.id
 
-        raise ValueError(
-            f"supersession chain exceeds walk bound ({max_restarts} restarts)"
-        )
+        raise ValueError(f"supersession chain exceeds walk bound ({max_restarts} restarts)")
 
     # ------------------------------------------------------------------
     # deactivate()
@@ -3754,9 +3819,7 @@ class FactManager:
         fact.active = False
         await session.flush()
 
-    async def set_tag(
-        self, fact_id: UUID, tag: str, present: bool, session: AsyncSession | None = None
-    ) -> None:
+    async def set_tag(self, fact_id: UUID, tag: str, present: bool, session: AsyncSession | None = None) -> None:
         """Add or remove a tag on a fact's tags ARRAY (idempotent)."""
         if session is None:
             async with self.db.session() as session:
@@ -3853,8 +3916,7 @@ class FactManager:
         # result, only momentarily revert to the pre-cooldown re-processing it
         # reduces; not worth synchronizing the background event write to harden.
         cooldown_days = (
-            getattr(self._settings, "contradiction_recheck_cooldown_days", 30)
-            if self._settings is not None else 30
+            getattr(self._settings, "contradiction_recheck_cooldown_days", 30) if self._settings is not None else 30
         )
         cooldown_clause = ""
         if cooldown_days and cooldown_days > 0:
@@ -3965,9 +4027,11 @@ class FactManager:
         gen = self._entity_vocab_gen
         async with self.db.session() as session:
             rows = await session.execute(
-                text("SELECT DISTINCT ek.entity_key FROM heart.fact_entity_keys ek "
-                     "JOIN heart.facts f ON f.id = ek.fact_id "
-                     "WHERE ek.agent_id = :a AND f.active = true LIMIT :lim"),
+                text(
+                    "SELECT DISTINCT ek.entity_key FROM heart.fact_entity_keys ek "
+                    "JOIN heart.facts f ON f.id = ek.fact_id "
+                    "WHERE ek.agent_id = :a AND f.active = true LIMIT :lim"
+                ),
                 {"a": self.agent_id, "lim": limit},
             )
             vocab = frozenset(r[0] for r in rows)
@@ -3976,8 +4040,12 @@ class FactManager:
         return vocab
 
     async def fetch_by_entity_keys(
-        self, keys: list[str], limit: int = 8, *,
-        track: bool = True, exclude_fact_ids: "list[UUID] | set[UUID] | None" = None,
+        self,
+        keys: list[str],
+        limit: int = 8,
+        *,
+        track: bool = True,
+        exclude_fact_ids: list[UUID] | set[UUID] | None = None,
     ):
         """R3.3: active facts matching any entity key, ranked by matched-key
         count then recency/ordinal. MUST join facts on active=true (entity
@@ -4061,8 +4129,8 @@ class FactManager:
                     "JOIN heart.facts f ON f.id = ek.fact_id "
                     "WHERE ek.agent_id = :a AND ek.entity_key = ANY(:keys) "
                     "  AND f.active = true AND f.agent_id = :a "
-                    + exclude_clause +
-                    "GROUP BY f.id, f.content, f.learned_at, f.source_ordinal, "
+                    + exclude_clause
+                    + "GROUP BY f.id, f.content, f.learned_at, f.source_ordinal, "
                     "         f.subject, f.event_date, f.source_episode_id, "
                     "         f.attribute_key, f.subject_key "
                     "ORDER BY matched DESC, f.learned_at DESC, "
@@ -4245,7 +4313,9 @@ class FactManager:
     )
 
     async def fetch_legacy_fields(
-        self, fact_ids: Sequence[UUID], session: AsyncSession | None = None,
+        self,
+        fact_ids: Sequence[UUID],
+        session: AsyncSession | None = None,
     ) -> dict[UUID, dict[str, Any]]:
         """One SELECT returning ``LEGACY_SUMMARY_FIELDS`` per id.
 
@@ -4263,12 +4333,12 @@ class FactManager:
         return await self._fetch_legacy_fields(fact_ids, session)
 
     async def _fetch_legacy_fields(
-        self, fact_ids: Sequence[UUID], session: AsyncSession,
+        self,
+        fact_ids: Sequence[UUID],
+        session: AsyncSession,
     ) -> dict[UUID, dict[str, Any]]:
         cols = [getattr(Fact, f) for f in self.LEGACY_SUMMARY_FIELDS]
-        result = await session.execute(
-            select(Fact.id, *cols).where(Fact.id.in_(list(fact_ids)))
-        )
+        result = await session.execute(select(Fact.id, *cols).where(Fact.id.in_(list(fact_ids))))
         out: dict[UUID, dict[str, Any]] = {}
         for row in result.all():
             vals = dict(zip(self.LEGACY_SUMMARY_FIELDS, row[1:], strict=True))

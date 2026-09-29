@@ -1404,3 +1404,121 @@ class TestSleepLLMInputCaps:
         handler._handle_updates_prefix.assert_awaited_once()
         passed_fact = handler._handle_updates_prefix.await_args.args[1]
         assert passed_fact["category"] == "technical"
+
+
+# ===========================================================================
+# TestRunPhaseRecordsErrorOnFalse
+# ===========================================================================
+
+
+class TestRunPhaseRecordsErrorOnFalse:
+    """_run_phase must call recorder.error() (not finish()) when the phase returns False.
+
+    Mutation evidence: if _run_phase always calls recorder.finish(run_id) regardless
+    of the result, the recorder.error call count will be 0 for a False-returning phase.
+    After the fix, a phase that returns False produces an 'error' row, so the
+    consecutive-error detector in ProcessFaultCheck can fire.
+    """
+
+    @pytest.mark.asyncio
+    async def test_false_result_calls_recorder_error_not_finish(self):
+        """_run_phase must record error (not finish) when phase returns False."""
+        from nous.handlers.sleep_handler import SleepHandler
+        from unittest.mock import AsyncMock, MagicMock
+
+        handler, brain, heart, bus, _ = _make_sleep_handler()
+
+        recorder = AsyncMock()
+        recorder.start = AsyncMock(return_value=42)
+        recorder.finish = AsyncMock()
+        recorder.error = AsyncMock()
+        handler._recorder = recorder
+
+        async def failing_phase():
+            return False
+
+        result = await handler._run_phase("review", failing_phase)
+
+        assert result is False
+        recorder.error.assert_called_once()
+        error_call_args = recorder.error.call_args
+        assert error_call_args[0][0] == 42  # run_id
+        assert "False" in error_call_args[0][1]  # error message mentions False
+        # finish must NOT be called for a False result
+        recorder.finish.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_true_result_calls_recorder_finish_not_error(self):
+        """_run_phase must record finish (not error) when phase returns True."""
+        handler, brain, heart, bus, _ = _make_sleep_handler()
+
+        recorder = AsyncMock()
+        recorder.start = AsyncMock(return_value=99)
+        recorder.finish = AsyncMock()
+        recorder.error = AsyncMock()
+        handler._recorder = recorder
+
+        async def succeeding_phase():
+            return True
+
+        result = await handler._run_phase("review", succeeding_phase)
+
+        assert result is True
+        recorder.finish.assert_called_once_with(99)
+        recorder.error.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stale_scan_wrapper_calls_error_on_false(self):
+        """The stale_scan-specific wrapper must also record error when phase returns False.
+
+        Mutation evidence: if the stale_scan inline wrapper calls finish()
+        unconditionally, recorder.error is never called for a failed stale_scan.
+        """
+        from nous.handlers.sleep_handler import SleepHandler
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        handler, brain, heart, bus, _ = _make_sleep_handler()
+
+        recorder = AsyncMock()
+        recorder.start = AsyncMock(return_value=77)
+        recorder.finish = AsyncMock()
+        recorder.error = AsyncMock()
+        handler._recorder = recorder
+
+        # Make _phase_stale_scan return False (simulates a DB error caught internally)
+        handler._phase_stale_scan = AsyncMock(return_value=False)
+
+        # Drive _run_sleep enough to hit the stale_scan branch
+        # by patching all other phases to skip quickly
+        handler._phase_review_decisions = AsyncMock(return_value=True)
+        handler._phase_prune = AsyncMock(return_value=True)
+        handler._phase_compress = AsyncMock(return_value=True)
+        handler._phase_reflect = AsyncMock(return_value=True)
+        handler._phase_generalize = AsyncMock(return_value=True)
+        handler._phase_cluster_consolidation = AsyncMock(return_value=True)
+        handler._phase_relink_open_episodes = AsyncMock(return_value=True)
+        handler._phase_graph_densification = AsyncMock(return_value=True)
+        handler._phase_prune_dead_edges = AsyncMock(return_value=True)
+        handler._phase_sweep_key_conflicts = AsyncMock(return_value=True)
+
+        # Patch _run_phase to bypass other phases' recorder calls
+        # but let the stale_scan inline block run naturally
+        original_run_phase = handler._run_phase
+
+        async def selective_run_phase(name, factory):
+            if name == "stale_scan":
+                return await original_run_phase(name, factory)
+            # for other phases, use recorder but don't let them interfere
+            return await factory()
+
+        handler._run_phase = selective_run_phase
+
+        from nous.events import Event
+        event = Event(type="sleep_started", agent_id="test-agent", data={}, session_id="s1")
+        await handler._run_sleep(event)
+
+        # error must have been called with the stale_scan run_id (77)
+        error_calls = [c for c in recorder.error.call_args_list if c[0][0] == 77]
+        finish_calls = [c for c in recorder.finish.call_args_list if c[0][0] == 77]
+        assert error_calls, "recorder.error must be called for stale_scan returning False"
+        assert not finish_calls, "recorder.finish must NOT be called for stale_scan returning False"

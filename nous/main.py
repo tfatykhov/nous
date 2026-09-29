@@ -406,6 +406,15 @@ async def create_components(settings: Settings) -> dict:
         if sleep_handler is not None and graph_densifier is not None:
             sleep_handler._graph_densifier = graph_densifier
 
+        # Fault detector: wire process recorder into sleep handler (migration 077).
+        if sleep_handler is not None and getattr(settings, "fault_detector_enabled", False):
+            try:
+                from nous.observability.process_recorder import ProcessRecorder
+                sleep_handler._recorder = ProcessRecorder(database, settings.agent_id)
+                logger.info("Fault detector: ProcessRecorder wired into SleepHandler")
+            except Exception:
+                logger.warning("Fault detector: ProcessRecorder wiring failed", exc_info=True)
+
         # F060: Wire episode summarizer into sleep handler so the abandoned-
         # episode recovery phase can re-summarize stuck-open sessions.
         if sleep_handler is not None and episode_summarizer is not None:
@@ -959,6 +968,45 @@ async def create_components(settings: Settings) -> dict:
                 logger.info(
                     "F034.2: EmailCheck registered with LLM tier (budget-gated)"
                 )
+
+            # Fault detector checks (decision 28f021a0, migration 077).
+            # Land-dark: only registered when fault_detector_enabled=True.
+            if getattr(settings, "fault_detector_enabled", False):
+                try:
+                    from nous.heartbeat.fault_detector import (
+                        ProcessFaultCheck, RetrievalCanaryCheck,
+                    )
+                    # ProcessFaultCheck watches sleep phases only; with sleep
+                    # disabled no SleepHandler/recorder exists, so stale rows
+                    # from an earlier deployment would age into missed-run
+                    # findings for a subsystem the operator turned off.
+                    if settings.sleep_enabled:
+                        registry.register(
+                            ProcessFaultCheck(
+                                db=database,
+                                settings=settings,
+                                agent_id=settings.agent_id,
+                            )
+                        )
+                        logger.info("Fault detector: ProcessFaultCheck registered")
+                    else:
+                        logger.info("Fault detector: ProcessFaultCheck skipped (sleep disabled)")
+                    canary_path = getattr(settings, "fault_detector_canary_path", "")
+                    if canary_path:
+                        registry.register(
+                            RetrievalCanaryCheck(heart=heart, settings=settings)
+                        )
+                        logger.info(
+                            "Fault detector: RetrievalCanaryCheck registered "
+                            "(canary_path=%s)", canary_path
+                        )
+                    else:
+                        logger.info(
+                            "Fault detector: RetrievalCanaryCheck skipped "
+                            "(fault_detector_canary_path not set)"
+                        )
+                except Exception:
+                    logger.warning("Fault detector check registration failed", exc_info=True)
 
             await heartbeat_runner.start()
         except ImportError:

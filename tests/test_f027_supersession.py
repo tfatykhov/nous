@@ -450,6 +450,41 @@ class TestPhaseStaleScam:
         assert fake_fact.active is False
 
     @pytest.mark.asyncio
+    async def test_examined_is_aged_population_not_deactivated_set(self):
+        """stale_examined must count the aged population BEFORE the recall
+        filter, so the fault detector's changed/examined ratio is not
+        identically 1.0.
+
+        Mutation evidence: record ``len(stale_facts)`` as stale_examined and
+        this reports 1 instead of 10.
+        """
+        handler, heart = self._make_handler()
+
+        fake_fact = MagicMock()
+        fake_fact.active = True
+
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=False)
+
+        count_result = MagicMock()
+        count_result.scalar_one.return_value = 10
+        scalars_mock = MagicMock()
+        scalars_mock.all.return_value = [fake_fact]
+        scan_result = MagicMock()
+        scan_result.scalars.return_value = scalars_mock
+        session.execute = AsyncMock(side_effect=[count_result, scan_result])
+
+        heart.db.session = MagicMock(return_value=session)
+        heart.agent_id = "test"
+
+        stats = {}
+        result = await handler._phase_stale_scan(stats)
+        assert result is True
+        assert stats["stale_examined"] == 10
+        assert stats["stale_deactivated"] == 1
+
+    @pytest.mark.asyncio
     async def test_exception_returns_false(self):
         handler, heart = self._make_handler()
         heart.db.session = MagicMock(side_effect=Exception("db error"))
