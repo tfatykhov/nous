@@ -136,6 +136,10 @@ class DynamicCheck(BaseCheck):
         cancelled = False
         for task in list(self._run_tasks):
             if _CURRENT_CHECK_RUN.get() is task:
+                # The initiating run may live on an instance an ``update``
+                # already replaced (codex P1, PR #656 round 9): record the
+                # self-disable here, or its final_run reads False.
+                self._self_disabled = True
                 continue
             # A done turn whose run() has not resumed yet is still an active
             # run (codex P1, PR #656 round 7): mark it too, or it would return

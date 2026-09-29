@@ -2751,3 +2751,40 @@ class TestFinalRunDecidedByTheRun:
         with pytest.raises(RuntimeError, match="final run broke"):
             await asyncio.wait_for(hb.trigger_check("own"), 2)
         assert registry.self_disabled_run_failed("own")
+
+    @pytest.mark.asyncio
+    async def test_self_disable_after_update_replaced_instance_is_final(self):
+        """codex P1 (PR #656 round 9): an update replaced the check while its
+        old instance was running; that old run then disabled itself and
+        failed. The disable must be recorded on the initiating instance, or
+        its final_run reads False and the DAG completes a failed node."""
+        from nous.heartbeat.dynamic import RUN_OUTCOME
+
+        registry = CheckRegistry()
+        loader = _loader_with_disable_row(registry, "own")
+        runner = AsyncMock()
+        runner.end_conversation = AsyncMock()
+
+        async def _run_turn(*args, **kwargs):
+            _tracked_check(loader, "own", AsyncMock())  # update's replacement
+            await loader.manage_check(action="disable", name="own")
+            raise RuntimeError("final run broke")
+
+        runner.run_turn = AsyncMock(side_effect=_run_turn)
+        old = DynamicCheck(
+            check_id="id-1",
+            name="own",
+            prompt="p",
+            tools=["bash"],
+            runner=runner,
+            active_runs=loader._active_runs,
+        )
+
+        outcome: dict[str, bool] = {}
+        token = RUN_OUTCOME.set(outcome)
+        try:
+            with pytest.raises(RuntimeError, match="final run broke"):
+                await asyncio.wait_for(old.run(), 1)
+        finally:
+            RUN_OUTCOME.reset(token)
+        assert outcome == {"final_run": True}
