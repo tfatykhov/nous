@@ -608,6 +608,7 @@ class AgentRunner:
         tool_name: str,
         tool_input: dict,
         entry_id: Any,
+        outcome: CallOutcome | None = None,
     ) -> bool:
         """Capture a pre-dispatch snapshot for compensable calls in background contexts.
 
@@ -718,6 +719,10 @@ class AgentRunner:
                 tool_name=tool_name,
                 snapshot_data=snap_data,
             )
+            if tool_name == "write_file" and outcome is not None:
+                # Bind the write to the file just snapshotted: write_file
+                # re-resolves the path and refuses if it now names another.
+                outcome.write_target = snap_data["full_path"]
             return True
         except SnapshotBlocksDispatch:
             raise
@@ -2314,12 +2319,14 @@ class AgentRunner:
                                 # contexts, which refuse rather than proceed without a snapshot.
                                 _snap_blocked: str | None = None
                                 _snapshotted = False
+                                outcome = CallOutcome()
                                 try:
                                     _snapshotted = await self._capture_compensation_snapshot(
                                         _ctx,
                                         tc["name"],
                                         dispatch_input,
                                         entry_id,
+                                        outcome=outcome,
                                     )
                                 except Exception as _sbd:
                                     from nous.api.compensation import SnapshotBlocksDispatch
@@ -2352,7 +2359,6 @@ class AgentRunner:
                                             "blocked" if is_error else "success",
                                         )
                                 else:
-                                    outcome = CallOutcome()
                                     timed_out = False
                                     try:
                                         async for item in self._dispatch_with_keepalive(
@@ -2940,12 +2946,14 @@ class AgentRunner:
                                 # contexts, which refuse rather than proceed without a snapshot.
                                 _snap_blocked2: str | None = None
                                 _snapshotted2 = False
+                                outcome = CallOutcome()
                                 try:
                                     _snapshotted2 = await self._capture_compensation_snapshot(
                                         ctx,
                                         tool_name,
                                         tool_input,
                                         entry_id,
+                                        outcome=outcome,
                                     )
                                 except Exception as _sbd2:
                                     from nous.api.compensation import SnapshotBlocksDispatch
@@ -2970,7 +2978,6 @@ class AgentRunner:
                                 elif suppressed is not None:
                                     result_text, is_error = suppressed.text, suppressed.is_error
                                 else:
-                                    outcome = CallOutcome()
                                     keyed = send_key is not None
                                     # @codex P1 on e8841b2: in-flight heartbeat
                                     # for tool calls that may exceed stall_timeout.

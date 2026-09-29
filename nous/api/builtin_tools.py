@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from nous.api.call_outcome import current_outcome
 from nous.api.tools import ToolDispatcher, _tool_error
 from nous.config import Settings
 
@@ -195,6 +196,13 @@ async def write_file_tool(
     """
     try:
         target = _validate_path(path, _workspace_dir)
+        # Phase 2.8: bound to the path its compensation snapshot recorded.
+        outcome = current_outcome()
+        if outcome is not None and outcome.write_target is not None and str(target) != outcome.write_target:
+            return _tool_error(
+                f"Path '{path}' no longer resolves to the file that was snapshotted before this write; "
+                "refused so the write stays revertible."
+            )
 
         # Auto-create parent directories
         await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)

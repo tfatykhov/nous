@@ -1936,3 +1936,42 @@ async def test_check_revert_uses_the_disable_transactions_prior_state() -> None:
         **kwargs,
     )
     store.record_written_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_write_is_bound_to_the_snapshotted_path(tmp_path) -> None:
+    """codex P2 #652 (compensation.py:292): a symlink retargeted between the
+    snapshot and the write must not let write_file mutate a file other than
+    the one snapshotted -- the revert would restore the wrong file."""
+    from unittest.mock import AsyncMock
+
+    from nous.api import call_outcome
+    from nous.api.builtin_tools import write_file_tool
+    from nous.api.call_outcome import CallOutcome
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    first = workspace / "first.txt"
+    first.write_text("first")
+    other = workspace / "other.txt"
+    other.write_text("other")
+    link = workspace / "link.txt"
+    link.symlink_to(first)
+
+    runner = _bare_runner(AsyncMock())
+    runner._workspace_dir = str(workspace)
+    outcome = CallOutcome()
+    assert await runner._capture_compensation_snapshot(
+        ExecutionContext(kind="subtask"), "write_file", {"path": "link.txt", "content": "new"}, uuid4(), outcome=outcome
+    )
+    assert outcome.write_target == str(first.resolve())
+
+    link.unlink()
+    link.symlink_to(other)
+    token = call_outcome._current.set(outcome)
+    try:
+        result = await write_file_tool("link.txt", "new", _workspace_dir=str(workspace))
+    finally:
+        call_outcome._current.reset(token)
+    assert result.get("is_error") is True
+    assert other.read_text() == "other" and first.read_text() == "first"

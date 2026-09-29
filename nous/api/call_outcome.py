@@ -22,6 +22,10 @@ class CallOutcome:
     # Phase 2.8: a heartbeat_check_manage disable's prior state and the
     # state token it wrote (DynamicCheckLoader.manage_check capture=).
     check_capture: dict | None = None
+    # Phase 2.8: the resolved path a write_file snapshot was captured for.
+    # write_file refuses to write anywhere else, so a symlink retargeted
+    # between the snapshot and the write cannot mutate an unsnapshotted file.
+    write_target: str | None = None
 
 
 _current: ContextVar[CallOutcome | None] = ContextVar("tool_call_outcome", default=None)
