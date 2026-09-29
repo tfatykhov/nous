@@ -549,12 +549,21 @@ class AgentRunner:
             and tool_name == "heartbeat_check_manage"
             and self._snap_store is not None
         ):
-            # The state token the disable wrote, from its own transaction: the
-            # revert re-enables only while the check still carries it.
+            # The state token the disable wrote AND the enabled state it
+            # overwrote, both from its own transaction: the revert re-enables
+            # only while the check still carries the token, and only if the
+            # check was enabled right before THIS disable -- the pre-dispatch
+            # read can be overtaken by a concurrent toggle.
             capture = outcome.check_capture if outcome is not None else None
             try:
-                if isinstance(capture, dict) and isinstance(capture.get("written"), dict):
-                    await self._snap_store.record_written_state(entry_id, capture["written"])
+                if (
+                    isinstance(capture, dict)
+                    and isinstance(capture.get("written"), dict)
+                    and isinstance(capture.get("prior_enabled"), bool)
+                ):
+                    await self._snap_store.record_written_state(
+                        entry_id, capture["written"], extra={"prior_enabled": capture["prior_enabled"]}
+                    )
                 else:
                     logger.warning(
                         "Harness Phase 2.8: %s reported no written check state; its revert will be refused",

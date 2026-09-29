@@ -168,14 +168,20 @@ class SnapshotStore:
             return (res.rowcount or 0) == 1
 
     async def record_written_state(
-        self, ledger_entry_id: UUID, written: dict[str, Any], *, prior: dict[str, Any] | None = None
+        self,
+        ledger_entry_id: UUID,
+        written: dict[str, Any],
+        *,
+        prior: dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> bool:
         """Merge ``written`` -- the state the call left behind -- into its
         snapshot, so the revert can refuse once anything has changed that
         state since. ``prior``, when given, replaces the pre-dispatch prior
         state (read inside the call's own transaction, it is exact where the
-        pre-dispatch read could be overtaken by a concurrent write). Returns
-        whether a row was updated."""
+        pre-dispatch read could be overtaken by a concurrent write); ``extra``
+        top-level fields replace their pre-dispatch values for the same
+        reason. Returns whether a row was updated."""
 
         async def _write() -> bool:
             async with self._db.session() as s:
@@ -192,6 +198,8 @@ class SnapshotStore:
                 merged = {**(row.snapshot_data or {}), "written": written}
                 if prior is not None:
                     merged["prior"] = prior
+                if extra:
+                    merged.update(extra)
                 row.snapshot_data = merged
                 await s.commit()
                 return True
@@ -271,31 +279,47 @@ async def snapshot_for_write_file(
     from nous.api.builtin_tools import _validate_path
 
     try:
-        _validate_path(path, workspace_dir)
+        target = _validate_path(path, workspace_dir)
     except ValueError as exc:
         return {"path": path, "invalid_path": str(exc)}
-    full_path = os.path.join(workspace_dir, path) if not os.path.isabs(path) else path
-    existed = os.path.exists(full_path)
+    # Every filesystem operation below uses the validated, resolved path --
+    # never the caller's -- and runs in one worker-thread pass over one open
+    # file. The final component is opened without following a symlink, the
+    # size comes from that descriptor, and after the read the path is
+    # validated again and must still name the very file that was read: a
+    # symlink retargeted outside the workspace between the check and the
+    # read can never have its target's content captured.
+    full_path = str(target)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+
+    def _capture() -> tuple[bool, str | None, bool]:
+        try:
+            f = open(full_path, "rb", opener=lambda p, flags: os.open(p, flags | nofollow))
+        except FileNotFoundError:
+            return False, None, False
+        with f:
+            st = os.fstat(f.fileno())
+            if st.st_size > _FILE_SNAPSHOT_MAX_BYTES:
+                return True, None, True
+            data = f.read(_FILE_SNAPSHOT_MAX_BYTES + 1)
+            recheck = os.stat(_validate_path(path, workspace_dir))
+            if (recheck.st_dev, recheck.st_ino) != (st.st_dev, st.st_ino):
+                raise ValueError(f"{path!r} changed while it was being snapshotted")
+        if len(data) > _FILE_SNAPSHOT_MAX_BYTES:
+            return True, None, True
+        return True, data.decode("utf-8", errors="replace"), False
+
+    existed = True
     prior_content: str | None = None
     oversized = False
     capture_error: str | None = None
-    if existed:
-        try:
-            file_size = os.path.getsize(full_path)
-            if file_size > _FILE_SNAPSHOT_MAX_BYTES:
-                oversized = True
-            else:
-
-                def _read() -> str:
-                    with open(full_path, encoding="utf-8", errors="replace") as f:
-                        return f.read()
-
-                prior_content = await asyncio.to_thread(_read)
-        except Exception as exc:
-            # The file exists but its content could not be read: the snapshot
-            # cannot restore it, and callers must know that (capture_error).
-            prior_content = None
-            capture_error = f"{type(exc).__name__}: {exc}"
+    try:
+        existed, prior_content, oversized = await asyncio.to_thread(_capture)
+    except Exception as exc:
+        # The file exists but its content could not be read safely: the
+        # snapshot cannot restore it, and callers must know that (capture_error).
+        prior_content = None
+        capture_error = f"{type(exc).__name__}: {exc}"
     snap: dict[str, Any] = {
         "path": path,
         "full_path": full_path,

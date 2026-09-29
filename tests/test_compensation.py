@@ -1859,4 +1859,80 @@ async def test_disable_captures_its_state_token_and_runner_records_it() -> None:
         tool_input={"name": "c", "action": "disable"},
         outcome=CallOutcome(check_capture=capture),
     )
-    store.record_written_state.assert_awaited_once_with(entry, capture["written"])
+    store.record_written_state.assert_awaited_once_with(entry, capture["written"], extra={"prior_enabled": True})
+
+
+@pytest.mark.asyncio
+async def test_snapshot_reads_the_validated_path_not_a_retargeted_symlink(tmp_path) -> None:
+    """codex P1 #652 (compensation.py:277): a symlink that points inside the
+    workspace when validated and is retargeted outside before the read must
+    never have the outside file captured. Every read uses the resolved path
+    from _validate_path, and the path is re-validated against the file read."""
+    from nous.api import builtin_tools
+    from nous.api import compensation as comp
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    inside = workspace / "inside.txt"
+    inside.write_text("inside content")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("host secret")
+    link = workspace / "link.txt"
+    link.symlink_to(inside)
+
+    real_validate = builtin_tools._validate_path
+    calls = 0
+
+    def _validate_then_retarget(path_str, workspace_dir):
+        nonlocal calls
+        calls += 1
+        resolved = real_validate(path_str, workspace_dir)
+        if calls == 1:
+            link.unlink()
+            link.symlink_to(secret)
+        return resolved
+
+    with patch.object(builtin_tools, "_validate_path", _validate_then_retarget):
+        snap = await comp.snapshot_for_write_file("link.txt", str(workspace))
+    assert snap.get("prior_content") != "host secret"
+    assert "host secret" not in repr(snap)
+    assert snap["full_path"] == str(inside.resolve())
+
+
+@pytest.mark.asyncio
+async def test_check_revert_uses_the_disable_transactions_prior_state() -> None:
+    """codex P1 #652 (runner.py:557): the pre-dispatch read said the check was
+    enabled, but a concurrent disable landed first, so THIS disable's
+    transaction saw prior_enabled=False. The runner must persist that actual
+    prior state; a capture without it records nothing (revert refused)."""
+    from unittest.mock import AsyncMock
+
+    from nous.api.call_outcome import CallOutcome
+
+    store = AsyncMock()
+    runner = _bare_runner(store)
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
+    runner._action_review_pusher = None
+    entry = uuid4()
+    kwargs = dict(snapshotted=True, status="success", tool_input={"name": "c", "action": "disable"})
+    capture = {"prior_enabled": False, "written": _WRITTEN_CHECK}
+    await runner._after_compensable_call(
+        ExecutionContext(kind="subtask"),
+        "heartbeat_check_manage",
+        entry,
+        "s1",
+        outcome=CallOutcome(check_capture=capture),
+        **kwargs,
+    )
+    store.record_written_state.assert_awaited_once_with(entry, _WRITTEN_CHECK, extra={"prior_enabled": False})
+
+    store.reset_mock()
+    await runner._after_compensable_call(
+        ExecutionContext(kind="subtask"),
+        "heartbeat_check_manage",
+        entry,
+        "s1",
+        outcome=CallOutcome(check_capture={"written": _WRITTEN_CHECK}),
+        **kwargs,
+    )
+    store.record_written_state.assert_not_awaited()
