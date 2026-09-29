@@ -100,6 +100,14 @@ _DEFAULT_FACTOR = 1.0
 # scaling neither helps nor hurts, so the step-2 gate would pass vacuously.
 _HISTORICAL_F058_FACTOR = 0.7627
 
+# Cutoff date for era-split analysis. PR #640 set _DEFAULT_FACTOR=1.0 on this
+# date. Decisions before this used factor 0.7627; decisions after use 1.0.
+# The aggregate gap across all ~1200 decisions is an artifact: legacy rows
+# were scored with 0.7627, so pooling them with pass-through 1.0 rows produces
+# a blended metric that measures neither policy. Per-era metrics are needed
+# before DCL Pass 12.
+_ERA_CUTOFF_DATE = datetime(2026, 9, 20, tzinfo=UTC)
+
 # Tolerance for comparing two factors (a configuration value).
 _FACTOR_TOLERANCE = 0.001
 
@@ -210,7 +218,8 @@ async def run(
             confidence AS stored,
             confidence_raw IS NOT NULL AS is_post_f058,
             calibration_factor AS applied_factor,
-            outcome
+            outcome,
+            created_at
         FROM brain.decisions
         WHERE agent_id = $1
           AND outcome IN ('success', 'partial', 'failure')
@@ -364,6 +373,38 @@ async def run(
         for f, members in sorted(eras.items(), reverse=True)
     ]
 
+    # Era-split analysis: separate pre/post factor=1.0 eras by cutoff date.
+    # The aggregate gap across all decisions is an artifact — legacy rows
+    # were calibrated with 0.7627, so pooling them with 1.0-era rows measures
+    # neither policy accurately.
+    pre_era_rows = [r for r in rows if r["created_at"] < _ERA_CUTOFF_DATE]
+    post_era_rows = [r for r in rows if r["created_at"] >= _ERA_CUTOFF_DATE]
+
+    pre_era_pairs = [(float(r["stored"]), _STRICT_OUTCOME[r["outcome"]])
+                     for r in pre_era_rows]
+    post_era_pairs = [(float(r["stored"]), _STRICT_OUTCOME[r["outcome"]])
+                      for r in post_era_rows]
+    all_pairs = [(float(r["stored"]), _STRICT_OUTCOME[r["outcome"]])
+                 for r in rows]
+
+    era_split = {
+        "cutoff_date": _ERA_CUTOFF_DATE.isoformat(),
+        "pre_era": {
+            "label": f"Pre-{_ERA_CUTOFF_DATE.date()} (factor=0.7627)",
+            "factor": _HISTORICAL_F058_FACTOR,
+            **summarize("pre_era", pre_era_pairs),
+        },
+        "post_era": {
+            "label": f"Post-{_ERA_CUTOFF_DATE.date()} (factor=1.0)",
+            "factor": _DEFAULT_FACTOR,
+            **summarize("post_era", post_era_pairs),
+        },
+        "overall": {
+            "label": "All eras (pooled)",
+            **summarize("overall", all_pairs),
+        },
+    }
+
     return {
         "factor": factor,
         "counterfactual_factor": counterfactual_factor,
@@ -384,6 +425,7 @@ async def run(
             "calibrated": summarize("Pre-F058 + counterfactual", cal_pairs),
         },
         "post_f058_direction": direction,
+        "era_split": era_split,
     }
 
 
@@ -538,6 +580,24 @@ async def _async_main(argv: list[str] | None = None) -> int:
               f"(scaling reduced overconfidence: {d_gap < 0})")
         print(f"   Caveat: n={era['raw']['n']} — directional only.")
     print()
+    print("## Era Split — Pre/Post factor=1.0")
+    es = result.get("era_split", {})
+    if es:
+        print(f"   Cutoff: {es['cutoff_date'][:10]} (PR #640 retired factor to 1.0)")
+        print()
+        for key in ("pre_era", "post_era", "overall"):
+            v = es[key]
+            if v.get("n", 0) == 0:
+                print(f"  {v['label']:<40}  n=0 — skip")
+            else:
+                print(
+                    f"  {v['label']:<40}  n={v['n']:>4}  "
+                    f"conf={v['mean_conf']:.3f}  succ={v['mean_outcome']:.3f}  "
+                    f"gap={v['gap']:+.3f}  Brier={v['brier']:.4f}  ECE={v['ece']:.4f}"
+                )
+        print()
+        print("   Note: Overall gap is an artifact of pooling two factor policies.")
+    print()
     print("=" * 84)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -638,6 +698,34 @@ def _build_md(result: dict, factor: float,
                         for era in pd)
             + " — directional only."
         )
+
+    # Era-split section
+    es = result.get("era_split", {})
+    if es:
+        md += [
+            "",
+            "## Era Split — Pre/Post factor=1.0",
+            "",
+            f"Cutoff date: **{es['cutoff_date'][:10]}** (PR #640 retired factor to 1.0)",
+            "",
+            "| era | n | mean_conf | success_rate | gap | Brier | ECE |",
+            "|---|---:|---:|---:|---:|---:|---:|",
+        ]
+        for key in ("pre_era", "post_era", "overall"):
+            v = es[key]
+            if v.get("n", 0) == 0:
+                md.append(f"| {v['label']} | 0 | — | — | — | — | — |")
+            else:
+                md.append(
+                    f"| {v['label']} | {v['n']} | {v['mean_conf']:.3f} | "
+                    f"{v['mean_outcome']:.3f} | {v['gap']:+.3f} | "
+                    f"{v['brier']:.4f} | {v['ece']:.4f} |"
+                )
+        md += [
+            "",
+            "- **Note**: The overall gap is an artifact of pooling two different "
+            "factor policies. Per-era metrics isolate each policy's calibration.",
+        ]
     return md
 
 
