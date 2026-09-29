@@ -300,7 +300,7 @@ class ProcedureInput(BaseModel):
     # hooks, requires_human_review} is declared on the manifest. Consumer
     # wiring deferred to F064.4-v2.
     runtime_metadata: dict | None = None
-    # Reasoning Maps L1 (migration 077): 'strategy' marks distilled strategy cards.
+    # Reasoning Maps L1 (migration 079): 'strategy' marks distilled strategy cards.
     kind: str | None = None
 
 
@@ -328,7 +328,7 @@ class ProcedureDetail(BaseModel):
     tags: list[str]
     active: bool
     created_at: datetime
-    # Reasoning Maps L1 (migration 077): 'strategy' marks distilled strategy cards.
+    # Reasoning Maps L1 (migration 079): 'strategy' marks distilled strategy cards.
     kind: str | None = None
 
 

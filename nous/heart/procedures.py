@@ -159,7 +159,7 @@ class ProcedureManager:
             # when the manifest didn't declare any of the new fields, but
             # we don't gate on a flag at write time (silent-drop fix).
             runtime_metadata=input.runtime_metadata,
-            # Reasoning Maps L1 (migration 077)
+            # Reasoning Maps L1 (migration 079)
             kind=input.kind,
         )
         session.add(procedure)

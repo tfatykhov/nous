@@ -4,7 +4,7 @@
 
 **Architecture:**
 - `decision_reviewed` bus event → `StrategyCardDistiller` handler → `call_background_llm_structured` → `ProcedureManager.store` + `GraphLinker.create_edge`
-- `Procedure.kind = 'strategy'` written to a new `kind` column (migration 077); idempotency via `runtime_metadata->>'source_decision_id'` lookup
+- `Procedure.kind = 'strategy'` written to a new `kind` column (migration 079); idempotency via `runtime_metadata->>'source_decision_id'` lookup
 - Context cap: after relevance filter in `ContextEngine.build`, slice strategy cards to `strategy_cards_max_per_turn` when `strategy_cards_retrieval_enabled`
 
 **Tech stack:** Python 3.12+, SQLAlchemy 2 async, pydantic v2, pytest (`asyncio_mode = "auto"`) with SQLite default / Postgres via `NOUS_TEST_DB=postgres`.
@@ -19,7 +19,7 @@
 - Distillation is off the hot path: the handler is async; the resolve call returns before distillation starts.
 - Idempotent per decision: a re-resolve triggers an UPDATE (or re-distil) of the existing card, never a new duplicate.
 - Every new setting ships with `False` / `0` / conservative default; nothing activates on deploy.
-- Migration 077: `IF NOT EXISTS`, no `BEGIN`/`COMMIT`, full-line `--` comments only, no `;` inside comments.
+- Migration 079: `IF NOT EXISTS`, no `BEGIN`/`COMMIT`, full-line `--` comments only, no `;` inside comments.
 - Tests run on SQLite by default; Postgres-specific features are gated behind `pytest.mark.postgres_only`.
 
 ---
@@ -28,8 +28,8 @@
 
 | File | Responsibility | Tasks |
 |---|---|---|
-| `sql/migrations/077_strategy_cards.sql` | Add `kind VARCHAR(100) NULL` to `heart.procedures` | A |
-| `nous/storage/models.py` | ORM mirror of migration 077 | A |
+| `sql/migrations/079_strategy_cards.sql` | Add `kind VARCHAR(100) NULL` to `heart.procedures` | A |
+| `nous/storage/models.py` | ORM mirror of migration 079 | A |
 | `nous/heart/schemas.py` | `ProcedureInput.kind` + `ProcedureDetail.kind` | A |
 | `nous/heart/procedures.py` | Pass `kind` through `_store()` | A |
 | `nous/config.py` | Three new settings | B |
@@ -44,7 +44,7 @@
 
 ### Step A1: Migration file
 
-Create `sql/migrations/077_strategy_cards.sql`:
+Create `sql/migrations/079_strategy_cards.sql`:
 
 ```sql
 -- 077: add kind column to heart.procedures for strategy cards (Reasoning Maps L1)
