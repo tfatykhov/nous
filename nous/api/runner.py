@@ -507,6 +507,23 @@ class AgentRunner:
         await lock.acquire()
         return lock
 
+    async def _record_written_state(self, entry_id: Any, written: dict, **kwargs: Any) -> bool:
+        """Persist a compensable call's written state, retrying transient
+        failures: without it the snapshot's revert is refused. True only once
+        a snapshot row was actually updated."""
+        for attempt in range(3):
+            try:
+                if await self._snap_store.record_written_state(entry_id, written, **kwargs):
+                    return True
+                return False  # no snapshot row: retrying cannot help
+            except Exception:
+                logger.warning(
+                    "Harness Phase 2.8: recording written state failed (attempt %d)", attempt + 1, exc_info=True
+                )
+                if attempt < 2:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+        return False
+
     async def _after_compensable_call(
         self,
         ctx: ExecutionContext,
@@ -518,31 +535,25 @@ class AgentRunner:
         status: str,
         tool_input: dict,
         outcome: CallOutcome | None = None,
-    ) -> None:
+    ) -> str | None:
         """After a snapshotted call succeeded: record the state it wrote
         where a revert must check it (resolve_decision -- the full review
         state, so a later re-review is never undone), then push the review
-        card. Fail-open: the call already happened."""
+        card. The call already happened, so this never fails it; but when
+        the written state cannot be recorded the revert would be refused, so
+        no card advertises one and the returned note (prefixed to the tool
+        result) tells the caller the change is applied and NOT revertible."""
+        recorded = True
         if snapshotted and status == "success" and tool_name == "resolve_decision" and self._snap_store is not None:
             # The prior and written states come from the resolving transaction
             # itself (row-locked), never a re-read before or after it: a
             # concurrent review can then neither be adopted as "written" nor
             # be skipped over by "prior".
             capture = outcome.review_capture if outcome is not None else None
-            try:
-                if isinstance(capture, dict) and "prior" in capture and "written" in capture:
-                    await self._snap_store.record_written_state(entry_id, capture["written"], prior=capture["prior"])
-                else:
-                    logger.warning(
-                        "Harness Phase 2.8: %s reported no transactional review state; its revert will be refused",
-                        tool_name,
-                    )
-            except Exception:
-                logger.warning(
-                    "Harness Phase 2.8: written state not recorded for %s; its revert will be refused",
-                    tool_name,
-                    exc_info=True,
-                )
+            if isinstance(capture, dict) and "prior" in capture and "written" in capture:
+                recorded = await self._record_written_state(entry_id, capture["written"], prior=capture["prior"])
+            else:
+                recorded = False
         if (
             snapshotted
             and status == "success"
@@ -555,29 +566,30 @@ class AgentRunner:
             # check was enabled right before THIS disable -- the pre-dispatch
             # read can be overtaken by a concurrent toggle.
             capture = outcome.check_capture if outcome is not None else None
-            try:
-                if (
-                    isinstance(capture, dict)
-                    and isinstance(capture.get("written"), dict)
-                    and isinstance(capture.get("prior_enabled"), bool)
-                ):
-                    await self._snap_store.record_written_state(
-                        entry_id, capture["written"], extra={"prior_enabled": capture["prior_enabled"]}
-                    )
-                else:
-                    logger.warning(
-                        "Harness Phase 2.8: %s reported no written check state; its revert will be refused",
-                        tool_name,
-                    )
-            except Exception:
-                logger.warning(
-                    "Harness Phase 2.8: written state not recorded for %s; its revert will be refused",
-                    tool_name,
-                    exc_info=True,
+            if (
+                isinstance(capture, dict)
+                and isinstance(capture.get("written"), dict)
+                and isinstance(capture.get("prior_enabled"), bool)
+            ):
+                recorded = await self._record_written_state(
+                    entry_id, capture["written"], extra={"prior_enabled": capture["prior_enabled"]}
                 )
+            else:
+                recorded = False
+        if not recorded:
+            logger.error(
+                "Harness Phase 2.8: written state not recorded for %s (ledger entry %s); it cannot be reverted",
+                tool_name,
+                entry_id,
+            )
+            return (
+                f"[harness] {tool_name} was applied but could NOT be made revertible (its written state "
+                "was not recorded); no revert is available for this change."
+            )
         await self._maybe_push_action_review(
             ctx, tool_name, entry_id, session_id, snapshotted=snapshotted, status=status
         )
+        return None
 
     async def _maybe_push_action_review(
         self,
@@ -2407,7 +2419,7 @@ class AgentRunner:
                                         external_ref=outcome.external_ref,
                                         keyed=send_key is not None,
                                     )
-                                    await self._after_compensable_call(
+                                    _unrevertible_note = await self._after_compensable_call(
                                         _ctx,
                                         tc["name"],
                                         entry_id,
@@ -2417,6 +2429,8 @@ class AgentRunner:
                                         tool_input=dispatch_input,
                                         outcome=outcome,
                                     )
+                                    if _unrevertible_note:
+                                        result_text = f"{_unrevertible_note}\n{result_text}"
                                     # F026: Record in execution ledger (post-dispatch)
                                     if ledger:
                                         ledger.record(
@@ -3051,7 +3065,7 @@ class AgentRunner:
                                         external_ref=outcome.external_ref,
                                         keyed=keyed,
                                     )
-                                    await self._after_compensable_call(
+                                    _unrevertible_note = await self._after_compensable_call(
                                         ctx,
                                         tool_name,
                                         entry_id,
@@ -3061,6 +3075,8 @@ class AgentRunner:
                                         tool_input=tool_input,
                                         outcome=outcome,
                                     )
+                                    if _unrevertible_note:
+                                        result_text = f"{_unrevertible_note}\n{result_text}"
                             finally:
                                 if _write_lock2 is not None:
                                     release_write_path_lock(_write_lock2)

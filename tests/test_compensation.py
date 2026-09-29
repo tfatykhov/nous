@@ -1997,3 +1997,41 @@ async def test_unknown_outcome_write_still_gets_a_review_card() -> None:
     await runner._maybe_push_action_review(ctx, "resolve_decision", entry, "s1", snapshotted=True, status="unknown")
     await runner._maybe_push_action_review(ctx, "write_file", entry, "s1", snapshotted=True, status="error")
     pusher.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unrecorded_written_state_is_retried_then_never_advertised_as_revertible() -> None:
+    """codex P1 #652 (runner.py:545): a failed record_written_state was only
+    logged, then a review card advertised a revert the compensator refuses.
+    It is now retried; if it still fails, no card is pushed and the caller
+    is told the change is applied but not revertible."""
+    from unittest.mock import AsyncMock
+
+    from nous.api.call_outcome import CallOutcome
+
+    runner = _bare_runner(AsyncMock())
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
+    runner._action_review_pusher = pusher = AsyncMock()
+    entry = uuid4()
+    outcome = CallOutcome(check_capture={"prior_enabled": True, "written": _WRITTEN_CHECK})
+    kwargs = dict(snapshotted=True, status="success", tool_input={"name": "c", "action": "disable"}, outcome=outcome)
+    ctx = ExecutionContext(kind="dag_node", undoable=True)
+
+    store = runner._snap_store
+    store.record_written_state.side_effect = [TimeoutError(), True]
+    with patch("nous.api.runner.asyncio.sleep", new=AsyncMock()):
+        note = await runner._after_compensable_call(ctx, "heartbeat_check_manage", entry, "s1", **kwargs)
+    assert note is None and store.record_written_state.await_count == 2
+    pusher.assert_awaited_once()
+
+    for failure in (TimeoutError(), False):
+        pusher.reset_mock()
+        store.record_written_state.reset_mock(side_effect=True)
+        if isinstance(failure, Exception):
+            store.record_written_state.side_effect = failure
+        else:
+            store.record_written_state.return_value = failure
+        with patch("nous.api.runner.asyncio.sleep", new=AsyncMock()):
+            note = await runner._after_compensable_call(ctx, "heartbeat_check_manage", entry, "s1", **kwargs)
+        assert note and "NOT be made revertible" in note
+        pusher.assert_not_awaited()
