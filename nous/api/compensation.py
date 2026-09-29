@@ -108,7 +108,7 @@ class CompensationRegistry:
 
 
 class SnapshotStore:
-    """Reads and writes ``nous_system.compensation_snapshots`` (migration 077)."""
+    """Reads and writes ``nous_system.compensation_snapshots`` (migration 080)."""
 
     def __init__(self, database: Any, agent_id: str, *, timeout: float = 5.0) -> None:
         self._db = database

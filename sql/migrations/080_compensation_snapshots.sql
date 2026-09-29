@@ -1,4 +1,4 @@
--- Migration 077: Compensation snapshots (harness Phase 2.8)
+-- Migration 080: Compensation snapshots (harness Phase 2.8)
 --
 -- Stores the prior state before a compensable tool call, linked to its
 -- ledger row. The compensator reads this to undo the call on review.revert.

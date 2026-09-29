@@ -45,7 +45,7 @@ The `TOOL_CLASSES` table gains a `compensable: bool` field (default `False`). Th
 
 ### 2. Compensation Snapshots
 
-Before a compensable tool dispatches, the runner captures a snapshot of the state that will change. Snapshots are stored in a new DB table `nous_system.compensation_snapshots` (migration 077).
+Before a compensable tool dispatches, the runner captures a snapshot of the state that will change. Snapshots are stored in a new DB table `nous_system.compensation_snapshots` (migration 080).
 
 ```sql
 CREATE TABLE nous_system.compensation_snapshots (
@@ -120,12 +120,12 @@ The check is in `DAGCreateRequest._validate_graph` (which already walks the grap
 ### Task 2: Compensation Snapshots (migration + model + capture)
 
 **Files:**
-- Create: `sql/migrations/077_compensation_snapshots.sql`
+- Create: `sql/migrations/080_compensation_snapshots.sql`
 - Modify: `nous/storage/models.py`
 - Modify: `nous/api/compensation.py` (add `SnapshotStore`)
 - Test: `tests/test_compensation.py`
 
-- [ ] Migration 077: `compensation_snapshots` table
+- [ ] Migration 080: `compensation_snapshots` table
 - [ ] ORM model `CompensationSnapshot`
 - [ ] `SnapshotStore` with `capture()`, `get()`, `mark_reverted()` methods
 - [ ] Tests: capture creates a row; mark_reverted is idempotent

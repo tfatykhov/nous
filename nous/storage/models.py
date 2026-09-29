@@ -1205,7 +1205,7 @@ class DAGNode(Base):
         JSONB, nullable=False, default=list, server_default="'[]'::jsonb"
     )
 
-    # Harness Phase 2.8 (migration 077): the node is declared undoable —
+    # Harness Phase 2.8 (migration 080): the node is declared undoable —
     # the harness enforces that every tool call from it uses a compensable tool.
     undoable: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
@@ -1573,7 +1573,7 @@ class ProcessRunLog(Base):
 class CompensationSnapshot(Base):
     """Harness Phase 2.8: prior state before a compensable tool call.
 
-    See migration 077. Linked to an execution ledger row; the compensator
+    See migration 080. Linked to an execution ledger row; the compensator
     reads ``snapshot_data`` to undo the call on ``review.revert``.
     ``reverted_at IS NOT NULL`` makes double revert a no-op.
     """
