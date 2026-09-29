@@ -165,11 +165,15 @@ class CheckRegistry:
 
     def register(self, check: BaseCheck, permanent: bool = False) -> None:
         """Register a check. Permanent checks cannot be unregistered."""
+        # Replacing a registered check (a dynamic check's update re-sync) keeps
+        # its fence: the check it fences is still to be disabled. Only a fresh
+        # registration drops a stale fence left on an absent name.
+        if check.name not in self._checks:
+            self._fenced.discard(check.name)
         self._checks[check.name] = check
         # A fresh registration starts with no recorded outcome, so a stale
         # failure from an earlier check of the same name cannot leak into it.
         self._disabled_run_failures.pop(check.name, None)
-        self._fenced.discard(check.name)
         if permanent:
             self._permanent.add(check.name)
         logger.info("Registered heartbeat check: %s (permanent=%s)", check.name, permanent)

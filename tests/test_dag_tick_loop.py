@@ -1766,7 +1766,7 @@ async def test_completion_check_defers_any_outcome_while_run_in_flight(shell_sta
 # ---------------------------------------------------------------------------
 
 
-def _finalize_setup(update_fails: bool = False):
+def _finalize_setup(update_fails: bool = False, reregister: bool = False):
     from types import SimpleNamespace
 
     from nous.dag.orchestrator import DAGOrchestrator
@@ -1804,6 +1804,18 @@ def _finalize_setup(update_fails: bool = False):
     store = AsyncMock()
 
     async def update_node(node_id, **fields):
+        if reregister:
+            # manage_check(action="update") re-syncs, registering a replacement.
+            replacement = DynamicCheck(
+                check_id="dag-check-id",
+                name="dag-worker",
+                prompt="do the node's updated work",
+                tools=[],
+                interval=1,
+                timeout=30,
+                runner=agent,
+            )
+            registry.register(replacement)
         # A scheduled tick and a REST trigger land during the terminal write.
         await hb._tick()
         await hb.trigger_check(check.name)
@@ -1825,8 +1837,11 @@ def _finalize_setup(update_fails: bool = False):
 
 
 @pytest.mark.asyncio
-async def test_no_check_run_starts_while_node_terminal_status_is_persisted():
-    _, orch, registry, node, agent, loader = _finalize_setup()
+@pytest.mark.parametrize("reregister", [False, True])
+async def test_no_check_run_starts_while_node_terminal_status_is_persisted(reregister):
+    # reregister: codex P1 (PR #656) — an update re-registering the check
+    # mid-write must not drop the fence.
+    _, orch, registry, node, agent, loader = _finalize_setup(reregister=reregister)
 
     await orch._finalize_awaiting_check_node(node, status="completed", result={"ok": True})
 
