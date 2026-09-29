@@ -1,4 +1,4 @@
--- 077: process_run_log — per-phase runtime heartbeat for fault detection
+-- 078: process_run_log — per-phase runtime heartbeat for fault detection
 --
 -- One row per periodic memory-process execution (e.g. 'sleep/stale_scan').
 -- Written by ProcessRecorder; consumed by ProcessFaultCheck heartbeat check.
