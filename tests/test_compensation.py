@@ -1975,3 +1975,25 @@ async def test_write_is_bound_to_the_snapshotted_path(tmp_path) -> None:
         call_outcome._current.reset(token)
     assert result.get("is_error") is True
     assert other.read_text() == "other" and first.read_text() == "first"
+
+
+@pytest.mark.asyncio
+async def test_unknown_outcome_write_still_gets_a_review_card() -> None:
+    """codex P1 #652 (runner.py:597): a timed-out write_file is closed
+    `unknown` -- its worker thread may still write -- so it must still get
+    the review card; its revert applies only if the recorded write landed.
+    Other tools record no written state on an unknown outcome: no card."""
+    from unittest.mock import AsyncMock
+
+    runner = _bare_runner(AsyncMock())
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
+    runner._action_review_pusher = pusher = AsyncMock()
+    ctx = ExecutionContext(kind="subtask")
+    entry = uuid4()
+    await runner._maybe_push_action_review(ctx, "write_file", entry, "s1", snapshotted=True, status="unknown")
+    pusher.assert_awaited_once_with("write_file", entry, "s1")
+
+    pusher.reset_mock()
+    await runner._maybe_push_action_review(ctx, "resolve_decision", entry, "s1", snapshotted=True, status="unknown")
+    await runner._maybe_push_action_review(ctx, "write_file", entry, "s1", snapshotted=True, status="error")
+    pusher.assert_not_awaited()

@@ -592,8 +592,14 @@ class AgentRunner:
         """Push the review card after a SUCCESSFUL, snapshotted background
         mutation -- the surface from which the user can invoke review.revert.
         Fail-open: the mutation already happened; a card that cannot be
-        pushed is logged, never an error for the call."""
-        if not (snapshotted and status == "success" and ctx.is_background):
+        pushed is logged, never an error for the call.
+
+        A write_file whose outcome is ``unknown`` (a timed-out worker thread
+        may still write) gets a card too: its revert restores only while the
+        file holds exactly the recorded written content, so it determines
+        itself whether the write landed."""
+        surfaced = status == "success" or (status == "unknown" and tool_name == "write_file")
+        if not (snapshotted and surfaced and ctx.is_background):
             return
         if not self._settings.compensation_auto_review_enabled or self._action_review_pusher is None:
             return
@@ -2383,6 +2389,14 @@ class AgentRunner:
                                             external_ref=outcome.external_ref,
                                             keyed=send_key is not None,
                                         )
+                                        await self._maybe_push_action_review(
+                                            _ctx,
+                                            tc["name"],
+                                            entry_id,
+                                            session_id,
+                                            snapshotted=_snapshotted,
+                                            status="unknown",
+                                        )
                                         raise
                                     _status = _close_status(is_error, timed_out or outcome.uncertain)
                                     await self._ledger_close(
@@ -3006,6 +3020,14 @@ class AgentRunner:
                                             "cancelled mid-call — outcome unknown",
                                             external_ref=outcome.external_ref,
                                             keyed=keyed,
+                                        )
+                                        await self._maybe_push_action_review(
+                                            ctx,
+                                            tool_name,
+                                            entry_id,
+                                            session_id,
+                                            snapshotted=_snapshotted2,
+                                            status="unknown",
                                         )
                                         raise
                                     except Exception as exc:
