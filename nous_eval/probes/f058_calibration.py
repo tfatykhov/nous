@@ -434,18 +434,18 @@ async def run(
         "cutoff_date_deprecated": _ERA_CUTOFF_DATE.isoformat(),
         "n_excluded": len(excluded_rows),
         "pre_era": {
-            "label": "Factor=0.7627 era",
             "factor": _HISTORICAL_F058_FACTOR,
             **summarize("pre_era", pre_era_pairs),
+            "label": "Factor=0.7627 era",
         },
         "post_era": {
-            "label": "Factor=1.0 era",
             "factor": _DEFAULT_FACTOR,
             **summarize("post_era", post_era_pairs),
+            "label": "Factor=1.0 era",
         },
         "overall": {
-            "label": "All eras (pooled, post-F058 only)",
             **summarize("overall", all_pairs),
+            "label": "All eras (pooled, post-F058 only)",
         },
     }
 

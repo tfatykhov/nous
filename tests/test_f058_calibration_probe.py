@@ -689,10 +689,15 @@ class TestEraSplit:
         result = await run(conn, "a", 1.0)
         es = result["era_split"]
 
-        assert es["cutoff_date"] == _ERA_CUTOFF_DATE.isoformat()
+        assert es["classification"] == "factor-based"
+        assert es["cutoff_date_deprecated"] == _ERA_CUTOFF_DATE.isoformat()
         assert es["pre_era"]["n"] == 2
         assert es["post_era"]["n"] == 3
         assert es["overall"]["n"] == 5
+        # Codex P2: summarize()'s own label must not clobber the era label.
+        assert es["pre_era"]["label"] == "Factor=0.7627 era"
+        assert es["post_era"]["label"] == "Factor=1.0 era"
+        assert es["overall"]["label"] == "All eras (pooled, post-F058 only)"
 
     @pytest.mark.asyncio
     async def test_era_split_computes_separate_metrics(self):
