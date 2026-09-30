@@ -1664,6 +1664,48 @@ async def test_concurrent_writes_to_one_path_snapshot_and_write_in_turn(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_concurrent_writes_revert_restores_first_not_original(tmp_path) -> None:
+    """codex P1 #652 (runner.py:684): reverting the second of two concurrent
+    writes must restore the state left by the first write, not the state before
+    either. Without per-path serialization both calls snapshotted the same prior
+    content and reverting B would silently erase A."""
+    from nous.api import compensation as comp
+
+    target = tmp_path / "data.txt"
+    target.write_text("original")
+
+    # Serialize: A acquires lock, snapshots "original", writes "A", releases
+    lock_a = comp.write_path_lock("data.txt", str(tmp_path))
+    await lock_a.acquire()
+    snap_a = await comp.snapshot_for_write_file("data.txt", str(tmp_path))
+    assert snap_a["prior_content"] == "original"
+    target.write_text("A")
+    snap_a["written_content_hash"] = _h("A")
+    snap_a["written_size"] = 1
+    comp.release_write_path_lock(lock_a)
+
+    # B acquires lock after A releases: snapshots "A", writes "B", releases
+    lock_b = comp.write_path_lock("data.txt", str(tmp_path))
+    await lock_b.acquire()
+    snap_b = await comp.snapshot_for_write_file("data.txt", str(tmp_path))
+    assert snap_b["prior_content"] == "A"  # key: B saw A's content, not original
+    target.write_text("B")
+    snap_b["written_content_hash"] = _h("B")
+    snap_b["written_size"] = 1
+    comp.release_write_path_lock(lock_b)
+
+    # File now contains "B"; reverting B must restore "A"
+    res = await comp.compensate_write_file(uuid4(), snap_b, None)
+    assert res.success
+    assert target.read_text() == "A"  # restored to A, not original
+
+    # Reverting A now must restore to original
+    res = await comp.compensate_write_file(uuid4(), snap_a, None)
+    assert res.success
+    assert target.read_text() == "original"
+
+
+@pytest.mark.asyncio
 async def test_after_compensable_call_records_the_transactional_decision_state() -> None:
     """codex P1 #652 (runner.py:530/660): the written AND prior review states
     come from the resolving transaction (CallOutcome.review_capture) -- never
