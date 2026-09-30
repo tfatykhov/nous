@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -26,6 +27,14 @@ class CallOutcome:
     # write_file refuses to write anywhere else, so a symlink retargeted
     # between the snapshot and the write cannot mutate an unsnapshotted file.
     write_target: str | None = None
+    # Phase 2.8: the state that snapshot recorded there (a sha256 hex, or
+    # builtin_tools.ABSENT); write_file refuses to replace anything else.
+    write_expected: str | None = None
+    # Phase 2.8: this call's builtin_tools.WriteFence, so a revert can stop a
+    # write orphaned by a cancelled call from landing after it.
+    write_fence: Any = None
+    # Phase 2.8: the per-path lock the runner holds for this write_file.
+    write_lock: Any = None
 
 
 _current: ContextVar[CallOutcome | None] = ContextVar("tool_call_outcome", default=None)

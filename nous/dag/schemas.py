@@ -504,11 +504,17 @@ class DAGCreateRequest(BaseModel):
                 if name in nodes_by_name
                 and nodes_by_name[name].type in (DAGNodeType.subtask, DAGNodeType.callback, DAGNodeType.check)
             ]
-            non_undoable = [n.name for n in acting if not n.undoable]
+            # A check node never counts as undoable, whatever it declares:
+            # it runs as a dynamic heartbeat check whose execution context
+            # does not carry the node's undoable flag (so nothing enforces
+            # it), and the only compensable call a check may make is a
+            # heartbeat_check_manage disable (codex P1 on #652).
+            non_undoable = [n.name for n in acting if not n.undoable or n.type == DAGNodeType.check]
             if non_undoable:
                 raise ValueError(
                     f"Approval node '{appr.name}': default_option is a 'proceed' option, "
-                    f"but downstream acting nodes {non_undoable} are not declared undoable"
+                    f"but downstream acting nodes {non_undoable} are not declared undoable "
+                    "(check nodes can never be undoable)"
                 )
             # A completion_check is a model-authored shell command the
             # orchestrator runs directly (create_subprocess_shell): it never

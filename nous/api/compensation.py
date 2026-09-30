@@ -59,6 +59,11 @@ def write_path_lock(path: str, workspace_dir: str) -> asyncio.Lock:
     return lock
 
 
+def write_path_lock_is(full_path: str, lock: asyncio.Lock) -> bool:
+    """Whether ``lock`` is the lock for ``full_path`` as it resolves now."""
+    return _write_path_locks.get(write_path_key(full_path, "")) is lock
+
+
 def release_write_path_lock(lock: asyncio.Lock) -> None:
     """Release ``lock`` and drop idle entries so the map stays bounded."""
     lock.release()
@@ -121,7 +126,19 @@ class SnapshotStore:
         ledger_entry_id: UUID,
         tool_name: str,
         snapshot_data: dict[str, Any],
+        card_pending: bool = False,
     ) -> UUID:
+        """Persist the prior state BEFORE the call is dispatched.
+
+        ``card_pending`` records, in the same insert, the intent to publish a
+        review card: written ahead of the side effect, so a process that dies
+        at any point after dispatch still leaves a marker the pending-card
+        sweep finds (codex P1 on #652). The sweep and the post-call path
+        clear it once the ledger shows the call cannot have changed anything,
+        or once the card is published.
+        """
+        if card_pending:
+            snapshot_data = {**snapshot_data, "_card_pending": True, "_card_tool_name": tool_name}
         snapshot_id = uuid4()
         row = CompensationSnapshot(
             id=snapshot_id,
@@ -167,46 +184,12 @@ class SnapshotStore:
             await s.commit()
             return (res.rowcount or 0) == 1
 
-    async def mark_card_pending(
-        self,
-        ledger_entry_id: UUID,
-        tool_name: str,
-    ) -> bool:
-        """Mark that a review card needs to be published for this snapshot.
-
-        Called before the first publication attempt; cleared by ``mark_card_published``
-        once the push succeeds. Idempotent: only sets the flag if not already set.
-        Returns whether a row was updated (codex P1 on #652: durable card publication).
-        """
-
-        async def _write() -> bool:
-            async with self._db.session() as s:
-                row = (
-                    await s.execute(
-                        select(CompensationSnapshot)
-                        .where(CompensationSnapshot.ledger_entry_id == ledger_entry_id)
-                        .where(CompensationSnapshot.agent_id == self._agent_id)
-                        .limit(1)
-                    )
-                ).scalar_one_or_none()
-                if row is None:
-                    return False
-                data = dict(row.snapshot_data or {})
-                if data.get("_card_pending"):
-                    return True  # already pending
-                data["_card_pending"] = True
-                data["_card_tool_name"] = tool_name
-                row.snapshot_data = data
-                await s.commit()
-                return True
-
-        return await asyncio.wait_for(_write(), timeout=self._timeout)
-
     async def mark_card_published(
         self,
         ledger_entry_id: UUID,
     ) -> bool:
-        """Clear the pending-card marker after a successful push.
+        """Clear the pending-card marker: the card was published, or the
+        ledger shows the call changed nothing.
 
         Returns whether a row was updated (codex P1 on #652: durable card publication).
         """
@@ -219,6 +202,11 @@ class SnapshotStore:
                         .where(CompensationSnapshot.ledger_entry_id == ledger_entry_id)
                         .where(CompensationSnapshot.agent_id == self._agent_id)
                         .limit(1)
+                        # Row-locked read-modify-write: the card marker and
+                        # the written state are merged into one JSONB value
+                        # by different tasks, and an unlocked merge could
+                        # write back a copy missing the other's key.
+                        .with_for_update()
                     )
                 ).scalar_one_or_none()
                 if row is None:
@@ -237,30 +225,59 @@ class SnapshotStore:
     async def get_pending_cards(
         self,
         limit: int = 10,
-    ) -> list[tuple[UUID, str]]:
-        """Return snapshots that need a review card published.
+        *,
+        absent_ledger_after_seconds: float = 3600.0,
+    ) -> list[tuple[UUID, str, str | None]]:
+        """Snapshots whose review card is still pending, with their ledger
+        status: ``(ledger_entry_id, tool_name, status)``.
 
-        Returns list of (ledger_entry_id, tool_name) tuples for snapshots with
-        ``_card_pending=True`` that haven't been reverted.
-        (codex P1 on #652: durable card publication).
+        The intent is written before dispatch, so the ledger decides what a
+        marker means: ``success``/``unknown`` -- publish; ``error``/``blocked``
+        -- nothing changed, clear it. A ``pending`` row is a call still in
+        flight (or, after a restart, one the startup sweep turns ``unknown``)
+        and is excluded HERE, in SQL, so long-running calls cannot fill the
+        batch and starve newer cards. A snapshot with no ledger row (the
+        ledger insert fails open) is returned with status None once older
+        than ``absent_ledger_after_seconds``: the call may have run, and the
+        compensators' own state guards make a card for a call that never
+        landed harmless. (codex P1 on #652: durable card publication.)
         """
+        from datetime import timedelta
 
-        async def _read() -> list[tuple[UUID, str]]:
+        from sqlalchemy import and_, or_
+
+        from nous.storage.models import ExecutionLedgerEntry
+
+        cutoff = datetime.now(UTC) - timedelta(seconds=absent_ledger_after_seconds)
+
+        async def _read() -> list[tuple[UUID, str, str | None]]:
             async with self._db.session() as s:
-                # Query for snapshots with _card_pending=True in JSONB
                 result = await s.execute(
                     select(
                         CompensationSnapshot.ledger_entry_id,
-                        CompensationSnapshot.snapshot_data,
+                        CompensationSnapshot.tool_name,
+                        ExecutionLedgerEntry.status,
+                    )
+                    .outerjoin(
+                        ExecutionLedgerEntry,
+                        ExecutionLedgerEntry.id == CompensationSnapshot.ledger_entry_id,
                     )
                     .where(CompensationSnapshot.agent_id == self._agent_id)
                     .where(CompensationSnapshot.reverted_at.is_(None))
                     .where(CompensationSnapshot.snapshot_data["_card_pending"].astext == "true")
+                    .where(
+                        or_(
+                            ExecutionLedgerEntry.status.in_(("success", "unknown", "error", "blocked")),
+                            and_(
+                                ExecutionLedgerEntry.id.is_(None),
+                                CompensationSnapshot.created_at < cutoff,
+                            ),
+                        )
+                    )
                     .order_by(CompensationSnapshot.created_at)
                     .limit(limit)
                 )
-                rows = result.all()
-                return [(row[0], (row[1] or {}).get("_card_tool_name", "unknown")) for row in rows]
+                return [(row[0], row[1], row[2]) for row in result.all()]
 
         return await asyncio.wait_for(_read(), timeout=self._timeout)
 
@@ -288,6 +305,11 @@ class SnapshotStore:
                         .where(CompensationSnapshot.ledger_entry_id == ledger_entry_id)
                         .where(CompensationSnapshot.agent_id == self._agent_id)
                         .limit(1)
+                        # Row-locked read-modify-write: the card marker and
+                        # the written state are merged into one JSONB value
+                        # by different tasks, and an unlocked merge could
+                        # write back a copy missing the other's key.
+                        .with_for_update()
                     )
                 ).scalar_one_or_none()
                 if row is None:
@@ -361,9 +383,10 @@ async def snapshot_for_write_file(
     """Capture the prior state of a file before write_file overwrites it.
 
     I/O is offloaded to a worker thread so the event loop is never stalled.
-    Files larger than ``_FILE_SNAPSHOT_MAX_BYTES`` are flagged ``oversized=True``
-    and an existing file whose content cannot be read carries ``capture_error``;
-    neither has ``prior_content`` captured, and callers in undoable contexts
+    The prior content is recorded as bytes (``prior_b64``, with its
+    ``prior_sha256``). Files larger than ``_FILE_SNAPSHOT_MAX_BYTES`` are
+    flagged ``oversized=True`` and an existing file whose content cannot be
+    read carries ``capture_error``; neither has ``prior_b64`` captured, and callers in undoable contexts
     should raise ``SnapshotBlocksDispatch`` rather than proceed without a snapshot.
 
     A path ``write_file`` would refuse (outside the workspace, via ``..`` or a
@@ -371,7 +394,10 @@ async def snapshot_for_write_file(
     filesystem access and flagged ``invalid_path``: nothing outside the
     workspace is ever stat'ed or read into a snapshot.
     """
+    import base64
+    import hashlib
     import os
+    import stat
 
     from nous.api.builtin_tools import _validate_path
 
@@ -389,13 +415,15 @@ async def snapshot_for_write_file(
     full_path = str(target)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
 
-    def _capture() -> tuple[bool, str | None, bool]:
+    def _capture() -> tuple[bool, bytes | None, bool]:
         try:
             f = open(full_path, "rb", opener=lambda p, flags: os.open(p, flags | nofollow))
         except FileNotFoundError:
             return False, None, False
         with f:
             st = os.fstat(f.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                raise ValueError(f"{path!r} is not a regular file")
             if st.st_size > _FILE_SNAPSHOT_MAX_BYTES:
                 return True, None, True
             data = f.read(_FILE_SNAPSHOT_MAX_BYTES + 1)
@@ -404,24 +432,27 @@ async def snapshot_for_write_file(
                 raise ValueError(f"{path!r} changed while it was being snapshotted")
         if len(data) > _FILE_SNAPSHOT_MAX_BYTES:
             return True, None, True
-        return True, data.decode("utf-8", errors="replace"), False
+        return True, data, False
 
     existed = True
-    prior_content: str | None = None
+    prior: bytes | None = None
     oversized = False
     capture_error: str | None = None
     try:
-        existed, prior_content, oversized = await asyncio.to_thread(_capture)
+        existed, prior, oversized = await asyncio.to_thread(_capture)
     except Exception as exc:
         # The file exists but its content could not be read safely: the
         # snapshot cannot restore it, and callers must know that (capture_error).
-        prior_content = None
+        prior = None
         capture_error = f"{type(exc).__name__}: {exc}"
+    # The prior content is kept as BYTES (base64), never decoded: a file that
+    # is not valid UTF-8 is restored byte for byte (codex P1 on #652).
     snap: dict[str, Any] = {
         "path": path,
         "full_path": full_path,
         "existed": existed,
-        "prior_content": prior_content,
+        "prior_b64": base64.b64encode(prior).decode("ascii") if prior is not None else None,
+        "prior_sha256": hashlib.sha256(prior).hexdigest() if prior is not None else None,
         "oversized": oversized,
     }
     if capture_error is not None:
@@ -434,21 +465,28 @@ async def compensate_write_file(
     snapshot_data: dict[str, Any],
     deps: Any,
 ) -> CompensationResult:
-    """Restore prior file content or delete if file was new.
+    """Restore prior file bytes, or delete the file if the call created it.
 
-    Stale-revert guard: the current file is compared with the
-    ``written_size`` and ``written_content_hash`` recorded at snapshot time
-    before anything is touched. A mismatch -- or a file our write left
-    present that is now gone -- means something changed it after our
-    ``write_file`` ran, and the revert is refused rather than discard that
-    newer change. A snapshot without both cannot make that distinction and
-    is refused too. The size is compared first, so a file that has since
-    grown is refused without being read; the bounded hash read and the
-    restore run on a worker thread, never on the event loop.
+    Every step goes through the same compare-and-replace primitive as the
+    forward write (``builtin_tools.atomic_replace_bytes`` /
+    ``remove_if_matches``): the target is never followed through a symlink,
+    the prior bytes land via a temp file and an atomic rename (a failed
+    restore leaves the file untouched and retryable), and the change is made
+    only while the file still holds exactly what the call wrote
+    (``written_content_hash``) -- anything else is a newer change and the
+    revert is refused rather than discard it. A snapshot that does not
+    record what was written cannot make that distinction and is refused.
+
+    Idempotent: a file already back at its prior state (or, for a created
+    file, already absent) reports success, so a revert whose completion was
+    not recorded can simply be retried. Before looking, the revert revokes
+    this call's write fence: a write orphaned by a cancelled call can then
+    no longer land after the revert decided the file was already reverted.
     """
+    import base64
+
     full_path = snapshot_data.get("full_path", "")
     existed = snapshot_data.get("existed", False)
-    prior_content = snapshot_data.get("prior_content")
     written_content_hash: str | None = snapshot_data.get("written_content_hash")
     written_size = snapshot_data.get("written_size")
 
@@ -458,76 +496,98 @@ async def compensate_write_file(
         # Without the hash of what the call wrote there is no way to tell our
         # write from a newer one, so the revert could destroy newer content.
         return CompensationResult(False, "revert refused: snapshot does not record what was written")
+    prior: bytes | None = None
+    if existed:
+        prior_b64 = snapshot_data.get("prior_b64")
+        if not isinstance(prior_b64, str):
+            return CompensationResult(False, "file existed but prior content not captured")
+        prior = base64.b64decode(prior_b64)
 
     # The same per-path lock write_file holds across its snapshot and write:
-    # held across the stale check AND the restore, no write can land between
+    # held across the check AND the restore, no runner write can land between
     # them and be overwritten by this revert.
     lock = write_path_lock(full_path, "")
     await lock.acquire()
     try:
         return await _check_and_restore_write_file(
-            full_path, existed, prior_content, written_size, written_content_hash
+            entry_id, full_path, existed, prior, written_size, written_content_hash
         )
     finally:
         release_write_path_lock(lock)
 
 
 async def _check_and_restore_write_file(
+    entry_id: UUID,
     full_path: str,
     existed: bool,
-    prior_content: str | None,
+    prior: bytes | None,
     written_size: int,
     written_content_hash: str,
 ) -> CompensationResult:
-    """``compensate_write_file``'s stale check and restore; the caller holds
-    the target's write-path lock."""
+    """``compensate_write_file``'s check and restore; the caller holds the
+    target's write-path lock."""
     import hashlib
-    import os
+    from pathlib import Path
 
-    def _current_matches() -> bool | None:
-        """None: the file is gone. Otherwise whether it still holds exactly
-        what our write left -- read at most ``written_size + 1`` bytes."""
-        try:
-            size = os.path.getsize(full_path)
-        except FileNotFoundError:
-            return None
-        if size != written_size:
-            return False
-        with open(full_path, "rb") as f:
-            data = f.read(written_size + 1)
-        return len(data) == written_size and hashlib.sha256(data).hexdigest() == written_content_hash
+    from nous.api.builtin_tools import (
+        ABSENT,
+        PreconditionFailed,
+        atomic_replace_bytes,
+        file_digest,
+        remove_if_matches,
+        revoke_write_fence,
+    )
+
+    target = Path(full_path)
+    limit = max(written_size, len(prior or b""))
+
+    def _revert() -> CompensationResult:
+        revoke_write_fence(str(entry_id))
+        current = file_digest(target, limit)
+        if existed:
+            assert prior is not None
+            if current == hashlib.sha256(prior).hexdigest():
+                return CompensationResult(True, f"{full_path} already holds its prior content")
+            if current == ABSENT:
+                # Our write left the file present: its absence now is a newer change.
+                return CompensationResult(False, f"revert refused: {full_path!r} was removed after the original write")
+            if current != written_content_hash:
+                raise PreconditionFailed("modified")
+            atomic_replace_bytes(target, prior, expected=written_content_hash, limit=limit)
+            return CompensationResult(True, f"restored prior content of {full_path}")
+        if current == ABSENT:
+            return CompensationResult(True, "file already absent")
+        if current != written_content_hash:
+            raise PreconditionFailed("modified")
+        remove_if_matches(target, written_content_hash, limit=limit)
+        return CompensationResult(True, f"deleted {full_path} (was new)")
 
     try:
-        matches = await asyncio.to_thread(_current_matches)
-    except Exception as exc:
-        return CompensationResult(False, f"stale-check read failed: {exc}")
-    if matches is None:
-        if not existed:
-            return CompensationResult(True, "file already absent")
-        # Our write left the file present: its absence now is a newer change.
-        return CompensationResult(False, f"revert refused: {full_path!r} was removed after the original write")
-    if not matches:
+        return await asyncio.to_thread(_revert)
+    except PreconditionFailed:
         return CompensationResult(
             False,
             f"revert refused: {full_path!r} was modified after the original write; "
             "revert would overwrite newer content",
         )
-
-    if existed and prior_content is None:
-        return CompensationResult(False, "file existed but prior content not captured")
-
-    def _restore() -> str:
-        if existed:
-            with open(full_path, "w", encoding="utf-8") as f:
-                f.write(prior_content)
-            return f"restored prior content of {full_path}"
-        os.remove(full_path)
-        return f"deleted {full_path} (was new)"
-
-    try:
-        return CompensationResult(True, await asyncio.to_thread(_restore))
     except Exception as exc:
         return CompensationResult(False, f"revert failed: {exc}")
+
+
+def snapshot_is_revertible(tool_name: str, snapshot_data: dict[str, Any]) -> bool:
+    """Whether a snapshot records everything its compensator's guard needs.
+
+    A card must not offer Revert for a snapshot its compensator would refuse:
+    the DB tools need the ``written`` state (recorded after the call, so a
+    call whose outcome was lost has none); write_file records what it writes
+    before dispatch.
+    """
+    data = snapshot_data or {}
+    if tool_name == "write_file":
+        return bool(data.get("written_content_hash")) and isinstance(data.get("written_size"), int)
+    if tool_name in ("resolve_decision", "heartbeat_check_manage"):
+        return isinstance(data.get("written"), dict)
+    return False
 
 
 async def compensate_heartbeat_check_manage(
@@ -573,6 +633,11 @@ async def compensate_heartbeat_check_manage(
         # re-enabling then would override that newer intent.
         if await loader.enable_if_unchanged(check_name, written["check_id"], written["enabled_state_token"]):
             return CompensationResult(True, f"re-enabled check {check_name!r}")
+        # Idempotent: the check (the same row) is enabled again -- by an
+        # earlier revert whose completion was not recorded, or by hand. That
+        # is the state this revert restores, so report it done.
+        if await loader.is_enabled(check_name, written["check_id"]):
+            return CompensationResult(True, f"check {check_name!r} is already enabled")
         return CompensationResult(
             False,
             f"revert refused: check {check_name!r} was changed or removed after the original disable",
@@ -641,6 +706,31 @@ async def compensate_resolve_decision(
             await s.commit()
         if (result.rowcount or 0) > 0:
             return CompensationResult(True, f"restored decision {decision_id} to outcome={prior.get('outcome')!r}")
+        # Idempotent: the decision already carries EVERY prior review field
+        # (the microsecond reviewed_at included) -- an earlier revert whose
+        # completion was not recorded. Report it done.
+        async with brain.db.session() as s:
+            row = (
+                await s.execute(
+                    select(
+                        Decision.outcome,
+                        Decision.outcome_result,
+                        Decision.reviewed_at,
+                        Decision.reviewer,
+                        Decision.superseded_by,
+                    )
+                    .where(Decision.id == UUID(decision_id))
+                    .where(Decision.agent_id == brain.agent_id)
+                )
+            ).first()
+        if row is not None and tuple(row) == (
+            prior.get("outcome"),
+            prior.get("outcome_result"),
+            _ts(prior.get("reviewed_at")),
+            prior.get("reviewer"),
+            _uuid(prior.get("superseded_by")),
+        ):
+            return CompensationResult(True, f"decision {decision_id} already carries its prior review state")
         return CompensationResult(
             False,
             f"revert refused: decision {decision_id} not found or reviewed again since the original call",

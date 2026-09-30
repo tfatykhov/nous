@@ -197,6 +197,34 @@ class TestResolveDecision:
         assert cap["written"]["outcome_result"] == "mine"
 
     @pytest.mark.asyncio
+    async def test_resolve_decision_capture_survives_a_cancel_during_the_commit(self, tools, brain, monkeypatch):
+        """codex P1 #652 (runner.py:645): the capture was attached to the call's
+        outcome only after brain.review returned, so a call cancelled while
+        its commit was in flight (outcome unknown -- it may have landed)
+        reported no written state and could never be reverted."""
+        import asyncio
+
+        from nous.api.call_outcome import CallOutcome
+        from nous.api.call_outcome import _current as outcome_var
+
+        did = await self._make_decision(tools, brain)
+
+        async def review_cancelled_mid_commit(*args, capture=None, **kwargs):
+            capture["prior"] = {"outcome": None}
+            capture["written"] = {"outcome": "noise"}
+            raise asyncio.CancelledError  # the commit was cancelled in flight
+
+        monkeypatch.setattr(brain, "review", review_cancelled_mid_commit)
+        outcome = CallOutcome()
+        token = outcome_var.set(outcome)
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await tools["resolve_decision"](decision_id=did, outcome="noise", resolution_note="x")
+        finally:
+            outcome_var.reset(token)
+        assert outcome.review_capture == {"prior": {"outcome": None}, "written": {"outcome": "noise"}}
+
+    @pytest.mark.asyncio
     async def test_resolve_decision_noise_allowed_in_background(self, tools, brain):
         """A background turn may mark a pending decision as noise, attributed to it."""
         did = await self._make_decision(tools, brain)

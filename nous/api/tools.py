@@ -2167,6 +2167,11 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         # resolving transaction, is what a compensation snapshot records.
         call_outcome = _outcome_var.get()
         capture: dict | None = {} if call_outcome is not None else None
+        # Attached BEFORE the await: Brain._review fills it in place before
+        # its commit, so a call cancelled mid-commit (outcome unknown) still
+        # reports the state it may have written.
+        if call_outcome is not None:
+            call_outcome.review_capture = capture
         try:
             detail = await brain.review(
                 UUID(decision_id),
@@ -2177,8 +2182,6 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 preserve_graded=_is_background,
                 capture=capture,
             )
-            if call_outcome is not None:
-                call_outcome.review_capture = capture
             text = f"Decision {detail.id} resolved: outcome={detail.outcome}"
             if detail.superseded_by:
                 text += f", superseded_by={detail.superseded_by}"
@@ -4885,14 +4888,15 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
             # compensation snapshot records for its stale-revert guard.
             call_outcome = _outcome_var.get()
             capture: dict | None = {} if call_outcome is not None and kwargs["action"] == "disable" else None
+            if capture is not None:
+                # Attached BEFORE the await (filled in place before the commit).
+                call_outcome.check_capture = capture
             result = await loader.manage_check(
                 action=kwargs["action"],
                 name=kwargs.get("name"),
                 updates=kwargs.get("updates"),
                 **({"capture": capture} if capture is not None else {}),
             )
-            if capture is not None:
-                call_outcome.check_capture = capture
             return {"content": [{"type": "text", "text": json.dumps(result)}]}
         except ValueError as e:
             return _tool_error(f"Error: {e}")

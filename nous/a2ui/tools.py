@@ -373,7 +373,13 @@ async def _server_compensation(
         try:
             snap = await snapshot_store.get_by_ledger_entry(_UUID(str(trace_id)))
             if snap is not None and snap.reverted_at is None:
-                revertible = compensation_registry.is_registered(snap.tool_name)
+                from nous.api.compensation import snapshot_is_revertible
+
+                # A Revert the compensator would refuse (e.g. the written
+                # state of a call whose outcome was lost) is not offered.
+                revertible = compensation_registry.is_registered(snap.tool_name) and snapshot_is_revertible(
+                    snap.tool_name, snap.snapshot_data
+                )
                 if revertible:
                     # The handler is the snapshot's tool, never the caller's
                     # string: review.revert dispatches on the snapshot, so a
@@ -404,11 +410,17 @@ def make_action_review_pusher(surface_service: Any, snapshot_store: Any, compens
 
     async def push(tool_name: str, ledger_entry_id: Any, session_id: str | None) -> str:
         trace_id = str(ledger_entry_id)
+        compensation = await _server_compensation(None, trace_id, snapshot_store, compensation_registry)
+        undo = (
+            "It can be undone from this card."
+            if compensation.get("revertible")
+            else "It could NOT be made revertible, so this card cannot undo it."
+        )
         params = {
             "title": f"Background change: {tool_name}",
-            "did": f"A background task ran {tool_name}. It can be undone from this card.",
+            "did": f"A background task ran {tool_name}. {undo}",
             "trace_id": trace_id,
-            "compensation": await _server_compensation(None, trace_id, snapshot_store, compensation_registry),
+            "compensation": compensation,
             # codex P2 on #652: mark as compensation card so builder skips
             # course_correct (trace_id is a ledger entry, not a decision ID).
             "compensation_card": True,

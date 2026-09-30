@@ -707,7 +707,24 @@ def _register_default_handlers(router: ActionRouter) -> None:
             return ActionResult(ok=False, message=f"revert failed: {exc}")
 
         if result.success:
-            await snap_store.mark_reverted(snapshot.id, result_message=result.message)
+            # The compensators are idempotent (a target already back at its
+            # prior state reports success), so if this record cannot be saved
+            # the card stays live and a retried Revert completes it -- the
+            # card is never resolved while the snapshot still reads unreverted.
+            for attempt in range(3):
+                try:
+                    await snap_store.mark_reverted(snapshot.id, result_message=result.message)
+                    break
+                except Exception:
+                    logger.warning(
+                        "review.revert: recording the revert failed (attempt %d)", attempt + 1, exc_info=True
+                    )
+                    if attempt == 2:
+                        return ActionResult(
+                            ok=False,
+                            message=f"reverted ({result.message}), but the revert could not be recorded; retry Revert",
+                        )
+                    await asyncio.sleep(0.5 * (attempt + 1))
             return ActionResult(
                 message=f"reverted: {result.message}",
                 resolve_surface=True,

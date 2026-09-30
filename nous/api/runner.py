@@ -37,7 +37,8 @@ from nous.api.cache_optimizer import CacheBreakDetector
 from nous.api.cache_optimizer import _hash as cache_hash
 from nous.api.call_outcome import CallOutcome
 from nous.api.compaction import ConversationCompactor
-from nous.api.compensation import release_write_path_lock, write_path_lock
+from nous.api.builtin_tools import ABSENT, drop_write_fence, register_write_fence
+from nous.api.compensation import release_write_path_lock, write_path_lock, write_path_lock_is
 from nous.api.execution_context import ExecutionContext, resolve_context
 from nous.api.idempotency import idempotency_key
 from nous.api.models import (  # noqa: F401 — re-exported for backward compat
@@ -493,31 +494,43 @@ class AgentRunner:
             fork.set_action_review_pusher(pusher)
 
     async def sweep_pending_cards(self, limit: int = 5) -> int:
-        """Retry publishing review cards that failed transiently.
+        """Publish review cards whose write-ahead intent is still pending.
 
-        Called from the heartbeat tick to ensure every compensation snapshot
-        eventually gets a user-visible review card. Returns the number of
-        cards successfully published.
-        (codex P1 on #652: durable card publication)
+        The intent is stored with the pre-dispatch snapshot, so every call
+        that may have changed state has one -- including a call whose process
+        died mid-dispatch. The ledger outcome decides what to do with it:
+        ``success``/``unknown`` (or no ledger row at all) publish the card
+        and clear the intent; ``error``/``blocked`` changed nothing and just
+        clear it. Rows still ``pending`` are never returned. Called at
+        startup and from the execution-ledger maintenance loop. Returns the
+        number of cards published. (codex P1 on #652: durable card publication)
         """
         if self._snap_store is None or self._action_review_pusher is None:
             return 0
         if not getattr(self._settings, "compensation_auto_review_enabled", False):
             return 0
+        from nous.cognitive.ledger_store import effective_orphan_threshold
+
         try:
-            pending = await self._snap_store.get_pending_cards(limit=limit)
+            pending = await self._snap_store.get_pending_cards(
+                limit=limit,
+                absent_ledger_after_seconds=effective_orphan_threshold(self._settings),
+            )
         except Exception:
             logger.warning("Harness Phase 2.8: get_pending_cards failed", exc_info=True)
             return 0
         published = 0
-        for ledger_entry_id, tool_name in pending:
+        for ledger_entry_id, tool_name, status in pending:
             try:
+                if status in ("error", "blocked"):
+                    await self._snap_store.mark_card_published(ledger_entry_id)
+                    continue
                 await self._action_review_pusher(tool_name, ledger_entry_id, None)
                 await self._snap_store.mark_card_published(ledger_entry_id)
                 published += 1
             except Exception:
                 logger.warning(
-                    "Harness Phase 2.8: retry card push failed for %s (entry %s)",
+                    "Harness Phase 2.8: pending card for %s (entry %s) not published",
                     tool_name,
                     ledger_entry_id,
                     exc_info=True,
@@ -576,7 +589,13 @@ class AgentRunner:
         no card advertises one and the returned note (prefixed to the tool
         result) tells the caller the change is applied and NOT revertible."""
         recorded = True
-        if snapshotted and status == "success" and tool_name == "resolve_decision" and self._snap_store is not None:
+        # ``unknown`` too: a call cancelled mid-commit may have written. The
+        # capture is filled before the commit, and the revert applies only
+        # while the row carries exactly that state (microsecond reviewed_at /
+        # fresh uuid token), so recording it for a write that never committed
+        # can only make its revert refuse -- never undo something else.
+        landed = status in ("success", "unknown")
+        if snapshotted and landed and tool_name == "resolve_decision" and self._snap_store is not None:
             # The prior and written states come from the resolving transaction
             # itself (row-locked), never a re-read before or after it: a
             # concurrent review can then neither be adopted as "written" nor
@@ -586,12 +605,7 @@ class AgentRunner:
                 recorded = await self._record_written_state(entry_id, capture["written"], prior=capture["prior"])
             else:
                 recorded = False
-        if (
-            snapshotted
-            and status == "success"
-            and tool_name == "heartbeat_check_manage"
-            and self._snap_store is not None
-        ):
+        if snapshotted and landed and tool_name == "heartbeat_check_manage" and self._snap_store is not None:
             # The state token the disable wrote AND the enabled state it
             # overwrote, both from its own transaction: the revert re-enables
             # only while the check still carries the token, and only if the
@@ -608,6 +622,12 @@ class AgentRunner:
                 )
             else:
                 recorded = False
+        # The card is published either way: when the written state is
+        # missing it says the change is NOT revertible (its revert would be
+        # refused), rather than leaving the user without any record of it.
+        await self._maybe_push_action_review(
+            ctx, tool_name, entry_id, session_id, snapshotted=snapshotted, status=status
+        )
         if not recorded:
             logger.error(
                 "Harness Phase 2.8: written state not recorded for %s (ledger entry %s); it cannot be reverted",
@@ -618,9 +638,6 @@ class AgentRunner:
                 f"[harness] {tool_name} was applied but could NOT be made revertible (its written state "
                 "was not recorded); no revert is available for this change."
             )
-        await self._maybe_push_action_review(
-            ctx, tool_name, entry_id, session_id, snapshotted=snapshotted, status=status
-        )
         return None
 
     async def _maybe_push_action_review(
@@ -633,49 +650,30 @@ class AgentRunner:
         snapshotted: bool,
         status: str,
     ) -> None:
-        """Push the review card after a SUCCESSFUL, snapshotted background
-        mutation -- the surface from which the user can invoke review.revert.
-        Fail-open: the mutation already happened; a card that cannot be
-        pushed is logged, never an error for the call.
+        """Resolve a snapshotted background call's write-ahead card intent.
 
-        A write_file whose outcome is ``unknown`` (a timed-out worker thread
-        may still write) gets a card too: its revert restores only while the
-        file holds exactly the recorded written content, so it determines
-        itself whether the write landed."""
-        surfaced = status == "success" or (status == "unknown" and tool_name == "write_file")
-        if not (snapshotted and surfaced and ctx.is_background):
+        ``success`` or ``unknown`` (a cancelled call may still have written):
+        publish the action_review card -- the surface from which the user can
+        invoke review.revert -- then clear the intent. ``error``/``blocked``:
+        nothing changed, clear it. Fail-open: the call already happened; a
+        failed publish or clear leaves the intent (stored before dispatch)
+        for the pending-card sweep, never an error for the call.
+        """
+        if not (snapshotted and ctx.is_background):
             return
         if not self._settings.compensation_auto_review_enabled or self._action_review_pusher is None:
             return
-        # codex P1 on #652: mark the card pending BEFORE attempting push,
-        # so a transient failure leaves a marker that can be retried on tick.
-        # Retry to make the marker durable: if both marker and push fail,
-        # the sweep cannot discover the orphan.
-        if self._snap_store is not None:
-            for attempt in range(3):
-                try:
-                    await self._snap_store.mark_card_pending(entry_id, tool_name)
-                    break
-                except Exception:
-                    logger.warning(
-                        "Harness Phase 2.8: mark_card_pending failed (attempt %d) for %s",
-                        attempt + 1,
-                        tool_name,
-                        exc_info=True,
-                    )
-                    if attempt < 2:
-                        await asyncio.sleep(0.5 * (attempt + 1))
         try:
-            await self._action_review_pusher(tool_name, entry_id, session_id)
-            # Mark published on success
+            if status in ("success", "unknown"):
+                await self._action_review_pusher(tool_name, entry_id, session_id)
             if self._snap_store is not None:
-                try:
-                    await self._snap_store.mark_card_published(entry_id)
-                except Exception:
-                    pass  # non-fatal: the card was pushed, flag will be cleared on next retry
+                await self._snap_store.mark_card_published(entry_id)
         except Exception:
-            logger.warning("Harness Phase 2.8: auto action_review push failed for %s", tool_name, exc_info=True)
-            # Card remains pending for retry on tick
+            logger.warning(
+                "Harness Phase 2.8: action_review card for %s left to the pending-card sweep",
+                tool_name,
+                exc_info=True,
+            )
 
     async def _capture_compensation_snapshot(
         self,
@@ -747,6 +745,14 @@ class AgentRunner:
                     return _unrevertible(f"{path!r} is too large to snapshot (exceeds 1MiB limit)")
                 if snap_data.get("capture_error"):
                     return _unrevertible(f"the prior content of {path!r} could not be read")
+                # The per-path lock was keyed on the path as it resolved
+                # BEFORE this call waited for it; the snapshot resolved it
+                # again. A symlink retargeted in between would leave this
+                # write under another path's lock, where a concurrent write
+                # to the real target could snapshot the same prior content.
+                held = outcome.write_lock if outcome is not None else None
+                if held is None or not write_path_lock_is(snap_data["full_path"], held):
+                    return _unrevertible(f"{path!r} resolved to a different file while waiting for its lock")
                 # Record what's about to be written so compensate_write_file can
                 # detect if the file was modified between the write and the revert.
                 content = (tool_input.get("content", "") or "").encode("utf-8")
@@ -793,11 +799,23 @@ class AgentRunner:
                 ledger_entry_id=entry_id,
                 tool_name=tool_name,
                 snapshot_data=snap_data,
+                # Write-ahead card intent (codex P1 on #652): stored before
+                # the side effect, so no crash after it can lose the card.
+                card_pending=bool(
+                    ctx.is_background
+                    and self._settings.compensation_auto_review_enabled
+                    and self._action_review_pusher is not None
+                ),
             )
             if tool_name == "write_file" and outcome is not None:
-                # Bind the write to the file just snapshotted: write_file
-                # re-resolves the path and refuses if it now names another.
+                # Bind the write to the file just snapshotted -- write_file
+                # re-resolves the path and refuses if it now names another --
+                # and to the state recorded there, which it verifies right
+                # before its rename. The fence lets a revert stop this write
+                # if the call is cancelled and its worker thread outlives it.
                 outcome.write_target = snap_data["full_path"]
+                outcome.write_expected = snap_data["prior_sha256"] if snap_data["existed"] else ABSENT
+                outcome.write_fence = register_write_fence(str(entry_id))
             return True
         except SnapshotBlocksDispatch:
             raise
@@ -2394,7 +2412,7 @@ class AgentRunner:
                                 # contexts, which refuse rather than proceed without a snapshot.
                                 _snap_blocked: str | None = None
                                 _snapshotted = False
-                                outcome = CallOutcome()
+                                outcome = CallOutcome(write_lock=_write_lock)
                                 try:
                                     _snapshotted = await self._capture_compensation_snapshot(
                                         _ctx,
@@ -2458,13 +2476,15 @@ class AgentRunner:
                                             external_ref=outcome.external_ref,
                                             keyed=send_key is not None,
                                         )
-                                        await self._maybe_push_action_review(
+                                        await self._after_compensable_call(
                                             _ctx,
                                             tc["name"],
                                             entry_id,
                                             session_id,
                                             snapshotted=_snapshotted,
                                             status="unknown",
+                                            tool_input=dispatch_input,
+                                            outcome=outcome,
                                         )
                                         raise
                                     _status = _close_status(is_error, timed_out or outcome.uncertain)
@@ -2497,6 +2517,10 @@ class AgentRunner:
                                             "error" if is_error else "success",
                                         )
                             finally:
+                                if outcome.write_fence is not None and not outcome.write_fence.started:
+                                    # The handler never handed the write to its
+                                    # worker thread: nothing can land any more.
+                                    drop_write_fence(outcome.write_fence)
                                 if _write_lock is not None:
                                     release_write_path_lock(_write_lock)
                             duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -3031,7 +3055,7 @@ class AgentRunner:
                                 # contexts, which refuse rather than proceed without a snapshot.
                                 _snap_blocked2: str | None = None
                                 _snapshotted2 = False
-                                outcome = CallOutcome()
+                                outcome = CallOutcome(write_lock=_write_lock2)
                                 try:
                                     _snapshotted2 = await self._capture_compensation_snapshot(
                                         ctx,
@@ -3092,23 +3116,36 @@ class AgentRunner:
                                             external_ref=outcome.external_ref,
                                             keyed=keyed,
                                         )
-                                        await self._maybe_push_action_review(
+                                        await self._after_compensable_call(
                                             ctx,
                                             tool_name,
                                             entry_id,
                                             session_id,
                                             snapshotted=_snapshotted2,
                                             status="unknown",
+                                            tool_input=tool_input,
+                                            outcome=outcome,
                                         )
                                         raise
                                     except Exception as exc:
                                         # The type only: an exception message can echo arguments.
+                                        _exc_status = _close_status(True, outcome.uncertain)
                                         await self._ledger_close(
                                             entry_id,
-                                            _close_status(True, outcome.uncertain),
+                                            _exc_status,
                                             f"{type(exc).__name__} raised during dispatch",
                                             external_ref=outcome.external_ref,
                                             keyed=keyed,
+                                        )
+                                        await self._after_compensable_call(
+                                            ctx,
+                                            tool_name,
+                                            entry_id,
+                                            session_id,
+                                            snapshotted=_snapshotted2,
+                                            status=_exc_status,
+                                            tool_input=tool_input,
+                                            outcome=outcome,
                                         )
                                         raise
                                     finally:
@@ -3135,6 +3172,10 @@ class AgentRunner:
                                     if _unrevertible_note:
                                         result_text = f"{_unrevertible_note}\n{result_text}"
                             finally:
+                                if outcome.write_fence is not None and not outcome.write_fence.started:
+                                    # The handler never handed the write to its
+                                    # worker thread: nothing can land any more.
+                                    drop_write_fence(outcome.write_fence)
                                 if _write_lock2 is not None:
                                     release_write_path_lock(_write_lock2)
                         duration_ms = int((time.monotonic() - start_time) * 1000)

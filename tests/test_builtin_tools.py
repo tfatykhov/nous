@@ -11,7 +11,6 @@ import pytest
 
 from nous.api.builtin_tools import (
     _MAX_FILE_SIZE,
-    _MAX_OUTPUT_CHARS,
     bash_tool,
     read_file_tool,
     write_file_tool,
@@ -327,31 +326,18 @@ class TestWriteFileTool:
         (e.g. ENOSPC during fsync) must leave the original file untouched."""
         import errno
         import os
-        import tempfile
 
-        from nous.api import builtin_tools
 
         target = tmp_path / "existing.txt"
         original_content = "original valuable content"
         target.write_text(original_content, encoding="utf-8")
 
-        real_mkstemp = tempfile.mkstemp
-        real_fsync = os.fsync
-
-        call_count = {"mkstemp": 0, "fsync": 0}
-        tmp_created: list[str] = []
-
-        def failing_mkstemp(**kwargs):
-            call_count["mkstemp"] += 1
-            fd, path = real_mkstemp(**kwargs)
-            tmp_created.append(path)
-            return fd, path
+        call_count = {"fsync": 0}
 
         def failing_fsync(fd):
             call_count["fsync"] += 1
             raise OSError(errno.ENOSPC, "No space left on device")
 
-        monkeypatch.setattr(tempfile, "mkstemp", failing_mkstemp)
         monkeypatch.setattr(os, "fsync", failing_fsync)
 
         result = await write_file_tool(
@@ -365,11 +351,7 @@ class TestWriteFileTool:
         assert "No space left" in text
 
         assert target.read_text(encoding="utf-8") == original_content
-
-        for tmp_path_str in tmp_created:
-            assert not os.path.exists(tmp_path_str), f"temp file {tmp_path_str} was not cleaned up"
-
-        assert call_count["mkstemp"] >= 1
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["existing.txt"], "temp file was not cleaned up"
         assert call_count["fsync"] >= 1
 
     @pytest.mark.asyncio

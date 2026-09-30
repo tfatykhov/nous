@@ -13,6 +13,7 @@ Tests cover:
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import os
 import tempfile
@@ -27,6 +28,7 @@ from nous.api.compensation import (
     CompensationResult,
     compensate_write_file,
     register_compensators,
+    release_write_path_lock,
     snapshot_for_write_file,
 )
 from nous.api.execution_context import ExecutionContext
@@ -38,6 +40,28 @@ from nous.dag.schemas import DAGCreateRequest, DAGEdgeSpec, DAGNodeSpec
 def _h(text: str) -> str:
     """The ``written_content_hash`` the runner records for ``text``."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _prior(text: str) -> dict:
+    """The byte snapshot ``snapshot_for_write_file`` records for ``text``."""
+    raw = text.encode("utf-8")
+    return {"prior_b64": base64.b64encode(raw).decode("ascii"), "prior_sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def _prior_text(snap: dict) -> str | None:
+    """The prior content a snapshot recorded, decoded for assertions."""
+    b64 = snap.get("prior_b64")
+    return None if b64 is None else base64.b64decode(b64).decode("utf-8")
+
+
+async def _held(path: str, workspace: str):
+    """A CallOutcome holding ``path``'s write lock, as the runner passes one."""
+    from nous.api.call_outcome import CallOutcome
+    from nous.api.compensation import write_path_lock
+
+    lock = write_path_lock(path, workspace)
+    await lock.acquire()
+    return CallOutcome(write_lock=lock)
 
 
 def _written(text: str) -> dict:
@@ -121,7 +145,7 @@ async def test_snapshot_for_write_file_existing() -> None:
     try:
         snap = await snapshot_for_write_file(path, "/")
         assert snap["existed"] is True
-        assert snap["prior_content"] == "original content"
+        assert _prior_text(snap) == "original content"
     finally:
         os.unlink(path)
 
@@ -132,7 +156,7 @@ async def test_snapshot_for_write_file_new() -> None:
     assert not os.path.exists(path)
     snap = await snapshot_for_write_file(path, "/")
     assert snap["existed"] is False
-    assert snap["prior_content"] is None
+    assert snap["prior_b64"] is None
 
 
 @pytest.mark.asyncio
@@ -146,7 +170,7 @@ async def test_compensate_write_file_restores_content() -> None:
             "path": path,
             "full_path": path,
             "existed": True,
-            "prior_content": "original content",
+            **_prior("original content"),
             **_written("new content after write"),
         }
         result = await compensate_write_file(uuid4(), snapshot_data, None)
@@ -168,7 +192,7 @@ async def test_compensate_write_file_deletes_new_file() -> None:
         "path": path,
         "full_path": path,
         "existed": False,
-        "prior_content": None,
+        "prior_b64": None,
         **_written("was created by write_file"),
     }
     result = await compensate_write_file(uuid4(), snapshot_data, None)
@@ -183,7 +207,7 @@ async def test_compensate_write_file_already_absent() -> None:
         "path": path,
         "full_path": path,
         "existed": False,
-        "prior_content": None,
+        "prior_b64": None,
         **_written("x"),
     }
     result = await compensate_write_file(uuid4(), snapshot_data, None)
@@ -199,7 +223,7 @@ async def test_compensate_write_file_refuses_without_written_hash() -> None:
         f.write("someone's newer edit")
         path = f.name
     try:
-        snapshot_data = {"path": path, "full_path": path, "existed": True, "prior_content": "old"}
+        snapshot_data = {"path": path, "full_path": path, "existed": True, **_prior("old")}
         result = await compensate_write_file(uuid4(), snapshot_data, None)
         assert result.success is False
         with open(path) as f:
@@ -477,7 +501,7 @@ async def test_review_revert_does_not_mark_reverted_on_failure() -> None:
     fake_snapshot = SimpleNamespace(
         id=snap_id,
         tool_name="write_file",
-        snapshot_data={"path": "/tmp/x", "full_path": "/tmp/x", "existed": False, "prior_content": None},
+        snapshot_data={"path": "/tmp/x", "full_path": "/tmp/x", "existed": False, "prior_b64": None},
         reverted_at=None,
     )
 
@@ -528,7 +552,7 @@ async def test_review_revert_marks_reverted_on_success() -> None:
     fake_snapshot = SimpleNamespace(
         id=snap_id,
         tool_name="write_file",
-        snapshot_data={"path": "/tmp/x", "full_path": "/tmp/x", "existed": False, "prior_content": None},
+        snapshot_data={"path": "/tmp/x", "full_path": "/tmp/x", "existed": False, "prior_b64": None},
         reverted_at=None,
     )
 
@@ -571,7 +595,7 @@ async def test_compensate_write_file_refuses_when_removed_after_write() -> None:
         "path": path,
         "full_path": path,
         "existed": True,
-        "prior_content": "the original content",
+        **_prior("the original content"),
         **_written("what write_file wrote"),
     }
     result = await compensate_write_file(uuid4(), snapshot_data, None)
@@ -595,7 +619,7 @@ async def test_compensate_write_file_fails_when_existed_no_prior_content() -> No
         "path": path,
         "full_path": path,
         "existed": True,
-        "prior_content": None,  # capture was not possible
+        "prior_b64": None,  # capture was not possible
         **_written("written"),
     }
     try:
@@ -647,8 +671,11 @@ def test_check_node_downstream_of_proceed_default_requires_undoable() -> None:
             DAGCreateRequest(name="check_test", nodes=nodes, edges=edges)
 
 
-def test_check_node_downstream_of_proceed_default_accepted_when_undoable() -> None:
-    """A check node declared undoable satisfies the proceed-default requirement."""
+def test_check_node_downstream_of_proceed_default_refused_even_when_undoable() -> None:
+    """codex P1 on #652 (dag/schemas.py:505): a check node runs as a dynamic
+    heartbeat check whose execution context never carries the node's
+    undoable flag, so declaring it undoable enforces nothing -- it must not
+    satisfy the proceed-default requirement."""
     from nous.dag.schemas import DAGCreateRequest, DAGEdgeSpec, DAGNodeSpec, DAGNodeType
 
     nodes = [
@@ -662,12 +689,12 @@ def test_check_node_downstream_of_proceed_default_accepted_when_undoable() -> No
             ],
             default_option="yes",
         ),
-        _check_node(undoable=True),  # properly declared
+        _check_node(undoable=True),  # declared, but unenforceable
     ]
     edges = [DAGEdgeSpec(from_node="approve", to_node="check_step", edge_type="context_flow")]
     with _mock_settings(dag_approval_proceed_default_enabled=True):
-        dag = DAGCreateRequest(name="check_test", nodes=nodes, edges=edges)
-        assert len(dag.nodes) == 2
+        with pytest.raises(ValueError, match="check nodes can never be undoable"):
+            DAGCreateRequest(name="check_test", nodes=nodes, edges=edges)
 
 
 # Finding #2 — config.py: persist ledger required for compensation.
@@ -729,7 +756,7 @@ async def test_compensate_write_file_refuses_stale_revert() -> None:
             "path": path,
             "full_path": path,
             "existed": True,
-            "prior_content": "original content",
+            **_prior("original content"),
             "written_content_hash": written_hash,
             "written_size": len(written_content.encode("utf-8")),
         }
@@ -758,7 +785,7 @@ async def test_compensate_write_file_proceeds_when_hash_matches() -> None:
             "path": path,
             "full_path": path,
             "existed": True,
-            "prior_content": "original content",
+            **_prior("original content"),
             "written_content_hash": written_hash,
             "written_size": len(written_content.encode("utf-8")),
         }
@@ -788,7 +815,7 @@ async def test_snapshot_for_write_file_flags_oversized() -> None:
     try:
         snap = await snapshot_for_write_file(path, "/")
         assert snap["oversized"] is True
-        assert snap["prior_content"] is None
+        assert snap["prior_b64"] is None
         assert snap["existed"] is True
     finally:
         os.unlink(path)
@@ -806,7 +833,7 @@ async def test_snapshot_for_write_file_reads_small_file() -> None:
     try:
         snap = await snapshot_for_write_file(path, "/")
         assert snap["oversized"] is False
-        assert snap["prior_content"] == "small content"
+        assert _prior_text(snap) == "small content"
     finally:
         os.unlink(path)
 
@@ -822,6 +849,8 @@ async def test_capture_compensation_snapshot_raises_for_oversized_undoable() -> 
 
     # Bypass __init__ — we only need the few attributes the method reads.
     runner = object.__new__(AgentRunner)
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
+    runner._action_review_pusher = None
     runner._snap_store = AsyncMock()
     runner._workspace_dir = "/"
     runner._dispatcher = SimpleNamespace()  # no repaired_args: input passes through
@@ -832,7 +861,7 @@ async def test_capture_compensation_snapshot_raises_for_oversized_undoable() -> 
         "path": "big.bin",
         "full_path": "/big.bin",
         "existed": True,
-        "prior_content": None,
+        "prior_b64": None,
         "oversized": True,
     }
 
@@ -871,17 +900,28 @@ async def test_capture_compensation_snapshot_uses_repaired_args() -> None:
         },
     )
     runner = object.__new__(AgentRunner)
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
+    runner._action_review_pusher = None
     runner._snap_store = AsyncMock()
     runner._workspace_dir = "/ws"
     runner._dispatcher = dispatcher
 
-    snap = AsyncMock(return_value={"path": "notes.txt", "existed": False, "prior_content": None, "oversized": False})
+    snap = AsyncMock(
+        return_value={
+            "path": "notes.txt",
+            "full_path": "/ws/notes.txt",
+            "existed": False,
+            "prior_b64": None,
+            "oversized": False,
+        }
+    )
     with patch("nous.api.compensation.snapshot_for_write_file", new=snap):
         captured = await runner._capture_compensation_snapshot(
             ExecutionContext(kind="dag_node", undoable=True),
             "write_file",
             {"content": 'hello world</content>\n<parameter name="path">notes.txt'},
             uuid4(),
+            outcome=await _held("notes.txt", "/ws"),
         )
     assert captured is True
     snap.assert_awaited_once_with("notes.txt", "/ws")
@@ -899,7 +939,9 @@ async def test_action_review_pusher_publishes_a_revertible_card() -> None:
 
     entry_id = uuid4()
     snap_store = SimpleNamespace(
-        get_by_ledger_entry=AsyncMock(return_value=SimpleNamespace(tool_name="write_file", reverted_at=None))
+        get_by_ledger_entry=AsyncMock(
+            return_value=SimpleNamespace(tool_name="write_file", reverted_at=None, snapshot_data=_written("x"))
+        )
     )
     registry = CompensationRegistry()
     register_compensators(registry)
@@ -934,7 +976,9 @@ async def test_action_review_pusher_bypasses_session_blocks() -> None:
 
     entry_id = uuid4()
     snap_store = SimpleNamespace(
-        get_by_ledger_entry=AsyncMock(return_value=SimpleNamespace(tool_name="write_file", reverted_at=None))
+        get_by_ledger_entry=AsyncMock(
+            return_value=SimpleNamespace(tool_name="write_file", reverted_at=None, snapshot_data=_written("x"))
+        )
     )
     registry = CompensationRegistry()
     register_compensators(registry)
@@ -1061,6 +1105,8 @@ async def test_capture_snapshots_heartbeat_check_manage_disable_only(inp, expect
     from nous.api.runner import AgentRunner
 
     runner = object.__new__(AgentRunner)
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
+    runner._action_review_pusher = None
     runner._snap_store = AsyncMock()
     runner._workspace_dir = "/"
     runner._dispatcher = SimpleNamespace()
@@ -1085,13 +1131,19 @@ async def test_capture_snapshot_in_background_non_undoable_context() -> None:
     from nous.api.runner import AgentRunner
 
     runner = object.__new__(AgentRunner)
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
+    runner._action_review_pusher = None
     runner._snap_store = AsyncMock()
     runner._workspace_dir = tempfile.gettempdir()
     runner._dispatcher = SimpleNamespace()
     inp = {"path": f"p2_{uuid4().hex[:8]}.txt", "content": "x"}
 
     for kind in ("subtask", "scheduled", "heartbeat_callback", "background"):
-        assert await runner._capture_compensation_snapshot(ExecutionContext(kind=kind), "write_file", inp, uuid4())
+        outcome = await _held(inp["path"], runner._workspace_dir)
+        assert await runner._capture_compensation_snapshot(
+            ExecutionContext(kind=kind), "write_file", inp, uuid4(), outcome=outcome
+        )
+        release_write_path_lock(outcome.write_lock)
     # a foreground turn has a human in the loop: unchanged, no snapshot
     assert not await runner._capture_compensation_snapshot(
         ExecutionContext(kind="interactive"), "write_file", inp, uuid4()
@@ -1108,10 +1160,12 @@ async def test_oversized_write_blocks_only_when_undoable() -> None:
     from nous.api.runner import AgentRunner
 
     runner = object.__new__(AgentRunner)
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
+    runner._action_review_pusher = None
     runner._snap_store = AsyncMock()
     runner._workspace_dir = "/"
     runner._dispatcher = SimpleNamespace()
-    big = {"path": "big.bin", "full_path": "/big.bin", "existed": True, "prior_content": None, "oversized": True}
+    big = {"path": "big.bin", "full_path": "/big.bin", "existed": True, "prior_b64": None, "oversized": True}
     with patch("nous.api.compensation.snapshot_for_write_file", new=AsyncMock(return_value=big)):
         got = await runner._capture_compensation_snapshot(
             ExecutionContext(kind="subtask"), "write_file", {"path": "big.bin", "content": "y"}, uuid4()
@@ -1186,6 +1240,8 @@ async def test_capture_records_prior_enabled_state_of_the_check(state, recorded)
     from nous.api.runner import AgentRunner
 
     runner = object.__new__(AgentRunner)
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
+    runner._action_review_pusher = None
     runner._snap_store = AsyncMock()
     if state is RuntimeError:
         runner._snap_store.check_enabled.side_effect = RuntimeError("db down")
@@ -1307,6 +1363,8 @@ def _bare_runner(snap_store=None):
     from nous.api.runner import AgentRunner
 
     runner = object.__new__(AgentRunner)
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=False)
+    runner._action_review_pusher = None
     runner._snap_store = snap_store
     runner._workspace_dir = tempfile.gettempdir()
     runner._dispatcher = SimpleNamespace()
@@ -1398,8 +1456,9 @@ async def test_capture_resolve_decision_records_prior_review_state() -> None:
 
 
 class _FakeSession:
-    def __init__(self, rowcount: int) -> None:
+    def __init__(self, rowcount: int, current_row: tuple | None = None) -> None:
         self.rowcount = rowcount
+        self.current_row = current_row  # what a SELECT of the decision returns
         self.stmts: list = []
         self.committed = False
 
@@ -1411,7 +1470,7 @@ class _FakeSession:
 
     async def execute(self, stmt):
         self.stmts.append(stmt)
-        return SimpleNamespace(rowcount=self.rowcount)
+        return SimpleNamespace(rowcount=self.rowcount, first=lambda: self.current_row)
 
     async def commit(self):
         self.committed = True
@@ -1429,8 +1488,8 @@ _WRITTEN_DECISION = {
 class _FakeBrain:
     """The real Brain interface: public ``db`` and ``agent_id`` only."""
 
-    def __init__(self, rowcount: int) -> None:
-        self.session_obj = _FakeSession(rowcount)
+    def __init__(self, rowcount: int, current_row: tuple | None = None) -> None:
+        self.session_obj = _FakeSession(rowcount, current_row)
         self.db = SimpleNamespace(session=lambda: self.session_obj)
         self.agent_id = "agent-x"
 
@@ -1546,11 +1605,19 @@ async def test_server_compensation_ignores_caller_handler() -> None:
     from nous.a2ui.tools import _server_compensation
 
     store = AsyncMock()
-    store.get_by_ledger_entry.return_value = SimpleNamespace(tool_name="write_file", reverted_at=None)
+    store.get_by_ledger_entry.return_value = SimpleNamespace(
+        tool_name="write_file", reverted_at=None, snapshot_data=_written("x")
+    )
     registry = CompensationRegistry()
     register_compensators(registry)
     comp = await _server_compensation({"revertible": True, "handler": "rm_everything"}, str(uuid4()), store, registry)
     assert comp["revertible"] is True and comp["handler"] == "write_file"
+    # a snapshot missing its guard state: the compensator would refuse, so no Revert
+    store.get_by_ledger_entry.return_value = SimpleNamespace(
+        tool_name="resolve_decision", reverted_at=None, snapshot_data={"prior": {}}
+    )
+    comp = await _server_compensation({"revertible": True}, str(uuid4()), store, registry)
+    assert comp["revertible"] is False
     store.get_by_ledger_entry.return_value = None
     comp = await _server_compensation({"revertible": True, "handler": "x"}, str(uuid4()), store, registry)
     assert comp["revertible"] is False and comp["handler"] is None
@@ -1622,7 +1689,7 @@ async def test_stale_check_refuses_a_grown_file_without_reading_it(tmp_path) -> 
     synchronous f.read() on the event loop before refusing."""
     target = tmp_path / "f.txt"
     target.write_text("x" * 10_000)
-    snap = {"full_path": str(target), "existed": True, "prior_content": "old", **_written("short")}
+    snap = {"full_path": str(target), "existed": True, **_prior("old"), **_written("short")}
     with patch("builtins.open", side_effect=AssertionError("must not read a size-mismatched file")):
         res = await compensate_write_file(uuid4(), snap, None)
     assert not res.success and "modified after" in res.message
@@ -1633,7 +1700,7 @@ async def test_stale_check_refuses_a_grown_file_without_reading_it(tmp_path) -> 
 async def test_file_revert_refused_without_written_size(tmp_path) -> None:
     target = tmp_path / "f.txt"
     target.write_text("new")
-    snap = {"full_path": str(target), "existed": True, "prior_content": "old", "written_content_hash": _h("new")}
+    snap = {"full_path": str(target), "existed": True, **_prior("old"), "written_content_hash": _h("new")}
     res = await compensate_write_file(uuid4(), snap, None)
     assert not res.success and target.read_text() == "new"
 
@@ -1673,7 +1740,7 @@ async def test_concurrent_writes_to_one_path_snapshot_and_write_in_turn(tmp_path
         def __init__(self) -> None:
             pass
 
-        async def capture(self, *, ledger_entry_id, tool_name, snapshot_data):
+        async def capture(self, *, ledger_entry_id, tool_name, snapshot_data, card_pending=False):
             captured.append(snapshot_data)
             return uuid4()
 
@@ -1696,7 +1763,7 @@ async def test_concurrent_writes_to_one_path_snapshot_and_write_in_turn(tmp_path
             for i, r in enumerate(runners)
         )
     )
-    priors = sorted(c["prior_content"] for c in captured)
+    priors = sorted(_prior_text(c) for c in captured)
     assert len(captured) == 2
     # one call saw the original, the other saw the first call's write -- never both "original"
     assert priors in (["A", "original"], ["B", "original"])
@@ -1717,7 +1784,7 @@ async def test_concurrent_writes_revert_restores_first_not_original(tmp_path) ->
     lock_a = comp.write_path_lock("data.txt", str(tmp_path))
     await lock_a.acquire()
     snap_a = await comp.snapshot_for_write_file("data.txt", str(tmp_path))
-    assert snap_a["prior_content"] == "original"
+    assert _prior_text(snap_a) == "original"
     target.write_text("A")
     snap_a["written_content_hash"] = _h("A")
     snap_a["written_size"] = 1
@@ -1727,7 +1794,7 @@ async def test_concurrent_writes_revert_restores_first_not_original(tmp_path) ->
     lock_b = comp.write_path_lock("data.txt", str(tmp_path))
     await lock_b.acquire()
     snap_b = await comp.snapshot_for_write_file("data.txt", str(tmp_path))
-    assert snap_b["prior_content"] == "A"  # key: B saw A's content, not original
+    assert _prior_text(snap_b) == "A"  # key: B saw A's content, not original
     target.write_text("B")
     snap_b["written_content_hash"] = _h("B")
     snap_b["written_size"] = 1
@@ -1799,7 +1866,7 @@ async def test_file_revert_waits_for_an_in_flight_write(tmp_path) -> None:
     snap = {
         "full_path": str(target),
         "existed": True,
-        "prior_content": "original",
+        **_prior("original"),
         **_written("ours"),
     }
     lock = comp.write_path_lock("f.txt", str(tmp_path))
@@ -1829,7 +1896,7 @@ async def test_unreadable_prior_file_blocks_an_undoable_write(tmp_path) -> None:
 
     with patch.object(comp, "open", _denied, create=True):
         snap = await comp.snapshot_for_write_file("wo.txt", str(tmp_path))
-        assert snap["existed"] and snap["prior_content"] is None and "PermissionError" in snap["capture_error"]
+        assert snap["existed"] and snap["prior_b64"] is None and "PermissionError" in snap["capture_error"]
         runner = _bare_runner(SimpleNamespace(capture=None))
         runner._workspace_dir = str(tmp_path)
         runner._handler_args = lambda name, inp: inp
@@ -1857,7 +1924,7 @@ async def test_snapshot_never_reads_a_path_outside_the_workspace(tmp_path) -> No
     secret.write_text("host secret")
     for path in (str(secret), "../secret.txt"):
         snap = await comp.snapshot_for_write_file(path, str(workspace))
-        assert "prior_content" not in snap and "existed" not in snap
+        assert "prior_b64" not in snap and "existed" not in snap
         assert "outside workspace" in snap["invalid_path"]
 
     store = SimpleNamespace(capture=None)
@@ -1884,7 +1951,11 @@ async def test_check_revert_refused_after_a_later_disable() -> None:
 
     snap = {"check_name": "c", "action": "disable", "prior_enabled": True, "written": _WRITTEN_CHECK}
     # a later disable replaced the token: the conditional enable touches nothing
-    loader = SimpleNamespace(enable_if_unchanged=AsyncMock(return_value=False), manage_check=AsyncMock())
+    loader = SimpleNamespace(
+        enable_if_unchanged=AsyncMock(return_value=False),
+        is_enabled=AsyncMock(return_value=False),
+        manage_check=AsyncMock(),
+    )
     res = await compensate_heartbeat_check_manage(uuid4(), snap, SimpleNamespace(heartbeat_loader=loader))
     assert not res.success and "changed or removed" in res.message
     loader.manage_check.assert_not_awaited()
@@ -1976,7 +2047,7 @@ async def test_snapshot_reads_the_validated_path_not_a_retargeted_symlink(tmp_pa
 
     with patch.object(builtin_tools, "_validate_path", _validate_then_retarget):
         snap = await comp.snapshot_for_write_file("link.txt", str(workspace))
-    assert snap.get("prior_content") != "host secret"
+    assert _prior_text(snap) != "host secret"
     assert "host secret" not in repr(snap)
     assert snap["full_path"] == str(inside.resolve())
 
@@ -2029,7 +2100,6 @@ async def test_write_is_bound_to_the_snapshotted_path(tmp_path) -> None:
 
     from nous.api import call_outcome
     from nous.api.builtin_tools import write_file_tool
-    from nous.api.call_outcome import CallOutcome
 
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -2042,7 +2112,7 @@ async def test_write_is_bound_to_the_snapshotted_path(tmp_path) -> None:
 
     runner = _bare_runner(AsyncMock())
     runner._workspace_dir = str(workspace)
-    outcome = CallOutcome()
+    outcome = await _held("link.txt", str(workspace))
     assert await runner._capture_compensation_snapshot(
         ExecutionContext(kind="subtask"), "write_file", {"path": "link.txt", "content": "new"}, uuid4(), outcome=outcome
     )
@@ -2060,11 +2130,11 @@ async def test_write_is_bound_to_the_snapshotted_path(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_outcome_write_still_gets_a_review_card() -> None:
-    """codex P1 #652 (runner.py:597): a timed-out write_file is closed
-    `unknown` -- its worker thread may still write -- so it must still get
-    the review card; its revert applies only if the recorded write landed.
-    Other tools record no written state on an unknown outcome: no card."""
+async def test_unknown_outcome_still_gets_a_review_card() -> None:
+    """codex P1 #652 (runner.py:597, 645): a call closed `unknown` -- a worker
+    thread or a commit that may still land -- gets the review card, for every
+    compensable tool; its revert applies only if the recorded write landed.
+    A call that failed changed nothing: no card."""
     from unittest.mock import AsyncMock
 
     runner = _bare_runner(AsyncMock())
@@ -2072,21 +2142,58 @@ async def test_unknown_outcome_write_still_gets_a_review_card() -> None:
     runner._action_review_pusher = pusher = AsyncMock()
     ctx = ExecutionContext(kind="subtask")
     entry = uuid4()
-    await runner._maybe_push_action_review(ctx, "write_file", entry, "s1", snapshotted=True, status="unknown")
-    pusher.assert_awaited_once_with("write_file", entry, "s1")
+    for tool in ("write_file", "resolve_decision", "heartbeat_check_manage"):
+        pusher.reset_mock()
+        await runner._maybe_push_action_review(ctx, tool, entry, "s1", snapshotted=True, status="unknown")
+        pusher.assert_awaited_once_with(tool, entry, "s1")
 
     pusher.reset_mock()
-    await runner._maybe_push_action_review(ctx, "resolve_decision", entry, "s1", snapshotted=True, status="unknown")
     await runner._maybe_push_action_review(ctx, "write_file", entry, "s1", snapshotted=True, status="error")
     pusher.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["resolve_decision", "heartbeat_check_manage"])
+async def test_unknown_db_outcome_records_its_written_state(tool) -> None:
+    """codex P1 #652 (runner.py:645): a DB call cancelled after its commit
+    landed was closed `unknown` and its written state -- already captured
+    before the commit -- was dropped, so the change could never be reverted.
+    It is recorded for `unknown` too; the revert's exact-match guard makes a
+    write that never committed unrevertible, never mis-reverted."""
+    from unittest.mock import AsyncMock
+
+    from nous.api.call_outcome import CallOutcome
+
+    runner = _bare_runner(AsyncMock())
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
+    runner._action_review_pusher = pusher = AsyncMock()
+    runner._snap_store.record_written_state.return_value = True
+    entry = uuid4()
+    if tool == "resolve_decision":
+        outcome = CallOutcome(review_capture={"prior": {"outcome": None}, "written": _WRITTEN_DECISION})
+    else:
+        outcome = CallOutcome(check_capture={"prior_enabled": True, "written": _WRITTEN_CHECK})
+    note = await runner._after_compensable_call(
+        ExecutionContext(kind="dag_node", undoable=True),
+        tool,
+        entry,
+        "s1",
+        snapshotted=True,
+        status="unknown",
+        tool_input={},
+        outcome=outcome,
+    )
+    assert note is None
+    runner._snap_store.record_written_state.assert_awaited_once()
+    pusher.assert_awaited_once_with(tool, entry, "s1")
 
 
 @pytest.mark.asyncio
 async def test_unrecorded_written_state_is_retried_then_never_advertised_as_revertible() -> None:
     """codex P1 #652 (runner.py:545): a failed record_written_state was only
     logged, then a review card advertised a revert the compensator refuses.
-    It is now retried; if it still fails, no card is pushed and the caller
-    is told the change is applied but not revertible."""
+    It is now retried; if it still fails the caller is told the change is
+    applied but not revertible, and the card offers no Revert."""
     from unittest.mock import AsyncMock
 
     from nous.api.call_outcome import CallOutcome
@@ -2116,7 +2223,9 @@ async def test_unrecorded_written_state_is_retried_then_never_advertised_as_reve
         with patch("nous.api.runner.asyncio.sleep", new=AsyncMock()):
             note = await runner._after_compensable_call(ctx, "heartbeat_check_manage", entry, "s1", **kwargs)
         assert note and "NOT be made revertible" in note
-        pusher.assert_not_awaited()
+        # The card is still published so the change is on record -- its
+        # Revert is derived server-side and not offered (snapshot_is_revertible).
+        pusher.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -2129,55 +2238,65 @@ async def test_unrecorded_written_state_is_retried_then_never_advertised_as_reve
 
 
 @pytest.mark.asyncio
-async def test_push_compensation_card_marks_pending_then_published() -> None:
-    """codex P1 on #652: the runner marks card pending BEFORE push,
-    clears it on success, so a transient failure leaves a retryable marker."""
+async def test_push_compensation_card_clears_the_intent_only_once_published() -> None:
+    """codex P1 on #652: the intent (stored before dispatch) is cleared only
+    after the card is published; a failed push leaves it for the sweep."""
     from unittest.mock import AsyncMock
 
-    from nous.api.runner import AgentRunner
-
-    runner = object.__new__(AgentRunner)
+    runner = _bare_runner(AsyncMock())
     runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
-    runner._snap_store = snap_store = AsyncMock()
     runner._action_review_pusher = pusher = AsyncMock()
+    snap_store = runner._snap_store
 
     entry = uuid4()
     ctx = ExecutionContext(kind="subtask")
 
-    # Successful push: marks pending, then marks published
     await runner._maybe_push_action_review(ctx, "write_file", entry, "s1", snapshotted=True, status="success")
-    snap_store.mark_card_pending.assert_awaited_once_with(entry, "write_file")
-    snap_store.mark_card_published.assert_awaited_once_with(entry)
     pusher.assert_awaited_once()
+    snap_store.mark_card_published.assert_awaited_once_with(entry)
 
-    # Failed push: marks pending, does NOT mark published
     snap_store.reset_mock()
     pusher.reset_mock()
     pusher.side_effect = TimeoutError("connection lost")
     await runner._maybe_push_action_review(ctx, "write_file", entry, "s1", snapshotted=True, status="success")
-    snap_store.mark_card_pending.assert_awaited_once()
     snap_store.mark_card_published.assert_not_awaited()
+
+    # A call that failed changed nothing: its intent is cleared, no card.
+    snap_store.reset_mock()
+    pusher.reset_mock()
+    await runner._maybe_push_action_review(ctx, "write_file", entry, "s1", snapshotted=True, status="error")
+    pusher.assert_not_awaited()
+    snap_store.mark_card_published.assert_awaited_once_with(entry)
 
 
 @pytest.mark.asyncio
-async def test_sweep_pending_cards_retries_failed_publications() -> None:
-    """codex P1 on #652: sweep_pending_cards retries snapshots with _card_pending."""
+async def test_sweep_pending_cards_follows_the_ledger_outcome() -> None:
+    """codex P1 on #652: the sweep publishes a card for every intent whose
+    call may have changed state (success / unknown / no ledger row) and just
+    clears the intent of a call that failed or was blocked."""
     from unittest.mock import AsyncMock
 
-    from nous.api.runner import AgentRunner
-
-    runner = object.__new__(AgentRunner)
-    runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
-    runner._snap_store = snap_store = AsyncMock()
+    runner = _bare_runner(AsyncMock())
+    runner._settings = SimpleNamespace(
+        compensation_auto_review_enabled=True,
+        execution_ledger_pending_unknown_after_seconds=7800,
+        tool_timeout=120,
+    )
     runner._action_review_pusher = pusher = AsyncMock()
+    snap_store = runner._snap_store
 
-    entry1, entry2 = uuid4(), uuid4()
-    snap_store.get_pending_cards.return_value = [(entry1, "write_file"), (entry2, "write_file")]
+    ok, unknown, absent, failed = uuid4(), uuid4(), uuid4(), uuid4()
+    snap_store.get_pending_cards.return_value = [
+        (ok, "write_file", "success"),
+        (unknown, "resolve_decision", "unknown"),
+        (absent, "write_file", None),
+        (failed, "write_file", "error"),
+    ]
 
-    published = await runner.sweep_pending_cards()
-    assert published == 2
-    assert pusher.await_count == 2
-    assert snap_store.mark_card_published.await_count == 2
+    assert await runner.sweep_pending_cards() == 3
+    assert [c.args[1] for c in pusher.await_args_list] == [ok, unknown, absent]
+    assert [c.args[0] for c in snap_store.mark_card_published.await_args_list] == [ok, unknown, absent, failed]
+    assert snap_store.get_pending_cards.await_args.kwargs["absent_ledger_after_seconds"] == 7800
 
 
 # Finding #2 — a2ui/tools.py: compensation cards hide course_correct
@@ -2231,7 +2350,9 @@ async def test_make_action_review_pusher_sets_compensation_card_flag() -> None:
 
     entry_id = uuid4()
     snap_store = SimpleNamespace(
-        get_by_ledger_entry=AsyncMock(return_value=SimpleNamespace(tool_name="write_file", reverted_at=None))
+        get_by_ledger_entry=AsyncMock(
+            return_value=SimpleNamespace(tool_name="write_file", reverted_at=None, snapshot_data=_written("x"))
+        )
     )
     registry = CompensationRegistry()
     register_compensators(registry)
@@ -2292,58 +2413,52 @@ async def test_enable_if_unchanged_succeeds_despite_sync_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mark_card_pending_retries_before_publish() -> None:
-    """codex P1 on #652: mark_card_pending retries up to 3 times before push,
-    so transient DB failures don't leave orphaned mutations without a marker."""
-    from unittest.mock import AsyncMock, call
+@pytest.mark.parametrize(
+    ("kind", "auto_review", "expected"),
+    [("subtask", True, True), ("subtask", False, False), ("dag_node", True, True)],
+)
+async def test_card_intent_is_stored_with_the_pre_dispatch_snapshot(kind, auto_review, expected) -> None:
+    """codex P1 on #652 (runner.py:658): the review-card intent used to be
+    written only after the side effect returned, so a process that died in
+    between left a mutation no sweep could ever card. It is now part of the
+    snapshot insert itself -- before dispatch."""
+    from unittest.mock import AsyncMock
 
-    from nous.api.runner import AgentRunner
-
-    runner = object.__new__(AgentRunner)
-    runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
-    runner._snap_store = snap_store = AsyncMock()
-    runner._action_review_pusher = pusher = AsyncMock()
-
-    entry = uuid4()
-    ctx = ExecutionContext(kind="subtask")
-
-    # Fail twice, succeed on third attempt
-    snap_store.mark_card_pending.side_effect = [RuntimeError("db down"), RuntimeError("db down"), None]
-
-    await runner._maybe_push_action_review(ctx, "write_file", entry, "s1", snapshotted=True, status="success")
-
-    # Should have tried 3 times
-    assert snap_store.mark_card_pending.await_count == 3
-    snap_store.mark_card_pending.assert_has_awaits([call(entry, "write_file")] * 3)
-    # And then pushed successfully
-    pusher.assert_awaited_once()
-    snap_store.mark_card_published.assert_awaited_once_with(entry)
+    runner = _bare_runner(AsyncMock())
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=auto_review)
+    runner._action_review_pusher = AsyncMock()
+    runner._snap_store.check_enabled.return_value = True
+    assert await runner._capture_compensation_snapshot(
+        ExecutionContext(kind=kind), "heartbeat_check_manage", {"name": "c", "action": "disable"}, uuid4()
+    )
+    assert runner._snap_store.capture.await_args.kwargs["card_pending"] is expected
 
 
 @pytest.mark.asyncio
-async def test_mark_card_pending_all_retries_exhausted_still_pushes() -> None:
-    """codex P1 on #652: even if all marker retries fail, push proceeds (fail-open).
-    The mutation already happened; better to try the push than abort entirely."""
-    from unittest.mock import AsyncMock
+async def test_capture_insert_carries_the_card_intent() -> None:
+    """The intent lands in the very row ``capture`` inserts."""
+    from nous.api.compensation import SnapshotStore
 
-    from nous.api.runner import AgentRunner
+    added: list = []
 
-    runner = object.__new__(AgentRunner)
-    runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
-    runner._snap_store = snap_store = AsyncMock()
-    runner._action_review_pusher = pusher = AsyncMock()
+    class _S:
+        async def __aenter__(self):
+            return self
 
-    entry = uuid4()
-    ctx = ExecutionContext(kind="subtask")
+        async def __aexit__(self, *exc):
+            return False
 
-    # All 3 attempts fail
-    snap_store.mark_card_pending.side_effect = RuntimeError("db permanently down")
+        def add(self, row):
+            added.append(row)
 
-    await runner._maybe_push_action_review(ctx, "write_file", entry, "s1", snapshotted=True, status="success")
+        async def commit(self):
+            pass
 
-    # Should have tried 3 times then proceeded to push
-    assert snap_store.mark_card_pending.await_count == 3
-    pusher.assert_awaited_once()
+    store = SnapshotStore(SimpleNamespace(session=lambda: _S()), "agent")
+    await store.capture(ledger_entry_id=uuid4(), tool_name="write_file", snapshot_data={"a": 1}, card_pending=True)
+    assert added[0].snapshot_data == {"a": 1, "_card_pending": True, "_card_tool_name": "write_file"}
+    await store.capture(ledger_entry_id=uuid4(), tool_name="write_file", snapshot_data={"a": 1})
+    assert added[1].snapshot_data == {"a": 1}
 
 
 def test_sweep_pending_cards_wired_in_main() -> None:
@@ -2374,3 +2489,389 @@ def test_sweep_pending_cards_wired_in_main() -> None:
                     startup_sweep_found = True
                     break
     assert startup_sweep_found, "startup sweep_pending_cards not wired with wait_for timeout"
+
+
+# ---------------------------------------------------------------------------
+# Round 8 (team review): one compare-and-replace primitive for write_file and
+# its revert, write fences, idempotent reverts. Each test fails without its fix.
+# ---------------------------------------------------------------------------
+
+
+async def _snapshotted_write(workspace, path: str, content: str, *, entry=None):
+    """Snapshot ``path`` as the runner does, then run write_file bound to it.
+    Returns (entry_id, snapshot_data, tool result)."""
+    from unittest.mock import AsyncMock
+
+    from nous.api import call_outcome
+    from nous.api.builtin_tools import write_file_tool
+
+    entry = entry or uuid4()
+    runner = _bare_runner(AsyncMock())
+    runner._workspace_dir = str(workspace)
+    runner._handler_args = lambda name, inp: inp
+    outcome = await _held(path, str(workspace))
+    try:
+        assert await runner._capture_compensation_snapshot(
+            ExecutionContext(kind="subtask"), "write_file", {"path": path, "content": content}, entry, outcome=outcome
+        )
+        snap = runner._snap_store.capture.await_args.kwargs["snapshot_data"]
+        token = call_outcome._current.set(outcome)
+        try:
+            result = await write_file_tool(path, content, _workspace_dir=str(workspace))
+        finally:
+            call_outcome._current.reset(token)
+    finally:
+        release_write_path_lock(outcome.write_lock)
+    return entry, snap, result
+
+
+@pytest.mark.asyncio
+async def test_short_os_write_is_completed_not_truncated(tmp_path, monkeypatch) -> None:
+    """codex P1 #652 (builtin_tools.py:220): a short os.write() was ignored,
+    so a truncated temp file replaced the target and write_file reported
+    success. Every byte is now written."""
+    from nous.api.builtin_tools import write_file_tool
+
+    real_write = os.write
+    monkeypatch.setattr(os, "write", lambda fd, data: real_write(fd, bytes(data[:3])))
+    result = await write_file_tool("out.txt", "hello partial world", _workspace_dir=str(tmp_path))
+    assert not result.get("is_error")
+    assert (tmp_path / "out.txt").read_text() == "hello partial world"
+
+
+@pytest.mark.asyncio
+async def test_new_file_gets_the_umask_default_mode_not_0600(tmp_path) -> None:
+    """Regression from the temp-file write: mkstemp created every NEW file
+    0600, where write_text gave the umask default (0644 under umask 022)."""
+    import stat
+
+    from nous.api.builtin_tools import write_file_tool
+
+    umask = os.umask(0o022)
+    os.umask(umask)
+    await write_file_tool("new.txt", "x", _workspace_dir=str(tmp_path))
+    assert stat.S_IMODE((tmp_path / "new.txt").stat().st_mode) == 0o666 & ~umask
+
+
+@pytest.mark.asyncio
+async def test_non_utf8_file_is_restored_byte_for_byte(tmp_path) -> None:
+    """codex P1 #652 (compensation.py:407): the snapshot decoded the prior
+    content with errors="replace", so a revert "succeeded" writing U+FFFD
+    over bytes that were not valid UTF-8."""
+    target = tmp_path / "blob.bin"
+    original = b"\xff\xfe\x00binary\x80\xc3("
+    target.write_bytes(original)
+    entry, snap, result = await _snapshotted_write(tmp_path, "blob.bin", "text now")
+    assert not result.get("is_error") and target.read_text() == "text now"
+    res = await compensate_write_file(entry, snap, None)
+    assert res.success, res.message
+    assert target.read_bytes() == original
+
+
+@pytest.mark.asyncio
+async def test_forward_write_refuses_a_file_changed_since_its_snapshot(tmp_path) -> None:
+    """codex P1 #652 (builtin_tools.py:228): a change another writer made
+    between the snapshot and the write was overwritten -- and a later revert
+    "restored" the older snapshot over it. The write now verifies the
+    snapshotted state right before its rename and refuses otherwise."""
+    from unittest.mock import AsyncMock
+
+    from nous.api import call_outcome
+    from nous.api.builtin_tools import write_file_tool
+
+    target = tmp_path / "f.txt"
+    target.write_text("original")
+    runner = _bare_runner(AsyncMock())
+    runner._workspace_dir = str(tmp_path)
+    runner._handler_args = lambda name, inp: inp
+    outcome = await _held("f.txt", str(tmp_path))
+    assert await runner._capture_compensation_snapshot(
+        ExecutionContext(kind="subtask"), "write_file", {"path": "f.txt", "content": "agent"}, uuid4(), outcome=outcome
+    )
+    target.write_text("concurrent edit")  # e.g. a bash tool, which takes no lock
+    token = call_outcome._current.set(outcome)
+    try:
+        result = await write_file_tool("f.txt", "agent", _workspace_dir=str(tmp_path))
+    finally:
+        call_outcome._current.reset(token)
+        release_write_path_lock(outcome.write_lock)
+    assert result.get("is_error") is True
+    assert target.read_text() == "concurrent edit"
+
+
+@pytest.mark.asyncio
+async def test_forward_write_to_an_absent_file_does_not_clobber_one_that_appeared(tmp_path) -> None:
+    """The ABSENT pre-state is enforced no-clobber: a file created between the
+    snapshot and the write is never replaced."""
+    from nous.api.builtin_tools import ABSENT, PreconditionFailed, atomic_replace_bytes
+
+    target = tmp_path / "late.txt"
+    target.write_text("someone else's")
+    with pytest.raises(PreconditionFailed):
+        atomic_replace_bytes(target, b"mine", expected=ABSENT)
+    assert target.read_text() == "someone else's"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["late.txt"]
+
+
+def test_absent_target_that_appears_during_the_write_is_not_clobbered(tmp_path, monkeypatch) -> None:
+    """The window after the last state check: a file created there is still
+    never replaced (the ABSENT case links no-clobber instead of renaming)."""
+    from nous.api import builtin_tools
+    from nous.api.builtin_tools import ABSENT, PreconditionFailed, atomic_replace_bytes
+
+    target = tmp_path / "race.txt"
+    real = builtin_tools._unchanged_since
+
+    def appears_right_after_the_check(dfd, name, pre):
+        ok = real(dfd, name, pre)
+        target.write_text("appeared")
+        return ok
+
+    monkeypatch.setattr(builtin_tools, "_unchanged_since", appears_right_after_the_check)
+    with pytest.raises(PreconditionFailed):
+        atomic_replace_bytes(target, b"mine", expected=ABSENT)
+    assert target.read_text() == "appeared"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["race.txt"]
+
+
+@pytest.mark.asyncio
+async def test_revert_never_follows_a_symlink_swapped_in(tmp_path) -> None:
+    """codex P1 #652 (compensation.py:497): the stale check and the restore
+    followed a symlink, so a target swapped for a link after the write could
+    have its link target -- outside the workspace -- overwritten."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("agent")  # same bytes as the write: the hash check alone would pass
+    target = ws / "f.txt"
+    target.write_text("original")
+    entry, snap, result = await _snapshotted_write(ws, "f.txt", "agent")
+    assert not result.get("is_error")
+    target.unlink()
+    target.symlink_to(outside)
+    res = await compensate_write_file(entry, snap, None)
+    assert not res.success
+    assert outside.read_text() == "agent" and target.is_symlink()
+    # the state read itself refuses the link rather than hash its target
+    from nous.api.builtin_tools import PreconditionFailed, file_digest
+
+    with pytest.raises(PreconditionFailed, match="symlink"):
+        file_digest(target, 100)
+
+
+@pytest.mark.asyncio
+async def test_failed_restore_leaves_the_file_intact_and_retryable(tmp_path, monkeypatch) -> None:
+    """codex P1 #652 (compensation.py:522): the restore truncated the file
+    before writing; an I/O failure left it damaged, and every retry was then
+    refused as stale. It is now a temp-file + atomic rename."""
+    import errno
+
+    target = tmp_path / "f.txt"
+    target.write_text("original")
+    entry, snap, _ = await _snapshotted_write(tmp_path, "f.txt", "agent write")
+    real_fsync = os.fsync
+
+    def enospc(fd):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(os, "fsync", enospc)
+    res = await compensate_write_file(entry, snap, None)
+    assert not res.success
+    assert target.read_text() == "agent write"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["f.txt"]
+    monkeypatch.setattr(os, "fsync", real_fsync)
+    res = await compensate_write_file(entry, snap, None)
+    assert res.success, res.message
+    assert target.read_text() == "original"
+
+
+@pytest.mark.asyncio
+async def test_revert_fences_off_a_write_orphaned_by_a_cancelled_call(tmp_path) -> None:
+    """codex P1 #652 (compensation.py:506): a cancelled write_file's worker
+    thread can outlive the call. A revert that found the new file still
+    absent marked it reverted -- and the orphan then created it. The revert
+    now revokes the call's write fence first, so the orphan can never land."""
+    from nous.api.builtin_tools import (
+        ABSENT,
+        PreconditionFailed,
+        _write_fences,
+        atomic_replace_bytes,
+        register_write_fence,
+    )
+
+    entry = uuid4()
+    target = tmp_path / "new.txt"
+    fence = register_write_fence(str(entry))
+    fence.started = True  # the worker thread is running, not yet renamed
+    snap = {"full_path": str(target), "existed": False, "prior_b64": None, **_written("late")}
+    res = await compensate_write_file(entry, snap, None)
+    assert res.success and "already absent" in res.message
+    # the orphaned worker reaches its rename only now
+    with pytest.raises(PreconditionFailed, match="revoked"):
+        atomic_replace_bytes(target, b"late", expected=ABSENT, fence=fence)
+    assert not target.exists()
+    _write_fences.pop(str(entry), None)
+
+
+@pytest.mark.asyncio
+async def test_symlink_retargeted_while_waiting_for_the_lock_is_not_revertible(tmp_path) -> None:
+    """codex P1 #652 (runner.py:539): the per-path lock is keyed on the path
+    as it resolved before the call waited for it. Retargeted in between, the
+    call held one file's lock while snapshotting and writing another."""
+    from unittest.mock import AsyncMock
+
+    from nous.api.compensation import SnapshotBlocksDispatch
+
+    a, b = tmp_path / "a.txt", tmp_path / "b.txt"
+    a.write_text("a")
+    b.write_text("b")
+    link = tmp_path / "link.txt"
+    link.symlink_to(a)
+    outcome = await _held("link.txt", str(tmp_path))  # lock keyed on a.txt
+    link.unlink()
+    link.symlink_to(b)
+    runner = _bare_runner(AsyncMock())
+    runner._workspace_dir = str(tmp_path)
+    runner._handler_args = lambda name, inp: inp
+    try:
+        with pytest.raises(SnapshotBlocksDispatch, match="different file"):
+            await runner._capture_compensation_snapshot(
+                ExecutionContext(kind="dag_node", undoable=True),
+                "write_file",
+                {"path": "link.txt", "content": "x"},
+                uuid4(),
+                outcome=outcome,
+            )
+        runner._snap_store.capture.assert_not_awaited()
+    finally:
+        release_write_path_lock(outcome.write_lock)
+
+
+@pytest.mark.asyncio
+async def test_write_file_revert_is_idempotent(tmp_path) -> None:
+    """codex P2 #652 (a2ui/actions.py:710): a revert whose completion could
+    not be recorded left the card live, and every retry was refused as stale
+    because the file already held its prior content. A retry now succeeds."""
+    target = tmp_path / "f.txt"
+    target.write_text("original")
+    entry, snap, _ = await _snapshotted_write(tmp_path, "f.txt", "agent")
+    assert (await compensate_write_file(entry, snap, None)).success
+    again = await compensate_write_file(entry, snap, None)
+    assert again.success and "already holds its prior content" in again.message
+    assert target.read_text() == "original"
+
+
+@pytest.mark.asyncio
+async def test_resolve_decision_revert_is_idempotent() -> None:
+    """codex P2 #652 (a2ui/actions.py:710): the guarded UPDATE matches nothing
+    once the decision is back at its prior state; that is success, not a
+    stale refusal. Any other state is still refused."""
+    from datetime import datetime
+
+    from nous.api.compensation import compensate_resolve_decision
+
+    prior = {
+        "outcome": "pending",
+        "outcome_result": "earlier",
+        "reviewed_at": "2026-09-01T12:00:00+00:00",
+        "reviewer": "agent",
+        "superseded_by": None,
+    }
+    at_prior = ("pending", "earlier", datetime.fromisoformat(prior["reviewed_at"]), "agent", None)
+    snap = {"decision_id": str(uuid4()), "prior": prior, "written": _WRITTEN_DECISION}
+    res = await compensate_resolve_decision(uuid4(), snap, SimpleNamespace(brain=_FakeBrain(0, at_prior)))
+    assert res.success and "already carries" in res.message
+    other = ("success", "later", datetime.fromisoformat(prior["reviewed_at"]), "agent", None)
+    res = await compensate_resolve_decision(uuid4(), snap, SimpleNamespace(brain=_FakeBrain(0, other)))
+    assert not res.success and "reviewed again" in res.message
+
+
+@pytest.mark.asyncio
+async def test_check_revert_is_idempotent() -> None:
+    """codex P2 #652 (a2ui/actions.py:710): once re-enabled, the token no
+    longer matches; the check being enabled again is the revert's goal."""
+    from unittest.mock import AsyncMock
+
+    from nous.api.compensation import compensate_heartbeat_check_manage
+
+    snap = {"check_name": "c", "action": "disable", "prior_enabled": True, "written": _WRITTEN_CHECK}
+    loader = SimpleNamespace(enable_if_unchanged=AsyncMock(return_value=False), is_enabled=AsyncMock(return_value=True))
+    res = await compensate_heartbeat_check_manage(uuid4(), snap, SimpleNamespace(heartbeat_loader=loader))
+    assert res.success and "already enabled" in res.message
+    loader.is_enabled.assert_awaited_once_with("c", "cid")
+
+
+@pytest.mark.asyncio
+async def test_review_revert_keeps_the_card_live_when_the_revert_cannot_be_recorded() -> None:
+    """codex P2 #652 (a2ui/actions.py:710): mark_reverted raising after a
+    successful compensator was an unhandled 500. It is retried, and if it
+    still fails the card stays live (a retried Revert is idempotent)."""
+    from unittest.mock import AsyncMock, patch
+
+    from nous.a2ui.actions import ActionRouter, _register_default_handlers
+
+    router = object.__new__(ActionRouter)
+    router._handlers = {}
+    router._compensation_registry = registry = CompensationRegistry()
+    registry.register("write_file", AsyncMock(return_value=CompensationResult(True, "restored")))
+    router._snapshot_store = store = SimpleNamespace(
+        get_by_ledger_entry=AsyncMock(
+            return_value=SimpleNamespace(id=uuid4(), tool_name="write_file", reverted_at=None, snapshot_data={})
+        ),
+        mark_reverted=AsyncMock(side_effect=RuntimeError("db down")),
+    )
+    router._heart = router._brain = router._heartbeat = None
+    handlers: dict = {}
+    router.register = lambda verb, fn, **kw: handlers.__setitem__(verb, fn)
+    _register_default_handlers(router)
+    ctx = SimpleNamespace(surface=SimpleNamespace(trace_id=str(uuid4())))
+    with patch("nous.a2ui.actions.asyncio.sleep", new=AsyncMock()):
+        result = await handlers["review.revert"](ctx)
+    assert result.ok is False and not result.resolve_surface
+    assert store.mark_reverted.await_count == 3
+
+    store.mark_reverted = AsyncMock(return_value=True)
+    result = await handlers["review.revert"](ctx)
+    assert result.ok is not False and result.resolve_surface
+
+
+@pytest.mark.asyncio
+async def test_disable_capture_survives_a_cancel_during_its_commit() -> None:
+    """codex P1 #652 (runner.py:645): the disable filled its capture only
+    after the commit, so a call cancelled mid-commit (outcome unknown, the
+    commit may have landed) reported nothing to make it revertible."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nous.heartbeat.dynamic import DynamicCheckLoader
+
+    loader = object.__new__(DynamicCheckLoader)
+    loader._registry = MagicMock(get_check=MagicMock(return_value=None))
+    loader._signatures, loader._loaded_ids, loader._id_to_name = {}, set(), {}
+    loader._active_runs, loader._mutation_lock = {}, asyncio.Lock()
+    model = SimpleNamespace(id=uuid4(), enabled=True, metadata_={}, updated_at=None)
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=model)))
+    session.commit = AsyncMock(side_effect=asyncio.CancelledError)
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=session)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    loader._db = SimpleNamespace(session=lambda: ctx)
+    loader._agent_id = "a"
+    capture: dict = {}
+    with pytest.raises(asyncio.CancelledError):
+        await loader.manage_check("disable", name="c", capture=capture)
+    assert capture["prior_enabled"] is True
+    assert capture["written"]["enabled_state_token"] == model.metadata_["enabled_state_token"]
+
+
+def test_card_offers_revert_only_when_the_guard_state_is_recorded() -> None:
+    """codex P1 #652: a DB call whose written state was lost (outcome
+    unknown, or its record failed) gets a card, but never a Revert the
+    compensator would refuse."""
+    from nous.api.compensation import snapshot_is_revertible
+
+    assert snapshot_is_revertible("write_file", _written("x"))
+    assert not snapshot_is_revertible("write_file", {})
+    for tool in ("resolve_decision", "heartbeat_check_manage"):
+        assert not snapshot_is_revertible(tool, {"prior": {}})
+        assert snapshot_is_revertible(tool, {"written": {}})

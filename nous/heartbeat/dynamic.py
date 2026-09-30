@@ -803,10 +803,14 @@ class DynamicCheckLoader:
                 model.enabled = False
                 model.metadata_ = {**_meta(model), _STATE_TOKEN_KEY: token}
                 model.updated_at = datetime.now(UTC)
-                await session.commit()
+                # Filled BEFORE the commit: a call cancelled while the commit
+                # is in flight still reports the token it may have written.
+                # The revert matches on that token, so a disable that never
+                # committed can never be "reverted".
                 if capture is not None:
                     capture["prior_enabled"] = prior_enabled
                     capture["written"] = {"check_id": str(model.id), _STATE_TOKEN_KEY: token}
+                await session.commit()
                 # codex P2 (PR #656): flag the in-memory check only once the
                 # disable is durable. Flagging before the commit left a failed
                 # commit with an enabled, registered check whose run() skips
@@ -888,6 +892,21 @@ class DynamicCheckLoader:
 
             else:
                 raise ValueError(f"Unknown action: {action}")
+
+    async def is_enabled(self, name: str, check_id: str) -> bool:
+        """Whether check ``name`` is still the row ``check_id`` and enabled."""
+        from uuid import UUID
+
+        from nous.storage.models import DynamicCheckModel
+
+        async with self._db.session() as session:
+            result = await session.execute(
+                select(DynamicCheckModel.enabled)
+                .where(DynamicCheckModel.agent_id == self._agent_id)
+                .where(DynamicCheckModel.name == name)
+                .where(DynamicCheckModel.id == UUID(check_id))
+            )
+            return result.scalar_one_or_none() is True
 
     async def enable_if_unchanged(self, name: str, check_id: str, token: str) -> bool:
         """Re-enable check ``name`` only while it is still the disabled row

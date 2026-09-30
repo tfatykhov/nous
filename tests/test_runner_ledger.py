@@ -681,9 +681,12 @@ class _FakeSnapStore:
     def __init__(self):
         self.captured: list[tuple] = []
 
-    async def capture(self, *, ledger_entry_id, tool_name, snapshot_data):
+    async def capture(self, *, ledger_entry_id, tool_name, snapshot_data, card_pending=False):
         self.captured.append((ledger_entry_id, tool_name, snapshot_data))
         return uuid.uuid4()
+
+    async def mark_card_published(self, ledger_entry_id):
+        return True
 
 
 async def _undoable_write(tmp_path, *, auto_review: bool, dispatch_error: bool = False):
