@@ -24,9 +24,15 @@ from nous.brain import Brain
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
+from nous.heartbeat.dynamic import (
+    CALLBACK_RETRY_DELAY_SECONDS,
+    RUN_OUTCOME,
+    DynamicCheck,
+    DynamicCheckCancelled,
+    DynamicCheckLoader,
+)
 from nous.heartbeat.finding_store import FindingStore
 from nous.heartbeat.registry import BaseCheck, CheckRegistry
-from nous.heartbeat.dynamic import CALLBACK_RETRY_DELAY_SECONDS, DynamicCheck, DynamicCheckLoader
 from nous.heartbeat.schemas import CheckResult, Finding, FindingAction, HeartbeatResult
 from nous.heartbeat.tuner import HeartbeatTuner
 
@@ -35,6 +41,25 @@ logger = logging.getLogger(__name__)
 # Audit HB-9: a single escalation step bumps urgency one level, never skipping
 # straight to "high". _should_escalate gates the timing per current urgency.
 _ESCALATION_LADDER: dict[str, str] = {"low": "normal", "normal": "high", "high": "high"}
+
+
+def _cancelled_by_sibling_run(exc: BaseException) -> bool:
+    """Whether ``exc`` is a run cancelled because a SIBLING run disabled the check."""
+    return isinstance(exc, DynamicCheckCancelled) and exc.by_sibling_run
+
+
+def _is_final_run(check: BaseCheck, sibling_cancelled: bool, outcome: dict[str, bool]) -> bool:
+    """Whether this run is its check's self-disabling final run.
+
+    A run cancelled because another run of the same check disabled it is not
+    the final run: the disabling run owns the outcome (codex P2, PR #656).
+    A DynamicCheck records the answer itself in ``outcome`` when its run
+    ends; the live flag is only a fallback for runs that recorded nothing
+    (codex P1, PR #656 round 7).
+    """
+    if "final_run" in outcome:
+        return outcome["final_run"]
+    return getattr(check, "_self_disabled", False) is True and not sibling_cancelled
 
 
 class HeartbeatRunner:
@@ -73,11 +98,22 @@ class HeartbeatRunner:
         self.dag_orchestrator: object | None = None  # F038: injected by main.py
 
         self._task: asyncio.Task | None = None
+        self._dag_task: asyncio.Task | None = None  # fix/dag-tick-own-loop
+        self._dag_tick_lock: asyncio.Lock = asyncio.Lock()
+        # Tracks a tick that timed out but is still running in background.
+        # The next iteration checks this to maintain single-flight even after
+        # the lock has been released by the timeout path.
+        self._dag_pending_task: asyncio.Task | None = None
+        # Absolute loop.time() deadline set when _dag_loop begins draining an
+        # in-flight tick during shutdown.  stop() reads this so the two drain
+        # windows share one total budget instead of each taking dag_tick_timeout.
+        self._dag_shutdown_drain_deadline: float | None = None
         self._running = False
         self._tick_count: int = 0
         self._tokens_used_today: int = 0
         self._budget_date: date = date.today()
         self._last_tick: datetime | None = None
+        self._last_dag_tick: datetime | None = None  # fix/dag-tick-own-loop
         self._last_digest_date: date | None = None
         self._last_prune: datetime | None = None
         self._tuner: HeartbeatTuner = HeartbeatTuner(
@@ -110,6 +146,7 @@ class HeartbeatRunner:
 
         await self._detect_missed_checks()
         self._task = asyncio.create_task(self._loop(), name="heartbeat-runner")
+        self._dag_task = asyncio.create_task(self._dag_loop(), name="dag-tick-loop")
         logger.info(
             "F034: Heartbeat started (tick=%ds, quiet=%d-%d, budget=%d tokens/day)",
             self._settings.heartbeat_tick_interval,
@@ -117,10 +154,18 @@ class HeartbeatRunner:
             self._settings.heartbeat_quiet_end,
             self._settings.heartbeat_daily_token_budget,
         )
+        logger.info(
+            "F038: DAG tick loop started (interval=%ds, timeout=%ds)",
+            self._settings.dag_tick_interval,
+            self._settings.dag_tick_timeout,
+        )
 
     async def stop(self) -> None:
-        """Stop the heartbeat loop."""
+        """Stop the heartbeat loop and DAG tick loop."""
         self._running = False
+        # Fix 4 (Codex P2): cancel the heartbeat check loop FIRST so it cannot
+        # wake from sleep and launch new tool-using checks (with external side
+        # effects) while DAG work is still draining.
         if self._task:
             self._task.cancel()
             try:
@@ -128,6 +173,80 @@ class HeartbeatRunner:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        if self._dag_task:
+            self._dag_task.cancel()
+            try:
+                await self._dag_task
+            except asyncio.CancelledError:
+                pass
+            self._dag_task = None
+        # Drain any tick that timed out and is still running in background.
+        # stop() must return only after this task is finished because
+        # shutdown_components() closes the DB and subtask pool immediately
+        # after — an in-flight tick would otherwise write to a closed pool.
+        # Always clear the reference so stop() never leaves it pointing at a
+        # finished (or live) task.
+        # Fix 2 (Codex P1): use asyncio.wait (not asyncio.wait_for) so the
+        # pending task is never cancelled on timeout.  Cancelling a shielded
+        # tick reintroduces the unsafe CancelledError window between primitive
+        # creation and the node's running transition.
+        _pending = self._dag_pending_task
+        self._dag_pending_task = None
+        if _pending is not None:
+            if _pending.done():
+                # Fix 6 (Codex P2 round-5): task completed while _dag_loop
+                # slept between iterations — harvest its result so
+                # last_dag_tick reflects a successful tick and any exception
+                # is routed through the structured failure log rather than
+                # silently dropped as an unhandled task exception.
+                try:
+                    _pending.result()
+                    self._last_dag_tick = datetime.now(UTC)
+                except Exception:
+                    logger.exception("F038: DAG pending tick raised (already completed at shutdown)")
+            else:
+                # Fix 8 (Codex P1 round-6): honour any budget already spent
+                # by _dag_loop's own shutdown drain.  If _dag_loop set a
+                # deadline before timing out, use the remaining seconds so the
+                # combined wait never exceeds one dag_tick_timeout.
+                loop = asyncio.get_running_loop()
+                if self._dag_shutdown_drain_deadline is not None:
+                    drain_timeout = max(0.0, self._dag_shutdown_drain_deadline - loop.time())
+                else:
+                    drain_timeout = float(self._settings.dag_tick_timeout)
+                logger.warning(
+                    "F038: Draining timed-out DAG tick during shutdown (waiting up to %.1fs)",
+                    drain_timeout,
+                )
+                done, _ = await asyncio.wait(
+                    {_pending},
+                    timeout=drain_timeout,
+                )
+                if not done:
+                    # Fix 7 (Codex P1 round-5): cancel the task so it cannot
+                    # access the DB or subtask pool after shutdown_components()
+                    # closes them.  We have already waited a full dag_tick_timeout
+                    # for a graceful finish; cancellation is the lesser evil
+                    # compared to writing to a closed pool.  The round-3
+                    # "do-not-cancel" constraint applied only to the _dag_loop
+                    # CancelledError path where the tick had just started and
+                    # the primitive/node-transition window was live.
+                    logger.error(
+                        "F038: Timed-out DAG tick did not complete within %ds "
+                        "during shutdown — cancelling to prevent DB access "
+                        "after resource teardown",
+                        self._settings.dag_tick_timeout,
+                    )
+                    _pending.cancel()
+                    try:
+                        await _pending
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                else:
+                    try:
+                        _pending.result()
+                    except Exception:
+                        logger.exception("F038: Timed-out DAG tick raised during shutdown drain")
 
         # Clean up dedicated runner and its API client
         if self._dedicated_runner is not None:
@@ -164,13 +283,6 @@ class HeartbeatRunner:
                 else:
                     await self._tick()
 
-                # F038: Advance DAG orchestrator
-                if self.dag_orchestrator is not None:
-                    try:
-                        await self.dag_orchestrator.tick()
-                    except Exception:
-                        logger.exception("F038: DAG orchestrator tick failed")
-
                 # F034.5: Periodic dynamic check sync
                 if (
                     self._dynamic_loader is not None
@@ -196,8 +308,136 @@ class HeartbeatRunner:
             except Exception:
                 logger.exception("Heartbeat tick failed")
 
+    async def _dag_loop(self) -> None:
+        """Independent DAG orchestrator tick loop — runs until cancelled.
+
+        Decoupled from the heartbeat check loop (fix/dag-tick-own-loop) so
+        slow or hung heartbeat checks cannot block DAG progress (completion
+        polling, wave launching, result delivery). Runs during quiet hours
+        because DAG work is not subject to the heartbeat token budget.
+
+        Single-flight: if the previous tick is still running when the next
+        interval fires, the new tick is SKIPPED with a WARNING. A per-tick
+        soft deadline logs when a tick exceeds the budget; the tick itself
+        is shielded from cancellation so that CancelledError cannot land
+        between a primitive-creation commit and the node's running
+        transition (Codex P1: untracked subtask / duplicate launch).
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(self._settings.dag_tick_interval)
+                if self.dag_orchestrator is None:
+                    continue
+
+                if self._dag_tick_lock.locked():
+                    logger.warning(
+                        "F038: DAG tick skipped — previous tick still running (interval=%ds, timeout=%ds)",
+                        self._settings.dag_tick_interval,
+                        self._settings.dag_tick_timeout,
+                    )
+                    continue
+
+                # A timed-out tick keeps running in background after its
+                # wait_for deadline fires. Single-flight is maintained by
+                # checking the pending-task reference (the lock was released
+                # when the timeout path exited `async with`).
+                if self._dag_pending_task is not None and not self._dag_pending_task.done():
+                    logger.warning(
+                        "F038: DAG tick skipped — previous tick timed out and is still running in background",
+                    )
+                    continue
+                # Fix 3 (Codex P2): harvest the result of a completed pending
+                # task so that (a) last_dag_tick reflects its success and
+                # (b) any exception is logged via the structured failure path
+                # rather than emitted as an unhandled task exception.
+                if self._dag_pending_task is not None:  # done — consume it
+                    try:
+                        self._dag_pending_task.result()
+                        self._last_dag_tick = datetime.now(UTC)
+                    except Exception:
+                        logger.exception("F038: DAG tick raised after timing out")
+                self._dag_pending_task = None  # clear any completed reference
+
+                async with self._dag_tick_lock:
+                    inner_task: asyncio.Task = asyncio.create_task(self.dag_orchestrator.tick())
+                    # Track for post-timeout single-flight (see check above).
+                    self._dag_pending_task = inner_task
+                    try:
+                        # Enforce the configured deadline. asyncio.wait_for
+                        # cancels only the shield wrapper on timeout — the
+                        # inner_task itself is NOT cancelled (shield protects
+                        # it), so in-flight DB writes and subtask launches
+                        # complete safely. The outer CancelledError path
+                        # (shutdown) drains inner_task before propagating.
+                        await asyncio.wait_for(
+                            asyncio.shield(inner_task),
+                            timeout=self._settings.dag_tick_timeout,
+                        )
+                    except TimeoutError:
+                        logger.error(
+                            "F038: DAG orchestrator tick timed out after %ds — "
+                            "tick is still running in background; "
+                            "subsequent ticks will skip until it completes",
+                            self._settings.dag_tick_timeout,
+                        )
+                        # inner_task continues; _dag_pending_task keeps the
+                        # reference so the single-flight check above prevents
+                        # a new tick from starting while it is still running.
+                    except asyncio.CancelledError:
+                        # Outer task was cancelled. inner_task is STILL
+                        # RUNNING — drain it with a bounded deadline so
+                        # shutdown cannot hang indefinitely on a hung DB or
+                        # network call (Fix 1, Codex P1 round-3).
+                        #
+                        # Fix 8 (Codex P1 round-6): record an absolute
+                        # deadline so stop()'s second drain uses the
+                        # REMAINING budget rather than a fresh full timeout.
+                        # Without this the two drain windows stack and the
+                        # total wait can reach 2 × dag_tick_timeout.
+                        loop = asyncio.get_running_loop()
+                        self._dag_shutdown_drain_deadline = loop.time() + self._settings.dag_tick_timeout
+                        _shutdown_drain_timed_out = False
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.shield(inner_task),
+                                timeout=self._settings.dag_tick_timeout,
+                            )
+                        except TimeoutError:
+                            logger.warning(
+                                "F038: In-flight DAG tick did not finish within "
+                                "%ds during shutdown drain — stop() will drain it",
+                                self._settings.dag_tick_timeout,
+                            )
+                            # Fix 5 (Codex P1 round-4): do NOT clear
+                            # _dag_pending_task when the drain times out.
+                            # inner_task is still running; stop() reads the
+                            # reference and drains it via asyncio.wait before
+                            # shutdown_components() closes the DB pool.
+                            _shutdown_drain_timed_out = True
+                        except Exception:
+                            logger.exception("F038: DAG orchestrator tick failed during shutdown drain")
+                        if not _shutdown_drain_timed_out:
+                            self._dag_pending_task = None
+                        self._last_dag_tick = datetime.now(UTC)
+                        raise
+                    except Exception:
+                        logger.exception("F038: DAG orchestrator tick failed")
+                        self._dag_pending_task = None
+                    else:
+                        self._last_dag_tick = datetime.now(UTC)
+                        self._dag_pending_task = None
+
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("F038: DAG tick loop iteration failed")
+
     async def _record_run_stats(
-        self, check: BaseCheck, *, success: bool, error_msg: str | None = None,
+        self,
+        check: BaseCheck,
+        *,
+        success: bool,
+        error_msg: str | None = None,
     ) -> None:
         """Single choke point for persisting a check's run outcome to the DB.
 
@@ -253,7 +493,9 @@ class HeartbeatRunner:
             return
         try:
             await self._dynamic_loader.update_run_stats(
-                check.check_id, success=success, error_msg=error_msg,
+                check.check_id,
+                success=success,
+                error_msg=error_msg,
             )
         except Exception as exc:
             outcome = "success" if success else "failure"
@@ -261,7 +503,8 @@ class HeartbeatRunner:
                 "F034.5/#590: failed to record %s run stats for check "
                 "'%s' — this run's record is LOST (downstream consumers "
                 "cannot distinguish this from the check never having run)",
-                outcome, check.name,
+                outcome,
+                check.name,
                 exc_info=exc,
             )
 
@@ -291,13 +534,57 @@ class HeartbeatRunner:
         callback_candidates: list[DynamicCheck] = []
 
         for check in due_checks:
+            # Codex P1: a DAG task can reap/cancel a DAG-managed dynamic
+            # check between the snapshot (get_due_checks) and here.  Re-
+            # verify the check is still registered and active before
+            # starting an LLM turn that would run its tools on a cancelled
+            # node.
+            if isinstance(check, DynamicCheck):
+                live = self._registry.get_check(check.name)
+                if (
+                    live is None
+                    or not live.active
+                    or live._self_disabled
+                    or self._registry.is_fenced(check.name)
+                ):
+                    logger.info(
+                        "Heartbeat check '%s' was unregistered or disabled after snapshot — skipping",
+                        check.name,
+                    )
+                    continue
+
+            # Bracket the run so the DAG loop cannot read a mid-run
+            # self-disable (manage_check unregisters the check before run()
+            # returns) as node completion. end_run fires in the finally,
+            # after the run's stats are recorded. No await separates this
+            # from the live re-check above. The outcome defaults to FAILED so
+            # an exit path that records nothing (a cancellation from stop(),
+            # any BaseException) can never read as success to the DAG loop;
+            # only a recorded success or an explicit skip overrides it.
+            self._registry.begin_run(check.name)
+            run_succeeded: bool | None = False
+            sibling_cancelled = False
+            outcome: dict[str, bool] = {}
+            outcome_token = RUN_OUTCOME.set(outcome)
             try:
                 result: CheckResult = await asyncio.wait_for(
                     check.run(),
                     timeout=check.timeout,
                 )
+                # A skipped result means run() returned early because the
+                # check was disabled at the execution boundary (race between
+                # _tick's snapshot and the first await in run()). Do not
+                # record stats or findings — no LLM turn ran.
+                if result.skipped:
+                    logger.debug(
+                        "Heartbeat check '%s' skipped at execution boundary (disabled concurrently)",
+                        check.name,
+                    )
+                    run_succeeded = None
+                    continue
                 check.mark_success()
                 successful_checks.add(check.name)
+                run_succeeded = True
 
                 # F034.5: Track token usage from dynamic checks
                 if result.tokens_used:
@@ -307,11 +594,7 @@ class HeartbeatRunner:
                 await self._record_run_stats(check, success=True)
 
                 # #273: Collect self-disabled checks with callbacks
-                if (
-                    isinstance(check, DynamicCheck)
-                    and result.self_disabled
-                    and check.on_complete_prompt
-                ):
+                if isinstance(check, DynamicCheck) and result.self_disabled and check.on_complete_prompt:
                     callback_candidates.append(check)
 
                 if result.has_updates:
@@ -321,16 +604,26 @@ class HeartbeatRunner:
                     for f in result.findings:
                         current_fingerprints.setdefault(check.name, set()).add(f.fingerprint())
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 check.mark_failure()
                 logger.warning("Heartbeat check '%s' timed out", check.name)
                 # F034.5: Record timeout as error for dynamic checks
                 await self._record_run_stats(check, success=False, error_msg="timeout")
+                run_succeeded = False
             except Exception as exc:
                 check.mark_failure()
                 logger.exception("Heartbeat check '%s' failed", check.name)
+                sibling_cancelled = _cancelled_by_sibling_run(exc)
                 # F034.5: Record error for dynamic checks
                 await self._record_run_stats(check, success=False, error_msg=str(exc)[:200])
+                run_succeeded = False
+            finally:
+                RUN_OUTCOME.reset(outcome_token)
+                self._registry.end_run(
+                    check.name,
+                    run_succeeded,
+                    self_disabled=_is_final_run(check, sibling_cancelled, outcome),
+                )
 
         # #273: Fire callbacks as background tasks (non-blocking)
         for cb_check in callback_candidates:
@@ -461,7 +754,10 @@ class HeartbeatRunner:
                     new_urgency = _ESCALATION_LADDER.get(f.urgency, "high")
                     logger.info(
                         "F034.1: Escalating finding %s (%s -> %s): %s",
-                        fp, f.urgency, new_urgency, f.summary[:60],
+                        fp,
+                        f.urgency,
+                        new_urgency,
+                        f.summary[:60],
                     )
                     f.urgency = new_urgency
                     time_escalated_checks.add(f.check_name)
@@ -480,12 +776,12 @@ class HeartbeatRunner:
                     continue  # already time-escalated, skip accumulation
                 if self._finding_store.check_accumulation_escalation(check_name):
                     logger.info(
-                        "F034.1: Accumulation escalation for check '%s'", check_name,
+                        "F034.1: Accumulation escalation for check '%s'",
+                        check_name,
                     )
                     # Send accumulation alert via Telegram
                     ack_items = [
-                        t for t in self._finding_store.get_digest_items()
-                        if t.finding.check_name == check_name
+                        t for t in self._finding_store.get_digest_items() if t.finding.check_name == check_name
                     ]
                     if ack_items:
                         lines = [f"[Heartbeat] Accumulation alert: {check_name} ({len(ack_items)} findings)"]
@@ -516,14 +812,17 @@ class HeartbeatRunner:
         actionable = [f for f in findings if f.needs_action]
         logger.info(
             "Heartbeat triage: %d routed, %d actionable, budget=%s",
-            len(findings), len(actionable), "ok" if self._has_budget() else "exhausted",
+            len(findings),
+            len(actionable),
+            "ok" if self._has_budget() else "exhausted",
         )
         if actionable and self._has_budget():
             await self._cognitive_triage(actionable)
         elif actionable and not self._has_budget():
             logger.warning(
                 "Heartbeat budget exhausted (%d/%d tokens) — %d actionable finding(s) not triaged",
-                self._tokens_used_today, self._settings.heartbeat_daily_token_budget,
+                self._tokens_used_today,
+                self._settings.heartbeat_daily_token_budget,
                 len(actionable),
             )
 
@@ -561,7 +860,8 @@ class HeartbeatRunner:
         try:
             heartbeat_model = self._settings.heartbeat_model or self._settings.background_model
             response_text, _context, usage = await triage_runner.run_turn(
-                session_id, message,
+                session_id,
+                message,
                 platform="heartbeat",
                 skip_episode=True,
                 is_subtask=True,
@@ -575,24 +875,27 @@ class HeartbeatRunner:
 
             logger.info(
                 "Heartbeat cognitive triage used %d tokens (daily: %d/%d)",
-                result.tokens_used, self._tokens_used_today,
+                result.tokens_used,
+                self._tokens_used_today,
                 self._settings.heartbeat_daily_token_budget,
             )
 
             if self._bus:
                 _parent = getattr(self, "_current_tick_event", None)
-                await self._bus.emit(Event(
-                    type="heartbeat_triage",
-                    agent_id=self._settings.agent_id,
-                    data={
-                        "session_id": session_id,
-                        "findings_count": len(findings),
-                        "tokens_used": result.tokens_used,
-                        "response_summary": result.response[:200],
-                    },
-                    trace_id=_parent.trace_id if _parent else None,
-                    caused_by=_parent.event_id if _parent else None,
-                ))
+                await self._bus.emit(
+                    Event(
+                        type="heartbeat_triage",
+                        agent_id=self._settings.agent_id,
+                        data={
+                            "session_id": session_id,
+                            "findings_count": len(findings),
+                            "tokens_used": result.tokens_used,
+                            "response_summary": result.response[:200],
+                        },
+                        trace_id=_parent.trace_id if _parent else None,
+                        caused_by=_parent.event_id if _parent else None,
+                    )
+                )
         except Exception:
             logger.exception("Heartbeat cognitive triage failed")
 
@@ -637,7 +940,8 @@ class HeartbeatRunner:
             if not self._has_budget():
                 logger.warning(
                     "#273: Skipping callback for '%s' — budget exhausted (attempt %d)",
-                    check.name, attempt + 1,
+                    check.name,
+                    attempt + 1,
                 )
                 break
             if attempt == 1:
@@ -646,7 +950,8 @@ class HeartbeatRunner:
 
             try:
                 response_text, _ctx, usage = await triage_runner.run_turn(
-                    session_id, instruction,
+                    session_id,
+                    instruction,
                     platform="heartbeat",
                     skip_episode=True,
                     is_subtask=True,
@@ -654,16 +959,20 @@ class HeartbeatRunner:
                     model_override=heartbeat_model,
                     is_background=True,
                     context=ExecutionContext(
-                        kind="heartbeat_callback", session_id=session_id,
+                        kind="heartbeat_callback",
+                        session_id=session_id,
                         declared_tools=tuple(check.on_complete_tools or ()) or None,
-                        check_name=check.name, run_id=run_id,
+                        check_name=check.name,
+                        run_id=run_id,
                     ),
                 )
                 tokens = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)
                 self._tokens_used_today += tokens
                 logger.info(
                     "#273: Callback for '%s' completed (tokens=%d, attempt=%d)",
-                    check.name, tokens, attempt + 1,
+                    check.name,
+                    tokens,
+                    attempt + 1,
                 )
                 # Success — clean up and return
                 try:
@@ -674,7 +983,8 @@ class HeartbeatRunner:
             except Exception:
                 logger.exception(
                     "#273: Callback for '%s' failed (attempt %d/2)",
-                    check.name, attempt + 1,
+                    check.name,
+                    attempt + 1,
                 )
                 # Clean up session before retry
                 try:
@@ -685,9 +995,7 @@ class HeartbeatRunner:
                 session_id = f"dynamic-callback-{check.name}-{uuid4().hex[:8]}"
 
         # Layer 2: Both attempts failed — send Telegram notification
-        await self._send_telegram(
-            f"[Heartbeat] Callback failed for check '{check.name}' — manual follow-up needed"
-        )
+        await self._send_telegram(f"[Heartbeat] Callback failed for check '{check.name}' — manual follow-up needed")
 
         # Layer 3: Create warning Finding
         failure_finding = Finding(
@@ -754,8 +1062,7 @@ class HeartbeatRunner:
                     if age_h >= threshold * 0.75:
                         near_escalation = " \u2b06\ufe0f"
                 lines.append(
-                    f"  - [{item.finding.urgency}] {item.finding.summary[:60]}"
-                    f" (x{item.seen_count}){near_escalation}"
+                    f"  - [{item.finding.urgency}] {item.finding.summary[:60]} (x{item.seen_count}){near_escalation}"
                 )
             if len(check_items) > 5:
                 lines.append(f"  ... and {len(check_items) - 5} more")
@@ -845,6 +1152,7 @@ class HeartbeatRunner:
         try:
             # Query last heartbeat event from DB
             from sqlalchemy import select
+
             from nous.storage.models import Event as EventModel
 
             async with self._heart.db.session() as session:
@@ -861,7 +1169,8 @@ class HeartbeatRunner:
                     if gap > self._settings.heartbeat_tick_interval * 10:
                         logger.warning(
                             "Heartbeat was offline for %.0f seconds (last tick: %s)",
-                            gap, row.isoformat(),
+                            gap,
+                            row.isoformat(),
                         )
         except Exception:
             logger.debug("Could not detect missed heartbeat checks (non-fatal)")
@@ -911,7 +1220,8 @@ class HeartbeatRunner:
             report = await self._tuner.tune(self._finding_store, self._registry)
             logger.info(
                 "F034.3/HB-3: scheduled tuning pass — %d adjustment(s), %d skipped",
-                len(report.adjustments), len(report.skipped_checks),
+                len(report.adjustments),
+                len(report.skipped_checks),
             )
         except Exception:
             logger.exception("F034.3/HB-3: scheduled tuning pass failed")
@@ -931,6 +1241,10 @@ class HeartbeatRunner:
     @property
     def last_tick(self) -> datetime | None:
         return self._last_tick
+
+    @property
+    def last_dag_tick(self) -> datetime | None:
+        return self._last_dag_tick
 
     def get_stats(self) -> dict:
         """F035.1: Return heartbeat runner statistics."""
@@ -952,19 +1266,31 @@ class HeartbeatRunner:
         check = self._registry.get_check(name)
         if check is None:
             return None
+        # A check whose DAG node is being terminalized starts no new run.
+        if self._registry.is_fenced(name):
+            return CheckResult(skipped=True)
+        # Same run bracket as _tick (outcome defaults to failed): see the
+        # comment there.
+        self._registry.begin_run(check.name)
+        run_succeeded: bool | None = False
+        sibling_cancelled = False
+        outcome: dict[str, bool] = {}
+        outcome_token = RUN_OUTCOME.set(outcome)
         try:
             result = await asyncio.wait_for(check.run(), timeout=check.timeout)
-            check.mark_success()
-            # F034.5: Update DB stats for dynamic checks
-            await self._record_run_stats(check, success=True)
+            # A skipped result means run() returned early because the check
+            # was disabled at the execution boundary — no LLM turn ran.
+            if result.skipped:
+                run_succeeded = None
+            else:
+                check.mark_success()
+                run_succeeded = True
+                # F034.5: Update DB stats for dynamic checks
+                await self._record_run_stats(check, success=True)
             if result.tokens_used:
                 self._tokens_used_today += result.tokens_used
             # #273: Fire callback if check self-disabled
-            if (
-                isinstance(check, DynamicCheck)
-                and result.self_disabled
-                and check.on_complete_prompt
-            ):
+            if isinstance(check, DynamicCheck) and result.self_disabled and check.on_complete_prompt:
                 if self._has_budget():
                     asyncio.create_task(
                         self._execute_callback(check),
@@ -978,6 +1304,14 @@ class HeartbeatRunner:
             return result
         except Exception as e:
             check.mark_failure()
+            sibling_cancelled = _cancelled_by_sibling_run(e)
             # F034.5: Update DB stats for dynamic checks on failure
             await self._record_run_stats(check, success=False, error_msg=str(e)[:200])
             raise
+        finally:
+            RUN_OUTCOME.reset(outcome_token)
+            self._registry.end_run(
+                check.name,
+                run_succeeded,
+                self_disabled=_is_final_run(check, sibling_cancelled, outcome),
+            )

@@ -211,6 +211,13 @@ class Settings(BaseSettings):
     # F038-2.1: Procedure score floor (embedding mode only)
     procedure_score_floor: float = 0.40
 
+    # Reasoning Maps L1: strategy card distillation (off by default)
+    strategy_cards_enabled: bool = False
+    # Reasoning Maps L1: cap strategy cards injected per turn (requires retrieval enabled)
+    strategy_cards_retrieval_enabled: bool = False
+    # Reasoning Maps L1: max strategy cards injected per turn (1 = ReasoningBank default)
+    strategy_cards_max_per_turn: int = 1
+
     # F079 catalog-first procedure delivery (progressive disclosure, à la Claude Code):
     #   BREADTH — a static `## Procedure Catalog` listing active procedure names+descs
     #     (proc_catalog_enabled). Renders stable fields only (no activation/effectiveness),
@@ -1606,6 +1613,10 @@ class Settings(BaseSettings):
     emerson_hook_url: str = ""  # Emerson presence hook URL
     emerson_hook_token: str = ""  # Emerson presence hook token
     google_service_account_json: str = Field("", validation_alias="GOOGLE_SERVICE_ACCOUNT_JSON")
+
+    # DAG tick loop — decoupled from heartbeat (fix/dag-tick-own-loop)
+    dag_tick_interval: int = Field(default=30, ge=1)  # seconds between DAG orchestrator ticks
+    dag_tick_timeout: int = Field(default=300, ge=1)  # max seconds for a single DAG tick before log+continue
 
     # F034: Heartbeat
     heartbeat_enabled: bool = True

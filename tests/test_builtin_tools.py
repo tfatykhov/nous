@@ -54,6 +54,29 @@ class TestBashTool:
         assert "1s" in text
 
     @pytest.mark.asyncio
+    @pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
+    async def test_bash_tool_cancel_kills_whole_command(self, tmp_path):
+        """codex P1 (PR #656): cancelling the calling turn (a DAG-disabled
+        heartbeat check) must stop the command, including a compound command's
+        later steps, so no side effect lands after the cancel."""
+        import asyncio
+
+        marker = tmp_path / "side_effect"
+        task = asyncio.create_task(
+            bash_tool(
+                command=f"sleep 1; {sys.executable} -c \"open('side_effect', 'w')\"",
+                timeout=30,
+                _workspace_dir=str(tmp_path),
+            )
+        )
+        await asyncio.sleep(0.3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(2)
+        assert not marker.exists()
+
+    @pytest.mark.asyncio
     async def test_bash_tool_output_truncation(self, tmp_path):
         """Output exceeding 100KB -> truncated with marker."""
         # Generate ~150KB of output (well over 100KB limit)

@@ -1910,6 +1910,7 @@ async def test_disable_captures_its_state_token_and_runner_records_it() -> None:
     loader = object.__new__(DynamicCheckLoader)
     loader._registry = MagicMock(get_check=MagicMock(return_value=None))
     loader._signatures, loader._loaded_ids, loader._id_to_name = {}, set(), {}
+    loader._active_runs, loader._mutation_lock = {}, asyncio.Lock()
     model = SimpleNamespace(id=uuid4(), enabled=True, metadata_={"other": 1}, updated_at=None)
     session = MagicMock()
     session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=model)))

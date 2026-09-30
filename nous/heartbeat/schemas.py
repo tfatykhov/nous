@@ -45,6 +45,10 @@ class CheckResult:
     findings: list[Finding] = field(default_factory=list)
     tokens_used: int = 0  # F034.5: token consumption for budget tracking
     self_disabled: bool = False  # #273: set when check self-disables during run
+    # Set when run() returned early because the check was disabled at the
+    # execution boundary (race between _tick's snapshot and coroutine start).
+    # Callers must not call mark_success() or record stats for skipped results.
+    skipped: bool = False
 
 
 @dataclass

@@ -8,12 +8,10 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from nous.utils import text_overlap
 
 from nous.brain.brain import Brain
 from nous.cognitive.dedup import ConversationDeduplicator
@@ -22,7 +20,7 @@ from nous.cognitive.schemas import BuildResult, ContextBudget, ContextSection, F
 from nous.cognitive.usage_tracker import UsageTracker
 from nous.config import Settings
 from nous.heart.heart import Heart
-from nous.heart.search import apply_frame_boost, _wrap_with_score
+from nous.heart.search import _wrap_with_score, apply_frame_boost
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
 from nous.observability.retrieval_trace import (
     BELOW_FLOOR,
@@ -33,6 +31,7 @@ from nous.observability.retrieval_trace import (
     SLICED_OFF,
     SUPERSEDED,
 )
+from nous.utils import text_overlap
 
 
 class _RenderedRef:
@@ -159,6 +158,10 @@ _IDENTITY_OVERLAP_THRESHOLD = 0.6
 # words with the bullet it corrects (scaffolding words), and corrections
 # reaching the prompt is the point of the fix. Verbatim-seeded bullets score 1.0.
 _IDENTITY_LINE_COVERAGE_THRESHOLD = 0.75
+
+# Extra list_procedures pages the catalog may read to backfill slots freed by the
+# strategy-card cap when the first fetch window is dominated by strategy cards.
+_CATALOG_BACKFILL_MAX_PAGES = 10
 
 
 def _is_system_episode(episode) -> bool:
@@ -380,7 +383,7 @@ class ContextEngine:
             _conv_msgs = _conv_msgs[-budget.conversation_window :]
 
         # Tier 0: Current date/time — always injected
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         datetime_text = now_utc.strftime("%A, %B %d, %Y %H:%M UTC")
         sections.append(
             ContextSection(
@@ -468,6 +471,11 @@ class ContextEngine:
         # turns and rides the static cache tier. Bodies are NOT here: the agent selects a
         # procedure by name and calls get_procedure(<name>) to load the full steps (depth).
         catalog_rendered = False
+        # Shared strategy-card budget across catalog and recommendations so both
+        # sections together never exceed strategy_cards_max_per_turn (finding #4).
+        _sc_enabled = getattr(self._settings, "strategy_cards_retrieval_enabled", False)
+        _sc_max = max(0, getattr(self._settings, "strategy_cards_max_per_turn", 1)) if _sc_enabled else 0
+        _sc_turn_used = 0  # strategy cards shown so far this turn (catalog + recommendations)
         if getattr(self._settings, "proc_catalog_enabled", False):
             # Whole catalog build is best-effort: any failure (DB error, or a bad/non-int
             # setting) → no catalog, never crash the turn. Size-reads live inside the try so
@@ -503,6 +511,57 @@ class ContextEngine:
                     winners[key] = p
             distinct_total = len(order)
             deduped = [winners[k] for k in order[:catalog_max]]
+            # Reasoning Maps L1: apply the per-turn strategy-card cap to the catalog
+            # using the shared _sc_turn_used counter (finding #4 — shared cap).
+            # Backfill any slots freed by the cap with non-strategy procedures from
+            # the fetched-but-not-initially-included tail (finding #3 — backfill).
+            if _sc_enabled and _sc_max > 0:
+                _cat_cap = max(0, _sc_max - _sc_turn_used)
+                _cat_sc = [p for p in deduped if getattr(p, "kind", None) == "strategy"]
+                if len(_cat_sc) > _cat_cap:
+                    _pre_filter_len = len(deduped)
+                    _cat_sc_excess_ids = {id(p) for p in _cat_sc[_cat_cap:]}
+                    deduped = [p for p in deduped if id(p) not in _cat_sc_excess_ids]
+                    # Backfill slots freed by the cap from procedures already fetched
+                    # but not initially included in the catalog_max slice.
+                    _n_to_backfill = _pre_filter_len - len(deduped)
+                    _sc_in_deduped = sum(1 for p in deduped if getattr(p, "kind", None) == "strategy")
+                    _tail_i = catalog_max
+                    _pages = 0
+                    while _n_to_backfill > 0:
+                        if _tail_i >= len(order):
+                            # Fetched window exhausted (e.g. dominated by strategy
+                            # cards): page further so older ordinary procedures can
+                            # still fill the catalog. Bounded; best-effort.
+                            if len(procs) >= total_active or _pages >= _CATALOG_BACKFILL_MAX_PAGES:
+                                break
+                            _pages += 1
+                            try:
+                                _page, _ = await self._heart.list_procedures(
+                                    limit=fetch_limit, offset=len(procs),
+                                    active_only=True, session=session,
+                                )
+                            except Exception as e:
+                                logger.warning("Procedure catalog backfill page failed: %s", e)
+                                break
+                            if not _page:
+                                break
+                            procs = procs + list(_page)
+                            for p in _page:
+                                key = getattr(p, "name", "") or ""
+                                if key and key not in winners:
+                                    order.append(key)
+                                    winners[key] = p
+                            distinct_total = len(order)
+                            continue
+                        _tail_p = winners[order[_tail_i]]
+                        _tail_i += 1
+                        if getattr(_tail_p, "kind", None) == "strategy":
+                            if _sc_in_deduped >= _cat_cap:
+                                continue  # tail strategy card also over cap
+                            _sc_in_deduped += 1
+                        deduped.append(_tail_p)
+                        _n_to_backfill -= 1
             if deduped:
                 desc_cap = getattr(self._settings, "proc_catalog_desc_chars", 120)
                 max_chars = getattr(self._settings, "proc_catalog_max_chars", 4000)
@@ -558,6 +617,13 @@ class ContextEngine:
                     row_lines.pop()
 
                 shown = len(row_lines)
+                # Update shared counter after truncation so only rendered cards count.
+                # Pass 3 can drop rows from the end (oldest/lowest priority); a strategy
+                # card removed there must not exhaust the per-turn cap for later sections.
+                if _sc_enabled and _sc_max > 0:
+                    _sc_turn_used += sum(
+                        1 for p in deduped[:shown] if getattr(p, "kind", None) == "strategy"
+                    )
                 # Omitted lower bound: distinct names dropped by the caps PLUS rows not even
                 # fetched (active rows beyond the fetch window). "+" because dups make it a
                 # lower bound. NOTE: catalog↔get_procedure consistency for DUPLICATE names is
@@ -1198,6 +1264,32 @@ class ContextEngine:
                 # fallback). `add` is first-wins, so those true attributions
                 # stand and this only catches anything it missed.
                 _tr_enter(selected or [], "procedure", "context_procedures_ladder")
+                # Reasoning Maps L1: cap strategy cards on the graph-primary path
+                # using the shared _sc_turn_used counter so the catalog and
+                # recommendations together honour the per-turn cap (finding #4).
+                if selected and _sc_enabled:
+                    _max_sc = max(0, _sc_max - _sc_turn_used)
+                    _sc_hits = [p for p in selected if getattr(p, "kind", None) == "strategy"]
+                    # 0 (either cap=0 global or budget exhausted) means no card passes.
+                    # When _sc_max==0 globally (unlimited), _max_sc==0 too; handle both.
+                    _sc_unlimited = (_sc_max == 0)
+                    _sc_served = _sc_hits if _sc_unlimited else _sc_hits[:_max_sc]
+                    if not _sc_unlimited and len(_sc_hits) > _max_sc:
+                        # Filter excess cards in-place to preserve the original
+                        # ranking so a high-ranked card is not moved to the tail
+                        # where the token-budget loop could cut it (finding #4).
+                        _excess_ids = {id(p) for p in _sc_hits[_max_sc:]}
+                        selected = [p for p in selected if id(p) not in _excess_ids]
+                        # Attribute the cap removals in the retrieval trace so
+                        # they do not appear as `unaccounted` (finding #5).
+                        _tr_filtered(_sc_hits, _sc_served, "procedure", SLICED_OFF, "strategy_card_cap")
+                    if _sc_hits:
+                        logger.debug(
+                            "StrategyCards (graph-primary): retrieved=%d served=%d (cap=%d)",
+                            len(_sc_hits), len(_sc_served), _sc_max,
+                        )
+                    # Update shared counter: track cards passing to recommendations.
+                    _sc_turn_used += len(_sc_served)
                 if selected:
                     cap = getattr(
                         self._settings, "proc_recommended_body_max_chars", 2500,
@@ -1393,6 +1485,40 @@ class ContextEngine:
                     _tr_filtered(_before, embedding_procedures, "procedure",
                                  FILTER_DROPPED, "identity_overlap")
 
+                # Reasoning Maps L1: cap strategy cards per turn.
+                # Filter excess cards in-place to preserve the original
+                # ranking so a top-ranked card is not moved behind every
+                # ordinary procedure where the token-budget loop could
+                # drop it while lower-ranked items remain (finding P2 #2
+                # — context.py:1438).
+                if (
+                    embedding_procedures
+                    and getattr(self._settings, "strategy_cards_retrieval_enabled", False)
+                ):
+                    max_sc = max(0, getattr(self._settings, "strategy_cards_max_per_turn", 1))
+                    strategy_hits = [
+                        p for p in embedding_procedures
+                        if getattr(p, "kind", None) == "strategy"
+                    ]
+                    # 0 is documented as unlimited — skip the cap entirely.
+                    if max_sc > 0 and len(strategy_hits) > max_sc:
+                        strategy_served = strategy_hits[:max_sc]
+                        _sc_excess_ids = {id(p) for p in strategy_hits[max_sc:]}
+                        embedding_procedures = [
+                            p for p in embedding_procedures if id(p) not in _sc_excess_ids
+                        ]
+                        _tr_filtered(
+                            strategy_hits, strategy_served, "procedure",
+                            SLICED_OFF, "strategy_card_cap_passive",
+                        )
+                    else:
+                        strategy_served = strategy_hits
+                    if strategy_hits:
+                        logger.debug(
+                            "StrategyCards: retrieved=%d served=%d (cap=%d)",
+                            len(strategy_hits), len(strategy_served), max_sc,
+                        )
+
                 # --- Combine tracks ---
                 # Track A (Critic) is registered HERE, not at the embedding
                 # registration above: a critic pick that the embedding search
@@ -1405,6 +1531,50 @@ class ContextEngine:
                 all_procedures = all_procedures[:total_slots]
                 _tr_filtered(_before_slots, all_procedures, "procedure",
                              SLICED_OFF, "total_slot_limit")
+
+                # Reasoning Maps L1: enforce strategy card cap on the COMBINED
+                # list using the shared _sc_turn_used counter so catalog + both
+                # procedure paths honour the per-turn cap (finding #4).
+                if all_procedures and _sc_enabled:
+                    _max_sc_combined = max(0, _sc_max - _sc_turn_used)
+                    _sc_unlimited_combined = (_sc_max == 0)
+                    if not _sc_unlimited_combined:  # 0 global = unlimited
+                        _sc_combined = [
+                            p for p in all_procedures
+                            if getattr(p, "kind", None) == "strategy"
+                        ]
+                        if len(_sc_combined) > _max_sc_combined:
+                            _sc_combined_served = _sc_combined[:_max_sc_combined]
+                            _sc_excess_ids = {id(p) for p in _sc_combined[_max_sc_combined:]}
+                            all_procedures = [
+                                p for p in all_procedures if id(p) not in _sc_excess_ids
+                            ]
+                            _tr_filtered(
+                                _sc_combined, _sc_combined_served, "procedure",
+                                SLICED_OFF, "strategy_card_cap_combined",
+                            )
+                            logger.debug(
+                                "StrategyCards (combined): total_cards=%d served=%d (cap=%d)",
+                                len(_sc_combined), len(_sc_combined_served), _sc_max,
+                            )
+                            # Backfill ordinary candidates that were cut by total_slots
+                            # now that strategy-card removals freed slots (finding #4).
+                            _combined_ids = {id(p) for p in all_procedures}
+                            _sc_now = sum(
+                                1 for p in all_procedures
+                                if getattr(p, "kind", None) == "strategy"
+                            )
+                            for _tail_p in _before_slots[total_slots:]:
+                                if len(all_procedures) >= total_slots:
+                                    break
+                                if id(_tail_p) in _combined_ids:
+                                    continue
+                                if getattr(_tail_p, "kind", None) == "strategy":
+                                    if _sc_now >= _max_sc_combined:
+                                        continue
+                                    _sc_now += 1
+                                all_procedures.append(_tail_p)
+                                _combined_ids.add(id(_tail_p))
 
                 if all_procedures:
                     for p in all_procedures:
@@ -1798,7 +1968,7 @@ class ContextEngine:
         if not self._settings.staleness_penalty_enabled:
             return results
         half_life = self._settings.staleness_half_life_days
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         adjusted = []
         for r in results:
             score = getattr(r, "score", None)
@@ -1828,7 +1998,7 @@ class ContextEngine:
         final_score = score * max(0.5, 1.0 - (age_days / 60))
         Episodes >60 days old get 0.5x penalty, recent ones ~1.0x.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         adjusted = []
         for ep in episodes:
             score = getattr(ep, "score", None)

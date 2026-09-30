@@ -83,7 +83,7 @@ Background retrievals (retrieval_log, migration 070) — covered by canary check
 ### New Files
 | File | Purpose |
 |------|---------|
-| `sql/migrations/077_process_run_log.sql` | Table + index |
+| `sql/migrations/078_process_run_log.sql` | Table + index |
 | `nous/observability/process_recorder.py` | ProcessRecorder + context manager |
 | `nous/heartbeat/fault_detector.py` | ProcessFaultCheck + RetrievalCanaryCheck |
 | `tests/test_fault_detector.py` | Focused unit tests with mutation evidence |
