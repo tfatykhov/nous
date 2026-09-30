@@ -5,6 +5,8 @@ Prompt-driven checks loaded from DB, running alongside permanent checks.
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import json
 import logging
 from datetime import UTC, datetime
@@ -34,6 +36,36 @@ class DynamicCheckLimitReached(ValueError):
     transient condition instead of failing it permanently — mirrors
     heart.subtasks.SubtaskQueueFull on the subtask path.
     """
+
+
+class DynamicCheckCancelled(RuntimeError):
+    """A check's in-flight run was cancelled because the check was disabled.
+
+    ``by_sibling_run`` is True when the disable came from ANOTHER run of the
+    same check disabling itself: that run is the check's final run and owns
+    the outcome, so this cancelled sibling must not be reported as a failed
+    final run (codex P2, PR #656).
+    """
+
+    def __init__(self, message: str, *, by_sibling_run: bool = False) -> None:
+        super().__init__(message)
+        self.by_sibling_run = by_sibling_run
+
+
+# The check-run task that owns the current task (and every task it spawns,
+# since create_task copies the context). Lets a check disable ITSELF from a
+# tool call without cancelling the very run that is making the call.
+_CURRENT_CHECK_RUN: contextvars.ContextVar[asyncio.Task | None] = contextvars.ContextVar(
+    "nous_current_check_run", default=None
+)
+
+# Per-run outcome slot set by the heartbeat runner around ``check.run()``.
+# run() records ``final_run`` (did THIS run disable its own check) before it
+# gives up ownership of its task, so the runner never infers it from the live
+# ``_self_disabled`` flag after an await.
+RUN_OUTCOME: contextvars.ContextVar[dict[str, bool] | None] = contextvars.ContextVar(
+    "nous_check_run_outcome", default=None
+)
 
 # Tools allowed for dynamic checks.
 # Note: bash is included per spec but could execute arbitrary commands;
@@ -65,6 +97,7 @@ class DynamicCheck(BaseCheck):
         model_override: str | None = None,
         on_complete_prompt: str | None = None,
         on_complete_tools: list[str] | None = None,
+        active_runs: dict[str, set[DynamicCheck]] | None = None,
     ) -> None:
         super().__init__()
         self.check_id = check_id
@@ -80,6 +113,47 @@ class DynamicCheck(BaseCheck):
         self.on_complete_prompt = on_complete_prompt
         self.on_complete_tools = [t for t in on_complete_tools if t in ALLOWED_TOOLS] if on_complete_tools else []
         self._self_disabled = False
+        # In-flight run tracking (codex P1, PR #656): disabling a check must
+        # stop a run that is already executing, not only prevent the next one.
+        # ``active_runs`` is owned by the loader so it can reach a running
+        # instance even after the registry dropped or replaced it.
+        self._active_runs = active_runs
+        # One entry per in-flight run (a REST trigger can overlap a tick), and
+        # the subset whose cancellation came from a disable.
+        self._run_tasks: set[asyncio.Task] = set()
+        self._disable_cancelled: set[asyncio.Task] = set()
+        # The subset cancelled because a sibling run disabled the check.
+        self._sibling_cancelled: set[asyncio.Task] = set()
+
+    def cancel_run(self, *, by_sibling_run: bool = False) -> bool:
+        """Cancel this check's in-flight runs, if any. Returns True if any cancelled.
+
+        A run never cancels itself: a check that disables itself from one of
+        its own tool calls is finishing its final run, which must complete.
+        ``by_sibling_run`` marks the cancelled runs as siblings of that final
+        run, so they do not report the final run's outcome.
+        """
+        cancelled = False
+        for task in list(self._run_tasks):
+            if _CURRENT_CHECK_RUN.get() is task:
+                # The initiating run may live on an instance an ``update``
+                # already replaced (codex P1, PR #656 round 9): record the
+                # self-disable here, or its final_run reads False.
+                self._self_disabled = True
+                continue
+            # A done turn whose run() has not resumed yet is still an active
+            # run (codex P1, PR #656 round 7): mark it too, or it would return
+            # self_disabled=True and fire on_complete for a disable it did
+            # not make. run() removes a task from _run_tasks once consumed.
+            self._disable_cancelled.add(task)
+            if by_sibling_run:
+                self._sibling_cancelled.add(task)
+            if not task.done():
+                task.cancel()
+            cancelled = True
+        if cancelled:
+            self._self_disabled = True
+        return cancelled
 
     def set_cron(self, cron_expr: str | None) -> None:
         """Set cron expression for scheduling."""
@@ -103,6 +177,14 @@ class DynamicCheck(BaseCheck):
         """Execute the check by running the prompt through the agent."""
         if self._runner is None:
             return CheckResult()
+        # Re-verify state at the actual execution boundary. _tick has a
+        # synchronous pre-check, but a concurrent DAG task can disable this
+        # check between that check and the first await inside this coroutine.
+        # Rechecking here is race-free within the coroutine (no awaits yet).
+        # Return skipped=True so callers can distinguish a no-op from a real
+        # successful run and avoid recording spurious success stats.
+        if not self.active or self._self_disabled:
+            return CheckResult(skipped=True)
 
         session_id = f"dynamic-check-{self.name}-{uuid4().hex[:8]}"
         has_pipeline_tools = bool(
@@ -130,20 +212,38 @@ class DynamicCheck(BaseCheck):
             f"If nothing noteworthy, return: {{\"has_findings\": false, \"findings\": []}}"
         )
 
+        run_task = asyncio.create_task(
+            self._run_turn(session_id, instruction),
+            name=f"dynamic-check-run-{self.name}",
+        )
+        self._run_tasks.add(run_task)
+        if self._active_runs is not None:
+            self._active_runs.setdefault(self.name, set()).add(self)
         try:
-            response_text, _ctx, usage = await self._runner.run_turn(
-                session_id, instruction,
-                platform="heartbeat",
-                skip_episode=True,
-                is_subtask=True,
-                tool_filter=self._tools if self._tools else None,
-                model_override=self._model_override,
-                is_background=True,
-                context=ExecutionContext(
-                    kind="heartbeat_check", session_id=session_id,
-                    declared_tools=tuple(self._tools) or None, check_name=self.name,
-                ),
-            )
+            try:
+                response_text, _ctx, usage = await run_task
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if run_task in self._disable_cancelled and not (current is not None and current.cancelling()):
+                    # Cancelled by a disable, not by our caller: surface it as
+                    # a failed run so the runner records it and never reads it
+                    # as success (the runner's own cancel still propagates).
+                    logger.info("DynamicCheck '%s' cancelled mid-run: check disabled", self.name)
+                    raise DynamicCheckCancelled(
+                        f"check '{self.name}' was disabled while running",
+                        by_sibling_run=run_task in self._sibling_cancelled,
+                    ) from None
+                raise
+            except Exception:
+                logger.exception("DynamicCheck '%s' failed", self.name)
+                raise
+            if run_task in self._disable_cancelled:
+                # The turn swallowed the cancel and returned anyway: a run the
+                # DAG terminated is still a failed run, never a completion.
+                raise DynamicCheckCancelled(
+                    f"check '{self.name}' was disabled while running",
+                    by_sibling_run=run_task in self._sibling_cancelled,
+                )
 
             findings = self._parse_findings(response_text or "")
             tokens = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)
@@ -153,14 +253,51 @@ class DynamicCheck(BaseCheck):
                 tokens_used=tokens,
                 self_disabled=self._self_disabled,
             )
-        except Exception:
-            logger.exception("DynamicCheck '%s' failed", self.name)
-            raise
         finally:
+            # Decide here, while this run still owns run_task, whether it is
+            # the check's self-disabling final run (codex P1, PR #656 round
+            # 7). The caller must not re-read the live _self_disabled flag
+            # later: a disable landing after this run ended (during the
+            # awaits below or in the caller's stats write) is not this run's.
+            outcome = RUN_OUTCOME.get()
+            if outcome is not None:
+                outcome["final_run"] = self._self_disabled and run_task not in self._sibling_cancelled
+            if not run_task.done():
+                run_task.cancel()
+            self._run_tasks.discard(run_task)
+            self._disable_cancelled.discard(run_task)
+            self._sibling_cancelled.discard(run_task)
+            if self._active_runs is not None and not self._run_tasks:
+                runs = self._active_runs.get(self.name)
+                if runs is not None:
+                    runs.discard(self)
+                    if not runs:
+                        self._active_runs.pop(self.name, None)
             try:
                 await self._runner.end_conversation(session_id)
             except Exception:
                 pass
+
+    async def _run_turn(self, session_id: str, instruction: str) -> tuple:
+        """Run the agent turn inside this check's own run task."""
+        assert self._runner is not None
+        _CURRENT_CHECK_RUN.set(asyncio.current_task())
+        return await self._runner.run_turn(
+            session_id,
+            instruction,
+            platform="heartbeat",
+            skip_episode=True,
+            is_subtask=True,
+            tool_filter=self._tools if self._tools else None,
+            model_override=self._model_override,
+            is_background=True,
+            context=ExecutionContext(
+                kind="heartbeat_check",
+                session_id=session_id,
+                declared_tools=tuple(self._tools) or None,
+                check_name=self.name,
+            ),
+        )
 
     def _parse_findings(self, response: str) -> list[Finding]:
         """Extract findings from LLM JSON response."""
@@ -222,6 +359,25 @@ class DynamicCheckLoader:
         self._loaded_ids: set[str] = set()
         self._id_to_name: dict[str, str] = {}
         self._signatures: dict[str, str] = {}  # name -> signature for change detection
+        # name -> instances with a run in flight (maintained by DynamicCheck.run)
+        self._active_runs: dict[str, set[DynamicCheck]] = {}
+        # codex P1 (PR #656 round 8): sync() reconciles a DB snapshot against
+        # _loaded_ids/_signatures, which create_check and manage_check mutate
+        # from other tasks (the DAG loop, REST). Interleaved, a stale snapshot
+        # unregisters a just-created check or resurrects a just-disabled one,
+        # so sync, create and manage run one at a time.
+        self._mutation_lock = asyncio.Lock()
+
+    def _cancel_active_runs(self, name: str) -> None:
+        """Cancel every in-flight run of ``name`` (a disabled check stops now)."""
+        checks = list(self._active_runs.get(name, ()))
+        # A run of ``name`` disabling its own check is that check's final run;
+        # the runs cancelled here are its siblings, not the final run.
+        initiator = _CURRENT_CHECK_RUN.get()
+        by_sibling_run = initiator is not None and any(initiator in c._run_tasks for c in checks)
+        for check in checks:
+            if check.cancel_run(by_sibling_run=by_sibling_run):
+                logger.info("F034.5: Cancelled in-flight run of disabled check '%s'", name)
 
     def set_runner(self, runner: AgentRunner) -> None:
         """Set the runner after construction (needed when runner is created in start())."""
@@ -234,6 +390,11 @@ class DynamicCheckLoader:
 
     async def sync(self) -> int:
         """Load/reload dynamic checks from DB. Returns count of active checks."""
+        async with self._mutation_lock:
+            return await self._sync_locked()
+
+    async def _sync_locked(self) -> int:
+        """sync() body; the caller holds ``_mutation_lock``."""
         rows = await self._fetch_enabled()
 
         current_ids = {str(r.id) for r in rows}
@@ -244,6 +405,7 @@ class DynamicCheckLoader:
             if name:
                 self._registry.unregister(name)
                 self._signatures.pop(name, None)
+                self._cancel_active_runs(name)
                 logger.info("F034.5: Unregistered dynamic check '%s'", name)
 
         # Register new/updated checks
@@ -272,6 +434,7 @@ class DynamicCheckLoader:
                 model_override=self._model_override,
                 on_complete_prompt=row.on_complete_prompt,
                 on_complete_tools=row.on_complete_tools or [],
+                active_runs=self._active_runs,
             )
             check.set_cron(row.cron_expr)
 
@@ -434,6 +597,34 @@ class DynamicCheckLoader:
         on_complete_tools: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create a new dynamic check. Returns the check dict."""
+        async with self._mutation_lock:
+            return await self._create_check_locked(
+                name,
+                description,
+                prompt,
+                tools,
+                interval_seconds,
+                cron_expr,
+                timeout_seconds,
+                urgent,
+                on_complete_prompt,
+                on_complete_tools,
+            )
+
+    async def _create_check_locked(
+        self,
+        name: str,
+        description: str,
+        prompt: str,
+        tools: list[str] | None = None,
+        interval_seconds: int = 3600,
+        cron_expr: str | None = None,
+        timeout_seconds: int | None = None,
+        urgent: bool = False,
+        on_complete_prompt: str | None = None,
+        on_complete_tools: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """create_check() body; the caller holds ``_mutation_lock``."""
         if timeout_seconds is None:
             timeout_seconds = self._default_timeout
         from nous.storage.models import DynamicCheckModel
@@ -508,6 +699,7 @@ class DynamicCheckLoader:
             model_override=self._model_override,
             on_complete_prompt=on_complete_prompt,
             on_complete_tools=validated_on_complete_tools,
+            active_runs=self._active_runs,
         )
         check.set_cron(cron_expr)
         self._registry.register(check, permanent=False)
@@ -531,6 +723,13 @@ class DynamicCheckLoader:
         self, action: str, name: str | None = None, updates: dict | None = None,
     ) -> dict[str, Any]:
         """List, enable, disable, delete, or update a dynamic check."""
+        async with self._mutation_lock:
+            return await self._manage_check_locked(action, name, updates)
+
+    async def _manage_check_locked(
+        self, action: str, name: str | None, updates: dict | None,
+    ) -> dict[str, Any]:
+        """manage_check() body; the caller holds ``_mutation_lock``."""
         from nous.storage.models import DynamicCheckModel
 
         if action == "list":
@@ -553,19 +752,26 @@ class DynamicCheckLoader:
                 model.enabled = True
                 model.updated_at = datetime.now(UTC)
                 await session.commit()
-                await self.sync()
+                await self._sync_locked()
                 return {"status": "enabled", "name": name}
 
             elif action == "disable":
-                # Set _self_disabled on in-memory check before unregistering
-                existing = self._registry.get_check(name)
-                if existing and isinstance(existing, DynamicCheck):
-                    existing._self_disabled = True
                 model.enabled = False
                 model.updated_at = datetime.now(UTC)
                 await session.commit()
+                # codex P2 (PR #656): flag the in-memory check only once the
+                # disable is durable. Flagging before the commit left a failed
+                # commit with an enabled, registered check whose run() skips
+                # forever (sync() keeps the instance: same signature).
+                existing = self._registry.get_check(name)
+                if existing and isinstance(existing, DynamicCheck):
+                    existing._self_disabled = True
                 self._registry.unregister(name)
                 self._signatures.pop(name, None)
+                # codex P1 (PR #656): a DAG reap/cancel lands here while the
+                # check may already be mid-run; stop that run instead of
+                # letting it keep calling tools until its own timeout.
+                self._cancel_active_runs(name)
                 check_id = str(model.id)
                 self._loaded_ids.discard(check_id)
                 self._id_to_name.pop(check_id, None)
@@ -577,6 +783,7 @@ class DynamicCheckLoader:
                 await session.commit()
                 self._registry.unregister(name)
                 self._signatures.pop(name, None)
+                self._cancel_active_runs(name)
                 self._loaded_ids.discard(check_id)
                 self._id_to_name.pop(check_id, None)
                 return {"status": "deleted", "name": name}
@@ -622,7 +829,7 @@ class DynamicCheckLoader:
                     raise ValueError("on_complete_tools must be a subset of check tools")
                 model.updated_at = datetime.now(UTC)
                 await session.commit()
-                await self.sync()
+                await self._sync_locked()
                 return {"status": "updated", "name": name}
 
             else:

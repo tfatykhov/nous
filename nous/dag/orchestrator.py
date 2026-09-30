@@ -175,6 +175,60 @@ _SUBTASK_BACKED = frozenset({"subtask", "callback"})
 # re-creating the permanent 'running' wedge the reaper exists to prevent.
 _MAX_REAP_CANCEL_RETRIES = 5
 
+
+def _registry_run_in_flight(registry: object, name: str | None) -> bool:
+    """Whether the heartbeat runner is mid-run on check ``name``.
+
+    Identity checks (``is True`` / ``is False``) keep a stand-in registry
+    without run tracking from reading as in flight or failed.
+    """
+    fn = getattr(registry, "is_in_flight", None)
+    return bool(name) and callable(fn) and fn(name) is True
+
+
+def _registry_disabled_run_failed(registry: object, name: str | None) -> bool:
+    """Whether check ``name`` disabled itself during a run that then failed."""
+    fn = getattr(registry, "self_disabled_run_failed", None)
+    return bool(name) and callable(fn) and fn(name) is True
+
+
+def _registry_final_run_failed(registry: object, name: str | None) -> bool:
+    """Whether check ``name``'s self-disabling final run finished and failed.
+
+    Shared by both check-node paths (_sync_check_node and the
+    completion_check poll) so neither can accept a disabled check as worker
+    completion while its last run's failure is still unrecorded.
+    """
+    return (
+        registry is not None
+        and not _registry_run_in_flight(registry, name)
+        and _registry_disabled_run_failed(registry, name)
+    )
+
+
+def _registry_consume_disabled_run_failure(registry: object, name: str | None) -> None:
+    """Release the registry's retained failure for ``name`` once recorded."""
+    fn = getattr(registry, "consume_self_disabled_run_failure", None)
+    if name and callable(fn):
+        fn(name)
+    # Also unprotect since the failure is consumed or the node is done.
+    _registry_unprotect_from_eviction(registry, name)
+
+
+def _registry_protect_from_eviction(registry: object, name: str | None) -> None:
+    """Mark ``name`` as DAG-associated so its failure entry isn't evicted."""
+    fn = getattr(registry, "protect_from_eviction", None)
+    if name and callable(fn):
+        fn(name)
+
+
+def _registry_unprotect_from_eviction(registry: object, name: str | None) -> None:
+    """Remove DAG protection from ``name``."""
+    fn = getattr(registry, "unprotect_from_eviction", None)
+    if name and callable(fn):
+        fn(name)
+
+
 # Completion check polling
 _CHECK_CMD_TIMEOUT = 10.0  # Hard timeout per check command invocation
 
@@ -1388,7 +1442,31 @@ class DAGOrchestrator:
             return
 
         registry = getattr(self._dynamic_loader, '_registry', None)
+        # codex P1 (PR #656): the DAG tick runs on its own loop, so it can
+        # observe a check that disabled itself mid-run — manage_check
+        # unregisters it while the run is still executing tools, before the
+        # runner records the run's outcome. Registry absence/inactivity only
+        # means "will not run again"; completion is the RUN finishing, so
+        # defer while a run is in flight and honor a failed final run.
+        if registry is not None and _registry_run_in_flight(registry, node.check_name):
+            return
         check = registry.get_check(node.check_name) if registry else None
+        if (check is None or not check.active) and _registry_final_run_failed(
+            registry,
+            node.check_name,
+        ):
+            await self._store.update_node(
+                node.id,
+                status="failed",
+                error="Check disabled itself but its final run failed",
+                completed_at=datetime.now(UTC),
+            )
+            node.status = "failed"
+            # Consumed only after the failure is persisted, so a failed write
+            # re-reads it next tick; consuming keeps the registry from
+            # retaining one entry per finished DAG check forever.
+            _registry_consume_disabled_run_failure(registry, node.check_name)
+            return
         if check is None:
             # Check was unregistered — for DAG-managed checks this means
             # self-disable completed (DynamicCheckLoader unregisters on disable).
@@ -1399,6 +1477,8 @@ class DAGOrchestrator:
                 completed_at=datetime.now(UTC),
             )
             node.status = "completed"
+            # No failure to consume, but still unprotect the check.
+            _registry_unprotect_from_eviction(registry, node.check_name)
             return
 
         # Use check.active to detect disabled checks (review fix)
@@ -1410,6 +1490,8 @@ class DAGOrchestrator:
                 completed_at=datetime.now(UTC),
             )
             node.status = "completed"
+            # No failure to consume, but still unprotect the check.
+            _registry_unprotect_from_eviction(registry, node.check_name)
 
     async def _poll_awaiting_checks(self, dag: ExecutionDAG) -> None:
         """Poll completion_check commands for nodes in awaiting_check status."""
@@ -1443,7 +1525,25 @@ class DAGOrchestrator:
             # success" instruction was wrong): computed once here and
             # reused for the rest of this node's iteration — see below for
             # why re-checking per-branch was itself the bug.
+            # codex P1 (PR #656 round 5): a check whose final run disabled
+            # itself and then failed leaves enabled=False in the DB, which
+            # _heartbeat_worker_has_run accepts as worker evidence. Honor the
+            # retained failure first, as _sync_check_node does, so a passing
+            # shell check cannot complete a node whose worker failed.
+            if await self._fail_if_final_run_failed(node):
+                continue
+
             worker_has_run = await self._heartbeat_worker_has_run(node)
+            # codex P1 (PR #656 round 6): the run can finish — and fail —
+            # while the helper above awaits the DB, after which the helper
+            # sees the durable enabled=False row and returns True. Re-read
+            # the registry after every await on this path; a run still in
+            # flight is not evidence yet (it may still fail), so defer —
+            # without skipping the timeout backstop below.
+            if await self._fail_if_final_run_failed(node):
+                continue
+            if self._check_run_in_flight(node):
+                worker_has_run = False
             if node.awaiting_check_at is None and worker_has_run:
                 established_at = datetime.now(UTC)
                 await self._store.update_node(
@@ -1526,13 +1626,27 @@ class DAGOrchestrator:
                 attempts = (node.check_attempts or 0) + 1
                 now = datetime.now(UTC)
 
+                result = None
                 if check.status == "success":
-                    # worker_has_run is guaranteed True here — we already
-                    # `continue`d above otherwise, in this SAME iteration,
-                    # with no intervening await that could change the
-                    # underlying run_count/error_count/enabled state. No
-                    # need to re-check.
                     result = await self._read_node_result(node, dag)
+                # codex P1 (PR #656 round 6): the shell command and result
+                # read are awaited too, so the worker's final run can start,
+                # disable itself and fail meanwhile. Re-read after the last
+                # await, before accepting a result.
+                if await self._fail_if_final_run_failed(
+                    node, check_attempts=attempts, last_check_at=now,
+                ):
+                    continue
+                # codex P1 (PR #656 round 7): a run in flight may still be
+                # doing the work that changes the completion state, so no
+                # shell outcome -- pass OR fail -- is terminal until it ends.
+                if check.status != "pending" and self._check_run_in_flight(node):
+                    check = CheckResult(status="pending", detail=check.detail)
+
+                if check.status == "success":
+                    # worker_has_run was established above; the in-flight
+                    # and retained-failure re-reads just before this branch
+                    # cover every await since then.
                     # Terminal transition + heartbeat cancel both go through
                     # _finalize_awaiting_check_node — see its docstring for
                     # why cleanup lives there and not inline per-branch.
@@ -1574,6 +1688,33 @@ class DAGOrchestrator:
                 logger.exception(
                     "Error polling completion check for node %s", node.name
                 )
+
+    def _check_run_in_flight(self, node: DAGNode) -> bool:
+        """Whether node's heartbeat check has a run executing right now."""
+        registry = getattr(self._dynamic_loader, "_registry", None)
+        return _registry_run_in_flight(registry, node.check_name)
+
+    async def _fail_if_final_run_failed(self, node: DAGNode, **fields: Any) -> bool:
+        """Fail an awaiting_check node whose self-disabling final run failed.
+
+        codex P1 (PR #656 round 5/6): enabled=False in the DB counts as
+        worker evidence, so a retained final-run failure must win over it.
+        The registry is live state, so callers re-read it after every await
+        in _poll_awaiting_checks rather than trusting an earlier answer.
+        Returns True if the node was failed.
+        """
+        registry = getattr(self._dynamic_loader, "_registry", None)
+        if not _registry_final_run_failed(registry, node.check_name):
+            return False
+        await self._finalize_awaiting_check_node(
+            node,
+            status="failed",
+            error="Check disabled itself but its final run failed",
+            **fields,
+        )
+        # Consumed only after the failure is persisted.
+        _registry_consume_disabled_run_failure(registry, node.check_name)
+        return True
 
     async def _heartbeat_worker_has_run(self, node: DAGNode) -> bool:
         """Whether node's heartbeat check has completed at least one
@@ -1699,6 +1840,12 @@ class DAGOrchestrator:
             return False
         if successful_runs:
             return True
+        # codex P1 (PR #656): enabled=False commits DURING the run that
+        # disables itself, so it proves the run finished only once that run
+        # is no longer in flight.
+        registry = getattr(self._dynamic_loader, "_registry", None)
+        if registry is not None and _registry_run_in_flight(registry, node.check_name):
+            return False
         try:
             disabled = await self._dynamic_loader.is_check_disabled(node.check_name)
         except Exception:
@@ -1737,6 +1884,30 @@ class DAGOrchestrator:
         reaches awaiting_check when completion_check is a non-empty
         string, so that branch is unreachable in practice.)
         """
+        # codex P1 (PR #656 round 8): callers decide the terminal status
+        # after their last in-flight read, but the check stays registered
+        # until _cancel_heartbeat_check below — a run could start during the
+        # awaited update and do work after the node was decided. Fence new
+        # runs before the first await; the disable unregisters (and so
+        # unfences) the check. If the status write fails the node is not
+        # terminal, so its worker must be able to run again.
+        #
+        # codex P1 (PR #656 round 10): a disable→enable cycle during the
+        # terminal write dropped the fence (unregister) and failed to
+        # re-apply it (register saw a fresh name). begin_finalization +
+        # end_finalization keep the fence independent of registration state
+        # so the check stays fenced until finalization completes.
+        registry = getattr(self._dynamic_loader, "_registry", None)
+        begin_finalization = (
+            getattr(registry, "begin_finalization", None)
+            if node.check_name else None
+        )
+        end_finalization = (
+            getattr(registry, "end_finalization", None)
+            if node.check_name else None
+        )
+        if callable(begin_finalization):
+            begin_finalization(node.check_name)
         completed_at = datetime.now(UTC)
         update_kwargs: dict[str, object] = {"status": status, "completed_at": completed_at}
         if error is not None:
@@ -1748,7 +1919,12 @@ class DAGOrchestrator:
         if last_check_at is not None:
             update_kwargs["last_check_at"] = last_check_at
 
-        await self._store.update_node(node.id, **update_kwargs)
+        try:
+            await self._store.update_node(node.id, **update_kwargs)
+        except BaseException:
+            if callable(end_finalization):
+                end_finalization(node.check_name)
+            raise
         node.status = status
         if result is not None:
             node.result = result
@@ -1758,6 +1934,10 @@ class DAGOrchestrator:
             node.last_check_at = last_check_at
 
         await self._cancel_heartbeat_check(node)
+        # Unfence after the disable so a re-enable that raced in stays
+        # fenced until now; a check re-enabled after this point is fine.
+        if callable(end_finalization):
+            end_finalization(node.check_name)
 
     async def _cancel_heartbeat_check(self, node: DAGNode) -> None:
         """Disable the heartbeat check for a node that resolved via shell completion_check.
@@ -3196,6 +3376,10 @@ class DAGOrchestrator:
                 urgent=True,
             )
             created = True
+            # Protect the check's failure entry from eviction so
+            # _sync_check_node can consume it even if many other checks fail.
+            registry = getattr(self._dynamic_loader, "_registry", None)
+            _registry_protect_from_eviction(registry, check_name)
             launched = await self._store.transition_node(
                 node.id,
                 from_statuses=_DISPATCHABLE,
@@ -3254,6 +3438,9 @@ class DAGOrchestrator:
         """Disable a check its node does not own (§3.3). Record it on the node
         first, so the reconciliation sweep can retry a disable that fails —
         a leaked check is urgent and exempt from quiet hours."""
+        # Unprotect the check's failure entry since its node will never consume it.
+        registry = getattr(self._dynamic_loader, "_registry", None)
+        _registry_unprotect_from_eviction(registry, check_name)
         try:
             await self._store.update_node(node_id, check_name=check_name)
         except Exception:
