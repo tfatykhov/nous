@@ -297,3 +297,74 @@ class TestWriteFileTool:
         )
         text = _extract_text(result)
         assert "600" in text  # Size: 600 bytes
+
+    @pytest.mark.asyncio
+    async def test_write_file_atomic_preserves_original_on_failure(self, tmp_path, monkeypatch):
+        """Codex P1 on #652: write_file is atomic — an I/O failure mid-write
+        (e.g. ENOSPC during fsync) must leave the original file untouched."""
+        import errno
+        import os
+        import tempfile
+
+        from nous.api import builtin_tools
+
+        target = tmp_path / "existing.txt"
+        original_content = "original valuable content"
+        target.write_text(original_content, encoding="utf-8")
+
+        real_mkstemp = tempfile.mkstemp
+        real_fsync = os.fsync
+
+        call_count = {"mkstemp": 0, "fsync": 0}
+        tmp_created: list[str] = []
+
+        def failing_mkstemp(**kwargs):
+            call_count["mkstemp"] += 1
+            fd, path = real_mkstemp(**kwargs)
+            tmp_created.append(path)
+            return fd, path
+
+        def failing_fsync(fd):
+            call_count["fsync"] += 1
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(tempfile, "mkstemp", failing_mkstemp)
+        monkeypatch.setattr(os, "fsync", failing_fsync)
+
+        result = await write_file_tool(
+            path="existing.txt",
+            content="new content that should not stick",
+            _workspace_dir=str(tmp_path),
+        )
+
+        text = _extract_text(result)
+        assert "Error" in text
+        assert "No space left" in text
+
+        assert target.read_text(encoding="utf-8") == original_content
+
+        for tmp_path_str in tmp_created:
+            assert not os.path.exists(tmp_path_str), f"temp file {tmp_path_str} was not cleaned up"
+
+        assert call_count["mkstemp"] >= 1
+        assert call_count["fsync"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_write_file_atomic_preserves_mode(self, tmp_path):
+        """Atomic write preserves the original file's mode."""
+        import stat
+
+        target = tmp_path / "executable.sh"
+        target.write_text("#!/bin/bash\necho hello", encoding="utf-8")
+        target.chmod(0o755)
+
+        result = await write_file_tool(
+            path="executable.sh",
+            content="#!/bin/bash\necho updated",
+            _workspace_dir=str(tmp_path),
+        )
+        text = _extract_text(result)
+        assert "written successfully" in text.lower()
+
+        mode = stat.S_IMODE(target.stat().st_mode)
+        assert mode == 0o755, f"expected 0o755, got {oct(mode)}"

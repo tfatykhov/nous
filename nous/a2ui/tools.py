@@ -392,7 +392,15 @@ def make_action_review_pusher(surface_service: Any, snapshot_store: Any, compens
     callback that publishes an action_review card after a compensable
     background mutation, so the user has a surface to invoke review.revert
     from. Revert eligibility goes through the same server-side derivation as
-    ``push_surface``; one card per ledger row (dedup on the row id)."""
+    ``push_surface``; one card per ledger row (dedup on the row id).
+
+    Note: session_id is accepted for interface compatibility but NOT forwarded
+    to push_built (codex P2 on #652). When a micro-app is closed while its
+    app.act worker runs, _retire_action_subtask() blocks the session from
+    pushes to prevent the cancelled action's completion from recreating the
+    closed app. Compensation cards are a distinct flow created by the runner,
+    not by the cancelled action — they must remain pushable so the snapshot
+    has a visible revert path."""
 
     async def push(tool_name: str, ledger_entry_id: Any, session_id: str | None) -> str:
         trace_id = str(ledger_entry_id)
@@ -406,7 +414,6 @@ def make_action_review_pusher(surface_service: Any, snapshot_store: Any, compens
         return await surface_service.push_built(
             built,
             dedup_key=f"review:{trace_id}",
-            session_id=session_id,
         )
 
     return push

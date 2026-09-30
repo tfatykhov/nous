@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import stat
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -178,6 +181,48 @@ async def read_file_tool(
         return _tool_error(f"Error reading file: {e}")
 
 
+def _atomic_write_sync(target: Path, content: str) -> None:
+    """Atomically write content to target via temp file + os.replace().
+
+    Writes to a temp file in the same directory, flushes, fsyncs, preserves
+    the original file's mode if it existed, then atomically replaces the
+    target. On any failure the original file is untouched and no temp file
+    remains (codex P1 on #652: prevents corruption on I/O failures mid-write).
+    """
+    parent = target.parent
+    parent.mkdir(parents=True, exist_ok=True)
+
+    original_mode: int | None = None
+    if target.exists():
+        original_mode = stat.S_IMODE(target.stat().st_mode)
+
+    fd = None
+    tmp_path: str | None = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=str(parent), prefix=".write_file_")
+        os.write(fd, content.encode("utf-8"))
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
+
+        if original_mode is not None:
+            os.chmod(tmp_path, original_mode)
+
+        os.replace(tmp_path, target)
+        tmp_path = None
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
 async def write_file_tool(
     path: str,
     content: str,
@@ -204,11 +249,7 @@ async def write_file_tool(
                 "refused so the write stays revertible."
             )
 
-        # Auto-create parent directories
-        await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
-
-        # Write file
-        await asyncio.to_thread(target.write_text, content, encoding="utf-8")
+        await asyncio.to_thread(_atomic_write_sync, target, content)
 
         return _mcp_response(
             f"File written successfully: {target}\n"

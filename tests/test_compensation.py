@@ -909,7 +909,8 @@ async def test_action_review_pusher_publishes_a_revertible_card() -> None:
     assert await push("write_file", entry_id, "s1") == "surf-1"
     built = service.push_built.await_args.args[0]
     kwargs = service.push_built.await_args.kwargs
-    assert kwargs["dedup_key"] == f"review:{entry_id}" and kwargs["session_id"] == "s1"
+    assert kwargs["dedup_key"] == f"review:{entry_id}"
+    assert "session_id" not in kwargs, "session_id must not be forwarded (codex P2 on #652)"
     assert "review.revert" in built.allowed_actions
     assert built.trace_id == str(entry_id)
 
@@ -917,6 +918,44 @@ async def test_action_review_pusher_publishes_a_revertible_card() -> None:
     snap_store.get_by_ledger_entry.return_value = SimpleNamespace(tool_name="write_file", reverted_at=object())
     await push("write_file", entry_id, "s1")
     assert "review.revert" not in service.push_built.await_args.args[0].allowed_actions
+
+
+@pytest.mark.asyncio
+async def test_action_review_pusher_bypasses_session_blocks() -> None:
+    """Codex P2 on #652: when a micro-app is closed while its app.act worker
+    runs, _retire_action_subtask() blocks the session from pushes. Compensation
+    cards must bypass this block so the snapshot has a visible revert path.
+
+    The fix is to not forward session_id to push_built — a push without a
+    session_id is never blocked."""
+    from unittest.mock import AsyncMock, call
+
+    from nous.a2ui.tools import make_action_review_pusher
+
+    entry_id = uuid4()
+    snap_store = SimpleNamespace(
+        get_by_ledger_entry=AsyncMock(return_value=SimpleNamespace(tool_name="write_file", reverted_at=None))
+    )
+    registry = CompensationRegistry()
+    register_compensators(registry)
+
+    blocked_session = "subtask-deadbeef"
+    push_calls: list = []
+
+    async def capturing_push_built(built, *, dedup_key=None, session_id=None, **kw):
+        push_calls.append({"session_id": session_id, "dedup_key": dedup_key})
+        if session_id == blocked_session:
+            raise PermissionError("session blocked")
+        return "surf-1"
+
+    service = SimpleNamespace(push_built=capturing_push_built)
+    push = make_action_review_pusher(service, snap_store, registry)
+
+    result = await push("write_file", entry_id, blocked_session)
+    assert result == "surf-1"
+    assert len(push_calls) == 1
+    assert push_calls[0]["session_id"] is None, "session_id must not be forwarded"
+    assert push_calls[0]["dedup_key"] == f"review:{entry_id}"
 
 
 @pytest.mark.parametrize("off", [{"a2ui_enabled": False}, {"execution_ledger_persist_enabled": False}])
