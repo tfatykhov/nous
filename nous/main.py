@@ -77,6 +77,8 @@ async def create_components(settings: Settings) -> dict:
     bus = None
     handler_http = None
     session_monitor = None
+    decision_reviewer = None
+    strategy_card_distiller = None
     if settings.event_bus_enabled:
         bus = EventBus()
 
@@ -229,6 +231,7 @@ async def create_components(settings: Settings) -> dict:
 
         if settings.actionability_backfill_on_startup:
             import asyncio as _asyncio
+
             from nous.handlers.actionability_backfill import (
                 ActionabilityBackfillHandler,
                 run_backfill_with_supervision,
@@ -328,13 +331,16 @@ async def create_components(settings: Settings) -> dict:
         except ImportError:
             logger.debug("RubricEvolver not available yet")
 
+        # Wire bus into brain so review events fire whenever the bus is active,
+        # independently of whether cross-type linking is enabled (finding #2).
+        brain._bus = bus
+
         # F022 Phase 2: Wire fact->decision graph linking
         try:
             from nous.handlers.fact_graph_linker import FactGraphLinker
 
             if graph_linker is not None and settings.cross_type_linking_enabled:
                 heart._bus = bus  # Inject bus for fact_learned emission
-                brain._bus = bus  # F040: Inject bus for decision_recorded emission
                 FactGraphLinker(graph_linker, settings, bus)
                 logger.debug("F022: FactGraphLinker wired — fact->decision linking enabled")
         except ImportError:
@@ -450,6 +456,22 @@ async def create_components(settings: Settings) -> dict:
             decision_reviewer = None
             logger.debug("DecisionReviewer not available yet")
 
+        # Reasoning Maps L1: strategy card distillation
+        try:
+            from nous.handlers.strategy_card_distiller import StrategyCardDistiller
+
+            strategy_card_distiller = StrategyCardDistiller(
+                brain=brain,
+                heart=heart,
+                settings=settings,
+                bus=bus,
+                llm_client=api_client,
+                graph_linker=graph_linker,
+            )
+        except ImportError:
+            strategy_card_distiller = None
+            logger.debug("StrategyCardDistiller not available yet")
+
         # F020: Clean up tool cache on session end
         from nous.api.tool_cache import cleanup_session_cache
 
@@ -472,6 +494,15 @@ async def create_components(settings: Settings) -> dict:
             await session_monitor.start()
         if decision_reviewer:
             await decision_reviewer.start()
+
+    # Warn when strategy card distillation is configured but will never run
+    # because the event bus (which delivers decision_reviewed events) is off.
+    if getattr(settings, "strategy_cards_enabled", False) and bus is None:
+        logger.warning(
+            "NOUS_STRATEGY_CARDS_ENABLED=true but NOUS_EVENT_BUS_ENABLED=false: "
+            "strategy card distillation requires the event bus to receive "
+            "decision_reviewed events. No cards will be distilled this session."
+        )
 
     # F039: Wire LLM client into monitor for inline correction detection
     # (outside bus guard — inline corrections work independently of event bus)
@@ -501,7 +532,7 @@ async def create_components(settings: Settings) -> dict:
         limits=httpx.Limits(max_connections=5, max_keepalive_connections=2),
     )
     # F033: Multi-tier search router
-    from nous.api.search_providers import TavilyProvider, ExaProvider, BraveProvider
+    from nous.api.search_providers import BraveProvider, ExaProvider, TavilyProvider
     from nous.api.search_router import SearchRouter
 
     search_router = SearchRouter(
@@ -868,13 +899,16 @@ async def create_components(settings: Settings) -> dict:
     heartbeat_runner = None
     if settings.heartbeat_enabled:
         try:
-            from nous.heartbeat.finding_store import FindingStore
-            from nous.heartbeat.runner import HeartbeatRunner
-            from nous.heartbeat.registry import CheckRegistry
-            from nous.heartbeat.schemas import EscalationConfig
             from nous.heartbeat.checks import (
-                HealthCheck, SelfInitiatedCheck, EmailCheck, DriveCheck,
+                DriveCheck,
+                EmailCheck,
+                HealthCheck,
+                SelfInitiatedCheck,
             )
+            from nous.heartbeat.finding_store import FindingStore
+            from nous.heartbeat.registry import CheckRegistry
+            from nous.heartbeat.runner import HeartbeatRunner
+            from nous.heartbeat.schemas import EscalationConfig
 
             escalation_config = EscalationConfig(
                 low_to_normal_hours=settings.heartbeat_escalation_low_to_normal_hours,
@@ -1043,9 +1077,9 @@ async def create_components(settings: Settings) -> dict:
     dag_store = None
     if settings.dag_enabled:
         try:
-            from nous.dag.store import DAGStore
-            from nous.dag.orchestrator import DAGOrchestrator
             from nous.dag.delivery import DAGResultDelivery
+            from nous.dag.orchestrator import DAGOrchestrator
+            from nous.dag.store import DAGStore
 
             dag_store = DAGStore(database, agent_id=settings.agent_id, settings=settings)
             # F087: carries a finished DAG's outcome to the bus, an optional
@@ -1108,7 +1142,8 @@ async def create_components(settings: Settings) -> dict:
                 try:
                     from nous.heart.work_queue import WorkQueueItemManager
                     from nous.heartbeat.work_queue import (
-                        WorkQueueCheck, build_adapter,
+                        WorkQueueCheck,
+                        build_adapter,
                     )
                     wq_items_mgr = WorkQueueItemManager(
                         database, settings.agent_id,
@@ -1242,6 +1277,7 @@ async def create_components(settings: Settings) -> dict:
         "subtask_pool": subtask_pool,
         "task_scheduler": task_scheduler,
         "decision_reviewer": decision_reviewer,
+        "strategy_card_distiller": strategy_card_distiller,
         "api_client": api_client,
         "sleep_handler": sleep_handler,
         "rubric_manager": rubric_manager,
@@ -1279,7 +1315,7 @@ async def shutdown_components(components: dict) -> None:
     if dag_orchestrator is not None:
         try:
             await asyncio.wait_for(dag_orchestrator.wait_for_delivery(), timeout=30)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "F087: in-flight DAG delivery did not finish within 30s — "
                 "abandoning it; the sweep will re-deliver after restart"
@@ -1367,6 +1403,14 @@ async def shutdown_components(components: dict) -> None:
     bus = components.get("bus")
     if bus:
         await bus.stop()
+
+    # Drain in-flight strategy-card distillation tasks before closing clients/DB.
+    strategy_card_distiller = components.get("strategy_card_distiller")
+    if strategy_card_distiller is not None:
+        try:
+            await strategy_card_distiller.shutdown()
+        except Exception:
+            logger.warning("StrategyCardDistiller shutdown error", exc_info=True)
 
     handler_http = components.get("handler_http")
     if handler_http:

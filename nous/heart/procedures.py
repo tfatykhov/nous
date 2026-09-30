@@ -159,6 +159,8 @@ class ProcedureManager:
             # when the manifest didn't declare any of the new fields, but
             # we don't gate on a flag at write time (silent-drop fix).
             runtime_metadata=input.runtime_metadata,
+            # Reasoning Maps L1 (migration 079)
+            kind=input.kind,
         )
         session.add(procedure)
         await session.flush()
@@ -224,6 +226,9 @@ class ProcedureManager:
         procedure.implementation_notes = input.implementation_notes or None
         procedure.tags = input.tags or None
         procedure.runtime_metadata = input.runtime_metadata
+        # Propagate kind so an in-place skill update does not silently inherit
+        # a prior 'strategy' kind (or vice-versa) from the existing row.
+        procedure.kind = input.kind
         if input.active is not None:
             procedure.active = input.active
         procedure.embedding = embedding
@@ -479,6 +484,7 @@ class ProcedureManager:
                     activation_count=p.activation_count or 0,
                     effectiveness=effectiveness,
                     score=final_score,
+                    kind=p.kind,
                     # F079 P1: carry body fields for the pull path (recall_deep).
                     # `p` is the full ORM row already in scope — no extra query.
                     core_patterns=list(p.core_patterns or []),
@@ -566,6 +572,7 @@ class ProcedureManager:
                 activation_count=p.activation_count or 0,
                 effectiveness=self._compute_effectiveness(p),
                 score=sims.get(p.id),
+                kind=p.kind,
                 core_patterns=list(p.core_patterns or []),
                 implementation_notes=list(p.implementation_notes or []),
             )
@@ -718,6 +725,7 @@ class ProcedureManager:
                 description=p.description,
                 activation_count=p.activation_count or 0,
                 effectiveness=self._compute_effectiveness(p),
+                kind=p.kind,
             )
             for p in procs
         ]
@@ -1035,4 +1043,5 @@ class ProcedureManager:
             tags=procedure.tags or [],
             active=procedure.active if procedure.active is not None else True,
             created_at=procedure.created_at,
+            kind=procedure.kind,
         )
