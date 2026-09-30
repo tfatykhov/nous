@@ -2284,3 +2284,93 @@ async def test_enable_if_unchanged_succeeds_despite_sync_failure() -> None:
     result = await loader.enable_if_unchanged("c", str(uuid4()), "tok")
     assert result is True
     session.commit.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# codex P1 on #652: durable pending marker + production sweep wiring
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mark_card_pending_retries_before_publish() -> None:
+    """codex P1 on #652: mark_card_pending retries up to 3 times before push,
+    so transient DB failures don't leave orphaned mutations without a marker."""
+    from unittest.mock import AsyncMock, call
+
+    from nous.api.runner import AgentRunner
+
+    runner = object.__new__(AgentRunner)
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
+    runner._snap_store = snap_store = AsyncMock()
+    runner._action_review_pusher = pusher = AsyncMock()
+
+    entry = uuid4()
+    ctx = ExecutionContext(kind="subtask")
+
+    # Fail twice, succeed on third attempt
+    snap_store.mark_card_pending.side_effect = [RuntimeError("db down"), RuntimeError("db down"), None]
+
+    await runner._maybe_push_action_review(ctx, "write_file", entry, "s1", snapshotted=True, status="success")
+
+    # Should have tried 3 times
+    assert snap_store.mark_card_pending.await_count == 3
+    snap_store.mark_card_pending.assert_has_awaits([call(entry, "write_file")] * 3)
+    # And then pushed successfully
+    pusher.assert_awaited_once()
+    snap_store.mark_card_published.assert_awaited_once_with(entry)
+
+
+@pytest.mark.asyncio
+async def test_mark_card_pending_all_retries_exhausted_still_pushes() -> None:
+    """codex P1 on #652: even if all marker retries fail, push proceeds (fail-open).
+    The mutation already happened; better to try the push than abort entirely."""
+    from unittest.mock import AsyncMock
+
+    from nous.api.runner import AgentRunner
+
+    runner = object.__new__(AgentRunner)
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
+    runner._snap_store = snap_store = AsyncMock()
+    runner._action_review_pusher = pusher = AsyncMock()
+
+    entry = uuid4()
+    ctx = ExecutionContext(kind="subtask")
+
+    # All 3 attempts fail
+    snap_store.mark_card_pending.side_effect = RuntimeError("db permanently down")
+
+    await runner._maybe_push_action_review(ctx, "write_file", entry, "s1", snapshotted=True, status="success")
+
+    # Should have tried 3 times then proceeded to push
+    assert snap_store.mark_card_pending.await_count == 3
+    pusher.assert_awaited_once()
+
+
+def test_sweep_pending_cards_wired_in_main() -> None:
+    """codex P1 on #652: sweep_pending_cards must be called from a production loop.
+    This test verifies the wiring exists in main.py (startup + maintenance loop)."""
+    import ast
+    from pathlib import Path
+
+    main_path = Path(__file__).parent.parent / "nous" / "main.py"
+    source = main_path.read_text()
+
+    # Must appear in the maintenance loop
+    assert "runner.sweep_pending_cards()" in source, "sweep_pending_cards not wired in maintenance loop"
+
+    # Must also have a startup sweep (bounded by wait_for)
+    tree = ast.parse(source)
+    startup_sweep_found = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            # Look for asyncio.wait_for(runner.sweep_pending_cards(), ...)
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "wait_for" and len(node.args) >= 1:
+                arg = node.args[0]
+                if (
+                    isinstance(arg, ast.Call)
+                    and isinstance(arg.func, ast.Attribute)
+                    and arg.func.attr == "sweep_pending_cards"
+                ):
+                    startup_sweep_found = True
+                    break
+    assert startup_sweep_found, "startup sweep_pending_cards not wired with wait_for timeout"

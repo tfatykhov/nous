@@ -649,11 +649,22 @@ class AgentRunner:
             return
         # codex P1 on #652: mark the card pending BEFORE attempting push,
         # so a transient failure leaves a marker that can be retried on tick.
+        # Retry to make the marker durable: if both marker and push fail,
+        # the sweep cannot discover the orphan.
         if self._snap_store is not None:
-            try:
-                await self._snap_store.mark_card_pending(entry_id, tool_name)
-            except Exception:
-                logger.warning("Harness Phase 2.8: mark_card_pending failed for %s", tool_name, exc_info=True)
+            for attempt in range(3):
+                try:
+                    await self._snap_store.mark_card_pending(entry_id, tool_name)
+                    break
+                except Exception:
+                    logger.warning(
+                        "Harness Phase 2.8: mark_card_pending failed (attempt %d) for %s",
+                        attempt + 1,
+                        tool_name,
+                        exc_info=True,
+                    )
+                    if attempt < 2:
+                        await asyncio.sleep(0.5 * (attempt + 1))
         try:
             await self._action_review_pusher(tool_name, entry_id, session_id)
             # Mark published on success

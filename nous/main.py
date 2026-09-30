@@ -445,6 +445,7 @@ async def create_components(settings: Settings) -> dict:
         if sleep_handler is not None and getattr(settings, "fault_detector_enabled", False):
             try:
                 from nous.observability.process_recorder import ProcessRecorder
+
                 sleep_handler._recorder = ProcessRecorder(database, settings.agent_id)
                 logger.info("Fault detector: ProcessRecorder wired into SleepHandler")
             except Exception:
@@ -643,7 +644,7 @@ async def create_components(settings: Settings) -> dict:
         async def _execution_ledger_maintenance_loop():
             # Prune at startup (a process restarted daily must still prune -
             # the F091 lesson) and then at most daily; sweep stale pending rows
-            # every interval.
+            # every interval; retry pending compensation cards (codex P1 #652).
             last_prune: float | None = None
             loop = asyncio.get_running_loop()
             while True:
@@ -660,6 +661,14 @@ async def create_components(settings: Settings) -> dict:
                     await ledger_store.mark_orphans_unknown(
                         older_than_seconds=effective_orphan_threshold(settings),
                     )
+                    # codex P1 on #652: retry pending compensation cards that
+                    # failed to publish on the original call.
+                    try:
+                        published = await runner.sweep_pending_cards()
+                        if published:
+                            logger.info("Harness: retried %d pending compensation card(s)", published)
+                    except Exception:
+                        logger.warning("Harness: sweep_pending_cards failed", exc_info=True)
                 except asyncio.CancelledError:
                     break
                 except Exception:
@@ -1101,8 +1110,10 @@ async def create_components(settings: Settings) -> dict:
             if getattr(settings, "fault_detector_enabled", False):
                 try:
                     from nous.heartbeat.fault_detector import (
-                        ProcessFaultCheck, RetrievalCanaryCheck,
+                        ProcessFaultCheck,
+                        RetrievalCanaryCheck,
                     )
+
                     # ProcessFaultCheck watches sleep phases only; with sleep
                     # disabled no SleepHandler/recorder exists, so stale rows
                     # from an earlier deployment would age into missed-run
@@ -1120,18 +1131,10 @@ async def create_components(settings: Settings) -> dict:
                         logger.info("Fault detector: ProcessFaultCheck skipped (sleep disabled)")
                     canary_path = getattr(settings, "fault_detector_canary_path", "")
                     if canary_path:
-                        registry.register(
-                            RetrievalCanaryCheck(heart=heart, settings=settings)
-                        )
-                        logger.info(
-                            "Fault detector: RetrievalCanaryCheck registered "
-                            "(canary_path=%s)", canary_path
-                        )
+                        registry.register(RetrievalCanaryCheck(heart=heart, settings=settings))
+                        logger.info("Fault detector: RetrievalCanaryCheck registered (canary_path=%s)", canary_path)
                     else:
-                        logger.info(
-                            "Fault detector: RetrievalCanaryCheck skipped "
-                            "(fault_detector_canary_path not set)"
-                        )
+                        logger.info("Fault detector: RetrievalCanaryCheck skipped (fault_detector_canary_path not set)")
                 except Exception:
                     logger.warning("Fault detector check registration failed", exc_info=True)
 
@@ -1162,9 +1165,7 @@ async def create_components(settings: Settings) -> dict:
         # Construction never touches the network and never raises on a bad
         # config: it records the reason and reports itself unconfigured.
         push_service = PushService(database, settings)
-        surface_service = SurfaceService(
-            database, settings, heart=heart, push=push_service
-        )
+        surface_service = SurfaceService(database, settings, heart=heart, push=push_service)
 
     # F038: DAG Orchestration
     dag_orchestrator = None
@@ -1349,6 +1350,13 @@ async def create_components(settings: Settings) -> dict:
             from nous.a2ui.tools import make_action_review_pusher
 
             runner.set_action_review_pusher(make_action_review_pusher(surface_service, _snap_store, _comp_registry))
+            # codex P1 on #652: startup sweep for pending cards left by a crash
+            try:
+                n = await asyncio.wait_for(runner.sweep_pending_cards(), timeout=30)
+                if n:
+                    logger.info("Harness: startup sweep retried %d pending compensation card(s)", n)
+            except Exception:
+                logger.warning("Harness: startup pending-card sweep failed", exc_info=True)
 
         async def _a2ui_sweep_loop():
             # Sweep once at startup, then periodically. The sweep must run
