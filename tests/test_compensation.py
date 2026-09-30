@@ -2875,3 +2875,62 @@ def test_card_offers_revert_only_when_the_guard_state_is_recorded() -> None:
     for tool in ("resolve_decision", "heartbeat_check_manage"):
         assert not snapshot_is_revertible(tool, {"prior": {}})
         assert snapshot_is_revertible(tool, {"written": {}})
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFOs only")
+async def test_write_file_over_a_fifo_is_refused_without_blocking(tmp_path) -> None:
+    """A FIFO with no writer must not hang the write (or its snapshot) on the
+    open that precedes the regular-file check."""
+    from nous.api.builtin_tools import write_file_tool
+
+    os.mkfifo(tmp_path / "pipe")
+    result = await asyncio.wait_for(write_file_tool("pipe", "x", _workspace_dir=str(tmp_path)), timeout=5)
+    assert result.get("is_error") is True
+    snap = await asyncio.wait_for(snapshot_for_write_file("pipe", str(tmp_path)), timeout=5)
+    assert snap.get("capture_error")
+
+
+def test_absent_create_falls_back_to_rename_only_when_links_are_unsupported(tmp_path) -> None:
+    """The no-clobber link degrades to a rename only where the filesystem has
+    no hard links; any other link failure propagates and writes nothing."""
+    import errno
+
+    from nous.api.builtin_tools import ABSENT, atomic_replace_bytes
+
+    def _link(err):
+        def fail(*a, **k):
+            raise OSError(err, os.strerror(err))
+
+        return fail
+
+    with patch("nous.api.builtin_tools.os.link", _link(errno.EOPNOTSUPP)):
+        atomic_replace_bytes(tmp_path / "a.txt", b"a", expected=ABSENT)
+    assert (tmp_path / "a.txt").read_bytes() == b"a"
+    with patch("nous.api.builtin_tools.os.link", _link(errno.ENOSPC)), pytest.raises(OSError):
+        atomic_replace_bytes(tmp_path / "b.txt", b"b", expected=ABSENT)
+    assert not (tmp_path / "b.txt").exists()
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".write_file_")]
+
+
+@pytest.mark.asyncio
+async def test_write_cancelled_before_its_worker_began_revokes_and_drops_the_fence(tmp_path) -> None:
+    """A write_file cancelled before its worker thread began may never run,
+    so its fence would never be dropped. It is revoked (a late start refuses)
+    and dropped."""
+    from nous.api import call_outcome
+    from nous.api.builtin_tools import ABSENT, _write_fences, register_write_fence, write_file_tool
+    from nous.api.call_outcome import CallOutcome
+
+    key = str(uuid4())
+    fence = register_write_fence(key)
+    outcome = CallOutcome(write_target=str(tmp_path / "n.txt"), write_expected=ABSENT, write_fence=fence)
+    token = call_outcome._current.set(outcome)
+    try:
+        with patch("nous.api.builtin_tools.asyncio.to_thread", side_effect=asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError):
+                await write_file_tool("n.txt", "x", _workspace_dir=str(tmp_path))
+    finally:
+        call_outcome._current.reset(token)
+    assert fence.revoked and key not in _write_fences
+    assert not (tmp_path / "n.txt").exists()

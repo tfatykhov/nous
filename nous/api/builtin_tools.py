@@ -207,6 +207,10 @@ async def read_file_tool(
 ABSENT = "absent"
 
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # 0 on Windows: symlink refusal is POSIX-only
+_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+# link() errnos meaning "this filesystem has no hard links" -- only these fall
+# back to a plain rename; any other link failure propagates.
+_LINK_UNSUPPORTED = {errno.EPERM, getattr(errno, "ENOTSUP", errno.EOPNOTSUPP), errno.EOPNOTSUPP}
 _DIR_FD = os.open in os.supports_dir_fd and os.replace in os.supports_dir_fd
 
 
@@ -229,6 +233,8 @@ class WriteFence:
         self.lock = threading.Lock()
         self.revoked = False
         self.started = False
+        # Set by the worker thread (under ``lock``) once it begins.
+        self.began = False
 
 
 _write_fences: dict[str, WriteFence] = {}
@@ -276,7 +282,9 @@ def _parent_dir(target: Path) -> Iterator[tuple[int | None, str]]:
 
 def _read_state(dfd: int | None, name: str, limit: int) -> _State:
     try:
-        fd = os.open(name, os.O_RDONLY | _NOFOLLOW, dir_fd=dfd)
+        # O_NONBLOCK: a FIFO with no writer would otherwise block this open
+        # forever; with it the open returns and fails the regular-file check.
+        fd = os.open(name, os.O_RDONLY | _NOFOLLOW | _NONBLOCK, dir_fd=dfd)
     except FileNotFoundError:
         return _State(ABSENT, None)
     except OSError as exc:
@@ -379,8 +387,11 @@ def atomic_replace_bytes(
                         os.link(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd, follow_symlinks=False)
                     except FileExistsError as exc:
                         raise PreconditionFailed(f"{target} appeared while it was being written") from exc
-                    except (OSError, NotImplementedError):
-                        os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)  # no hard links here
+                    except (OSError, NotImplementedError) as exc:
+                        if isinstance(exc, OSError) and exc.errno not in _LINK_UNSUPPORTED:
+                            raise
+                        logger.warning("write_file: no hard links for %s; creating it by rename", target)
+                        os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
                         tmp = None
                 else:
                     os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
@@ -450,6 +461,9 @@ async def write_file_tool(
 
         def _run() -> None:
             try:
+                if fence is not None:
+                    with fence.lock:
+                        fence.began = True
                 atomic_replace_bytes(target, data, expected=expected, fence=fence)
             finally:
                 if fence is not None:
@@ -457,7 +471,18 @@ async def write_file_tool(
 
         if fence is not None:
             fence.started = True
-        await asyncio.to_thread(_run)
+        try:
+            await asyncio.to_thread(_run)
+        except asyncio.CancelledError:
+            if fence is not None:
+                # Cancelled before the worker began: it may never run, so its
+                # finally would never drop the fence. Revoke it first, so a
+                # worker that does start later refuses to write.
+                with fence.lock:
+                    if not fence.began:
+                        fence.revoked = True
+                        drop_write_fence(fence)
+            raise
 
         return _mcp_response(f"File written successfully: {target}\nSize: {len(content):,} bytes")
 

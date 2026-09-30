@@ -581,13 +581,15 @@ class AgentRunner:
         tool_input: dict,
         outcome: CallOutcome | None = None,
     ) -> str | None:
-        """After a snapshotted call succeeded: record the state it wrote
-        where a revert must check it (resolve_decision -- the full review
-        state, so a later re-review is never undone), then push the review
-        card. The call already happened, so this never fails it; but when
-        the written state cannot be recorded the revert would be refused, so
-        no card advertises one and the returned note (prefixed to the tool
-        result) tells the caller the change is applied and NOT revertible."""
+        """After a snapshotted call returned (any status): when it may have
+        written (``success``/``unknown``), record the state it wrote where a
+        revert must check it (resolve_decision -- the full review state, so a
+        later re-review is never undone); then resolve the review-card intent
+        (publish, or clear for ``error``/``blocked``). The call already
+        happened, so this never fails it; but when the written state cannot
+        be recorded the revert would be refused, so the card offers no Revert
+        and the returned note (prefixed to the tool result) tells the caller
+        the change is applied and NOT revertible."""
         recorded = True
         # ``unknown`` too: a call cancelled mid-commit may have written. The
         # capture is filled before the commit, and the revert applies only

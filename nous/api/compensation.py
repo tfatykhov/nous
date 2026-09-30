@@ -414,10 +414,12 @@ async def snapshot_for_write_file(
     # read can never have its target's content captured.
     full_path = str(target)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
+    nonblock = getattr(os, "O_NONBLOCK", 0)
 
     def _capture() -> tuple[bool, bytes | None, bool]:
         try:
-            f = open(full_path, "rb", opener=lambda p, flags: os.open(p, flags | nofollow))
+            # O_NONBLOCK: a FIFO with no writer must not block the snapshot.
+            f = open(full_path, "rb", opener=lambda p, flags: os.open(p, flags | nofollow | nonblock))
         except FileNotFoundError:
             return False, None, False
         with f:
