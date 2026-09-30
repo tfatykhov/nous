@@ -100,6 +100,15 @@ _DEFAULT_FACTOR = 1.0
 # scaling neither helps nor hurts, so the step-2 gate would pass vacuously.
 _HISTORICAL_F058_FACTOR = 0.7627
 
+# Historical reference: PR #640 retired the factor to 1.0 on this date.
+# DEPRECATED for era classification — era split now uses calibration_factor
+# directly (see P1-1 fix). When an old decision's confidence is edited after
+# retirement, Brain._update recalibrates it with the current factor (1.0) and
+# stamps calibration_factor while preserving its original created_at. So a
+# date-based cutoff misclassifies these decisions — a factor-1.0 value lands
+# in the 0.7627 era, corrupting per-policy metrics.
+_ERA_CUTOFF_DATE = datetime(2026, 9, 20, tzinfo=UTC)
+
 # Tolerance for comparing two factors (a configuration value).
 _FACTOR_TOLERANCE = 0.001
 
@@ -210,7 +219,8 @@ async def run(
             confidence AS stored,
             confidence_raw IS NOT NULL AS is_post_f058,
             calibration_factor AS applied_factor,
-            outcome
+            outcome,
+            created_at
         FROM brain.decisions
         WHERE agent_id = $1
           AND outcome IN ('success', 'partial', 'failure')
@@ -364,6 +374,81 @@ async def run(
         for f, members in sorted(eras.items(), reverse=True)
     ]
 
+    # Era-split analysis: separate pre/post factor=1.0 eras by RECORDED FACTOR.
+    # The aggregate gap across all decisions is an artifact — legacy rows
+    # were calibrated with 0.7627, so pooling them with 1.0-era rows measures
+    # neither policy accurately.
+    #
+    # P1-1 FIX: When an old decision's confidence is edited after retirement,
+    # Brain._update recalibrates it with the current factor (1.0) and stamps
+    # calibration_factor while preserving its original created_at. So the old
+    # date-based cutoff (_ERA_CUTOFF_DATE = 2026-09-20) misclassified these
+    # decisions — a factor-1.0 value landed in the 0.7627 era, corrupting
+    # per-policy metrics.
+    #
+    # Now we classify by the factor that was actually applied, reading it
+    # directly from brain.decisions.calibration_factor (migration 073).
+    # Rows with NULL or unexpected factors are excluded and logged.
+    post_f058_reviewed = [r for r in rows if r["is_post_f058"]]  # P1-2 fix
+
+    pre_era_rows = []
+    post_era_rows = []
+    excluded_rows = []
+
+    for r in post_f058_reviewed:
+        f = r["applied_factor"]
+        if f is None:
+            # Migration 073 predates the row; treat as legacy era
+            pre_era_rows.append(r)
+        elif abs(float(f) - _HISTORICAL_F058_FACTOR) <= _FACTOR_TOLERANCE:
+            pre_era_rows.append(r)
+        elif abs(float(f) - _DEFAULT_FACTOR) <= _FACTOR_TOLERANCE:
+            post_era_rows.append(r)
+        else:
+            # Unexpected factor value; exclude from era analysis
+            excluded_rows.append(r)
+
+    if excluded_rows:
+        import sys
+        print(f"WARNING: {len(excluded_rows)} decisions have unexpected "
+              f"calibration_factor values and are excluded from era analysis.",
+              file=sys.stderr)
+        for r in excluded_rows[:3]:  # Show first 3
+            print(f"  - factor={r['applied_factor']}, "
+                  f"created_at={r['created_at']}", file=sys.stderr)
+
+    pre_era_pairs = [(float(r["stored"]), _STRICT_OUTCOME[r["outcome"]])
+                     for r in pre_era_rows]
+    post_era_pairs = [(float(r["stored"]), _STRICT_OUTCOME[r["outcome"]])
+                      for r in post_era_rows]
+    # P1-2 FIX: Only include post-F058 decisions in the all_pairs aggregate
+    # for era split reporting. Pre-F058 decisions have confidence_raw=NULL
+    # (migration 039 deliberately left these) and predate the calibration
+    # system, so including them corrupts the metrics.
+    # Also exclude decisions with unexpected calibration_factor values.
+    all_pairs = [(float(r["stored"]), _STRICT_OUTCOME[r["outcome"]])
+                 for r in (pre_era_rows + post_era_rows)]
+
+    era_split = {
+        "classification": "factor-based",
+        "cutoff_date_deprecated": _ERA_CUTOFF_DATE.isoformat(),
+        "n_excluded": len(excluded_rows),
+        "pre_era": {
+            "factor": _HISTORICAL_F058_FACTOR,
+            **summarize("pre_era", pre_era_pairs),
+            "label": "Factor=0.7627 era",
+        },
+        "post_era": {
+            "factor": _DEFAULT_FACTOR,
+            **summarize("post_era", post_era_pairs),
+            "label": "Factor=1.0 era",
+        },
+        "overall": {
+            **summarize("overall", all_pairs),
+            "label": "All eras (pooled, post-F058 only)",
+        },
+    }
+
     return {
         "factor": factor,
         "counterfactual_factor": counterfactual_factor,
@@ -384,6 +469,7 @@ async def run(
             "calibrated": summarize("Pre-F058 + counterfactual", cal_pairs),
         },
         "post_f058_direction": direction,
+        "era_split": era_split,
     }
 
 
@@ -538,6 +624,26 @@ async def _async_main(argv: list[str] | None = None) -> int:
               f"(scaling reduced overconfidence: {d_gap < 0})")
         print(f"   Caveat: n={era['raw']['n']} — directional only.")
     print()
+    print("## Era Split — Factor-based classification")
+    es = result.get("era_split", {})
+    if es:
+        print(f"   Classification: {es['classification']}")
+        print(f"   Excluded (unexpected factor): {es['n_excluded']}")
+        print()
+        for key in ("pre_era", "post_era", "overall"):
+            v = es[key]
+            if v.get("n", 0) == 0:
+                print(f"  {v['label']:<40}  n=0 — skip")
+            else:
+                print(
+                    f"  {v['label']:<40}  n={v['n']:>4}  "
+                    f"conf={v['mean_conf']:.3f}  succ={v['mean_outcome']:.3f}  "
+                    f"gap={v['gap']:+.3f}  Brier={v['brier']:.4f}  ECE={v['ece']:.4f}"
+                )
+        print()
+        print("   Note: Eras classified by calibration_factor, not created_at.")
+        print("         Overall includes only post-F058 decisions (is_post_f058=True).")
+    print()
     print("=" * 84)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -638,6 +744,39 @@ def _build_md(result: dict, factor: float,
                         for era in pd)
             + " — directional only."
         )
+
+    # Era-split section
+    es = result.get("era_split", {})
+    if es:
+        md += [
+            "",
+            "## Era Split — Factor-based classification",
+            "",
+            f"Classification method: **{es['classification']}**",
+            f"Excluded decisions (unexpected factor): **{es['n_excluded']}**",
+            "",
+            "| era | n | mean_conf | success_rate | gap | Brier | ECE |",
+            "|---|---:|---:|---:|---:|---:|---:|",
+        ]
+        for key in ("pre_era", "post_era", "overall"):
+            v = es[key]
+            if v.get("n", 0) == 0:
+                md.append(f"| {v['label']} | 0 | — | — | — | — | — |")
+            else:
+                md.append(
+                    f"| {v['label']} | {v['n']} | {v['mean_conf']:.3f} | "
+                    f"{v['mean_outcome']:.3f} | {v['gap']:+.3f} | "
+                    f"{v['brier']:.4f} | {v['ece']:.4f} |"
+                )
+        md += [
+            "",
+            "- **Note**: Eras classified by `calibration_factor` (migration 073), "
+            "not `created_at`. Edited decisions recalibrated post-retirement now "
+            "correctly land in the factor=1.0 era.",
+            "- Overall includes only post-F058 decisions (`is_post_f058=True`). "
+            "Pre-F058 decisions have `confidence_raw=NULL` and predate the "
+            "calibration system.",
+        ]
     return md
 
 

@@ -9,6 +9,7 @@ import pytest
 
 from nous.brain.calibration_scaling import calibrate_confidence
 from nous_eval.probes.f058_calibration import (
+    _ERA_CUTOFF_DATE,
     _FACTOR_RETIRED_AT,
     _HISTORICAL_F058_FACTOR,
     brier,
@@ -214,11 +215,15 @@ class _FakeConn:
         return self._reviewed
 
 
-def _reviewed(conf_outcomes, post=False, factor=None):
+def _reviewed(conf_outcomes, post=False, factor=None, created_at=None):
+    # Default to before the era cutoff for backwards compatibility with existing tests
+    if created_at is None:
+        created_at = _ERA_CUTOFF_DATE - timedelta(days=30)
     return [
         {"raw": c,
          "stored": calibrate_confidence(c, factor) if post and factor else c,
-         "is_post_f058": post, "applied_factor": factor, "outcome": o}
+         "is_post_f058": post, "applied_factor": factor, "outcome": o,
+         "created_at": created_at}
         for c, o in conf_outcomes
     ]
 
@@ -545,7 +550,8 @@ class TestDirectionCheckSeparatesCalibrationEras:
     async def test_provenance_null_rows_join_the_legacy_era(self):
         null_rows = [
             {"raw": c, "stored": calibrate_confidence(c, _HISTORICAL_F058_FACTOR),
-             "is_post_f058": True, "applied_factor": None, "outcome": o}
+             "is_post_f058": True, "applied_factor": None, "outcome": o,
+             "created_at": _ERA_CUTOFF_DATE - timedelta(days=30)}
             for c, o in self._LEGACY
         ]
         d = await self._direction(
@@ -649,10 +655,89 @@ class TestUnprovenancedRowsUseTheHistoricalFactor:
     async def test_counterfactual_override_does_not_relabel_history(self):
         rows = [
             {"raw": c, "stored": calibrate_confidence(c, _HISTORICAL_F058_FACTOR),
-             "is_post_f058": True, "applied_factor": None, "outcome": o}
+             "is_post_f058": True, "applied_factor": None, "outcome": o,
+             "created_at": _ERA_CUTOFF_DATE - timedelta(days=30)}
             for c, o in [(0.9, "failure"), (0.8, "success")]
         ]
         conn = _FakeConn([(1.0, 1.0, _AFTER)], rows)
         d = (await run(conn, "a", 1.0, 0.5))["post_f058_direction"]
         assert [e["factor"] for e in d] == [_HISTORICAL_F058_FACTOR]
         assert d[0]["raw"]["n"] == 2
+
+
+class TestEraSplit:
+    """Codex P2 from PR #640: separate pre/post factor=1.0 eras.
+
+    The aggregate gap across all decisions is an artifact of pooling two
+    different factor policies. Per-era metrics isolate each policy.
+    """
+
+    @pytest.mark.asyncio
+    async def test_era_split_separates_by_cutoff_date(self):
+        """Decisions are split at _ERA_CUTOFF_DATE."""
+        pre = _reviewed(
+            [(0.9, "success"), (0.8, "failure")],
+            post=True, factor=_HISTORICAL_F058_FACTOR,
+            created_at=_ERA_CUTOFF_DATE - timedelta(days=10),
+        )
+        post = _reviewed(
+            [(0.7, "success"), (0.6, "failure"), (0.5, "success")],
+            post=True, factor=1.0,
+            created_at=_ERA_CUTOFF_DATE + timedelta(days=5),
+        )
+        conn = _FakeConn([(1.0, 1.0, _AFTER)], pre + post)
+        result = await run(conn, "a", 1.0)
+        es = result["era_split"]
+
+        assert es["classification"] == "factor-based"
+        assert es["cutoff_date_deprecated"] == _ERA_CUTOFF_DATE.isoformat()
+        assert es["pre_era"]["n"] == 2
+        assert es["post_era"]["n"] == 3
+        assert es["overall"]["n"] == 5
+        # Codex P2: summarize()'s own label must not clobber the era label.
+        assert es["pre_era"]["label"] == "Factor=0.7627 era"
+        assert es["post_era"]["label"] == "Factor=1.0 era"
+        assert es["overall"]["label"] == "All eras (pooled, post-F058 only)"
+
+    @pytest.mark.asyncio
+    async def test_era_split_computes_separate_metrics(self):
+        """Each era has its own Brier, gap, etc."""
+        pre = _reviewed(
+            [(0.9, "failure")],  # overconfident
+            post=True, factor=_HISTORICAL_F058_FACTOR,
+            created_at=_ERA_CUTOFF_DATE - timedelta(days=1),
+        )
+        post = _reviewed(
+            [(0.9, "success")],  # well-calibrated
+            post=True, factor=1.0,
+            created_at=_ERA_CUTOFF_DATE + timedelta(days=1),
+        )
+        conn = _FakeConn([(1.0, 1.0, _AFTER)], pre + post)
+        result = await run(conn, "a", 1.0)
+        es = result["era_split"]
+
+        # Pre-era: 0.9 confidence, 0.0 outcome → gap = +0.9
+        assert es["pre_era"]["gap"] > 0
+        # Post-era: 0.9 confidence, 1.0 outcome → gap = -0.1
+        assert es["post_era"]["gap"] < 0
+
+    @pytest.mark.asyncio
+    async def test_era_split_handles_empty_eras(self):
+        """Empty eras have n=0 with no other metrics."""
+        pre_only = _reviewed(
+            [(0.8, "success")],
+            post=True, factor=_HISTORICAL_F058_FACTOR,
+            created_at=_ERA_CUTOFF_DATE - timedelta(days=5),
+        )
+        conn = _FakeConn([(1.0, 1.0, _AFTER)], pre_only)
+        result = await run(conn, "a", 1.0)
+        es = result["era_split"]
+
+        assert es["pre_era"]["n"] == 1
+        assert es["post_era"]["n"] == 0
+        assert es["overall"]["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_era_split_cutoff_is_2026_09_20(self):
+        """The cutoff date is the factor=1.0 retirement date from PR #640."""
+        assert _ERA_CUTOFF_DATE == datetime(2026, 9, 20, tzinfo=UTC)
