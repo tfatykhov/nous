@@ -158,18 +158,33 @@ class CheckRegistry:
         # the set, so a failure nobody consumes (its DAG was cancelled first)
         # cannot grow it without limit.
         self._disabled_run_failures: dict[str, None] = {}
+        # Checks with pending DAG nodes that may consume their failure entry.
+        # Entries in this set are protected from the cap-based eviction so a
+        # slow-finishing DAG check's failure isn't dropped before consumption.
+        self._dag_protected: set[str] = set()
         # Checks that may not start a new run: the DAG orchestrator fences a
         # check before persisting its node's terminal status, so no run can
         # start between that decision and the check's disable.
         self._fenced: set[str] = set()
+        # Checks whose terminal node write is in progress: a disable followed
+        # by enable during finalization must not drop the fence. Tracked
+        # separately from _fenced so unfence() can still be the normal path
+        # for a failed terminal write without racing a concurrent re-enable.
+        self._finalizing: set[str] = set()
 
     def register(self, check: BaseCheck, permanent: bool = False) -> None:
         """Register a check. Permanent checks cannot be unregistered."""
         # Replacing a registered check (a dynamic check's update re-sync) keeps
         # its fence: the check it fences is still to be disabled. Only a fresh
-        # registration drops a stale fence left on an absent name.
-        if check.name not in self._checks:
+        # registration drops a stale fence left on an absent name — and only
+        # when no finalization is in flight, since a disable→enable during
+        # finalization must stay fenced until the terminal write completes.
+        if check.name not in self._checks and check.name not in self._finalizing:
             self._fenced.discard(check.name)
+        # A re-registration during finalization must re-apply the fence, since
+        # unregister() may have run already (fence kept, but check absent).
+        if check.name in self._finalizing:
+            self._fenced.add(check.name)
         self._checks[check.name] = check
         # A fresh registration starts with no recorded outcome, so a stale
         # failure from an earlier check of the same name cannot leak into it.
@@ -183,8 +198,11 @@ class CheckRegistry:
         if name in self._permanent:
             logger.warning("Cannot unregister permanent check: %s", name)
             return False
-        # An unregistered check cannot start a run, so its fence is moot.
-        self._fenced.discard(name)
+        # An unregistered check cannot start a run, so its fence is normally
+        # moot — but if finalization is in flight, keep the fence so a
+        # re-enable before finalization completes stays fenced.
+        if name not in self._finalizing:
+            self._fenced.discard(name)
         if name in self._checks:
             del self._checks[name]
             return True
@@ -201,6 +219,21 @@ class CheckRegistry:
     def is_fenced(self, name: str) -> bool:
         """Whether new runs of ``name`` are fenced off."""
         return name in self._fenced
+
+    def begin_finalization(self, name: str) -> None:
+        """Mark a check's terminal node write as in progress.
+
+        A disable followed by enable while finalization is in progress must
+        not drop the fence — the check stays fenced until finalization
+        completes successfully or fails.
+        """
+        self._fenced.add(name)
+        self._finalizing.add(name)
+
+    def end_finalization(self, name: str) -> None:
+        """Mark a check's terminal node write as complete; unfence it."""
+        self._finalizing.discard(name)
+        self._fenced.discard(name)
 
     def begin_run(self, name: str) -> None:
         """Mark a run of ``name`` as in flight (call before ``check.run()``)."""
@@ -230,8 +263,20 @@ class CheckRegistry:
         if self_disabled and succeeded is False:
             self._disabled_run_failures.pop(name, None)
             self._disabled_run_failures[name] = None
+            # Evict oldest non-protected entries. Protected entries belong to
+            # DAG checks that haven't consumed their failure yet — evicting
+            # them would cause _sync_check_node to mark the node COMPLETED
+            # instead of FAILED.
             while len(self._disabled_run_failures) > _MAX_RETAINED_DISABLED_RUN_FAILURES:
-                del self._disabled_run_failures[next(iter(self._disabled_run_failures))]
+                for oldest in self._disabled_run_failures:
+                    if oldest not in self._dag_protected:
+                        del self._disabled_run_failures[oldest]
+                        break
+                else:
+                    # All entries are protected; stop evicting to avoid an
+                    # infinite loop. This is a transient state — DAG consumption
+                    # or cancellation will unprotect and consume them.
+                    break
 
     def is_in_flight(self, name: str) -> bool:
         """Whether a run of ``name`` has started and not yet finished."""
@@ -244,6 +289,14 @@ class CheckRegistry:
     def consume_self_disabled_run_failure(self, name: str) -> None:
         """Drop the retained failure for ``name`` once it has been recorded."""
         self._disabled_run_failures.pop(name, None)
+
+    def protect_from_eviction(self, name: str) -> None:
+        """Mark ``name`` as DAG-associated so its failure entry is not evicted."""
+        self._dag_protected.add(name)
+
+    def unprotect_from_eviction(self, name: str) -> None:
+        """Remove DAG protection from ``name``."""
+        self._dag_protected.discard(name)
 
     def get_due_checks(self, now: datetime | None = None) -> list[BaseCheck]:
         """Get all checks that are due to run."""

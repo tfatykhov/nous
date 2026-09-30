@@ -410,6 +410,50 @@ class TestCheckRegistry:
         assert entry["permanent"] is True
         assert entry["urgent_override"] is False
 
+    def test_protected_failures_not_evicted(self):
+        """codex P2 (PR #656): DAG-protected failure entries aren't evicted.
+
+        The 1,024-entry cap should only evict non-protected entries so a
+        pending DAG check's failure entry isn't dropped before consumption.
+        """
+        from nous.heartbeat.registry import _MAX_RETAINED_DISABLED_RUN_FAILURES
+
+        reg = CheckRegistry()
+        # Fill the registry beyond the cap with protected entries
+        for i in range(_MAX_RETAINED_DISABLED_RUN_FAILURES + 10):
+            name = f"check-{i}"
+            reg.protect_from_eviction(name)
+            reg.end_run(name, succeeded=False, self_disabled=True)
+
+        # All protected entries should be retained despite exceeding the cap
+        for i in range(_MAX_RETAINED_DISABLED_RUN_FAILURES + 10):
+            name = f"check-{i}"
+            assert reg.self_disabled_run_failed(name), f"{name} was evicted"
+
+    def test_unprotected_failures_evicted_first(self):
+        """codex P2 (PR #656): only unprotected entries are evicted."""
+        from nous.heartbeat.registry import _MAX_RETAINED_DISABLED_RUN_FAILURES
+
+        reg = CheckRegistry()
+        # Add a mix of protected and unprotected entries
+        for i in range(_MAX_RETAINED_DISABLED_RUN_FAILURES):
+            name = f"check-{i}"
+            if i % 2 == 0:
+                reg.protect_from_eviction(name)  # even = protected
+            reg.end_run(name, succeeded=False, self_disabled=True)
+
+        # Add one more unprotected entry to trigger eviction
+        reg.end_run("trigger", succeeded=False, self_disabled=True)
+
+        # All protected entries should still exist
+        for i in range(_MAX_RETAINED_DISABLED_RUN_FAILURES):
+            name = f"check-{i}"
+            if i % 2 == 0:
+                assert reg.self_disabled_run_failed(name), f"protected {name} was evicted"
+
+        # At least one unprotected entry should have been evicted (check-1)
+        assert not reg.self_disabled_run_failed("check-1"), "unprotected check-1 should be evicted"
+
 
 # ===========================================================================
 # TestHeartbeatRunner — 16 tests
