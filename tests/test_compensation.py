@@ -928,7 +928,7 @@ async def test_action_review_pusher_bypasses_session_blocks() -> None:
 
     The fix is to not forward session_id to push_built — a push without a
     session_id is never blocked."""
-    from unittest.mock import AsyncMock, call
+    from unittest.mock import AsyncMock
 
     from nous.a2ui.tools import make_action_review_pusher
 
@@ -2117,3 +2117,170 @@ async def test_unrecorded_written_state_is_retried_then_never_advertised_as_reve
             note = await runner._after_compensable_call(ctx, "heartbeat_check_manage", entry, "s1", **kwargs)
         assert note and "NOT be made revertible" in note
         pusher.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Codex findings 2026-09-30 — regression tests (must FAIL before the fix)
+# ---------------------------------------------------------------------------
+
+
+# Finding #1 — runner.py: durable card publication
+# If push_builtin() fails transiently, mark_card_pending ensures retry on tick.
+
+
+@pytest.mark.asyncio
+async def test_push_compensation_card_marks_pending_then_published() -> None:
+    """codex P1 on #652: the runner marks card pending BEFORE push,
+    clears it on success, so a transient failure leaves a retryable marker."""
+    from unittest.mock import AsyncMock
+
+    from nous.api.runner import AgentRunner
+
+    runner = object.__new__(AgentRunner)
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
+    runner._snap_store = snap_store = AsyncMock()
+    runner._action_review_pusher = pusher = AsyncMock()
+
+    entry = uuid4()
+    ctx = ExecutionContext(kind="subtask")
+
+    # Successful push: marks pending, then marks published
+    await runner._maybe_push_action_review(ctx, "write_file", entry, "s1", snapshotted=True, status="success")
+    snap_store.mark_card_pending.assert_awaited_once_with(entry, "write_file")
+    snap_store.mark_card_published.assert_awaited_once_with(entry)
+    pusher.assert_awaited_once()
+
+    # Failed push: marks pending, does NOT mark published
+    snap_store.reset_mock()
+    pusher.reset_mock()
+    pusher.side_effect = TimeoutError("connection lost")
+    await runner._maybe_push_action_review(ctx, "write_file", entry, "s1", snapshotted=True, status="success")
+    snap_store.mark_card_pending.assert_awaited_once()
+    snap_store.mark_card_published.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sweep_pending_cards_retries_failed_publications() -> None:
+    """codex P1 on #652: sweep_pending_cards retries snapshots with _card_pending."""
+    from unittest.mock import AsyncMock
+
+    from nous.api.runner import AgentRunner
+
+    runner = object.__new__(AgentRunner)
+    runner._settings = SimpleNamespace(compensation_auto_review_enabled=True)
+    runner._snap_store = snap_store = AsyncMock()
+    runner._action_review_pusher = pusher = AsyncMock()
+
+    entry1, entry2 = uuid4(), uuid4()
+    snap_store.get_pending_cards.return_value = [(entry1, "write_file"), (entry2, "write_file")]
+
+    published = await runner.sweep_pending_cards()
+    assert published == 2
+    assert pusher.await_count == 2
+    assert snap_store.mark_card_published.await_count == 2
+
+
+# Finding #2 — a2ui/tools.py: compensation cards hide course_correct
+# trace_id is a ledger UUID, not a Decision id.
+
+
+def test_compensation_card_hides_course_correct_and_make_rule() -> None:
+    """codex P2 on #652: compensation cards set compensation_card=True,
+    so the builder skips course_correct/make_rule (trace_id is not a decision)."""
+    from nous.a2ui.builders.action_review import action_review
+
+    # compensation card: no course_correct, no make_rule
+    built = action_review(
+        {
+            "title": "Background write",
+            "did": "wrote file",
+            "trace_id": str(uuid4()),
+            "compensation_card": True,
+            "compensation": {"revertible": True, "handler": "write_file"},
+        }
+    )
+    assert "review.course_correct" not in built.allowed_actions
+    assert "review.make_rule" not in built.allowed_actions
+    assert "review.acknowledge" in built.allowed_actions
+    assert "review.revert" in built.allowed_actions
+    # no correction_field in components
+    assert "correction_field" not in [c["id"] for c in built.components]
+
+    # regular decision review: has course_correct and make_rule
+    built = action_review(
+        {
+            "title": "Decision review",
+            "did": "made a decision",
+            "trace_id": str(uuid4()),
+            "compensation": {"revertible": False, "handler": None},
+        }
+    )
+    assert "review.course_correct" in built.allowed_actions
+    assert "review.make_rule" in built.allowed_actions
+    assert "correction_field" in [c["id"] for c in built.components]
+
+
+@pytest.mark.asyncio
+async def test_make_action_review_pusher_sets_compensation_card_flag() -> None:
+    """codex P2 on #652: the auto-review pusher sets compensation_card=True
+    so the builder hides course_correct (trace_id is a ledger entry, not decision)."""
+    from unittest.mock import AsyncMock
+
+    from nous.a2ui.tools import make_action_review_pusher
+    from nous.api.compensation import CompensationRegistry, register_compensators
+
+    entry_id = uuid4()
+    snap_store = SimpleNamespace(
+        get_by_ledger_entry=AsyncMock(return_value=SimpleNamespace(tool_name="write_file", reverted_at=None))
+    )
+    registry = CompensationRegistry()
+    register_compensators(registry)
+
+    built_surface = None
+
+    async def capturing_push(surface, **kw):
+        nonlocal built_surface
+        built_surface = surface
+        return "surf-1"
+
+    service = SimpleNamespace(push_built=capturing_push)
+    push = make_action_review_pusher(service, snap_store, registry)
+    await push("write_file", entry_id, "s1")
+
+    # The built surface should not have course_correct
+    assert built_surface is not None
+    assert "review.course_correct" not in built_surface.allowed_actions
+    assert "review.make_rule" not in built_surface.allowed_actions
+
+
+# Finding #3 — dynamic.py: preserve reverts when sync fails
+
+
+@pytest.mark.asyncio
+async def test_enable_if_unchanged_succeeds_despite_sync_failure() -> None:
+    """codex P2 on #652: if sync() raises after the conditional update commits,
+    treat it as success (the DB row was re-enabled) rather than failure."""
+    from unittest.mock import AsyncMock
+
+    from nous.heartbeat.dynamic import DynamicCheckLoader
+
+    loader = object.__new__(DynamicCheckLoader)
+    loader._agent_id = "a"
+    loader._mutation_lock = asyncio.Lock()
+
+    # Mock the session to return rowcount=1 (successful update)
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=SimpleNamespace(rowcount=1))
+    session.commit = AsyncMock()
+    ctx = AsyncMock()
+    ctx.__aenter__ = AsyncMock(return_value=session)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    loader._db = SimpleNamespace(session=lambda: ctx)
+
+    # Make sync raise AFTER the commit
+    loader._sync_locked = AsyncMock(side_effect=RuntimeError("DB down"))
+
+    # Despite sync failure, should return True (the update committed)
+    result = await loader.enable_if_unchanged("c", str(uuid4()), "tok")
+    assert result is True
+    session.commit.assert_awaited_once()

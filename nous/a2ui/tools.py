@@ -409,6 +409,9 @@ def make_action_review_pusher(surface_service: Any, snapshot_store: Any, compens
             "did": f"A background task ran {tool_name}. It can be undone from this card.",
             "trace_id": trace_id,
             "compensation": await _server_compensation(None, trace_id, snapshot_store, compensation_registry),
+            # codex P2 on #652: mark as compensation card so builder skips
+            # course_correct (trace_id is a ledger entry, not a decision ID).
+            "compensation_card": True,
         }
         built = TEMPLATES["action_review"](params)
         return await surface_service.push_built(

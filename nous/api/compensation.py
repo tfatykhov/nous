@@ -167,6 +167,103 @@ class SnapshotStore:
             await s.commit()
             return (res.rowcount or 0) == 1
 
+    async def mark_card_pending(
+        self,
+        ledger_entry_id: UUID,
+        tool_name: str,
+    ) -> bool:
+        """Mark that a review card needs to be published for this snapshot.
+
+        Called before the first publication attempt; cleared by ``mark_card_published``
+        once the push succeeds. Idempotent: only sets the flag if not already set.
+        Returns whether a row was updated (codex P1 on #652: durable card publication).
+        """
+
+        async def _write() -> bool:
+            async with self._db.session() as s:
+                row = (
+                    await s.execute(
+                        select(CompensationSnapshot)
+                        .where(CompensationSnapshot.ledger_entry_id == ledger_entry_id)
+                        .where(CompensationSnapshot.agent_id == self._agent_id)
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if row is None:
+                    return False
+                data = dict(row.snapshot_data or {})
+                if data.get("_card_pending"):
+                    return True  # already pending
+                data["_card_pending"] = True
+                data["_card_tool_name"] = tool_name
+                row.snapshot_data = data
+                await s.commit()
+                return True
+
+        return await asyncio.wait_for(_write(), timeout=self._timeout)
+
+    async def mark_card_published(
+        self,
+        ledger_entry_id: UUID,
+    ) -> bool:
+        """Clear the pending-card marker after a successful push.
+
+        Returns whether a row was updated (codex P1 on #652: durable card publication).
+        """
+
+        async def _write() -> bool:
+            async with self._db.session() as s:
+                row = (
+                    await s.execute(
+                        select(CompensationSnapshot)
+                        .where(CompensationSnapshot.ledger_entry_id == ledger_entry_id)
+                        .where(CompensationSnapshot.agent_id == self._agent_id)
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if row is None:
+                    return False
+                data = dict(row.snapshot_data or {})
+                if not data.get("_card_pending"):
+                    return True  # already cleared
+                data.pop("_card_pending", None)
+                data.pop("_card_tool_name", None)
+                row.snapshot_data = data
+                await s.commit()
+                return True
+
+        return await asyncio.wait_for(_write(), timeout=self._timeout)
+
+    async def get_pending_cards(
+        self,
+        limit: int = 10,
+    ) -> list[tuple[UUID, str]]:
+        """Return snapshots that need a review card published.
+
+        Returns list of (ledger_entry_id, tool_name) tuples for snapshots with
+        ``_card_pending=True`` that haven't been reverted.
+        (codex P1 on #652: durable card publication).
+        """
+
+        async def _read() -> list[tuple[UUID, str]]:
+            async with self._db.session() as s:
+                # Query for snapshots with _card_pending=True in JSONB
+                result = await s.execute(
+                    select(
+                        CompensationSnapshot.ledger_entry_id,
+                        CompensationSnapshot.snapshot_data,
+                    )
+                    .where(CompensationSnapshot.agent_id == self._agent_id)
+                    .where(CompensationSnapshot.reverted_at.is_(None))
+                    .where(CompensationSnapshot.snapshot_data["_card_pending"].astext == "true")
+                    .order_by(CompensationSnapshot.created_at)
+                    .limit(limit)
+                )
+                rows = result.all()
+                return [(row[0], (row[1] or {}).get("_card_tool_name", "unknown")) for row in rows]
+
+        return await asyncio.wait_for(_read(), timeout=self._timeout)
+
     async def record_written_state(
         self,
         ledger_entry_id: UUID,

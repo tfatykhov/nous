@@ -25,8 +25,14 @@ def action_review(params: dict[str, Any]) -> Any:
     title = params["title"]
     trace_id = _validated_trace_id(params.get("trace_id"))
     compensation = params.get("compensation") or {"revertible": False, "handler": None, "note": ""}
+    # codex P2 on #652: compensation cards have trace_id=ledger_entry_id, not a
+    # decision ID. course_correct and make_rule call brain.review(trace_id) which
+    # would fail for a ledger UUID, so hide those verbs for compensation cards.
+    is_compensation_card = bool(params.get("compensation_card"))
 
-    allowed = ["review.acknowledge", "review.course_correct", "review.make_rule"]
+    allowed = ["review.acknowledge"]
+    if not is_compensation_card:
+        allowed.extend(["review.course_correct", "review.make_rule"])
 
     # Phase 2.8: offer Revert only for a block the server derived
     # (a2ui.tools._server_compensation, from the snapshot store + registry):
@@ -63,24 +69,31 @@ def action_review(params: dict[str, Any]) -> Any:
     )
 
     ctx = {"traceId": trace_id} if trace_id else {}
-    verbs: list[str] = ["ack", "correct", "rule"]
+    verbs: list[str] = ["ack"]
     components: list[dict] = [
         Button("ack", child="ack_l", variant="primary", action=event("review.acknowledge", ctx)),
         Text("ack_l", "Fine"),
-        Button(
-            "correct",
-            child="correct_l",
-            action=event("review.course_correct", {**ctx, "correction": {"path": "/correction"}}),
-        ),
-        Text("correct_l", "Wrong call — noted below"),
-        Button(
-            "rule",
-            child="rule_l",
-            variant="borderless",
-            action=event("review.make_rule", {**ctx, "correction": {"path": "/correction"}}),
-        ),
-        Text("rule_l", "Make this a standing rule"),
     ]
+    # codex P2 on #652: skip course_correct/make_rule for compensation cards
+    if not is_compensation_card:
+        verbs.extend(["correct", "rule"])
+        components.extend(
+            [
+                Button(
+                    "correct",
+                    child="correct_l",
+                    action=event("review.course_correct", {**ctx, "correction": {"path": "/correction"}}),
+                ),
+                Text("correct_l", "Wrong call — noted below"),
+                Button(
+                    "rule",
+                    child="rule_l",
+                    variant="borderless",
+                    action=event("review.make_rule", {**ctx, "correction": {"path": "/correction"}}),
+                ),
+                Text("rule_l", "Make this a standing rule"),
+            ]
+        )
 
     if revertible:
         verbs.append("revert")
@@ -96,8 +109,14 @@ def action_review(params: dict[str, Any]) -> Any:
             ]
         )
 
+    # codex P2 on #652: only show correction field if course_correct is available
+    root_children = ["card"]
+    if not is_compensation_card:
+        root_children.append("correction_field")
+    root_children.append("acts")
+
     s.add(
-        Column("root", children=["card", "correction_field", "acts"], align="stretch"),
+        Column("root", children=root_children, align="stretch"),
         ActionReviewCard(
             "card",
             title=title,
@@ -106,12 +125,17 @@ def action_review(params: dict[str, Any]) -> Any:
             cost={"path": "/cost"},
             compensation={"path": "/compensation"},
         ),
-        TextField(
-            "correction_field",
-            label="Correction (optional — sent with 'Wrong call')",
-            value={"path": "/correction"},
-            variant="longText",
-        ),
+    )
+    if not is_compensation_card:
+        s.add(
+            TextField(
+                "correction_field",
+                label="Correction (optional — sent with 'Wrong call')",
+                value={"path": "/correction"},
+                variant="longText",
+            ),
+        )
+    s.add(
         Row("acts", children=verbs, justify="spaceBetween"),
         *components,
     )

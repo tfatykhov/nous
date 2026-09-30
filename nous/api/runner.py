@@ -492,6 +492,38 @@ class AgentRunner:
         for fork in self._forks:
             fork.set_action_review_pusher(pusher)
 
+    async def sweep_pending_cards(self, limit: int = 5) -> int:
+        """Retry publishing review cards that failed transiently.
+
+        Called from the heartbeat tick to ensure every compensation snapshot
+        eventually gets a user-visible review card. Returns the number of
+        cards successfully published.
+        (codex P1 on #652: durable card publication)
+        """
+        if self._snap_store is None or self._action_review_pusher is None:
+            return 0
+        if not getattr(self._settings, "compensation_auto_review_enabled", False):
+            return 0
+        try:
+            pending = await self._snap_store.get_pending_cards(limit=limit)
+        except Exception:
+            logger.warning("Harness Phase 2.8: get_pending_cards failed", exc_info=True)
+            return 0
+        published = 0
+        for ledger_entry_id, tool_name in pending:
+            try:
+                await self._action_review_pusher(tool_name, ledger_entry_id, None)
+                await self._snap_store.mark_card_published(ledger_entry_id)
+                published += 1
+            except Exception:
+                logger.warning(
+                    "Harness Phase 2.8: retry card push failed for %s (entry %s)",
+                    tool_name,
+                    ledger_entry_id,
+                    exc_info=True,
+                )
+        return published
+
     async def _acquire_write_lock(self, tool_name: str, tool_input: dict) -> asyncio.Lock | None:
         """Phase 2.8: hold the target path's lock across a write_file's
         snapshot capture AND its write, in every context. Two writes to one
@@ -615,10 +647,24 @@ class AgentRunner:
             return
         if not self._settings.compensation_auto_review_enabled or self._action_review_pusher is None:
             return
+        # codex P1 on #652: mark the card pending BEFORE attempting push,
+        # so a transient failure leaves a marker that can be retried on tick.
+        if self._snap_store is not None:
+            try:
+                await self._snap_store.mark_card_pending(entry_id, tool_name)
+            except Exception:
+                logger.warning("Harness Phase 2.8: mark_card_pending failed for %s", tool_name, exc_info=True)
         try:
             await self._action_review_pusher(tool_name, entry_id, session_id)
+            # Mark published on success
+            if self._snap_store is not None:
+                try:
+                    await self._snap_store.mark_card_published(entry_id)
+                except Exception:
+                    pass  # non-fatal: the card was pushed, flag will be cleared on next retry
         except Exception:
             logger.warning("Harness Phase 2.8: auto action_review push failed for %s", tool_name, exc_info=True)
+            # Card remains pending for retry on tick
 
     async def _capture_compensation_snapshot(
         self,
