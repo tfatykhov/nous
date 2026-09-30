@@ -34,7 +34,7 @@ class TestBashTool:
     async def test_bash_tool_success(self, tmp_path):
         """Simple command -> stdout captured in response."""
         result = await bash_tool(
-            command=f'{sys.executable} -c "print(\'hello from bash tool\')"',
+            command=f"{sys.executable} -c \"print('hello from bash tool')\"",
             _workspace_dir=str(tmp_path),
         )
         text = _extract_text(result)
@@ -80,7 +80,7 @@ class TestBashTool:
         """Output exceeding 100KB -> truncated with marker."""
         # Generate ~150KB of output (well over 100KB limit)
         result = await bash_tool(
-            command=f'{sys.executable} -c "print(\'x\' * 200000)"',
+            command=f"{sys.executable} -c \"print('x' * 200000)\"",
             _workspace_dir=str(tmp_path),
         )
         text = _extract_text(result)
@@ -90,7 +90,7 @@ class TestBashTool:
     async def test_bash_tool_stderr(self, tmp_path):
         """Stderr output captured and labeled."""
         result = await bash_tool(
-            command=f'{sys.executable} -c "import sys; sys.stderr.write(\'warning msg\\n\')"',
+            command=f"{sys.executable} -c \"import sys; sys.stderr.write('warning msg\\n')\"",
             _workspace_dir=str(tmp_path),
         )
         text = _extract_text(result)
@@ -113,7 +113,7 @@ class TestBashTool:
         line = authoritative wrapper status), so quoted 'Exit code: N' in a
         command's own output can be disambiguated downstream."""
         result = await bash_tool(
-            command=f'{sys.executable} -c "print(\'hello\')"',
+            command=f"{sys.executable} -c \"print('hello')\"",
             _workspace_dir=str(tmp_path),
         )
         text = _extract_text(result)
@@ -126,7 +126,7 @@ class TestBashTool:
         assert not workspace.exists()
 
         result = await bash_tool(
-            command=f'{sys.executable} -c "print(\'created\')"',
+            command=f"{sys.executable} -c \"print('created')\"",
             _workspace_dir=str(workspace),
         )
         text = _extract_text(result)
@@ -326,7 +326,6 @@ class TestWriteFileTool:
         (e.g. ENOSPC during fsync) must leave the original file untouched."""
         import errno
         import os
-
 
         target = tmp_path / "existing.txt"
         original_content = "original valuable content"

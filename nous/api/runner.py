@@ -33,11 +33,11 @@ from nous.api.attachments import (
     sanitize_blocks_for_storage,
     validate_attachment,
 )
+from nous.api.builtin_tools import ABSENT, drop_write_fence, register_write_fence
 from nous.api.cache_optimizer import CacheBreakDetector
 from nous.api.cache_optimizer import _hash as cache_hash
 from nous.api.call_outcome import CallOutcome
 from nous.api.compaction import ConversationCompactor
-from nous.api.builtin_tools import ABSENT, drop_write_fence, register_write_fence
 from nous.api.compensation import release_write_path_lock, write_path_lock, write_path_lock_is
 from nous.api.execution_context import ExecutionContext, resolve_context
 from nous.api.idempotency import idempotency_key
@@ -3209,7 +3209,7 @@ class AgentRunner:
                             from nous.api.tool_cache import cache_compressed_result
 
                             async with self._heart.db.session() as db_sess:
-                                hash_key = await cache_compressed_result(
+                                await cache_compressed_result(
                                     db_sess,
                                     agent_id=self._settings.agent_id,
                                     session_id=session_id,

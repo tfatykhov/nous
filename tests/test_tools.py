@@ -145,12 +145,15 @@ class TestResolveDecision:
         multiple decisions share the same created_at timestamp (SQLite).
         """
         from nous.brain.schemas import RecordInput
-        detail = await brain.record(RecordInput(
-            description=f"Decision to resolve in tool test {uuid.uuid4()}",
-            confidence=0.7,
-            category="tooling",
-            stakes="low",
-        ))
+
+        detail = await brain.record(
+            RecordInput(
+                description=f"Decision to resolve in tool test {uuid.uuid4()}",
+                confidence=0.7,
+                category="tooling",
+                stakes="low",
+            )
+        )
         return str(detail.id)
 
     @pytest.mark.asyncio
@@ -158,7 +161,9 @@ class TestResolveDecision:
         """resolve_decision persists outcome + note."""
         did = await self._make_decision(tools, brain)
         result = await tools["resolve_decision"](
-            decision_id=did, outcome="noise", resolution_note="sweep artifact",
+            decision_id=did,
+            outcome="noise",
+            resolution_note="sweep artifact",
         )
         assert "resolved" in result["content"][0]["text"]
         detail = await brain.get(uuid.UUID(did))
@@ -186,6 +191,7 @@ class TestResolveDecision:
         written = await store.decision_state(did)
         # a later review lands after the call: the capture still reports the call's own write
         await brain.review(uuid.UUID(did), "noise", result="later review", reviewer="someone-else")
+
         def _naive(state):  # the SQLite test DB drops the UTC offset on read
             ts = state["reviewed_at"]
             return {**state, "reviewed_at": ts and ts.split("+")[0]}
@@ -229,7 +235,9 @@ class TestResolveDecision:
         """A background turn may mark a pending decision as noise, attributed to it."""
         did = await self._make_decision(tools, brain)
         result = await tools["resolve_decision"](
-            decision_id=did, outcome="noise", resolution_note="heartbeat tick artifact",
+            decision_id=did,
+            outcome="noise",
+            resolution_note="heartbeat tick artifact",
             _is_background=True,
         )
         assert result.get("is_error") is not True
@@ -253,7 +261,9 @@ class TestResolveDecision:
         """Background turns cannot grade a prediction; the error names what IS allowed."""
         did = await self._make_decision(tools, brain)
         result = await tools["resolve_decision"](
-            decision_id=did, outcome=outcome, _is_background=True,
+            decision_id=did,
+            outcome=outcome,
+            _is_background=True,
         )
         assert result.get("is_error") is True
         text = result["content"][0]["text"]
@@ -268,14 +278,18 @@ class TestResolveDecision:
         old_id = await self._make_decision(tools, brain)
         new_id = await self._make_decision(tools, brain)
         refused = await tools["resolve_decision"](
-            decision_id=old_id, outcome="superseded", _is_background=True,
+            decision_id=old_id,
+            outcome="superseded",
+            _is_background=True,
         )
         assert refused.get("is_error") is True
         assert "superseded_by" in refused["content"][0]["text"]
         assert (await brain.get(uuid.UUID(old_id))).outcome == "pending"
 
         result = await tools["resolve_decision"](
-            decision_id=old_id, outcome="superseded", superseded_by=new_id,
+            decision_id=old_id,
+            outcome="superseded",
+            superseded_by=new_id,
             _is_background=True,
         )
         assert result.get("is_error") is not True
@@ -290,7 +304,9 @@ class TestResolveDecision:
         did = await self._make_decision(tools, brain)
         await tools["resolve_decision"](decision_id=did, outcome="failure", resolution_note="broke prod")
         result = await tools["resolve_decision"](
-            decision_id=did, outcome="noise", _is_background=True,
+            decision_id=did,
+            outcome="noise",
+            _is_background=True,
         )
         assert result.get("is_error") is True
         assert "failure" in result["content"][0]["text"]
@@ -305,7 +321,9 @@ class TestResolveDecision:
         new_id = await self._make_decision(tools, brain)
         await tools["resolve_decision"](decision_id=old_id, outcome="noise", _is_background=True)
         result = await tools["resolve_decision"](
-            decision_id=old_id, outcome="superseded", superseded_by=new_id,
+            decision_id=old_id,
+            outcome="superseded",
+            superseded_by=new_id,
             _is_background=True,
         )
         assert result.get("is_error") is not True
@@ -318,11 +336,15 @@ class TestResolveDecision:
         old_id = await self._make_decision(tools, brain)
         new_id = await self._make_decision(tools, brain)
         await tools["resolve_decision"](
-            decision_id=old_id, outcome="superseded", superseded_by=new_id,
+            decision_id=old_id,
+            outcome="superseded",
+            superseded_by=new_id,
             _is_background=True,
         )
         result = await tools["resolve_decision"](
-            decision_id=old_id, outcome="noise", _is_background=True,
+            decision_id=old_id,
+            outcome="noise",
+            _is_background=True,
         )
         assert result.get("is_error") is not True
         assert "superseded_by" not in result["content"][0]["text"]
@@ -424,7 +446,9 @@ class TestResolveDecision:
         """
         did = await self._make_decision(tools, brain)
         result = await tools["resolve_decision"](
-            decision_id=did, outcome="superseded", resolution_note="replaced it",
+            decision_id=did,
+            outcome="superseded",
+            resolution_note="replaced it",
         )
         assert result.get("is_error") is True
         assert "superseded_by" in result["content"][0]["text"]
@@ -437,7 +461,9 @@ class TestResolveDecision:
         """Non-supersession outcomes are unaffected by the new requirement."""
         did = await self._make_decision(tools, brain)
         result = await tools["resolve_decision"](
-            decision_id=did, outcome="success", resolution_note="shipped",
+            decision_id=did,
+            outcome="success",
+            resolution_note="shipped",
         )
         assert result.get("is_error") is not True
         detail = await brain.get(uuid.UUID(did))

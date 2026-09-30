@@ -8,13 +8,12 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
 
 
-class DAGNodeType(str, Enum):
+class DAGNodeType(str, Enum):  # noqa: UP042 -- StrEnum changes str()/format() output (e.g. dag/approval.py)
     """Types of DAG execution nodes."""
 
     subtask = "subtask"
@@ -30,7 +29,7 @@ class DAGNodeType(str, Enum):
     approval = "approval"
 
 
-class DAGStatus(str, Enum):
+class DAGStatus(str, Enum):  # noqa: UP042 -- StrEnum changes str()/format() output (e.g. dag/approval.py)
     """Status of a DAG execution."""
 
     pending = "pending"
@@ -41,7 +40,7 @@ class DAGStatus(str, Enum):
     partial = "partial"
 
 
-class DAGNodeStatus(str, Enum):
+class DAGNodeStatus(str, Enum):  # noqa: UP042 -- StrEnum changes str()/format() output (e.g. dag/approval.py)
     """Status of an individual DAG node."""
 
     pending = "pending"

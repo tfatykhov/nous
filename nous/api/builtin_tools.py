@@ -95,16 +95,11 @@ async def bash_tool(
         )
 
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=effective_timeout
-            )
-        except asyncio.TimeoutError:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=effective_timeout)
+        except TimeoutError:
             proc.kill()
             await proc.wait()
-            return _tool_error(
-                f"Command timed out after {effective_timeout}s.\n"
-                f"Command: {command}"
-            )
+            return _tool_error(f"Command timed out after {effective_timeout}s.\nCommand: {command}")
         except asyncio.CancelledError:
             # The calling turn was cancelled (e.g. its heartbeat check was
             # disabled by the DAG mid-run): don't leave the command running.
@@ -464,10 +459,7 @@ async def write_file_tool(
             fence.started = True
         await asyncio.to_thread(_run)
 
-        return _mcp_response(
-            f"File written successfully: {target}\n"
-            f"Size: {len(content):,} bytes"
-        )
+        return _mcp_response(f"File written successfully: {target}\nSize: {len(content):,} bytes")
 
     except PreconditionFailed as e:
         return _tool_error(f"Refused to write '{path}': {e}; nothing was written.")

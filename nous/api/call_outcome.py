@@ -15,8 +15,8 @@ from typing import Any
 
 @dataclass
 class CallOutcome:
-    external_ref: str | None = None   # provider id: SMTP Message-ID, Telegram message_id
-    uncertain: bool = False           # the provider may have acted although the call failed
+    external_ref: str | None = None  # provider id: SMTP Message-ID, Telegram message_id
+    uncertain: bool = False  # the provider may have acted although the call failed
     # Phase 2.8: resolve_decision's review state before/after its write, read
     # inside the resolving transaction under a row lock (Brain.review capture=).
     review_capture: dict | None = None
